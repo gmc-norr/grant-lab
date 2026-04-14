@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: call_monitor
+      POSTGRES_PASSWORD: call_monitor
+      POSTGRES_DB: call_monitor
+    ports:
+      - "5432:5432"
+    volumes:
+      - call_monitor_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U call_monitor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  call_monitor_pgdata:
