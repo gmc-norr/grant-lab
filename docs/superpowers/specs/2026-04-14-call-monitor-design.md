@@ -61,7 +61,7 @@ Each module is independently testable and depends only on the database (not on o
 
 ## Data model
 
-Six core tables.
+Seven core tables.
 
 ```
 sources
@@ -78,30 +78,45 @@ profiles
   id, name, kind ('org'|'group'|'user'),
   description (text),
   structured (jsonb)   -- {areas[], budget_min, budget_max, trl_min, trl_max, hard_exclusions[]}
-  created_by, created_at, updated_at
+  is_active (bool, default true)
+  created_by (FK users(id)), created_at, updated_at
 
 call_rankings
   call_id, profile_id, score (int 0-100), rationale (text),
-  model (text), prompt_version (text), ranked_at (timestamp)
+  model (text), prompt_version (text), ranked_at (timestamptz)
   PRIMARY KEY(call_id, profile_id)
 
 users
   id, email, name, is_admin (bool), created_at, last_login_at
+
+magic_link_tokens
+  id, user_id (FK users(id)), token_hash (text),
+  created_at (timestamptz), expires_at (timestamptz),
+  consumed_at (timestamptz, null)
+  INDEX on token_hash
 
 subscriptions
   user_id, profile_id, digest_enabled (bool)
   PRIMARY KEY(user_id, profile_id)
 ```
 
-Plus two small auxiliary tables:
+Plus three small auxiliary tables:
 
 ```
 user_call_dismissals
-  user_id, call_id, dismissed_at
+  user_id, call_id, dismissed_at (timestamptz)
   PRIMARY KEY(user_id, call_id)
 
 digest_runs
-  id, user_id, sent_at, included_call_ids (int[])
+  id, user_id (FK users(id)), sent_at (timestamptz),
+  included_call_ids (int[])
+
+ranking_jobs
+  id, call_id (FK calls(id)), profile_id (FK profiles(id)),
+  status ('pending'|'running'|'failed'|'done'),
+  attempts (int, default 0), last_error (text, null),
+  created_at (timestamptz), updated_at (timestamptz)
+  INDEX on (status, updated_at)
 ```
 
 **Notes:**
@@ -109,8 +124,10 @@ digest_runs
 - `calls.raw` retains the original payload so we can re-extract or re-rank without re-fetching.
 - `call_rankings` is recomputed on profile change (delete + re-rank) or new call (insert per profile). `prompt_version` (a short string bumped when the prompt template changes) makes stale rows identifiable without relying solely on `ranked_at`.
 - All profile kinds share one schema — distinguished only by `kind`.
-- `subscriptions` controls digest delivery, independent of viewability — for v1, all logged-in users can view all profiles.
-- **Indexing.** GIN index on `calls.keywords` (text[]) for keyword filtering; B-tree on `calls.deadline` and `calls.published_at` for feed sorts; B-tree on `(call_rankings.profile_id, call_rankings.score DESC)` for ranked feeds.
+- **Profile deletion is soft.** `profiles.is_active` defaults `true`; setting it `false` removes the profile from feeds, ranking backfills, and digests, but preserves `call_rankings` and `subscriptions` history for audit. Hard delete is never exposed in the UI; available via a direct SQL command if a profile needs to be fully removed. FKs cascade on hard delete for test cleanliness.
+- `subscriptions` controls digest delivery, independent of viewability — for v1, all logged-in users can view all `is_active` profiles. Subscriptions to a soft-deleted profile are ignored at digest time but rows are kept (re-activating the profile restores them).
+- **All timestamp columns are `TIMESTAMPTZ`.** Adapters must normalize source timestamps to UTC before yielding a `NormalizedCall`. The web layer converts to `Europe/Stockholm` for display; the DB stores UTC. Deadlines especially matter: an EU call's "23:59 Brussels time" must be stored as the correct UTC instant, not as a naive timestamp.
+- **Indexing.** GIN index on `calls.keywords` (text[]) for keyword filtering; B-tree on `calls.deadline` and `calls.published_at` for feed sorts; B-tree on `(call_rankings.profile_id, call_rankings.score DESC)` for ranked feeds; unique index on `magic_link_tokens.token_hash`.
 - **`digest_runs.included_call_ids` as int[]** is fine for v1 audit needs. If we later want richer per-call audit (e.g., the score at the time of send, or filtering "show me everything that included call X"), migrate to a `digest_run_calls` join table.
 
 ## Ingestion
@@ -198,9 +215,23 @@ USER (per call):
 
 **Burst cost.** A profile bootstrap or significant edit triggers a backfill against ~90 days of calls (estimate: ~600 calls × 1 profile = 600 ranking calls in a few minutes). At Haiku rates with cached profiles, this is still cents per backfill. The "re-rank everything" admin button is the largest burst: ~600 calls × 15 profiles = ~9,000 ranking calls — under $1, and rate-limited by the in-process queue so it can't overwhelm the API or the DB.
 
+### Job queue & retry semantics
+
+Ranking jobs are the unit `(call_id, profile_id)`. They are enqueued in an in-process queue (Python `asyncio.Queue` or a lightweight `rq`-style table in Postgres — a `ranking_jobs` table with `attempts` counter is the pragmatic choice at this scale and survives restarts).
+
+Each job:
+
+1. Reads the call and profile.
+2. Calls Claude, parses JSON, upserts `call_rankings` on `(call_id, profile_id)` PK — idempotent.
+3. On LLM error (5xx, timeout), retries with exponential backoff (e.g., 30s, 2m, 10m), up to 5 attempts.
+4. On parse error (malformed JSON), retries once with a tightened prompt; if still bad, dead-letter the job.
+5. After 5 failed attempts, mark the job failed in `ranking_jobs.status`, surface the count in the admin panel, do **not** block other jobs.
+
+Per-pair retry (not per-batch) matters: if scoring a new call against 15 profiles fails on profile #7, profiles 8–15 still complete. The dead-letter job can be retried manually from the admin panel.
+
 ### Storage
 
-One row per `(call_id, profile_id)` in `call_rankings`, including `model` and `ranked_at` so stale rankings can be identified after model or prompt changes.
+One row per `(call_id, profile_id)` in `call_rankings`, including `model`, `prompt_version`, and `ranked_at` so stale rankings can be identified after model or prompt changes. A separate `ranking_jobs` table tracks in-flight and failed jobs.
 
 ## Profile management & bootstrap
 
@@ -251,7 +282,29 @@ FastAPI + Jinja2 templates + HTMX. No SPA, no build step. Approximately 10 route
 
 Email magic links. User enters email → one-time link sent → click sets a 30-day session cookie. No passwords, no SSO. Restricted to a hospital email domain allowlist (configured via env var).
 
-`ALLOWED_EMAIL_DOMAIN` accepts a comma-separated list, matched against the substring after the final `@`. Subdomains and aliases must be listed explicitly — e.g., `regionstockholm.se,karolinska.se,ki.se`. The match is exact on the domain (no wildcard); if the hospital uses many subdomains, list them. This is intentional — implicit subdomain matching has bitten teams before (e.g., `intern.regionstockholm.se` accidentally being treated like the main domain).
+**Token lifecycle:**
+
+- On login request, generate 32 random bytes; URL-encode as the user-visible token; store only `sha256(token)` in `magic_link_tokens.token_hash` (never the raw token). Treat it like a password.
+- `expires_at = now() + 15 minutes`. Links older than that are rejected.
+- **Single-use:** on click, atomically `UPDATE ... SET consumed_at = now() WHERE consumed_at IS NULL AND expires_at > now() RETURNING user_id`. A row that returns zero rows means already-consumed or expired — reject.
+- Session cookie is independent: a 30-day signed, HTTP-only, Secure, SameSite=Lax cookie holding the user id. Replay of the consumed magic link gains nothing.
+- **User creation:** if the submitted email is in the allowlist and no user exists, create one on magic-link request (so first-click also creates them). `users.name` starts null; user can set it on `/me`.
+
+**Rate limiting:**
+
+- Per email: max 5 magic-link requests per 15 minutes (stored in a small in-memory LRU or a Postgres table `login_attempts`). Prevents inbox-spamming abuse from anyone who knows a colleague's address.
+- Per IP: max 30 requests per 15 minutes across all emails.
+- Exceeding either returns the same UI message as a successful request ("check your email") without sending — do not leak rate-limit state to the caller.
+
+**Domain allowlist:**
+
+`ALLOWED_EMAIL_DOMAINS` accepts a comma-separated list, matched against the substring after the final `@`. Subdomains and aliases must be listed explicitly — e.g., `regionstockholm.se,karolinska.se,ki.se`. The match is exact on the domain (no wildcard); if the hospital uses many subdomains, list them. This is intentional — implicit subdomain matching has bitten teams before (e.g., `intern.regionstockholm.se` accidentally being treated like the main domain).
+
+**Known residual risk:** anyone with a hospital-domain email alias that forwards to an external address can gain access. Acceptable for this threat model (internal tool, low-sensitivity data), explicitly noted so future changes don't assume otherwise.
+
+**First-admin bootstrap:**
+
+On startup, a bootstrap routine reads `INITIAL_ADMIN_EMAIL` (comma-separated, optional). For each address: if the user exists, set `is_admin = true`; otherwise create the user with `is_admin = true`. Idempotent, safe to run every boot. Without this env var, the `/admin` panel is unreachable on a fresh deploy.
 
 ### Pages
 
@@ -285,10 +338,16 @@ Weekly, Monday 07:00 Europe/Stockholm.
 
 For each user with at least one subscription:
 
-1. Gather subscribed profiles where `digest_enabled = true`.
-2. For each profile: top 5 calls with `score >= threshold` (default 60), where the call is new since the user's last digest and the deadline is still in the future.
-3. Skip the email entirely if zero qualifying calls (no "nothing to report" noise).
-4. Render one email grouped by profile, send via Resend (or SMTP relay if hospital prefers).
+1. Gather subscribed profiles where `digest_enabled = true` and the profile is `is_active = true`.
+2. For each profile, select up to 5 calls matching *all* of:
+   - `call_rankings.score >= threshold` (default 60)
+   - `call_id NOT IN` the union of `digest_runs.included_call_ids` for this user (i.e., this user has never been sent this call in any prior digest)
+   - `calls.deadline IS NULL OR calls.deadline > now()` (rolling/continuous calls with `NULL` deadline are included, not dropped)
+3. Deduplicate across the user's profile sections: if the same call qualifies for multiple subscribed profiles, show it once, under the highest-scoring profile; note other matching profiles inline ("also matches: <list>").
+4. Skip the email entirely if zero qualifying calls after dedup (no "nothing to report" noise).
+5. Render one email grouped by profile, send via Resend (or SMTP relay if hospital prefers).
+
+**"New since last digest" is defined strictly as set-difference against this user's `digest_runs.included_call_ids` history.** A call that was below threshold last week but crossed the threshold this week (e.g., after a prompt change or re-rank) *will* be included — which is the desired behavior. A call included in a previous digest but that the user didn't act on is *not* re-sent; if the user wants to see it again, they use the dashboard.
 
 ### Email content
 
@@ -326,7 +385,7 @@ MJML → HTML at build time, plus a plain-text alternative. Stored in `digest/te
 
 - Single container, deployed to Fly.io or a small Hetzner VM. One process for web + scheduler.
 - Managed Postgres separately; daily automated backups.
-- Secrets via env vars: `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAIN`.
+- Secrets and config via env vars: `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAINS` (comma-separated), `INITIAL_ADMIN_EMAIL` (comma-separated, optional after first deploy).
 - CI: GitHub Actions runs lint + tests on every push; the golden-set ranking eval runs on a weekly cron.
 
 ## Testing
