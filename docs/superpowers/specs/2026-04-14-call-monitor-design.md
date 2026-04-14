@@ -366,14 +366,14 @@ call-monitor/
 
 The features below are deliberately deferred. They are listed in rough priority order; the actual order will follow user feedback after v1 ships.
 
-### Near term (months 1–3 after v1)
+### Near term
 
 - **More sources.** Add adapters for ESF (`esf.se`), Tillväxtverket (regional fund), EUfonder.se aggregator, and key program-specific pages (e.g., `digital-strategy.ec.europa.eu` for AI/health calls). Each is one new file in `sources/`.
 - **Slack/Teams delivery.** A new `delivery/` module alongside `digest/`; per-subscription channel target. Hospital likely already runs Teams.
 - **Per-call user actions.** "Interested" / "Not interested" / "Discussing" — beyond the simple Hide. Surface aggregate "X people interested" on call detail.
 - **Better filters.** Programme taxonomy, geographic eligibility, consortium requirements.
 
-### Medium term (months 3–9)
+### Medium term
 
 - **Application tracking.** Promote a call to a "tracked application": owner, status (intent / drafting / submitted / awarded / rejected), deadline reminders, file uploads. This is a meaningful new module but well-bounded.
 - **Profile ownership and roles.** Profile owner, editors, viewers. Currently everyone can edit everything; this gets uncomfortable as the org grows.
@@ -381,7 +381,7 @@ The features below are deliberately deferred. They are listed in rough priority 
 - **Trend dashboard.** Org-level view: funding-call volume by programme over time, our hit rate per programme, gaps where we should be applying more.
 - **Cross-profile clustering.** Show which calls match multiple profiles (collaboration opportunities).
 
-### Longer term (9+ months)
+### Longer term
 
 - **Application-prep helpers.** Pre-fill standard sections (organization description, past projects) when starting a new application. Optionally an LLM-drafted first pass of the relevance section based on the matched profile.
 - **Researcher directory integration.** If/when the hospital exposes one, replace pasted member lists with real lookups.
