@@ -82,7 +82,7 @@ profiles
 
 call_rankings
   call_id, profile_id, score (int 0-100), rationale (text),
-  model (text), ranked_at (timestamp)
+  model (text), prompt_version (text), ranked_at (timestamp)
   PRIMARY KEY(call_id, profile_id)
 
 users
@@ -107,9 +107,11 @@ digest_runs
 **Notes:**
 
 - `calls.raw` retains the original payload so we can re-extract or re-rank without re-fetching.
-- `call_rankings` is recomputed on profile change (delete + re-rank) or new call (insert per profile).
+- `call_rankings` is recomputed on profile change (delete + re-rank) or new call (insert per profile). `prompt_version` (a short string bumped when the prompt template changes) makes stale rows identifiable without relying solely on `ranked_at`.
 - All profile kinds share one schema — distinguished only by `kind`.
 - `subscriptions` controls digest delivery, independent of viewability — for v1, all logged-in users can view all profiles.
+- **Indexing.** GIN index on `calls.keywords` (text[]) for keyword filtering; B-tree on `calls.deadline` and `calls.published_at` for feed sorts; B-tree on `(call_rankings.profile_id, call_rankings.score DESC)` for ranked feeds.
+- **`digest_runs.included_call_ids` as int[]** is fine for v1 audit needs. If we later want richer per-call audit (e.g., the score at the time of send, or filtering "show me everything that included call X"), migrate to a `digest_run_calls` join table.
 
 ## Ingestion
 
@@ -135,7 +137,9 @@ APScheduler runs each adapter daily at staggered times (e.g., 03:00, 03:15 Europ
 1. Calls `adapter.fetch_new_calls(since=source.last_fetched_at)`
 2. Upserts each `NormalizedCall` by `(source_id, external_id)` — idempotent
 3. For genuinely new rows, enqueues a ranking job (in-process queue at this scale)
-4. Updates `source.last_fetched_at` only on success
+4. Updates `source.last_fetched_at` only if the run completed end-to-end without error. **Partial failures** (e.g., 40 of 50 records inserted, then a network error) do *not* advance the timestamp — the next run re-fetches from the same `since`, and the idempotent upsert handles already-seen records. This trades a small amount of duplicate work for guaranteed at-least-once ingestion.
+
+**Multi-instance future.** APScheduler runs in-process and is safe with one instance. If we ever run multiple replicas (probably not at this scale), we need either a single dedicated scheduler instance or a database-backed lock (e.g., `pg_advisory_lock` keyed by source slug) to prevent duplicate concurrent ingest jobs. Out of scope for v1; flagged here so we don't paint ourselves into a corner.
 
 ### Failure isolation
 
@@ -190,7 +194,9 @@ USER (per call):
 
 ### Cost expectation
 
-~50 new calls/week × 15 profiles = ~750 ranking calls/week. With prompt caching on profile blocks, well under $5/month. Backfill on profile changes is similarly cheap.
+~50 new calls/week × 15 profiles = ~750 ranking calls/week steady-state. With prompt caching on profile blocks, well under $5/month at steady state.
+
+**Burst cost.** A profile bootstrap or significant edit triggers a backfill against ~90 days of calls (estimate: ~600 calls × 1 profile = 600 ranking calls in a few minutes). At Haiku rates with cached profiles, this is still cents per backfill. The "re-rank everything" admin button is the largest burst: ~600 calls × 15 profiles = ~9,000 ranking calls — under $1, and rate-limited by the in-process queue so it can't overwhelm the API or the DB.
 
 ### Storage
 
@@ -200,9 +206,12 @@ One row per `(call_id, profile_id)` in `call_rankings`, including `model` and `r
 
 ### Bootstrap flow (the killer feature)
 
-1. **Create profile** — user enters name, kind, and seed data: a list of group members (names + ORCID/affiliation) and/or pasted past grants (titles + abstracts).
+1. **Create profile** — user enters name, kind, and seed data: a list of group members (ORCID preferred; name + affiliation as fallback) and/or pasted past grants (titles + abstracts).
 2. **Bootstrap fetch** — backend pulls evidence:
-   - PubMed via E-utilities for the listed authors (last 5 years), no API key required.
+   - **PubMed via E-utilities** for the listed authors (last 5 years), no API key required.
+     - **ORCID-first matching:** if an ORCID is provided, use the `AUID` field to fetch unambiguous publications.
+     - **Name-based fallback:** when only name + affiliation is provided, query PubMed with `Author[au] AND Affiliation[ad]` to reduce false positives. Affiliation matching is fuzzy and noisy by nature; the user reviews the draft, so some imprecision is acceptable.
+     - **Empty results:** if no publications are found for a member, log it and continue with the rest. The bootstrap proceeds even if all PubMed lookups fail — the LLM draft will then rest only on pasted grants.
    - Past grants are used as-pasted (no reliable structured source for Swedish/EU per-researcher grants).
 3. **Draft generation** — Claude reads (publications + grants) → produces a 1–2 paragraph free-text description plus suggested structured fields (areas, TRL, budget range).
 4. **Edit screen** — user reviews, refines free text, adjusts structured fields, saves.
@@ -242,13 +251,16 @@ FastAPI + Jinja2 templates + HTMX. No SPA, no build step. Approximately 10 route
 
 Email magic links. User enters email → one-time link sent → click sets a 30-day session cookie. No passwords, no SSO. Restricted to a hospital email domain allowlist (configured via env var).
 
+`ALLOWED_EMAIL_DOMAIN` accepts a comma-separated list, matched against the substring after the final `@`. Subdomains and aliases must be listed explicitly — e.g., `regionstockholm.se,karolinska.se,ki.se`. The match is exact on the domain (no wildcard); if the hospital uses many subdomains, list them. This is intentional — implicit subdomain matching has bitten teams before (e.g., `intern.regionstockholm.se` accidentally being treated like the main domain).
+
 ### Pages
 
 - `/` — dashboard. Sidebar lists profiles. Main pane shows ranked call feed for the selected profile.
 - `/calls/<id>` — call detail. Full metadata + per-profile scores ("Why this matched") + link to original source.
 - `/profiles` — list of all profiles.
 - `/profiles/new` — bootstrap wizard.
-- `/profiles/<id>` — view + edit (free text, structured fields, member list).
+- `/profiles/<id>` — view-only summary (description, structured fields, recent ranked calls).
+- `/profiles/<id>/edit` — separate edit page (form-based, not inline). One submit updates the profile and triggers re-ranking. Inline editing is rejected for v1 — it adds JS complexity and HTMX form-swap edge cases that aren't worth it for an infrequently-edited resource.
 - `/profiles/<id>/calls` — call feed pinned to that profile.
 - `/me` — subscription preferences (which profiles email you).
 - `/admin` — source health, ranking queue depth, "re-rank everything" button. Gated by `users.is_admin`.
@@ -385,6 +397,7 @@ The features below are deliberately deferred. They are listed in rough priority 
 
 ## Open questions
 
-- **Hospital email allowlist** — confirm exact domain(s) before launch.
+- **Hospital email allowlist** — confirm exact domain(s), including any subdomains, before launch.
 - **SMTP vs Resend** — confirm hospital is OK with outbound email via Resend; if not, default to SMTP relay through hospital infra.
 - **Past-grants data** — pasted text is the v1 answer; revisit if/when the hospital exposes a structured grants registry.
+- **Initial `prompt_version`** — start at `"v1"`. Bump when the system or per-profile prompt template changes in a way that warrants re-ranking; the admin "re-rank everything" button performs the backfill.
