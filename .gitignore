@@ -1,0 +1,21 @@
+# Worktrees — isolated workspaces per feature/plan (see CLAUDE.md)
+.worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
