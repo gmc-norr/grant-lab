@@ -17,9 +17,10 @@ The wedge over existing tools (e.g., Ymner) is **smarter ranking against multipl
 - Two ingestion sources: EU Funding & Tenders Portal, Vinnova
 - Multi-profile ranking (organization-level + research-group-level + user-level)
 - Profile bootstrap from publications (PubMed) and pasted past grants
-- Web dashboard for browsing ranked calls
-- Weekly email digest per profile subscription
+- Web dashboard for browsing ranked calls (shows all ranked calls, not just above-threshold)
+- Weekly email digest per profile subscription, with `must_include` force-inclusion and borderline section
 - Magic-link email auth, restricted to a hospital email domain
+- LLM reliability defenses: `temperature=0`, stored raw responses, pinned `prompt_version`, golden-set drift detection, admin-visible dead-letter queue
 
 **Explicitly out of scope for v1** (see Roadmap):
 
@@ -77,13 +78,16 @@ calls
 profiles
   id, name, kind ('org'|'group'|'user'),
   description (text),
-  structured (jsonb)   -- {areas[], budget_min, budget_max, trl_min, trl_max, hard_exclusions[]}
+  structured (jsonb)   -- {areas[], budget_min, budget_max, trl_min, trl_max, must_include[], hard_exclusions[]}
   is_active (bool, default true)
   created_by (FK users(id)), created_at, updated_at
 
 call_rankings
   call_id, profile_id, score (int 0-100), rationale (text),
-  model (text), prompt_version (text), ranked_at (timestamptz)
+  model (text), prompt_version (text),
+  raw_response (jsonb),                 -- full LLM output for debugging
+  sample_count (int, default 1),        -- 1 or 3 (consensus for borderline)
+  ranked_at (timestamptz)
   PRIMARY KEY(call_id, profile_id)
 
 users
@@ -201,7 +205,7 @@ USER (per call):
 
 ### Model
 
-`claude-haiku-4-5` for v1. Promote to Sonnet only if quality is insufficient on the golden set.
+`claude-haiku-4-5` for v1, `temperature=0` on every call. This does not guarantee bit-exact determinism (Anthropic explicitly doesn't guarantee it) but cuts run-to-run variance dramatically. Promote to Sonnet only if quality is insufficient on the golden set.
 
 ### Triggers
 
@@ -231,7 +235,58 @@ Per-pair retry (not per-batch) matters: if scoring a new call against 15 profile
 
 ### Storage
 
-One row per `(call_id, profile_id)` in `call_rankings`, including `model`, `prompt_version`, and `ranked_at` so stale rankings can be identified after model or prompt changes. A separate `ranking_jobs` table tracks in-flight and failed jobs.
+One row per `(call_id, profile_id)` in `call_rankings`, including `model`, `prompt_version`, `ranked_at`, and `raw_response` (full LLM JSON output — tiny storage cost, large debuggability payoff when a score looks wrong). A separate `ranking_jobs` table tracks in-flight and failed jobs.
+
+## LLM reliability & miss prevention
+
+LLM scoring is non-deterministic at the edges. A call that genuinely belongs in someone's feed can be scored 55 on one day and 65 on another — that's the reality, not a bug to fix. The design goal is therefore not "never miss anything" (unachievable with any ranking system) but **defence in depth: no single LLM miss is catastrophic, and systemic misses are detectable and correctable**.
+
+### Failure modes we expect
+
+- **Stochasticity** within a ~±10-point noise band, especially on borderline calls.
+- **Model drift** — same prompt a year later behaves differently; Anthropic updates models.
+- **Prompt sensitivity** — small profile rewordings shift all scores by several points.
+- **Parse failures / hallucinations** — malformed JSON, or a rationale that contradicts the score.
+- **Systematic blind spots** — the model consistently under-scores an area a profile under-describes.
+
+### v1 defenses (built-in)
+
+**1. Dashboard is the source of truth; digest is a convenience.**
+The dashboard shows *every* ranked call, sortable and filterable by score — not just above-threshold. Any user worried about a miss can scroll past the threshold in seconds. This is the single most important defense; the rest are refinements on top.
+
+**2. `must_include` keyword safety net.**
+Profiles carry a list of `must_include` terms (e.g., `["federated learning", "digital pathology"]`). Any call whose title, summary, or keywords contains one (case-insensitive substring match) is force-included in that profile's digest and feed regardless of LLM score. This is the escape hatch for topics the LLM consistently under-scores, and it does not depend on the model behaving well.
+
+**3. Borderline section in the digest.**
+After the top-5 above-threshold block, the digest appends a collapsed "Borderline (score 45–60)" section with up to 5 additional calls. Users see a one-line preview; they can expand or open the dashboard. This catches the ±10-point noise band without disruption.
+
+**4. `raw_response` stored with every ranking.**
+Full LLM JSON kept on `call_rankings.raw_response`. When a score looks wrong, the admin can see what the model actually said — including any parse artifacts, hedging, or contradictory rationale.
+
+**5. Pinned model + `prompt_version` + `temperature=0`.**
+Every ranking row records exactly which regime produced it. A prompt or model change is a visible event that can be backfilled via the admin "re-rank everything" button. No silent drift.
+
+**6. Dead-letter queue visible in admin.**
+Failed ranking jobs (from the per-pair retry logic) surface in the admin panel with the last error and raw response, never silently dropped.
+
+**7. Golden-set drift detection.**
+The weekly golden-set eval compares current scores against a historical baseline. Any shift > 10 points on any pair fires an admin alert — early warning for model or prompt drift.
+
+### v1 explicit non-goals
+
+- **No multi-model ensembles.** Scoring with Claude *and* GPT-4 and cross-checking adds cost and complexity for marginal lift at this scale.
+- **No embedding-based pre-filter.** At ~50 calls/week the LLM *is* the filter; a vector index would add moving parts without buying anything. Revisit if source count grows to 10+.
+
+### Near-term additions (see Roadmap)
+
+- **Consensus scoring for borderline calls** (score 3× and take median for calls scoring 45–70 on any profile, roughly 10% of volume — tightens the noise band where decisions are hardest).
+- **User feedback loop** ("Mark relevant / not relevant" on call detail). LLM/user disagreements are the richest signal for profile refinement and prompt tuning.
+- **Miss-detection audit.** Monthly cross-reference of hospital application submissions vs. calls ever surfaced in a digest to anyone involved. Any submitted application whose source call was never in a digest is a confirmed miss worth analyzing. Requires the hospital to share application records.
+- **Monthly "everything not yet shown" catch-all digest.** Lists all calls scoring ≥40 against at least one profile that have not yet appeared in any user's digest. Uncurated, browse-oriented.
+
+### The philosophical point
+
+Getting ingestion right matters more than getting ranking right. A miss in the digest is recoverable (user finds it on the dashboard); a miss from the dashboard means the call isn't in the DB — a completely different (and easier to detect) class of bug. The highest-leverage reliability investment is **source adapter quality + ingestion monitoring**, not prompt tweaking.
 
 ## Profile management & bootstrap
 
@@ -258,7 +313,11 @@ Same edit screen as the final bootstrap step. No bootstrap re-run unless explici
 areas: text[]              # free-form tags
 budget_min, budget_max     # int or null
 trl_min, trl_max           # 1-9 or null
+must_include: text[]       # safety-net keywords (case-insensitive substring match)
+                           # — any call mentioning one is force-included in digests
+                           #   regardless of LLM score
 hard_exclusions: text[]    # e.g., "animal studies", "defence"
+                           # — LLM scores ≤10; also hard-filters the digest
 ```
 
 ### Permissions (v1)
@@ -320,9 +379,11 @@ On startup, a bootstrap routine reads `INITIAL_ADMIN_EMAIL` (comma-separated, op
 
 ### Feed interactions
 
-- Filters: deadline (next 30/60/90 days), programme, score threshold.
+- **The feed shows *every* ranked call for the selected profile, not just above-threshold.** Default sort is by score desc, so the top is what matters most, but users can scroll past the threshold or lower the filter to find anything that was scored. This is the primary miss-prevention defense: the digest is a convenience, the dashboard is the source of truth.
+- Filters: deadline (next 30/60/90 days), programme, score threshold (default 0 — show everything, user can raise).
 - Sort: score, deadline, newest.
 - Per-user "Hide" button — dismisses a call from that user's feeds via `user_call_dismissals`. Doesn't affect others.
+- Visual indication for `must_include` matches (a small badge) so users can see why a call was surfaced independent of its score.
 
 ### Out of v1 (see Roadmap)
 
@@ -339,12 +400,12 @@ Weekly, Monday 07:00 Europe/Stockholm.
 For each user with at least one subscription:
 
 1. Gather subscribed profiles where `digest_enabled = true` and the profile is `is_active = true`.
-2. For each profile, select up to 5 calls matching *all* of:
-   - `call_rankings.score >= threshold` (default 60)
-   - `call_id NOT IN` the union of `digest_runs.included_call_ids` for this user (i.e., this user has never been sent this call in any prior digest)
-   - `calls.deadline IS NULL OR calls.deadline > now()` (rolling/continuous calls with `NULL` deadline are included, not dropped)
+2. For each profile, build three candidate buckets (all filtered by: `call_id NOT IN` this user's prior `digest_runs.included_call_ids`, and `calls.deadline IS NULL OR calls.deadline > now()`):
+   - **Must-include:** any call whose title/summary/keywords contain a term from `profile.structured.must_include` (case-insensitive substring match). Included unconditionally.
+   - **Top matches:** calls with `score >= threshold` (default 60), minus any already in the must-include bucket. Take up to 5 by score desc.
+   - **Borderline:** calls with `45 <= score < threshold`, minus any in the other buckets. Take up to 5 by score desc. Rendered as a collapsed "Borderline matches" section below the main block.
 3. Deduplicate across the user's profile sections: if the same call qualifies for multiple subscribed profiles, show it once, under the highest-scoring profile; note other matching profiles inline ("also matches: <list>").
-4. Skip the email entirely if zero qualifying calls after dedup (no "nothing to report" noise).
+4. Skip the email entirely only if all three buckets are empty for every subscribed profile (no "nothing to report" noise).
 5. Render one email grouped by profile, send via Resend (or SMTP relay if hospital prefers).
 
 **"New since last digest" is defined strictly as set-difference against this user's `digest_runs.included_call_ids` history.** A call that was below threshold last week but crossed the threshold this week (e.g., after a prompt change or re-rank) *will* be included — which is the desired behavior. A call included in a previous digest but that the user didn't act on is *not* re-sent; if the user wants to see it again, they use the dashboard.
@@ -428,6 +489,10 @@ The features below are deliberately deferred. They are listed in rough priority 
 ### Near term
 
 - **More sources.** Add adapters for ESF (`esf.se`), Tillväxtverket (regional fund), EUfonder.se aggregator, and key program-specific pages (e.g., `digital-strategy.ec.europa.eu` for AI/health calls). Each is one new file in `sources/`.
+- **Consensus scoring for borderline calls.** Score pairs in the 45–70 band 3× at `temperature=0` and take the median. Tightens the noise band exactly where threshold decisions are hardest. ~10% cost overhead.
+- **User feedback loop on call detail.** "Mark relevant" / "Mark not relevant" buttons. Persist to `user_call_feedback`. Aggregate disagreements with LLM score visible in admin — richest signal for profile and prompt tuning.
+- **Miss-detection audit.** Monthly cross-reference of hospital application submissions vs. calls ever surfaced in digests. Confirmed misses feed back into profile `must_include` lists and prompt refinement. Requires hospital to share application records.
+- **Monthly "catch-all" digest.** Lists all calls scoring ≥40 against ≥1 profile that never appeared in a user's digest. Uncurated safety net.
 - **Slack/Teams delivery.** A new `delivery/` module alongside `digest/`; per-subscription channel target. Hospital likely already runs Teams.
 - **Per-call user actions.** "Interested" / "Not interested" / "Discussing" — beyond the simple Hide. Surface aggregate "X people interested" on call detail.
 - **Better filters.** Programme taxonomy, geographic eligibility, consortium requirements.
