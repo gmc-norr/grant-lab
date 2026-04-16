@@ -251,7 +251,7 @@ git commit -m "feat: local Postgres via docker-compose"
 ## Task 3: Database session layer + testcontainers fixture
 
 **Files:**
-- Create: `src/call_monitor/db/__init__.py` (empty)
+- Create: `src/call_monitor/db/__init__.py` (initially empty; Task 5 adds the models import for Alembic autogenerate — see Task 5 Step 4 note)
 - Create: `src/call_monitor/db/base.py`
 - Create: `src/call_monitor/db/session.py`
 - Create: `tests/conftest.py`
@@ -600,9 +600,21 @@ def pg_session_factory(migrated_engine):
 Run: `uv run pytest tests/test_models.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'call_monitor.db.models'`.
 
-- [ ] **Step 4: Write `db/models.py`**
+- [ ] **Step 4: Write `db/models.py` and register it in `db/__init__.py`**
 
-`src/call_monitor/db/models.py`:
+Replace the (currently empty) `src/call_monitor/db/__init__.py` with:
+
+```python
+# Importing models here registers every model with Base.metadata as a side
+# effect. Anything that imports from `call_monitor.db.*` (notably alembic/env.py
+# via `from call_monitor.db.base import Base`) triggers this package init,
+# which means `Base.metadata.tables` is populated when Alembic resolves
+# `target_metadata`. Without this, `alembic revision --autogenerate` produces
+# empty diffs.
+from call_monitor.db import models  # noqa: F401
+```
+
+Then create `src/call_monitor/db/models.py`:
 
 ```python
 from __future__ import annotations
