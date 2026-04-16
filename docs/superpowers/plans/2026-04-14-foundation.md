@@ -896,7 +896,20 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cookie_secure(self) -> bool:
-        """Emit Secure cookie attribute only under HTTPS — derived from APP_BASE_URL."""
+        """Whether to set Secure on session cookies.
+
+        Derived from `APP_BASE_URL` because that's the URL the **browser**
+        sees — which is what the Secure attribute keys off. In a typical
+        deploy a TLS-terminating proxy (Nginx/Traefik/Apache) sits in
+        front and forwards HTTP to the app, so `request.url.scheme` would
+        say `http` and is the wrong signal. Don't change this to look at
+        the incoming request — `APP_BASE_URL` is the right answer.
+
+        Same value also gates the email-sender fallback in `main.py`:
+        without it, a misconfigured prod (https without `RESEND_API_KEY`)
+        would silently log magic links to stderr instead of refusing to
+        start.
+        """
         return self.app_base_url.lower().startswith("https://")
 ```
 
