@@ -30,6 +30,11 @@ def upgrade() -> None:
         ),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("email", name="uq_users_email"),
+        # CHECK forces lowercase storage so UNIQUE(email) actually means
+        # one row per address (Postgres `=` is case-sensitive otherwise).
+        sa.CheckConstraint(
+            "email = lower(email)", name="ck_users_email_lowercase"
+        ),
     )
     op.create_table(
         "magic_link_tokens",

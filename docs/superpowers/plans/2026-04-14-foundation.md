@@ -501,8 +501,8 @@ git commit -m "feat: alembic setup reading DATABASE_URL from env"
 ```python
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import text
-from sqlalchemy.orm import sessionmaker
+import pytest
+from sqlalchemy.exc import IntegrityError
 
 from call_monitor.db.models import MagicLinkToken, User
 
@@ -519,20 +519,22 @@ def test_can_insert_and_read_user(pg_session_factory):
 
 
 def test_user_email_is_unique(pg_session_factory):
-    from sqlalchemy.exc import IntegrityError
-
     SessionLocal = pg_session_factory
     with SessionLocal() as s:
         s.add(User(email="bob@ki.se"))
         s.commit()
-    with SessionLocal() as s:
+    with SessionLocal() as s, pytest.raises(IntegrityError):
         s.add(User(email="bob@ki.se"))
-        try:
-            s.commit()
-        except IntegrityError:
-            s.rollback()
-        else:
-            raise AssertionError("expected IntegrityError on duplicate email")
+        s.commit()
+
+
+def test_user_email_check_rejects_mixed_case(pg_session_factory):
+    """The CHECK constraint forces lowercase storage so UNIQUE(email) is
+    case-insensitive in practice. Inserting a non-lowercased email must fail."""
+    SessionLocal = pg_session_factory
+    with SessionLocal() as s, pytest.raises(IntegrityError):
+        s.add(User(email="Alice@ki.se"))
+        s.commit()
 
 
 def test_magic_link_token_row(pg_session_factory):
@@ -607,7 +609,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -615,6 +625,15 @@ from call_monitor.db.base import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Defense in depth: the application always lowercases before insert,
+        # but Postgres `UNIQUE(email)` is case-sensitive, so a rogue SQL
+        # admin task could create both `Alice@ki.se` and `alice@ki.se` and
+        # split a single person across two accounts. The CHECK forces
+        # lowercase at the DB level — combined with UNIQUE(email), this
+        # guarantees one row per address regardless of case.
+        CheckConstraint("email = lower(email)", name="ck_users_email_lowercase"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
@@ -693,6 +712,11 @@ def upgrade() -> None:
         ),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("email", name="uq_users_email"),
+        # CHECK forces lowercase storage so UNIQUE(email) actually means
+        # one row per address (Postgres `=` is case-sensitive otherwise).
+        sa.CheckConstraint(
+            "email = lower(email)", name="ck_users_email_lowercase"
+        ),
     )
     op.create_table(
         "magic_link_tokens",

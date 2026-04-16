@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -10,6 +18,15 @@ from call_monitor.db.base import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Defense in depth: the application always lowercases before insert,
+        # but Postgres `UNIQUE(email)` is case-sensitive, so a rogue SQL
+        # admin task could create both `Alice@ki.se` and `alice@ki.se` and
+        # split a single person across two accounts. The CHECK forces
+        # lowercase at the DB level — combined with UNIQUE(email), this
+        # guarantees one row per address regardless of case.
+        CheckConstraint("email = lower(email)", name="ck_users_email_lowercase"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)

@@ -1,5 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy.exc import IntegrityError
+
 from call_monitor.db.models import MagicLinkToken, User
 
 
@@ -15,20 +18,22 @@ def test_can_insert_and_read_user(pg_session_factory):
 
 
 def test_user_email_is_unique(pg_session_factory):
-    from sqlalchemy.exc import IntegrityError
-
     SessionLocal = pg_session_factory
     with SessionLocal() as s:
         s.add(User(email="bob@ki.se"))
         s.commit()
-    with SessionLocal() as s:
+    with SessionLocal() as s, pytest.raises(IntegrityError):
         s.add(User(email="bob@ki.se"))
-        try:
-            s.commit()
-        except IntegrityError:
-            s.rollback()
-        else:
-            raise AssertionError("expected IntegrityError on duplicate email")
+        s.commit()
+
+
+def test_user_email_check_rejects_mixed_case(pg_session_factory):
+    """The CHECK constraint forces lowercase storage so UNIQUE(email) is
+    case-insensitive in practice. Inserting a non-lowercased email must fail."""
+    SessionLocal = pg_session_factory
+    with SessionLocal() as s, pytest.raises(IntegrityError):
+        s.add(User(email="Alice@ki.se"))
+        s.commit()
 
 
 def test_magic_link_token_row(pg_session_factory):
