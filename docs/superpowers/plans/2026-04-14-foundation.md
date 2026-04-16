@@ -963,27 +963,43 @@ git commit -m "feat: structured JSON logging to stderr"
 - Create: `src/call_monitor/web/templates/base.html`
 - Create: `tests/test_web_health.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 `tests/test_web_health.py`:
 
 ```python
 from fastapi.testclient import TestClient
 
+from call_monitor.db.session import make_engine
 from call_monitor.main import create_app
 
 
-def test_healthz_returns_ok(pg_url, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", pg_url)
+def _set_min_env(monkeypatch, database_url):
+    monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
+
+def test_healthz_returns_ok(pg_url, monkeypatch):
+    _set_min_env(monkeypatch, pg_url)
     app = create_app()
     with TestClient(app) as client:
         r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_healthz_returns_503_when_db_unreachable(pg_url, monkeypatch):
+    """Outage path: simulate a dead database by swapping app.state.engine."""
+    _set_min_env(monkeypatch, pg_url)
+    app = create_app()
+    # Replace the engine with one pointing at a closed port (fast TCP refusal).
+    app.state.engine = make_engine("postgresql+psycopg://x:x@127.0.0.1:1/x")
+    with TestClient(app) as client:
+        r = client.get("/healthz")
+    assert r.status_code == 503
+    assert "db unavailable" in r.json()["detail"]
 ```
 
 - [ ] **Step 2: Write `web/templates/base.html`**
@@ -1006,13 +1022,27 @@ def test_healthz_returns_ok(pg_url, monkeypatch):
 - [ ] **Step 3: Write `web/routes/health.py`**
 
 ```python
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy import text
 
 router = APIRouter()
 
 
 @router.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz(request: Request) -> dict[str, str]:
+    """Liveness + readiness in one endpoint.
+
+    Single-instance deploy: there's no useful liveness-vs-readiness split.
+    Monitoring should treat any non-200 as "do not route traffic / page
+    operator." We ping the database with `SELECT 1` so an unreachable DB
+    surfaces as 503 instead of being silently invisible.
+    """
+    engine = request.app.state.engine
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001 — surface any DB error as 503
+        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
     return {"status": "ok"}
 ```
 
