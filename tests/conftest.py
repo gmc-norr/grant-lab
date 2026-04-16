@@ -4,7 +4,20 @@ from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
 from alembic import command
+from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_dotenv(monkeypatch):
+    """Disable .env loading for every test.
+
+    A developer's local .env can otherwise pre-fill SESSION_SECRET,
+    INITIAL_ADMIN_EMAIL, etc., turning hermetic env-driven tests into
+    flaky pass-on-my-machine traps. Tests that exercise Settings() must
+    rely solely on monkeypatch.setenv()."""
+    # SettingsConfigDict is a TypedDict; mutate via dict-item assignment.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture(scope="session")

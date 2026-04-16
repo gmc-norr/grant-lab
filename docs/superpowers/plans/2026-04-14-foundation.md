@@ -287,7 +287,19 @@ def test_session_factory_yields_working_session(db_engine):
 import pytest
 from testcontainers.postgres import PostgresContainer
 
+from call_monitor.config import Settings
 from call_monitor.db.session import make_engine
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_dotenv(monkeypatch):
+    """Disable .env loading for every test.
+
+    A developer's local .env can otherwise pre-fill SESSION_SECRET,
+    INITIAL_ADMIN_EMAIL, etc., turning hermetic env-driven tests into
+    flaky pass-on-my-machine traps. Tests that exercise Settings() must
+    rely solely on monkeypatch.setenv()."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture(scope="session")
