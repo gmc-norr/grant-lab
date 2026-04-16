@@ -1,7 +1,10 @@
 import pytest
+from alembic.config import Config
+from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
-from call_monitor.db.session import make_engine
+from alembic import command
+from call_monitor.db.session import make_engine, make_session_factory
 
 
 @pytest.fixture(scope="session")
@@ -32,3 +35,29 @@ def db_engine(pg_url):
         yield engine
     finally:
         engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated_engine(db_engine, pg_url):
+    """Same engine as `db_engine`, but with Alembic migrations applied first.
+
+    Reuses `db_engine` (single shared, disposed at session teardown) to keep
+    connection accounting clean.
+    """
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", pg_url)
+    command.upgrade(cfg, "head")
+    return db_engine
+
+
+@pytest.fixture()
+def pg_session_factory(migrated_engine):
+    SessionLocal = make_session_factory(migrated_engine)
+    yield SessionLocal
+    # truncate all tables between tests for isolation
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "TRUNCATE TABLE users, magic_link_tokens RESTART IDENTITY CASCADE"
+            )
+        )
