@@ -213,7 +213,10 @@ services:
       POSTGRES_PASSWORD: call_monitor
       POSTGRES_DB: call_monitor
     ports:
-      - "5432:5432"
+      # Bind to loopback so a known-credential dev DB is never exposed to
+      # the LAN. Override the host port via HOST_DB_PORT if 5432 is busy
+      # (e.g. another local Postgres):  HOST_DB_PORT=5433 docker compose up -d
+      - "127.0.0.1:${HOST_DB_PORT:-5432}:5432"
     volumes:
       - call_monitor_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -261,18 +264,17 @@ git commit -m "feat: local Postgres via docker-compose"
 ```python
 from sqlalchemy import text
 
-from call_monitor.db.session import make_engine, make_session_factory
+from call_monitor.db.session import make_session_factory
 
 
-def test_engine_executes_select_one(pg_url):
-    engine = make_engine(pg_url)
-    with engine.connect() as conn:
+def test_engine_executes_select_one(db_engine):
+    with db_engine.connect() as conn:
         result = conn.execute(text("SELECT 1")).scalar()
     assert result == 1
 
 
-def test_session_factory_yields_working_session(pg_url):
-    SessionLocal = make_session_factory(make_engine(pg_url))
+def test_session_factory_yields_working_session(db_engine):
+    SessionLocal = make_session_factory(db_engine)
     with SessionLocal() as session:
         assert session.execute(text("SELECT 42")).scalar() == 42
 ```
@@ -285,18 +287,37 @@ def test_session_factory_yields_working_session(pg_url):
 import pytest
 from testcontainers.postgres import PostgresContainer
 
+from call_monitor.db.session import make_engine
+
 
 @pytest.fixture(scope="session")
 def pg_container():
-    with PostgresContainer("postgres:16") as pg:
+    # driver="psycopg" makes get_connection_url() emit `postgresql+psycopg://...`
+    # directly. No post-hoc URL rewrite, so the fixture is robust if testcontainers
+    # ever changes its default driver.
+    with PostgresContainer("postgres:16", driver="psycopg") as pg:
         yield pg
 
 
 @pytest.fixture(scope="session")
 def pg_url(pg_container):
-    # testcontainers returns a psycopg2-style URL; swap driver to psycopg v3
-    url = pg_container.get_connection_url()
-    return url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
+    return pg_container.get_connection_url()
+
+
+@pytest.fixture(scope="session")
+def db_engine(pg_url):
+    """Session-scoped Engine: shared across tests, disposed at session teardown.
+
+    Without this, tests that build their own Engine via `make_engine(pg_url)`
+    leak DBAPI connections to the GC and emit `ResourceWarning` (which become
+    fatal under `filterwarnings = ["error"]`). Centralizing here also avoids
+    spinning up a fresh engine per test.
+    """
+    engine = make_engine(pg_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 ```
 
 - [ ] **Step 3: Write `db/base.py`**
@@ -368,11 +389,19 @@ Expected: Creates `alembic/` dir and `alembic.ini`.
 
 - [ ] **Step 2: Edit `alembic.ini`**
 
-Change the `sqlalchemy.url` line to:
-```
-sqlalchemy.url =
-```
-(empty — we'll inject it from env at runtime).
+Make two edits:
+
+1. Change the `sqlalchemy.url` line to:
+   ```
+   sqlalchemy.url =
+   ```
+   (empty — we'll inject it from env at runtime).
+
+2. Change `prepend_sys_path = .` to:
+   ```
+   prepend_sys_path = src
+   ```
+   The project uses `src/` layout. Without this, `from call_monitor.db.base import Base` only works when the package is installed editable (`uv sync`). A future Dockerfile that runs `pip install --no-deps .` then `alembic upgrade head` would fail with `ModuleNotFoundError`. `prepend_sys_path = src` makes Alembic work directly from the source tree, no editable install required.
 
 - [ ] **Step 3: Rewrite `alembic/env.py`**
 
@@ -389,24 +418,30 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Prefer an explicit URL injected via `cfg.set_main_option("sqlalchemy.url", ...)`
-# (this is how the test fixture in tests/conftest.py drives migrations against
-# a testcontainers Postgres). Fall back to DATABASE_URL from the environment
-# so `uv run alembic upgrade head` works from a shell.
-database_url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL")
-if not database_url:
-    raise RuntimeError(
-        "No database URL: set DATABASE_URL in the environment "
-        "or inject via cfg.set_main_option('sqlalchemy.url', ...)"
-    )
-config.set_main_option("sqlalchemy.url", database_url)
-
 target_metadata = Base.metadata
 
 
+def _resolve_database_url() -> str:
+    """Prefer an explicit URL injected via ``cfg.set_main_option(...)`` (the
+    test fixture path); fall back to ``DATABASE_URL`` env. Resolved lazily so
+    metadata-only commands (``alembic heads``, ``history``, ``branches``)
+    don't require a database URL — only commands that actually run migrations
+    do.
+    """
+    url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "No database URL: set DATABASE_URL in the environment "
+            "or inject via cfg.set_main_option('sqlalchemy.url', ...)"
+        )
+    return url
+
+
 def run_migrations_offline() -> None:
+    url = _resolve_database_url()
+    config.set_main_option("sqlalchemy.url", url)
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -416,6 +451,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    config.set_main_option("sqlalchemy.url", _resolve_database_url())
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -528,17 +564,20 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 
-from call_monitor.db.session import make_engine, make_session_factory
+from call_monitor.db.session import make_session_factory
 
 
 @pytest.fixture(scope="session")
-def migrated_engine(pg_url):
-    engine = make_engine(pg_url)
+def migrated_engine(db_engine, pg_url):
+    """Same engine as `db_engine`, but with Alembic migrations applied first.
+
+    Reuses `db_engine` (single shared, disposed at session teardown) to keep
+    connection accounting clean.
+    """
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", pg_url)
     command.upgrade(cfg, "head")
-    yield engine
-    engine.dispose()
+    return db_engine
 
 
 @pytest.fixture()
@@ -1280,16 +1319,25 @@ from call_monitor.auth.domain import domain_allowed, extract_domain
         ("alice@ki.se", "ki.se"),
         ("Bob@KI.SE", "ki.se"),
         ("carol+tag@karolinska.se", "karolinska.se"),
-        ("x@y@ki.se", "ki.se"),  # split on final @
     ],
 )
 def test_extract_domain(email, expected):
     assert extract_domain(email) == expected
 
 
-def test_extract_domain_rejects_missing_at():
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-an-email",       # no @
+        "x@y@ki.se",          # multiple @
+        "@ki.se",             # empty local part
+        "alice@",             # empty domain
+        "",                   # empty
+    ],
+)
+def test_extract_domain_rejects_malformed(bad):
     with pytest.raises(ValueError):
-        extract_domain("not-an-email")
+        extract_domain(bad)
 
 
 @pytest.mark.parametrize(
@@ -1316,9 +1364,16 @@ Expected: fails on import.
 
 ```python
 def extract_domain(email: str) -> str:
-    if "@" not in email:
-        raise ValueError(f"not an email address: {email!r}")
-    return email.rsplit("@", 1)[1].lower()
+    """Return the lower-cased domain of an email address.
+
+    Strict: exactly one `@`, both local and domain parts non-empty. Rejects
+    multi-`@` addresses (`x@y@ki.se`) so we never write malformed addresses
+    to the users table or hand them to the email API.
+    """
+    parts = email.split("@")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"not a valid email address: {email!r}")
+    return parts[1].lower()
 
 
 def domain_allowed(email: str, allowed_domains: list[str]) -> bool:
@@ -1402,6 +1457,7 @@ Run: `uv run pytest tests/test_auth_rate_limit.py -v`
 - [ ] **Step 3: Write `auth/rate_limit.py`**
 
 ```python
+import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -1413,6 +1469,11 @@ class SlidingWindowLimiter:
     Single-instance deploy assumption — safe because APScheduler/FastAPI run
     as exactly one process. For multi-instance we'd promote this to a
     Postgres table or Redis.
+
+    Thread-safe: FastAPI sync handlers run in anyio's thread pool, so two
+    `/login` POSTs can race the read-then-modify pattern below. A single
+    lock around the whole body costs essentially nothing at our request
+    rates and removes the race.
     """
 
     def __init__(
@@ -1425,17 +1486,19 @@ class SlidingWindowLimiter:
         self._window = window_seconds
         self._clock = clock
         self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.Lock()
 
     def allow(self, key: str) -> bool:
-        now = self._clock()
-        q = self._events[key]
-        cutoff = now - self._window
-        while q and q[0] < cutoff:
-            q.popleft()
-        if len(q) >= self._max:
-            return False
-        q.append(now)
-        return True
+        with self._lock:
+            now = self._clock()
+            q = self._events[key]
+            cutoff = now - self._window
+            while q and q[0] < cutoff:
+                q.popleft()
+            if len(q) >= self._max:
+                return False
+            q.append(now)
+            return True
 ```
 
 - [ ] **Step 4: Run tests**
@@ -1538,7 +1601,14 @@ class InMemoryEmailSender:
 
 class ConsoleEmailSender:
     """Local-dev sender: writes the full message to the logger so developers
-    can copy the magic link out of the app's stderr stream. Not for production."""
+    can copy the magic link out of the app's stderr stream.
+
+    SECURITY: never select this in production — it logs the full magic link
+    body, which inside a 15-minute window is equivalent to a session token.
+    `create_app()` only allows it when `cookie_secure=False` (i.e. dev over
+    plain HTTP); a misconfigured prod (https without `RESEND_API_KEY`) must
+    fail to start, not silently log credentials.
+    """
 
     def send(self, *, to: str, subject: str, text_body: str) -> None:
         _logger.info(
@@ -1892,15 +1962,26 @@ def create_app() -> FastAPI:
     from call_monitor.auth.session_cookie import SessionSigner
     from call_monitor.web.routes import auth, health
 
-    # ConsoleEmailSender logs the full message to stderr (via structured logging)
-    # so developers running locally can copy the magic link from the terminal.
+    # Email sender selection is environment-gated:
+    # - RESEND_API_KEY set                → real ResendEmailSender (any environment).
+    # - No key, but cookie_secure=False   → ConsoleEmailSender (dev over plain HTTP).
+    # - No key AND cookie_secure=True     → REFUSE to start. Falling back to
+    #   ConsoleEmailSender in prod would (a) silently break login delivery and
+    #   (b) write the full magic link to stderr/log aggregator — a 15-minute
+    #   takeover window for anyone with log access. Loud failure only.
     # Tests override this with InMemoryEmailSender via app.state after creation.
     if settings.resend_api_key:
         email_sender = ResendEmailSender(
             api_key=settings.resend_api_key, from_address=settings.email_from
         )
-    else:
+    elif not settings.cookie_secure:
         email_sender = ConsoleEmailSender()
+    else:
+        raise RuntimeError(
+            "RESEND_API_KEY is required when APP_BASE_URL is https://. "
+            "Refusing to fall back to ConsoleEmailSender in production "
+            "(would log magic links to stderr — see auth/email.py)."
+        )
 
     app = FastAPI(lifespan=lifespan)
     app.state.settings = settings
