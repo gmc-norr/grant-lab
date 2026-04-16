@@ -596,15 +596,20 @@ def migrated_engine(db_engine, pg_url):
 
 @pytest.fixture()
 def pg_session_factory(migrated_engine):
+    from call_monitor.db.base import Base
+
     SessionLocal = make_session_factory(migrated_engine)
     yield SessionLocal
-    # truncate all tables between tests for isolation
-    with migrated_engine.begin() as conn:
-        conn.execute(
-            text(
-                "TRUNCATE TABLE users, magic_link_tokens RESTART IDENTITY CASCADE"
+    # Truncate every table Base knows about, sorted for determinism. Future
+    # plans that add tables get isolation for free without having to remember
+    # to update this fixture. CASCADE handles FK ordering; RESTART IDENTITY
+    # resets sequences so id counters are predictable across tests.
+    table_names = ", ".join(t.name for t in Base.metadata.sorted_tables)
+    if table_names:
+        with migrated_engine.begin() as conn:
+            conn.execute(
+                text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE")
             )
-        )
 ```
 
 - [ ] **Step 3: Run the test to verify failure**
