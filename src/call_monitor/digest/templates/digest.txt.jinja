@@ -1,0 +1,22 @@
+{{ payload.total_calls }} new funding call{{ 's' if payload.total_calls != 1 else '' }}
+
+{% for section in payload.sections %}
+== {{ section.profile_name }} ==
+{% set must = section.entries | selectattr('bucket', 'equalto', 'must_include') | list %}
+{% set top  = section.entries | selectattr('bucket', 'equalto', 'top') | list %}
+{% set bord = section.entries | selectattr('bucket', 'equalto', 'borderline') | list %}
+{% for e in must + top %}
+- {{ e.title }}{% if e.score is not none %} (score {{ e.score }}){% endif %}{% if e.bucket == 'must_include' %} [must-include match]{% endif %}
+  {{ e.url }}
+{% if e.deadline %}  Deadline: {{ e.deadline.strftime('%Y-%m-%d') }}{% if days_until(e.deadline) is not none %} (in {{ days_until(e.deadline) }} days){% endif %}
+{% endif %}{% if e.rationale %}  {{ e.rationale }}
+{% endif %}{% if e.also_in_profiles %}  Also matches: {{ e.also_in_profiles | join(', ') }}
+{% endif %}
+{% endfor %}
+{% if bord %}-- Borderline ({{ bord | length }}) --
+{% for e in bord %}- {{ e.title }} (score {{ e.score }})
+  {{ e.url }}
+{% endfor %}{% endif %}
+{% endfor %}
+
+Manage subscriptions: {{ dashboard_url }}me

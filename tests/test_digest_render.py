@@ -1,0 +1,81 @@
+from datetime import UTC, datetime, timedelta
+
+from call_monitor.digest.assemble import (
+    DigestCallEntry,
+    DigestPayload,
+    DigestProfileSection,
+)
+from call_monitor.digest.render import build_subject, render_html, render_text
+
+
+def _payload():
+    now = datetime(2026, 4, 17, tzinfo=UTC)
+    must = DigestCallEntry(
+        call_id=1, title="Pathology AI", summary="great",
+        deadline=now + timedelta(days=14), score=None, rationale=None,
+        url="http://app/calls/1", bucket="must_include", also_in_profiles=[],
+    )
+    top = DigestCallEntry(
+        call_id=2, title="Funding Vinnova", summary="apply",
+        deadline=now + timedelta(days=30), score=82, rationale="strong fit",
+        url="http://app/calls/2", bucket="top",
+        also_in_profiles=["Other Group"],
+    )
+    border = DigestCallEntry(
+        call_id=3, title="Borderline call", summary="maybe",
+        deadline=None, score=52, rationale="weak fit",
+        url="http://app/calls/3", bucket="borderline", also_in_profiles=[],
+    )
+    section = DigestProfileSection(
+        profile_id=1, profile_name="Group A", entries=[must, top, border],
+    )
+    return DigestPayload(
+        user_id=42, user_email="u@ki.se", sections=[section], total_calls=3,
+    )
+
+
+def test_subject_has_count_and_profile_names():
+    subj = build_subject(_payload())
+    assert "3" in subj
+    assert "Group A" in subj
+
+
+def test_html_renders_titles_and_links():
+    html = render_html(_payload(), dashboard_url="http://app/")
+    assert "<html" in html.lower()
+    assert "Pathology AI" in html
+    assert "Funding Vinnova" in html
+    assert "Borderline call" in html
+    assert "http://app/calls/1" in html
+    assert "82" in html
+    assert "Borderline" in html
+
+
+def test_html_includes_also_in_profiles_note():
+    html = render_html(_payload(), dashboard_url="http://app/")
+    assert "Other Group" in html  # the also_in_profiles list
+
+
+def test_text_renders_titles_and_urls():
+    text = render_text(_payload(), dashboard_url="http://app/")
+    assert "Pathology AI" in text
+    assert "http://app/calls/2" in text
+    assert "Manage subscriptions" in text  # footer
+
+
+def test_html_escapes_xss_in_title():
+    """Autoescape must be active for HTML template — user-supplied content is not raw."""
+    xss_entry = DigestCallEntry(
+        call_id=99, title="<script>alert('xss')</script>", summary="bad",
+        deadline=None, score=80, rationale=None,
+        url="http://app/calls/99", bucket="top", also_in_profiles=[],
+    )
+    section = DigestProfileSection(
+        profile_id=1, profile_name="Group A", entries=[xss_entry],
+    )
+    payload = DigestPayload(
+        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+    )
+    html = render_html(payload, dashboard_url="http://app/")
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><body style="font-family: sans-serif; max-width: 640px; margin: 0 auto; padding: 16px;">
+<h1 style="font-size: 18px;">{{ payload.total_calls }} new funding call{{ 's' if payload.total_calls != 1 else '' }}</h1>
+
+{% for section in payload.sections %}
+  <h2 style="font-size: 16px; border-bottom: 1px solid #ddd; padding-bottom: 4px;">{{ section.profile_name }}</h2>
+
+  {% set must = section.entries | selectattr('bucket', 'equalto', 'must_include') | list %}
+  {% set top  = section.entries | selectattr('bucket', 'equalto', 'top') | list %}
+  {% set bord = section.entries | selectattr('bucket', 'equalto', 'borderline') | list %}
+
+  {% for e in must + top %}
+    <div style="margin: 12px 0; padding: 8px; border-left: 3px solid {% if e.bucket == 'must_include' %}#a14{% else %}#27a{% endif %}">
+      <div><a href="{{ e.url }}" style="font-weight: bold; text-decoration: none;">{{ e.title }}</a></div>
+      {% if e.score is not none %}<div style="font-size: 12px; color: #555;">Score: {{ e.score }}{% if e.rationale %} — {{ e.rationale }}{% endif %}</div>{% endif %}
+      {% if e.deadline %}<div style="font-size: 12px; color: #555;">Deadline: {{ e.deadline.strftime('%Y-%m-%d') }}{% if days_until(e.deadline) is not none %} (in {{ days_until(e.deadline) }} days){% endif %}</div>{% endif %}
+      {% if e.bucket == 'must_include' %}<div style="font-size: 11px; color: #a14;">Matched a must-include keyword</div>{% endif %}
+      {% if e.also_in_profiles %}<div style="font-size: 11px; color: #888;">Also matches: {{ e.also_in_profiles | join(', ') }}</div>{% endif %}
+    </div>
+  {% endfor %}
+
+  {% if bord %}
+    <details style="margin: 8px 0;">
+      <summary style="cursor: pointer; font-size: 13px; color: #555;">Borderline matches ({{ bord | length }})</summary>
+      {% for e in bord %}
+        <div style="margin: 8px 0 8px 16px; padding: 6px; border-left: 2px solid #ccc;">
+          <div><a href="{{ e.url }}" style="text-decoration: none;">{{ e.title }}</a></div>
+          {% if e.score is not none %}<div style="font-size: 12px; color: #777;">Score: {{ e.score }}{% if e.rationale %} — {{ e.rationale }}{% endif %}</div>{% endif %}
+        </div>
+      {% endfor %}
+    </details>
+  {% endif %}
+{% endfor %}
+
+<p style="font-size: 12px; color: #888; margin-top: 24px;">
+  <a href="{{ dashboard_url }}me" style="color: #888;">Manage subscriptions</a>
+</p>
+</body></html>
