@@ -36,6 +36,10 @@ class Settings(BaseSettings):
         default="https://data.vinnova.se", alias="VINNOVA_BASE_URL"
     )
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
+    ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
+    ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
+    ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
+    gemma_model: str = Field(default="gemma4:e4b-q8", alias="GEMMA_MODEL")
 
     @field_validator("allowed_email_domains", "initial_admin_emails", mode="before")
     @classmethod

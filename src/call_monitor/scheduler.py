@@ -6,10 +6,13 @@ from typing import Protocol
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_STOPPED
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import sessionmaker
 
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
+from call_monitor.ranking.ollama_client import OllamaClient
+from call_monitor.ranking.worker import drain_queue
 from call_monitor.sources.eu_portal import EUPortalAdapter
 from call_monitor.sources.vinnova import VinnovaAdapter
 
@@ -43,6 +46,10 @@ def build_scheduler(
     vinnova_base_url: str,
     vinnova_api_key: str | None,
     alerter: ConsecutiveFailureTracker | _Alerter,
+    ollama_url: str,
+    gemma_model: str,
+    ranking_tick_seconds: int,
+    ranking_queue_batch: int,
     start: bool = True,
 ) -> BackgroundScheduler:
     """Build (and optionally start) the daily ingestion scheduler.
@@ -96,6 +103,25 @@ def build_scheduler(
             "scheduler.vinnova_skipped",
             extra={"event": "vinnova_skipped", "reason": "VINNOVA_API_KEY not set"},
         )
+
+    ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
+
+    def _rank_drain_job() -> None:
+        drain_queue(
+            session_factory=session_factory,
+            client=ollama,
+            batch_size=ranking_queue_batch,
+        )
+
+    sched.add_job(
+        _rank_drain_job,
+        trigger=IntervalTrigger(seconds=ranking_tick_seconds),
+        id="rank:drain",
+        name="Drain ranking job queue",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
 
     if start:
         sched.start()

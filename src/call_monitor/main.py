@@ -46,19 +46,23 @@ async def lifespan(app: FastAPI):
         vinnova_base_url=settings.vinnova_base_url,
         vinnova_api_key=settings.vinnova_api_key,
         alerter=alerter,
+        ollama_url=settings.ollama_url,
+        gemma_model=settings.gemma_model,
+        ranking_tick_seconds=settings.ranking_tick_seconds,
+        ranking_queue_batch=settings.ranking_queue_batch,
         start=True,
     )
     try:
         yield
     finally:
-        # Stop the scheduler's background threads before disposing the engine
-        # — a job firing during teardown could otherwise see a closed pool.
-        # `wait=False` lets in-flight ranking-job churn drain async-style;
-        # at our cron cadence (daily) there's almost never anything in flight.
-        app.state.scheduler.shutdown(wait=False)
-        # Preserve foundation review-fixes' engine disposal: without it,
-        # repeated test-side create_app() calls leak DBAPI connections to
-        # the GC, surfaced as ResourceWarning under filterwarnings=error.
+        # wait=True so an in-flight rank-drain or ingest job completes
+        # against the still-open pool — Plan 3 made the rank tick 60s, so
+        # mid-flight at shutdown is plausible (was daily-only before).
+        app.state.scheduler.shutdown(wait=True)
+        # Foundation v1 review-fixes added engine.dispose() here. Preserve it:
+        # without disposal, repeated test-side create_app() calls leak DBAPI
+        # connections to the GC, which psycopg surfaces as ResourceWarning
+        # (and pyproject.toml has filterwarnings=["error::ResourceWarning"]).
         app.state.engine.dispose()
 
 
