@@ -20,7 +20,7 @@ The wedge over existing tools (e.g., Ymner) is **smarter ranking against multipl
 - Web dashboard for browsing ranked calls (shows all ranked calls, not just above-threshold)
 - Weekly email digest per profile subscription, with `must_include` force-inclusion and borderline section
 - Magic-link email auth, restricted to a hospital email domain
-- LLM reliability defenses: `temperature=0`, stored raw responses, pinned `prompt_version`, golden-set drift detection, admin-visible dead-letter queue
+- LLM reliability defenses: `temperature=0`, pinned model + quantization, stored raw responses, pinned `prompt_version`, golden-set drift detection, admin-visible dead-letter queue
 
 **Explicitly out of scope for v1** (see Roadmap):
 
@@ -47,7 +47,7 @@ Each module is independently testable and depends only on the database (not on o
 
 - `sources/` — one adapter per source. Each exposes `fetch_new_calls(since: datetime) -> Iterator[NormalizedCall]`. Adding a source = adding a file.
 - `ingestion/` — orchestrator that runs source adapters on schedule, deduplicates, writes to `calls`, enqueues ranking jobs.
-- `ranking/` — given `(call, profile)`, returns `(score 0–100, rationale)`. Calls Anthropic Claude Haiku 4.5 with prompt caching on profile blocks.
+- `ranking/` — given `(call, profile)`, returns `(score 0–100, rationale)`. Calls a locally-hosted Gemma 4 E4B instance via an OpenAI-compatible HTTP client, with prefix caching on profile blocks.
 - `profiles/` — CRUD + bootstrap flow (PubMed + LLM → draft → user edit).
 - `digest/` — weekly job that assembles and sends per-recipient digest emails.
 - `web/` — FastAPI routes + Jinja2 templates + HTMX. Magic-link auth.
@@ -121,6 +121,9 @@ ranking_jobs
   attempts (int, default 0), last_error (text, null),
   created_at (timestamptz), updated_at (timestamptz)
   INDEX on (status, updated_at)
+  UNIQUE INDEX on (call_id, profile_id) WHERE status IN ('pending', 'running')
+    -- prevents stacking duplicate active jobs on retrigger/restart;
+    -- terminal states ('done', 'failed') can coexist with a fresh retry.
 ```
 
 **Notes:**
@@ -160,7 +163,7 @@ APScheduler runs each adapter daily at staggered times (e.g., 03:00, 03:15 Europ
 3. For genuinely new rows, enqueues a ranking job (in-process queue at this scale)
 4. Updates `source.last_fetched_at` only if the run completed end-to-end without error. **Partial failures** (e.g., 40 of 50 records inserted, then a network error) do *not* advance the timestamp — the next run re-fetches from the same `since`, and the idempotent upsert handles already-seen records. This trades a small amount of duplicate work for guaranteed at-least-once ingestion.
 
-**Multi-instance future.** APScheduler runs in-process and is safe with one instance. If we ever run multiple replicas (probably not at this scale), we need either a single dedicated scheduler instance or a database-backed lock (e.g., `pg_advisory_lock` keyed by source slug) to prevent duplicate concurrent ingest jobs. Out of scope for v1; flagged here so we don't paint ourselves into a corner.
+**Single-instance is a hard v1 deploy constraint.** APScheduler runs in-process and is only safe with exactly one replica. Running two would produce duplicate daily ingest runs and duplicate ranking jobs. The deployment (see Deployment section) must enforce this — e.g., a single systemd service on the on-prem box, or `max_replicas: 1` if orchestrated. If multi-instance ever becomes necessary, either (a) run the scheduler in a dedicated single-instance process distinct from web replicas, or (b) guard each scheduled job with a `pg_advisory_lock` keyed by job type (e.g., `pg_try_advisory_lock(hashtext('ingest:' || source_slug))`). Out of scope for v1; flagged here so we don't paint ourselves into a corner.
 
 ### Failure isolation
 
@@ -174,7 +177,7 @@ Given `(call, profile)`, return `(score: int 0–100, rationale: str)`.
 
 ### Prompt shape
 
-A single Claude call per pair. The profile block is marked with `cache_control` so subsequent rankings against the same profile hit the prompt cache.
+A single inference call per `(call, profile)` pair against the local Gemma 4 E4B endpoint. The profile block is placed first in the prompt so the inference engine's prefix cache can be reused across all rankings that share a profile. Structured output is enforced via Gemma 4's native function-calling / JSON-mode (schema below), which largely eliminates parse failures.
 
 ```
 SYSTEM (cached per profile):
@@ -205,7 +208,13 @@ USER (per call):
 
 ### Model
 
-`claude-haiku-4-5` for v1, `temperature=0` on every call. This does not guarantee bit-exact determinism (Anthropic explicitly doesn't guarantee it) but cuts run-to-run variance dramatically. Promote to Sonnet only if quality is insufficient on the golden set.
+**Gemma 4 E4B** (Google's open-weight "Effective 4B" model, Apache 2.0, released April 2026) served locally via Ollama on a hospital-owned NVIDIA RTX 2080 Ti (11 GB VRAM). Run at **Q8 quantization** (~5 GB weights), leaving headroom for KV cache and activations at the ~3–5 K-token prompts this workload produces.
+
+`temperature=0` on every call. This does not guarantee bit-exact determinism (floating-point non-determinism on GPU, tokenizer edge cases) but cuts run-to-run variance dramatically. Combined with the pinned model + quantization + `prompt_version` recorded on every ranking row, any shift in outputs is traceable to a deliberate change.
+
+JSON output is enforced via Gemma 4's native function-calling / structured-output mode — the model emits `{"score": int, "rationale": str}` directly against a declared schema, eliminating nearly all parse failures that plague free-form JSON prompting.
+
+If quality on the golden set is insufficient, escalation options in order: (1) try bf16 instead of Q8 (trades ~3 GB more VRAM for full-precision weights), (2) swap to a larger model on better hardware — e.g., Gemma 4 26B MoE on an A100, or fall back to a hosted API like Claude Haiku 4.5. The ranking module's interface (prompt in, JSON out) makes any of these a config-level swap.
 
 ### Triggers
 
@@ -213,11 +222,13 @@ USER (per call):
 - Profile created or `description`/`structured` changed → backfill score against every call from the last 90 days.
 - Admin "re-rank everything" button (used after prompt changes).
 
-### Cost expectation
+### Cost and throughput expectation
 
-~50 new calls/week × 15 profiles = ~750 ranking calls/week steady-state. With prompt caching on profile blocks, well under $5/month at steady state.
+With local inference there is no per-call API cost — only GPU time and electricity on hardware the hospital already owns.
 
-**Burst cost.** A profile bootstrap or significant edit triggers a backfill against ~90 days of calls (estimate: ~600 calls × 1 profile = 600 ranking calls in a few minutes). At Haiku rates with cached profiles, this is still cents per backfill. The "re-rank everything" admin button is the largest burst: ~600 calls × 15 profiles = ~9,000 ranking calls — under $1, and rate-limited by the in-process queue so it can't overwhelm the API or the DB.
+~50 new calls/week × 15 profiles = ~750 rankings/week steady-state. Gemma 4 E4B on a 2080 Ti comfortably runs each ranking in well under a second with warm prefix cache, so steady-state load is a few minutes of GPU time per week.
+
+**Burst load.** A profile bootstrap or significant edit triggers a backfill against ~90 days of calls (~600 calls × 1 profile = 600 rankings, a few minutes of GPU work). The "re-rank everything" admin button is the largest burst: ~600 calls × 15 profiles = ~9,000 rankings — on the order of an hour of GPU time. The in-process queue rate-limits this so it can't saturate the GPU and starve new-call rankings that arrive during the backfill; new-call jobs are enqueued at a higher priority than backfill jobs.
 
 ### Job queue & retry semantics
 
@@ -226,16 +237,16 @@ Ranking jobs are the unit `(call_id, profile_id)`. They are enqueued in an in-pr
 Each job:
 
 1. Reads the call and profile.
-2. Calls Claude, parses JSON, upserts `call_rankings` on `(call_id, profile_id)` PK — idempotent.
-3. On LLM error (5xx, timeout), retries with exponential backoff (e.g., 30s, 2m, 10m), up to 5 attempts.
-4. On parse error (malformed JSON), retries once with a tightened prompt; if still bad, dead-letter the job.
+2. Calls the Gemma 4 E4B endpoint, parses JSON, upserts `call_rankings` on `(call_id, profile_id)` PK — idempotent.
+3. On inference error (HTTP 5xx, timeout, Ollama unavailable), retries with exponential backoff (e.g., 30s, 2m, 10m), up to 5 attempts.
+4. On parse error (malformed JSON despite structured-output mode — rare), retries once with a tightened prompt; if still bad, dead-letter the job.
 5. After 5 failed attempts, mark the job failed in `ranking_jobs.status`, surface the count in the admin panel, do **not** block other jobs.
 
 Per-pair retry (not per-batch) matters: if scoring a new call against 15 profiles fails on profile #7, profiles 8–15 still complete. The dead-letter job can be retried manually from the admin panel.
 
 ### Storage
 
-One row per `(call_id, profile_id)` in `call_rankings`, including `model`, `prompt_version`, `ranked_at`, and `raw_response` (full LLM JSON output — tiny storage cost, large debuggability payoff when a score looks wrong). A separate `ranking_jobs` table tracks in-flight and failed jobs.
+One row per `(call_id, profile_id)` in `call_rankings`, including `model` (e.g., `"gemma-4-e4b-q8"` — records both model and quantization since both affect outputs), `prompt_version`, `ranked_at`, and `raw_response` (full LLM JSON output — tiny storage cost, large debuggability payoff when a score looks wrong). A separate `ranking_jobs` table tracks in-flight and failed jobs.
 
 ## LLM reliability & miss prevention
 
@@ -244,7 +255,7 @@ LLM scoring is non-deterministic at the edges. A call that genuinely belongs in 
 ### Failure modes we expect
 
 - **Stochasticity** within a ~±10-point noise band, especially on borderline calls.
-- **Model drift** — same prompt a year later behaves differently; Anthropic updates models.
+- **Model drift** — local weights are pinned so drift is opt-in rather than pushed on us, but upgrading Gemma (or changing quantization) still shifts outputs and must be treated as a prompt-change-equivalent event.
 - **Prompt sensitivity** — small profile rewordings shift all scores by several points.
 - **Parse failures / hallucinations** — malformed JSON, or a rationale that contradicts the score.
 - **Systematic blind spots** — the model consistently under-scores an area a profile under-describes.
@@ -263,8 +274,8 @@ After the top-5 above-threshold block, the digest appends a collapsed "Borderlin
 **4. `raw_response` stored with every ranking.**
 Full LLM JSON kept on `call_rankings.raw_response`. When a score looks wrong, the admin can see what the model actually said — including any parse artifacts, hedging, or contradictory rationale.
 
-**5. Pinned model + `prompt_version` + `temperature=0`.**
-Every ranking row records exactly which regime produced it. A prompt or model change is a visible event that can be backfilled via the admin "re-rank everything" button. No silent drift.
+**5. Pinned model + quantization + `prompt_version` + `temperature=0`.**
+Every ranking row records exactly which regime produced it — the `model` column stores both model and quantization (e.g., `"gemma-4-e4b-q8"`). A prompt, model, or quantization change is a visible event that can be backfilled via the admin "re-rank everything" button. No silent drift.
 
 **6. Dead-letter queue visible in admin.**
 Failed ranking jobs (from the per-pair retry logic) surface in the admin panel with the last error and raw response, never silently dropped.
@@ -274,7 +285,7 @@ The weekly golden-set eval compares current scores against a historical baseline
 
 ### v1 explicit non-goals
 
-- **No multi-model ensembles.** Scoring with Claude *and* GPT-4 and cross-checking adds cost and complexity for marginal lift at this scale.
+- **No multi-model ensembles.** Scoring with two different models and cross-checking adds complexity for marginal lift at this scale.
 - **No embedding-based pre-filter.** At ~50 calls/week the LLM *is* the filter; a vector index would add moving parts without buying anything. Revisit if source count grows to 10+.
 
 ### Near-term additions (see Roadmap)
@@ -298,8 +309,9 @@ Getting ingestion right matters more than getting ranking right. A miss in the d
      - **ORCID-first matching:** if an ORCID is provided, use the `AUID` field to fetch unambiguous publications.
      - **Name-based fallback:** when only name + affiliation is provided, query PubMed with `Author[au] AND Affiliation[ad]` to reduce false positives. Affiliation matching is fuzzy and noisy by nature; the user reviews the draft, so some imprecision is acceptable.
      - **Empty results:** if no publications are found for a member, log it and continue with the rest. The bootstrap proceeds even if all PubMed lookups fail — the LLM draft will then rest only on pasted grants.
+     - **Rate limiting:** unauthenticated E-utilities is capped at 3 requests/second. The bootstrap fetch throttles to ≤2 req/s with a small jitter and backs off on HTTP 429. Bootstrapping a 10-member group therefore takes ~5–10 seconds for the lookup phase, which is fine (the user is already waiting on the LLM draft). If this ever becomes a bottleneck, request an NCBI API key to raise the cap to 10 req/s.
    - Past grants are used as-pasted (no reliable structured source for Swedish/EU per-researcher grants).
-3. **Draft generation** — Claude reads (publications + grants) → produces a 1–2 paragraph free-text description plus suggested structured fields (areas, TRL, budget range).
+3. **Draft generation** — the LLM (Gemma 4 E4B, same instance used for ranking) reads (publications + grants) → produces a 1–2 paragraph free-text description plus suggested structured fields (areas, TRL, budget range).
 4. **Edit screen** — user reviews, refines free text, adjusts structured fields, saves.
 5. **Re-rank trigger** — backfill scoring against last 90 days of calls.
 
@@ -357,7 +369,7 @@ Email magic links. User enters email → one-time link sent → click sets a 30-
 
 **Domain allowlist:**
 
-`ALLOWED_EMAIL_DOMAINS` accepts a comma-separated list, matched against the substring after the final `@`. Subdomains and aliases must be listed explicitly — e.g., `regionstockholm.se,karolinska.se,ki.se`. The match is exact on the domain (no wildcard); if the hospital uses many subdomains, list them. This is intentional — implicit subdomain matching has bitten teams before (e.g., `intern.regionstockholm.se` accidentally being treated like the main domain).
+`ALLOWED_EMAIL_DOMAINS` accepts a comma-separated list — e.g., `regionstockholm.se,karolinska.se,ki.se`. For each incoming email, extract the substring after the final `@`, lowercase it, and check for **case-insensitive equality** against any entry in the list. No wildcard, no subdomain matching: `intern.regionstockholm.se` does *not* match `regionstockholm.se`. If the hospital uses multiple subdomains, each one must be listed explicitly. This is intentional — implicit subdomain matching has bitten teams before.
 
 **Known residual risk:** anyone with a hospital-domain email alias that forwards to an external address can gain access. Acceptable for this threat model (internal tool, low-sensitivity data), explicitly noted so future changes don't assume otherwise.
 
@@ -404,7 +416,7 @@ For each user with at least one subscription:
    - **Must-include:** any call whose title/summary/keywords contain a term from `profile.structured.must_include` (case-insensitive substring match). Included unconditionally.
    - **Top matches:** calls with `score >= threshold` (default 60), minus any already in the must-include bucket. Take up to 5 by score desc.
    - **Borderline:** calls with `45 <= score < threshold`, minus any in the other buckets. Take up to 5 by score desc. Rendered as a collapsed "Borderline matches" section below the main block.
-3. Deduplicate across the user's profile sections: if the same call qualifies for multiple subscribed profiles, show it once, under the highest-scoring profile; note other matching profiles inline ("also matches: <list>").
+3. Deduplicate across the user's profile sections: if the same call qualifies for multiple subscribed profiles, show it once, under the highest-scoring profile; note other matching profiles inline ("also matches: <list>"). **Tie-breaker:** if two profiles produce the same score for a call, assign the call to the profile with the lowest `profile_id`. This keeps the "primary" profile assignment stable across re-ranks — otherwise the same call can flap between profiles week to week, which looks like a bug.
 4. Skip the email entirely only if all three buckets are empty for every subscribed profile (no "nothing to report" noise).
 5. Render one email grouped by profile, send via Resend (or SMTP relay if hospital prefers).
 
@@ -435,7 +447,8 @@ MJML → HTML at build time, plus a plain-text alternative. Stored in `digest/te
 - **DB:** PostgreSQL 16 (managed)
 - **ORM/migrations:** SQLAlchemy 2.x + Alembic
 - **Scheduler:** APScheduler (in-process)
-- **LLM:** `anthropic` SDK, Claude Haiku 4.5, prompt caching on profile blocks
+- **LLM:** Gemma 4 E4B (Q8) served locally via Ollama; accessed through an OpenAI-compatible HTTP client (`openai` SDK pointed at the local endpoint). Prefix caching on profile blocks.
+- **GPU:** NVIDIA RTX 2080 Ti (11 GB VRAM, compute capability 7.5). Note: vLLM dropped Turing support; Ollama and llama.cpp are the supported paths.
 - **Email:** Resend or SMTP relay
 - **HTTP:** `httpx` with retries
 - **Package management:** `uv`
@@ -444,16 +457,17 @@ MJML → HTML at build time, plus a plain-text alternative. Stored in `digest/te
 
 ## Deployment
 
-- Single container, deployed to Fly.io or a small Hetzner VM. One process for web + scheduler.
-- Managed Postgres separately; daily automated backups.
-- Secrets and config via env vars: `ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAINS` (comma-separated), `INITIAL_ADMIN_EMAIL` (comma-separated, optional after first deploy).
-- CI: GitHub Actions runs lint + tests on every push; the golden-set ranking eval runs on a weekly cron.
+- **On-prem deployment, exactly one instance.** The 2080 Ti lives in a hospital-owned box, so the app deploys there alongside an Ollama service. One process for web + scheduler; Ollama runs as a sibling service (systemd unit or a second container sharing the GPU).
+- **Single-instance is a hard constraint, not a soft preference.** APScheduler runs in-process; two replicas would produce duplicate ingestion runs and duplicate ranking jobs. Deploy configuration must enforce `replicas=1` (e.g., a systemd service, or `max_replicas: 1` / equivalent on whatever orchestrator is used). If multi-instance becomes necessary later, move scheduling to a dedicated instance or add a `pg_advisory_lock` keyed by job type — see the Scheduling section.
+- Managed Postgres separately (or on-prem Postgres, whichever hospital IT prefers); daily automated backups.
+- Secrets and config via env vars: `OLLAMA_URL` (default `http://localhost:11434`), `GEMMA_MODEL` (e.g., `"gemma-4-e4b-q8"`), `RESEND_API_KEY` (or SMTP settings), `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAINS` (comma-separated), `INITIAL_ADMIN_EMAIL` (comma-separated, optional after first deploy).
+- CI: GitHub Actions runs lint + tests on every push. The golden-set ranking eval runs on a weekly cron on the deployment host (it needs the GPU); results are posted back to an admin-visible page or alert channel.
 
 ## Testing
 
 - **Unit tests** for each module: adapter normalization, ranking with fake LLM, digest assembly with seeded DB, profile bootstrap with fake PubMed + fake LLM.
 - **Integration tests:** full ingest → rank → digest pipeline against ephemeral Postgres (testcontainers).
-- **Golden ranking set:** ~20 hand-labeled `(call, profile, expected_band)` triples, run against real Claude weekly to catch regressions.
+- **Golden ranking set:** ~20 hand-labeled `(call, profile, expected_band)` triples, run against the live Gemma 4 E4B endpoint weekly to catch regressions from model, quantization, or prompt changes.
 - **No browser tests** for v1 — server-rendered pages are testable via FastAPI's `TestClient`. Playwright not warranted at this scale.
 
 ## Observability
