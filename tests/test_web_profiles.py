@@ -181,3 +181,27 @@ def test_profile_edit_post_saves_and_triggers_backfill(
 
         jobs = s.execute(select(RankingJob).where(RankingJob.profile_id == pid)).scalars().all()
     assert len(jobs) == 1  # our one recent Call got enqueued
+
+
+def test_profile_view_renders_fields(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    pid, _ = profile_factory(
+        name="Viewable",
+        description="nice description",
+        structured={"areas": ["digital pathology"], "must_include": ["kw1"], "hard_exclusions": []},
+    )
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/profiles/{pid}")
+    assert r.status_code == 200
+    assert "Viewable" in r.text
+    assert "nice description" in r.text
+    assert "digital pathology" in r.text
+
+
+def test_profile_view_404_for_unknown(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/profiles/99999")
+    assert r.status_code == 404

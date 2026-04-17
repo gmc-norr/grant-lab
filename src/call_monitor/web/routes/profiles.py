@@ -85,6 +85,26 @@ def profile_new_submit(
     return RedirectResponse(url=f"/profiles/{new_id}/edit", status_code=303)
 
 
+@router.get("/profiles/{profile_id}", response_class=HTMLResponse)
+def profile_detail(
+    request: Request,
+    profile_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    from fastapi import HTTPException
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        p = session.get(Profile, profile_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        session.expunge(p)
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="profile_detail.html",
+        context={"profile": p, "user": user},
+    )
+
+
 @router.get("/profiles/{profile_id}/edit", response_class=HTMLResponse)
 def profile_edit_form(
     request: Request,

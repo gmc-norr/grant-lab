@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ profile.name }} — Call Monitor{% endblock %}
+{% block content %}
+<p><a href="/profiles">&larr; All profiles</a></p>
+<h1>{{ profile.name }}
+  <small>({{ profile.kind.value if profile.kind.value is defined else profile.kind }})</small>
+  {% if not profile.is_active %}<span style="color:#999">(inactive)</span>{% endif %}
+</h1>
+
+<p><a href="/profiles/{{ profile.id }}/edit">Edit</a> · <a href="/?profile={{ profile.id }}">Ranked feed</a></p>
+
+<h2>Description</h2>
+<p>{{ profile.description or '— (no description)' }}</p>
+
+<h2>Structured fields</h2>
+<dl>
+  <dt>Areas</dt><dd>{{ profile.structured.areas | join(', ') if profile.structured.areas else '—' }}</dd>
+  <dt>Budget</dt>
+  <dd>
+    {% if profile.structured.budget_min or profile.structured.budget_max %}
+      {{ profile.structured.budget_min or '—' }} – {{ profile.structured.budget_max or '—' }}
+    {% else %}—{% endif %}
+  </dd>
+  <dt>TRL</dt>
+  <dd>
+    {% if profile.structured.trl_min or profile.structured.trl_max %}
+      {{ profile.structured.trl_min or '—' }} – {{ profile.structured.trl_max or '—' }}
+    {% else %}—{% endif %}
+  </dd>
+  <dt>Must include</dt>
+  <dd>{{ profile.structured.must_include | join(', ') if profile.structured.must_include else '—' }}</dd>
+  <dt>Hard exclusions</dt>
+  <dd>{{ profile.structured.hard_exclusions | join(', ') if profile.structured.hard_exclusions else '—' }}</dd>
+</dl>
+{% endblock %}
