@@ -224,6 +224,44 @@ def test_run_digest_dry_run_does_not_send_or_write(pg_session_factory, now):
     assert runs == []
 
 
+def test_run_digest_continues_when_one_user_assembly_fails(
+    pg_session_factory, now, monkeypatch
+):
+    """If assemble_for_user raises for one user, subsequent users still get
+    digests. Spec docstring: 'Per-recipient try/except so one bounce doesn't
+    stop the batch.'"""
+    with pg_session_factory() as s:
+        uid_bad = _seed_user_with_payload(s, email="bad@ki.se")
+        _seed_user_with_payload(s, email="good@ki.se")
+        s.commit()
+
+    real_assemble = __import__(
+        "call_monitor.digest.send", fromlist=["assemble_for_user"]
+    ).assemble_for_user
+
+    def flaky_assemble(session, *, user_id, now):
+        if user_id == uid_bad:
+            raise RuntimeError("simulated profile-data corruption")
+        return real_assemble(session, user_id=user_id, now=now)
+
+    monkeypatch.setattr(
+        "call_monitor.digest.send.assemble_for_user", flaky_assemble
+    )
+
+    email = _FakeEmail()
+    summary = run_digest(
+        session_factory=pg_session_factory, email_client=email,
+        settings=_FakeSettings(), now=now,
+    )
+
+    # Good user got their digest; bad user was logged and skipped
+    assert summary.emails_sent == 1
+    assert summary.users_processed == 2
+    sent_to = [c["to"] for c in email.calls]
+    assert "good@ki.se" in sent_to
+    assert "bad@ki.se" not in sent_to
+
+
 def test_run_digest_skips_disabled_users(pg_session_factory, now):
     with pg_session_factory() as s:
         uid = _seed_user_with_payload(s, email="disabled@ki.se")

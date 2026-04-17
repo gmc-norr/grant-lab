@@ -83,66 +83,74 @@ def run_digest(
             if existing is not None:
                 continue
 
-            payload = assemble_for_user(session, user_id=uid, now=now)
-            if payload is None:
-                continue
-
-            html = render_html(payload, dashboard_url=settings.admin_dashboard_url)
-            text = render_text(payload, dashboard_url=settings.admin_dashboard_url)
-            subject = build_subject(payload)
-
-            if settings.digest_dry_run:
-                _logger.info(
-                    "digest.dry_run",
-                    extra={
-                        "event": "digest_dry_run",
-                        "user_id": uid,
-                        "to": payload.user_email,
-                        "subject": subject,
-                        "n_calls": payload.total_calls,
-                    },
-                )
-                continue
-
             try:
-                result = email_client.send(
-                    to=payload.user_email, subject=subject, html=html, text=text
-                )
-            except EmailTransportError as e:
-                summary.transport_errors += 1
-                _logger.warning(
-                    "digest.transport_error",
-                    extra={"event": "digest_transport_error", "user_id": uid, "error": str(e)},
-                )
-                continue
+                payload = assemble_for_user(session, user_id=uid, now=now)
+                if payload is None:
+                    continue
 
-            user = session.get(User, uid)
-            if not result.ok:
-                summary.bounces += 1
-                user.digest_bounce_count = (user.digest_bounce_count or 0) + 1
-                _logger.warning(
-                    "digest.bounce",
-                    extra={
-                        "event": "digest_bounce",
-                        "user_id": uid,
-                        "bounce_count": user.digest_bounce_count,
-                        "reason": result.bounce_reason,
-                    },
-                )
-                if user.digest_bounce_count >= BOUNCE_DISABLE_THRESHOLD:
-                    user.digest_disabled_at = now
-                    summary.users_disabled += 1
+                html = render_html(payload, dashboard_url=settings.admin_dashboard_url)
+                text = render_text(payload, dashboard_url=settings.admin_dashboard_url)
+                subject = build_subject(payload)
+
+                if settings.digest_dry_run:
+                    _logger.info(
+                        "digest.dry_run",
+                        extra={
+                            "event": "digest_dry_run",
+                            "user_id": uid,
+                            "to": payload.user_email,
+                            "subject": subject,
+                            "n_calls": payload.total_calls,
+                        },
+                    )
+                    continue
+
+                try:
+                    result = email_client.send(
+                        to=payload.user_email, subject=subject, html=html, text=text
+                    )
+                except EmailTransportError as e:
+                    summary.transport_errors += 1
+                    _logger.warning(
+                        "digest.transport_error",
+                        extra={"event": "digest_transport_error", "user_id": uid, "error": str(e)},
+                    )
+                    continue
+
+                user = session.get(User, uid)
+                if not result.ok:
+                    summary.bounces += 1
+                    user.digest_bounce_count = (user.digest_bounce_count or 0) + 1
+                    _logger.warning(
+                        "digest.bounce",
+                        extra={
+                            "event": "digest_bounce",
+                            "user_id": uid,
+                            "bounce_count": user.digest_bounce_count,
+                            "reason": result.bounce_reason,
+                        },
+                    )
+                    if user.digest_bounce_count >= BOUNCE_DISABLE_THRESHOLD:
+                        user.digest_disabled_at = now
+                        summary.users_disabled += 1
+                    session.commit()
+                    continue
+
+                # Success
+                user.digest_bounce_count = 0
+                session.add(DigestRun(
+                    user_id=uid,
+                    included_call_ids=[e.call_id for sec in payload.sections for e in sec.entries],
+                    sent_at=now,
+                ))
                 session.commit()
+                summary.emails_sent += 1
+            except Exception as e:  # noqa: BLE001
+                _logger.exception(
+                    "digest.user_failed",
+                    extra={"event": "digest_user_failed", "user_id": uid, "error": str(e)},
+                )
+                # Continue with next user — one bad profile mustn't kill the batch
                 continue
-
-            # Success
-            user.digest_bounce_count = 0
-            session.add(DigestRun(
-                user_id=uid,
-                included_call_ids=[e.call_id for sec in payload.sections for e in sec.entries],
-                sent_at=now,
-            ))
-            session.commit()
-            summary.emails_sent += 1
 
     return summary

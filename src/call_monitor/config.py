@@ -50,6 +50,11 @@ class Settings(BaseSettings):
         default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL"
     )
 
+    @field_validator("admin_dashboard_url", mode="after")
+    @classmethod
+    def _ensure_trailing_slash(cls, v: str) -> str:
+        return v if v.endswith("/") else v + "/"
+
     @field_validator("allowed_email_domains", "initial_admin_emails", mode="before")
     @classmethod
     def _split_csv(cls, v):
