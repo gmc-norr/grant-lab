@@ -56,7 +56,11 @@ def _parse_score_rationale(content: str) -> tuple[int, str]:
     if "score" not in parsed:
         raise LLMError("assistant content missing required key 'score'")
     score = parsed["score"]
-    if not isinstance(score, int) or not 0 <= score <= 100:
+    # `isinstance(True, int)` is True in Python (bool subclasses int), so
+    # a model returning {"score": true} would otherwise coerce to 1 and
+    # silently persist a nonsense ranking. Reject booleans explicitly so
+    # malformed LLM output is retried / dead-lettered instead.
+    if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
         raise LLMError(f"score must be an integer in 0–100; got {score!r}")
     rationale = str(parsed.get("rationale") or "")
     if len(rationale) > _RATIONALE_MAX:

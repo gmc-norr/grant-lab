@@ -38,6 +38,20 @@ def calls_index(
 ):
     session_factory = request.app.state.session_factory
     with session_factory() as session:
+        # Validate the requested profile is real AND active before
+        # showing the ranked view. Spec (design spec, "Profile deletion
+        # is soft") requires inactive profiles to be absent from feeds.
+        # Unknown or inactive ?profile=<id> degrades to the unranked
+        # list so a stale bookmark doesn't error or leak audit data.
+        if profile is not None:
+            exists_and_active = session.execute(
+                select(Profile.id).where(
+                    Profile.id == profile, Profile.is_active.is_(True)
+                )
+            ).scalar_one_or_none()
+            if exists_and_active is None:
+                profile = None
+
         # When a profile is selected, LEFT JOIN call_rankings for THAT
         # profile and sort by score desc (nulls last). Without a profile,
         # fall back to the unranked sort (newest/deadline).

@@ -86,17 +86,14 @@ def test_root_without_profile_still_uses_published_at(
     assert body.index("Unranked") < body.index("Low score") < body.index("High score")
 
 
-def test_root_unknown_profile_degrades_gracefully(
+def test_root_unknown_profile_degrades_to_unranked(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """Bogus ?profile=<id> shouldn't 500 or hide calls. The route LEFT
-    JOINs call_rankings on profile_id=<unknown>, which matches nothing,
-    so all calls render with empty score cells and the dropdown falls
-    back to the '— No profile —' option (id 99999 isn't in the active
-    profiles list). Non-fatal by design — a stale bookmark from before
-    a soft-delete shouldn't error."""
+    """Bogus ?profile=<id> falls back to the unranked view (no Score
+    column). Spec requires inactive profiles to be absent from feeds,
+    and an unknown id is treated the same way so stale bookmarks don't
+    leak audit data or error out."""
     profile_factory()  # create a real one but request a different id
-    # Seed one call so the page has content to render
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         s.add(Call(source_id=src.id, external_id="U-1", url="https://x", title="Visible call"))
@@ -107,9 +104,44 @@ def test_root_unknown_profile_degrades_gracefully(
     with client:
         r = client.get("/?profile=99999")
     assert r.status_code == 200
-    # The score column is present (profile was requested) but its cell is empty
-    # for every row because no CallRanking matches profile_id=99999.
-    assert "Score" in r.text  # column header
-    assert "Visible call" in r.text  # call still renders
-    # Dropdown falls back to "— No profile —" because 99999 is not in the list
-    assert "— No profile —" in r.text
+    # Score column HEADER must NOT be present — this is the unranked view.
+    assert "<th>Score</th>" not in r.text
+    assert "Visible call" in r.text
+
+
+def test_root_inactive_profile_degrades_to_unranked(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Spec: inactive profiles are removed from feeds. ?profile=<inactive>
+    MUST NOT show the stored ranking scores for that profile — otherwise
+    a soft-delete wouldn't actually remove audit data from the UI."""
+    from call_monitor.db.models import CallRanking, Profile
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="I-1", url="https://x/i",
+            title="Should be hidden",
+            published_at=datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=profile_id, score=99,
+            rationale="hidden", model="gemma4:e4b-q8", prompt_version="v1",
+        ))
+        # Now soft-delete the profile
+        s.get(Profile, profile_id).is_active = False
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/?profile={profile_id}")
+    assert r.status_code == 200
+    # Unranked view — no Score column header
+    assert "<th>Score</th>" not in r.text
+    # The stored score must NOT leak into the response
+    assert "99" not in r.text
+    # The call itself still renders (it exists regardless of profile state)
+    assert "Should be hidden" in r.text

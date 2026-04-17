@@ -100,6 +100,42 @@ def test_drain_retries_on_llm_error_then_dead_letters(
     assert "simulated outage" in job.last_error
 
 
+def test_drain_skips_jobs_for_profiles_deactivated_after_enqueue(
+    pg_session_factory, profile_factory
+):
+    """Spec: inactive profiles are out of ranking backfills. If a profile
+    is soft-deleted after its jobs were enqueued, the worker must NOT
+    consume Ollama capacity for it nor refresh its call_rankings. Mark
+    the job DONE (resolved without work) and skip."""
+    from call_monitor.db.models import CallRanking, Profile
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        _seed_call_and_pending_job(s, profile_id)
+        # Deactivate the profile AFTER the job is enqueued.
+        s.get(Profile, profile_id).is_active = False
+        s.commit()
+
+    ranker = _StaticRanker(score=99)
+    n = drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        ranker=ranker,
+        batch_size=10,
+    )
+    # The job was claimed and processed (counted as processed).
+    assert n == 1
+    # But the ranker was NOT called — no Ollama capacity consumed.
+    assert ranker.calls == 0
+
+    with pg_session_factory() as s:
+        jobs = s.execute(select(RankingJob)).scalars().all()
+        rankings = s.execute(select(CallRanking)).scalars().all()
+    assert jobs[0].status == RankingJobStatus.DONE
+    # No call_rankings row was written — spec requires the profile to be
+    # out of circulation, including new writes.
+    assert rankings == []
+
+
 def test_drain_skips_when_no_pending_jobs(pg_session_factory):
     n = drain_queue(
         session_factory=pg_session_factory,

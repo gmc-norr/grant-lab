@@ -90,6 +90,15 @@ def test_score_out_of_range_raises_llm_error():
         rank_pair(client=client, profile=_profile(), call=_call())
 
 
+def test_score_bool_raises_llm_error():
+    """Python's isinstance(True, int) is True (bool subclasses int). Without
+    an explicit bool check, `{"score": true}` would silently persist as
+    score=1 instead of being retried/dead-lettered."""
+    client = _client_returning({"score": True, "rationale": "boolish"})
+    with pytest.raises(LLMError, match="score"):
+        rank_pair(client=client, profile=_profile(), call=_call())
+
+
 def test_empty_assistant_content_raises_llm_error():
     """Gemma in JSON mode may respond with tool_calls instead of plain
     content, leaving content=None or empty. Must raise LLMError, not

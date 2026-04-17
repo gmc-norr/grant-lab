@@ -86,6 +86,25 @@ def drain_queue(
                     )
                     session.commit()
                     continue
+                if not profile.is_active:
+                    # Profile was soft-deleted after the job was enqueued.
+                    # Spec: inactive profiles are out of ranking backfills —
+                    # don't burn Ollama capacity or refresh call_rankings
+                    # for a profile that shouldn't be in circulation.
+                    # Mark the job DONE (resolved without work) rather than
+                    # FAILED (didn't actually fail) so the dead-letter queue
+                    # stays meaningful.
+                    mark_done(session, job_id)
+                    session.commit()
+                    _logger.info(
+                        "ranking.job_skipped_inactive_profile",
+                        extra={
+                            "event": "ranking_job_skipped_inactive",
+                            "job_id": job_id,
+                            "profile_id": profile_id,
+                        },
+                    )
+                    continue
                 result = ranker(client=client, profile=profile, call=call)
                 session.merge(
                     CallRanking(
