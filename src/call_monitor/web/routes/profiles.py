@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
@@ -58,6 +58,10 @@ def profile_new_submit(
     pasted_grants: str = Form(""),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
+    if len(name) > 200:
+        raise HTTPException(status_code=400, detail="name too long (max 200 chars)")
+    if len(pasted_grants) > 100_000:
+        raise HTTPException(status_code=413, detail="pasted grants too large (max 100 KB)")
     members = _parse_members(orcids, names_affiliations)
     if kind not in {k.value for k in ProfileKind}:
         kind = "group"
@@ -91,7 +95,6 @@ def profile_detail(
     profile_id: int,
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    from fastapi import HTTPException
     session_factory = request.app.state.session_factory
     with session_factory() as session:
         p = session.get(Profile, profile_id)
@@ -115,7 +118,6 @@ def profile_edit_form(
     with session_factory() as session:
         p = session.get(Profile, profile_id)
         if p is None:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="profile not found")
         session.expunge(p)
     return request.app.state.templates.TemplateResponse(
@@ -139,11 +141,12 @@ def profile_edit_submit(
     hard_exclusions: str = Form(""),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
+    if len(description) > 50_000:
+        raise HTTPException(status_code=413, detail="description too long (max 50 KB)")
     session_factory = request.app.state.session_factory
     with session_factory() as session:
         p = session.get(Profile, profile_id)
         if p is None:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="profile not found")
         p.description = description
         p.structured = {

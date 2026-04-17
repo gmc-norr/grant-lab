@@ -205,3 +205,78 @@ def test_profile_view_404_for_unknown(monkeypatch, pg_url, pg_session_factory):
     with client:
         r = client.get("/profiles/99999")
     assert r.status_code == 404
+
+
+def test_profile_new_rejects_too_long_name(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "X" * 201,
+                "kind": "group",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+
+
+def test_profile_new_rejects_oversized_grants(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "X",
+                "kind": "group",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "a" * 100_001,
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 413
+
+
+def test_profile_edit_rejects_oversized_description(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(name="desc test")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "d" * 50_001,
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 413
+
+
+def test_profile_edit_preserves_zero_budget_min(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Regression: stored budget_min=0 must round-trip through the edit form."""
+    pid, _ = profile_factory(
+        name="zero budget", structured={"budget_min": 0, "budget_max": 100}
+    )
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/profiles/{pid}/edit")
+    assert r.status_code == 200
+    assert 'value="0"' in r.text  # budget_min=0 rendered as "0", not ""

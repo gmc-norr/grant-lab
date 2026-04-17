@@ -72,7 +72,7 @@ def bootstrap_profile(
             draft = parse_bootstrap_response(content)
             description = draft.description
             structured = draft.structured
-    except (LLMError, BootstrapParseError, KeyError, IndexError, TypeError) as e:
+    except (LLMError, BootstrapParseError, KeyError, IndexError, TypeError, AttributeError) as e:
         _logger.warning(
             "profiles.bootstrap.llm_failed",
             extra={"event": "bootstrap_llm_failed", "error": str(e)},

@@ -15,12 +15,12 @@
     </label>
   </p>
   <p>
-    <label>Budget min <input type="text" name="budget_min" value="{{ profile.structured.budget_min or '' }}"></label>
-    <label>Budget max <input type="text" name="budget_max" value="{{ profile.structured.budget_max or '' }}"></label>
+    <label>Budget min <input type="text" name="budget_min" value="{{ '' if profile.structured.budget_min is none else profile.structured.budget_min }}"></label>
+    <label>Budget max <input type="text" name="budget_max" value="{{ '' if profile.structured.budget_max is none else profile.structured.budget_max }}"></label>
   </p>
   <p>
-    <label>TRL min (1-9) <input type="text" name="trl_min" value="{{ profile.structured.trl_min or '' }}"></label>
-    <label>TRL max (1-9) <input type="text" name="trl_max" value="{{ profile.structured.trl_max or '' }}"></label>
+    <label>TRL min (1-9) <input type="text" name="trl_min" value="{{ '' if profile.structured.trl_min is none else profile.structured.trl_min }}"></label>
+    <label>TRL max (1-9) <input type="text" name="trl_max" value="{{ '' if profile.structured.trl_max is none else profile.structured.trl_max }}"></label>
   </p>
   <p>
     <label>Must-include keywords (one per line)<br>

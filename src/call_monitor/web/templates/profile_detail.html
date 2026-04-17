@@ -17,14 +17,14 @@
   <dt>Areas</dt><dd>{{ profile.structured.areas | join(', ') if profile.structured.areas else '—' }}</dd>
   <dt>Budget</dt>
   <dd>
-    {% if profile.structured.budget_min or profile.structured.budget_max %}
-      {{ profile.structured.budget_min or '—' }} – {{ profile.structured.budget_max or '—' }}
+    {% if profile.structured.budget_min is not none or profile.structured.budget_max is not none %}
+      {{ profile.structured.budget_min if profile.structured.budget_min is not none else '—' }} – {{ profile.structured.budget_max if profile.structured.budget_max is not none else '—' }}
     {% else %}—{% endif %}
   </dd>
   <dt>TRL</dt>
   <dd>
-    {% if profile.structured.trl_min or profile.structured.trl_max %}
-      {{ profile.structured.trl_min or '—' }} – {{ profile.structured.trl_max or '—' }}
+    {% if profile.structured.trl_min is not none or profile.structured.trl_max is not none %}
+      {{ profile.structured.trl_min if profile.structured.trl_min is not none else '—' }} – {{ profile.structured.trl_max if profile.structured.trl_max is not none else '—' }}
     {% else %}—{% endif %}
   </dd>
   <dt>Must include</dt>

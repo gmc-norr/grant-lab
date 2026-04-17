@@ -104,3 +104,29 @@ def test_bootstrap_pubmed_failure_falls_back_to_grants_only():
     draft = bootstrap_profile(seed=seed, pubmed=broken_pubmed, ollama=ollama)
     assert draft.publications_fetched == 0
     assert draft.description  # LLM still produces one from grants
+
+
+def test_bootstrap_malformed_llm_envelope_does_not_throw():
+    """If the LLM returns a garbage envelope shape (e.g. choices[0].message
+    is a list instead of a dict), bootstrap must still return a DraftProfile."""
+    empty_pubmed = PubMedClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"esearchresult": {"idlist": []}})
+        ),
+        sleep_between_members=0,
+    )
+    bad_envelope = {
+        "choices": [{"message": ["not", "a", "dict"]}],
+    }
+    ollama = OllamaClient(
+        base_url="http://x",
+        model="gemma4:e4b-q8",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=bad_envelope)),
+    )
+    seed = SeedInput(
+        name="X", kind="group", members=[Member(orcid="0000-0001-2345-6789")], pasted_grants=""
+    )
+    draft = bootstrap_profile(seed=seed, pubmed=empty_pubmed, ollama=ollama)
+    # Doesn't throw, returns empty-ish draft
+    assert draft.description == ""
+    assert draft.structured["areas"] == []
