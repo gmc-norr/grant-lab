@@ -86,3 +86,38 @@ def pg_session_factory(migrated_engine):
                     "('Vinnova', 'vinnova')"
                 )
             )
+
+
+@pytest.fixture()
+def profile_factory(pg_session_factory):
+    """Yield a factory that creates a Profile owned by a fresh User.
+    Returns the (profile_id, user_id) tuple so tests can use the IDs
+    after the session closes."""
+    from call_monitor.db.models import Profile, ProfileKind, User
+
+    created: list[int] = []
+
+    def _make(
+        *,
+        name: str = "Group A",
+        kind: ProfileKind = ProfileKind.GROUP,
+        description: str = "Cancer immunotherapy and digital pathology research.",
+        structured: dict | None = None,
+    ) -> tuple[int, int]:
+        with pg_session_factory() as s:
+            u = User(email=f"owner-{len(created)}@ki.se")
+            s.add(u)
+            s.flush()
+            p = Profile(
+                name=name,
+                kind=kind,
+                description=description,
+                structured=structured or {},
+                created_by=u.id,
+            )
+            s.add(p)
+            s.commit()
+            created.append(p.id)
+            return p.id, u.id
+
+    yield _make

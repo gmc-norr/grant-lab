@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from call_monitor.db.models import Source
+from call_monitor.db.models import Call, Profile, Source
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.upsert import upsert_call
+from call_monitor.ranking.queue import enqueue_for_pair
 from call_monitor.sources.types import AdapterError, SourceAdapter
 
 _logger = logging.getLogger(__name__)
@@ -55,6 +56,12 @@ def run_ingestion(
     error_msg: str | None = None
 
     try:
+        # Track Call ids touched this run (both new and updated). We enqueue
+        # ranking jobs for ALL of them, not just inserts — an updated call
+        # might have a meaningful field change (deadline shifted, summary
+        # rewritten) that warrants re-ranking. The job queue's partial
+        # unique index dedup-guards if a job is already pending.
+        touched_call_ids: list[int] = []
         with session_factory() as session:
             for call in adapter.fetch_new_calls(since=since):
                 was_new = upsert_call(session, source_id=source_id, call=call)
@@ -62,12 +69,30 @@ def run_ingestion(
                     inserted += 1
                 else:
                     updated += 1
+                # Look up the row's id for the enqueue step. autoflush=True
+                # means the prior INSERT/UPDATE is visible here.
+                cid = session.execute(
+                    select(Call.id).where(
+                        Call.source_id == source_id,
+                        Call.external_id == call.external_id,
+                    )
+                ).scalar_one()
+                touched_call_ids.append(cid)
             # Advance timestamp inside the same transaction.
             session.execute(
                 Source.__table__.update()
                 .where(Source.id == source_id)
                 .values(last_fetched_at=run_started_at)
             )
+            # Enqueue ranking jobs for every touched call × active profile.
+            # This happens INSIDE the same transaction as the upsert + timestamp
+            # advance so a failure here rolls back everything atomically.
+            active_profile_ids = session.execute(
+                select(Profile.id).where(Profile.is_active.is_(True))
+            ).scalars().all()
+            for cid in touched_call_ids:
+                for pid in active_profile_ids:
+                    enqueue_for_pair(session, call_id=cid, profile_id=pid)
             session.commit()
     except AdapterError as e:
         # Expected operational failure (network blip, 5xx, malformed JSON).

@@ -12,20 +12,31 @@
       {% endfor %}
     </select>
   </label>
-  <label style="margin-left: 1em;">Sort
-    <select name="sort" onchange="this.form.submit()">
-      <option value="newest" {% if selected_sort == "newest" %}selected{% endif %}>Newest first</option>
-      <option value="deadline" {% if selected_sort == "deadline" %}selected{% endif %}>Soonest deadline</option>
+  <label style="margin-left: 1em;">Profile
+    <select name="profile" onchange="this.form.submit()">
+      <option value="">— No profile —</option>
+      {% for p in profiles %}
+        <option value="{{ p.id }}" {% if p.id == selected_profile_id %}selected{% endif %}>{{ p.name }}</option>
+      {% endfor %}
     </select>
   </label>
+  {% if not selected_profile_id %}
+    <label style="margin-left: 1em;">Sort
+      <select name="sort" onchange="this.form.submit()">
+        <option value="newest" {% if selected_sort == "newest" %}selected{% endif %}>Newest first</option>
+        <option value="deadline" {% if selected_sort == "deadline" %}selected{% endif %}>Soonest deadline</option>
+      </select>
+    </label>
+  {% endif %}
 </form>
 
-{% if not calls %}
+{% if not calls_with_rankings %}
   <p><em>No calls have been ingested yet.</em></p>
 {% else %}
   <table>
     <thead>
       <tr>
+        {% if selected_profile_id %}<th>Score</th>{% endif %}
         <th>Title</th>
         <th>Source</th>
         <th>Programme</th>
@@ -34,8 +45,11 @@
       </tr>
     </thead>
     <tbody>
-      {% for c in calls %}
+      {% for c, r in calls_with_rankings %}
         <tr>
+          {% if selected_profile_id %}
+            <td>{{ r.score if r else '—' }}</td>
+          {% endif %}
           <td><a href="/calls/{{ c.id }}">{{ c.title }}</a></td>
           <td>{{ c.source.name }}</td>
           <td>{{ c.programme or '—' }}</td>

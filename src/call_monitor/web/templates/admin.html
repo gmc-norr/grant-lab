@@ -21,4 +21,19 @@
     {% endfor %}
   </tbody>
 </table>
+<h2>Ranking queue</h2>
+<table>
+  <thead>
+    <tr><th>Status</th><th>Jobs</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Pending</td><td>{{ queue_counts.get(queue_status_pending, 0) }}</td></tr>
+    <tr><td>Running</td><td>{{ queue_counts.get(queue_status_running, 0) }}</td></tr>
+    <tr><td>Failed (dead-letter)</td><td>{{ queue_counts.get(queue_status_failed, 0) }}</td></tr>
+    <tr><td>Done</td><td>{{ queue_counts.get(queue_status_done, 0) }}</td></tr>
+  </tbody>
+</table>
+<form method="post" action="/admin/rerank" style="margin-top: 1em;">
+  <button type="submit">Re-rank everything (last 90 days × active profiles)</button>
+</form>
 {% endblock %}

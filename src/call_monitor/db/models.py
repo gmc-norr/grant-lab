@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 from datetime import datetime
 
 from sqlalchemy import (
@@ -8,12 +9,15 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -130,3 +134,122 @@ class Call(Base):
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     source: Mapped[Source] = relationship(back_populates="calls")
+
+
+class ProfileKind(enum.StrEnum):
+    ORG = "org"
+    GROUP = "group"
+    USER = "user"
+
+
+class RankingJobStatus(enum.StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    FAILED = "failed"
+    DONE = "done"
+
+
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[ProfileKind] = mapped_column(
+        Enum(ProfileKind, name="profile_kind", values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+    )
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    structured: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class CallRanking(Base):
+    __tablename__ = "call_rankings"
+    __table_args__ = (
+        # B-tree on (profile_id, score DESC NULLS LAST) — backs the
+        # dashboard's ranked-feed sort literally (ORDER BY score DESC
+        # NULLS LAST). Direction matters: a plain (profile_id, score) ASC
+        # index would be scanned backward, but PG can't combine that with
+        # NULLS LAST without a sort step. Declaring it DESC NULLS LAST
+        # makes the plan free.
+        Index(
+            "ix_call_rankings_profile_score",
+            "profile_id",
+            text("score DESC NULLS LAST"),
+            postgresql_using="btree",
+        ),
+    )
+
+    call_id: Mapped[int] = mapped_column(
+        ForeignKey("calls.id", ondelete="CASCADE"), primary_key=True
+    )
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    raw_response: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    sample_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
+    ranked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RankingJob(Base):
+    __tablename__ = "ranking_jobs"
+    __table_args__ = (
+        Index("ix_ranking_jobs_status_updated", "status", "updated_at"),
+        # Partial unique index: one pending/running job per (call, profile) pair.
+        # Terminal states (done, failed) are excluded so re-ranking can coexist
+        # with prior history. Declared here so alembic check/autogenerate stays
+        # consistent with the migration; postgresql_where carries the predicate.
+        Index(
+            "uq_ranking_jobs_active_pair",
+            "call_id",
+            "profile_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    call_id: Mapped[int] = mapped_column(
+        ForeignKey("calls.id", ondelete="CASCADE"), nullable=False
+    )
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[RankingJobStatus] = mapped_column(
+        Enum(
+            RankingJobStatus,
+            name="ranking_job_status",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+        default=RankingJobStatus.PENDING,
+    )
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )

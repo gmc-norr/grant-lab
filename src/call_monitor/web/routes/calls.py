@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from call_monitor.auth.dependencies import get_current_user
-from call_monitor.db.models import Call, Source, User
+from call_monitor.db.models import Call, CallRanking, Profile, Source, User
 
 router = APIRouter()
 
@@ -32,37 +32,77 @@ def calls_index(
     request: Request,
     source: str | None = Query(default=None),
     sort: _Sort = Query(default="newest"),  # noqa: B008
+    profile: int | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     session_factory = request.app.state.session_factory
     with session_factory() as session:
-        stmt = (
-            select(Call)
-            .options(joinedload(Call.source))
-            .order_by(*_order_for(sort))
-            .limit(limit)
-        )
+        # Validate the requested profile is real AND active before
+        # showing the ranked view. Spec (design spec, "Profile deletion
+        # is soft") requires inactive profiles to be absent from feeds.
+        # Unknown or inactive ?profile=<id> degrades to the unranked
+        # list so a stale bookmark doesn't error or leak audit data.
+        if profile is not None:
+            exists_and_active = session.execute(
+                select(Profile.id).where(
+                    Profile.id == profile, Profile.is_active.is_(True)
+                )
+            ).scalar_one_or_none()
+            if exists_and_active is None:
+                profile = None
+
+        # When a profile is selected, LEFT JOIN call_rankings for THAT
+        # profile and sort by score desc (nulls last). Without a profile,
+        # fall back to the unranked sort (newest/deadline).
+        if profile is not None:
+            stmt = (
+                select(Call, CallRanking)
+                .options(joinedload(Call.source))
+                .outerjoin(
+                    CallRanking,
+                    (CallRanking.call_id == Call.id)
+                    & (CallRanking.profile_id == profile),
+                )
+                .order_by(
+                    CallRanking.score.desc().nullslast(),
+                    Call.published_at.desc().nullslast(),
+                    Call.id.desc(),
+                )
+                .limit(limit)
+            )
+        else:
+            stmt = (
+                select(Call, None)
+                .options(joinedload(Call.source))
+                .order_by(*_order_for(sort))
+                .limit(limit)
+            )
         if source:
             stmt = stmt.where(
                 Call.source_id == select(Source.id).where(Source.slug == source).scalar_subquery()
             )
-        calls = session.execute(stmt).scalars().unique().all()
+        rows = session.execute(stmt).unique().all()
+        # Normalize to (Call, CallRanking|None) shape regardless of branch
+        calls_with_rankings: list[tuple[Call, CallRanking | None]] = [
+            (row[0], row[1] if profile is not None else None) for row in rows
+        ]
         sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
-        # expunge_all() detaches everything in the identity map — including the
-        # `source` rows reached via joinedload(Call.source). Per-object expunge
-        # leaves them attached and the template's `c.source.name` lookup would
-        # raise DetachedInstanceError once the session closes below.
+        profiles = session.execute(
+            select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name)
+        ).scalars().all()
         session.expunge_all()
 
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="calls_index.html",
         context={
-            "calls": calls,
+            "calls_with_rankings": calls_with_rankings,
             "sources": sources,
+            "profiles": profiles,
             "selected_source": source,
             "selected_sort": sort,
+            "selected_profile_id": profile,
             "user": user,
         },
     )
