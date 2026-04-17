@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -14,150 +15,170 @@ _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 _ACCEPT_V2 = "application/vnd.vinnova.opendata.2.0+json"
 
 
-def _parse_ymd(s: str | None) -> tuple[int, int, int] | None:
-    """Parse a Vinnova `YYYY-MM-DD` calendar date into (y, m, d) ints.
+def _parse_iso_stockholm(s: str | None) -> datetime | None:
+    """Parse a naive ISO timestamp from Vinnova (e.g. ``"2022-04-11T00:00:00"``)
+    and interpret it as Europe/Stockholm wall-clock time.
 
-    Returns None on any malformed input — the caller decides what UTC
-    instant the date should map to (see _publication_at vs _deadline_at).
+    Returns a UTC-aware datetime, or None on any malformed / missing input.
     """
     if not s:
         return None
     try:
-        y, m, d = (int(p) for p in s.split("-"))
-    except (ValueError, AttributeError):
+        naive = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
         return None
-    return y, m, d
-
-
-def _publication_at(ymd: str | None) -> datetime | None:
-    """Map an `OppningsDatum` (publication day) to UTC midnight of that
-    calendar day. Vinnova only gives us the day, not the moment of
-    publication; UTC midnight preserves the calendar date verbatim
-    (no DST shifts) and the dashboard renders just the date anyway.
-    """
-    parsed = _parse_ymd(ymd)
-    if parsed is None:
-        return None
-    y, m, d = parsed
-    return datetime(y, m, d, 0, 0, tzinfo=UTC)
-
-
-def _deadline_at(ymd: str | None) -> datetime | None:
-    """Map a `StangningsDatum` (closing day) to 23:59 Europe/Stockholm of
-    that calendar day, then convert to UTC. Deadlines ARE wall-clock
-    cutoffs ('applications must be in by end of day Stockholm') so the
-    timezone math is load-bearing — a deadline at 23:59 CEST (April–Oct)
-    is 21:59 UTC; at 23:59 CET (Nov–Mar) it's 22:59 UTC.
-    """
-    parsed = _parse_ymd(ymd)
-    if parsed is None:
-        return None
-    y, m, d = parsed
-    local = datetime(y, m, d, 23, 59, tzinfo=_STOCKHOLM)
+    local = naive.replace(tzinfo=_STOCKHOLM)
     return local.astimezone(UTC)
 
 
 class VinnovaAdapter:
-    """SourceAdapter for Vinnova's open-data Utlysningar endpoint."""
+    """SourceAdapter for Vinnova's open-data two-stage API.
+
+    Stage 1: ``GET /api/utlysningar/{date}``  — list of programmes.
+    Stage 2: ``GET /api/ansokningsomgangar/{Dnr}`` — one round per call.
+
+    Both endpoints are unauthenticated (no API key required).
+    """
 
     slug = "vinnova"
 
     def __init__(
         self,
         *,
-        api_key: str,
         base_url: str,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 30.0,
+        sleep_between_rounds: float = 0.15,
     ):
-        if not api_key:
-            raise ValueError("VinnovaAdapter requires a non-empty api_key")
-        # Insist on https — the API key is sent as a header on every request,
-        # and a misconfigured `VINNOVA_BASE_URL=http://...` would leak the
-        # subscription key in plaintext over the network. Tests can pass an
-        # https URL alongside a MockTransport (no real connection happens).
+        # Insist on https — even though the endpoint is unauthenticated,
+        # enforcing TLS prevents accidental misconfiguration that could
+        # let a network attacker tamper with funding-call data in transit.
+        # Tests can pass an https URL alongside a MockTransport (no real
+        # connection happens).
         normalized = base_url.rstrip("/")
         if not normalized.lower().startswith("https://"):
             raise ValueError(
                 f"VinnovaAdapter requires an https:// base_url; got {base_url!r}"
             )
-        self._api_key = api_key
         self._base_url = normalized
         self._transport = transport
         self._timeout = timeout
+        self._sleep_between_rounds = sleep_between_rounds
 
     def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
-        # The endpoint takes a date suffix and returns calls modified on/after.
+        # The endpoint takes a date suffix: modified-since semantics.
         date_suffix = since.astimezone(_STOCKHOLM).date().isoformat()
-        path = f"/api/utlysningar/{date_suffix}"
+        programmes_path = f"/api/utlysningar/{date_suffix}"
+
         try:
             with httpx.Client(
                 base_url=self._base_url,
                 transport=self._transport,
                 timeout=self._timeout,
             ) as client:
-                resp = client.get(
-                    path,
-                    headers={
-                        "Accept": _ACCEPT_V2,
-                        "Ocp-Apim-Subscription-Key": self._api_key,
-                    },
-                )
+                resp = client.get(programmes_path, headers={"Accept": _ACCEPT_V2})
                 resp.raise_for_status()
-                payload = resp.json()
+                programmes = resp.json()
+
+                if not isinstance(programmes, list):
+                    raise AdapterError(
+                        f"Vinnova /utlysningar returned non-list: {type(programmes).__name__}"
+                    )
+
+                first_round = True
+                for programme in programmes:
+                    for round_ref in programme.get("AnsokningsomgangDnrLista") or []:
+                        dnr = round_ref.get("DiarienummerAnsokningsomgang")
+                        if not dnr:
+                            continue
+                        if not first_round:
+                            time.sleep(self._sleep_between_rounds)
+                        first_round = False
+
+                        round_path = f"/api/ansokningsomgangar/{dnr}"
+                        round_resp = client.get(round_path, headers={"Accept": _ACCEPT_V2})
+                        round_resp.raise_for_status()
+                        round_list = round_resp.json()
+
+                        if not isinstance(round_list, list):
+                            raise AdapterError(
+                                f"Vinnova /ansokningsomgangar/{dnr} returned non-list: "
+                                f"{type(round_list).__name__}"
+                            )
+
+                        if not round_list:
+                            continue
+                        normalized = self._normalize(round_list[0])
+                        if normalized is not None:
+                            yield normalized
+
         except httpx.HTTPError as e:
             raise AdapterError(f"Vinnova fetch failed: {e}") from e
+        except AdapterError:
+            raise
         except ValueError as e:
             raise AdapterError(f"Vinnova returned non-JSON body: {e}") from e
 
-        if not isinstance(payload, list):
-            raise AdapterError(
-                f"Vinnova returned non-list payload: {type(payload).__name__}"
-            )
-
-        for item in payload:
-            normalized = self._normalize(item)
-            if normalized is None:
-                continue
-            yield normalized
-
     def _normalize(self, item: dict) -> NormalizedCall | None:
+        now_utc = datetime.now(UTC)
+
         external_id = item.get("Diarienummer")
         title = item.get("Titel")
         if not external_id or not title:
             _logger.info(
                 "vinnova.skip_incomplete",
-                extra={"event": "skip_incomplete", "fields_present": list(item.keys())},
+                extra={
+                    "event": "skip_incomplete",
+                    "fields_present": list(item.keys()),
+                },
             )
             return None
 
-        # The portal nests the canonical URL inside `Lankar`. Take the first.
+        # Only surface rounds that are publicly visible on the web portal.
+        if item.get("Publik") != 1 or item.get("Webbsida") != 1:
+            _logger.info(
+                "vinnova.skip_unpublished",
+                extra={"event": "skip_unpublished", "external_id": str(external_id)},
+            )
+            return None
+
+        # Skip rounds whose deadline has already passed.
+        deadline = _parse_iso_stockholm(item.get("Stangningsdatum"))
+        if deadline is None or deadline <= now_utc:
+            _logger.info(
+                "vinnova.skip_closed",
+                extra={"event": "skip_closed", "external_id": str(external_id)},
+            )
+            return None
+
+        # The URL lives in LankLista; each entry has a "URL" key (uppercase).
         url = ""
-        for link in item.get("Lankar") or []:
-            if isinstance(link, dict) and link.get("Url"):
-                url = str(link["Url"])
-                break
+        for link in item.get("LankLista") or []:
+            if isinstance(link, dict) and link.get("URL"):
+                candidate = str(link["URL"])
+                if is_safe_url(candidate):
+                    url = candidate
+                    break
         if not url:
-            return None
-        # Defense in depth against stored XSS — see is_safe_url docstring.
-        if not is_safe_url(url):
-            _logger.warning(
-                "vinnova.skip_unsafe_url",
-                extra={"event": "skip_unsafe_url", "external_id": str(external_id)},
+            _logger.info(
+                "vinnova.skip_no_url",
+                extra={"event": "skip_no_url", "external_id": str(external_id)},
             )
             return None
 
-        budget = item.get("Budget")
+        published_at = _parse_iso_stockholm(item.get("Oppningsdatum"))
+
         return NormalizedCall(
             external_id=str(external_id),
             url=url,
             title=str(title),
             summary=item.get("Beskrivning"),
-            deadline=_deadline_at(item.get("StangningsDatum")),
-            budget_max=int(budget) if isinstance(budget, int | float) else None,
-            currency=item.get("Valuta"),
-            programme=item.get("Program"),
-            keywords=list(item.get("Nyckelord") or []),
-            published_at=_publication_at(item.get("OppningsDatum")),
+            deadline=deadline,
+            budget_min=None,
+            budget_max=None,
+            currency=None,
+            programme=None,
+            keywords=[],
+            published_at=published_at,
             raw=item,
         )

@@ -15,7 +15,6 @@ def test_build_scheduler_returns_one_job_per_active_adapter():
         session_factory=lambda: None,  # not invoked because we don't start
         eu_portal_base_url="https://ec.europa.eu",
         vinnova_base_url="https://data.vinnova.se",
-        vinnova_api_key="dummy",
         alerter=_NullAlerter(),
         ollama_url="http://localhost:11434",
         gemma_model="gemma4:e4b-q8",
@@ -29,30 +28,11 @@ def test_build_scheduler_returns_one_job_per_active_adapter():
     sched.shutdown(wait=False)
 
 
-def test_build_scheduler_skips_vinnova_without_api_key():
-    sched = build_scheduler(
-        session_factory=lambda: None,
-        eu_portal_base_url="https://ec.europa.eu",
-        vinnova_base_url="https://data.vinnova.se",
-        vinnova_api_key=None,
-        alerter=_NullAlerter(),
-        ollama_url="http://localhost:11434",
-        gemma_model="gemma4:e4b-q8",
-        ranking_tick_seconds=60,
-        ranking_queue_batch=10,
-        start=False,
-    )
-    job_slugs = sorted(j.id for j in sched.get_jobs())
-    assert job_slugs == ["ingest:eu_portal", "rank:drain"]
-    sched.shutdown(wait=False)
-
-
 def test_build_scheduler_includes_rank_drain_job():
     sched = build_scheduler(
         session_factory=lambda: None,
         eu_portal_base_url="https://ec.europa.eu",
         vinnova_base_url="https://data.vinnova.se",
-        vinnova_api_key="dummy",
         alerter=_NullAlerter(),
         ollama_url="http://localhost:11434",
         gemma_model="gemma4:e4b-q8",

@@ -13,8 +13,7 @@ def _build(session_factory, *, with_digest):
     kwargs = dict(
         session_factory=session_factory,
         eu_portal_base_url="http://eu",
-        vinnova_base_url="http://vin",
-        vinnova_api_key=None,
+        vinnova_base_url="https://data.vinnova.se",
         alerter=MagicMock(),
         ollama_url="http://ollama",
         gemma_model="gemma4:e4b-q8",

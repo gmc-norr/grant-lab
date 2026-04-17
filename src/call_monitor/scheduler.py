@@ -48,7 +48,6 @@ def build_scheduler(
     session_factory: sessionmaker,
     eu_portal_base_url: str,
     vinnova_base_url: str,
-    vinnova_api_key: str | None,
     alerter: ConsecutiveFailureTracker | _Alerter,
     ollama_url: str,
     gemma_model: str,
@@ -88,27 +87,21 @@ def build_scheduler(
         coalesce=True,
     )
 
-    if vinnova_api_key:
-        def _vinnova_job() -> None:
-            adapter = VinnovaAdapter(api_key=vinnova_api_key, base_url=vinnova_base_url)
-            run_ingestion(
-                session_factory=session_factory, adapter=adapter, alerter=alerter
-            )
+    def _vinnova_job() -> None:
+        adapter = VinnovaAdapter(base_url=vinnova_base_url)
+        run_ingestion(
+            session_factory=session_factory, adapter=adapter, alerter=alerter
+        )
 
-        sched.add_job(
-            _vinnova_job,
-            trigger=CronTrigger(hour=3, minute=15),
-            id="ingest:vinnova",
-            name="Ingest Vinnova",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
-    else:
-        _logger.warning(
-            "scheduler.vinnova_skipped",
-            extra={"event": "vinnova_skipped", "reason": "VINNOVA_API_KEY not set"},
-        )
+    sched.add_job(
+        _vinnova_job,
+        trigger=CronTrigger(hour=3, minute=15),
+        id="ingest:vinnova",
+        name="Ingest Vinnova",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
 
