@@ -40,6 +40,21 @@ async def lifespan(app: FastAPI):
         admin_email=settings.admin_alert_email,
     )
     app.state.ingestion_alerter = alerter
+
+    from call_monitor.email.factory import EmailConfigError, build_email_client
+
+    digest_email_client = None
+    if settings.resend_api_key or settings.smtp_host:
+        try:
+            digest_email_client = build_email_client(settings)
+            app.state.digest_email_client = digest_email_client
+        except EmailConfigError as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "digest.email_client_unavailable",
+                extra={"event": "digest_email_client_unavailable", "error": str(e)},
+            )
+
     app.state.scheduler = build_scheduler(
         session_factory=app.state.session_factory,
         eu_portal_base_url=settings.eu_portal_base_url,
@@ -50,6 +65,8 @@ async def lifespan(app: FastAPI):
         gemma_model=settings.gemma_model,
         ranking_tick_seconds=settings.ranking_tick_seconds,
         ranking_queue_batch=settings.ranking_queue_batch,
+        digest_email_client=digest_email_client,
+        digest_settings=settings,
         start=True,
     )
     try:
