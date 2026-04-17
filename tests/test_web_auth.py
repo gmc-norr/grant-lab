@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from call_monitor.auth.email import InMemoryEmailSender
 from call_monitor.auth.rate_limit import SlidingWindowLimiter
+from call_monitor.auth.tokens import issue_token
 from call_monitor.db.models import User
 from call_monitor.main import create_app
 
@@ -58,7 +59,7 @@ def test_login_post_silently_drops_disallowed_domain(monkeypatch, pg_url, pg_ses
     assert sender.sent == []
 
 
-def test_login_post_is_rate_limited_per_email(monkeypatch, pg_url):
+def test_login_post_is_rate_limited_per_email(monkeypatch, pg_url, pg_session_factory):
     app, sender = _mk_app(monkeypatch, pg_url)
     app.state.email_limiter = SlidingWindowLimiter(max_requests=2, window_seconds=60)
     with TestClient(app) as client:
@@ -66,3 +67,41 @@ def test_login_post_is_rate_limited_per_email(monkeypatch, pg_url):
             r = client.post("/login", data={"email": "alice@ki.se"})
             assert r.status_code == 200
     assert len(sender.sent) == 2
+
+
+def test_verify_sets_session_cookie_and_redirects(monkeypatch, pg_url, pg_session_factory):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+
+    with TestClient(app) as client:
+        r = client.get(f"/login/verify?token={raw}", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/me"
+    assert "session" in r.cookies
+
+
+def test_verify_rejects_unknown_token(monkeypatch, pg_url):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get("/login/verify?token=nope", follow_redirects=False)
+    assert r.status_code == 400
+
+
+def test_verify_rejects_replay(monkeypatch, pg_url, pg_session_factory):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+
+    with TestClient(app) as client:
+        assert client.get(f"/login/verify?token={raw}", follow_redirects=False).status_code == 303
+        r = client.get(f"/login/verify?token={raw}", follow_redirects=False)
+    assert r.status_code == 400

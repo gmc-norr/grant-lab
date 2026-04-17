@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from call_monitor.auth.domain import domain_allowed
-from call_monitor.auth.tokens import issue_token
+from call_monitor.auth.tokens import (
+    TokenAlreadyConsumed,
+    TokenExpired,
+    TokenNotFound,
+    consume_token,
+    issue_token,
+)
 from call_monitor.db.models import User
 
 router = APIRouter()
@@ -55,5 +63,38 @@ def login_submit(request: Request, email: str = Form(...)):
         to=email_normalized,
         subject="Your Call Monitor login link",
         text_body=f"Click to sign in (valid 15 min):\n\n{link}\n",
+    )
+    return response
+
+
+@router.get("/login/verify")
+def login_verify(request: Request, token: str):
+    session_factory = request.app.state.session_factory
+    session_signer = request.app.state.session_signer
+    settings = request.app.state.settings
+
+    with session_factory() as session:
+        try:
+            user_id = consume_token(session, token)
+        except (TokenNotFound, TokenExpired, TokenAlreadyConsumed) as e:
+            raise HTTPException(status_code=400, detail="invalid or expired link") from e
+
+        user = session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=400, detail="invalid link")
+        user.last_login_at = datetime.now(UTC)
+        session.commit()
+
+    cookie_value = session_signer.make(user_id=user_id)
+    # Foundation has no "/" yet — land the user on /me, which exists.
+    # The Ingestion plan will replace this with "/" once the dashboard is introduced.
+    response = RedirectResponse(url="/me", status_code=303)
+    response.set_cookie(
+        "session",
+        cookie_value,
+        max_age=30 * 24 * 3600,
+        httponly=True,
+        secure=settings.cookie_secure,  # True when APP_BASE_URL is https://
+        samesite="lax",
     )
     return response
