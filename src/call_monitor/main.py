@@ -30,7 +30,7 @@ def create_app() -> FastAPI:
     from call_monitor.auth.email import ConsoleEmailSender, ResendEmailSender
     from call_monitor.auth.rate_limit import SlidingWindowLimiter
     from call_monitor.auth.session_cookie import SessionSigner
-    from call_monitor.web.routes import auth, health
+    from call_monitor.web.routes import auth, health, me
 
     # Email sender selection is environment-gated:
     # - RESEND_API_KEY set                → real ResendEmailSender (any environment).
@@ -67,4 +67,5 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(me.router)
     return app

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Your profile — Call Monitor{% endblock %}
+{% block content %}
+<h1>Your profile</h1>
+<p>Signed in as <code>{{ user.email }}</code>{% if user.is_admin %} (admin){% endif %}.</p>
+
+<form method="post" action="/me">
+  <label>Display name
+    <input type="text" name="name" value="{{ user.name or '' }}" maxlength="200">
+  </label>
+  <button type="submit">Save</button>
+</form>
+{% endblock %}
