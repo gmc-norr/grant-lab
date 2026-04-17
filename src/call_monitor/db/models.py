@@ -4,17 +4,18 @@ from datetime import datetime
 
 from sqlalchemy import (
     ARRAY,
-    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -82,7 +83,7 @@ class Source(Base):
     last_fetched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -95,9 +96,14 @@ class Call(Base):
     __table_args__ = (
         # Unique per source per external_id — the idempotency contract for
         # upsert; the implicit unique index backs the ON CONFLICT clause.
-        # GIN on keywords + B-tree on deadline/published_at are declared in
-        # the migration (the model stays clean of postgresql_using=... noise).
         UniqueConstraint("source_id", "external_id", name="uq_calls_source_external"),
+        # Indices declared on the model so `alembic check` / autogenerate stay
+        # consistent with the migration. The dashboard sorts on
+        # published_at/deadline; the digest filters keywords via && (overlap),
+        # which a GIN index accelerates.
+        Index("ix_calls_keywords_gin", "keywords", postgresql_using="gin"),
+        Index("ix_calls_deadline", "deadline"),
+        Index("ix_calls_published_at", "published_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -121,6 +127,6 @@ class Call(Base):
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    raw: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     source: Mapped[Source] = relationship(back_populates="calls")
