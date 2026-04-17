@@ -1267,7 +1267,7 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass
 
-from call_monitor.auth.email import EmailSender
+from call_monitor.auth.email import EmailSendFailed, EmailSender
 
 _logger = logging.getLogger(__name__)
 
@@ -1324,8 +1324,13 @@ class ConsecutiveFailureTracker:
                         f"Last error: {error or '(no detail)'}\n"
                     ),
                 )
-            except Exception as e:  # noqa: BLE001 — alerter must not crash the orchestrator
-                _logger.warning("alerter.send_failed", extra={"event": "alerter_send_failed", "exc": str(e)})
+            except EmailSendFailed as e:
+                # Email provider outage shouldn't crash the orchestrator.
+                # Real bugs (TypeError, etc.) still surface.
+                _logger.warning(
+                    "alerter.send_failed",
+                    extra={"event": "alerter_send_failed", "exc": str(e)},
+                )
 
     def record_success(self, source_slug: str) -> None:
         with self._lock:
@@ -1645,6 +1650,13 @@ VINNOVA_BASE_URL=https://data.vinnova.se
 VINNOVA_API_KEY=
 # Optional: receive consecutive-failure alerts here. Leave blank to suppress.
 ADMIN_ALERT_EMAIL=
+
+# Foundation review-fixes added this but didn't document it; documenting now.
+# When true, the rate limiter keys off X-Forwarded-For instead of the
+# socket peer. Only set TRUSTED_PROXY=true when the app sits behind a
+# proxy you control end-to-end (otherwise a client can spoof the header
+# and bypass rate limiting).
+TRUSTED_PROXY=false
 ```
 
 - [ ] **Step 2: Write failing test**
@@ -1786,10 +1798,14 @@ Edit `src/call_monitor/main.py` — extend `create_app` to construct the alerter
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Deferred import: keeps `admin_bootstrap` off the import graph until
+    # lifespan runs, so test-side `create_app()` calls that never enter
+    # lifespan don't pay the import cost or trigger its side-effects.
     from call_monitor.admin_bootstrap import bootstrap_admins
     bootstrap_admins(
         app.state.session_factory,
         emails=app.state.settings.initial_admin_emails,
+        allowed_domains=app.state.settings.allowed_email_domains,
     )
 
     from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
@@ -1813,7 +1829,16 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Stop the scheduler's background threads before disposing the engine
+        # — a job firing during teardown could otherwise see a closed pool.
+        # `wait=False` lets in-flight ranking-job churn drain async-style;
+        # at our cron cadence (daily) there's almost never anything in flight.
         app.state.scheduler.shutdown(wait=False)
+        # Foundation v1 review-fixes added engine.dispose() here. Preserve it:
+        # without disposal, repeated test-side create_app() calls leak DBAPI
+        # connections to the GC, which psycopg surfaces as ResourceWarning
+        # (and pyproject.toml has filterwarnings=["error::ResourceWarning"]).
+        app.state.engine.dispose()
 ```
 
 - [ ] **Step 5: Run tests**
