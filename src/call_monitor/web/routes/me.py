@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from call_monitor.auth.dependencies import get_current_user
@@ -23,6 +23,10 @@ def update_me(
     session_factory = request.app.state.session_factory
     with session_factory() as session:
         db_user = session.get(User, user.id)
+        if db_user is None:
+            # User row vanished between get_current_user's lookup and this
+            # handler — treat as logged out rather than 500 on None.name.
+            raise HTTPException(status_code=401, detail="not authenticated")
         db_user.name = name.strip() or None
         session.commit()
         session.refresh(db_user)

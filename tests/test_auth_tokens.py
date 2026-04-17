@@ -3,9 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from call_monitor.auth.tokens import (
-    TokenAlreadyConsumed,
-    TokenExpired,
-    TokenNotFound,
+    InvalidToken,
     consume_token,
     hash_token,
     issue_token,
@@ -56,6 +54,8 @@ def test_consume_token_marks_consumed_and_returns_user_id(pg_session_factory):
 
 
 def test_consume_token_rejects_replay(pg_session_factory):
+    """Replay (already-consumed token) raises InvalidToken — indistinguishable
+    from unknown/expired to the caller (no oracle leak)."""
     with pg_session_factory() as s:
         u = User(email="alice@ki.se")
         s.add(u)
@@ -66,7 +66,7 @@ def test_consume_token_rejects_replay(pg_session_factory):
         consume_token(s, raw)
         s.commit()
 
-        with pytest.raises(TokenAlreadyConsumed):
+        with pytest.raises(InvalidToken):
             consume_token(s, raw)
 
 
@@ -78,10 +78,38 @@ def test_consume_token_rejects_expired(pg_session_factory):
         s.refresh(u)
         raw = issue_token(s, user_id=u.id, ttl_minutes=-1)  # already expired
         s.commit()
-        with pytest.raises(TokenExpired):
+        with pytest.raises(InvalidToken):
             consume_token(s, raw)
 
 
 def test_consume_token_rejects_unknown(pg_session_factory):
-    with pg_session_factory() as s, pytest.raises(TokenNotFound):
+    with pg_session_factory() as s, pytest.raises(InvalidToken):
         consume_token(s, "does-not-exist-at-all-12345678")
+
+
+def test_consume_token_emits_exactly_one_sql_statement_on_failure(pg_session_factory):
+    """Regression guard: consume_token must NOT classify failure reasons
+    by running a second SELECT. That would leak a timing oracle
+    distinguishing 'token exists (expired/consumed)' from 'token unknown'.
+    """
+    from sqlalchemy import event
+
+    with pg_session_factory() as s:
+        statements: list[str] = []
+        engine = s.get_bind()
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _capture(conn, cursor, statement, parameters, context, executemany):
+            # Filter to just the token-table statements this function emits.
+            if "magic_link_tokens" in statement.lower():
+                statements.append(statement)
+
+        try:
+            with pytest.raises(InvalidToken):
+                consume_token(s, "does-not-exist-at-all-12345678")
+        finally:
+            event.remove(engine, "before_cursor_execute", _capture)
+
+    # Exactly one UPDATE — no follow-up SELECT.
+    assert len(statements) == 1, f"expected 1 stmt, got {len(statements)}: {statements}"
+    assert statements[0].strip().lower().startswith("update")

@@ -1,21 +1,52 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from call_monitor.auth.domain import domain_allowed
-from call_monitor.auth.tokens import (
-    TokenAlreadyConsumed,
-    TokenExpired,
-    TokenNotFound,
-    consume_token,
-    issue_token,
-)
+from call_monitor.auth.email import EmailSendFailed
+from call_monitor.auth.tokens import InvalidToken, consume_token, issue_token
 from call_monitor.db.models import User
 
+_logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+# Hard cap matches users.email VARCHAR(320). Reject oversized inputs
+# *before* they reach the rate limiter so an attacker can't grow the
+# limiter dict with junk keys (memory-amplification DoS).
+MAX_EMAIL_LEN = 320
+
+
+def _email_fingerprint(email: str) -> str:
+    """Short hex of sha256(email). Safe to log — doesn't expose the
+    address but lets an operator correlate events across log lines."""
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
+
+
+def _client_ip(request: Request) -> str:
+    """Resolve the caller's IP.
+
+    When `settings.trusted_proxy` is True, the first entry in the
+    X-Forwarded-For header is trusted. Otherwise we use `request.client`
+    directly and fail loudly (500-ish) if it's absent — silently bucketing
+    unknown clients into a shared "0.0.0.0" key breaks the rate limiter
+    for all legitimate traffic behind certain proxy configurations.
+    """
+    settings = request.app.state.settings
+    if getattr(settings, "trusted_proxy", False):
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            first = xff.split(",", 1)[0].strip()
+            if first:
+                return first
+    if request.client is None:
+        raise HTTPException(status_code=400, detail="cannot determine client")
+    return request.client.host
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -33,19 +64,46 @@ def login_submit(request: Request, email: str = Form(...)):
     email_sender = request.app.state.email_sender
     session_factory = request.app.state.session_factory
 
-    email_normalized = email.strip().lower()
-    client_ip = request.client.host if request.client else "0.0.0.0"
-
-    # Always show the same page. Never leak rate-limit/allowlist state.
+    # Always show the same page. Never leak rate-limit/allowlist/shape state.
     response = request.app.state.templates.TemplateResponse(
         request=request, name="login_sent.html", context={}
     )
 
+    # 1. Length cap BEFORE anything that keys off the email. Prevents an
+    #    unbounded email field from growing the rate-limiter dict.
+    if len(email) > MAX_EMAIL_LEN:
+        _logger.info(
+            "login rejected: email too long",
+            extra={"event": "login_rejected_oversized"},
+        )
+        return response
+
+    email_normalized = email.strip().lower()
+    client_ip = _client_ip(request)
+    email_fp = _email_fingerprint(email_normalized)
+
+    _logger.info(
+        "login requested",
+        extra={"event": "login_requested", "email_fp": email_fp, "ip": client_ip},
+    )
+
     if not ip_limiter.allow(client_ip):
+        _logger.info(
+            "login rate-limited by IP",
+            extra={"event": "login_rate_limited_ip", "ip": client_ip},
+        )
         return response
     if not email_limiter.allow(email_normalized):
+        _logger.info(
+            "login rate-limited by email",
+            extra={"event": "login_rate_limited_email", "email_fp": email_fp},
+        )
         return response
     if not domain_allowed(email_normalized, settings.allowed_email_domains):
+        _logger.info(
+            "login rejected: domain not allowed",
+            extra={"event": "login_domain_rejected", "email_fp": email_fp},
+        )
         return response
 
     with session_factory() as session:
@@ -59,10 +117,26 @@ def login_submit(request: Request, email: str = Form(...)):
         session.commit()
 
     link = f"{settings.app_base_url.rstrip('/')}/login/verify?token={raw}"
-    email_sender.send(
-        to=email_normalized,
-        subject="Your Call Monitor login link",
-        text_body=f"Click to sign in (valid 15 min):\n\n{link}\n",
+    try:
+        email_sender.send(
+            to=email_normalized,
+            subject="Your Call Monitor login link",
+            text_body=f"Click to sign in (valid 15 min):\n\n{link}\n",
+        )
+    except EmailSendFailed:
+        # Log and return the same "check your email" page. Raising would
+        # surface a 500 which (a) leaks that this address was worth sending
+        # to and (b) leaves the user behind the email rate-limit for 15 min.
+        _logger.warning(
+            "email send failed",
+            extra={"event": "login_email_send_failed", "email_fp": email_fp},
+            exc_info=True,
+        )
+        return response
+
+    _logger.info(
+        "login email sent",
+        extra={"event": "login_email_sent", "email_fp": email_fp},
     )
     return response
 
@@ -71,14 +145,32 @@ def login_submit(request: Request, email: str = Form(...)):
 def login_verify(request: Request, token: str):
     session_factory = request.app.state.session_factory
     session_signer = request.app.state.session_signer
+    ip_limiter = request.app.state.ip_limiter
     settings = request.app.state.settings
 
+    # Rate-limit by IP: the token is 32-byte secrets.token_urlsafe so an
+    # online guess is computationally infeasible, but this is a cheap
+    # brake against future regressions and straightforward DDoS (each
+    # attempt is one DB UPDATE).
+    client_ip = _client_ip(request)
+    if not ip_limiter.allow(client_ip):
+        _logger.info(
+            "verify rate-limited by IP",
+            extra={"event": "verify_rate_limited_ip", "ip": client_ip},
+        )
+        raise HTTPException(status_code=429, detail="too many requests")
+
+    # Commit consumption in its own transaction so any later failure
+    # (user missing, DB hiccup, code change that raises) cannot roll the
+    # consumption back. Single-use must not depend on what happens after.
     with session_factory() as session:
         try:
             user_id = consume_token(session, token)
-        except (TokenNotFound, TokenExpired, TokenAlreadyConsumed) as e:
+        except InvalidToken as e:
             raise HTTPException(status_code=400, detail="invalid or expired link") from e
+        session.commit()
 
+    with session_factory() as session:
         user = session.get(User, user_id)
         if user is None:
             raise HTTPException(status_code=400, detail="invalid link")
@@ -97,4 +189,5 @@ def login_verify(request: Request, token: str):
         secure=settings.cookie_secure,  # True when APP_BASE_URL is https://
         samesite="lax",
     )
+    _logger.info("verify success", extra={"event": "verify_success"})
     return response

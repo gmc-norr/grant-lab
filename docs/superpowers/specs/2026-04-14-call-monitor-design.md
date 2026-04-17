@@ -97,7 +97,8 @@ magic_link_tokens
   id, user_id (FK users(id)), token_hash (text),
   created_at (timestamptz), expires_at (timestamptz),
   consumed_at (timestamptz, null)
-  INDEX on token_hash
+  UNIQUE(token_hash)   -- also provides the lookup index used by
+                       -- consume_token's `WHERE token_hash = :h`
 
 subscriptions
   user_id, profile_id, digest_enabled (bool)

@@ -35,7 +35,12 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: int = logging.INFO) -> None:
-    """Install a JsonFormatter stderr handler on the root logger.
+    """Install a JsonFormatter stdout handler on the root logger.
+
+    Writes to stdout to match the v1 design spec's observability contract
+    (`Structured JSON logs to stdout`). Most container runtimes capture
+    both streams, but standardizing on stdout avoids platform-specific
+    routing quirks (e.g. Kubernetes treating stderr as an "errors" stream).
 
     Idempotent: if a `JsonFormatter` handler is already attached, only the
     log level is updated and existing handlers are left in place. This
@@ -48,7 +53,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
         root.setLevel(level)
         return
-    handler = logging.StreamHandler(sys.stderr)
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
     root.setLevel(level)

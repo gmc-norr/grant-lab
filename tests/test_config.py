@@ -44,3 +44,43 @@ def test_settings_require_session_secret(monkeypatch):
 
     with pytest.raises(ValueError):
         Settings()
+
+
+def test_create_app_refuses_to_start_without_resend_key_in_prod(monkeypatch, pg_url):
+    """Security-critical invariant: in production (https URL) with no
+    RESEND_API_KEY set, the app MUST refuse to boot rather than silently
+    falling back to ConsoleEmailSender (which would log magic links to
+    stderr — a 15-minute takeover window for anyone with log access).
+    """
+    from call_monitor.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-monitor.example.com")
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="RESEND_API_KEY"):
+        create_app()
+
+
+def test_create_app_allows_console_sender_in_dev_without_resend_key(
+    monkeypatch, pg_url
+):
+    """Converse of the refuse-to-start test: plain HTTP APP_BASE_URL is
+    dev, so ConsoleEmailSender is the intended fallback and create_app
+    must NOT raise."""
+    from call_monitor.auth.email import ConsoleEmailSender
+    from call_monitor.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+
+    app = create_app()
+    try:
+        assert isinstance(app.state.email_sender, ConsoleEmailSender)
+    finally:
+        app.state.engine.dispose()
