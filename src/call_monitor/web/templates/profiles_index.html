@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Profiles — Call Monitor{% endblock %}
+{% block content %}
+<h1>Ranking profiles</h1>
+<p><a href="/profiles/new">+ Create a new profile</a></p>
+
+{% if not profiles %}
+  <p><em>No profiles yet. Create one to see ranked calls on the dashboard.</em></p>
+{% else %}
+  <ul>
+    {% for p in profiles %}
+      <li>
+        <a href="/profiles/{{ p.id }}">{{ p.name }}</a>
+        <small>({{ p.kind.value if p.kind.value is defined else p.kind }})</small>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}
