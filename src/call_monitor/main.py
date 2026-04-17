@@ -11,7 +11,8 @@ from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
 from call_monitor.logging import configure_logging
-from call_monitor.web.routes import auth, health, me
+from call_monitor.web.filters import display_date, display_dt
+from call_monitor.web.routes import admin, auth, calls, health, me
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -28,13 +29,36 @@ async def lifespan(app: FastAPI):
         emails=app.state.settings.initial_admin_emails,
         allowed_domains=app.state.settings.allowed_email_domains,
     )
+
+    from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
+    from call_monitor.scheduler import build_scheduler
+
+    settings = app.state.settings
+    alerter = ConsecutiveFailureTracker(
+        threshold=3,
+        sender=app.state.email_sender,
+        admin_email=settings.admin_alert_email,
+    )
+    app.state.ingestion_alerter = alerter
+    app.state.scheduler = build_scheduler(
+        session_factory=app.state.session_factory,
+        eu_portal_base_url=settings.eu_portal_base_url,
+        vinnova_base_url=settings.vinnova_base_url,
+        vinnova_api_key=settings.vinnova_api_key,
+        alerter=alerter,
+        start=True,
+    )
     try:
         yield
     finally:
-        # Release pooled DB connections. Without this, repeatedly
-        # constructing apps in tests (and in principle in production
-        # reload) leaks DBAPI connections to the GC, which psycopg
-        # surfaces as ResourceWarning.
+        # Stop the scheduler's background threads before disposing the engine
+        # — a job firing during teardown could otherwise see a closed pool.
+        # `wait=False` lets in-flight ranking-job churn drain async-style;
+        # at our cron cadence (daily) there's almost never anything in flight.
+        app.state.scheduler.shutdown(wait=False)
+        # Preserve foundation review-fixes' engine disposal: without it,
+        # repeated test-side create_app() calls leak DBAPI connections to
+        # the GC, surfaced as ResourceWarning under filterwarnings=error.
         app.state.engine.dispose()
 
 
@@ -72,7 +96,14 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
-    app.state.templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Per design spec: web layer renders all timestamps in Europe/Stockholm.
+    # Templates use `{{ dt | display_dt }}` / `{{ dt | display_date }}` —
+    # NEVER call .strftime() on a raw datetime in templates (it would
+    # render UTC and display 1–2 hours wrong half the year).
+    templates.env.filters["display_dt"] = display_dt
+    templates.env.filters["display_date"] = display_date
+    app.state.templates = templates
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(
         max_requests=5, window_seconds=15 * 60, name="email"
@@ -93,4 +124,6 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(me.router)
+    app.include_router(calls.router)
+    app.include_router(admin.router)
     return app

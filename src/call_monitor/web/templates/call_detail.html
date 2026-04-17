@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ call.title }} — Call Monitor{% endblock %}
+{% block content %}
+<p><a href="/">&larr; All calls</a></p>
+<h1>{{ call.title }}</h1>
+<p><strong>Source:</strong> {{ call.source.name }}
+   {% if call.programme %}· <strong>Programme:</strong> {{ call.programme }}{% endif %}</p>
+
+<dl>
+  <dt>External ID</dt><dd><code>{{ call.external_id }}</code></dd>
+  <dt>URL</dt><dd><a href="{{ call.url }}" target="_blank" rel="noopener">{{ call.url }}</a></dd>
+  <dt>Published</dt><dd>{{ call.published_at | display_date }}</dd>
+  <dt>Deadline</dt><dd>{{ call.deadline | display_dt }}</dd>
+  <dt>Budget</dt>
+  <dd>
+    {% if call.budget_min or call.budget_max %}
+      {{ '{:,}'.format(call.budget_min) if call.budget_min else '—' }} –
+      {{ '{:,}'.format(call.budget_max) if call.budget_max else '—' }} {{ call.currency or '' }}
+    {% else %}—{% endif %}
+  </dd>
+  <dt>Keywords</dt><dd>{{ ', '.join(call.keywords) if call.keywords else '—' }}</dd>
+</dl>
+
+{% if call.summary %}
+  <h2>Summary</h2>
+  <p>{{ call.summary }}</p>
+{% endif %}
+{% endblock %}

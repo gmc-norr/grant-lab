@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     # `proxy_set_header X-Forwarded-For`). When False, X-Forwarded-For
     # is ignored so an attacker can't spoof their rate-limit bucket.
     trusted_proxy: bool = Field(default=False, alias="TRUSTED_PROXY")
+    vinnova_api_key: str | None = Field(default=None, alias="VINNOVA_API_KEY")
+    eu_portal_base_url: str = Field(
+        default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL"
+    )
+    vinnova_base_url: str = Field(
+        default="https://data.vinnova.se", alias="VINNOVA_BASE_URL"
+    )
+    admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
 
     @field_validator("allowed_email_domains", "initial_admin_emails", mode="before")
     @classmethod

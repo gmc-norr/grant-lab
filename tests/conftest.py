@@ -78,3 +78,11 @@ def pg_session_factory(migrated_engine):
             conn.execute(
                 text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE")
             )
+            # Re-seed sources so model/orchestrator tests find them after teardown.
+            conn.execute(
+                text(
+                    "INSERT INTO sources (name, slug) VALUES "
+                    "('EU Funding & Tenders Portal', 'eu_portal'), "
+                    "('Vinnova', 'vinnova')"
+                )
+            )
