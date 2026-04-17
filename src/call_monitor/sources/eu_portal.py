@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from call_monitor.sources.types import AdapterError, NormalizedCall
+from call_monitor.sources.types import AdapterError, NormalizedCall, is_safe_url
 
 _logger = logging.getLogger(__name__)
 
@@ -50,12 +50,18 @@ class EUPortalAdapter:
         self._timeout = timeout
 
     def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
-        params = {
-            "status": "OPEN,FORTHCOMING",
-            # `since` is informational at this endpoint — server-side filtering
-            # by date isn't always honored. The orchestrator's idempotent upsert
-            # tolerates fetching the full set on every run.
-        }
+        # Repeated `status` params (status=OPEN&status=FORTHCOMING) are the
+        # safest cross-API encoding — comma-separated values get URL-encoded
+        # to %2C and not all servers reverse that.
+        params = [("status", "OPEN"), ("status", "FORTHCOMING")]
+        # `since` is informational at this endpoint — server-side filtering
+        # by date isn't always honored. The orchestrator's idempotent upsert
+        # tolerates fetching the full set on every run.
+        # TODO (post-Plan 3): a periodic reaper should mark calls absent from
+        # consecutive fetches as stale, so the dashboard doesn't accumulate
+        # CLOSED entries indefinitely. Currently the orchestrator is
+        # additive-only — by design at v1 — but worth scheduling once the
+        # ranking and digest layers exist.
         try:
             with httpx.Client(
                 base_url=self._base_url,
@@ -86,6 +92,13 @@ class EUPortalAdapter:
             _logger.info(
                 "eu_portal.skip_incomplete",
                 extra={"event": "skip_incomplete", "fields_present": list(item.keys())},
+            )
+            return None
+        # Defense in depth against stored XSS — see is_safe_url docstring.
+        if not is_safe_url(str(url)):
+            _logger.warning(
+                "eu_portal.skip_unsafe_url",
+                extra={"event": "skip_unsafe_url", "external_id": str(external_id)},
             )
             return None
 

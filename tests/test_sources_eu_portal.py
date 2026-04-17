@@ -54,9 +54,38 @@ def test_fetch_yields_normalized_calls():
 def test_fetch_skips_records_missing_required_fields():
     body = {
         "results": [
-            {"identifier": "OK-1", "title": "ok", "url": "u"},
+            {"identifier": "OK-1", "title": "ok", "url": "https://example.org/ok-1"},
             {"identifier": "BAD-1"},  # missing title and url
             {"title": "no id"},
+        ]
+    }
+    adapter = EUPortalAdapter(
+        base_url="https://x", transport=_mock_transport(body=body)
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert [c.external_id for c in out] == ["OK-1"]
+
+
+def test_fetch_skips_records_with_unsafe_url_scheme():
+    """Defense in depth: javascript:/data: URLs would render as click-to-XSS
+    in the dashboard template. Adapter must drop them at ingest time."""
+    body = {
+        "results": [
+            {
+                "identifier": "OK-1",
+                "title": "ok",
+                "url": "https://example.org/ok-1",
+            },
+            {
+                "identifier": "XSS-1",
+                "title": "click me",
+                "url": "javascript:alert(document.cookie)",
+            },
+            {
+                "identifier": "DATA-1",
+                "title": "data url",
+                "url": "data:text/html,<script>alert(1)</script>",
+            },
         ]
     }
     adapter = EUPortalAdapter(

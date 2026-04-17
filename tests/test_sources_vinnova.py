@@ -59,8 +59,29 @@ def test_fetch_normalizes_vinnova_record():
 
 def test_skips_records_without_diarienummer():
     body = [
-        {"Diarienummer": "OK", "Titel": "T", "Lankar": [{"Url": "u"}]},
+        {"Diarienummer": "OK", "Titel": "T", "Lankar": [{"Url": "https://x/ok"}]},
         {"Titel": "no id"},
+    ]
+    adapter = VinnovaAdapter(
+        api_key="k", base_url="https://x", transport=_mock_transport(body=body)
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert [c.external_id for c in out] == ["OK"]
+
+
+def test_skips_records_with_unsafe_url_scheme():
+    """javascript:/data: URLs would render as click-to-XSS in the dashboard."""
+    body = [
+        {
+            "Diarienummer": "OK",
+            "Titel": "ok",
+            "Lankar": [{"Url": "https://www.vinnova.se/e/ok"}],
+        },
+        {
+            "Diarienummer": "XSS",
+            "Titel": "click me",
+            "Lankar": [{"Url": "javascript:alert(1)"}],
+        },
     ]
     adapter = VinnovaAdapter(
         api_key="k", base_url="https://x", transport=_mock_transport(body=body)
@@ -80,3 +101,10 @@ def test_5xx_raises_adapter_error():
 def test_no_api_key_raises_at_construction():
     with pytest.raises(ValueError):
         VinnovaAdapter(api_key="", base_url="https://x")
+
+
+def test_http_base_url_raises_at_construction():
+    """The API key is sent as a header on every request — sending it over
+    plaintext http:// would leak it. Adapter must refuse to construct."""
+    with pytest.raises(ValueError, match="https://"):
+        VinnovaAdapter(api_key="k", base_url="http://data.vinnova.se")

@@ -11,13 +11,28 @@ class AdapterError(Exception):
     full-run failure (do NOT advance last_fetched_at, increment failure count)."""
 
 
+def is_safe_url(url: str) -> bool:
+    """Return True iff the URL uses an http(s) scheme.
+
+    Adapters use this to drop records whose URL would render as a
+    `javascript:` (or `data:`, etc.) link in the dashboard — those would
+    execute on click as stored XSS. Doing the check at ingest time is
+    defense-in-depth: the dashboard template is also Jinja-autoescaped,
+    but autoescape doesn't strip dangerous URL schemes from `href=...`.
+    """
+    lower = url.lower()
+    return lower.startswith(("http://", "https://"))
+
+
 @dataclass(slots=True)
 class NormalizedCall:
     """Source-agnostic shape that the ingestion orchestrator persists.
 
-    Adapters MUST normalize timestamps to UTC and budgets to integer minor
-    units of `currency` (or None if unknown). `external_id` is the source's
-    own stable identifier — uniqueness is per-source, enforced by the DB.
+    Adapters MUST normalize timestamps to UTC. Budget values pass through
+    in the source's native unit (typically major: euros, kronor) — the
+    dashboard renders them with thousand-separators, no normalization.
+    `external_id` is the source's own stable identifier — uniqueness is
+    per-source, enforced by the DB.
     """
 
     external_id: str

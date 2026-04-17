@@ -52,9 +52,11 @@ def test_upsert_replaces_existing_row_in_place(pg_session_factory):
     assert rows[0].deadline == datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def test_upsert_preserves_fetched_at_floor(pg_session_factory):
-    """fetched_at is set on first insert; subsequent upserts MAY refresh it
-    (we use NOW()) since 'last seen' is the more useful semantic."""
+def test_upsert_refreshes_fetched_at_on_re_encounter(pg_session_factory):
+    """fetched_at semantics: 'last seen', not 'first seen'. Each upsert
+    refreshes the column to NOW() so subsequent reads are monotonically
+    >= the previous value. Used by the dashboard to surface freshly-seen
+    calls and by future reaper logic to identify stale rows."""
     with pg_session_factory() as s:
         sid = _vinnova_id(s)
         upsert_call(s, source_id=sid, call=NormalizedCall(external_id="V-1", url="u", title="T"))

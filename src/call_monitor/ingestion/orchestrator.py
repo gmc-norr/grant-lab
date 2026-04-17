@@ -70,15 +70,35 @@ def run_ingestion(
             )
             session.commit()
     except AdapterError as e:
+        # Expected operational failure (network blip, 5xx, malformed JSON).
+        # WARN-level: noisy alerts here would train operators to ignore them.
+        # The 3-strike alerter pings the admin if the streak persists.
         error_msg = str(e)
+        _logger.warning(
+            "ingestion.adapter_error",
+            extra={
+                "event": "ingestion_adapter_error",
+                "source": adapter.slug,
+                "error": error_msg,
+            },
+        )
     except Exception as e:  # noqa: BLE001 — orchestrator must not crash the scheduler
+        # Unexpected failure (TypeError, KeyError, etc.) — almost always a
+        # code bug. Log at ERROR with traceback so Sentry / log aggregator
+        # surfaces it immediately, separate from the routine adapter-error
+        # noise above. Still feed the streak counter so the alerter can
+        # email if the bug persists past the threshold.
         error_msg = f"{type(e).__name__}: {e}"
+        _logger.exception(
+            "ingestion.unexpected_error",
+            extra={
+                "event": "ingestion_unexpected_error",
+                "source": adapter.slug,
+                "error": error_msg,
+            },
+        )
 
     if error_msg is not None:
-        _logger.warning(
-            "ingestion.failed",
-            extra={"event": "ingestion_failed", "source": adapter.slug, "error": error_msg},
-        )
         alerter.record_failure(adapter.slug, error=error_msg)
     else:
         _logger.info(

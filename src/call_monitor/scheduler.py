@@ -51,6 +51,13 @@ def build_scheduler(
     replicas would each run their own scheduler — duplicate fetches and
     duplicate ranking jobs once Plan 3 lands. Deployment must enforce one
     replica (see CLAUDE.md / spec).
+
+    Multi-instance escape hatch (documented in design spec, "Ingestion ▸
+    Multi-instance future"): wrap each scheduled job body in a Postgres
+    `pg_try_advisory_lock(hashtext('ingest:' || source_slug))`, returning
+    early if the lock isn't acquired. That lets multiple replicas coexist
+    while guaranteeing only one runs each job. Out of scope for v1 —
+    flagged here so a future replica-bump deliberately revisits this.
     """
     sched = _SafeBackgroundScheduler(timezone="Europe/Stockholm")
 
