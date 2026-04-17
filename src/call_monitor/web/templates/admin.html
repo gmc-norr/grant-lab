@@ -15,7 +15,7 @@
     {% for s in sources %}
       <tr>
         <td>{{ s.name }} (<code>{{ s.slug }}</code>)</td>
-        <td>{{ s.last_fetched_at.strftime('%Y-%m-%d %H:%M %Z') if s.last_fetched_at else '— never' }}</td>
+        <td>{% if s.last_fetched_at %}{{ s.last_fetched_at | display_dt }}{% else %}— never{% endif %}</td>
         <td>{{ s.call_count }}</td>
       </tr>
     {% endfor %}

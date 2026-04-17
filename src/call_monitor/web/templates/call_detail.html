@@ -9,8 +9,8 @@
 <dl>
   <dt>External ID</dt><dd><code>{{ call.external_id }}</code></dd>
   <dt>URL</dt><dd><a href="{{ call.url }}" target="_blank" rel="noopener">{{ call.url }}</a></dd>
-  <dt>Published</dt><dd>{{ call.published_at.strftime('%Y-%m-%d') if call.published_at else '—' }}</dd>
-  <dt>Deadline</dt><dd>{{ call.deadline.strftime('%Y-%m-%d %H:%M %Z') if call.deadline else '—' }}</dd>
+  <dt>Published</dt><dd>{{ call.published_at | display_date }}</dd>
+  <dt>Deadline</dt><dd>{{ call.deadline | display_dt }}</dd>
   <dt>Budget</dt>
   <dd>
     {% if call.budget_min or call.budget_max %}

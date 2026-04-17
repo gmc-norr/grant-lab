@@ -11,6 +11,7 @@ from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
 from call_monitor.logging import configure_logging
+from call_monitor.web.filters import display_date, display_dt
 from call_monitor.web.routes import admin, auth, calls, health, me
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
@@ -95,7 +96,14 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
-    app.state.templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Per design spec: web layer renders all timestamps in Europe/Stockholm.
+    # Templates use `{{ dt | display_dt }}` / `{{ dt | display_date }}` —
+    # NEVER call .strftime() on a raw datetime in templates (it would
+    # render UTC and display 1–2 hours wrong half the year).
+    templates.env.filters["display_dt"] = display_dt
+    templates.env.filters["display_date"] = display_date
+    app.state.templates = templates
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(
         max_requests=5, window_seconds=15 * 60, name="email"

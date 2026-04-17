@@ -12,6 +12,12 @@
       {% endfor %}
     </select>
   </label>
+  <label style="margin-left: 1em;">Sort
+    <select name="sort" onchange="this.form.submit()">
+      <option value="newest" {% if selected_sort == "newest" %}selected{% endif %}>Newest first</option>
+      <option value="deadline" {% if selected_sort == "deadline" %}selected{% endif %}>Soonest deadline</option>
+    </select>
+  </label>
 </form>
 
 {% if not calls %}
@@ -33,8 +39,8 @@
           <td><a href="/calls/{{ c.id }}">{{ c.title }}</a></td>
           <td>{{ c.source.name }}</td>
           <td>{{ c.programme or '—' }}</td>
-          <td>{{ c.deadline.strftime('%Y-%m-%d') if c.deadline else '—' }}</td>
-          <td>{{ c.published_at.strftime('%Y-%m-%d') if c.published_at else '—' }}</td>
+          <td>{{ c.deadline | display_date }}</td>
+          <td>{{ c.published_at | display_date }}</td>
         </tr>
       {% endfor %}
     </tbody>

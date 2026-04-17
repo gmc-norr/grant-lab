@@ -20,6 +20,16 @@ def upsert_call(
     extra round-trip per call. At ~50 calls/week this is negligible. If
     profiling later says otherwise, switch to RETURNING (xmax = 0)::bool via
     raw SQL — same atomic guarantee, no read.
+
+    Race-condition note: under concurrent ingestion of the same brand-new
+    call, two workers could both observe "not present" in the pre-check;
+    one would INSERT, the other would UPDATE via ON CONFLICT, but BOTH
+    would return True. The DATA is correct (one row), only the inserted/
+    updated accounting is wrong. v1 single-instance deploy makes this
+    impossible. **Plan 3 must NOT use this boolean to detect "this call
+    is new, enqueue ranking work" — query for calls without a ranking
+    row instead.** That keeps ranking idempotent regardless of any
+    future relaxation of the single-instance constraint.
     """
     payload = {
         "source_id": source_id,

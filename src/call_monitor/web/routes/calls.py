@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
@@ -10,11 +12,26 @@ from call_monitor.db.models import Call, Source, User
 
 router = APIRouter()
 
+# Per design spec: "Sort: score, deadline, newest." Score lands in Plan 3
+# (per-profile). For Plan 2 we offer the two ordering primitives that don't
+# depend on rankings.
+_Sort = Literal["newest", "deadline"]
+
+
+def _order_for(sort: _Sort):
+    if sort == "deadline":
+        # Soonest deadline first; never-expires (NULL) sink to the bottom.
+        return (Call.deadline.asc().nullslast(), Call.id.desc())
+    # "newest" (default): most recently published first; older or unknown
+    # publication date sink to the bottom.
+    return (Call.published_at.desc().nullslast(), Call.id.desc())
+
 
 @router.get("/", response_class=HTMLResponse)
 def calls_index(
     request: Request,
     source: str | None = Query(default=None),
+    sort: _Sort = Query(default="newest"),  # noqa: B008
     limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
@@ -23,7 +40,7 @@ def calls_index(
         stmt = (
             select(Call)
             .options(joinedload(Call.source))
-            .order_by(Call.published_at.desc().nullslast(), Call.id.desc())
+            .order_by(*_order_for(sort))
             .limit(limit)
         )
         if source:
@@ -41,7 +58,13 @@ def calls_index(
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="calls_index.html",
-        context={"calls": calls, "sources": sources, "selected_source": source, "user": user},
+        context={
+            "calls": calls,
+            "sources": sources,
+            "selected_source": source,
+            "selected_sort": sort,
+            "user": user,
+        },
     )
 
 

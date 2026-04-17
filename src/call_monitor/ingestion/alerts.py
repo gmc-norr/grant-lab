@@ -44,35 +44,45 @@ class ConsecutiveFailureTracker:
             st = self._state[source_slug]
             st.consecutive_failures += 1
             st.last_error = error
-            should_alert = (
+            should_attempt_alert = (
                 st.consecutive_failures >= self._threshold
                 and not st.alerted
                 and self._admin_email is not None
             )
-            if should_alert:
-                st.alerted = True
-        if should_alert:
-            try:
-                subject = (
-                    f"[call-monitor] {source_slug} failing: "
-                    f"{self._threshold}+ consecutive errors"
-                )
-                self._sender.send(
-                    to=self._admin_email,
-                    subject=subject,
-                    text_body=(
-                        f"Source `{source_slug}` has failed {self._threshold} or more "
-                        f"consecutive ingestion runs.\n\n"
-                        f"Last error: {error or '(no detail)'}\n"
-                    ),
-                )
-            except EmailSendFailed as e:
-                # Email provider outage shouldn't crash the orchestrator.
-                # Real bugs (TypeError, etc.) still surface.
-                _logger.warning(
-                    "alerter.send_failed",
-                    extra={"event": "alerter_send_failed", "exc": str(e)},
-                )
+        if not should_attempt_alert:
+            return
+
+        # CRITICAL: only mark `alerted=True` AFTER the send succeeds. If we
+        # flipped it pre-send (the obvious mistake) and the email provider
+        # is also down, we'd suppress every future alert for this streak —
+        # one transient mail outage masks the real ongoing ingestion outage
+        # the alert was supposed to surface.
+        try:
+            subject = (
+                f"[call-monitor] {source_slug} failing: "
+                f"{self._threshold}+ consecutive errors"
+            )
+            self._sender.send(
+                to=self._admin_email,
+                subject=subject,
+                text_body=(
+                    f"Source `{source_slug}` has failed {self._threshold} or more "
+                    f"consecutive ingestion runs.\n\n"
+                    f"Last error: {error or '(no detail)'}\n"
+                ),
+            )
+        except EmailSendFailed as e:
+            # Email provider outage shouldn't crash the orchestrator and
+            # shouldn't flip alerted=True — the next ingestion failure will
+            # retry the send. Real bugs (TypeError, etc.) still surface.
+            _logger.warning(
+                "alerter.send_failed",
+                extra={"event": "alerter_send_failed", "exc": str(e)},
+            )
+            return
+
+        with self._lock:
+            self._state[source_slug].alerted = True
 
     def record_success(self, source_slug: str) -> None:
         with self._lock:

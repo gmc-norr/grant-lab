@@ -39,7 +39,9 @@ def test_admin_requires_admin(monkeypatch, pg_url, pg_session_factory):
 
 def test_admin_lists_sources_with_status(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
-    # Mark one source as recently fetched
+    # Mark one source as recently fetched. UTC 03:15 in April → 05:15 CEST,
+    # so the rendered page must show 05:15 (the spec mandates Europe/Stockholm
+    # display).
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         src.last_fetched_at = datetime(2026, 4, 16, 3, 15, tzinfo=UTC)
@@ -52,3 +54,7 @@ def test_admin_lists_sources_with_status(monkeypatch, pg_url, pg_session_factory
     assert "EU Funding &amp; Tenders Portal" in r.text
     assert "Vinnova" in r.text
     assert "2026-04-16" in r.text
+    # Stockholm conversion: stored 03:15 UTC → displayed 05:15 (CEST in April)
+    assert "05:15" in r.text
+    # And NOT the raw UTC value:
+    assert "03:15 UTC" not in r.text
