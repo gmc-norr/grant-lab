@@ -16,6 +16,12 @@ venv/
 .env
 .env.local
 
+# Claude Code per-project config (per-user; share opt-in via `git add -f`)
+.claude/
+
+# Locally-rendered exports of design specs / plans
+docs/**/*.pdf
+
 # OS
 .DS_Store
 Thumbs.db
