@@ -66,10 +66,8 @@ def test_text_renders_titles_and_urls():
 def test_html_renders_deadline_in_stockholm_timezone():
     """Call.deadline is stored UTC. Templates must render in Europe/Stockholm
     (per main.py:122-126 — 'NEVER call .strftime() on a raw datetime in templates')."""
-    from datetime import UTC, datetime as _dt
-    now = _dt(2026, 4, 17, tzinfo=UTC)
     # 23:30 UTC on Apr 30 = 01:30 Stockholm on May 1 (CEST, +2)
-    late_deadline_utc = _dt(2026, 4, 30, 23, 30, tzinfo=UTC)
+    late_deadline_utc = datetime(2026, 4, 30, 23, 30, tzinfo=UTC)
     entry = DigestCallEntry(
         call_id=1, title="Late Deadline", summary=None,
         deadline=late_deadline_utc, score=80, rationale=None,
@@ -83,6 +81,43 @@ def test_html_renders_deadline_in_stockholm_timezone():
     # Must render Stockholm date (May 1), not UTC date (April 30)
     assert "2026-05-01" in html
     assert "2026-04-30" not in html
+
+
+def test_html_link_goes_to_in_app_not_external_source():
+    """Spec line 429: 'link to dashboard call detail.' Clicking a digest
+    entry must land the user on /calls/<id> (where the Hide button lives),
+    not the external source URL."""
+    entry = DigestCallEntry(
+        call_id=42, title="Source URL is external",
+        summary=None, deadline=None, score=80, rationale=None,
+        url="https://vinnova.se/external-call-page",  # the source URL
+        bucket="top", also_in_profiles=[],
+    )
+    section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
+    payload = DigestPayload(
+        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+    )
+    html = render_html(payload, dashboard_url="http://app.example.com/")
+    # In-app link must be present
+    assert "http://app.example.com/calls/42" in html
+    # External URL should NOT be the primary clickable link — it's the source URL
+    # that bypasses the in-app Hide button flow. Verify we're not linking to it.
+    assert 'href="https://vinnova.se/external-call-page"' not in html
+
+
+def test_text_link_goes_to_in_app():
+    """Plain-text digest must also link to in-app detail, not external source."""
+    entry = DigestCallEntry(
+        call_id=42, title="T", summary=None, deadline=None,
+        score=80, rationale=None, url="https://vinnova.se/x",
+        bucket="top", also_in_profiles=[],
+    )
+    section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
+    payload = DigestPayload(
+        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+    )
+    text = render_text(payload, dashboard_url="http://app.example.com/")
+    assert "http://app.example.com/calls/42" in text
 
 
 def test_html_escapes_xss_in_title():
