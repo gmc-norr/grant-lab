@@ -27,7 +27,7 @@ class DigestRunSummary:
     users_disabled: int = 0
 
 
-def _week_start(now: datetime) -> datetime:
+def week_start(now: datetime) -> datetime:
     """Stockholm-week start (Monday 00:00 Europe/Stockholm) for the week
     containing `now`.
 
@@ -58,7 +58,7 @@ def run_digest(
     Per-recipient try/except so one bounce doesn't stop the batch.
     """
     summary = DigestRunSummary()
-    week_start = _week_start(now)
+    week_start_dt = week_start(now)
 
     # Find users who have at least one subscription AND are not auto-disabled.
     # Skipping disabled users at SQL keeps the `users_processed` metric meaningful
@@ -77,7 +77,7 @@ def run_digest(
             existing = session.execute(
                 select(DigestRun.id).where(
                     DigestRun.user_id == uid,
-                    DigestRun.sent_at >= week_start,
+                    DigestRun.sent_at >= week_start_dt,
                 )
             ).scalar_one_or_none()
             if existing is not None:

@@ -335,6 +335,39 @@ def test_assemble_skips_inactive_profile(pg_session_factory, now):
     assert payload is None
 
 
+def test_assemble_must_include_whitespace_term_does_not_match_all(
+    pg_session_factory, now
+):
+    """A whitespace-only must_include term must not ilike-match every call."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["   "])
+        _seed_call(s, title="Random", score=20, profile_id=pid)
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    # No must-include match → score 20 is below borderline → nothing to send
+    assert payload is None
+
+
+def test_assemble_must_include_escapes_like_wildcards(pg_session_factory, now):
+    """'100%' must match literally, not as a wildcard."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["100%"])
+        _seed_call(
+            s, title="Funding with 100% match rate", score=20, profile_id=pid,
+        )
+        _seed_call(
+            s, title="Unrelated call", score=20, profile_id=pid,
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    titles = [e.title for sec in payload.sections for e in sec.entries]
+    assert "Funding with 100% match rate" in titles
+    assert "Unrelated call" not in titles
+
+
 def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -16,6 +16,7 @@ from call_monitor.db.models import (
     Source,
     User,
 )
+from call_monitor.digest.send import week_start as _week_start
 from call_monitor.ranking.backfill import backfill_profile
 
 router = APIRouter()
@@ -23,14 +24,13 @@ router = APIRouter()
 
 def _digest_panel_context(session) -> dict:
     now = datetime.now(UTC)
-    week_start = now - timedelta(days=now.isoweekday() - 1)
-    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start_dt = _week_start(now)
 
     last_run = session.execute(
         select(DigestRun).order_by(DigestRun.sent_at.desc()).limit(1)
     ).scalar_one_or_none()
     runs_this_week = session.execute(
-        select(func.count(DigestRun.id)).where(DigestRun.sent_at >= week_start)
+        select(func.count(DigestRun.id)).where(DigestRun.sent_at >= week_start_dt)
     ).scalar_one()
     disabled_users = session.execute(
         select(func.count(User.id)).where(User.digest_disabled_at.is_not(None))

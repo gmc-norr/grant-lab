@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -67,8 +68,10 @@ def test_admin_panel_shows_recent_run_summary(monkeypatch, pg_url, pg_session_fa
         client.__exit__(None, None, None)
     assert r.status_code == 200
     assert "Digest" in r.text
-    # Runs-this-week is rendered as a dd value
-    assert "Runs this week" in r.text
+    # The <dd> following "Runs this week" should contain "1" since we inserted one run
+    m = re.search(r"Runs this week</dt>\s*<dd>\s*(\d+)\s*</dd>", r.text)
+    assert m is not None, "Runs-this-week row not found"
+    assert int(m.group(1)) == 1
 
 
 def test_admin_panel_shows_disabled_user_count(monkeypatch, pg_url, pg_session_factory):
@@ -82,4 +85,8 @@ def test_admin_panel_shows_disabled_user_count(monkeypatch, pg_url, pg_session_f
         r = client.get("/admin")
     finally:
         client.__exit__(None, None, None)
-    assert "disabled" in r.text.lower()
+    m = re.search(
+        r"Disabled users[^<]*</dt>\s*<dd>\s*(\d+)\s*</dd>", r.text
+    )
+    assert m is not None, "Disabled-users row not found"
+    assert int(m.group(1)) == 1

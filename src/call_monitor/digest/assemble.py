@@ -18,6 +18,13 @@ from call_monitor.db.models import (
 )
 
 DIGEST_TOP_THRESHOLD = 60
+
+
+def _escape_like(term: str) -> str:
+    """Escape LIKE wildcards (`%`, `_`) so admin-entered terms like '100%'
+    match literally, not as wildcards. The backslash is also escaped in
+    case a term contains one already."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 DIGEST_BORDERLINE_LOWER = 45
 DIGEST_BUCKET_SIZE = 5
 
@@ -96,7 +103,9 @@ def assemble_for_user(
 
     for profile in profiles:
         must_terms = [
-            t.lower() for t in (profile.structured.get("must_include") or []) if t
+            t.strip().lower()
+            for t in (profile.structured.get("must_include") or [])
+            if t and t.strip()
         ]
 
         # 3a. must-include candidates (any score, any ranking, even unranked)
@@ -113,9 +122,9 @@ def assemble_for_user(
                     Call.id.notin_(excluded) if excluded else True,
                     or_(Call.deadline.is_(None), Call.deadline > now),
                     or_(*[
-                        Call.title.ilike(f"%{t}%")
-                        | Call.summary.ilike(f"%{t}%")
-                        | keywords_str.ilike(f"%{t}%")
+                        Call.title.ilike(f"%{_escape_like(t)}%", escape="\\")
+                        | Call.summary.ilike(f"%{_escape_like(t)}%", escape="\\")
+                        | keywords_str.ilike(f"%{_escape_like(t)}%", escape="\\")
                         for t in must_terms
                     ]),
                 )
