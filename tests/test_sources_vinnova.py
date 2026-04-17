@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -6,105 +7,179 @@ import pytest
 from call_monitor.sources.types import AdapterError
 from call_monitor.sources.vinnova import VinnovaAdapter
 
-_FAKE_OK_BODY = [
+_STOCKHOLM = ZoneInfo("Europe/Stockholm")
+
+_PROGRAMMES = [
     {
-        "Diarienummer": "2026-01234",
-        "Titel": "Datadriven sjukvård",
-        "Beskrivning": "Stöd för datadriven utveckling i hälso- och sjukvård.",
-        "OppningsDatum": "2026-04-01",
-        "StangningsDatum": "2026-06-30",
-        "Budget": 50000000,
-        "Valuta": "SEK",
-        "Program": "Datadriven hälsa",
-        "Lankar": [
-            {"Url": "https://www.vinnova.se/e/2026-01234"}
+        "Diarienummer": "2009-02335",
+        "Titel": "FFI - Styrelse initierade projekt",
+        "AnsokningsomgangDnrLista": [
+            {"DiarienummerAnsokningsomgang": "ROUND-OPEN"},
+            {"DiarienummerAnsokningsomgang": "ROUND-CLOSED"},
+            {"DiarienummerAnsokningsomgang": "ROUND-NONPUBLIC"},
         ],
-        "Nyckelord": ["digital pathology", "ai"],
     }
 ]
 
+_ROUND_OPEN = [{
+    "Diarienummer": "ROUND-OPEN",
+    "DiarienummerUtlysning": "2009-02335",
+    "Titel": "Open round",
+    "Beskrivning": "Lots of detail.",
+    "TitelEngelska": "Open round (en)",
+    "BeskrivningEngelska": "Lots of detail (en).",
+    "Oppningsdatum": "2026-04-01T00:00:00",
+    "Stangningsdatum": "2099-12-31T14:00:00",
+    "LankLista": [
+        {"Beskrivning": "ansök här:", "URL": "https://www.vinnova.se/e/round-open"},
+    ],
+    "Publik": 1, "Webbsida": 1, "Extern": 1,
+}]
 
-def _mock_transport(status: int = 200, body=None, raise_exc=None):
+_ROUND_CLOSED = [{
+    "Diarienummer": "ROUND-CLOSED",
+    "DiarienummerUtlysning": "2009-02335",
+    "Titel": "Closed round",
+    "Beskrivning": "...",
+    "Oppningsdatum": "2020-01-01T00:00:00",
+    "Stangningsdatum": "2020-06-30T23:59:00",
+    "LankLista": [{"Beskrivning": "x", "URL": "https://www.vinnova.se/e/closed"}],
+    "Publik": 1, "Webbsida": 1,
+}]
+
+_ROUND_NONPUBLIC = [{
+    "Diarienummer": "ROUND-NONPUBLIC",
+    "DiarienummerUtlysning": "2009-02335",
+    "Titel": "Non-public round",
+    "Beskrivning": "...",
+    "Oppningsdatum": "2026-04-01T00:00:00",
+    "Stangningsdatum": "2099-12-31T14:00:00",
+    "LankLista": [{"Beskrivning": "x", "URL": "https://www.vinnova.se/e/nonpub"}],
+    "Publik": 0, "Webbsida": 1,
+}]
+
+
+def _mock_transport(routes: dict[str, list | dict] | None = None):
+    """Map exact path suffix → JSON body."""
+    routes = routes or {
+        "/api/utlysningar/2026-01-01": _PROGRAMMES,
+        "/api/ansokningsomgangar/ROUND-OPEN": _ROUND_OPEN,
+        "/api/ansokningsomgangar/ROUND-CLOSED": _ROUND_CLOSED,
+        "/api/ansokningsomgangar/ROUND-NONPUBLIC": _ROUND_NONPUBLIC,
+    }
+
     def handler(request):
-        if raise_exc is not None:
-            raise raise_exc
-        # Sanity check: header negotiation
         assert request.headers.get("Accept") == "application/vnd.vinnova.opendata.2.0+json"
-        return httpx.Response(status, json=body if body is not None else _FAKE_OK_BODY)
+        for needle, body in routes.items():
+            if needle in str(request.url.path):
+                return httpx.Response(200, json=body)
+        raise AssertionError(f"unexpected URL: {request.url}")
+
     return httpx.MockTransport(handler)
 
 
-def test_fetch_normalizes_vinnova_record():
-    adapter = VinnovaAdapter(
-        api_key="test-key",
+def _make(transport=None):
+    return VinnovaAdapter(
         base_url="https://data.vinnova.se",
-        transport=_mock_transport(),
+        transport=transport or _mock_transport(),
+        sleep_between_rounds=0,
     )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+
+
+def test_fetch_returns_only_open_public_rounds():
+    out = list(_make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    ids = [c.external_id for c in out]
+    assert ids == ["ROUND-OPEN"]
+
+
+def test_open_round_is_normalized_correctly():
+    out = list(_make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
     assert len(out) == 1
     c = out[0]
-    assert c.external_id == "2026-01234"
-    assert c.title == "Datadriven sjukvård"
-    # OppningsDatum interpreted as published_at (Europe/Stockholm midnight → UTC)
-    assert c.published_at == datetime(2026, 4, 1, tzinfo=UTC)
-    # StangningsDatum at 23:59 Europe/Stockholm → 21:59 UTC during summer (CEST)
-    # We store as the day's end in the *source's* timezone; conversion happens
-    # at write. Adapter MUST emit tz-aware UTC.
-    assert c.deadline is not None and c.deadline.tzinfo is not None
-    assert c.budget_max == 50_000_000
-    assert c.currency == "SEK"
-    assert c.url == "https://www.vinnova.se/e/2026-01234"
-    assert "ai" in c.keywords
+    assert c.external_id == "ROUND-OPEN"
+    assert c.title == "Open round"
+    assert c.summary == "Lots of detail."
+    assert c.url == "https://www.vinnova.se/e/round-open"
+    # Oppningsdatum 2026-04-01T00:00:00 (Stockholm) -> UTC = 2026-03-31T22:00:00 (CEST -2)
+    # ... or 2026-03-31T23:00:00 if CET. April 1 is post-DST in EU, so CEST (+02).
+    assert c.published_at is not None and c.published_at.tzinfo is not None
+    # Stangningsdatum 2099-12-31T14:00:00 (Stockholm CET +01 in winter) -> UTC 13:00
+    assert c.deadline == datetime(2099, 12, 31, 13, 0, tzinfo=UTC)
+    # Adapter doesn't populate budget/programme/keywords for v1 (Vinnova API
+    # doesn't expose them on the round endpoint).
+    assert c.budget_min is None
+    assert c.budget_max is None
+    assert c.currency is None
+    assert c.programme is None
+    assert c.keywords == []
 
 
-def test_skips_records_without_diarienummer():
-    body = [
-        {"Diarienummer": "OK", "Titel": "T", "Lankar": [{"Url": "https://x/ok"}]},
-        {"Titel": "no id"},
-    ]
+def test_fetch_skips_round_with_no_safe_url():
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {"Diarienummer": "P", "Titel": "T",
+             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "BAD-URL"}]},
+        ],
+        "/api/ansokningsomgangar/BAD-URL": [{
+            "Diarienummer": "BAD-URL", "Titel": "x", "Beskrivning": "x",
+            "Oppningsdatum": "2026-04-01T00:00:00",
+            "Stangningsdatum": "2099-12-31T14:00:00",
+            "LankLista": [{"URL": "javascript:alert(1)"}],
+            "Publik": 1, "Webbsida": 1,
+        }],
+    }
+    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC)
+    ))
+    assert out == []
+
+
+def test_fetch_skips_round_with_no_links():
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {"Diarienummer": "P", "Titel": "T",
+             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "NOLINKS"}]},
+        ],
+        "/api/ansokningsomgangar/NOLINKS": [{
+            "Diarienummer": "NOLINKS", "Titel": "x", "Beskrivning": "x",
+            "Oppningsdatum": "2026-04-01T00:00:00",
+            "Stangningsdatum": "2099-12-31T14:00:00",
+            "LankLista": [],
+            "Publik": 1, "Webbsida": 1,
+        }],
+    }
+    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC)
+    ))
+    assert out == []
+
+
+def test_http_error_raises_adapter_error():
+    def handler(request):
+        return httpx.Response(503)
+
     adapter = VinnovaAdapter(
-        api_key="k", base_url="https://x", transport=_mock_transport(body=body)
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert [c.external_id for c in out] == ["OK"]
-
-
-def test_skips_records_with_unsafe_url_scheme():
-    """javascript:/data: URLs would render as click-to-XSS in the dashboard."""
-    body = [
-        {
-            "Diarienummer": "OK",
-            "Titel": "ok",
-            "Lankar": [{"Url": "https://www.vinnova.se/e/ok"}],
-        },
-        {
-            "Diarienummer": "XSS",
-            "Titel": "click me",
-            "Lankar": [{"Url": "javascript:alert(1)"}],
-        },
-    ]
-    adapter = VinnovaAdapter(
-        api_key="k", base_url="https://x", transport=_mock_transport(body=body)
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert [c.external_id for c in out] == ["OK"]
-
-
-def test_5xx_raises_adapter_error():
-    adapter = VinnovaAdapter(
-        api_key="k", base_url="https://x", transport=_mock_transport(status=502)
+        base_url="https://data.vinnova.se",
+        transport=httpx.MockTransport(handler),
+        sleep_between_rounds=0,
     )
     with pytest.raises(AdapterError):
         list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
 
 
-def test_no_api_key_raises_at_construction():
-    with pytest.raises(ValueError):
-        VinnovaAdapter(api_key="", base_url="https://x")
+def test_non_list_payload_raises():
+    def handler(request):
+        return httpx.Response(200, json={"not": "a list"})
+
+    adapter = VinnovaAdapter(
+        base_url="https://data.vinnova.se",
+        transport=httpx.MockTransport(handler),
+        sleep_between_rounds=0,
+    )
+    with pytest.raises(AdapterError):
+        list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
 
 
-def test_http_base_url_raises_at_construction():
-    """The API key is sent as a header on every request — sending it over
-    plaintext http:// would leak it. Adapter must refuse to construct."""
-    with pytest.raises(ValueError, match="https://"):
-        VinnovaAdapter(api_key="k", base_url="http://data.vinnova.se")
+def test_https_required():
+    with pytest.raises(ValueError, match="https"):
+        VinnovaAdapter(base_url="http://insecure.example/")

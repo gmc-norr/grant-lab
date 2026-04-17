@@ -59,7 +59,6 @@ async def lifespan(app: FastAPI):
         session_factory=app.state.session_factory,
         eu_portal_base_url=settings.eu_portal_base_url,
         vinnova_base_url=settings.vinnova_base_url,
-        vinnova_api_key=settings.vinnova_api_key,
         alerter=alerter,
         ollama_url=settings.ollama_url,
         gemma_model=settings.gemma_model,
