@@ -62,6 +62,15 @@ def profile_new_submit(
         raise HTTPException(status_code=400, detail="name too long (max 200 chars)")
     if len(pasted_grants) > 100_000:
         raise HTTPException(status_code=413, detail="pasted grants too large (max 100 KB)")
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        existing = session.execute(
+            select(Profile.id).where(
+                Profile.name == name, Profile.is_active.is_(True)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="profile name already exists")
     members = _parse_members(orcids, names_affiliations)
     if kind not in {k.value for k in ProfileKind}:
         kind = "group"
@@ -72,7 +81,6 @@ def profile_new_submit(
     ollama = OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model)
     draft = bootstrap_profile(seed=seed, pubmed=pubmed, ollama=ollama)
 
-    session_factory = request.app.state.session_factory
     with session_factory() as session:
         profile = Profile(
             name=name,

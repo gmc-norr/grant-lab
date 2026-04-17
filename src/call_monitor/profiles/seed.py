@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re as _re
 from dataclasses import dataclass, field
+
+_ORCID_RE = _re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 
 
 @dataclass
@@ -17,6 +20,8 @@ class Member:
     affiliation: str | None = None
 
     def __post_init__(self) -> None:
+        if self.orcid is not None and not _ORCID_RE.match(self.orcid):
+            raise ValueError(f"invalid ORCID format: {self.orcid!r}")
         if not self.orcid and not (self.name and self.affiliation):
             raise ValueError(
                 "Member requires either `orcid` or both `name` and `affiliation`"

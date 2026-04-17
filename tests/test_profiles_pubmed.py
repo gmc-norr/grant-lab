@@ -115,3 +115,14 @@ def test_http_error_raises_pubmed_error():
     )
     with pytest.raises(PubMedError):
         client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
+
+
+def test_member_rejects_malformed_orcid():
+    with pytest.raises(ValueError, match="invalid ORCID"):
+        Member(orcid="not-an-orcid")
+
+
+def test_member_accepts_x_check_digit_orcid():
+    # Valid ORCIDs can end in a literal 'X' (checksum).
+    m = Member(orcid="0000-0002-1825-009X")
+    assert m.orcid == "0000-0002-1825-009X"

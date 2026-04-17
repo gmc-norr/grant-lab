@@ -110,3 +110,58 @@ def test_me_name_form_does_not_wipe_subscriptions(
         subs = s.execute(select(Subscription).where(Subscription.user_id == uid)).scalars().all()
     assert len(subs) == 1
     assert subs[0].profile_id == p1
+
+
+def test_me_post_silently_drops_unknown_profile_ids(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Posting subscribe_<nonexistent_id> must not 500 the handler."""
+    p1, _ = profile_factory(name="Real")
+    app = _setup(monkeypatch, pg_url)
+    uid = _user(pg_session_factory)
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.post(
+            "/me",
+            data={
+                "name": "",
+                "_subscriptions_submitted": "1",
+                f"subscribe_{p1}": "on",
+                "subscribe_999999": "on",  # bogus
+            },
+        )
+    assert r.status_code == 200
+    with pg_session_factory() as s:
+        subs = s.execute(select(Subscription).where(Subscription.user_id == uid)).scalars().all()
+    assert {sub.profile_id for sub in subs} == {p1}
+
+
+def test_me_post_silently_drops_inactive_profile_subscribe(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Subscribing to an INACTIVE profile must be silently dropped."""
+    p1, _ = profile_factory(name="Inactive")
+    with pg_session_factory() as s:
+        from call_monitor.db.models import Profile
+        s.get(Profile, p1).is_active = False
+        s.commit()
+    app = _setup(monkeypatch, pg_url)
+    uid = _user(pg_session_factory)
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.post(
+            "/me",
+            data={
+                "name": "",
+                "_subscriptions_submitted": "1",
+                f"subscribe_{p1}": "on",
+            },
+        )
+    assert r.status_code == 200
+    with pg_session_factory() as s:
+        subs = s.execute(select(Subscription).where(Subscription.user_id == uid)).scalars().all()
+    assert subs == []

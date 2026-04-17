@@ -280,3 +280,24 @@ def test_profile_edit_preserves_zero_budget_min(
         r = client.get(f"/profiles/{pid}/edit")
     assert r.status_code == 200
     assert 'value="0"' in r.text  # budget_min=0 rendered as "0", not ""
+
+
+def test_profile_new_rejects_duplicate_active_name(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(name="Duplicate me")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Duplicate me",
+                "kind": "group",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "x",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 409

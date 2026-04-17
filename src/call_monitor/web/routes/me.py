@@ -60,8 +60,18 @@ async def update_me(
         # touch the subscriptions table — otherwise every name save
         # would silently unsubscribe the user from every profile.
         if "_subscriptions_submitted" in form:
+            # Only allow subscriptions to ACTIVE profiles that actually exist.
+            # Silently drop stale / fabricated IDs rather than 500ing on the FK.
+            valid_ids = set(
+                session.execute(
+                    select(Profile.id).where(
+                        Profile.id.in_(desired_subscribed_ids),
+                        Profile.is_active.is_(True),
+                    )
+                ).scalars().all()
+            ) if desired_subscribed_ids else set()
             session.execute(delete(Subscription).where(Subscription.user_id == user.id))
-            for pid in desired_subscribed_ids:
+            for pid in valid_ids:
                 session.add(Subscription(user_id=user.id, profile_id=pid))
         session.commit()
 
