@@ -13,7 +13,11 @@ TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup tasks belong here (admin bootstrap lands in Task 17).
+    from call_monitor.admin_bootstrap import bootstrap_admins
+    bootstrap_admins(
+        app.state.session_factory,
+        emails=app.state.settings.initial_admin_emails,
+    )
     yield
 
 
