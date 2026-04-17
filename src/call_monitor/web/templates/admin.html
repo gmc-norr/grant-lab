@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Admin — Call Monitor{% endblock %}
+{% block content %}
+<h1>Admin</h1>
+<h2>Source health</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Source</th>
+      <th>Last fetched</th>
+      <th>Calls in DB</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in sources %}
+      <tr>
+        <td>{{ s.name }} (<code>{{ s.slug }}</code>)</td>
+        <td>{{ s.last_fetched_at.strftime('%Y-%m-%d %H:%M %Z') if s.last_fetched_at else '— never' }}</td>
+        <td>{{ s.call_count }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

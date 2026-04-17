@@ -11,7 +11,7 @@ from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
 from call_monitor.logging import configure_logging
-from call_monitor.web.routes import auth, calls, health, me
+from call_monitor.web.routes import admin, auth, calls, health, me
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -117,4 +117,5 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(me.router)
     app.include_router(calls.router)
+    app.include_router(admin.router)
     return app
