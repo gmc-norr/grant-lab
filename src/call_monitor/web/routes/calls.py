@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
 from call_monitor.auth.dependencies import get_current_user
-from call_monitor.db.models import Call, CallRanking, Profile, Source, User
+from call_monitor.db.models import Call, CallRanking, Profile, Source, User, UserCallDismissal
 
 router = APIRouter()
 
@@ -82,6 +83,12 @@ def calls_index(
             stmt = stmt.where(
                 Call.source_id == select(Source.id).where(Source.slug == source).scalar_subquery()
             )
+        dismissed_subq = (
+            select(UserCallDismissal.call_id)
+            .where(UserCallDismissal.user_id == user.id)
+            .scalar_subquery()
+        )
+        stmt = stmt.where(Call.id.notin_(dismissed_subq))
         rows = session.execute(stmt).unique().all()
         # Normalize to (Call, CallRanking|None) shape regardless of branch
         calls_with_rankings: list[tuple[Call, CallRanking | None]] = [
@@ -129,3 +136,23 @@ def call_detail(
         name="call_detail.html",
         context={"call": call, "user": user},
     )
+
+
+@router.post("/calls/{call_id}/hide")
+def hide_call(
+    request: Request,
+    call_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        # ON CONFLICT DO NOTHING — idempotent if user clicks Hide twice
+        session.execute(
+            pg_insert(UserCallDismissal)
+            .values(user_id=user.id, call_id=call_id)
+            .on_conflict_do_nothing(index_elements=["user_id", "call_id"])
+        )
+        session.commit()
+    return RedirectResponse(url="/", status_code=303)
