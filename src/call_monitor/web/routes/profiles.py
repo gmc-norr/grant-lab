@@ -11,6 +11,7 @@ from call_monitor.db.models import Profile, ProfileKind, User
 from call_monitor.profiles.bootstrap import bootstrap_profile
 from call_monitor.profiles.pubmed import PubMedClient
 from call_monitor.profiles.seed import Member, SeedInput
+from call_monitor.ranking.backfill import backfill_profile
 from call_monitor.ranking.ollama_client import OllamaClient
 
 router = APIRouter()
@@ -82,6 +83,79 @@ def profile_new_submit(
         new_id = profile.id
 
     return RedirectResponse(url=f"/profiles/{new_id}/edit", status_code=303)
+
+
+@router.get("/profiles/{profile_id}/edit", response_class=HTMLResponse)
+def profile_edit_form(
+    request: Request,
+    profile_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        p = session.get(Profile, profile_id)
+        if p is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="profile not found")
+        session.expunge(p)
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="profile_edit.html",
+        context={"profile": p, "user": user},
+    )
+
+
+@router.post("/profiles/{profile_id}/edit")
+def profile_edit_submit(
+    request: Request,
+    profile_id: int,
+    description: str = Form(""),
+    areas: str = Form(""),
+    budget_min: str = Form(""),
+    budget_max: str = Form(""),
+    trl_min: str = Form(""),
+    trl_max: str = Form(""),
+    must_include: str = Form(""),
+    hard_exclusions: str = Form(""),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        p = session.get(Profile, profile_id)
+        if p is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="profile not found")
+        p.description = description
+        p.structured = {
+            "areas": _split_lines(areas),
+            "budget_min": _int_or_none(budget_min),
+            "budget_max": _int_or_none(budget_max),
+            "trl_min": _int_or_none(trl_min),
+            "trl_max": _int_or_none(trl_max),
+            "must_include": _split_lines(must_include),
+            "hard_exclusions": _split_lines(hard_exclusions),
+        }
+        session.commit()
+
+    # Trigger backfill so edits flow into re-ranking without the user
+    # having to wait for the nightly scheduler tick.
+    backfill_profile(session_factory=session_factory, profile_id=profile_id)
+
+    return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)
+
+
+def _split_lines(raw: str) -> list[str]:
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+
+def _int_or_none(raw: str) -> int | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _parse_members(orcids: str, names_affiliations: str) -> list[Member]:

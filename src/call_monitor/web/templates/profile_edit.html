@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ profile.name }} — Call Monitor{% endblock %}
+{% block content %}
+<h1>Edit profile: {{ profile.name }}</h1>
+
+<form method="post" action="/profiles/{{ profile.id }}/edit">
+  <p>
+    <label>Description<br>
+      <textarea name="description" rows="6" cols="80">{{ profile.description }}</textarea>
+    </label>
+  </p>
+  <p>
+    <label>Areas (one per line)<br>
+      <textarea name="areas" rows="4">{{ profile.structured.areas | join('\n') if profile.structured.areas else '' }}</textarea>
+    </label>
+  </p>
+  <p>
+    <label>Budget min <input type="text" name="budget_min" value="{{ profile.structured.budget_min or '' }}"></label>
+    <label>Budget max <input type="text" name="budget_max" value="{{ profile.structured.budget_max or '' }}"></label>
+  </p>
+  <p>
+    <label>TRL min (1-9) <input type="text" name="trl_min" value="{{ profile.structured.trl_min or '' }}"></label>
+    <label>TRL max (1-9) <input type="text" name="trl_max" value="{{ profile.structured.trl_max or '' }}"></label>
+  </p>
+  <p>
+    <label>Must-include keywords (one per line)<br>
+      <textarea name="must_include" rows="3">{{ profile.structured.must_include | join('\n') if profile.structured.must_include else '' }}</textarea>
+    </label>
+  </p>
+  <p>
+    <label>Hard exclusions (one per line)<br>
+      <textarea name="hard_exclusions" rows="3">{{ profile.structured.hard_exclusions | join('\n') if profile.structured.hard_exclusions else '' }}</textarea>
+    </label>
+  </p>
+  <p>
+    <button type="submit">Save and re-rank</button>
+    <small>Saving kicks off a backfill of the last 90 days against this profile.</small>
+  </p>
+</form>
+
+<p><a href="/profiles/{{ profile.id }}">Cancel</a></p>
+{% endblock %}

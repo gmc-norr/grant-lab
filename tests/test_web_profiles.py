@@ -113,3 +113,71 @@ def test_profile_new_post_creates_profile_and_redirects(
     assert p.description == "fake draft description"
     assert p.structured["areas"] == ["digital pathology"]
     assert p.is_active is True
+
+
+def test_profile_edit_form_renders_existing_values(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(
+        name="Edit me",
+        description="initial desc",
+        structured={"areas": ["x"], "must_include": ["kw"], "hard_exclusions": []},
+    )
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/profiles/{pid}/edit")
+    assert r.status_code == 200
+    assert "initial desc" in r.text
+    assert "Edit me" in r.text
+
+
+def test_profile_edit_post_saves_and_triggers_backfill(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Saving an edit enqueues backfill jobs for the last 90 days of
+    calls. We seed one recent Call and assert a RankingJob appears
+    for (call, profile) after the save."""
+    from datetime import UTC, datetime
+
+    from call_monitor.db.models import Call, RankingJob, Source
+
+    pid, _ = profile_factory(name="Backfill target")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        s.add(Call(
+            source_id=src.id, external_id="E-1", url="https://x", title="T",
+            published_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "updated description",
+                "areas": "digital pathology\nfederated learning",
+                "budget_min": "100000",
+                "budget_max": "5000000",
+                "trl_min": "4",
+                "trl_max": "8",
+                "must_include": "pathology",
+                "hard_exclusions": "animal studies",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    from call_monitor.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        assert p.description == "updated description"
+        assert p.structured["areas"] == ["digital pathology", "federated learning"]
+        assert p.structured["budget_min"] == 100000
+        assert p.structured["must_include"] == ["pathology"]
+        assert p.structured["hard_exclusions"] == ["animal studies"]
+
+        jobs = s.execute(select(RankingJob).where(RankingJob.profile_id == pid)).scalars().all()
+    assert len(jobs) == 1  # our one recent Call got enqueued
