@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import smtplib
 from dataclasses import dataclass
+from email.message import EmailMessage
 from typing import Protocol
 
 import httpx
@@ -99,3 +101,53 @@ class ResendClient:
 
         # 5xx
         raise EmailTransportError(f"resend {resp.status_code}")
+
+
+class SMTPClient:
+    """Stdlib smtplib wrapper. STARTTLS on port 587 by convention.
+
+    Treats per-address SMTPRecipientsRefused as bounces; other smtplib
+    exceptions as transport errors."""
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        user: str | None,
+        password: str | None,
+        from_addr: str,
+        timeout: float = 30.0,
+    ):
+        self._host = host
+        self._port = port
+        self._user = user
+        self._password = password
+        self._from = from_addr
+        self._timeout = timeout
+
+    def send(self, *, to: str, subject: str, html: str, text: str) -> SendResult:
+        msg = EmailMessage()
+        msg["From"] = self._from
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.set_content(text)
+        msg.add_alternative(html, subtype="html")
+
+        try:
+            with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as conn:
+                conn.starttls()
+                if self._user and self._password:
+                    conn.login(self._user, self._password)
+                conn.sendmail(self._from, [to], msg.as_string())
+        except smtplib.SMTPRecipientsRefused as e:
+            # Per-recipient reject — bounce
+            details = "; ".join(
+                f"{addr}:{code} {msg.decode() if isinstance(msg, bytes) else msg}"
+                for addr, (code, msg) in e.recipients.items()
+            )
+            return SendResult(ok=False, bounce_reason=f"refused: {details}")
+        except (smtplib.SMTPException, OSError) as e:
+            raise EmailTransportError(f"smtp error: {e}") from e
+
+        return SendResult(ok=True, message_id=None)
