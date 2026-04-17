@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
-    gemma_model: str = Field(default="gemma4:e4b-q8", alias="GEMMA_MODEL")
+    gemma_model: str = Field(default="gemma4:e4b-it-q8_0", alias="GEMMA_MODEL")
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")

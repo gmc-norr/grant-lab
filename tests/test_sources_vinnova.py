@@ -98,7 +98,9 @@ def test_open_round_is_normalized_correctly():
     c = out[0]
     assert c.external_id == "ROUND-OPEN"
     assert c.title == "Open round"
-    assert c.summary == "Lots of detail."
+    # _ROUND_OPEN has both Beskrivning and BeskrivningEngelska; _build_summary
+    # concatenates them.
+    assert c.summary == "Lots of detail.\n\nLots of detail (en)."
     assert c.url == "https://www.vinnova.se/e/round-open"
     # Oppningsdatum 2026-04-01T00:00:00 (Stockholm) -> UTC = 2026-03-31T22:00:00 (CEST -2)
     # ... or 2026-03-31T23:00:00 if CET. April 1 is post-DST in EU, so CEST (+02).
@@ -183,3 +185,59 @@ def test_non_list_payload_raises():
 def test_https_required():
     with pytest.raises(ValueError, match="https"):
         VinnovaAdapter(base_url="http://insecure.example/")
+
+
+def test_summary_includes_webtextlista_and_english_blurb():
+    """The ranker needs more signal than Vinnova's 40-char Beskrivning.
+    WebTextLista carries the real prose; BeskrivningEngelska is bonus."""
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {"Diarienummer": "P", "Titel": "T",
+             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "RICH"}]},
+        ],
+        "/api/ansokningsomgangar/RICH": [{
+            "Diarienummer": "RICH", "Titel": "Title",
+            "Beskrivning": "Short tagline.",
+            "BeskrivningEngelska": "Short tagline (en).",
+            "WebTextLista": [
+                {"TextID": 1, "TextSv": "Detaljerad svensk beskrivning av projektet."},
+                {"TextID": 2, "TextSv": "Mer detaljer om finansieringen."},
+            ],
+            "Oppningsdatum": "2026-04-01T00:00:00",
+            "Stangningsdatum": "2099-12-31T14:00:00",
+            "LankLista": [{"URL": "https://www.vinnova.se/e/rich"}],
+            "Publik": 1, "Webbsida": 1,
+        }],
+    }
+    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC)
+    ))
+    assert len(out) == 1
+    summary = out[0].summary
+    assert summary is not None
+    assert "Short tagline." in summary
+    assert "Detaljerad svensk beskrivning av projektet." in summary
+    assert "Mer detaljer om finansieringen." in summary
+    assert "Short tagline (en)." in summary
+
+
+def test_summary_falls_back_to_just_beskrivning_when_no_webtext():
+    """Round with only the short Beskrivning should still produce a summary."""
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {"Diarienummer": "P", "Titel": "T",
+             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "PLAIN"}]},
+        ],
+        "/api/ansokningsomgangar/PLAIN": [{
+            "Diarienummer": "PLAIN", "Titel": "Title",
+            "Beskrivning": "Just a tagline.",
+            "Oppningsdatum": "2026-04-01T00:00:00",
+            "Stangningsdatum": "2099-12-31T14:00:00",
+            "LankLista": [{"URL": "https://www.vinnova.se/e/plain"}],
+            "Publik": 1, "Webbsida": 1,
+        }],
+    }
+    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC)
+    ))
+    assert out[0].summary == "Just a tagline."

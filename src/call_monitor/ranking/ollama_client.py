@@ -44,7 +44,7 @@ class OllamaClient:
         base_url: str,
         model: str,
         transport: httpx.BaseTransport | None = None,
-        timeout: float = 60.0,
+        timeout: float = 120.0,  # 120s: cold model load on 2080 Ti can take 30-60s
     ):
         self._base_url = base_url.rstrip("/")
         self.model = model  # public so rank_pair can fall back to it
