@@ -178,9 +178,7 @@ def login_verify(request: Request, token: str):
         session.commit()
 
     cookie_value = session_signer.make(user_id=user_id)
-    # Foundation has no "/" yet — land the user on /me, which exists.
-    # The Ingestion plan will replace this with "/" once the dashboard is introduced.
-    response = RedirectResponse(url="/me", status_code=303)
+    response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         "session",
         cookie_value,

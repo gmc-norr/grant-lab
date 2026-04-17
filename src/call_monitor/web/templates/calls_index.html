@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Funding calls — Call Monitor{% endblock %}
+{% block content %}
+<h1>Funding calls</h1>
+
+<form method="get" action="/" style="margin-bottom: 1em;">
+  <label>Source
+    <select name="source" onchange="this.form.submit()">
+      <option value="">All sources</option>
+      {% for s in sources %}
+        <option value="{{ s.slug }}" {% if s.slug == selected_source %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+
+{% if not calls %}
+  <p><em>No calls have been ingested yet.</em></p>
+{% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Source</th>
+        <th>Programme</th>
+        <th>Deadline</th>
+        <th>Published</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in calls %}
+        <tr>
+          <td><a href="/calls/{{ c.id }}">{{ c.title }}</a></td>
+          <td>{{ c.source.name }}</td>
+          <td>{{ c.programme or '—' }}</td>
+          <td>{{ c.deadline.strftime('%Y-%m-%d') if c.deadline else '—' }}</td>
+          <td>{{ c.published_at.strftime('%Y-%m-%d') if c.published_at else '—' }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

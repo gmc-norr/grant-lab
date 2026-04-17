@@ -85,7 +85,7 @@ def test_verify_sets_session_cookie_and_redirects(monkeypatch, pg_url, pg_sessio
     with TestClient(app) as client:
         r = client.get(f"/login/verify?token={raw}", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/me"
+    assert r.headers["location"] == "/"
     assert "session" in r.cookies
 
 
