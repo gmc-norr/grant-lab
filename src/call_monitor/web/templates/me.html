@@ -10,4 +10,25 @@
   </label>
   <button type="submit">Save</button>
 </form>
+
+<h2>Profile subscriptions</h2>
+<p>Check profiles whose weekly digest you want to receive.</p>
+<form method="post" action="/me">
+  <input type="hidden" name="name" value="{{ user.name or '' }}">
+  <table>
+    <thead><tr><th></th><th>Profile</th></tr></thead>
+    <tbody>
+      {% for p in profiles %}
+        <tr>
+          <td>
+            <input type="checkbox" name="subscribe_{{ p.id }}"
+                   {% if p.id in subscribed_ids %}checked{% endif %}>
+          </td>
+          <td>{{ p.name }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><button type="submit">Save subscriptions</button></p>
+</form>
 {% endblock %}
