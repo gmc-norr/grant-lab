@@ -6,6 +6,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from call_monitor.digest.assemble import DigestPayload
+from call_monitor.web.filters import display_date, display_dt
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 
@@ -29,6 +30,8 @@ def _env(autoescape_html: bool) -> Environment:
         lstrip_blocks=True,
     )
     env.globals["days_until"] = _days_until
+    env.filters["display_date"] = display_date
+    env.filters["display_dt"] = display_dt
     return env
 
 

@@ -63,6 +63,28 @@ def test_text_renders_titles_and_urls():
     assert "Manage subscriptions" in text  # footer
 
 
+def test_html_renders_deadline_in_stockholm_timezone():
+    """Call.deadline is stored UTC. Templates must render in Europe/Stockholm
+    (per main.py:122-126 — 'NEVER call .strftime() on a raw datetime in templates')."""
+    from datetime import UTC, datetime as _dt
+    now = _dt(2026, 4, 17, tzinfo=UTC)
+    # 23:30 UTC on Apr 30 = 01:30 Stockholm on May 1 (CEST, +2)
+    late_deadline_utc = _dt(2026, 4, 30, 23, 30, tzinfo=UTC)
+    entry = DigestCallEntry(
+        call_id=1, title="Late Deadline", summary=None,
+        deadline=late_deadline_utc, score=80, rationale=None,
+        url="http://app/calls/1", bucket="top", also_in_profiles=[],
+    )
+    section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
+    payload = DigestPayload(
+        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+    )
+    html = render_html(payload, dashboard_url="http://app/")
+    # Must render Stockholm date (May 1), not UTC date (April 30)
+    assert "2026-05-01" in html
+    assert "2026-04-30" not in html
+
+
 def test_html_escapes_xss_in_title():
     """Autoescape must be active for HTML template — user-supplied content is not raw."""
     xss_entry = DigestCallEntry(
