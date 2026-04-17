@@ -29,10 +29,13 @@ class EmailClient(Protocol):
 # Other 4xx (auth, rate-limit, server-side validation) → transport error
 # (don't count, alert). Rate-limit is sender-scoped on Resend; treating it
 # as a per-recipient bounce would auto-disable users for our quota issue.
+# NOTE: "missing_field" is intentionally excluded. It indicates a sender-side
+# payload regression (our code forgot a required field — e.g. "from"). Counting
+# it as a bounce would auto-disable every recipient we try to email for our own
+# config/code bug, not their address. Raise EmailTransportError instead.
 _RESEND_BOUNCE_NAMES = {
     "validation_error",
     "invalid_email",
-    "missing_field",
 }
 
 

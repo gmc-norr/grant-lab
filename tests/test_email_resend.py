@@ -65,6 +65,19 @@ def test_resend_network_error_raises_transport_error():
         client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
 
 
+def test_resend_missing_field_is_transport_error_not_bounce():
+    """missing_field is a sender-side payload regression (our code forgot a
+    required field). Don't count as per-recipient bounce — we'd auto-disable
+    valid users for our own config error."""
+    def handler(req):
+        return httpx.Response(
+            422, json={"name": "missing_field", "message": "from is required"},
+        )
+    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    with pytest.raises(EmailTransportError):
+        client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
+
+
 def test_resend_authorization_header_set():
     captured = {}
     def handler(req):
