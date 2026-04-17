@@ -20,15 +20,15 @@ def reset_root_handlers():
     root.handlers.extend(saved)
 
 
-def _last_json_line(stderr: str) -> dict:
-    return json.loads(stderr.strip().splitlines()[-1])
+def _last_json_line(stream: str) -> dict:
+    return json.loads(stream.strip().splitlines()[-1])
 
 
 def test_logging_outputs_json(capsys):
     configure_logging()
     log = logging.getLogger("test")
     log.info("hello", extra={"user_id": 42})
-    payload = _last_json_line(capsys.readouterr().err)
+    payload = _last_json_line(capsys.readouterr().out)
     assert payload["message"] == "hello"
     assert payload["level"] == "INFO"
     assert payload["user_id"] == 42
@@ -49,7 +49,7 @@ def test_extra_cannot_clobber_reserved_keys(capsys):
         "real-message",
         extra={"level": "PWNED", "logger": "fake", "ts": "0", "exc": "spoofed"},
     )
-    payload = _last_json_line(capsys.readouterr().err)
+    payload = _last_json_line(capsys.readouterr().out)
     assert payload["level"] == "WARNING"
     assert payload["logger"] == "test"
     assert payload["message"] == "real-message"

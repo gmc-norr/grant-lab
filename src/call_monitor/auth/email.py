@@ -9,6 +9,13 @@ import httpx
 _logger = logging.getLogger(__name__)
 
 
+class EmailSendFailed(Exception):
+    """Raised by a sender when the upstream service fails to accept the
+    message. Callers (e.g. /login) can choose to log-and-continue rather
+    than surfacing an internal error that leaks whether the address was
+    worth sending to."""
+
+
 @dataclass
 class EmailMessage:
     to: str
@@ -53,16 +60,27 @@ class ConsoleEmailSender:
         )
 
 
+def _default_resend_client() -> httpx.Client:
+    return httpx.Client(timeout=10.0)
+
+
 @dataclass
 class ResendEmailSender:
+    """Send via Resend's HTTP API. Single long-lived httpx.Client —
+    construct once in create_app(), reuse across requests.
+
+    The `client` field is a DI seam: tests inject an httpx.MockTransport
+    to assert request shape without hitting the network. Default
+    constructs a 10-second-timeout client suitable for production use.
+    """
+
     api_key: str
     from_address: str
-    _client: httpx.Client | None = None
+    client: httpx.Client = field(default_factory=_default_resend_client)
 
     def send(self, *, to: str, subject: str, text_body: str) -> None:
-        client = self._client or httpx.Client(timeout=10.0)
         try:
-            r = client.post(
+            r = self.client.post(
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
@@ -73,6 +91,5 @@ class ResendEmailSender:
                 },
             )
             r.raise_for_status()
-        finally:
-            if self._client is None:
-                client.close()
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
+            raise EmailSendFailed(str(e)) from e

@@ -10,16 +10,14 @@ from sqlalchemy.orm import Session
 from call_monitor.db.models import MagicLinkToken
 
 
-class TokenNotFound(Exception):
-    pass
+class InvalidToken(Exception):
+    """Raised by consume_token for any reason the token can't be redeemed.
 
-
-class TokenExpired(Exception):
-    pass
-
-
-class TokenAlreadyConsumed(Exception):
-    pass
+    One exception class, not three, because distinguishing
+    unknown / expired / already-consumed at the API surface creates a timing
+    oracle the /login/verify route shouldn't expose. All three paths are
+    collapsed to the same 400 by the route handler, and that's by design.
+    """
 
 
 def hash_token(raw: str) -> str:
@@ -27,6 +25,10 @@ def hash_token(raw: str) -> str:
 
 
 def issue_token(session: Session, *, user_id: int, ttl_minutes: int = 15) -> str:
+    """Issue a magic-link token. Caller is responsible for committing.
+
+    The raw token is returned once; only its sha256 hash is persisted.
+    """
     raw = secrets.token_urlsafe(32)
     now = datetime.now(UTC)
     row = MagicLinkToken(
@@ -42,12 +44,15 @@ def issue_token(session: Session, *, user_id: int, ttl_minutes: int = 15) -> str
 def consume_token(session: Session, raw: str) -> int:
     """Atomically mark the token consumed and return the owning user_id.
 
-    Raises TokenNotFound / TokenExpired / TokenAlreadyConsumed.
+    Single SQL statement so there's no classification oracle: unknown,
+    expired, and already-consumed all surface as InvalidToken.
+
+    Caller must commit the session for the consumption to persist;
+    if the caller's transaction rolls back, the token remains redeemable.
     """
     token_hash = hash_token(raw)
     now = datetime.now(UTC)
 
-    # Atomic single-use: UPDATE ... WHERE consumed_at IS NULL AND expires_at > now()
     result = session.execute(
         text(
             """
@@ -62,22 +67,6 @@ def consume_token(session: Session, raw: str) -> int:
         {"now": now, "token_hash": token_hash},
     )
     row = result.first()
-    if row is not None:
-        return int(row[0])
-
-    # Figure out *why* it failed so the caller can report accurately.
-    existing = session.execute(
-        text(
-            "SELECT consumed_at, expires_at FROM magic_link_tokens WHERE token_hash = :h"
-        ),
-        {"h": token_hash},
-    ).first()
-    if existing is None:
-        raise TokenNotFound()
-    consumed_at, expires_at = existing
-    if consumed_at is not None:
-        raise TokenAlreadyConsumed()
-    if expires_at <= now:
-        raise TokenExpired()
-    # Should be unreachable.
-    raise TokenNotFound()
+    if row is None:
+        raise InvalidToken()
+    return int(row[0])

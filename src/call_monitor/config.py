@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     app_base_url: str = Field(alias="APP_BASE_URL")
     resend_api_key: str | None = Field(default=None, alias="RESEND_API_KEY")
     email_from: str = Field(default="no-reply@example.com", alias="EMAIL_FROM")
+    # Set to True only when running behind a proxy we control that
+    # sets X-Forwarded-For correctly (e.g. Nginx/Traefik with
+    # `proxy_set_header X-Forwarded-For`). When False, X-Forwarded-For
+    # is ignored so an attacker can't spoof their rate-limit bucket.
+    trusted_proxy: bool = Field(default=False, alias="TRUSTED_PROXY")
 
     @field_validator("allowed_email_domains", "initial_admin_emails", mode="before")
     @classmethod

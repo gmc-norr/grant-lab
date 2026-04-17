@@ -43,3 +43,8 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Treat leaked-DBAPI-connection ResourceWarnings as test failures so the
+# connection-lifecycle discipline in tests/conftest.py doesn't regress
+# silently. Scoped narrowly to ResourceWarning — we don't want a stray
+# DeprecationWarning from an unrelated library to fail the suite.
+filterwarnings = ["error::ResourceWarning"]
