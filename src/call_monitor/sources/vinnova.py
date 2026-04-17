@@ -95,6 +95,12 @@ class VinnovaAdapter:
                             time.sleep(self._sleep_between_rounds)
                         first_round = False
 
+                        # An HTTP error on any one round aborts the whole
+                        # batch (raise_for_status → AdapterError below). The
+                        # orchestrator's idempotent upsert tolerates that:
+                        # the next tick re-fetches and picks up where we
+                        # stopped. Per-round try/except would swallow
+                        # systemic outages we want to alert on.
                         round_path = f"/api/ansokningsomgangar/{dnr}"
                         round_resp = client.get(round_path, headers={"Accept": _ACCEPT_V2})
                         round_resp.raise_for_status()
@@ -142,7 +148,11 @@ class VinnovaAdapter:
             )
             return None
 
-        # Skip rounds whose deadline has already passed.
+        # Skip rounds whose deadline has already passed. We also skip rounds
+        # with NO Stangningsdatum (perpetual / rolling) — they're rare in
+        # Vinnova's data and ranking against an open-ended deadline confuses
+        # the dashboard's deadline-sorted feed. Revisit if real perpetuals
+        # ever surface and matter to a hospital-research user.
         deadline = _parse_iso_stockholm(item.get("Stangningsdatum"))
         if deadline is None or deadline <= now_utc:
             _logger.info(
