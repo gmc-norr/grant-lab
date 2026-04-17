@@ -56,6 +56,7 @@ def test_me_post_subscribe_creates_rows(
             "/me",
             data={
                 "name": "",  # existing name field stays
+                "_subscriptions_submitted": "1",
                 f"subscribe_{p1}": "on",
                 # p2 omitted → not subscribed
             },
@@ -80,7 +81,32 @@ def test_me_post_unsubscribe_removes_row(
     client = TestClient(app)
     client.cookies.set("session", signer.make(user_id=uid))
     with client:
-        client.post("/me", data={"name": ""})  # no subscribe_ keys → unsubscribe all
+        # subs form, no checkboxes → unsubscribe all
+        client.post("/me", data={"name": "", "_subscriptions_submitted": "1"})
     with pg_session_factory() as s:
         subs = s.execute(select(Subscription).where(Subscription.user_id == uid)).scalars().all()
     assert subs == []
+
+
+def test_me_name_form_does_not_wipe_subscriptions(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Submitting the standalone name form (no subscriptions discriminator)
+    must NOT touch the subscriptions table. This was a real bug — the
+    handler used to unconditionally delete-and-reinsert."""
+    p1, _ = profile_factory(name="Group A")
+    app = _setup(monkeypatch, pg_url)
+    uid = _user(pg_session_factory)
+    with pg_session_factory() as s:
+        s.add(Subscription(user_id=uid, profile_id=p1))
+        s.commit()
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        # Simulate the name form: only the `name` field, no subs discriminator
+        client.post("/me", data={"name": "New Name"})
+    with pg_session_factory() as s:
+        subs = s.execute(select(Subscription).where(Subscription.user_id == uid)).scalars().all()
+    assert len(subs) == 1
+    assert subs[0].profile_id == p1

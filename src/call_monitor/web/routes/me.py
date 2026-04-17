@@ -54,12 +54,15 @@ async def update_me(
             raise HTTPException(status_code=401, detail="user not found")
         db_user.name = name.strip() or None
 
-        # Sync subscriptions: delete everything for this user, re-insert
-        # the current form's checked boxes. Simpler than diffing and the
-        # subscriptions table is small (one row per user×profile).
-        session.execute(delete(Subscription).where(Subscription.user_id == user.id))
-        for pid in desired_subscribed_ids:
-            session.add(Subscription(user_id=user.id, profile_id=pid))
+        # Sync subscriptions only when the subscriptions form was
+        # actually submitted. The name-only form omits the
+        # `_subscriptions_submitted` discriminator, so it must not
+        # touch the subscriptions table — otherwise every name save
+        # would silently unsubscribe the user from every profile.
+        if "_subscriptions_submitted" in form:
+            session.execute(delete(Subscription).where(Subscription.user_id == user.id))
+            for pid in desired_subscribed_ids:
+                session.add(Subscription(user_id=user.id, profile_id=pid))
         session.commit()
 
         # Re-render with fresh state
