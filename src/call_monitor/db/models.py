@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     SmallInteger,
     String,
     Text,
@@ -45,6 +46,12 @@ class User(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    digest_bounce_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    digest_disabled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -269,4 +276,39 @@ class RankingJob(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class UserCallDismissal(Base):
+    __tablename__ = "user_call_dismissals"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    call_id: Mapped[int] = mapped_column(
+        ForeignKey("calls.id", ondelete="CASCADE"), primary_key=True
+    )
+    dismissed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DigestRun(Base):
+    __tablename__ = "digest_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # BigInteger[] (NOT Integer[]) because calls.id is BigInteger — silently
+    # truncating a 2^31+ id would be a nasty post-release bug.
+    included_call_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger), nullable=False, default=list
+    )
+
+    __table_args__ = (
+        Index("ix_digest_runs_user_sent", "user_id", text("sent_at DESC")),
     )

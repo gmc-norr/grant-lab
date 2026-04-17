@@ -25,4 +25,9 @@
   <h2>Summary</h2>
   <p>{{ call.summary }}</p>
 {% endif %}
+
+<form method="post" action="/calls/{{ call.id }}/hide" style="margin-top:1em">
+  <button type="submit">Hide this call</button>
+  <small>Removes it from your feed permanently. Other users are unaffected.</small>
+</form>
 {% endblock %}

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import smtplib
 from dataclasses import dataclass, field
+from email.message import EmailMessage as _EmailMessage
 from typing import Protocol
 
 import httpx
@@ -58,6 +60,43 @@ class ConsoleEmailSender:
                 "body": text_body,
             },
         )
+
+
+@dataclass
+class SMTPEmailSender:
+    """Send magic-link emails via stdlib smtplib (STARTTLS on port 587).
+
+    Mirrors the ResendEmailSender interface (`send(*, to, subject, text_body)`)
+    so it can slot into the same email_sender slot in create_app(). Uses the
+    same STARTTLS+login+sendmail flow as email.client.SMTPClient but targets
+    the single-field text-only magic-link path — intentional duplication, v1.
+
+    SECURITY: only used for magic-link delivery (plain-text body). The digest
+    path uses email.client.SMTPClient which also supports HTML parts.
+    """
+
+    host: str
+    port: int
+    user: str | None
+    password: str | None
+    from_address: str
+    timeout: float = 30.0
+
+    def send(self, *, to: str, subject: str, text_body: str) -> None:
+        msg = _EmailMessage()
+        msg["From"] = self.from_address
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.set_content(text_body)
+
+        try:
+            with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as conn:
+                conn.starttls()
+                if self.user and self.password:
+                    conn.login(self.user, self.password)
+                conn.sendmail(self.from_address, [to], msg.as_string())
+        except (smtplib.SMTPException, OSError) as e:
+            raise EmailSendFailed(str(e)) from e
 
 
 def _default_resend_client() -> httpx.Client:

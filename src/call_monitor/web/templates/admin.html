@@ -36,4 +36,13 @@
 <form method="post" action="/admin/rerank" style="margin-top: 1em;">
   <button type="submit">Re-rank everything (last 90 days × active profiles)</button>
 </form>
+<h2>Digest</h2>
+<dl>
+  <dt>Last digest sent</dt>
+  <dd>{% if digest_last_sent_at %}{{ digest_last_sent_at | display_dt }}{% else %}No digests sent{% endif %}</dd>
+  <dt>Runs this week</dt>
+  <dd>{{ digest_runs_this_week }}</dd>
+  <dt>Disabled users (3+ bounces)</dt>
+  <dd>{{ digest_disabled_users }}</dd>
+</dl>
 {% endblock %}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
@@ -7,15 +9,37 @@ from sqlalchemy import func, select
 from call_monitor.auth.dependencies import require_admin
 from call_monitor.db.models import (
     Call,
+    DigestRun,
     Profile,
     RankingJob,
     RankingJobStatus,
     Source,
     User,
 )
+from call_monitor.digest.send import week_start as _week_start
 from call_monitor.ranking.backfill import backfill_profile
 
 router = APIRouter()
+
+
+def _digest_panel_context(session) -> dict:
+    now = datetime.now(UTC)
+    week_start_dt = _week_start(now)
+
+    last_run = session.execute(
+        select(DigestRun).order_by(DigestRun.sent_at.desc()).limit(1)
+    ).scalar_one_or_none()
+    runs_this_week = session.execute(
+        select(func.count(DigestRun.id)).where(DigestRun.sent_at >= week_start_dt)
+    ).scalar_one()
+    disabled_users = session.execute(
+        select(func.count(User.id)).where(User.digest_disabled_at.is_not(None))
+    ).scalar_one()
+    return {
+        "digest_last_sent_at": last_run.sent_at if last_run else None,
+        "digest_runs_this_week": runs_this_week,
+        "digest_disabled_users": disabled_users,
+    }
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -46,11 +70,7 @@ def admin_index(
             .group_by(RankingJob.status)
         ).all()
         queue_counts = {status: count for status, count in queue_rows}
-
-    return request.app.state.templates.TemplateResponse(
-        request=request,
-        name="admin.html",
-        context={
+        context = {
             "sources": sources,
             "queue_counts": queue_counts,
             "queue_status_pending": RankingJobStatus.PENDING.value,
@@ -58,7 +78,13 @@ def admin_index(
             "queue_status_failed": RankingJobStatus.FAILED.value,
             "queue_status_done": RankingJobStatus.DONE.value,
             "user": user,
-        },
+        }
+        context.update(_digest_panel_context(session))
+
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="admin.html",
+        context=context,
     )
 
 

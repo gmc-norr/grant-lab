@@ -40,6 +40,20 @@ class Settings(BaseSettings):
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-q8", alias="GEMMA_MODEL")
+    email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
+    smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_user: str | None = Field(default=None, alias="SMTP_USER")
+    smtp_password: str | None = Field(default=None, alias="SMTP_PASSWORD")
+    digest_dry_run: bool = Field(default=False, alias="DIGEST_DRY_RUN")
+    admin_dashboard_url: str = Field(
+        default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL"
+    )
+
+    @field_validator("admin_dashboard_url", mode="after")
+    @classmethod
+    def _ensure_trailing_slash(cls, v: str) -> str:
+        return v if v.endswith("/") else v + "/"
 
     @field_validator("allowed_email_domains", "initial_admin_emails", mode="before")
     @classmethod

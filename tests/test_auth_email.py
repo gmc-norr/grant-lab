@@ -1,5 +1,6 @@
 import json
 import logging
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -9,6 +10,7 @@ from call_monitor.auth.email import (
     EmailSendFailed,
     InMemoryEmailSender,
     ResendEmailSender,
+    SMTPEmailSender,
 )
 
 
@@ -103,3 +105,43 @@ def test_resend_sender_default_client_has_10s_timeout():
         assert sender.client.timeout.read == 10.0
     finally:
         sender.client.close()
+
+
+def test_smtp_email_sender_sends_magic_link(monkeypatch):
+    """SMTPEmailSender must send the magic-link via STARTTLS+login, matching
+    the SMTPClient flow in email.client but through the auth.email interface."""
+    fake_smtp_class = MagicMock()
+    fake_conn = MagicMock()
+    fake_smtp_class.return_value.__enter__.return_value = fake_conn
+    fake_conn.sendmail.return_value = {}
+    monkeypatch.setattr("call_monitor.auth.email.smtplib.SMTP", fake_smtp_class)
+
+    sender = SMTPEmailSender(
+        host="smtp.ki.se",
+        port=587,
+        user="user@ki.se",
+        password="secret",
+        from_address="no-reply@ki.se",
+    )
+    sender.send(to="alice@ki.se", subject="Your login link", text_body="Click: https://x/verify?t=abc")
+
+    fake_conn.starttls.assert_called_once()
+    fake_conn.login.assert_called_once_with("user@ki.se", "secret")
+    fake_conn.sendmail.assert_called_once()
+    # Verify the recipient and from address
+    args = fake_conn.sendmail.call_args
+    assert args[0][0] == "no-reply@ki.se"
+    assert args[0][1] == ["alice@ki.se"]
+    assert "https://x/verify?t=abc" in args[0][2]
+
+
+def test_smtp_email_sender_raises_email_send_failed_on_smtp_error(monkeypatch):
+    import smtplib
+    fake_smtp_class = MagicMock(side_effect=smtplib.SMTPConnectError(421, "down"))
+    monkeypatch.setattr("call_monitor.auth.email.smtplib.SMTP", fake_smtp_class)
+
+    sender = SMTPEmailSender(
+        host="smtp.ki.se", port=587, user="u", password="p", from_address="no-reply@ki.se"
+    )
+    with pytest.raises(EmailSendFailed):
+        sender.send(to="alice@ki.se", subject="Hi", text_body="Click me")

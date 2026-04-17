@@ -64,6 +64,28 @@ def test_create_app_refuses_to_start_without_resend_key_in_prod(monkeypatch, pg_
         create_app()
 
 
+def test_admin_dashboard_url_gets_trailing_slash_appended(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("ADMIN_DASHBOARD_URL", "https://app.example.com")
+
+    s = Settings()
+    assert s.admin_dashboard_url == "https://app.example.com/"
+
+
+def test_admin_dashboard_url_already_trailing_slash_is_idempotent(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("ADMIN_DASHBOARD_URL", "https://app.example.com/")
+
+    s = Settings()
+    assert s.admin_dashboard_url == "https://app.example.com/"
+
+
 def test_create_app_allows_console_sender_in_dev_without_resend_key(
     monkeypatch, pg_url
 ):

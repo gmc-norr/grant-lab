@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from call_monitor.auth.email import ConsoleEmailSender, ResendEmailSender
+from call_monitor.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
 from call_monitor.auth.rate_limit import SlidingWindowLimiter
 from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.config import Settings
@@ -40,6 +40,21 @@ async def lifespan(app: FastAPI):
         admin_email=settings.admin_alert_email,
     )
     app.state.ingestion_alerter = alerter
+
+    from call_monitor.email.factory import EmailConfigError, build_email_client
+
+    digest_email_client = None
+    if settings.resend_api_key or settings.smtp_host:
+        try:
+            digest_email_client = build_email_client(settings)
+            app.state.digest_email_client = digest_email_client
+        except EmailConfigError as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "digest.email_client_unavailable",
+                extra={"event": "digest_email_client_unavailable", "error": str(e)},
+            )
+
     app.state.scheduler = build_scheduler(
         session_factory=app.state.session_factory,
         eu_portal_base_url=settings.eu_portal_base_url,
@@ -50,6 +65,8 @@ async def lifespan(app: FastAPI):
         gemma_model=settings.gemma_model,
         ranking_tick_seconds=settings.ranking_tick_seconds,
         ranking_queue_batch=settings.ranking_queue_batch,
+        digest_email_client=digest_email_client,
+        digest_settings=settings,
         start=True,
     )
     try:
@@ -74,8 +91,10 @@ def create_app() -> FastAPI:
     # allocate a DB engine so the refuse-to-start path in production
     # doesn't leak a connection pool to the GC:
     # - RESEND_API_KEY set                → real ResendEmailSender (any environment).
-    # - No key, but cookie_secure=False   → ConsoleEmailSender (dev over plain HTTP).
-    # - No key AND cookie_secure=True     → REFUSE to start. Falling back to
+    # - SMTP_HOST set (no RESEND key)     → SMTPEmailSender — accepted production transport
+    #   for sites that run their own SMTP relay (e.g. Postfix/SendGrid SMTP).
+    # - No key, no SMTP, cookie_secure=False → ConsoleEmailSender (dev over plain HTTP).
+    # - No key, no SMTP, cookie_secure=True  → REFUSE to start. Falling back to
     #   ConsoleEmailSender in prod would (a) silently break login delivery and
     #   (b) write the full magic link to stderr/log aggregator — a 15-minute
     #   takeover window for anyone with log access. Loud failure only.
@@ -84,11 +103,19 @@ def create_app() -> FastAPI:
         email_sender = ResendEmailSender(
             api_key=settings.resend_api_key, from_address=settings.email_from
         )
+    elif settings.smtp_host:
+        email_sender = SMTPEmailSender(
+            host=settings.smtp_host,
+            port=settings.smtp_port,
+            user=settings.smtp_user,
+            password=settings.smtp_password,
+            from_address=settings.email_from,
+        )
     elif not settings.cookie_secure:
         email_sender = ConsoleEmailSender()
     else:
         raise RuntimeError(
-            "RESEND_API_KEY is required when APP_BASE_URL is https://. "
+            "RESEND_API_KEY or SMTP_HOST is required when APP_BASE_URL is https://. "
             "Refusing to fall back to ConsoleEmailSender in production "
             "(would log magic links to stderr — see auth/email.py)."
         )

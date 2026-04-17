@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC
+from datetime import datetime as _dt
 from typing import Protocol
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -9,6 +11,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import sessionmaker
 
+from call_monitor.digest.send import run_digest
+from call_monitor.email.client import EmailClient
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
@@ -50,6 +54,8 @@ def build_scheduler(
     gemma_model: str,
     ranking_tick_seconds: int,
     ranking_queue_batch: int,
+    digest_email_client: EmailClient | None = None,
+    digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     start: bool = True,
 ) -> BackgroundScheduler:
     """Build (and optionally start) the daily ingestion scheduler.
@@ -122,6 +128,55 @@ def build_scheduler(
         max_instances=1,
         coalesce=True,
     )
+
+    if digest_email_client is not None and digest_settings is not None:
+        def _digest_tick() -> None:
+            now = _dt.now(UTC)
+            _logger.info("digest.tick.start", extra={"event": "digest_tick_start"})
+            try:
+                summary = run_digest(
+                    session_factory=session_factory,
+                    email_client=digest_email_client,
+                    settings=digest_settings,
+                    now=now,
+                )
+                _logger.info(
+                    "digest.tick.done",
+                    extra={
+                        "event": "digest_tick_done",
+                        "users_processed": summary.users_processed,
+                        "emails_sent": summary.emails_sent,
+                        "bounces": summary.bounces,
+                        "transport_errors": summary.transport_errors,
+                        "users_disabled": summary.users_disabled,
+                    },
+                )
+            except Exception as e:  # noqa: BLE001
+                _logger.exception(
+                    "digest.tick.error",
+                    extra={"event": "digest_tick_error", "error": str(e)},
+                )
+
+        sched.add_job(
+            _digest_tick,
+            # Scheduler timezone is already Europe/Stockholm (see _SafeBackgroundScheduler
+            # construction at top of build_scheduler), so day_of_week='mon' hour=7
+            # fires at Stockholm Monday 07:00.
+            trigger=CronTrigger(day_of_week="mon", hour=7, minute=0),
+            id="digest:weekly",
+            name="Weekly digest",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+    else:
+        _logger.info(
+            "scheduler.digest_skipped",
+            extra={
+                "event": "digest_skipped",
+                "reason": "no_email_config",
+            },
+        )
 
     if start:
         sched.start()
