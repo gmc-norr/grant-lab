@@ -21,6 +21,12 @@ _BULK_ENQUEUE_SQL = text(
     INSERT INTO ranking_jobs (call_id, profile_id, status, attempts)
     SELECT c.id, :profile_id, 'pending', 0
     FROM calls c
+    -- NOTE: WHERE published_at >= :cutoff also excludes calls with
+    -- published_at IS NULL (NULL comparisons return NULL, treated as
+    -- false). In practice these are rare — most ingestion paths set
+    -- published_at — but a profile created later will not see them.
+    -- If we ever surface unranked calls to a new profile, this filter
+    -- needs revisiting.
     WHERE c.published_at >= :cutoff
     ON CONFLICT (call_id, profile_id) WHERE status IN ('pending', 'running')
     DO NOTHING

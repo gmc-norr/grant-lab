@@ -31,6 +31,29 @@ def _parse_iso_stockholm(s: str | None) -> datetime | None:
     return local.astimezone(UTC)
 
 
+def _build_summary(item: dict) -> str | None:
+    """Compose a richer ranker-facing summary from the round payload.
+
+    Vinnova's `Beskrivning` is title-length (40-70 chars); the actual
+    substantive prose lives in `WebTextLista[*].TextSv`. We concatenate
+    both so the LLM has something to discriminate on beyond the title.
+    """
+    parts: list[str] = []
+    beskr = item.get("Beskrivning")
+    if isinstance(beskr, str) and beskr.strip():
+        parts.append(beskr.strip())
+    for entry in item.get("WebTextLista") or []:
+        if not isinstance(entry, dict):
+            continue
+        text = entry.get("TextSv")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    eng = item.get("BeskrivningEngelska")
+    if isinstance(eng, str) and eng.strip() and eng.strip() != (beskr or "").strip():
+        parts.append(eng.strip())
+    return "\n\n".join(parts) if parts else None
+
+
 class VinnovaAdapter:
     """SourceAdapter for Vinnova's open-data two-stage API.
 
@@ -142,7 +165,7 @@ class VinnovaAdapter:
 
         # Only surface rounds that are publicly visible on the web portal.
         if item.get("Publik") != 1 or item.get("Webbsida") != 1:
-            _logger.info(
+            _logger.debug(
                 "vinnova.skip_unpublished",
                 extra={"event": "skip_unpublished", "external_id": str(external_id)},
             )
@@ -155,7 +178,7 @@ class VinnovaAdapter:
         # ever surface and matter to a hospital-research user.
         deadline = _parse_iso_stockholm(item.get("Stangningsdatum"))
         if deadline is None or deadline <= now_utc:
-            _logger.info(
+            _logger.debug(
                 "vinnova.skip_closed",
                 extra={"event": "skip_closed", "external_id": str(external_id)},
             )
@@ -170,19 +193,20 @@ class VinnovaAdapter:
                     url = candidate
                     break
         if not url:
-            _logger.info(
+            _logger.debug(
                 "vinnova.skip_no_url",
                 extra={"event": "skip_no_url", "external_id": str(external_id)},
             )
             return None
 
+        summary = _build_summary(item)
         published_at = _parse_iso_stockholm(item.get("Oppningsdatum"))
 
         return NormalizedCall(
             external_id=str(external_id),
             url=url,
             title=str(title),
-            summary=item.get("Beskrivning"),
+            summary=summary,
             deadline=deadline,
             budget_min=None,
             budget_max=None,
