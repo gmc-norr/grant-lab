@@ -47,7 +47,7 @@ def test_me_renders_current_user(monkeypatch, pg_url, pg_session_factory):
 def test_me_post_updates_name(monkeypatch, pg_url, pg_session_factory):
     client, uid = _logged_in_client(monkeypatch, pg_url, pg_session_factory)
     with client:
-        r = client.post("/me", data={"name": "Alice Andersson"})
+        r = client.post("/me/name", data={"name": "Alice Andersson"})
     assert r.status_code == 200
     with pg_session_factory() as s:
         u = s.get(User, uid)
@@ -119,5 +119,5 @@ def test_me_post_returns_401_when_user_gone(monkeypatch, pg_url, pg_session_fact
         s.commit()
 
     with client:
-        r = client.post("/me", data={"name": "Whatever"})
+        r = client.post("/me/name", data={"name": "Whatever"})
     assert r.status_code == 401

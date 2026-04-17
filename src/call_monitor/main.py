@@ -12,7 +12,7 @@ from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
 from call_monitor.logging import configure_logging
 from call_monitor.web.filters import display_date, display_dt
-from call_monitor.web.routes import admin, auth, calls, health, me
+from call_monitor.web.routes import admin, auth, calls, health, me, profiles
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -130,4 +130,5 @@ def create_app() -> FastAPI:
     app.include_router(me.router)
     app.include_router(calls.router)
     app.include_router(admin.router)
+    app.include_router(profiles.router)
     return app

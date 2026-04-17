@@ -4,10 +4,30 @@
 <h1>Your profile</h1>
 <p>Signed in as <code>{{ user.email }}</code>{% if user.is_admin %} (admin){% endif %}.</p>
 
-<form method="post" action="/me">
+<form method="post" action="/me/name">
   <label>Display name
     <input type="text" name="name" value="{{ user.name or '' }}" maxlength="200">
   </label>
   <button type="submit">Save</button>
+</form>
+
+<h2>Profile subscriptions</h2>
+<p>Check profiles whose weekly digest you want to receive.</p>
+<form method="post" action="/me/subscriptions">
+  <table>
+    <thead><tr><th></th><th>Profile</th></tr></thead>
+    <tbody>
+      {% for p in profiles %}
+        <tr>
+          <td>
+            <input type="checkbox" name="subscribe_{{ p.id }}"
+                   {% if p.id in subscribed_ids %}checked{% endif %}>
+          </td>
+          <td>{{ p.name }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><button type="submit">Save subscriptions</button></p>
 </form>
 {% endblock %}
