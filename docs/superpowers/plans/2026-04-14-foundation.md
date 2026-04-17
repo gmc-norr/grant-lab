@@ -213,7 +213,10 @@ services:
       POSTGRES_PASSWORD: call_monitor
       POSTGRES_DB: call_monitor
     ports:
-      - "5432:5432"
+      # Bind to loopback so a known-credential dev DB is never exposed to
+      # the LAN. Override the host port via HOST_DB_PORT if 5432 is busy
+      # (e.g. another local Postgres):  HOST_DB_PORT=5433 docker compose up -d
+      - "127.0.0.1:${HOST_DB_PORT:-5432}:5432"
     volumes:
       - call_monitor_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -248,7 +251,7 @@ git commit -m "feat: local Postgres via docker-compose"
 ## Task 3: Database session layer + testcontainers fixture
 
 **Files:**
-- Create: `src/call_monitor/db/__init__.py` (empty)
+- Create: `src/call_monitor/db/__init__.py` (initially empty; Task 5 adds the models import for Alembic autogenerate — see Task 5 Step 4 note)
 - Create: `src/call_monitor/db/base.py`
 - Create: `src/call_monitor/db/session.py`
 - Create: `tests/conftest.py`
@@ -261,18 +264,17 @@ git commit -m "feat: local Postgres via docker-compose"
 ```python
 from sqlalchemy import text
 
-from call_monitor.db.session import make_engine, make_session_factory
+from call_monitor.db.session import make_session_factory
 
 
-def test_engine_executes_select_one(pg_url):
-    engine = make_engine(pg_url)
-    with engine.connect() as conn:
+def test_engine_executes_select_one(db_engine):
+    with db_engine.connect() as conn:
         result = conn.execute(text("SELECT 1")).scalar()
     assert result == 1
 
 
-def test_session_factory_yields_working_session(pg_url):
-    SessionLocal = make_session_factory(make_engine(pg_url))
+def test_session_factory_yields_working_session(db_engine):
+    SessionLocal = make_session_factory(db_engine)
     with SessionLocal() as session:
         assert session.execute(text("SELECT 42")).scalar() == 42
 ```
@@ -285,18 +287,49 @@ def test_session_factory_yields_working_session(pg_url):
 import pytest
 from testcontainers.postgres import PostgresContainer
 
+from call_monitor.config import Settings
+from call_monitor.db.session import make_engine
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_dotenv(monkeypatch):
+    """Disable .env loading for every test.
+
+    A developer's local .env can otherwise pre-fill SESSION_SECRET,
+    INITIAL_ADMIN_EMAIL, etc., turning hermetic env-driven tests into
+    flaky pass-on-my-machine traps. Tests that exercise Settings() must
+    rely solely on monkeypatch.setenv()."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+
 
 @pytest.fixture(scope="session")
 def pg_container():
-    with PostgresContainer("postgres:16") as pg:
+    # driver="psycopg" makes get_connection_url() emit `postgresql+psycopg://...`
+    # directly. No post-hoc URL rewrite, so the fixture is robust if testcontainers
+    # ever changes its default driver.
+    with PostgresContainer("postgres:16", driver="psycopg") as pg:
         yield pg
 
 
 @pytest.fixture(scope="session")
 def pg_url(pg_container):
-    # testcontainers returns a psycopg2-style URL; swap driver to psycopg v3
-    url = pg_container.get_connection_url()
-    return url.replace("postgresql+psycopg2://", "postgresql+psycopg://")
+    return pg_container.get_connection_url()
+
+
+@pytest.fixture(scope="session")
+def db_engine(pg_url):
+    """Session-scoped Engine: shared across tests, disposed at session teardown.
+
+    Without this, tests that build their own Engine via `make_engine(pg_url)`
+    leak DBAPI connections to the GC and emit `ResourceWarning` (which become
+    fatal under `filterwarnings = ["error"]`). Centralizing here also avoids
+    spinning up a fresh engine per test.
+    """
+    engine = make_engine(pg_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 ```
 
 - [ ] **Step 3: Write `db/base.py`**
@@ -368,11 +401,19 @@ Expected: Creates `alembic/` dir and `alembic.ini`.
 
 - [ ] **Step 2: Edit `alembic.ini`**
 
-Change the `sqlalchemy.url` line to:
-```
-sqlalchemy.url =
-```
-(empty — we'll inject it from env at runtime).
+Make two edits:
+
+1. Change the `sqlalchemy.url` line to:
+   ```
+   sqlalchemy.url =
+   ```
+   (empty — we'll inject it from env at runtime).
+
+2. Change `prepend_sys_path = .` to:
+   ```
+   prepend_sys_path = src
+   ```
+   The project uses `src/` layout. Without this, `from call_monitor.db.base import Base` only works when the package is installed editable (`uv sync`). A future Dockerfile that runs `pip install --no-deps .` then `alembic upgrade head` would fail with `ModuleNotFoundError`. `prepend_sys_path = src` makes Alembic work directly from the source tree, no editable install required.
 
 - [ ] **Step 3: Rewrite `alembic/env.py`**
 
@@ -387,26 +428,38 @@ from call_monitor.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-# Prefer an explicit URL injected via `cfg.set_main_option("sqlalchemy.url", ...)`
-# (this is how the test fixture in tests/conftest.py drives migrations against
-# a testcontainers Postgres). Fall back to DATABASE_URL from the environment
-# so `uv run alembic upgrade head` works from a shell.
-database_url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL")
-if not database_url:
-    raise RuntimeError(
-        "No database URL: set DATABASE_URL in the environment "
-        "or inject via cfg.set_main_option('sqlalchemy.url', ...)"
-    )
-config.set_main_option("sqlalchemy.url", database_url)
+    # disable_existing_loggers=False is critical: the default (True) sets
+    # `disabled=True` on every logger NOT named in the [loggers] section of
+    # alembic.ini — silently turning off our app's own loggers (e.g.
+    # `call_monitor.auth.email`) for the rest of the process. The damage
+    # surfaces in tests as "the message was logged but caplog saw nothing"
+    # because `Logger.disabled=True` short-circuits before any handler runs.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
 
+def _resolve_database_url() -> str:
+    """Prefer an explicit URL injected via ``cfg.set_main_option(...)`` (the
+    test fixture path); fall back to ``DATABASE_URL`` env. Resolved lazily so
+    metadata-only commands (``alembic heads``, ``history``, ``branches``)
+    don't require a database URL — only commands that actually run migrations
+    do.
+    """
+    url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "No database URL: set DATABASE_URL in the environment "
+            "or inject via cfg.set_main_option('sqlalchemy.url', ...)"
+        )
+    return url
+
+
 def run_migrations_offline() -> None:
+    url = _resolve_database_url()
+    config.set_main_option("sqlalchemy.url", url)
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -416,6 +469,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    config.set_main_option("sqlalchemy.url", _resolve_database_url())
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -465,8 +519,8 @@ git commit -m "feat: alembic setup reading DATABASE_URL from env"
 ```python
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import text
-from sqlalchemy.orm import sessionmaker
+import pytest
+from sqlalchemy.exc import IntegrityError
 
 from call_monitor.db.models import MagicLinkToken, User
 
@@ -483,20 +537,22 @@ def test_can_insert_and_read_user(pg_session_factory):
 
 
 def test_user_email_is_unique(pg_session_factory):
-    from sqlalchemy.exc import IntegrityError
-
     SessionLocal = pg_session_factory
     with SessionLocal() as s:
         s.add(User(email="bob@ki.se"))
         s.commit()
-    with SessionLocal() as s:
+    with SessionLocal() as s, pytest.raises(IntegrityError):
         s.add(User(email="bob@ki.se"))
-        try:
-            s.commit()
-        except IntegrityError:
-            s.rollback()
-        else:
-            raise AssertionError("expected IntegrityError on duplicate email")
+        s.commit()
+
+
+def test_user_email_check_rejects_mixed_case(pg_session_factory):
+    """The CHECK constraint forces lowercase storage so UNIQUE(email) is
+    case-insensitive in practice. Inserting a non-lowercased email must fail."""
+    SessionLocal = pg_session_factory
+    with SessionLocal() as s, pytest.raises(IntegrityError):
+        s.add(User(email="Alice@ki.se"))
+        s.commit()
 
 
 def test_magic_link_token_row(pg_session_factory):
@@ -528,30 +584,38 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 
-from call_monitor.db.session import make_engine, make_session_factory
+from call_monitor.db.session import make_session_factory
 
 
 @pytest.fixture(scope="session")
-def migrated_engine(pg_url):
-    engine = make_engine(pg_url)
+def migrated_engine(db_engine, pg_url):
+    """Same engine as `db_engine`, but with Alembic migrations applied first.
+
+    Reuses `db_engine` (single shared, disposed at session teardown) to keep
+    connection accounting clean.
+    """
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", pg_url)
     command.upgrade(cfg, "head")
-    yield engine
-    engine.dispose()
+    return db_engine
 
 
 @pytest.fixture()
 def pg_session_factory(migrated_engine):
+    from call_monitor.db.base import Base
+
     SessionLocal = make_session_factory(migrated_engine)
     yield SessionLocal
-    # truncate all tables between tests for isolation
-    with migrated_engine.begin() as conn:
-        conn.execute(
-            text(
-                "TRUNCATE TABLE users, magic_link_tokens RESTART IDENTITY CASCADE"
+    # Truncate every table Base knows about, sorted for determinism. Future
+    # plans that add tables get isolation for free without having to remember
+    # to update this fixture. CASCADE handles FK ordering; RESTART IDENTITY
+    # resets sequences so id counters are predictable across tests.
+    table_names = ", ".join(t.name for t in Base.metadata.sorted_tables)
+    if table_names:
+        with migrated_engine.begin() as conn:
+            conn.execute(
+                text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE")
             )
-        )
 ```
 
 - [ ] **Step 3: Run the test to verify failure**
@@ -559,16 +623,36 @@ def pg_session_factory(migrated_engine):
 Run: `uv run pytest tests/test_models.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'call_monitor.db.models'`.
 
-- [ ] **Step 4: Write `db/models.py`**
+- [ ] **Step 4: Write `db/models.py` and register it in `db/__init__.py`**
 
-`src/call_monitor/db/models.py`:
+Replace the (currently empty) `src/call_monitor/db/__init__.py` with:
+
+```python
+# Importing models here registers every model with Base.metadata as a side
+# effect. Anything that imports from `call_monitor.db.*` (notably alembic/env.py
+# via `from call_monitor.db.base import Base`) triggers this package init,
+# which means `Base.metadata.tables` is populated when Alembic resolves
+# `target_metadata`. Without this, `alembic revision --autogenerate` produces
+# empty diffs.
+from call_monitor.db import models  # noqa: F401
+```
+
+Then create `src/call_monitor/db/models.py`:
 
 ```python
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -576,6 +660,15 @@ from call_monitor.db.base import Base
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Defense in depth: the application always lowercases before insert,
+        # but Postgres `UNIQUE(email)` is case-sensitive, so a rogue SQL
+        # admin task could create both `Alice@ki.se` and `alice@ki.se` and
+        # split a single person across two accounts. The CHECK forces
+        # lowercase at the DB level — combined with UNIQUE(email), this
+        # guarantees one row per address regardless of case.
+        CheckConstraint("email = lower(email)", name="ck_users_email_lowercase"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
@@ -654,6 +747,11 @@ def upgrade() -> None:
         ),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("email", name="uq_users_email"),
+        # CHECK forces lowercase storage so UNIQUE(email) actually means
+        # one row per address (Postgres `=` is case-sensitive otherwise).
+        sa.CheckConstraint(
+            "email = lower(email)", name="ck_users_email_lowercase"
+        ),
     )
     op.create_table(
         "magic_link_tokens",
@@ -804,7 +902,20 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cookie_secure(self) -> bool:
-        """Emit Secure cookie attribute only under HTTPS — derived from APP_BASE_URL."""
+        """Whether to set Secure on session cookies.
+
+        Derived from `APP_BASE_URL` because that's the URL the **browser**
+        sees — which is what the Secure attribute keys off. In a typical
+        deploy a TLS-terminating proxy (Nginx/Traefik/Apache) sits in
+        front and forwards HTTP to the app, so `request.url.scheme` would
+        say `http` and is the wrong signal. Don't change this to look at
+        the incoming request — `APP_BASE_URL` is the right answer.
+
+        Same value also gates the email-sender fallback in `main.py`:
+        without it, a misconfigured prod (https without `RESEND_API_KEY`)
+        would silently log magic links to stderr instead of refusing to
+        start.
+        """
         return self.app_base_url.lower().startswith("https://")
 ```
 
@@ -828,7 +939,7 @@ git commit -m "feat: Pydantic settings with CSV parsing for domain/admin lists"
 - Create: `src/call_monitor/logging.py`
 - Create: `tests/test_logging.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 `tests/test_logging.py`:
 
@@ -836,20 +947,75 @@ git commit -m "feat: Pydantic settings with CSV parsing for domain/admin lists"
 import json
 import logging
 
-from call_monitor.logging import configure_logging
+import pytest
+
+from call_monitor.logging import JsonFormatter, configure_logging
+
+
+@pytest.fixture(autouse=True)
+def reset_root_handlers():
+    """Each test gets a fresh root logger so configure_logging() actually
+    re-installs a handler bound to pytest's per-test captured stderr.
+    Without this, the idempotent-configure check in configure_logging()
+    keeps a stale handler pointing at a previous test's stderr buffer."""
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    root.handlers.clear()
+    yield
+    root.handlers.clear()
+    root.handlers.extend(saved)
+
+
+def _last_json_line(stderr: str) -> dict:
+    return json.loads(stderr.strip().splitlines()[-1])
 
 
 def test_logging_outputs_json(capsys):
     configure_logging()
     log = logging.getLogger("test")
     log.info("hello", extra={"user_id": 42})
-    captured = capsys.readouterr()
-    # one JSON object per line
-    line = captured.err.strip().splitlines()[-1]
-    payload = json.loads(line)
+    payload = _last_json_line(capsys.readouterr().err)
     assert payload["message"] == "hello"
     assert payload["level"] == "INFO"
     assert payload["user_id"] == 42
+
+
+def test_extra_cannot_clobber_reserved_keys(capsys):
+    """A caller passing `extra={"level": "PWNED"}` must not overwrite the
+    real log level — that would let bad code bypass level-based filters.
+
+    Note: stdlib `makeRecord` already rejects `extra={"message": ...}` and
+    `extra={"asctime": ...}` with KeyError, so those names can't be tested
+    here. `level`, `logger`, `ts`, `exc` are not protected by stdlib and
+    would otherwise reach our payload — _RESERVED keeps them out.
+    """
+    configure_logging()
+    log = logging.getLogger("test")
+    log.warning(
+        "real-message",
+        extra={"level": "PWNED", "logger": "fake", "ts": "0", "exc": "spoofed"},
+    )
+    payload = _last_json_line(capsys.readouterr().err)
+    assert payload["level"] == "WARNING"
+    assert payload["logger"] == "test"
+    assert payload["message"] == "real-message"
+    assert payload["ts"] != "0"
+    assert "exc" not in payload
+
+
+def test_configure_logging_is_idempotent():
+    """Calling configure_logging() twice must not duplicate handlers nor
+    clobber existing ones — important because create_app() invokes it on
+    every call and tests may attach their own handlers (e.g. caplog)."""
+    configure_logging()
+    root = logging.getLogger()
+    json_handlers_before = sum(1 for h in root.handlers if isinstance(h.formatter, JsonFormatter))
+    handlers_before = list(root.handlers)
+
+    configure_logging()
+    json_handlers_after = sum(1 for h in root.handlers if isinstance(h.formatter, JsonFormatter))
+    assert json_handlers_after == json_handlers_before == 1
+    assert root.handlers == handlers_before  # exact same handler instances
 ```
 
 - [ ] **Step 2: Run test — expect fail**
@@ -867,8 +1033,14 @@ import logging
 import sys
 from datetime import UTC, datetime
 
+# Top-level keys we set explicitly in `format()`. User-supplied `extra={}`
+# fields with these names would otherwise overwrite them — including `level`,
+# which would let a careless caller bypass log-level filters or audit assertions.
+_RESERVED = {"ts", "level", "logger", "message", "exc"}
+
 
 class JsonFormatter(logging.Formatter):
+    # Stdlib LogRecord attrs we should not surface as user fields.
     _STANDARD = {
         "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
         "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
@@ -884,16 +1056,28 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         for key, value in record.__dict__.items():
-            if key not in self._STANDARD and not key.startswith("_"):
-                payload[key] = value
+            if key in self._STANDARD or key in _RESERVED or key.startswith("_"):
+                continue
+            payload[key] = value
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str)
 
 
 def configure_logging(level: int = logging.INFO) -> None:
+    """Install a JsonFormatter stderr handler on the root logger.
+
+    Idempotent: if a `JsonFormatter` handler is already attached, only the
+    log level is updated and existing handlers are left in place. This
+    matters because `create_app()` calls `configure_logging()` on every
+    invocation; without this guard, each fresh app wipes the root logger's
+    handlers, which would silently drop records from `caplog` or any other
+    test-side handler attached between calls.
+    """
     root = logging.getLogger()
-    root.handlers.clear()
+    if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
+        root.setLevel(level)
+        return
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
@@ -924,27 +1108,43 @@ git commit -m "feat: structured JSON logging to stderr"
 - Create: `src/call_monitor/web/templates/base.html`
 - Create: `tests/test_web_health.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 `tests/test_web_health.py`:
 
 ```python
 from fastapi.testclient import TestClient
 
+from call_monitor.db.session import make_engine
 from call_monitor.main import create_app
 
 
-def test_healthz_returns_ok(pg_url, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", pg_url)
+def _set_min_env(monkeypatch, database_url):
+    monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
+
+def test_healthz_returns_ok(pg_url, monkeypatch):
+    _set_min_env(monkeypatch, pg_url)
     app = create_app()
     with TestClient(app) as client:
         r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_healthz_returns_503_when_db_unreachable(pg_url, monkeypatch):
+    """Outage path: simulate a dead database by swapping app.state.engine."""
+    _set_min_env(monkeypatch, pg_url)
+    app = create_app()
+    # Replace the engine with one pointing at a closed port (fast TCP refusal).
+    app.state.engine = make_engine("postgresql+psycopg://x:x@127.0.0.1:1/x")
+    with TestClient(app) as client:
+        r = client.get("/healthz")
+    assert r.status_code == 503
+    assert "db unavailable" in r.json()["detail"]
 ```
 
 - [ ] **Step 2: Write `web/templates/base.html`**
@@ -967,13 +1167,27 @@ def test_healthz_returns_ok(pg_url, monkeypatch):
 - [ ] **Step 3: Write `web/routes/health.py`**
 
 ```python
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy import text
 
 router = APIRouter()
 
 
 @router.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz(request: Request) -> dict[str, str]:
+    """Liveness + readiness in one endpoint.
+
+    Single-instance deploy: there's no useful liveness-vs-readiness split.
+    Monitoring should treat any non-200 as "do not route traffic / page
+    operator." We ping the database with `SELECT 1` so an unreachable DB
+    surfaces as 503 instead of being silently invisible.
+    """
+    engine = request.app.state.engine
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001 — surface any DB error as 503
+        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
     return {"status": "ok"}
 ```
 
@@ -1280,16 +1494,25 @@ from call_monitor.auth.domain import domain_allowed, extract_domain
         ("alice@ki.se", "ki.se"),
         ("Bob@KI.SE", "ki.se"),
         ("carol+tag@karolinska.se", "karolinska.se"),
-        ("x@y@ki.se", "ki.se"),  # split on final @
     ],
 )
 def test_extract_domain(email, expected):
     assert extract_domain(email) == expected
 
 
-def test_extract_domain_rejects_missing_at():
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-an-email",       # no @
+        "x@y@ki.se",          # multiple @
+        "@ki.se",             # empty local part
+        "alice@",             # empty domain
+        "",                   # empty
+    ],
+)
+def test_extract_domain_rejects_malformed(bad):
     with pytest.raises(ValueError):
-        extract_domain("not-an-email")
+        extract_domain(bad)
 
 
 @pytest.mark.parametrize(
@@ -1316,9 +1539,16 @@ Expected: fails on import.
 
 ```python
 def extract_domain(email: str) -> str:
-    if "@" not in email:
-        raise ValueError(f"not an email address: {email!r}")
-    return email.rsplit("@", 1)[1].lower()
+    """Return the lower-cased domain of an email address.
+
+    Strict: exactly one `@`, both local and domain parts non-empty. Rejects
+    multi-`@` addresses (`x@y@ki.se`) so we never write malformed addresses
+    to the users table or hand them to the email API.
+    """
+    parts = email.split("@")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"not a valid email address: {email!r}")
+    return parts[1].lower()
 
 
 def domain_allowed(email: str, allowed_domains: list[str]) -> bool:
@@ -1402,6 +1632,7 @@ Run: `uv run pytest tests/test_auth_rate_limit.py -v`
 - [ ] **Step 3: Write `auth/rate_limit.py`**
 
 ```python
+import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -1413,6 +1644,11 @@ class SlidingWindowLimiter:
     Single-instance deploy assumption — safe because APScheduler/FastAPI run
     as exactly one process. For multi-instance we'd promote this to a
     Postgres table or Redis.
+
+    Thread-safe: FastAPI sync handlers run in anyio's thread pool, so two
+    `/login` POSTs can race the read-then-modify pattern below. A single
+    lock around the whole body costs essentially nothing at our request
+    rates and removes the race.
     """
 
     def __init__(
@@ -1425,17 +1661,19 @@ class SlidingWindowLimiter:
         self._window = window_seconds
         self._clock = clock
         self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.Lock()
 
     def allow(self, key: str) -> bool:
-        now = self._clock()
-        q = self._events[key]
-        cutoff = now - self._window
-        while q and q[0] < cutoff:
-            q.popleft()
-        if len(q) >= self._max:
-            return False
-        q.append(now)
-        return True
+        with self._lock:
+            now = self._clock()
+            q = self._events[key]
+            cutoff = now - self._window
+            while q and q[0] < cutoff:
+                q.popleft()
+            if len(q) >= self._max:
+                return False
+            q.append(now)
+            return True
 ```
 
 - [ ] **Step 4: Run tests**
@@ -1538,7 +1776,14 @@ class InMemoryEmailSender:
 
 class ConsoleEmailSender:
     """Local-dev sender: writes the full message to the logger so developers
-    can copy the magic link out of the app's stderr stream. Not for production."""
+    can copy the magic link out of the app's stderr stream.
+
+    SECURITY: never select this in production — it logs the full magic link
+    body, which inside a 15-minute window is equivalent to a session token.
+    `create_app()` only allows it when `cookie_secure=False` (i.e. dev over
+    plain HTTP); a misconfigured prod (https without `RESEND_API_KEY`) must
+    fail to start, not silently log credentials.
+    """
 
     def send(self, *, to: str, subject: str, text_body: str) -> None:
         _logger.info(
@@ -1892,15 +2137,26 @@ def create_app() -> FastAPI:
     from call_monitor.auth.session_cookie import SessionSigner
     from call_monitor.web.routes import auth, health
 
-    # ConsoleEmailSender logs the full message to stderr (via structured logging)
-    # so developers running locally can copy the magic link from the terminal.
+    # Email sender selection is environment-gated:
+    # - RESEND_API_KEY set                → real ResendEmailSender (any environment).
+    # - No key, but cookie_secure=False   → ConsoleEmailSender (dev over plain HTTP).
+    # - No key AND cookie_secure=True     → REFUSE to start. Falling back to
+    #   ConsoleEmailSender in prod would (a) silently break login delivery and
+    #   (b) write the full magic link to stderr/log aggregator — a 15-minute
+    #   takeover window for anyone with log access. Loud failure only.
     # Tests override this with InMemoryEmailSender via app.state after creation.
     if settings.resend_api_key:
         email_sender = ResendEmailSender(
             api_key=settings.resend_api_key, from_address=settings.email_from
         )
-    else:
+    elif not settings.cookie_secure:
         email_sender = ConsoleEmailSender()
+    else:
+        raise RuntimeError(
+            "RESEND_API_KEY is required when APP_BASE_URL is https://. "
+            "Refusing to fall back to ConsoleEmailSender in production "
+            "(would log magic links to stderr — see auth/email.py)."
+        )
 
     app = FastAPI(lifespan=lifespan)
     app.state.settings = settings

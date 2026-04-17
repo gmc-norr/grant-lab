@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: call_monitor
+      POSTGRES_PASSWORD: call_monitor
+      POSTGRES_DB: call_monitor
+    ports:
+      # Bind to loopback so a known-credential dev DB is never exposed to
+      # the LAN. Override the host port via HOST_DB_PORT if 5432 is busy
+      # (e.g. another local Postgres):  HOST_DB_PORT=5433 docker compose up -d
+      - "127.0.0.1:${HOST_DB_PORT:-5432}:5432"
+    volumes:
+      - call_monitor_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U call_monitor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  call_monitor_pgdata:
