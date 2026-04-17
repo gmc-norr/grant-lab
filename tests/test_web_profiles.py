@@ -301,3 +301,124 @@ def test_profile_new_rejects_duplicate_active_name(
             follow_redirects=False,
         )
     assert r.status_code == 409
+
+
+def test_profile_new_coerces_invalid_kind_to_group(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Unknown kind value silently coerces to 'group'."""
+    from unittest.mock import patch
+
+    from call_monitor.profiles.seed import DraftProfile
+
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    fake_draft = DraftProfile(
+        description="x",
+        structured={
+            "areas": [],
+            "budget_min": None,
+            "budget_max": None,
+            "trl_min": None,
+            "trl_max": None,
+            "must_include": [],
+            "hard_exclusions": [],
+        },
+        publications_fetched=0,
+        publications_skipped=0,
+    )
+    with (
+        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        client,
+    ):
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Coerced kind",
+                "kind": "not-a-real-kind",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    from call_monitor.db.models import Profile, ProfileKind
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Coerced kind")).scalar_one()
+    assert p.kind == ProfileKind.GROUP
+
+
+def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
+    from unittest.mock import patch
+
+    from call_monitor.profiles.seed import DraftProfile
+
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    fake_draft = DraftProfile(
+        description="x",
+        structured={
+            "areas": [],
+            "budget_min": None,
+            "budget_max": None,
+            "trl_min": None,
+            "trl_max": None,
+            "must_include": [],
+            "hard_exclusions": [],
+        },
+        publications_fetched=0,
+        publications_skipped=0,
+    )
+    with (
+        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        client,
+    ):
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Org profile",
+                "kind": "org",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    from call_monitor.db.models import Profile, ProfileKind
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Org profile")).scalar_one()
+    assert p.kind == ProfileKind.ORG
+
+
+def test_profile_new_requires_auth(monkeypatch, pg_url):
+    app = _setup(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "x",
+                "kind": "group",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "",
+            },
+        )
+    assert r.status_code == 401
+
+
+def test_profile_edit_requires_auth(monkeypatch, pg_url, profile_factory):
+    pid, _ = profile_factory(name="needs-auth")
+    app = _setup(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get(f"/profiles/{pid}/edit")
+    assert r.status_code == 401
+
+
+def test_profile_detail_requires_auth(monkeypatch, pg_url, profile_factory):
+    pid, _ = profile_factory(name="detail-needs-auth")
+    app = _setup(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get(f"/profiles/{pid}")
+    assert r.status_code == 401

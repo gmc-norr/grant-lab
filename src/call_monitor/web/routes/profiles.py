@@ -175,8 +175,11 @@ def profile_edit_submit(
     return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)
 
 
+_MAX_LIST_ENTRIES = 100
+
+
 def _split_lines(raw: str) -> list[str]:
-    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()][:_MAX_LIST_ENTRIES]
 
 
 def _int_or_none(raw: str) -> int | None:
