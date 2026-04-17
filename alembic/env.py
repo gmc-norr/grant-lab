@@ -8,7 +8,13 @@ from call_monitor.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is critical: the default (True) sets
+    # `disabled=True` on every logger NOT named in the [loggers] section of
+    # alembic.ini — silently turning off our app's own loggers (e.g.
+    # `call_monitor.auth.email`) for the rest of the process. The damage
+    # surfaces in tests as "the message was logged but caplog saw nothing"
+    # because `Logger.disabled=True` short-circuits before any handler runs.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
