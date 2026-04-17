@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import select, update
 
 from call_monitor.db.models import Call, RankingJob, RankingJobStatus, Source
 from call_monitor.ranking.queue import (
@@ -6,6 +8,7 @@ from call_monitor.ranking.queue import (
     enqueue_for_pair,
     mark_done,
     mark_failed,
+    requeue_stuck_running,
 )
 
 
@@ -112,3 +115,52 @@ def test_mark_failed_terminal_dead_letters(pg_session_factory, profile_factory):
     with pg_session_factory() as s:
         row = s.execute(select(RankingJob)).scalar_one()
     assert row.status == RankingJobStatus.FAILED
+
+
+def test_requeue_stuck_running_recovers_crashed_workers(pg_session_factory, profile_factory):
+    """If a worker crashed mid-tick the claimed jobs are stuck in RUNNING
+    forever (claim_pending_jobs only finds PENDING). The reaper flips
+    them back to PENDING so the next tick retries."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call(s)
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
+        claimed = claim_pending_jobs(s, limit=1)
+        # Simulate "stuck for >5 minutes": rewind updated_at directly.
+        s.execute(
+            update(RankingJob)
+            .where(RankingJob.id == claimed[0].id)
+            .values(updated_at=datetime.now(UTC) - timedelta(minutes=10))
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        n = requeue_stuck_running(s)
+        s.commit()
+    assert n == 1
+
+    with pg_session_factory() as s:
+        row = s.execute(select(RankingJob)).scalar_one()
+    assert row.status == RankingJobStatus.PENDING
+    # attempts NOT incremented — the previous run never reached mark_failed
+    assert row.attempts == 0
+
+
+def test_requeue_stuck_running_leaves_recently_running_alone(pg_session_factory, profile_factory):
+    """A job that's actively running (updated within the threshold) must
+    NOT be requeued — that would risk double-running the same job."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call(s)
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
+        claim_pending_jobs(s, limit=1)
+        s.commit()
+
+    with pg_session_factory() as s:
+        n = requeue_stuck_running(s)
+        s.commit()
+    assert n == 0
+
+    with pg_session_factory() as s:
+        row = s.execute(select(RankingJob)).scalar_one()
+    assert row.status == RankingJobStatus.RUNNING

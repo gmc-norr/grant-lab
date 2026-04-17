@@ -86,14 +86,30 @@ def test_root_without_profile_still_uses_published_at(
     assert body.index("Unranked") < body.index("Low score") < body.index("High score")
 
 
-def test_root_unknown_profile_shows_no_calls(
+def test_root_unknown_profile_degrades_gracefully(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
+    """Bogus ?profile=<id> shouldn't 500 or hide calls. The route LEFT
+    JOINs call_rankings on profile_id=<unknown>, which matches nothing,
+    so all calls render with empty score cells and the dropdown falls
+    back to the '— No profile —' option (id 99999 isn't in the active
+    profiles list). Non-fatal by design — a stale bookmark from before
+    a soft-delete shouldn't error."""
     profile_factory()  # create a real one but request a different id
+    # Seed one call so the page has content to render
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        s.add(Call(source_id=src.id, external_id="U-1", url="https://x", title="Visible call"))
+        s.commit()
+
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
     with client:
         r = client.get("/?profile=99999")
-    # Behavior choice: render as if no profile selected (200, no scores).
-    # We document this as "non-fatal — bogus IDs are ignored."
     assert r.status_code == 200
+    # The score column is present (profile was requested) but its cell is empty
+    # for every row because no CallRanking matches profile_id=99999.
+    assert "Score" in r.text  # column header
+    assert "Visible call" in r.text  # call still renders
+    # Dropdown falls back to "— No profile —" because 99999 is not in the list
+    assert "— No profile —" in r.text

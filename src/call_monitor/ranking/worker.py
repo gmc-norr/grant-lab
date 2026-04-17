@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import sessionmaker
 
 from call_monitor.db.models import Call, CallRanking, Profile
 from call_monitor.ranking.ollama_client import LLMError, OllamaClient
-from call_monitor.ranking.queue import claim_pending_jobs, mark_done, mark_failed
+from call_monitor.ranking.queue import (
+    claim_pending_jobs,
+    mark_done,
+    mark_failed,
+    requeue_stuck_running,
+)
 from call_monitor.ranking.rank_pair import RankResult
 from call_monitor.ranking.rank_pair import rank_pair as default_rank_pair
 
@@ -44,6 +50,14 @@ def drain_queue(
     `client` is the OllamaClient. It's optional in tests where `ranker`
     is a static double that doesn't call the LLM.
     """
+    # First: requeue any RUNNING jobs that have been stuck past the
+    # threshold (a previous worker crashed mid-tick and never reached
+    # mark_done/mark_failed). Without this, those jobs are invisible to
+    # claim_pending_jobs forever.
+    with session_factory() as session:
+        requeue_stuck_running(session)
+        session.commit()
+
     with session_factory() as session:
         jobs = claim_pending_jobs(session, limit=batch_size)
         if not jobs:
@@ -82,6 +96,13 @@ def drain_queue(
                         model=result.model,
                         prompt_version=result.prompt_version,
                         raw_response=result.raw_response,
+                        # Explicitly set ranked_at so re-rank refreshes the
+                        # timestamp. Otherwise session.merge() on the
+                        # composite-PK row sees no change to ranked_at and
+                        # the column keeps its first-insert server_default
+                        # value forever — the spec expects ranked_at to
+                        # reflect the most recent ranking event.
+                        ranked_at=datetime.now(UTC),
                     )
                 )
                 mark_done(session, job_id)

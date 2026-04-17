@@ -35,6 +35,14 @@ def _extract_assistant_content(envelope: dict) -> str:
             "Ollama returned empty assistant content "
             "(model may have used tool_calls instead of plain content)"
         )
+    # Future-proofing: a multimodal provider may return content as a list
+    # of parts (e.g., [{"type":"text","text":"..."}]). Guard now so a
+    # provider swap fails at LLMError (retried + eventually dead-lettered)
+    # rather than TypeError on json.loads([...]).
+    if not isinstance(content, str):
+        raise LLMError(
+            f"Ollama returned non-string content: {type(content).__name__}"
+        )
     return content
 
 

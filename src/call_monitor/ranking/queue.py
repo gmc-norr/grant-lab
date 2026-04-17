@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -11,6 +11,14 @@ from call_monitor.db.models import RankingJob, RankingJobStatus
 
 _logger = logging.getLogger(__name__)
 _LAST_ERROR_MAX = 2000
+
+# A job that's been in RUNNING longer than this is presumed dead — the
+# worker process either crashed (SIGKILL, OOM, dev-server Ctrl-C) or
+# something hangs indefinitely. The reaper requeues it as PENDING so the
+# next tick retries. Set generously to avoid double-running a slow but
+# legitimate Gemma call (single-instance Ollama on a 2080 Ti is well
+# under 60s per ranking, but bursts of dozens at once could queue up).
+_STUCK_AFTER = timedelta(minutes=5)
 
 
 def enqueue_for_pair(session: Session, *, call_id: int, profile_id: int) -> bool:
@@ -68,6 +76,33 @@ def claim_pending_jobs(session: Session, *, limit: int) -> list[RankingJob]:
         row.updated_at = now
     session.flush()
     return rows
+
+
+def requeue_stuck_running(session: Session) -> int:
+    """Flip jobs that have been RUNNING longer than _STUCK_AFTER back to
+    PENDING. Returns the number requeued. Called at the start of each
+    drain tick — without this, a worker crash mid-tick leaves the
+    claimed jobs in RUNNING forever (claim_pending_jobs only finds
+    PENDING). Note: this does NOT increment `attempts`; the previous
+    run never reached mark_failed so it shouldn't count toward the
+    dead-letter threshold.
+    """
+    cutoff = datetime.now(UTC) - _STUCK_AFTER
+    result = session.execute(
+        update(RankingJob)
+        .where(
+            RankingJob.status == RankingJobStatus.RUNNING,
+            RankingJob.updated_at < cutoff,
+        )
+        .values(status=RankingJobStatus.PENDING, updated_at=datetime.now(UTC))
+    )
+    n = result.rowcount or 0
+    if n:
+        _logger.warning(
+            "ranking.requeued_stuck",
+            extra={"event": "ranking_requeued_stuck", "count": n},
+        )
+    return n
 
 
 def mark_done(session: Session, job_id: int) -> None:
