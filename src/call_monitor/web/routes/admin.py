@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 
-from call_monitor.auth.dependencies import require_admin
+from call_monitor.auth.dependencies import get_current_user, require_admin
 from call_monitor.db.models import (
     Call,
     CallRanking,
@@ -153,3 +154,78 @@ def admin_rerank(
     for pid in active_profile_ids:
         backfill_profile(session_factory=session_factory, profile_id=pid)
     return RedirectResponse(url="/admin", status_code=303)
+
+
+@router.get("/admin/ranking-compare", response_class=HTMLResponse)
+def ranking_compare(
+    request: Request,
+    profile: int | None = None,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin only")
+    if profile is None:
+        raise HTTPException(status_code=400, detail="profile query param required")
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        p = session.get(Profile, profile)
+        if p is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        v1 = aliased(CallRanking)
+        v2 = aliased(CallRanking)
+        rows = session.execute(
+            select(
+                Call.id, Call.title, Call.url,
+                v1.aggregate_score, v1.rationale,
+                v2.aggregate_score, v2.rationale,
+            )
+            .select_from(Call)
+            .join(
+                v1,
+                (v1.call_id == Call.id)
+                & (v1.profile_id == profile)
+                & (v1.scheme == "v1"),
+                isouter=True,
+            )
+            .join(
+                v2,
+                (v2.call_id == Call.id)
+                & (v2.profile_id == profile)
+                & (v2.scheme == "v2"),
+                isouter=True,
+            )
+            .where(
+                (v1.aggregate_score.is_not(None))
+                | (v2.aggregate_score.is_not(None))
+            )
+            .order_by(func.coalesce(v2.aggregate_score, v1.aggregate_score).desc())
+            .limit(200)
+        ).all()
+        items = [
+            {
+                "call_id": cid,
+                "title": title,
+                "url": url,
+                "v1_score": v1s,
+                "v1_rationale": v1r,
+                "v2_score": v2s,
+                "v2_rationale": v2r,
+                "delta": (
+                    abs(v1s - v2s) if v1s is not None and v2s is not None else None
+                ),
+            }
+            for cid, title, url, v1s, v1r, v2s, v2r in rows
+        ]
+        profile_name = p.name
+        session.expunge_all()
+
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="ranking_compare.html",
+        context={
+            "profile_id": profile,
+            "profile_name": profile_name,
+            "items": items,
+            "user": user,
+        },
+    )
