@@ -17,6 +17,16 @@
   <p>
     <label>Budget min <input type="text" name="budget_min" value="{{ '' if profile.structured.budget_min is none else profile.structured.budget_min }}"></label>
     <label>Budget max <input type="text" name="budget_max" value="{{ '' if profile.structured.budget_max is none else profile.structured.budget_max }}"></label>
+    <label>Currency
+      <select name="budget_currency">
+        <option value=""    {% if not profile.budget_currency %}selected{% endif %}>(unknown)</option>
+        <option value="SEK" {% if profile.budget_currency == 'SEK' %}selected{% endif %}>SEK</option>
+        <option value="EUR" {% if profile.budget_currency == 'EUR' %}selected{% endif %}>EUR</option>
+        <option value="USD" {% if profile.budget_currency == 'USD' %}selected{% endif %}>USD</option>
+        <option value="NOK" {% if profile.budget_currency == 'NOK' %}selected{% endif %}>NOK</option>
+        <option value="DKK" {% if profile.budget_currency == 'DKK' %}selected{% endif %}>DKK</option>
+      </select>
+    </label>
   </p>
   <p>
     <label>TRL min (1-9) <input type="text" name="trl_min" value="{{ '' if profile.structured.trl_min is none else profile.structured.trl_min }}"></label>

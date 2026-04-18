@@ -422,3 +422,74 @@ def test_profile_detail_requires_auth(monkeypatch, pg_url, profile_factory):
     with TestClient(app) as client:
         r = client.get(f"/profiles/{pid}")
     assert r.status_code == 401
+
+
+def test_profile_edit_round_trips_budget_currency(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(name="Currency test")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x",
+                "areas": "",
+                "budget_min": "100000",
+                "budget_max": "5000000",
+                "budget_currency": "SEK",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    from call_monitor.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.budget_currency == "SEK"
+
+
+def test_profile_edit_accepts_empty_currency_as_null(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(name="No currency")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    from call_monitor.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.budget_currency is None
+
+
+def test_profile_detail_renders_currency_when_set(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    from call_monitor.db.models import Profile
+    pid, _ = profile_factory(
+        name="Display currency",
+        structured={"budget_min": 100000, "budget_max": 500000},
+    )
+    with pg_session_factory() as s:
+        s.get(Profile, pid).budget_currency = "EUR"
+        s.commit()
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/profiles/{pid}")
+    assert r.status_code == 200
+    assert "EUR" in r.text

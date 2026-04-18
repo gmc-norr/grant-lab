@@ -18,7 +18,7 @@
   <dt>Budget</dt>
   <dd>
     {% if profile.structured.budget_min is not none or profile.structured.budget_max is not none %}
-      {{ profile.structured.budget_min if profile.structured.budget_min is not none else '—' }} – {{ profile.structured.budget_max if profile.structured.budget_max is not none else '—' }}
+      {{ profile.structured.budget_min if profile.structured.budget_min is not none else '—' }} – {{ profile.structured.budget_max if profile.structured.budget_max is not none else '—' }}{% if profile.budget_currency %} {{ profile.budget_currency }}{% endif %}
     {% else %}—{% endif %}
   </dd>
   <dt>TRL</dt>
