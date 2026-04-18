@@ -96,3 +96,51 @@ def _run_round_trip(engine, alembic_cfg):
     with engine.begin() as conn:
         rows = conn.execute(text("SELECT scheme, aggregate_score FROM call_rankings")).fetchall()
     assert rows == [("v1", 70)]
+    # Restore head so subsequent tests see the full schema.
+    command.upgrade(alembic_cfg, "head")
+
+
+def test_0007_adds_pgvector_columns_and_partial_indexes(pg_url):
+    """After alembic upgrade head, pgvector columns and partial NULL indexes exist."""
+    from sqlalchemy import create_engine, inspect, text
+
+    engine = create_engine(pg_url, future=True)
+    try:
+        insp = inspect(engine)
+
+        cols_calls = {c["name"] for c in insp.get_columns("calls")}
+        cols_profiles = {c["name"] for c in insp.get_columns("profiles")}
+        cols_rankings = {c["name"] for c in insp.get_columns("call_rankings")}
+        assert "embedding" in cols_calls
+        assert "embedding_model" in cols_calls
+        assert "embedding" in cols_profiles
+        assert "embedding_model" in cols_profiles
+        assert "embed_similarity" in cols_rankings
+
+        # Partial indexes: querying pg_indexes is the cleanest check.
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE indexname IN ('ix_calls_embedding_null', 'ix_profiles_embedding_null')"
+            )).all()
+        assert {r[0] for r in rows} == {
+            "ix_calls_embedding_null",
+            "ix_profiles_embedding_null",
+        }
+    finally:
+        engine.dispose()
+
+
+def test_0007_extension_vector_installed(pg_url):
+    """pgvector extension is installed and the vector type usable."""
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(pg_url, future=True)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT extname FROM pg_extension WHERE extname='vector'")
+            ).all()
+        assert len(rows) == 1
+    finally:
+        engine.dispose()
