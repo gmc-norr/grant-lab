@@ -960,13 +960,16 @@ git commit -m "feat: scheduler registers setwise:daily + golden_eval:weekly"
 
 ---
 
-## Task 5: Profile flip auto-triggers backfill
+## Task 5: Admin scheme radio + flip auto-triggers backfill
 
 **Files:**
-- Modify: `src/call_monitor/web/routes/profiles.py` (POST `/profiles/<id>/edit` calls `backfill_profile` if `ranking_scheme` changed)
+- Modify: `src/call_monitor/web/routes/profiles.py` (POST `/profiles/<id>/edit` accepts `ranking_scheme` admin-only; existing `backfill_profile` call carries through to the new scheme)
+- Modify: `src/call_monitor/web/templates/profile_edit.html` (admin-only radio appears here for the first time — Plan A intentionally deferred it)
 - Modify: `tests/test_web_profiles.py`
 
-When admin flips a profile from `ranking_scheme='v1'` to `'v2'`, all the existing v2 backfill needs to run so the dashboard / digest immediately have data. Reuse `backfill_profile` (already idempotent and scheme-aware after Plan A).
+The radio button for `ranking_scheme` (`v1` ↔ `v2`) is added HERE in Plan C, not in Plan A. Plan A added the column with default `'v1'` but left no UI to change it because (a) v2 didn't exist (Plan A's worker raises `NotImplementedError`), and (b) flipping under Plan A would hide v1 rankings via the read-path filters with no v2 rows to replace them. Plan B implemented `rank_pair_v2`. NOW it's safe to expose the radio.
+
+When admin flips a profile from `ranking_scheme='v1'` to `'v2'`, the existing per-save `backfill_profile` call (Plan 4) re-enqueues the last 90 days of calls under the new scheme — `backfill_profile` reads `profile.ranking_scheme` after commit, so the new scheme is what gets enqueued. No extra wiring needed; just expose the radio and accept the form field.
 
 - [ ] **Step 1: Failing test — append to `tests/test_web_profiles.py`**
 
@@ -1027,36 +1030,85 @@ def test_profile_edit_flipping_scheme_enqueues_backfill(
     assert len(jobs) == 1
 ```
 
-- [ ] **Step 2: Update `src/call_monitor/web/routes/profiles.py`**
+- [ ] **Step 2: Update `src/call_monitor/web/routes/profiles.py` — add `ranking_scheme` form handling**
 
-Find `profile_edit_submit`. After the existing `session.commit()` and the existing `backfill_profile(...)` call (which runs unconditionally on save per Plan 4), add a check that captures the BEFORE value of `ranking_scheme` and re-runs backfill if it changed.
+Add `ranking_scheme: str = Form("")` to `profile_edit_submit`'s parameter list.
 
-Actually, since Plan 4 already runs `backfill_profile` on every save (idempotent), this task is essentially: ensure that the scheme used by `backfill_profile` is the NEW scheme (post-flip). Verify:
-
-1. `p.ranking_scheme` is set BEFORE `session.commit()` (it is, per Plan A's task 7)
-2. `backfill_profile` reads `profile.ranking_scheme` AFTER commit (it does, per Plan A's task 2)
-
-So the flip already triggers a v2 backfill on the next save. **The only missing thing is: verify the flow end-to-end with a test, and add a comment in the route that this is intentional.**
-
-Add a one-line comment:
+In the body, after the existing `budget_currency` block from Plan A Task 6, add the admin-only scheme handling:
 
 ```python
-        # Backfill is unconditional on every save (idempotent at DB level).
-        # When the admin flips ranking_scheme, this re-enqueues the last 90
-        # days of calls under the NEW scheme without any extra wiring.
+        # Admin-only operational toggle. Silently ignore non-admin attempts —
+        # the radio is only rendered for admins, but a researcher could still
+        # craft a POST with this field. Drop the value rather than 400ing.
+        if user.is_admin:
+            requested = (ranking_scheme or "").strip().lower()
+            if requested in {"v1", "v2"}:
+                p.ranking_scheme = requested
+```
+
+Also confirm that the existing `backfill_profile(session_factory=session_factory, profile_id=profile_id)` call (per Plan 4 / Plan A Task 2's update) is still present. It runs unconditionally on every save and reads `profile.ranking_scheme` AFTER commit — so flipping the scheme automatically re-enqueues the last 90 days under the new scheme without extra wiring. Add a one-line comment to make this intentional behavior explicit:
+
+```python
+        # Backfill is unconditional on every save (idempotent at DB level via
+        # the partial unique index on (call_id, profile_id, scheme)). When
+        # the admin flips ranking_scheme above, this re-enqueues the last 90
+        # days of calls under the NEW scheme — no extra wiring needed.
         backfill_profile(session_factory=session_factory, profile_id=profile_id)
 ```
 
-If the existing test for backfill-on-save still passes after this change, the only new code is the test from Step 1.
+- [ ] **Step 3: Update `src/call_monitor/web/templates/profile_edit.html` — add the admin radio**
 
-- [ ] **Step 3: Verify and commit**
+At the top of the form (before the description textarea is fine), conditionally render the radio:
+
+```html
+{% if user.is_admin %}
+  <p>
+    <label><strong>Ranking scheme (admin only)</strong></label><br>
+    <label><input type="radio" name="ranking_scheme" value="v1" {% if profile.ranking_scheme == 'v1' %}checked{% endif %}> v1 (monolithic LLM score)</label>
+    <label style="margin-left: 1em"><input type="radio" name="ranking_scheme" value="v2" {% if profile.ranking_scheme == 'v2' %}checked{% endif %}> v2 (criterion-rubric)</label>
+    <br><small>Flipping schemes triggers a 90-day backfill under the new scheme. Existing rows under the old scheme are retained for audit.</small>
+  </p>
+{% endif %}
+```
+
+The route's GET handler that renders the edit template already passes `user` in the context (verify by reading the existing handler). If not, add it.
+
+- [ ] **Step 4: Add a non-admin-can't-flip regression test — append to `tests/test_web_profiles.py`**
+
+```python
+def test_profile_edit_non_admin_cannot_flip_ranking_scheme(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Non-admin POST with ranking_scheme=v2 is silently ignored — scheme stays v1."""
+    pid, _ = profile_factory(name="Scheme protect")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)  # creates a non-admin user
+    with client:
+        client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "budget_currency": "", "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+                "ranking_scheme": "v2",  # attempted
+            },
+            follow_redirects=False,
+        )
+    from sqlalchemy import select
+    from call_monitor.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.ranking_scheme == "v1"  # unchanged — non-admin's flip was dropped
+```
+
+- [ ] **Step 5: Verify and commit**
 
 ```bash
-uv run pytest tests/test_web_profiles.py::test_profile_edit_flipping_scheme_enqueues_backfill -v
+uv run pytest tests/test_web_profiles.py -v
 uv run pytest -v
 uv run ruff check .
-git add src/call_monitor/web/routes/profiles.py tests/test_web_profiles.py
-git commit -m "feat: profile scheme flip triggers backfill under new scheme"
+git add src/call_monitor/web/routes/profiles.py src/call_monitor/web/templates/profile_edit.html tests/test_web_profiles.py
+git commit -m "feat: admin scheme radio + flip auto-triggers backfill"
 ```
 
 ---

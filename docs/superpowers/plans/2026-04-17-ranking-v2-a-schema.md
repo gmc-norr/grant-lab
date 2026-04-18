@@ -14,7 +14,7 @@
 
 - **Scheme is part of `ranking_jobs` identity, not just `call_rankings`.** Per the spec's H1-fix: a queued job's intent must be frozen at enqueue time. Otherwise an admin flipping `profiles.ranking_scheme` mid-flight would silently change what the worker scores. The worker reads `scheme` from the job, never from the profile.
 - **Default to `'v1'` everywhere.** Existing rows backfill to `'v1'`. New profiles default to `'v1'` (Plan C will flip the default to `'v2'` after rollout week 4 when v2 ships and is validated).
-- **`profiles.ranking_scheme` toggle is admin-only.** Operational/deployment decision, not a per-researcher knob. Edit form gates the radio behind `user.is_admin`.
+- **`profiles.ranking_scheme` is invisible from the UI in Plan A.** The column exists with default `'v1'`; nothing in Plan A's templates lets a user (admin or not) flip it. The radio button moves to **Plan B** so it can't be flipped while v2 still raises `NotImplementedError`. Why: per Plan 4, profile saves trigger `backfill_profile` immediately, AND Plan A's read-path filters by `profile.ranking_scheme`. If Plan A let the admin flip a profile to v2, the save would (a) enqueue guaranteed-failing v2 jobs, and (b) hide the profile's existing v1 rankings from feed/digest. Disastrous regression. Defer.
 - **`profiles.budget_currency` is a freeform-but-validated text** column with a small dropdown in the UI: `""` (unknown) / `SEK` / `EUR` / `USD` / `NOK` / `DKK`. Defaults to `NULL` for existing profiles (the v2 budget gate treats NULL as unknown, no penalty — but the column is added in this plan because the gate will exist in Plan B and the migration must precede it).
 - **Worker raises `NotImplementedError` on `scheme='v2'`** rather than silently routing to v1. Surfaces the operational mistake immediately as a FAILED job in the dead-letter queue, with a clear "rank_pair_v2 not implemented; flip profile back to v1 or wait for Plan B" message. This guards against admin accident.
 - **Read-path filters use `profile.ranking_scheme`.** Each query that currently joins `call_rankings` on `(call_id, profile_id)` adds `AND scheme = :profile_scheme` where `:profile_scheme` is fetched once per request. The `/admin/ranking-compare` view (Plan C) is the only consumer that selects both schemes; it will be implemented later.
@@ -42,9 +42,11 @@ call-monitor/
 │   ├── web/
 │   │   ├── routes/
 │   │   │   ├── calls.py                             # dashboard scheme filter on ranked feed
-│   │   │   └── profiles.py                          # edit POST accepts budget_currency + ranking_scheme
+│   │   │   └── profiles.py                          # edit POST accepts budget_currency
+│   │   │                                              (ranking_scheme deferred to Plan C)
 │   │   └── templates/
-│   │       ├── profile_edit.html                    # currency dropdown + admin-only scheme radio
+│   │       ├── profile_edit.html                    # currency dropdown
+│   │       │                                          (scheme radio deferred to Plan C)
 │   │       └── profile_detail.html                  # render currency next to budget
 │   └── digest/
 │       └── assemble.py                              # scheme filter on all CallRanking queries
@@ -596,19 +598,23 @@ def downgrade() -> None:
     op.drop_column("profiles", "budget_currency")
     op.drop_column("profiles", "ranking_scheme")
 
-    # call_rankings: restore index + PK + column name.
+    # call_rankings: restore PK + column name + index.
+    # ORDER MATTERS: drop the new index first; rename aggregate_score → score
+    # BEFORE recreating ix_call_rankings_profile_score, because that index
+    # references "score". If we recreated the index before the rename, the
+    # CREATE INDEX would fail on a missing column.
     op.drop_index("ix_call_rankings_profile_scheme_score", table_name="call_rankings")
+    op.drop_constraint("pk_call_rankings", "call_rankings", type_="primary")
+    op.create_primary_key(
+        "pk_call_rankings", "call_rankings", ["call_id", "profile_id"]
+    )
+    op.alter_column("call_rankings", "aggregate_score", new_column_name="score")
     op.create_index(
         "ix_call_rankings_profile_score",
         "call_rankings",
         ["profile_id", sa.text("score DESC NULLS LAST")],
         postgresql_using="btree",
     )
-    op.drop_constraint("pk_call_rankings", "call_rankings", type_="primary")
-    op.create_primary_key(
-        "pk_call_rankings", "call_rankings", ["call_id", "profile_id"]
-    )
-    op.alter_column("call_rankings", "aggregate_score", new_column_name="score")
     op.drop_column("call_rankings", "setwise_offset")
     op.drop_column("call_rankings", "aggregate_reason")
     op.drop_column("call_rankings", "scheme")
@@ -803,10 +809,20 @@ def enqueue_for_pair(
             scheme=scheme,
             status=RankingJobStatus.PENDING,
         )
-        .on_conflict_do_nothing(index_elements=["call_id", "profile_id", "scheme"])
+        .on_conflict_do_nothing(
+            index_elements=["call_id", "profile_id", "scheme"],
+            # PG requires the predicate to match the partial unique index
+            # (uq_ranking_jobs_active_pair) for the planner to route the
+            # conflict resolution. Without index_where, this raises
+            # CardinalityViolation. Match the predicate from Plan A's
+            # migration verbatim.
+            index_where=text("status IN ('pending', 'running')"),
+        )
     )
     return result.inserted_primary_key is not None
 ```
+
+(Add `from sqlalchemy import text` to the imports if not already present.)
 
 - [ ] **Step 4: Update `src/call_monitor/ranking/backfill.py`**
 
@@ -868,26 +884,36 @@ def backfill_profile(*, session_factory, profile_id: int) -> int:
 
 - [ ] **Step 5: Update `src/call_monitor/ingestion/orchestrator.py`**
 
-The orchestrator iterates new Calls and enqueues a ranking job for each (call, active-profile) pair. Find the per-call enqueue loop. It currently looks like:
+The orchestrator currently fetches only `Profile.id` (not full rows), so `profile.ranking_scheme` would not be loaded. Two changes needed:
+
+**5a. Change the SELECT to include `ranking_scheme`** (line ~90):
 
 ```python
-for profile in active_profiles:
-    enqueue_for_pair(session, call_id=call.id, profile_id=profile.id)
+            # Was:
+            #   active_profile_ids = session.execute(
+            #       select(Profile.id).where(Profile.is_active.is_(True))
+            #   ).scalars().all()
+            # New:
+            active_profiles = session.execute(
+                select(Profile.id, Profile.ranking_scheme).where(
+                    Profile.is_active.is_(True)
+                )
+            ).all()
 ```
 
-Change to:
+**5b. Update the per-call enqueue loop** to unpack the tuple:
 
 ```python
-for profile in active_profiles:
-    enqueue_for_pair(
-        session,
-        call_id=call.id,
-        profile_id=profile.id,
-        scheme=profile.ranking_scheme,
-    )
+                for pid, pscheme in active_profiles:
+                    enqueue_for_pair(
+                        session,
+                        call_id=call_db_id,
+                        profile_id=pid,
+                        scheme=pscheme,
+                    )
 ```
 
-Read the orchestrator carefully — `active_profiles` is loaded once before the iteration; verify the `ranking_scheme` field is populated on those instances (it should be, since they come from a fresh SELECT at orchestrator start).
+Read the orchestrator file — adapt variable names (`pid`, `pscheme`, `call_db_id`) to match the surrounding code's naming. The shape change is: from "list of ids" to "list of (id, scheme) tuples".
 
 - [ ] **Step 6: Extend `tests/test_ingestion_orchestrator.py`**
 
@@ -1081,63 +1107,112 @@ Expected: tests fail because the worker doesn't currently distinguish schemes (i
 
 - [ ] **Step 3: Update `src/call_monitor/ranking/worker.py`**
 
-Find the `drain_queue` function. It currently iterates claimed jobs and calls `ranker(client=..., profile=..., call=...)` for each. Add scheme dispatch.
-
-Inside the per-job loop, before the existing `ranker(...)` call, insert:
+The current worker's `drain_queue` is shaped like this (read `worker.py` lines ~60-130 to confirm before editing):
 
 ```python
-        if job.scheme != "v1":
-            # v2 path is not implemented in this plan. Mark FAILED with a
-            # clear message so the admin sees this in the dead-letter queue
-            # instead of silently routing to v1.
-            mark_failed(
-                session,
-                job_id=job.id,
-                error=(
-                    f"rank_pair_v2 not implemented (job scheme={job.scheme!r}); "
-                    "flip profiles.ranking_scheme back to 'v1' or wait for Plan B"
-                ),
-                max_attempts=MAX_ATTEMPTS,
+with session_factory() as session:
+    jobs = claim_pending_jobs(session, limit=batch_size)
+    if not jobs:
+        return 0
+    # Capture identifying fields before commit + close — we'll re-open
+    # per-job so a single bad job doesn't poison the whole batch.
+    claimed = [
+        (job.id, job.call_id, job.profile_id, job.attempts) for job in jobs
+    ]
+    session.commit()
+
+processed = 0
+for job_id, call_id, profile_id, attempts in claimed:
+    ...
+```
+
+We need to capture `job.scheme` too. **Two changes** to the worker:
+
+1. Extend the tuple unpacked from claimed to include scheme.
+2. Add a v2 short-circuit at the top of the per-job try block that marks the job FAILED-terminal (so it goes straight to dead-letter, not to retry).
+
+Replace the existing `claimed = [...]` line with:
+
+```python
+        claimed = [
+            (job.id, job.call_id, job.profile_id, job.attempts, job.scheme)
+            for job in jobs
+        ]
+```
+
+And the loop signature:
+
+```python
+    for job_id, call_id, profile_id, attempts, scheme in claimed:
+```
+
+Inside the loop's `try:` block, **before** the `with session_factory() as session:` for the per-job session, insert the v2 short-circuit. Put it at the very top of the try so it runs before we open a per-job session:
+
+```python
+        # v2 path is not implemented in Plan A. Mark FAILED-terminal so the
+        # job lands in the dead-letter queue rather than silently routing to
+        # v1. Plan B replaces this branch with the real rank_pair_v2 call.
+        if scheme != "v1":
+            with session_factory() as session:
+                mark_failed(
+                    session,
+                    job_id,
+                    error=(
+                        f"rank_pair_v2 not implemented (job scheme={scheme!r}); "
+                        "wait for Plan B or revert profile.ranking_scheme to 'v1'"
+                    ),
+                    terminal=True,
+                )
+                session.commit()
+            _logger.warning(
+                "ranking.job_v2_not_implemented",
+                extra={
+                    "event": "ranking_job_v2_not_implemented",
+                    "job_id": job_id,
+                    "scheme": scheme,
+                },
             )
             continue
 ```
 
-Verify `mark_failed` is the existing helper used elsewhere in worker.py — its signature should already exist from Plan 3.
+Note: `mark_failed`'s real signature is `mark_failed(session, job_id, *, error: str, terminal: bool)` — `terminal=True` puts the job in the FAILED dead-letter state (no retry), `terminal=False` would revert to PENDING for retry. We choose `terminal=True` because retrying a v2 job under Plan A would just fail the same way 5 times and waste cycles.
 
-When the v1 ranker DOES succeed, the resulting CallRanking row must be written with `scheme='v1'`. Find the `merge` / insert call that creates the CallRanking and add `scheme="v1"` to the column list. The merge currently looks like:
+When the v1 ranker DOES succeed (later in the same loop), the resulting CallRanking row must be written with `scheme='v1'`. Find the existing `session.merge(CallRanking(...))` call. It currently looks like:
 
 ```python
-session.merge(CallRanking(
-    call_id=job.call_id,
-    profile_id=job.profile_id,
-    aggregate_score=result.score,
-    rationale=result.rationale,
-    model=result.model,
-    prompt_version=result.prompt_version,
-    raw_response=result.raw_response,
-    ranked_at=datetime.now(UTC),
-))
+session.merge(
+    CallRanking(
+        call_id=call_id,
+        profile_id=profile_id,
+        score=result.score,                 # NB: column was renamed in Task 1
+        rationale=result.rationale,
+        model=result.model,
+        prompt_version=result.prompt_version,
+        raw_response=result.raw_response,
+        ranked_at=datetime.now(UTC),
+    )
+)
 ```
 
 Change to:
 
 ```python
-session.merge(CallRanking(
-    call_id=job.call_id,
-    profile_id=job.profile_id,
-    scheme=job.scheme,                 # NEW
-    aggregate_score=result.score,
-    rationale=result.rationale,
-    model=result.model,
-    prompt_version=result.prompt_version,
-    raw_response=result.raw_response,
-    ranked_at=datetime.now(UTC),
-))
+session.merge(
+    CallRanking(
+        call_id=call_id,
+        profile_id=profile_id,
+        scheme=scheme,                       # always 'v1' here (we continue'd above for v2)
+        aggregate_score=result.score,        # renamed by Task 1
+        rationale=result.rationale,
+        model=result.model,
+        prompt_version=result.prompt_version,
+        raw_response=result.raw_response,
+        ranked_at=datetime.now(UTC),
+    )
+)
 ```
 
-Note: `aggregate_score` was renamed from `score` in Task 1. Worker should already be using the new name after Task 1 — if not, fix it here.
-
-Also: the `claim_pending_jobs` query in `queue.py` already returns full `RankingJob` ORM rows, so `job.scheme` is accessible without query changes.
+(Task 1 already covers the `score` → `aggregate_score` rename. If it's been done, the only diff here is the new `scheme=scheme` line.)
 
 - [ ] **Step 4: Verify and commit**
 
@@ -1155,11 +1230,11 @@ git commit -m "feat: worker dispatches by job.scheme; v2 → NotImplementedError
 
 **Files:**
 - Modify: `src/call_monitor/web/routes/calls.py` (ranked-feed query)
-- Modify: `tests/test_web_calls.py` (or whichever test file owns the dashboard) — add scheme-filter regression
+- Modify: `tests/test_web_calls_with_score.py` (the file that already owns the ranked-feed tests per Plan 3) — add scheme-filter regression
 
 - [ ] **Step 1: Failing test**
 
-Find the existing dashboard test file (likely `tests/test_web_calls.py` or `tests/test_dashboard.py`). Append:
+The dashboard ranked-feed tests live in `tests/test_web_calls_with_score.py` (added by Plan 3 commit `8daa7d4`). Append the new test there:
 
 ```python
 def test_dashboard_ranked_feed_filters_by_profile_ranking_scheme(
@@ -1221,7 +1296,7 @@ def test_dashboard_ranked_feed_filters_by_profile_ranking_scheme(
 - [ ] **Step 2: Run — expect failure (both 70 and 20 likely appear)**
 
 ```bash
-uv run pytest tests/test_web_calls.py::test_dashboard_ranked_feed_filters_by_profile_ranking_scheme -v
+uv run pytest tests/test_web_calls_with_score.py::test_dashboard_ranked_feed_filters_by_profile_ranking_scheme -v
 ```
 
 Expected: assertion failure on `assert "20" not in r.text` (or duplicated rows in the rendered table).
@@ -1254,10 +1329,10 @@ If the unranked branch (no `?profile=`) does NOT touch `CallRanking`, no change 
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-uv run pytest tests/test_web_calls.py -v
+uv run pytest tests/test_web_calls_with_score.py -v
 uv run pytest -v
 uv run ruff check .
-git add src/call_monitor/web/routes/calls.py tests/test_web_calls.py
+git add src/call_monitor/web/routes/calls.py tests/test_web_calls_with_score.py
 git commit -m "feat: dashboard ranked feed filters by profile.ranking_scheme"
 ```
 
@@ -1515,135 +1590,9 @@ git commit -m "feat: profile budget_currency form field + display"
 
 ---
 
-## Task 7: Profile model + form: `ranking_scheme` toggle (admin-only)
+## Task 7: Migration round-trip integration test
 
-**Files:**
-- Modify: `src/call_monitor/web/routes/profiles.py` (edit POST honors `ranking_scheme` only when `user.is_admin`)
-- Modify: `src/call_monitor/web/templates/profile_edit.html` (radio gated by `user.is_admin`)
-- Modify: `tests/test_web_profiles.py` (admin can flip; non-admin cannot)
-
-- [ ] **Step 1: Failing tests — append to `tests/test_web_profiles.py`**
-
-```python
-def test_profile_edit_admin_can_flip_ranking_scheme(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
-    pid, _ = profile_factory(name="Scheme flip")
-    monkeypatch.setenv("DATABASE_URL", pg_url)
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("INITIAL_ADMIN_EMAIL", "admin@ki.se")
-    from call_monitor.main import create_app
-    from call_monitor.auth.session_cookie import SessionSigner
-    from fastapi.testclient import TestClient
-    from sqlalchemy import select
-    from call_monitor.db.models import User, Profile
-    app = create_app()
-
-    # Trigger admin bootstrap by entering the lifespan briefly.
-    with TestClient(app):
-        pass
-    with pg_session_factory() as s:
-        admin = s.execute(select(User).where(User.email == "admin@ki.se")).scalar_one()
-        uid = admin.id
-    signer: SessionSigner = app.state.session_signer
-    client = TestClient(app)
-    client.cookies.set("session", signer.make(user_id=uid))
-    with client:
-        r = client.post(
-            f"/profiles/{pid}/edit",
-            data={
-                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
-                "budget_currency": "", "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
-                "ranking_scheme": "v2",
-            },
-            follow_redirects=False,
-        )
-    assert r.status_code == 303
-    with pg_session_factory() as s:
-        p = s.get(Profile, pid)
-    assert p.ranking_scheme == "v2"
-
-
-def test_profile_edit_non_admin_cannot_flip_ranking_scheme(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
-    """Non-admin POST with ranking_scheme=v2 is silently ignored — scheme stays v1."""
-    pid, _ = profile_factory(name="Scheme protect")
-    app = _setup(monkeypatch, pg_url)
-    client = _logged_in(app, pg_session_factory)  # creates a non-admin user
-    with client:
-        r = client.post(
-            f"/profiles/{pid}/edit",
-            data={
-                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
-                "budget_currency": "", "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
-                "ranking_scheme": "v2",  # attempted
-            },
-            follow_redirects=False,
-        )
-    assert r.status_code == 303
-    from sqlalchemy import select
-    from call_monitor.db.models import Profile
-    with pg_session_factory() as s:
-        p = s.get(Profile, pid)
-    assert p.ranking_scheme == "v1"  # unchanged
-```
-
-- [ ] **Step 2: Run — expect failure**
-
-- [ ] **Step 3: Update `src/call_monitor/web/routes/profiles.py`**
-
-Add `ranking_scheme` as a Form parameter:
-
-```python
-    ranking_scheme: str = Form(""),
-```
-
-In the body, after the budget_currency block:
-
-```python
-        # Operational toggle — admin-only. Silently ignore non-admin attempts
-        # so a researcher can't accidentally flip a profile via crafted form
-        # data; admins use the radio surfaced in the edit template.
-        if user.is_admin:
-            requested = (ranking_scheme or "").strip().lower()
-            if requested in {"v1", "v2"}:
-                p.ranking_scheme = requested
-```
-
-- [ ] **Step 4: Update `src/call_monitor/web/templates/profile_edit.html`**
-
-At the top of the form (before the description textarea is fine), conditionally render the radio:
-
-```html
-{% if user.is_admin %}
-  <p>
-    <label><strong>Ranking scheme (admin)</strong></label><br>
-    <label><input type="radio" name="ranking_scheme" value="v1" {% if profile.ranking_scheme == 'v1' %}checked{% endif %}> v1 (monolithic LLM score)</label>
-    <label style="margin-left: 1em"><input type="radio" name="ranking_scheme" value="v2" {% if profile.ranking_scheme == 'v2' %}checked{% endif %}> v2 (criterion-rubric — requires Plan B)</label>
-  </p>
-{% endif %}
-```
-
-The route's GET handler that renders the edit template already passes `user` in the context (verify by reading the existing handler). If not, add it.
-
-- [ ] **Step 5: Verify and commit**
-
-```bash
-uv run pytest tests/test_web_profiles.py -v
-uv run pytest -v
-uv run ruff check .
-git add src/call_monitor/web/routes/profiles.py src/call_monitor/web/templates/profile_edit.html tests/test_web_profiles.py
-git commit -m "feat: profile ranking_scheme toggle (admin-only)"
-```
-
----
-
-## Task 8: Migration round-trip integration test
+> **Note:** The admin-flippable `ranking_scheme` radio originally planned as Task 7 has been **moved to Plan C** (where the rollout flow lives — admin compare view, auto-backfill on flip, etc.). Plan A leaves `profiles.ranking_scheme` defaulting to `'v1'` with no UI to change it — flipping under Plan A would enqueue v2 jobs that immediately FAIL (Task 3) and hide all v1 rankings via the read-path filters (Tasks 4–5). Plan B ships v2 itself; Plan C exposes the radio + form-handler so admins can actually flip profiles once v2 is implemented.
 
 **Files:**
 - Create: `tests/test_alembic_v2_round_trip.py`
@@ -1719,13 +1668,13 @@ def test_round_trip_upgrade_downgrade_upgrade(pg_url, alembic_cfg):
     # Down one revision (0006 → 0005). Should drop v2 rows + new schema.
     command.downgrade(alembic_cfg, "0005")
     with engine.begin() as conn:
-        # The v2 row must be gone; v1 row must remain.
-        rows = conn.execute(text("SELECT scheme FROM call_rankings")).fetchall()
-        # After downgrade the column is dropped — query without scheme:
-    # Re-read after schema change:
-    with engine.begin() as conn:
+        # After downgrade, the `scheme` column is gone — query without it.
+        # The v1 row from the seed must survive; the v2 row was deleted.
         n_rows = conn.execute(text("SELECT count(*) FROM call_rankings")).scalar_one()
+        # The pre-rename column name is `score` (downgrade renamed back).
+        scores = conn.execute(text("SELECT score FROM call_rankings")).scalars().all()
     assert n_rows == 1, "expected exactly the v1 row to survive the down-migration"
+    assert scores == [70], "v1 row's score column should hold the seeded value"
 
     # Up again (0005 → 0006). Schema restored; the surviving v1 row picks up
     # scheme='v1' from the server_default.
