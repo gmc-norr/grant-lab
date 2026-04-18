@@ -43,7 +43,7 @@ def drain_queue(
     done-or-failed. Returns the number of jobs processed (whether or not
     they succeeded).
 
-    `embedding_threshold` is the cosine cutoff for the v2 embedding
+    `embedding_threshold` is the cosine cutoff for the embedding
     pre-gate, threaded through to rank_pair → evaluate_gates. Sole source
     of truth: Settings.embedding_pregate_threshold (callers in
     scheduler.py / main.py read it from there).
