@@ -118,6 +118,24 @@ def test_assemble_must_include_overrides_score(pg_session_factory, now):
     assert "Pathology" in must[0].title
 
 
+def test_assemble_must_include_unranked_call_still_surfaced(pg_session_factory, now):
+    """OUTER JOIN: a must-include match with NO CallRanking row should still
+    appear in the must_include bucket (score=None, rationale=None)."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["genomics"])
+        # No score / no profile_id passed → no CallRanking row created.
+        _seed_call(s, title="Genomics call (unranked)")
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    must = [e for e in payload.sections[0].entries if e.bucket == "must_include"]
+    assert len(must) == 1
+    assert must[0].title == "Genomics call (unranked)"
+    assert must[0].score is None
+    assert must[0].rationale is None
+
+
 def test_assemble_must_include_matches_keywords(pg_session_factory, now):
     """Spec line 417: must-include matches title/summary/KEYWORDS."""
     with pg_session_factory() as s:
@@ -251,6 +269,28 @@ def test_assemble_excludes_already_in_prior_digest(pg_session_factory, now):
     titles = [e.title for sec in payload.sections for e in sec.entries]
     assert "New" in titles
     assert "Old" not in titles
+
+
+def test_assemble_prior_ids_bounded_to_26_weeks(pg_session_factory, now):
+    """DigestRun rows older than 26 weeks should not contribute to the
+    excluded set. (Their calls are excluded by the deadline filter anyway,
+    but this avoids loading thousands of stale ids into Python over years.)"""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        cid_ancient = _seed_call(s, title="Ancient", score=85, profile_id=pid)
+        # A 27-week-old DigestRun: the bound should drop it from prior_ids,
+        # so the call is surfaced again.
+        ancient_run = DigestRun(
+            user_id=uid,
+            included_call_ids=[cid_ancient],
+            sent_at=now - timedelta(weeks=27),
+        )
+        s.add(ancient_run)
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    titles = [e.title for sec in payload.sections for e in sec.entries]
+    assert "Ancient" in titles
 
 
 def test_assemble_excludes_past_deadline(pg_session_factory, now):

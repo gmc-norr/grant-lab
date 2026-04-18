@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -88,9 +88,18 @@ def assemble_for_user(
             select(UserCallDismissal.call_id).where(UserCallDismissal.user_id == user_id)
         ).scalars().all()
     )
+    # Bound prior_ids to the last 26 weeks. Calls older than ~6 months are
+    # excluded by the `Call.deadline > now` filter anyway, so this is a pure
+    # memory bound with no behavior change. Without it, included_call_ids
+    # grows unboundedly (weekly digest x 25 calls = thousands of ids over
+    # years).
+    prior_cutoff = now - timedelta(weeks=26)
     prior_ids: set[int] = set()
     for run in session.execute(
-        select(DigestRun.included_call_ids).where(DigestRun.user_id == user_id)
+        select(DigestRun.included_call_ids).where(
+            DigestRun.user_id == user_id,
+            DigestRun.sent_at >= prior_cutoff,
+        )
     ).scalars().all():
         prior_ids.update(run or [])
 
@@ -116,8 +125,17 @@ def assemble_for_user(
         # scan), but at v1 corpus size (thousands of calls) this is fine.
         if must_terms:
             keywords_str = func.array_to_string(Call.keywords, " ")
+            # OUTER JOIN against this profile's ranking — must-include calls
+            # are surfaced even if unranked (CallRanking will be None). This
+            # mirrors the top/borderline pattern but with outerjoin to avoid
+            # an N+1 follow-up query per matched call.
             must_q = (
-                select(Call)
+                select(Call, CallRanking)
+                .outerjoin(
+                    CallRanking,
+                    (CallRanking.call_id == Call.id)
+                    & (CallRanking.profile_id == profile.id),
+                )
                 .where(
                     Call.id.notin_(excluded) if excluded else True,
                     or_(Call.deadline.is_(None), Call.deadline > now),
@@ -129,14 +147,7 @@ def assemble_for_user(
                     ]),
                 )
             )
-            for c in session.execute(must_q).scalars().all():
-                # need this profile's ranking (if any) for score display
-                rk = session.execute(
-                    select(CallRanking).where(
-                        CallRanking.call_id == c.id,
-                        CallRanking.profile_id == profile.id,
-                    )
-                ).scalar_one_or_none()
+            for c, rk in session.execute(must_q).all():
                 per_call[c.id].append((profile, "must_include", rk))
                 call_objs[c.id] = c
 
