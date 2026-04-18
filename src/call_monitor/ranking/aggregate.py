@@ -28,7 +28,8 @@ class LLMResult:
 @dataclass(frozen=True)
 class AggregateResult:
     score: int  # 0-100
-    reason: str | None  # 'timeline'|'budget'|'trl'|'eligibility'|'exclusion'|None
+    # 'timeline'|'budget'|'trl'|'embedding'|'eligibility'|'exclusion'|None
+    reason: str | None
 
 
 def aggregate(
@@ -39,9 +40,11 @@ def aggregate(
 ) -> AggregateResult:
     """Combine gates + LLM into a final score per the v2 spec's aggregation table.
 
-    `must_include_override=True` skips ONLY the timeline-FAIL short-circuit
-    (spec line 282 — must_include is a force-include for topic, not for
-    budget/TRL). Budget/TRL FAILs still zero the score even with override.
+    `must_include_override=True` skips the timeline AND embedding short-circuits
+    (spec line 282 — must_include is a force-include for *topic*: a profile
+    keyword match means the user explicitly wants this call regardless of
+    deadline urgency or low cosine similarity to the profile description).
+    Budget/TRL FAILs still zero the score even with override.
     """
     # Rule-based gates short-circuit (timeline conditional on override).
     if not must_include_override and gates.timeline.status == GateStatus.FAIL:
@@ -50,6 +53,11 @@ def aggregate(
         return AggregateResult(0, "budget")
     if gates.trl.status == GateStatus.FAIL:
         return AggregateResult(0, "trl")
+    # Embedding pre-gate: cheaper than LLM but pricier than timeline/budget/
+    # TRL, so it runs LAST among the rule-based gates. Bypassed by
+    # must_include for the same reason as timeline (both are topic gates).
+    if not must_include_override and gates.embedding.status == GateStatus.FAIL:
+        return AggregateResult(0, "embedding")
 
     # LLM gates short-circuit next.
     if llm.eligibility == "fail":

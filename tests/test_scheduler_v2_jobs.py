@@ -18,6 +18,7 @@ def _build(session_factory, *, with_digest=False):
         gemma_model="gemma4:e4b-it-q4_K_M",
         ranking_tick_seconds=60,
         ranking_queue_batch=10,
+        embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
     if with_digest:
@@ -37,6 +38,12 @@ def test_scheduler_registers_setwise_daily(pg_session_factory):
 def test_scheduler_registers_golden_eval_weekly(pg_session_factory):
     sched = _build(pg_session_factory)
     assert sched.get_job("golden_eval:weekly") is not None
+    sched.shutdown(wait=False)
+
+
+def test_scheduler_registers_embeddings_refresh_missing(pg_session_factory):
+    sched = _build(pg_session_factory)
+    assert sched.get_job("embeddings:refresh-missing") is not None
     sched.shutdown(wait=False)
 
 

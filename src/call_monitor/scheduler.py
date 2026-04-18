@@ -13,6 +13,8 @@ from sqlalchemy.orm import sessionmaker
 
 from call_monitor.digest.send import run_digest
 from call_monitor.email.client import EmailClient
+from call_monitor.embeddings.client import OllamaEmbedClient
+from call_monitor.embeddings.refresh import refresh_missing_embeddings_tick
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
@@ -54,6 +56,7 @@ def build_scheduler(
     gemma_model: str,
     ranking_tick_seconds: int,
     ranking_queue_batch: int,
+    embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     start: bool = True,
@@ -76,7 +79,12 @@ def build_scheduler(
 
     def _eu_job() -> None:
         adapter = EUPortalAdapter(base_url=eu_portal_base_url)
-        run_ingestion(session_factory=session_factory, adapter=adapter, alerter=alerter)
+        run_ingestion(
+            session_factory=session_factory,
+            adapter=adapter,
+            alerter=alerter,
+            embed_client=embed_client,
+        )
 
     sched.add_job(
         _eu_job,
@@ -91,7 +99,10 @@ def build_scheduler(
     def _vinnova_job() -> None:
         adapter = VinnovaAdapter(base_url=vinnova_base_url)
         run_ingestion(
-            session_factory=session_factory, adapter=adapter, alerter=alerter
+            session_factory=session_factory,
+            adapter=adapter,
+            alerter=alerter,
+            embed_client=embed_client,
         )
 
     sched.add_job(
@@ -192,6 +203,31 @@ def build_scheduler(
         trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),
         id="golden_eval:weekly",
         name="Weekly golden-set evaluation",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    def _embeddings_tick() -> None:
+        try:
+            refresh_missing_embeddings_tick(
+                session_factory=session_factory,
+                embed_client=embed_client,
+                batch_size=200,
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.exception(
+                "embeddings.refresh_missing_tick.failed",
+                extra={"event": "embedding_refresh_tick_failed", "error": str(e)},
+            )
+            return
+        # No need to re-log summary — refresh_missing_embeddings_tick already does.
+
+    sched.add_job(
+        _embeddings_tick,
+        trigger=CronTrigger(hour=3, minute=30),
+        id="embeddings:refresh-missing",
+        name="Daily backfill of missing embeddings",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

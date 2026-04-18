@@ -110,6 +110,23 @@ def drain_queue(
                             session.commit()
                             continue
 
+                        # Preserve a previously-recorded embed_similarity when
+                        # this run produced None (e.g. degraded re-rank: the
+                        # embedding model was swapped, profile/call vectors
+                        # disagree, _safe_cosine returns None → UNKNOWN gate
+                        # → LLM still ran). session.merge writes all
+                        # attributes unconditionally, so without this the
+                        # historical diagnostic value would be silently
+                        # clobbered, leaving operators no signal to tune the
+                        # cosine threshold against.
+                        new_sim = v2_result.embed_similarity
+                        if new_sim is None:
+                            existing = session.get(
+                                CallRanking, (call_id, profile_id, "v2")
+                            )
+                            if existing is not None:
+                                new_sim = existing.embed_similarity
+
                         session.merge(CallRanking(
                             call_id=call_id,
                             profile_id=profile_id,
@@ -120,6 +137,7 @@ def drain_queue(
                             model=v2_result.model,
                             prompt_version=v2_result.prompt_version,
                             raw_response=v2_result.raw_response or {},
+                            embed_similarity=new_sim,
                             ranked_at=datetime.now(UTC),
                         ))
                         _write_v2_criteria_rows(session, call_id, profile_id, v2_result)
@@ -236,6 +254,13 @@ def _v2_summary(r: RankResultV2) -> str:
     When must_include overrode a failing timeline gate, the summary
     explicitly notes that — otherwise users see a high score on a
     deadline-imminent call with no warning."""
+    if r.reason == "embedding":
+        # Surface the cosine value to 3 decimals so admins can see exactly
+        # how far the call sat below the threshold and tune accordingly.
+        sim_str = (
+            f"{r.embed_similarity:.3f}" if r.embed_similarity is not None else "n/a"
+        )
+        return f"FAIL: topic_dissimilar (cosine {sim_str})"
     if r.parsed is None:
         return f"Short-circuited: {r.reason}"
     base = (
@@ -254,9 +279,10 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
     schema makes the table accept inserts; this function is the only writer.
 
     Special case: when r.must_include_override is True AND the failing gate
-    was timeline, we DO continue past the timeline row to write the LLM
-    criterion rows, because the LLM was actually called (rank_pair_v2's
-    must_include bypass).
+    was timeline OR embedding, we DO continue past that row to write the
+    subsequent rows (and the LLM rows when reached), because the LLM was
+    actually called (rank_pair_v2's must_include bypass — Plan D extends
+    the bypass to the embedding gate, mirroring the timeline bypass).
 
     Deletes prior-run rows first so the breakdown UI never displays a
     mix of fresh and stale criteria. Wrapped in the same transaction as
@@ -280,10 +306,17 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
     now = datetime.now(UTC)
 
     # Gate rows — write up to and including the failing one (or all if no gate failed).
+    # Order matches rank_pair_v2's evaluation order (budget/trl unconditional,
+    # then timeline, then embedding) — but the visual order in the breakdown
+    # UI follows this list. We keep timeline/budget/trl first (the historical
+    # display order) and append embedding at the end so the embedding row
+    # always appears after the cheap structural gates it depends on having
+    # passed.
     gate_results = [
-        ("timeline", r.gates.timeline),
-        ("budget",   r.gates.budget),
-        ("trl",      r.gates.trl),
+        ("timeline",  r.gates.timeline),
+        ("budget",    r.gates.budget),
+        ("trl",       r.gates.trl),
+        ("embedding", r.gates.embedding),
     ]
     for name, gr in gate_results:
         session.add(CallRankingCriterion(
@@ -291,14 +324,16 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
             criterion=name,
             rating=gr.status.value,
             rating_expected=None,
-            rationale=gr.reason,  # 'too_soon' / 'expired' / 'currency_mismatch' / None
+            # 'too_soon' | 'expired' | 'currency_mismatch' | 'topic_dissimilar' | None
+            rationale=gr.reason,
             quoted_evidence=None,
             ranked_at=now,
         ))
         if gr.status == GateStatus.FAIL:
-            # Continue past timeline FAIL when must_include_override is set —
-            # the LLM was called, so we have parsed criteria to write.
-            if name == "timeline" and r.must_include_override:
+            # Continue past timeline OR embedding FAIL when must_include_override
+            # is set — rank_pair_v2 bypasses both for must_include matches and
+            # the LLM was actually called, so we have parsed criteria to write.
+            if name in ("timeline", "embedding") and r.must_include_override:
                 continue
             return  # stop — subsequent criteria not evaluated
 

@@ -26,7 +26,9 @@ def pg_container():
     # driver="psycopg" makes get_connection_url() emit `postgresql+psycopg://...`
     # directly. No post-hoc URL rewrite, so the fixture is robust if testcontainers
     # ever changes its default driver.
-    with PostgresContainer("postgres:16", driver="psycopg") as pg:
+    # pgvector/pgvector:pg16 is Postgres 16 with the vector extension preinstalled.
+    # Required for the embedding columns added in migration 0007.
+    with PostgresContainer("pgvector/pgvector:pg16", driver="psycopg") as pg:
         yield pg
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
     BigInteger,
@@ -142,6 +143,10 @@ class Call(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(1024), nullable=True,
+    )
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     source: Mapped[Source] = relationship(back_populates="calls")
 
@@ -195,6 +200,10 @@ class Profile(Base):
     )
     # ISO 4217. NULL = unknown — v2's budget gate treats NULL as no penalty.
     budget_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(1024), nullable=True,
+    )
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Subscription(Base):
@@ -255,6 +264,7 @@ class CallRanking(Base):
     ranked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    embed_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     @hybrid_property
     def display_score(self) -> int:

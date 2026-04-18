@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from dataclasses import dataclass
@@ -115,6 +116,42 @@ from call_monitor.ranking.prompt import (  # noqa: E402
 _QUOTED_EVIDENCE_MAX = 200
 
 
+@functools.lru_cache(maxsize=1)
+def _get_threshold() -> float:
+    """Read the embedding pre-gate threshold from Settings, cached.
+
+    Settings() reads env at construction; Settings is not a singleton in
+    this codebase (see main.py — it's instantiated lazily). Without this
+    cache we'd build a fresh Settings on every rank_pair_v2 call, which
+    is wasteful in a 60-s-tick worker. The cache key is empty so env
+    overrides take effect on process restart (or after an explicit
+    `_get_threshold.cache_clear()`, used by env-override tests).
+
+    Settings has several REQUIRED env vars (DATABASE_URL etc.) and unit
+    tests for rank_pair_v2 don't set them — falling back to the module
+    default in that case keeps the unit tests pure (no env needed) while
+    still letting production / e2e tests pick up EMBEDDING_PREGATE_THRESHOLD.
+    """
+    from call_monitor.ranking.criteria import EMBEDDING_PREGATE_THRESHOLD
+
+    try:
+        from call_monitor.config import Settings
+        return Settings().embedding_pregate_threshold
+    except Exception as e:  # noqa: BLE001 — fall back gracefully on any Settings load failure
+        # WARN (not exception) — no stack trace needed; this is an expected
+        # path when Settings env vars aren't set (unit tests). In production
+        # we want operator visibility if Settings ever fails to load.
+        _logger.warning(
+            "ranking.embedding_threshold_fallback",
+            extra={
+                "event": "embedding_threshold_fallback",
+                "reason": str(e),
+                "fallback_value": EMBEDDING_PREGATE_THRESHOLD,
+            },
+        )
+        return EMBEDDING_PREGATE_THRESHOLD
+
+
 @dataclass(frozen=True)
 class RankResultV2:
     """Output of rank_pair_v2 — richer than v1's RankResult so the worker
@@ -129,6 +166,13 @@ class RankResultV2:
     model: str
     prompt_version: str
     raw_response: dict             # full LLM envelope (for debugging) or {} on short-circuit
+    # Cosine similarity between profile.embedding and call.embedding at the
+    # time of ranking. None when either vector was missing OR the two were
+    # embedded under different models (Codex H2 — meaningless cosine).
+    # Persisted on every result path (clean LLM, gate FAIL, must_include
+    # bypass) for downstream analysis. Default None so existing
+    # constructors don't break.
+    embed_similarity: float | None = None
 
 
 def rank_pair_v2(
@@ -153,17 +197,37 @@ def rank_pair_v2(
     On LLM parse failure, raises ParseV2Error (caller decides retry /
     dead-letter). On Ollama failure, raises LLMError.
     """
-    gates = evaluate_gates(profile, call, now=now)
+    # Embedding pre-gate input: cosine of the two stored vectors. Returns
+    # None (→ UNKNOWN gate → LLM runs) when either vector is missing OR
+    # the two were embedded under different models (Codex H2). Cosine
+    # between mismatched-model vectors is meaningless; treating as
+    # UNKNOWN is the safe fallback. Operator should run the backfill CLI
+    # to bring everything to the current model.
+    embed_sim = _safe_cosine(profile, call)
+
+    gates = evaluate_gates(
+        profile, call, now=now,
+        embed_similarity=embed_sim,
+        embedding_threshold=_get_threshold(),
+    )
     must_include_match = _call_matches_must_include(profile, call)
 
     # Budget/TRL fail unconditionally (must_include doesn't override these).
     if gates.budget.status == GateStatus.FAIL:
-        return _gate_fail_result(gates, "budget", must_include_match)
+        return _gate_fail_result(gates, "budget", must_include_match,
+                                 embed_similarity=embed_sim)
     if gates.trl.status == GateStatus.FAIL:
-        return _gate_fail_result(gates, "trl", must_include_match)
+        return _gate_fail_result(gates, "trl", must_include_match,
+                                 embed_similarity=embed_sim)
     # Timeline fail short-circuits ONLY when must_include doesn't match.
     if gates.timeline.status == GateStatus.FAIL and not must_include_match:
-        return _gate_fail_result(gates, "timeline", must_include_match)
+        return _gate_fail_result(gates, "timeline", must_include_match,
+                                 embed_similarity=embed_sim)
+    # Embedding fail short-circuits ONLY when must_include doesn't match
+    # (mirrors the timeline bypass — must_include is a topic-force-include).
+    if gates.embedding.status == GateStatus.FAIL and not must_include_match:
+        return _gate_fail_result(gates, "embedding", must_include_match,
+                                 embed_similarity=embed_sim)
 
     messages = build_messages_v2(profile=profile, call=call)
     envelope = client.chat(
@@ -199,10 +263,17 @@ def rank_pair_v2(
         model=client.model,
         prompt_version=PROMPT_VERSION_V2,
         raw_response=envelope,
+        embed_similarity=embed_sim,
     )
 
 
-def _gate_fail_result(gates: Gates, reason: str, must_include_match: bool) -> RankResultV2:
+def _gate_fail_result(
+    gates: Gates,
+    reason: str,
+    must_include_match: bool,
+    *,
+    embed_similarity: float | None = None,
+) -> RankResultV2:
     return RankResultV2(
         score=0,
         reason=reason,
@@ -214,6 +285,7 @@ def _gate_fail_result(gates: Gates, reason: str, must_include_match: bool) -> Ra
         model="",
         prompt_version=PROMPT_VERSION_V2,
         raw_response={},
+        embed_similarity=embed_similarity,
     )
 
 
@@ -272,4 +344,33 @@ def _verify_quoted_evidence(parsed: ParsedV2, call) -> ParsedV2:
         topic_fit_quoted=_verify_one(parsed.topic_fit_quoted),
         eligibility_quoted=_verify_one(parsed.eligibility_quoted),
         exclusions_quoted=_verify_one(parsed.exclusions_quoted),
+    )
+
+
+def _safe_cosine(profile, call) -> float | None:
+    """Compute cosine but return None on missing vectors OR model mismatch.
+
+    A model mismatch (one vector under bge-m3, the other under e.g.
+    bge-m3-v2) yields meaningless cosine — treat as UNKNOWN. Logged at
+    WARNING level so an operator notices and runs the backfill CLI.
+    """
+    from call_monitor.embeddings.similarity import cosine
+
+    p_model = getattr(profile, "embedding_model", None)
+    c_model = getattr(call, "embedding_model", None)
+    if p_model is not None and c_model is not None and p_model != c_model:
+        _logger.warning(
+            "ranking.embedding_model_mismatch",
+            extra={
+                "event": "embedding_model_mismatch",
+                "profile_id": getattr(profile, "id", None),
+                "call_id": getattr(call, "id", None),
+                "profile_model": p_model,
+                "call_model": c_model,
+            },
+        )
+        return None
+    return cosine(
+        getattr(profile, "embedding", None),
+        getattr(call, "embedding", None),
     )

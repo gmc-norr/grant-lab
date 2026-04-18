@@ -189,3 +189,259 @@ def test_rank_pair_v2_must_include_match_requires_term_in_text():
     assert r.score == 0
     assert r.reason == "timeline"
     assert r.must_include_override is False
+
+
+# ---------------------------------------------------------------------------
+# Plan D Task 5 — embedding pre-gate integration
+# ---------------------------------------------------------------------------
+
+def _happy_path_v2_client():
+    """Clean LLM response with logprobs that yield expected ~4.0 → score 80."""
+    return _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        },
+        logprobs=[
+            {"token": "4", "logprob": -0.05, "top_logprobs": [
+                {"token": "4", "logprob": -0.05},
+                {"token": "5", "logprob": -3.0},
+                {"token": "3", "logprob": -3.5},
+            ]},
+        ],
+    )
+
+
+def _make_profile(*, embedding, embedding_model, structured=None, description="desc"):
+    """Build a SimpleNamespace profile with all the attributes rank_pair_v2 +
+    build_messages_v2 need."""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        id=1,
+        name="P",
+        description=description,
+        kind=SimpleNamespace(value="group"),
+        structured=structured if structured is not None else {},
+        budget_currency=None,
+        ranking_scheme="v2",
+        embedding=embedding,
+        embedding_model=embedding_model,
+    )
+
+
+def _make_call(*, embedding, embedding_model, title="T", summary="S", full_text="F",
+               deadline_days=30):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        id=1,
+        title=title,
+        summary=summary,
+        full_text=full_text,
+        programme=None,
+        deadline=datetime.now(UTC) + timedelta(days=deadline_days),
+        budget_min=None, budget_max=None, currency=None,
+        structured={}, keywords=[],
+        embedding=embedding,
+        embedding_model=embedding_model,
+    )
+
+
+def test_rank_pair_v2_short_circuits_on_low_cosine_similarity():
+    """Embedding gate FAIL: cosine 0.10 < 0.30 → score 0, reason 'embedding',
+    LLM never called."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    profile = _make_profile(
+        embedding=[1.0, 0.0, 0.0] + [0.0] * 1021,
+        embedding_model="bge-m3",
+        description="research desc",
+    )
+    call = _make_call(
+        embedding=[0.1, 0.99, 0.0] + [0.0] * 1021,
+        embedding_model="bge-m3",
+        title="Off-topic call",
+        summary="EV charging",
+        full_text="x",
+    )
+
+    client = MagicMock()
+    client.chat.side_effect = AssertionError("LLM should not be called for embedding-FAIL")
+
+    result = rank_pair_v2(client=client, profile=profile, call=call, now=datetime.now(UTC))
+    assert result.score == 0
+    assert result.reason == "embedding"
+    assert result.embed_similarity is not None
+    assert result.embed_similarity < 0.30
+
+
+def test_rank_pair_v2_persists_embed_similarity_on_clean_path():
+    """Even on clean LLM-completion paths, embed_similarity is set on the result."""
+    from datetime import UTC, datetime
+
+    profile = _make_profile(
+        embedding=[1.0] + [0.0] * 1023,
+        embedding_model="bge-m3",
+        description="cancer research",
+    )
+    call = _make_call(
+        embedding=[0.95, 0.31] + [0.0] * 1022,  # cosine ~0.95
+        embedding_model="bge-m3",
+        title="On-topic call",
+        summary="cancer biomarker",
+        full_text="cancer",
+    )
+
+    client = _happy_path_v2_client()
+
+    result = rank_pair_v2(client=client, profile=profile, call=call, now=datetime.now(UTC))
+    assert result.embed_similarity is not None
+    assert result.embed_similarity > 0.9
+
+
+def test_rank_pair_v2_falls_through_to_llm_when_either_embedding_missing():
+    """Either embedding NULL → cosine None → UNKNOWN gate → LLM runs."""
+    from datetime import UTC, datetime
+
+    profile = _make_profile(
+        embedding=None,  # MISSING
+        embedding_model=None,
+    )
+    call = _make_call(
+        embedding=[0.5] * 1024,
+        embedding_model="bge-m3",
+    )
+
+    client = _happy_path_v2_client()
+
+    result = rank_pair_v2(client=client, profile=profile, call=call, now=datetime.now(UTC))
+    # LLM was called; score reflects the rubric path.
+    assert result.score > 0
+    assert result.reason is None
+    # No similarity recorded.
+    assert result.embed_similarity is None
+
+
+def test_rank_pair_v2_returns_none_similarity_on_model_mismatch(caplog):
+    """Codex H2 regression: profile embedded under bge-m3-old, call under bge-m3 →
+    cosine is meaningless → return None → UNKNOWN gate → LLM runs. WARN log emitted
+    so operator runs the backfill CLI."""
+    import logging
+    from datetime import UTC, datetime
+
+    profile = _make_profile(
+        embedding=[1.0] + [0.0] * 1023,
+        embedding_model="bge-m3-old",
+        description="cancer",
+    )
+    call = _make_call(
+        embedding=[1.0] + [0.0] * 1023,
+        embedding_model="bge-m3",
+        title="On-topic",
+        summary="cancer",
+        full_text="cancer",
+    )
+    call.id = 42
+
+    client = _happy_path_v2_client()
+
+    with caplog.at_level(logging.WARNING, logger="call_monitor.ranking.rank_pair"):
+        result = rank_pair_v2(client=client, profile=profile, call=call, now=datetime.now(UTC))
+
+    # LLM ran (gate was UNKNOWN, not FAIL)
+    assert result.score > 0
+    assert result.reason is None
+    # Similarity NOT recorded (we couldn't compute a meaningful one)
+    assert result.embed_similarity is None
+    # Warning emitted
+    assert any(
+        "embedding_model_mismatch" in (r.getMessage() or "")
+        or "embedding_model_mismatch" in r.message
+        for r in caplog.records
+    )
+
+
+def test_rank_pair_v2_must_include_bypasses_embedding_gate():
+    """A must_include keyword match bypasses the embedding gate, just like timeline."""
+    from datetime import UTC, datetime
+
+    profile = _make_profile(
+        embedding=[1.0, 0.0, 0.0] + [0.0] * 1021,
+        embedding_model="bge-m3",
+        structured={"must_include": ["ferroptosis"]},
+    )
+    call = _make_call(
+        embedding=[0.05, 1.0, 0.0] + [0.0] * 1021,  # cosine ~0.05 — would FAIL gate
+        embedding_model="bge-m3",
+        title="Ferroptosis study",
+        summary="x",
+        full_text="x",
+    )
+
+    client = _happy_path_v2_client()
+
+    result = rank_pair_v2(client=client, profile=profile, call=call, now=datetime.now(UTC))
+    # Bypassed: LLM ran, score is from rubric, not 0.
+    assert result.score > 0
+    assert result.reason is None
+    assert result.must_include_override is True
+    # Similarity still recorded.
+    assert result.embed_similarity is not None
+
+
+def test_rank_pair_v2_embedding_threshold_respects_env_override(monkeypatch):
+    """EMBEDDING_PREGATE_THRESHOLD env var actually changes the gate cutoff.
+
+    Cosine ~0.4 is well above the 0.30 default (would PASS) but below an
+    env-overridden 0.5 (must FAIL). Proves the Settings value is threaded
+    through evaluate_gates rather than the hardcoded module constant
+    being silently used."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from call_monitor.ranking import rank_pair as rp_mod
+
+    # Required Settings env vars so Settings() can be constructed at all.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    # The actual override under test.
+    monkeypatch.setenv("EMBEDDING_PREGATE_THRESHOLD", "0.5")
+
+    # Bust the lru_cache so the new env value is read.
+    rp_mod._get_threshold.cache_clear()
+
+    # Build a profile/call pair with cosine ~0.4 (below 0.5, above 0.3).
+    # cos(theta) for [1, 0, ...] vs [0.4, sqrt(1-0.16), 0, ...] = 0.4
+    import math
+
+    profile = _make_profile(
+        embedding=[1.0] + [0.0] * 1023,
+        embedding_model="bge-m3",
+        description="x",
+    )
+    call = _make_call(
+        embedding=[0.4, math.sqrt(1 - 0.16)] + [0.0] * 1022,
+        embedding_model="bge-m3",
+    )
+
+    client = MagicMock()
+    client.chat.side_effect = AssertionError(
+        "LLM should not be called: env-overridden threshold should FAIL the gate"
+    )
+
+    try:
+        result = rank_pair_v2(
+            client=client, profile=profile, call=call, now=datetime.now(UTC),
+        )
+        assert result.score == 0
+        assert result.reason == "embedding"
+        # Sanity: cosine actually was in the (0.30, 0.50) window.
+        assert result.embed_similarity is not None
+        assert 0.30 < result.embed_similarity < 0.50
+    finally:
+        # Clear cache so subsequent tests fall back to the module default.
+        rp_mod._get_threshold.cache_clear()

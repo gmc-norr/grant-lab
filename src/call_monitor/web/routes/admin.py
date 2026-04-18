@@ -188,11 +188,17 @@ def ranking_compare(
         # NOT NULL backing column — display_score is an expression that
         # only evaluates non-NULL when both inputs are non-NULL (i.e.,
         # the joined v1/v2 row exists at all).
+        # embed_similarity is selected per-scheme so the operator can spot
+        # LLM/embedding disagreements (high cosine + low LLM score, or vice
+        # versa) — the documented miss-detection signal. v1 will always be
+        # NULL here (v1 doesn't compute it), but selecting both keeps the
+        # column shape symmetric and future-proofs against a hypothetical
+        # v1 backfill.
         rows = session.execute(
             select(
                 Call.id, Call.title, Call.url,
-                v1.display_score, v1.rationale,
-                v2.display_score, v2.rationale,
+                v1.display_score, v1.rationale, v1.embed_similarity,
+                v2.display_score, v2.rationale, v2.embed_similarity,
             )
             .select_from(Call)
             .join(
@@ -223,13 +229,15 @@ def ranking_compare(
                 "url": url,
                 "v1_score": v1s,
                 "v1_rationale": v1r,
+                "v1_cosine": v1_sim,
                 "v2_score": v2s,
                 "v2_rationale": v2r,
+                "v2_cosine": v2_sim,
                 "delta": (
                     abs(v1s - v2s) if v1s is not None and v2s is not None else None
                 ),
             }
-            for cid, title, url, v1s, v1r, v2s, v2r in rows
+            for cid, title, url, v1s, v1r, v1_sim, v2s, v2r, v2_sim in rows
         ]
         profile_name = profile_obj.name
         session.expunge_all()

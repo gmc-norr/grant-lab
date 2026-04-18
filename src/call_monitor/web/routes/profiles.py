@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -8,6 +9,7 @@ from sqlalchemy import select
 
 from call_monitor.auth.dependencies import get_current_user
 from call_monitor.db.models import Profile, ProfileKind, User
+from call_monitor.embeddings.refresh import refresh_profile_embedding
 from call_monitor.profiles.bootstrap import bootstrap_profile
 from call_monitor.profiles.pubmed import PubMedClient
 from call_monitor.profiles.seed import Member, SeedInput
@@ -15,6 +17,8 @@ from call_monitor.ranking.backfill import backfill_profile
 from call_monitor.ranking.ollama_client import OllamaClient
 
 router = APIRouter()
+
+_logger = logging.getLogger(__name__)
 
 
 @router.get("/profiles", response_class=HTMLResponse)
@@ -94,6 +98,24 @@ def profile_new_submit(
         session.refresh(profile)
         new_id = profile.id
 
+    # Embed the new profile sync so the next ingest tick (which enqueues jobs
+    # against every active profile) sees a populated embedding. Best-effort:
+    # on failure we log and proceed; the daily refresh-missing tick re-tries.
+    embed_client = request.app.state.embed_client
+    try:
+        with session_factory() as s:
+            refresh_profile_embedding(s, embed_client, new_id)
+            s.commit()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning(
+            "profile.embedding_refresh_failed",
+            extra={
+                "event": "profile_embedding_refresh_failed",
+                "profile_id": new_id,
+                "error": str(e),
+            },
+        )
+
     return RedirectResponse(url=f"/profiles/{new_id}/edit", status_code=303)
 
 
@@ -154,11 +176,21 @@ def profile_edit_submit(
     if len(description) > 50_000:
         raise HTTPException(status_code=413, detail="description too long (max 50 KB)")
     session_factory = request.app.state.session_factory
+    description_changed = False
     with session_factory() as session:
         p = session.get(Profile, profile_id)
         if p is None:
             raise HTTPException(status_code=404, detail="profile not found")
+        # Capture pre-mutation value for the change-detection below. Compare
+        # on stripped form so whitespace-only edits don't trigger a needless
+        # re-embed (build_profile_text strips anyway).
+        old_description = p.description or ""
         p.description = description
+        # Capture the change-detection flag at the moment of mutation so
+        # intent isn't load-bearing on commit ordering — a future contributor
+        # adding work between this assignment and the commit (or moving the
+        # commit earlier) won't accidentally invalidate the comparison.
+        description_changed = old_description.strip() != description.strip()
         p.structured = {
             "areas": _split_lines(areas),
             "budget_min": _int_or_none(budget_min),
@@ -183,6 +215,29 @@ def profile_edit_submit(
             if requested in {"v1", "v2"}:
                 p.ranking_scheme = requested
         session.commit()
+
+    # Re-embed sync if the description actually changed. Codex H1: this MUST
+    # happen BEFORE backfill_profile() so the freshly-enqueued ranking jobs
+    # see the new embedding (and not the stale one from the pre-edit
+    # description). Skip when only the rubric (areas/must_include/etc.)
+    # changed — those don't feed into the embedding text.
+    if description_changed:
+        embed_client = request.app.state.embed_client
+        try:
+            with session_factory() as s:
+                refresh_profile_embedding(s, embed_client, profile_id)
+                s.commit()
+        except Exception as e:  # noqa: BLE001
+            _logger.warning(
+                "profile.embedding_refresh_failed",
+                extra={
+                    "event": "profile_embedding_refresh_failed",
+                    "profile_id": profile_id,
+                    "error": str(e),
+                },
+            )
+            # Don't abort — backfill still runs, embedding gate becomes UNKNOWN
+            # and the LLM runs as the safe fallback. Daily refresh tick re-tries.
 
     # Backfill is unconditional on every save (idempotent at DB level via
     # the partial unique index on (call_id, profile_id, scheme)). When

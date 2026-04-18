@@ -96,3 +96,69 @@ def _run_round_trip(engine, alembic_cfg):
     with engine.begin() as conn:
         rows = conn.execute(text("SELECT scheme, aggregate_score FROM call_rankings")).fetchall()
     assert rows == [("v1", 70)]
+    # Restore head so subsequent tests see the full schema.
+    command.upgrade(alembic_cfg, "head")
+
+
+def test_0007_adds_pgvector_columns_and_partial_indexes(migrated_engine):
+    """After alembic upgrade head, pgvector columns and partial NULL indexes exist."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(migrated_engine)
+
+    cols_calls = {c["name"] for c in insp.get_columns("calls")}
+    cols_profiles = {c["name"] for c in insp.get_columns("profiles")}
+    cols_rankings = {c["name"] for c in insp.get_columns("call_rankings")}
+    assert "embedding" in cols_calls
+    assert "embedding_model" in cols_calls
+    assert "embedding" in cols_profiles
+    assert "embedding_model" in cols_profiles
+    assert "embed_similarity" in cols_rankings
+
+    # Partial indexes: querying pg_indexes is the cleanest check.
+    with migrated_engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE indexname IN ('ix_calls_embedding_null', 'ix_profiles_embedding_null')"
+        )).all()
+    assert {r[0] for r in rows} == {
+        "ix_calls_embedding_null",
+        "ix_profiles_embedding_null",
+    }
+
+
+def test_0007_extension_vector_installed(migrated_engine):
+    """pgvector extension is installed and the vector type usable."""
+    from sqlalchemy import text
+
+    with migrated_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT extname FROM pg_extension WHERE extname='vector'")
+        ).all()
+    assert len(rows) == 1
+
+
+def test_0007_check_constraint_rejects_orphan_embedding(pg_session_factory):
+    """Setting embedding without embedding_model (or vice versa) must fail."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+
+    from call_monitor.db.models import Call, Source
+
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="ck-1", url="https://x", title="T",
+            published_at=datetime.now(UTC),
+            embedding=[0.1] * 1024,
+            embedding_model=None,  # orphan — should violate CHECK
+        )
+        s.add(c)
+        try:
+            s.commit()
+        except IntegrityError as e:
+            assert "ck_calls_embedding_model_paired" in str(e)
+        else:
+            raise AssertionError("CHECK constraint should have rejected orphan embedding")

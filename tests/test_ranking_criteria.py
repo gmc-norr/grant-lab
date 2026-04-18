@@ -133,3 +133,68 @@ def test_trl_unknown_when_either_side_missing():
         now=_NOW,
     )
     assert g.trl.status == GateStatus.UNKNOWN
+
+
+# --- Embedding gate ---
+
+def test_embedding_gate_passes_above_threshold():
+    from call_monitor.ranking.criteria import EMBEDDING_PREGATE_THRESHOLD, GateStatus, _embedding
+    g = _embedding(EMBEDDING_PREGATE_THRESHOLD + 0.01)
+    assert g.status == GateStatus.PASS
+
+
+def test_embedding_gate_fails_below_threshold():
+    from call_monitor.ranking.criteria import EMBEDDING_PREGATE_THRESHOLD, GateStatus, _embedding
+    g = _embedding(EMBEDDING_PREGATE_THRESHOLD - 0.01)
+    assert g.status == GateStatus.FAIL
+    assert g.reason == "topic_dissimilar"
+
+
+def test_embedding_gate_passes_at_exact_threshold():
+    """Spec: >= threshold passes. Exactly-equal is PASS."""
+    from call_monitor.ranking.criteria import EMBEDDING_PREGATE_THRESHOLD, GateStatus, _embedding
+    g = _embedding(EMBEDDING_PREGATE_THRESHOLD)
+    assert g.status == GateStatus.PASS
+
+
+def test_embedding_gate_unknown_when_similarity_is_none():
+    """Missing embedding (model down or backfill incomplete) -> UNKNOWN,
+    not FAIL. Caller falls through to LLM."""
+    from call_monitor.ranking.criteria import GateStatus, _embedding
+    g = _embedding(None)
+    assert g.status == GateStatus.UNKNOWN
+
+
+def test_evaluate_gates_includes_embedding_field():
+    """Gates dataclass now has 4 fields, embedding being the new one."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from call_monitor.ranking.criteria import Gates, evaluate_gates
+
+    profile = SimpleNamespace(structured={}, budget_currency=None)
+    call = SimpleNamespace(
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None,
+        structured={},
+    )
+    gates = evaluate_gates(profile, call, now=datetime.now(UTC), embed_similarity=0.5)
+    assert isinstance(gates, Gates)
+    assert hasattr(gates, "embedding")
+    assert gates.embedding.status.value == "pass"
+
+
+def test_evaluate_gates_default_embed_similarity_none_yields_unknown():
+    """Backwards-compat: callers that don't pass embed_similarity get UNKNOWN."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from call_monitor.ranking.criteria import GateStatus, evaluate_gates
+
+    profile = SimpleNamespace(structured={}, budget_currency=None)
+    call = SimpleNamespace(
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None, structured={},
+    )
+    gates = evaluate_gates(profile, call, now=datetime.now(UTC))
+    assert gates.embedding.status == GateStatus.UNKNOWN
