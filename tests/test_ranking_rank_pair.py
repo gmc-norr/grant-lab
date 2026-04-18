@@ -1,13 +1,19 @@
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 
 import httpx
 
 from call_monitor.ranking.ollama_client import OllamaClient
-from call_monitor.ranking.rank_pair import RankResult, rank_pair
+from call_monitor.ranking.rank_pair import RankResult
+from call_monitor.ranking.rank_pair import rank_pair as _rank_pair
 
 _NOW = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+# Mirrors Settings.embedding_pregate_threshold default. Most tests don't tune
+# the threshold; they just need *some* value because rank_pair now requires it.
+_DEFAULT_EMBEDDING_THRESHOLD = 0.30
+rank_pair = partial(_rank_pair, embedding_threshold=_DEFAULT_EMBEDDING_THRESHOLD)
 
 
 @dataclass
@@ -389,33 +395,17 @@ def test_rank_pair_must_include_bypasses_embedding_gate():
     assert result.embed_similarity is not None
 
 
-def test_rank_pair_embedding_threshold_respects_env_override(monkeypatch):
-    """EMBEDDING_PREGATE_THRESHOLD env var actually changes the gate cutoff.
-
-    Cosine ~0.4 is well above the 0.30 default (would PASS) but below an
-    env-overridden 0.5 (must FAIL). Proves the Settings value is threaded
-    through evaluate_gates rather than the hardcoded module constant
-    being silently used."""
+def test_rank_pair_threshold_kwarg_actually_changes_the_gate_cutoff():
+    """Threading a custom embedding_threshold into rank_pair changes the
+    gate cutoff. Cosine ~0.4 PASSes the default 0.30 but FAILs at 0.50,
+    proving the kwarg is honoured (the single source of truth — there is
+    no module-level constant or lru_cache to silently shadow it)."""
+    import math
     from datetime import UTC, datetime
     from unittest.mock import MagicMock
 
-    from call_monitor.ranking import rank_pair as rp_mod
-
-    # Required Settings env vars so Settings() can be constructed at all.
-    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    # The actual override under test.
-    monkeypatch.setenv("EMBEDDING_PREGATE_THRESHOLD", "0.5")
-
-    # Bust the lru_cache so the new env value is read.
-    rp_mod._get_threshold.cache_clear()
-
-    # Build a profile/call pair with cosine ~0.4 (below 0.5, above 0.3).
+    # Build a profile/call pair with cosine ~0.4 (above 0.30, below 0.50).
     # cos(theta) for [1, 0, ...] vs [0.4, sqrt(1-0.16), 0, ...] = 0.4
-    import math
-
     profile = _make_profile(
         embedding=[1.0] + [0.0] * 1023,
         embedding_model="bge-m3",
@@ -428,18 +418,31 @@ def test_rank_pair_embedding_threshold_respects_env_override(monkeypatch):
 
     client = MagicMock()
     client.chat.side_effect = AssertionError(
-        "LLM should not be called: env-overridden threshold should FAIL the gate"
+        "LLM should not be called: threshold=0.5 must FAIL the embedding gate"
     )
 
-    try:
-        result = rank_pair(
-            client=client, profile=profile, call=call, now=datetime.now(UTC),
-        )
-        assert result.score == 0
-        assert result.reason == "embedding"
-        # Sanity: cosine actually was in the (0.30, 0.50) window.
-        assert result.embed_similarity is not None
-        assert 0.30 < result.embed_similarity < 0.50
-    finally:
-        # Clear cache so subsequent tests fall back to the module default.
-        rp_mod._get_threshold.cache_clear()
+    # Note: bypass the partial-wrapped `rank_pair` — we want to set the
+    # threshold explicitly, not inherit the test-default of 0.30.
+    result = _rank_pair(
+        client=client, profile=profile, call=call, now=datetime.now(UTC),
+        embedding_threshold=0.5,
+    )
+    assert result.score == 0
+    assert result.reason == "embedding"
+    assert result.embed_similarity is not None
+    assert 0.30 < result.embed_similarity < 0.50
+
+
+def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
+    """The Settings field that callers (worker → rank_pair) read is the
+    single source of truth — it picks up EMBEDDING_PREGATE_THRESHOLD from
+    the environment. (Replaces the old lru_cache-flush test.)"""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("EMBEDDING_PREGATE_THRESHOLD", "0.42")
+
+    from call_monitor.config import Settings
+
+    assert Settings().embedding_pregate_threshold == 0.42

@@ -22,6 +22,7 @@ def test_build_scheduler_returns_one_job_per_active_adapter():
         gemma_model="gemma4:e4b-q8",
         ranking_tick_seconds=60,
         ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )
@@ -44,6 +45,7 @@ def test_build_scheduler_includes_rank_drain_job():
         gemma_model="gemma4:e4b-q8",
         ranking_tick_seconds=60,
         ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )

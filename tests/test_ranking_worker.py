@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from functools import partial
 
 import httpx
 from sqlalchemy import select
@@ -16,7 +17,12 @@ from call_monitor.db.models import (
     User,
 )
 from call_monitor.ranking.ollama_client import OllamaClient
-from call_monitor.ranking.worker import drain_queue
+from call_monitor.ranking.worker import drain_queue as _drain_queue
+
+# Mirrors Settings.embedding_pregate_threshold default. drain_queue now requires
+# the threshold (no module-level constant); tests get the same default via
+# this wrapper.
+drain_queue = partial(_drain_queue, embedding_threshold=0.30)
 
 
 def _seed(s):

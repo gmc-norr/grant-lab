@@ -55,6 +55,7 @@ def build_scheduler(
     gemma_model: str,
     ranking_tick_seconds: int,
     ranking_queue_batch: int,
+    embedding_pregate_threshold: float,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
@@ -120,6 +121,7 @@ def build_scheduler(
         drain_queue(
             session_factory=session_factory,
             client=ollama,
+            embedding_threshold=embedding_pregate_threshold,
             batch_size=ranking_queue_batch,
         )
 

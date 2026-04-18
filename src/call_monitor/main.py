@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI):
         gemma_model=settings.gemma_model,
         ranking_tick_seconds=settings.ranking_tick_seconds,
         ranking_queue_batch=settings.ranking_queue_batch,
+        embedding_pregate_threshold=settings.embedding_pregate_threshold,
         embed_client=app.state.embed_client,
         digest_email_client=digest_email_client,
         digest_settings=settings,

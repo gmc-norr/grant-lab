@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from functools import partial
 
 import httpx
 from sqlalchemy import select
@@ -16,7 +17,11 @@ from call_monitor.db.models import (
     User,
 )
 from call_monitor.ranking.ollama_client import OllamaClient
-from call_monitor.ranking.worker import drain_queue
+from call_monitor.ranking.worker import drain_queue as _drain_queue
+
+# drain_queue now requires embedding_threshold (no module-level default).
+# Mirrors Settings.embedding_pregate_threshold default of 0.30.
+drain_queue = partial(_drain_queue, embedding_threshold=0.30)
 
 
 def _ollama_canned():

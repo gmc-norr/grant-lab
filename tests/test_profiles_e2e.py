@@ -1,3 +1,4 @@
+from functools import partial
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -10,7 +11,10 @@ from call_monitor.profiles.seed import DraftProfile
 from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
 from call_monitor.ranking.prompt import Parsed
 from call_monitor.ranking.rank_pair import RankResult
-from call_monitor.ranking.worker import drain_queue
+from call_monitor.ranking.worker import drain_queue as _drain_queue
+
+# drain_queue now requires embedding_threshold (no module-level default).
+drain_queue = partial(_drain_queue, embedding_threshold=0.30)
 
 
 def _stub_rank_pair_returning(score: int = 80):

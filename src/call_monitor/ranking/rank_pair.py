@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import logging
 from dataclasses import dataclass
 from dataclasses import replace as _replace
@@ -22,42 +21,6 @@ from call_monitor.ranking.prompt import (
 
 _logger = logging.getLogger(__name__)
 _QUOTED_EVIDENCE_MAX = 200
-
-
-@functools.lru_cache(maxsize=1)
-def _get_threshold() -> float:
-    """Read the embedding pre-gate threshold from Settings, cached.
-
-    Settings() reads env at construction; Settings is not a singleton in
-    this codebase (see main.py — it's instantiated lazily). Without this
-    cache we'd build a fresh Settings on every rank_pair call, which is
-    wasteful in a 60-s-tick worker. The cache key is empty so env
-    overrides take effect on process restart (or after an explicit
-    `_get_threshold.cache_clear()`, used by env-override tests).
-
-    Settings has several REQUIRED env vars (DATABASE_URL etc.) and unit
-    tests for rank_pair don't set them — falling back to the module
-    default in that case keeps the unit tests pure (no env needed) while
-    still letting production / e2e tests pick up EMBEDDING_PREGATE_THRESHOLD.
-    """
-    from call_monitor.ranking.criteria import EMBEDDING_PREGATE_THRESHOLD
-
-    try:
-        from call_monitor.config import Settings
-        return Settings().embedding_pregate_threshold
-    except Exception as e:  # noqa: BLE001 — fall back gracefully on any Settings load failure
-        # WARN (not exception) — no stack trace needed; this is an expected
-        # path when Settings env vars aren't set (unit tests). In production
-        # we want operator visibility if Settings ever fails to load.
-        _logger.warning(
-            "ranking.embedding_threshold_fallback",
-            extra={
-                "event": "embedding_threshold_fallback",
-                "reason": str(e),
-                "fallback_value": EMBEDDING_PREGATE_THRESHOLD,
-            },
-        )
-        return EMBEDDING_PREGATE_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -88,6 +51,7 @@ def rank_pair(
     profile,
     call,
     now: datetime,
+    embedding_threshold: float,
 ) -> RankResult:
     """Run gates → LLM → parse → verify quotes → aggregate. Returns a
     structured RankResult.
@@ -115,7 +79,7 @@ def rank_pair(
     gates = evaluate_gates(
         profile, call, now=now,
         embed_similarity=embed_sim,
-        embedding_threshold=_get_threshold(),
+        embedding_threshold=embedding_threshold,
     )
     must_include_match = _call_matches_must_include(profile, call)
 

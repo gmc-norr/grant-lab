@@ -36,11 +36,17 @@ def drain_queue(
     *,
     session_factory: sessionmaker,
     client: OllamaClient | None,
+    embedding_threshold: float,
     batch_size: int = 10,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
     done-or-failed. Returns the number of jobs processed (whether or not
     they succeeded).
+
+    `embedding_threshold` is the cosine cutoff for the v2 embedding
+    pre-gate, threaded through to rank_pair → evaluate_gates. Sole source
+    of truth: Settings.embedding_pregate_threshold (callers in
+    scheduler.py / main.py read it from there).
     """
     # First: requeue any RUNNING jobs that have been stuck past the
     # threshold (a previous worker crashed mid-tick and never reached
@@ -102,6 +108,7 @@ def drain_queue(
                         profile=profile,
                         call=call,
                         now=datetime.now(UTC),
+                        embedding_threshold=embedding_threshold,
                     )
                 except (LLMError, ParseError) as e:
                     terminal = (attempts + 1) >= MAX_ATTEMPTS
