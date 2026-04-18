@@ -76,7 +76,11 @@ def calls_index(
                     & (CallRanking.scheme == profile_obj.ranking_scheme),
                 )
                 .order_by(
-                    CallRanking.aggregate_score.desc().nullslast(),
+                    # display_score = aggregate_score + setwise_offset
+                    # clamped to [0, 100] (per spec line 191). Ordering
+                    # by the displayed score keeps the calls index in sync
+                    # with what the user actually sees in the score column.
+                    CallRanking.display_score.desc().nullslast(),
                     Call.published_at.desc().nullslast(),
                     Call.id.desc(),
                 )

@@ -110,6 +110,54 @@ def test_compare_view_unknown_profile_returns_404(
     assert r.status_code == 404
 
 
+def test_compare_view_uses_display_score_with_setwise_offset(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """C1 regression: ranking-compare must show v2's display_score (offset-
+    adjusted) and compute the v1↔v2 delta against display_score, not bare
+    aggregate. Otherwise the compare view would silently disagree with
+    every other surface (calls index, call detail, digest)."""
+    pid, _ = profile_factory(name="Compare offset")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="CMP-OFFSET", url="https://x/cmp",
+            title="CompareOffsetCall",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v1",
+            aggregate_score=70, setwise_offset=0,  # v1 always 0
+            rationale="v1 baseline",
+            model="m", prompt_version="v1", ranked_at=datetime.now(UTC),
+        ))
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v2",
+            aggregate_score=55, setwise_offset=5,  # display = 60
+            rationale="v2 borderline lifted",
+            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup_admin(monkeypatch, pg_url)
+    client = _admin_cookie(app, pg_session_factory)
+    with client:
+        r = client.get(f"/admin/ranking-compare?profile={pid}")
+    assert r.status_code == 200
+    # v2 column shows the OFFSET-ADJUSTED score (60), not the bare 55.
+    import re
+    row = re.search(
+        r"CompareOffsetCall.*?>70<.*?>60<.*?>10<",
+        r.text, re.DOTALL,
+    )
+    assert row, (
+        "compare view must show v1=70, v2=60 (=55+5), |Δ|=10 (=|70-60|). "
+        "If we read the bare aggregate, v2 would be 55 and Δ would be 15."
+    )
+
+
 def test_compare_view_renders_em_dash_when_only_one_scheme(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):

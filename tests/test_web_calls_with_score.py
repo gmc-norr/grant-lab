@@ -147,6 +147,66 @@ def test_root_inactive_profile_degrades_to_unranked(
     assert "Should be hidden" in r.text
 
 
+def test_root_orders_by_display_score_with_setwise_offset(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """C1 regression: when two v2 borderline calls have equal aggregate_score
+    but different setwise_offset, the +offset row must sort ahead of the
+    -offset row in the calls index. Without display_score in the ORDER BY,
+    setwise's daily ±5 nudge would be invisible to users.
+
+    Also asserts the displayed score in the Score column is the offset-
+    adjusted value, not the bare aggregate.
+    """
+    from call_monitor.db.models import CallRanking, Profile
+    pid, _ = profile_factory(name="V2 ordered")
+    with pg_session_factory() as s:
+        # Profile must be on v2 — calls index joins on the active scheme.
+        s.get(Profile, pid).ranking_scheme = "v2"
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        # Two calls, both aggregate=55. cA gets +5, cB gets -5 → display
+        # 60 vs 50 → cA must sort first.
+        cA = Call(
+            source_id=src.id, external_id="setwise-A", url="https://x/a",
+            title="OffsetPlus", published_at=datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        cB = Call(
+            source_id=src.id, external_id="setwise-B", url="https://x/b",
+            title="OffsetMinus", published_at=datetime(2026, 4, 2, tzinfo=UTC),
+        )
+        s.add_all([cA, cB])
+        s.flush()
+        s.add(CallRanking(
+            call_id=cA.id, profile_id=pid, scheme="v2",
+            aggregate_score=55, setwise_offset=5,
+            rationale="r", model="m", prompt_version="v2.0",
+            ranked_at=datetime.now(UTC),
+        ))
+        s.add(CallRanking(
+            call_id=cB.id, profile_id=pid, scheme="v2",
+            aggregate_score=55, setwise_offset=-5,
+            rationale="r", model="m", prompt_version="v2.0",
+            ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/?profile={pid}")
+    assert r.status_code == 200
+    body = r.text
+    # OffsetPlus (display 60) sorts before OffsetMinus (display 50).
+    assert body.index("OffsetPlus") < body.index("OffsetMinus"), (
+        "display_score not driving ORDER BY: OffsetPlus (display 60) "
+        "should sort ahead of OffsetMinus (display 50) when bare "
+        "aggregates are tied at 55."
+    )
+    # Displayed score column shows the offset-adjusted value.
+    assert ">60<" in body, "expected display_score 60 (=55+5) in Score column"
+    assert ">50<" in body, "expected display_score 50 (=55-5) in Score column"
+
+
 def test_dashboard_ranked_feed_filters_by_profile_ranking_scheme(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):

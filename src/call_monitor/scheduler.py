@@ -174,9 +174,9 @@ def build_scheduler(
     )
 
     def _golden_tick() -> None:
-        # Lazy import: Task 6 ships call_monitor.ranking.eval after this task.
-        # Importing inside the job body lets Task 4 land first; the import
-        # only fires when the scheduled job actually runs.
+        # Lazy import: keeps scheduler module-load cheap and dodges any
+        # potential cycle via ranking → db → web. The import only fires
+        # when the scheduled job actually runs (weekly).
         from call_monitor.ranking.eval import run_golden_set_eval
 
         try:

@@ -18,10 +18,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    case,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -253,6 +255,46 @@ class CallRanking(Base):
     ranked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+    @hybrid_property
+    def display_score(self) -> int:
+        """User-visible score = aggregate_score + setwise_offset, clamped to
+        [0, 100]. v1 rows always have setwise_offset == 0 (no setwise pass
+        runs against v1) so display_score == aggregate_score there. v2 rows
+        in the borderline band may differ by ±5 after the daily setwise pass.
+
+        Per spec line 191: "final displayed score is `aggregate_score +
+        setwise_offset`, clamped to [0, 100]". All render and ordering
+        paths read this; the BARE `aggregate_score` is reserved for write
+        paths and the setwise borderline-band membership filter (the
+        membership is intentionally defined on the un-offset score so
+        offsets can't oscillate calls in/out of the band on subsequent
+        passes).
+        """
+        raw = (self.aggregate_score or 0) + (self.setwise_offset or 0)
+        return max(0, min(100, raw))
+
+    @display_score.expression
+    def display_score(cls):
+        """SQL form of display_score so ORDER BY / WHERE clauses can use it.
+        GREATEST(0, LEAST(100, aggregate_score + setwise_offset)) is the
+        Postgres clamp idiom.
+
+        Critical: Postgres `GREATEST` / `LEAST` IGNORE NULL inputs (unlike
+        arithmetic, which propagates them). A bare LEFT JOIN to
+        call_rankings produces NULL aggregate_score for unranked calls;
+        without the CASE guard, GREATEST(0, LEAST(100, NULL)) collapses
+        to 0 and unranked rows sort as score=0 instead of NULLS LAST.
+        The CASE makes display_score NULL whenever aggregate_score is
+        NULL, restoring the same NULL semantics as the bare column.
+        """
+        return case(
+            (cls.aggregate_score.is_(None), None),
+            else_=func.greatest(
+                0,
+                func.least(100, cls.aggregate_score + cls.setwise_offset),
+            ),
+        )
 
 
 class RankingJob(Base):

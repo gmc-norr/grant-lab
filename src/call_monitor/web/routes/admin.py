@@ -178,11 +178,21 @@ def ranking_compare(
         # Postgres puts NULLs last on DESC by default — exactly what we want
         # (rows with a v2 score sort first; v1-only rows fall back to v1).
         # No need to add `.nulls_last()` defensively.
+        #
+        # display_score = aggregate_score + setwise_offset clamped to
+        # [0, 100] (per spec line 191). v1 setwise_offset is always 0 so
+        # v1.display_score == v1.aggregate_score; v2 may differ by ±5.
+        # Using display_score here keeps the compare view in sync with
+        # what calls index / call detail / digest all surface. The WHERE
+        # IS NOT NULL guard remains on aggregate_score because that's the
+        # NOT NULL backing column — display_score is an expression that
+        # only evaluates non-NULL when both inputs are non-NULL (i.e.,
+        # the joined v1/v2 row exists at all).
         rows = session.execute(
             select(
                 Call.id, Call.title, Call.url,
-                v1.aggregate_score, v1.rationale,
-                v2.aggregate_score, v2.rationale,
+                v1.display_score, v1.rationale,
+                v2.display_score, v2.rationale,
             )
             .select_from(Call)
             .join(
@@ -203,7 +213,7 @@ def ranking_compare(
                 (v1.aggregate_score.is_not(None))
                 | (v2.aggregate_score.is_not(None))
             )
-            .order_by(func.coalesce(v2.aggregate_score, v1.aggregate_score).desc())
+            .order_by(func.coalesce(v2.display_score, v1.display_score).desc())
             .limit(200)
         ).all()
         items = [

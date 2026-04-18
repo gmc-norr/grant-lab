@@ -91,6 +91,52 @@ def test_call_detail_renders_v2_criterion_breakdown(
     assert "AI funding call" in r.text  # quoted evidence
 
 
+def test_call_detail_renders_display_score_with_setwise_offset(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """C1 regression: call detail page must show display_score (= aggregate
+    + setwise_offset, clamped) in the Score line, not the bare aggregate.
+    Otherwise a v2 borderline call lifted from 55 → 60 by setwise would
+    still render 55 here while showing 60 in the calls index — confusing
+    the operator about which value is canonical."""
+    pid, _ = profile_factory(name="V2 score offset")
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        p.ranking_scheme = "v2"
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="DETAIL-OFFSET",
+            url="https://x/detail-offset", title="DetailOffsetCall",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v2",
+            aggregate_score=55, setwise_offset=5,  # display = 60
+            aggregate_reason=None,
+            rationale="borderline lifted by setwise",
+            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+        cid = c.id
+
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/calls/{cid}?profile={pid}")
+    assert r.status_code == 200
+    # Score line shows display_score (60), not bare aggregate (55).
+    assert "<strong>Score:</strong> 60" in r.text, (
+        "call detail Score line must render display_score=60 "
+        "(=aggregate 55 + setwise +5), not the bare aggregate 55"
+    )
+    # Bare aggregate must NOT appear in the Score line specifically. It
+    # may appear elsewhere (e.g. inside other text), so we anchor on the
+    # exact "Score: 55" form.
+    assert "<strong>Score:</strong> 55" not in r.text
+
+
 def test_call_detail_no_breakdown_for_v1_ranking(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):

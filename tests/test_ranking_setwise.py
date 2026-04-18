@@ -324,3 +324,102 @@ def test_setwise_returns_zero_for_v1_profile(pg_session_factory):
         now=datetime.now(UTC),
     )
     assert n == 0
+
+
+def test_setwise_returns_zero_for_inactive_profile(pg_session_factory):
+    """I2 regression: an inactive v2 profile must NOT trigger setwise even
+    if it has 4+ borderline calls. The scheduler tick already filters by
+    is_active, but `run_setwise_for_profile` is the function-of-record
+    and any ad-hoc/test caller must get the same protection.
+
+    Verifies:
+      1. The LLM is never called (handler raises if invoked).
+      2. setwise_offset stays 0 on every borderline row.
+      3. Return value is 0.
+    """
+    with pg_session_factory() as s:
+        pid, cids = _seed_profile_with_borderline_calls(s, scores=[58, 55, 50, 47])
+        # Seed-helper profiles are active by default; flip this one off.
+        s.get(Profile, pid).is_active = False
+        s.commit()
+
+    def handler(req):
+        raise AssertionError("LLM should not be called — profile is inactive")
+    client = OllamaClient(
+        base_url="http://x", model="m",
+        transport=httpx.MockTransport(handler),
+    )
+    n = run_setwise_for_profile(
+        session_factory=pg_session_factory,
+        client=client, profile_id=pid, now=datetime.now(UTC),
+    )
+    assert n == 0
+    with pg_session_factory() as s:
+        offsets = [r.setwise_offset for r in s.execute(select(CallRanking)).scalars().all()]
+    assert all(o == 0 for o in offsets), offsets
+
+
+def test_setwise_drift_skip_when_score_moves_out_of_borderline(pg_session_factory):
+    """I3 regression: between candidate fetch and per-row offset apply, the
+    rank:drain worker may re-rank a call and push its aggregate_score out
+    of the borderline band. We MUST NOT then apply a ±5 offset to a row
+    that's no longer borderline — that would break the band-membership
+    invariant (next pass would still pick it up only if it's in [45, 60),
+    but the offset would have moved a 70-score row to 75 or 65).
+
+    Simulation: handler bumps cids[0]'s aggregate_score to 70 (out of
+    band) immediately before returning the permutation. The setwise
+    writer then attempts to apply +5 offset to cids[0] but the drift
+    guard skips it. The remaining three rows (still in band) get their
+    offsets applied.
+    """
+    with pg_session_factory() as s:
+        pid, cids = _seed_profile_with_borderline_calls(s, scores=[58, 55, 50, 47])
+        s.commit()
+
+    # The handler runs DURING the LLM call — between the candidate fetch
+    # and the per-row write. Mutate cids[0]'s score here to simulate a
+    # concurrent rank:drain re-rank.
+    perm = [cids[0], cids[2], cids[3], cids[1]]
+    body = {
+        "model": "m",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": json.dumps({"order": perm})},
+        }],
+    }
+
+    def handler(req):
+        # Simulate rank:drain bumping cids[0] out of borderline band
+        # mid-pass. Use a fresh session so it commits before the per-row
+        # writer's session reads.
+        with pg_session_factory() as s_concurrent:
+            rk = s_concurrent.get(CallRanking, (cids[0], pid, "v2"))
+            rk.aggregate_score = 70
+            s_concurrent.commit()
+        return httpx.Response(200, json=body)
+
+    client = OllamaClient(
+        base_url="http://x", model="m",
+        transport=httpx.MockTransport(handler),
+    )
+    n = run_setwise_for_profile(
+        session_factory=pg_session_factory,
+        client=client, profile_id=pid, now=datetime.now(UTC),
+    )
+    # Group still applied (the other three rows got offsets); applied
+    # counter is per-group, not per-row.
+    assert n == 1
+
+    with pg_session_factory() as s:
+        rows = {r.call_id: r.setwise_offset for r in s.execute(select(CallRanking)).scalars().all()}
+    # cids[0] was bumped out of band → drift skip → offset stays at the
+    # reset value (0) instead of getting +5 applied.
+    assert rows[cids[0]] == 0, (
+        "drift guard failed: cids[0] is now at score 70 (out of borderline) "
+        "but got an offset applied"
+    )
+    # The other three are still in band → their offsets were applied.
+    assert rows[cids[2]] == SETWISE_OFFSETS[2]
+    assert rows[cids[3]] == SETWISE_OFFSETS[3]
+    assert rows[cids[1]] == SETWISE_OFFSETS[4]

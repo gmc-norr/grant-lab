@@ -55,9 +55,13 @@ def run_setwise_for_profile(
     flip groups daily, making offsets flap.
     """
     # Pass-start reset. One UPDATE scoped to this profile's v2 rows.
+    # `is_active` guard: callers should already filter (the scheduler
+    # tick does), but this is the function-of-record for "run setwise
+    # against a profile" so refuse to run against an inactive profile
+    # in case an ad-hoc script or test reaches us directly.
     with session_factory() as session:
         profile = session.get(Profile, profile_id)
-        if profile is None or profile.ranking_scheme != "v2":
+        if profile is None or not profile.is_active or profile.ranking_scheme != "v2":
             return 0
         session.execute(
             update(CallRanking)
@@ -88,6 +92,13 @@ def run_setwise_for_profile(
         ).all()
         # Re-fetch profile in this session for use in prompt building.
         profile = session.get(Profile, profile_id)
+        # Corner case: profile deleted between the early-bail session and
+        # this re-fetch. Bail with 0 rather than letting the next line
+        # AttributeError on `profile.name`. We've already done the reset
+        # UPDATE above (no-op against zero rows post-deletion-cascade,
+        # so still safe).
+        if profile is None:
+            return 0
         # Snapshot the fields we need so the Profile object isn't bound
         # to a closed session by the time _ask_for_permutation reads it.
         profile_name = profile.name
@@ -102,6 +113,7 @@ def run_setwise_for_profile(
         groups.append([(r[0], r[1], r[2]) for r in rows[i : i + SETWISE_GROUP_SIZE]])
 
     applied = 0
+    drift_skips = 0
     for group in groups:
         perm = _ask_for_permutation(
             client,
@@ -115,10 +127,41 @@ def run_setwise_for_profile(
             for rank, cid in enumerate(perm, start=1):
                 offset = SETWISE_OFFSETS.get(rank, 0)
                 rk = session.get(CallRanking, (cid, profile_id, "v2"))
-                if rk is not None:
-                    rk.setwise_offset = offset
+                if rk is None:
+                    continue
+                # Drift guard: rank:drain may have re-ranked this row mid
+                # setwise pass and pushed its aggregate_score out of the
+                # borderline band. Applying an offset would then move a
+                # non-borderline call by ±5 — a band-membership invariant
+                # violation. Skip and log; the next daily pass will pick
+                # the call up if it's still borderline.
+                if (
+                    rk.aggregate_score < SETWISE_BORDERLINE_LOWER
+                    or rk.aggregate_score >= SETWISE_BORDERLINE_UPPER
+                ):
+                    drift_skips += 1
+                    _logger.debug(
+                        "ranking.setwise.drift_skip",
+                        extra={
+                            "event": "setwise_drift_skip",
+                            "call_id": cid,
+                            "profile_id": profile_id,
+                            "current_score": rk.aggregate_score,
+                        },
+                    )
+                    continue
+                rk.setwise_offset = offset
             session.commit()
         applied += 1
+    if drift_skips:
+        _logger.info(
+            "ranking.setwise.drift_skips_total",
+            extra={
+                "event": "setwise_drift_skips_total",
+                "profile_id": profile_id,
+                "drift_skips": drift_skips,
+            },
+        )
     return applied
 
 

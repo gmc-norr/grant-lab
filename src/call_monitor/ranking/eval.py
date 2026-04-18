@@ -145,7 +145,13 @@ def run_golden_set_eval(
                 ).scalar_one_or_none()
                 if row is None:
                     continue
-                actual.append(float(row.aggregate_score))
+                # Use display_score (= aggregate + setwise, clamped) so
+                # the golden-set tau measures correlation against what
+                # the user actually sees in the UI. For v1 rows
+                # display_score == aggregate_score (no setwise pass);
+                # for v2 borderline rows the offset is exactly what the
+                # operator should see reflected in tau.
+                actual.append(float(row.display_score))
                 expected.append(float(t["expected_score"]))
         return actual, expected
 
