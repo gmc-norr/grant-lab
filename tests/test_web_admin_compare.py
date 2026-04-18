@@ -97,3 +97,71 @@ def test_compare_view_missing_profile_param_returns_400(
     with client:
         r = client.get("/admin/ranking-compare")
     assert r.status_code == 400
+
+
+def test_compare_view_unknown_profile_returns_404(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """profile=<nonexistent id> → 404."""
+    app = _setup_admin(monkeypatch, pg_url)
+    client = _admin_cookie(app, pg_session_factory)
+    with client:
+        r = client.get("/admin/ranking-compare?profile=999999")
+    assert r.status_code == 404
+
+
+def test_compare_view_renders_em_dash_when_only_one_scheme(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """A call with only a v1 ranking shows em-dash for v2 score and delta;
+    a call with only a v2 ranking shows em-dash for v1 score and delta."""
+    pid, _ = profile_factory(name="Single scheme")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        # Call A: v1 only
+        ca = Call(
+            source_id=src.id, external_id="A", url="https://x/a", title="OnlyV1",
+            published_at=datetime.now(UTC),
+        )
+        s.add(ca)
+        s.flush()
+        s.add(CallRanking(
+            call_id=ca.id, profile_id=pid, scheme="v1", aggregate_score=42,
+            rationale="just v1", model="m", prompt_version="v1",
+            ranked_at=datetime.now(UTC),
+        ))
+        # Call B: v2 only
+        cb = Call(
+            source_id=src.id, external_id="B", url="https://x/b", title="OnlyV2",
+            published_at=datetime.now(UTC),
+        )
+        s.add(cb)
+        s.flush()
+        s.add(CallRanking(
+            call_id=cb.id, profile_id=pid, scheme="v2", aggregate_score=88,
+            rationale="just v2", model="m", prompt_version="v2.0",
+            ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup_admin(monkeypatch, pg_url)
+    client = _admin_cookie(app, pg_session_factory)
+    with client:
+        r = client.get(f"/admin/ranking-compare?profile={pid}")
+    assert r.status_code == 200
+    assert "OnlyV1" in r.text
+    assert "OnlyV2" in r.text
+    # Tighten: assert each row has em-dash in the v2/v1 score and delta cells.
+    # Use a regex anchored to the call title.
+    import re
+    # OnlyV1 row: 42 in v1 col, em-dash in v2 col, em-dash in delta col
+    onlyv1 = re.search(
+        r'OnlyV1.*?>42<.*?—.*?—',
+        r.text, re.DOTALL,
+    )
+    assert onlyv1, "OnlyV1 row missing em-dashes for v2 score and delta"
+    onlyv2 = re.search(
+        r'OnlyV2.*?—.*?>88<.*?—',
+        r.text, re.DOTALL,
+    )
+    assert onlyv2, "OnlyV2 row missing em-dashes for v1 score and delta"

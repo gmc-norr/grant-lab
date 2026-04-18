@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
-from call_monitor.auth.dependencies import get_current_user, require_admin
+from call_monitor.auth.dependencies import require_admin
 from call_monitor.db.models import (
     Call,
     CallRanking,
@@ -160,19 +160,20 @@ def admin_rerank(
 def ranking_compare(
     request: Request,
     profile: int | None = None,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(require_admin),  # noqa: B008
 ):
-    if not user.is_admin:
-        raise HTTPException(status_code=403, detail="admin only")
     if profile is None:
         raise HTTPException(status_code=400, detail="profile query param required")
     session_factory = request.app.state.session_factory
     with session_factory() as session:
-        p = session.get(Profile, profile)
-        if p is None:
+        profile_obj = session.get(Profile, profile)
+        if profile_obj is None:
             raise HTTPException(status_code=404, detail="profile not found")
         v1 = aliased(CallRanking)
         v2 = aliased(CallRanking)
+        # Postgres puts NULLs last on DESC by default — exactly what we want
+        # (rows with a v2 score sort first; v1-only rows fall back to v1).
+        # No need to add `.nulls_last()` defensively.
         rows = session.execute(
             select(
                 Call.id, Call.title, Call.url,
@@ -216,7 +217,7 @@ def ranking_compare(
             }
             for cid, title, url, v1s, v1r, v2s, v2r in rows
         ]
-        profile_name = p.name
+        profile_name = profile_obj.name
         session.expunge_all()
 
     return request.app.state.templates.TemplateResponse(
