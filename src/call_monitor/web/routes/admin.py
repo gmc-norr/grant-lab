@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from call_monitor.auth.dependencies import require_admin
 from call_monitor.db.models import (
@@ -42,12 +42,42 @@ def _digest_panel_context(session) -> dict:
     }
 
 
+def _embedding_coverage_context(session, *, current_model: str) -> dict:
+    """Counts of Calls/Profiles missing embeddings or embedded against an
+    older model. Lets ops see at a glance when the embedding pre-gate is
+    silently degrading to UNKNOWN (which masks topic-fit signal)."""
+    call_stale = session.execute(
+        select(func.count(Call.id)).where(
+            or_(Call.embedding.is_(None), Call.embedding_model != current_model)
+        )
+    ).scalar_one()
+    call_total = session.execute(select(func.count(Call.id))).scalar_one()
+    profile_stale = session.execute(
+        select(func.count(Profile.id)).where(
+            or_(Profile.embedding.is_(None), Profile.embedding_model != current_model)
+        )
+    ).scalar_one()
+    profile_total = session.execute(select(func.count(Profile.id))).scalar_one()
+    return {
+        "embedding_coverage": {
+            "call_stale": call_stale,
+            "call_total": call_total,
+            "call_embedded": call_total - call_stale,
+            "profile_stale": profile_stale,
+            "profile_total": profile_total,
+            "profile_embedded": profile_total - profile_stale,
+            "current_model": current_model,
+        }
+    }
+
+
 @router.get("/admin", response_class=HTMLResponse)
 def admin_index(
     request: Request,
     user: User = Depends(require_admin),  # noqa: B008
 ):
     session_factory = request.app.state.session_factory
+    settings = request.app.state.settings
     with session_factory() as session:
         rows = session.execute(
             select(Source, func.count(Call.id).label("call_count"))
@@ -80,6 +110,11 @@ def admin_index(
             "user": user,
         }
         context.update(_digest_panel_context(session))
+        context.update(
+            _embedding_coverage_context(
+                session, current_model=settings.embedding_model
+            )
+        )
         # Lazy import: keeps admin route module-load cheap and dodges any
         # potential cycle via ranking → db → web → admin.
         from call_monitor.ranking.eval import load_last_report
