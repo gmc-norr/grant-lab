@@ -272,6 +272,118 @@ def test_worker_v2_rerank_clears_stale_criterion_rows(pg_session_factory):
     assert by_name["timeline"].rating == "fail"
 
 
+def test_worker_writes_embed_similarity_on_clean_v2_path(pg_session_factory, monkeypatch):
+    """When rank_pair_v2 returns a clean result with embed_similarity=0.45,
+    the worker persists that value to call_rankings.embed_similarity."""
+    from call_monitor.ranking import worker as worker_mod
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_monitor.ranking.prompt import ParsedV2
+    from call_monitor.ranking.rank_pair import RankResultV2
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s, scheme="v2")
+        s.commit()
+
+    parsed = ParsedV2(
+        topic_fit_rating=4,
+        topic_fit_rationale="ok", topic_fit_quoted=None,
+        eligibility_rating="pass", eligibility_rationale="ok", eligibility_quoted=None,
+        exclusions_rating="pass", exclusions_rationale="ok", exclusions_quoted=None,
+    )
+    stub_result = RankResultV2(
+        score=80, reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        topic_expected=4.0, logprob_fallback=False,
+        must_include_override=False,
+        model="m", prompt_version="v2.0", raw_response={},
+        embed_similarity=0.45,
+    )
+
+    def _stub_rank_pair_v2(**_kwargs):
+        return stub_result
+
+    monkeypatch.setattr(worker_mod, "rank_pair_v2", _stub_rank_pair_v2)
+
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+
+    with pg_session_factory() as s:
+        r = s.execute(select(CallRanking).where(CallRanking.scheme == "v2")).scalar_one()
+    assert r.embed_similarity == 0.45
+    assert r.aggregate_score == 80
+
+
+def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, monkeypatch):
+    """Even on gate-FAIL short-circuits (e.g. embedding gate FAILed), the
+    cosine should still be persisted — useful for tuning the threshold later."""
+    from call_monitor.ranking import worker as worker_mod
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_monitor.ranking.rank_pair import RankResultV2
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s, scheme="v2")
+        s.commit()
+
+    stub_result = RankResultV2(
+        score=0, reason="embedding",
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.FAIL, reason="topic_dissimilar"),
+        ),
+        parsed=None,
+        topic_expected=None, logprob_fallback=False,
+        must_include_override=False,
+        model="", prompt_version="v2.0", raw_response={},
+        embed_similarity=0.18,
+    )
+
+    def _stub_rank_pair_v2(**_kwargs):
+        return stub_result
+
+    monkeypatch.setattr(worker_mod, "rank_pair_v2", _stub_rank_pair_v2)
+
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+
+    with pg_session_factory() as s:
+        r = s.execute(select(CallRanking).where(CallRanking.scheme == "v2")).scalar_one()
+    assert r.embed_similarity == 0.18
+    assert r.aggregate_score == 0
+    assert r.aggregate_reason == "embedding"
+
+
+def test_worker_v2_summary_renders_embedding_fail_reason():
+    """When aggregate_reason == 'embedding', the one-line summary mentions
+    'topic_dissimilar' and the cosine value to 3 decimals."""
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_monitor.ranking.rank_pair import RankResultV2
+    from call_monitor.ranking.worker import _v2_summary
+
+    r = RankResultV2(
+        score=0, reason="embedding",
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.FAIL, reason="topic_dissimilar"),
+        ),
+        parsed=None,
+        topic_expected=None, logprob_fallback=False,
+        must_include_override=False,
+        model="m", prompt_version="v2.0", raw_response={},
+        embed_similarity=0.18,
+    )
+    summary = _v2_summary(r)
+    assert "topic_dissimilar" in summary
+    assert "0.180" in summary
+
+
 def test_worker_v2_must_include_override_appears_in_summary(pg_session_factory):
     """Codex N1: when must_include bypasses the timeline gate, the rationale
     one-line summary must surface that fact so users aren't surprised by a

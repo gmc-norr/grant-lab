@@ -120,6 +120,7 @@ def drain_queue(
                             model=v2_result.model,
                             prompt_version=v2_result.prompt_version,
                             raw_response=v2_result.raw_response or {},
+                            embed_similarity=v2_result.embed_similarity,
                             ranked_at=datetime.now(UTC),
                         ))
                         _write_v2_criteria_rows(session, call_id, profile_id, v2_result)
@@ -236,6 +237,13 @@ def _v2_summary(r: RankResultV2) -> str:
     When must_include overrode a failing timeline gate, the summary
     explicitly notes that — otherwise users see a high score on a
     deadline-imminent call with no warning."""
+    if r.reason == "embedding":
+        # Surface the cosine value to 3 decimals so admins can see exactly
+        # how far the call sat below the threshold and tune accordingly.
+        sim_str = (
+            f"{r.embed_similarity:.3f}" if r.embed_similarity is not None else "n/a"
+        )
+        return f"FAIL: topic_dissimilar (cosine {sim_str})"
     if r.parsed is None:
         return f"Short-circuited: {r.reason}"
     base = (
