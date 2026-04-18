@@ -69,16 +69,39 @@ def test_worker_dispatches_v1_job_to_v1_ranker(pg_session_factory):
     assert ranking.aggregate_score == 77
 
 
-def test_worker_marks_v2_job_failed_with_helpful_error(pg_session_factory):
-    """v2 jobs are dead-letter-FAILED with a clear message — Plan B will
-    replace this dead-letter with the real rank_pair_v2 path."""
+def test_worker_runs_v2_job_and_writes_call_ranking(pg_session_factory):
+    """v2 jobs now execute rank_pair_v2 (Plan B). A v2 job with a far-future
+    deadline produces a DONE job and a CallRanking row with scheme='v2'."""
+    import json
+
+    import httpx
+
+    from call_monitor.ranking.ollama_client import OllamaClient
+
     with pg_session_factory() as s:
         cid, pid = _seed_pair(s, profile_scheme="v2")
         _enqueue(s, cid, pid, "v2")
         s.commit()
 
+    body = {
+        "model": "gemma4:e4b-it-q4_K_M",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": json.dumps({
+                "topic_fit": {"rating": 3, "rationale": "ok", "quoted_evidence": None},
+                "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+                "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            })},
+            "logprobs": None,
+        }],
+    }
+    client = OllamaClient(
+        base_url="http://x", model="gemma4:e4b-it-q4_K_M",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json=body)),
+    )
+
     drain_queue(
-        session_factory=pg_session_factory, client=None,
+        session_factory=pg_session_factory, client=client,
         ranker=lambda **kw: (_ for _ in ()).throw(AssertionError("v1 ranker called for v2 job")),
         batch_size=10,
     )
@@ -86,13 +109,19 @@ def test_worker_marks_v2_job_failed_with_helpful_error(pg_session_factory):
     with pg_session_factory() as s:
         job = s.execute(select(RankingJob)).scalar_one()
         rankings = s.execute(select(CallRanking)).scalars().all()
-    assert job.status == RankingJobStatus.FAILED
-    assert "rank_pair_v2 not implemented" in (job.last_error or "")
-    assert rankings == []  # no row written
+    assert job.status == RankingJobStatus.DONE
+    assert len(rankings) == 1
+    assert rankings[0].scheme == "v2"
 
 
-def test_worker_processes_v1_jobs_alongside_v2_failures(pg_session_factory):
-    """A v2 failure does not stop subsequent v1 jobs in the same batch."""
+def test_worker_processes_v1_and_v2_jobs_in_same_batch(pg_session_factory):
+    """v1 and v2 jobs in the same batch are both processed and produce DONE rows."""
+    import json
+
+    import httpx
+
+    from call_monitor.ranking.ollama_client import OllamaClient
+
     with pg_session_factory() as s:
         cid_a, pid_a = _seed_pair(s, profile_scheme="v1")
         cid_b, pid_b = _seed_pair(s, profile_scheme="v2")
@@ -100,8 +129,25 @@ def test_worker_processes_v1_jobs_alongside_v2_failures(pg_session_factory):
         _enqueue(s, cid_b, pid_b, "v2")
         s.commit()
 
+    body = {
+        "model": "gemma4:e4b-it-q4_K_M",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": json.dumps({
+                "topic_fit": {"rating": 3, "rationale": "ok", "quoted_evidence": None},
+                "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+                "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            })},
+            "logprobs": None,
+        }],
+    }
+    client = OllamaClient(
+        base_url="http://x", model="gemma4:e4b-it-q4_K_M",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json=body)),
+    )
+
     drain_queue(
-        session_factory=pg_session_factory, client=None,
+        session_factory=pg_session_factory, client=client,
         ranker=lambda *, client, profile, call: RankResult(
             score=50, rationale="r", model="m", prompt_version="v1", raw_response={},
         ),
@@ -112,4 +158,4 @@ def test_worker_processes_v1_jobs_alongside_v2_failures(pg_session_factory):
         jobs = s.execute(select(RankingJob)).scalars().all()
         rows = {(j.profile_id, j.scheme): j.status for j in jobs}
     assert rows[(pid_a, "v1")] == RankingJobStatus.DONE
-    assert rows[(pid_b, "v2")] == RankingJobStatus.FAILED
+    assert rows[(pid_b, "v2")] == RankingJobStatus.DONE

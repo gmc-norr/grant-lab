@@ -6,15 +6,17 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import sessionmaker
 
-from call_monitor.db.models import Call, CallRanking, Profile
+from call_monitor.db.models import Call, CallRanking, CallRankingCriterion, Profile
+from call_monitor.ranking.criteria import GateStatus
 from call_monitor.ranking.ollama_client import LLMError, OllamaClient
+from call_monitor.ranking.prompt import ParseV2Error
 from call_monitor.ranking.queue import (
     claim_pending_jobs,
     mark_done,
     mark_failed,
     requeue_stuck_running,
 )
-from call_monitor.ranking.rank_pair import RankResult
+from call_monitor.ranking.rank_pair import RankResult, RankResultV2, rank_pair_v2
 from call_monitor.ranking.rank_pair import rank_pair as default_rank_pair
 
 _logger = logging.getLogger(__name__)
@@ -74,30 +76,69 @@ def drain_queue(
     for job_id, call_id, profile_id, attempts, scheme in claimed:
         processed += 1
         try:
-            # v2 path is not implemented in Plan A. Mark FAILED-terminal so
-            # the job lands in the dead-letter queue rather than silently
-            # routing to v1. Plan B replaces this branch with the real
-            # rank_pair_v2 call.
-            if scheme != "v1":
-                with session_factory() as session:
-                    mark_failed(
-                        session,
-                        job_id,
-                        error=(
-                            f"rank_pair_v2 not implemented (job scheme={scheme!r}); "
-                            "wait for Plan B or revert profile.ranking_scheme to 'v1'"
-                        ),
-                        terminal=True,
+            if scheme == "v2":
+                try:
+                    with session_factory() as session:
+                        call = session.get(Call, call_id)
+                        profile = session.get(Profile, profile_id)
+                        if call is None or profile is None:
+                            mark_failed(
+                                session, job_id,
+                                error="call or profile vanished",
+                                terminal=True,
+                            )
+                            session.commit()
+                            continue
+                        if not profile.is_active:
+                            mark_done(session, job_id)
+                            session.commit()
+                            continue
+                        try:
+                            v2_result = rank_pair_v2(
+                                client=client,
+                                profile=profile,
+                                call=call,
+                                now=datetime.now(UTC),
+                            )
+                        except (LLMError, ParseV2Error) as e:
+                            terminal = (attempts + 1) >= MAX_ATTEMPTS
+                            mark_failed(
+                                session, job_id,
+                                error=f"v2 ranking failed: {e}",
+                                terminal=terminal,
+                            )
+                            session.commit()
+                            continue
+
+                        session.merge(CallRanking(
+                            call_id=call_id,
+                            profile_id=profile_id,
+                            scheme="v2",
+                            aggregate_score=v2_result.score,
+                            aggregate_reason=v2_result.reason,
+                            rationale=_v2_summary(v2_result),
+                            model=v2_result.model,
+                            prompt_version=v2_result.prompt_version,
+                            raw_response=v2_result.raw_response or {},
+                            ranked_at=datetime.now(UTC),
+                        ))
+                        _write_v2_criteria_rows(session, call_id, profile_id, v2_result)
+                        mark_done(session, job_id)
+                        session.commit()
+                except Exception as e:  # noqa: BLE001 — worker must not crash the scheduler
+                    terminal = (attempts + 1) >= MAX_ATTEMPTS
+                    with session_factory() as session:
+                        mark_failed(
+                            session, job_id,
+                            error=f"{type(e).__name__}: {e}",
+                            terminal=terminal,
+                        )
+                        session.commit()
+                    _logger.exception(
+                        "ranking.v2_job_unexpected",
+                        extra={"event": "ranking_v2_job_unexpected", "job_id": job_id,
+                               "attempts": attempts + 1, "terminal": terminal},
                     )
-                    session.commit()
-                _logger.warning(
-                    "ranking.job_v2_not_implemented",
-                    extra={
-                        "event": "ranking_job_v2_not_implemented",
-                        "job_id": job_id,
-                        "scheme": scheme,
-                    },
-                )
                 continue
 
             with session_factory() as session:
@@ -186,3 +227,81 @@ def drain_queue(
                 },
             )
     return processed
+
+
+def _v2_summary(r: RankResultV2) -> str:
+    """One-line summary for the rationale column (v2's free-form text is
+    the per-criterion rationales, which live in CallRankingCriterion)."""
+    if r.parsed is None:
+        return f"Short-circuited: {r.reason}"
+    return (
+        f"Topic {r.parsed.topic_fit_rating}/5 · "
+        f"Eligibility: {r.parsed.eligibility_rating} · "
+        f"Exclusions: {r.parsed.exclusions_rating}"
+    )
+
+
+def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV2) -> None:
+    """Write sparse CallRankingCriterion rows. Only the criteria actually
+    evaluated up to (and including) the failing gate are inserted. Plan A's
+    schema makes the table accept inserts; this function is the only writer.
+
+    Special case: when r.must_include_override is True AND the failing gate
+    was timeline, we DO continue past the timeline row to write the LLM
+    criterion rows, because the LLM was actually called (rank_pair_v2's
+    must_include bypass)."""
+    now = datetime.now(UTC)
+
+    # Gate rows — write up to and including the failing one (or all if no gate failed).
+    gate_results = [
+        ("timeline", r.gates.timeline),
+        ("budget",   r.gates.budget),
+        ("trl",      r.gates.trl),
+    ]
+    for name, gr in gate_results:
+        session.merge(CallRankingCriterion(
+            call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
+            criterion=name,
+            rating=gr.status.value,
+            rating_expected=None,
+            rationale=gr.reason,  # 'too_soon' / 'expired' / 'currency_mismatch' / None
+            quoted_evidence=None,
+            ranked_at=now,
+        ))
+        if gr.status == GateStatus.FAIL:
+            # Continue past timeline FAIL when must_include_override is set —
+            # the LLM was called, so we have parsed criteria to write.
+            if name == "timeline" and r.must_include_override:
+                continue
+            return  # stop — subsequent criteria not evaluated
+
+    # LLM rows — only if we got that far (parsed is not None).
+    if r.parsed is None:
+        return
+    session.merge(CallRankingCriterion(
+        call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
+        criterion="topic_fit",
+        rating=str(r.parsed.topic_fit_rating),
+        rating_expected=r.topic_expected,
+        rationale=r.parsed.topic_fit_rationale,
+        quoted_evidence=r.parsed.topic_fit_quoted,
+        ranked_at=now,
+    ))
+    session.merge(CallRankingCriterion(
+        call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
+        criterion="eligibility",
+        rating=r.parsed.eligibility_rating,
+        rating_expected=None,
+        rationale=r.parsed.eligibility_rationale,
+        quoted_evidence=r.parsed.eligibility_quoted,
+        ranked_at=now,
+    ))
+    session.merge(CallRankingCriterion(
+        call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
+        criterion="exclusions",
+        rating=r.parsed.exclusions_rating,
+        rating_expected=None,
+        rationale=r.parsed.exclusions_rationale,
+        quoted_evidence=r.parsed.exclusions_quoted,
+        ranked_at=now,
+    ))

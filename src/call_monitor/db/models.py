@@ -143,6 +143,13 @@ class Call(Base):
 
     source: Mapped[Source] = relationship(back_populates="calls")
 
+    @property
+    def structured(self) -> dict:
+        """Alias for `raw` — duck-types the criteria-module interface which
+        reads trl_min/trl_max from call.structured. Returns {} when raw is
+        empty so gate checks default to UNKNOWN (not FAIL)."""
+        return self.raw or {}
+
 
 class ProfileKind(enum.StrEnum):
     ORG = "org"
