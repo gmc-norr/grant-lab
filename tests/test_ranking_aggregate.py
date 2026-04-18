@@ -113,6 +113,10 @@ def _gates_pass():
         timeline=GateResult(GateStatus.PASS),
         budget=GateResult(GateStatus.PASS),
         trl=GateResult(GateStatus.PASS),
+        # UNKNOWN = no embedding signal; gate doesn't short-circuit. Tests
+        # in this file that explicitly probe embedding behavior construct
+        # their own Gates with embedding=FAIL.
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
 
 
@@ -136,6 +140,7 @@ def test_aggregate_timeline_fail_short_circuits():
         timeline=GateResult(GateStatus.FAIL, reason="too_soon"),
         budget=GateResult(GateStatus.PASS),
         trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_expected=4.5))
     assert r.score == 0
@@ -149,6 +154,7 @@ def test_aggregate_timeline_fail_ignored_with_must_include_override():
         timeline=GateResult(GateStatus.FAIL, reason="too_soon"),
         budget=GateResult(GateStatus.PASS),
         trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_expected=4.5), must_include_override=True)
     # 4.5 × 20 = 90, not 0.
@@ -164,6 +170,7 @@ def test_aggregate_budget_fail_still_short_circuits_even_with_override():
         timeline=GateResult(GateStatus.PASS),
         budget=GateResult(GateStatus.FAIL),
         trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_expected=4.5), must_include_override=True)
     assert r.score == 0
@@ -175,6 +182,7 @@ def test_aggregate_budget_fail_short_circuits():
         timeline=GateResult(GateStatus.PASS),
         budget=GateResult(GateStatus.FAIL),
         trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_expected=4.5))
     assert r.score == 0
@@ -186,6 +194,7 @@ def test_aggregate_trl_fail_short_circuits():
         timeline=GateResult(GateStatus.PASS),
         budget=GateResult(GateStatus.PASS),
         trl=GateResult(GateStatus.FAIL),
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_expected=4.5))
     assert r.score == 0
@@ -226,6 +235,7 @@ def test_aggregate_unknown_gates_do_not_short_circuit():
         timeline=GateResult(GateStatus.PASS),
         budget=GateResult(GateStatus.UNKNOWN),
         trl=GateResult(GateStatus.UNKNOWN),
+        embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_expected=4.0))
     assert r.score == 80
@@ -278,3 +288,56 @@ def test_logprob_expected_returns_none_when_no_rating_anchor():
         ('4', [('4', -0.1)]),  # bare integer with no preceding "rating" anchor
     )
     assert logprob_expected(content) is None
+
+
+# --- Embedding gate aggregation ---
+
+def test_aggregate_embedding_fail_short_circuits_to_zero():
+    from call_monitor.ranking.aggregate import LLMResult, aggregate
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+
+    gates = Gates(
+        timeline=GateResult(GateStatus.PASS),
+        budget=GateResult(GateStatus.PASS),
+        trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.FAIL, reason="topic_dissimilar"),
+    )
+    llm = LLMResult(topic_expected=4.0, topic_argmax=4, eligibility="pass", exclusions="pass")
+    r = aggregate(gates, llm)
+    assert r.score == 0
+    assert r.reason == "embedding"
+
+
+def test_aggregate_embedding_fail_bypassed_by_must_include():
+    """Like timeline, must_include_override skips the embedding short-circuit."""
+    from call_monitor.ranking.aggregate import LLMResult, aggregate
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+
+    gates = Gates(
+        timeline=GateResult(GateStatus.PASS),
+        budget=GateResult(GateStatus.PASS),
+        trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.FAIL, reason="topic_dissimilar"),
+    )
+    llm = LLMResult(topic_expected=4.0, topic_argmax=4, eligibility="pass", exclusions="pass")
+    r = aggregate(gates, llm, must_include_override=True)
+    # Bypass -> fall through to clean LLM path: 4.0 * 20 = 80
+    assert r.score == 80
+    assert r.reason is None
+
+
+def test_aggregate_embedding_unknown_does_not_short_circuit():
+    """UNKNOWN means missing embedding — fall through to LLM as if no gate."""
+    from call_monitor.ranking.aggregate import LLMResult, aggregate
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+
+    gates = Gates(
+        timeline=GateResult(GateStatus.PASS),
+        budget=GateResult(GateStatus.PASS),
+        trl=GateResult(GateStatus.PASS),
+        embedding=GateResult(GateStatus.UNKNOWN),
+    )
+    llm = LLMResult(topic_expected=3.0, topic_argmax=3, eligibility="pass", exclusions="pass")
+    r = aggregate(gates, llm)
+    assert r.score == 60
+    assert r.reason is None

@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q8_0", alias="GEMMA_MODEL")
+    embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
+    # Cosine-similarity threshold for the v2 embedding pre-gate. Pairs
+    # below this (computed by the caller, not the gate) are zeroed out
+    # before the LLM is invoked. Default 0.30 chosen from BGE-M3's typical
+    # similarity distribution (see ranking-v2 spec).
+    embedding_pregate_threshold: float = Field(
+        default=0.30, alias="EMBEDDING_PREGATE_THRESHOLD"
+    )
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
