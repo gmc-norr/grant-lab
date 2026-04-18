@@ -109,12 +109,51 @@ chat_turns
   id (uuid)
   workspace_id (FK workspaces(id))
   role (text)                                -- 'user' | 'assistant' | 'tool'
-  content (jsonb)                            -- full SDK message payload, incl. tool calls/results
+  content (jsonb)                            -- SDK message payload. Attachment bytes and
+                                             --   preliminary-data text are stored by reference only
+                                             --   (see "Attachment references" design note).
   tokens_in (int, nullable)
   tokens_out (int, nullable)
   model (text, nullable)                     -- e.g., 'claude-opus-4-7'
   created_at (timestamptz)
   INDEX on (workspace_id, created_at)
+
+turn_jobs
+  id (uuid)
+  workspace_id (FK workspaces(id))
+  user_turn_id (FK chat_turns(id), nullable) -- populated once the user message row is written
+  status (text)                              -- 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  error (text, nullable)                     -- populated on status='failed'
+  queued_at (timestamptz)
+  started_at (timestamptz, nullable)
+  completed_at (timestamptz, nullable)
+  INDEX on (workspace_id, queued_at)
+  UNIQUE INDEX on (workspace_id) WHERE status = 'running'
+    -- enforces "one running turn per workspace" at the DB level; the subprocess also
+    -- holds pg_advisory_lock(hashtext('workspace:' || workspace_id::text)).
+
+chat_summaries
+  id (uuid)
+  workspace_id (FK workspaces(id))
+  summary (text)                             -- compaction output: bounded-size summary
+                                             --   of all turns up to and including summarized_through
+  summarized_through (FK chat_turns(id))     -- last turn included in this summary
+  tokens (int)                               -- summary size, for budgeting
+  model (text)                               -- model used to produce the summary
+  created_at (timestamptz)
+  INDEX on (workspace_id, created_at DESC)
+
+attachment_jobs
+  id (uuid)
+  workspace_id (FK workspaces(id))
+  attachment_id (FK attachments(id))
+  kind (text)                                -- 'describe_figure' for v1 (room to extend)
+  status (text)                              -- 'queued' | 'running' | 'completed' | 'failed'
+  attempts (int, default 0)
+  last_error (text, nullable)
+  queued_at, updated_at (timestamptz)
+  INDEX on (status, updated_at)
+  UNIQUE INDEX on (attachment_id, kind) WHERE status IN ('queued', 'running')
 
 artifact_versions
   id (uuid)
@@ -133,7 +172,8 @@ attachments
   filename (text)
   storage_path (text)                        -- relative to var/workspaces/<id>/attachments/
   mime_type (text)
-  description (text, nullable)               -- populated by vision-on-ingest for figures
+  description (text, nullable)               -- populated asynchronously by the describe_figure job
+                                             --   (see attachment_jobs); null until the job completes
   uploaded_by (FK users(id))
   uploaded_at (timestamptz)
 
@@ -149,8 +189,13 @@ workspace_events
 
 **Design notes:**
 
-- **`chat_turns.content` is jsonb** storing the SDK's native message shape (including tool-use and tool-result blocks). This makes resuming a subprocess from history a straightforward replay.
-- **`artifact_versions` is pointers-only** — actual content history lives in git (see Artifact versioning). The DB stores just enough to join commits to turns and timestamps.
+- **`chat_turns.content` is jsonb** storing the SDK's native message shape (tool-use and tool-result blocks included). This makes resuming a subprocess from history a replay rather than a reconstruction.
+- **Attachment references, not bytes.** Tool-result blocks that carry attachment content (`look_at_figure`, `read_preliminary_data`) store a reference — `{"attachment_id": "<uuid>", "kind": "figure" | "preliminary_data"}` — not inflated bytes or text. The subprocess re-inflates from disk on replay. This is a hard rule: no attachment bytes, image base64, or preliminary-data text may appear in `chat_turns.content`. Violations bloat Postgres, duplicate the "files on disk, metadata in DB" rule, and blow up the backup footprint.
+- **Turn lifecycle lives in `turn_jobs`, not `chat_turns`.** A user sends a message → one row in `chat_turns` (role='user') + one row in `turn_jobs` (`status='queued'`), committed in the same DB transaction. The subprocess picks the oldest queued job for its workspace, transitions it to `running`, generates the agent response(s) (which append assistant/tool rows to `chat_turns`), and transitions the job to `completed` or `failed`. Assistant/tool rows never get their own `turn_jobs` row — they are results, not requests.
+- **Workspace lock.** The subprocess holds `pg_advisory_lock(hashtext('workspace:' || workspace_id::text))` for its lifetime. The unique partial index on `turn_jobs.workspace_id WHERE status='running'` is the database-level safety net. A second subprocess racing to run the same workspace blocks on the advisory lock.
+- **Orphan sweep on workspace open.** When a subprocess launches (or `/admin` runs "recover workspace"), a single SQL pass transitions any `running` `turn_jobs` for that workspace to `failed` with `error='orphaned'`. This cleans up after crashes and redeploys.
+- **Compaction (bounded replay).** When a workspace's active-conversation size exceeds a threshold (e.g., 100 turns or 200K input tokens since the latest summary), a background job calls the summarizer model on the un-summarized turns and writes a `chat_summaries` row. Subprocess resume = `latest chat_summaries row + all chat_turns after summarized_through`. This caps cold-start cost and context size at a known ceiling regardless of workspace age. Prompt caching further reduces resume cost when the summary+turns prefix is stable.
+- **`artifact_versions` is pointers-only** — content history lives in git. The DB stores just enough to join commits to turns and timestamps.
 - **`workspace_events`** is the audit trail. `cloud_turn_sent` specifically enables compliance to trace how many turns left the hospital network, when, by whom, for which workspace — without duplicating content.
 - **Files on disk, metadata in Postgres.** Proposal markdown lives in the workspace git repo on disk. Attachment bytes live on disk; rows are metadata + description.
 - **Soft delete on `workspaces`.** Consistent with the existing `profiles.is_active` pattern. Hard delete is SQL-only.
@@ -198,10 +243,27 @@ Each workspace's working directory is a git repo initialized at workspace creati
 
 **External sync (deferred).** One repo per workspace means "push this proposal to my own git remote" is a future feature, not a redesign. Out of scope for this phase.
 
-**Drift risk (DB ↔ git).** Mitigations:
-- `artifact_versions.commit_sha` is written inside the same DB transaction that records the triggering `chat_turns` row, and only *after* the git commit succeeds. A failed commit → no DB row.
-- An `/admin` "verify workspace" action walks each workspace, confirms every recorded sha exists in git, flags mismatches.
-- Backups: `var/workspaces/` is in the backup set alongside Postgres. Restore requires both.
+**DB ↔ git consistency.** The filesystem is outside Postgres's transaction boundary, so perfect atomicity isn't achievable. The design accepts this and defines an explicit reconciliation policy instead.
+
+Write order:
+
+1. Git commit in the workspace repo (gets commit sha `X`).
+2. DB transaction: insert the triggering `chat_turns` row (if applicable) + `artifact_versions` row with `commit_sha=X` + mark the corresponding `turn_jobs` row `completed`. Commit.
+
+If step 1 fails: no state change anywhere.
+If step 2 fails: git has commit `X`, DB does not know about it. This is the drift case.
+
+**Reconciliation is forward-only and never destructive.** Git commits are never undone by reconciliation — they are the user's and agent's work product, and `git reset` is not a bulk recovery tool. Instead:
+
+- **Orphan commit (sha in git, no `artifact_versions` row):** backfill by inserting an `artifact_versions` row reading message and timestamp from `git log`. `triggering_turn_id` is left null; `created_by='reconciled'`. A `workspace_events` row (`kind='git_drift_reconciled'`) records what was backfilled.
+- **Orphan row (sha in `artifact_versions`, no git commit):** impossible under the write order above (the git commit happens first), so if it occurs it signals a deeper bug — the row is marked with `created_by='unrecoverable'` and an admin alert fires. The row is not deleted, to preserve audit history.
+
+Triggers:
+
+- **On workspace open:** the workspace-reopen code runs a fast reconciliation pass before the subprocess launches.
+- **On-demand:** `/admin` "verify and reconcile workspace" button runs the same pass against one or all workspaces.
+
+Backups: `var/workspaces/` is in the backup set alongside Postgres. A cross-consistent restore requires snapshots taken at the same point — operationally, restore Postgres first, then the working directory, then run reconciliation.
 
 **Commit overhead.** ~20–50 ms per commit on SSD — negligible vs turn latency dominated by Opus (seconds).
 
@@ -209,13 +271,19 @@ Each workspace's working directory is a git repo initialized at workspace creati
 
 **Hybrid vision: describe-on-ingest, re-vision on demand.**
 
-On upload of an image attachment, the server runs `describe_figure` synchronously (a one-shot vision call — likely Haiku for cost; confirmed at implementation). The returned description is stored in `attachments.description` and surfaced inline in the chat as a system/tool message: "Figure figure-1.png described: …". The user can see what the agent now "knows."
+On upload of an image attachment, the server writes the `attachments` row and enqueues a `describe_figure` job in `attachment_jobs`. The upload request returns as soon as the row is written — upload success does **not** depend on Anthropic being reachable. The attachment appears in the UI with a "description pending" badge.
 
-Subsequent turns carry only the text description. When the agent needs to double-check a visual claim, it calls `look_at_figure(attachment_id)` to re-attach the image to the next turn.
+A background worker (same process, separate async task) drains `attachment_jobs`:
 
-Preliminary data (CSVs, PDFs) is analogous — `read_preliminary_data` pulls text content into the conversation on demand, rather than keeping it in context permanently.
+- On success → `attachments.description` is populated, a system/tool message is appended to the workspace chat ("Figure figure-1.png described: …"), and the badge clears.
+- On transient failure (HTTP 5xx, timeout) → exponential backoff retry (e.g., 30 s, 2 min, 10 min), up to 5 attempts.
+- After 5 failures → job `status='failed'`, `attachments.description` remains null, and the UI shows a "description failed — retry" button that enqueues a fresh job.
 
-This matches the Q3-C decision: description by default, re-vision on demand. It avoids paying vision token cost on every turn while keeping the "re-check when it matters" path available.
+The one-shot vision call is model-configurable (likely Claude Haiku 4.5 for cost — confirmed at implementation) and does not require the agent subprocess; it is a direct Anthropic SDK call from the worker.
+
+Subsequent turns carry only the text description. When the agent needs to double-check a visual claim, it calls `look_at_figure(attachment_id)` to re-attach the image to the next turn. `read_preliminary_data(attachment_id)` similarly pulls CSV/PDF text into the conversation on demand. Both tool results are stored in `chat_turns.content` as references, not inflated bytes (see Data model — Attachment references).
+
+This matches the Q3-C decision: description by default, re-vision on demand. It avoids paying vision token cost on every turn, keeps the re-check path available, and decouples upload UX from Anthropic availability.
 
 ## Workspace UX
 
@@ -233,10 +301,11 @@ This matches the Q3-C decision: description by default, re-vision on demand. It 
 
 ### Chat mechanics
 
-- Attachments upload per-turn or per-workspace. Uploading an image triggers `describe_figure` synchronously; the description renders inline in the chat.
+- Attachments upload per-turn or per-workspace. Image uploads return immediately; `describe_figure` runs asynchronously in the background (see Figures). The description renders inline in the chat as a system/tool message once the job completes.
 - Long agent turns stream via SSE. The artifact pane refreshes on each `edit_proposal` / `replace_proposal` completion.
 - A small "branch: main" indicator in the artifact pane is the source of truth for the current branch.
-- User can send a turn at any time (no blocking while the agent generates), but the agent completes its current turn before starting the next — no interleaved edits.
+- User can send a turn at any time. Each submission writes a `chat_turns` row + a `turn_jobs` row (`status='queued'`) in one DB transaction. The agent subprocess drains queued jobs in FIFO order — one `running` job per workspace at a time, enforced by a unique partial index on `turn_jobs` and a workspace-level `pg_advisory_lock` held by the subprocess. A queued-but-not-running turn is visible in the UI (position indicator) and is cancellable by the user before it starts. Multi-tab submissions land as ordered queue entries; they do not race or duplicate.
+- On reconnect or page refresh during a running turn, the UI re-subscribes to the stream via a per-`turn_jobs.id` resume token. If the subprocess crashed, the orphan-sweep on workspace open transitions the orphaned `running` job to `failed` with `error='orphaned'`, and the UI surfaces it with a "retry" action that enqueues a fresh turn.
 
 ### Collaboration (shared-read, single-write)
 
@@ -305,17 +374,38 @@ This is the "legal says no" escape hatch. Shipping without it and rebuilding it 
 
 ### Rename cutover (`call-monitor` → `call-manager`)
 
-One coordinated change at cutover:
+The rename requires downtime because `ALTER DATABASE ... RENAME` requires zero open connections. Under the single-instance deploy, this is a scheduled maintenance window (announce ≥24 h in advance; the actual rename is seconds).
 
-1. **Code/package:** `src/call_monitor/` → `src/call_manager/`. Systematic import-path rename; module file names stay identical.
-2. **Repo:** rename the GitHub repo; keep `call-monitor` as a redirect alias.
-3. **Database:** `ALTER DATABASE call_monitor RENAME TO call_manager` as part of the deploy script; connection strings updated in the same release.
-4. **Service/deployment:** systemd unit or orchestrator service renamed.
-5. **Env-var prefix:** existing vars don't use a `CALL_MONITOR_` prefix, so no migration needed.
-6. **User-facing copy:** page titles, email "from" name, email subject templates.
-7. A tagged release marks the rename point so rollbacks are clean.
+**Pre-merge changes (no downtime):**
 
-No backwards-compatibility shims. Small user base, single-instance deploy, one-shot rename.
+1. `src/call_monitor/` → `src/call_manager/`. Systematic import-path rename; module file names stay identical. Tests pass on the new name.
+2. Repo rename on GitHub with `call-monitor` retained as an automatic redirect.
+3. User-facing copy updates (page titles, email "from" name, email subject templates).
+4. Tag a release immediately before the cutover so rollback is a single `git checkout`.
+
+**Cutover runbook (the scheduled window):**
+
+1. Announce start of window on the internal channel.
+2. `systemctl stop call-monitor` — stops the web + scheduler process, drains connections.
+3. Verify no remaining Postgres connections to `call_monitor`:
+   `SELECT pid, state FROM pg_stat_activity WHERE datname = 'call_monitor';` — must be empty.
+   If non-empty, investigate (likely an admin psql session) and close it.
+4. `ALTER DATABASE call_monitor RENAME TO call_manager;` — run as a Postgres superuser connected to a different database (`postgres` is fine).
+5. Deploy the call-manager release: update `DATABASE_URL` to point at `call_manager`, install the new systemd unit `call-manager.service`, disable `call-monitor.service`.
+6. `systemctl start call-manager`.
+7. Smoke-test: `/healthz`, `/` (loads), `/admin` (loads), trigger one ingestion run manually from admin.
+8. Announce end of window.
+
+**Rollback (if smoke-test or post-start traffic fails):**
+
+1. `systemctl stop call-manager`.
+2. Verify no connections to `call_manager`: `SELECT pid FROM pg_stat_activity WHERE datname = 'call_manager';` — empty.
+3. `ALTER DATABASE call_manager RENAME TO call_monitor;`.
+4. Redeploy the prior tagged release (call-monitor) with `DATABASE_URL` pointing at `call_monitor`.
+5. `systemctl start call-monitor`.
+6. Investigate the failure offline.
+
+Both the cutover and rollback fit in a single maintenance window of well under an hour. No backwards-compatibility shims — under single-instance deploy with a small user base, shims cost more total engineering time than a clean one-shot rename with a planned window.
 
 ## Testing
 
@@ -324,6 +414,10 @@ No backwards-compatibility shims. Small user base, single-instance deploy, one-s
 - **Contract test against the live API.** One tagged test (`@pytest.mark.live`) runs a short real conversation against Opus weekly in CI. Guards against SDK and API shape drift. Excluded from the default test run.
 - **Golden drafting test.** A tiny fixture — one call + one profile + one preliminary data file — with an expected-shape assertion (artifact has N sections, references the preliminary data). Weekly cron alongside the existing golden-ranking eval.
 - **Workspace/git correctness tests.** Verify DB `commit_sha` values exist in git; verify commits-match-turns pairing; verify branch tools don't corrupt state.
+- **Turn-queue tests.** Concurrent submissions from two simulated tabs land as ordered queue entries with no duplicates. A kill-9 on a subprocess mid-turn leaves exactly one `running` row; the next workspace open transitions it to `failed` with `error='orphaned'` and accepts new turns. The unique partial index rejects a second `running` row for the same workspace.
+- **Reconciliation tests.** Inject a git commit with no `artifact_versions` row; open-workspace reconciliation backfills it and writes a `git_drift_reconciled` event. Inject an `artifact_versions` row with no matching commit; reconciliation marks it `unrecoverable` and fires an admin alert. No `git reset` is ever invoked.
+- **Compaction tests.** With a crafted workspace whose chat history exceeds the compaction threshold, verify a `chat_summaries` row is produced and that resume uses `summary + turns-since-summary` rather than full-history replay.
+- **Attachment-job tests.** Uploading an image returns before Anthropic would have responded; the attachment row exists with null description; the background worker drains the job and populates the description. With Anthropic mocked to always 500, the job retries and then transitions to `failed` with a retry button available.
 - **No browser tests.** Server-rendered + HTMX; `TestClient` covers routes.
 
 ## Out of scope (revisit later)
