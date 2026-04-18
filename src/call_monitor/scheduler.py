@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from call_monitor.digest.send import run_digest
 from call_monitor.email.client import EmailClient
+from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
@@ -54,6 +55,7 @@ def build_scheduler(
     gemma_model: str,
     ranking_tick_seconds: int,
     ranking_queue_batch: int,
+    embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     start: bool = True,
@@ -76,7 +78,12 @@ def build_scheduler(
 
     def _eu_job() -> None:
         adapter = EUPortalAdapter(base_url=eu_portal_base_url)
-        run_ingestion(session_factory=session_factory, adapter=adapter, alerter=alerter)
+        run_ingestion(
+            session_factory=session_factory,
+            adapter=adapter,
+            alerter=alerter,
+            embed_client=embed_client,
+        )
 
     sched.add_job(
         _eu_job,
@@ -91,7 +98,10 @@ def build_scheduler(
     def _vinnova_job() -> None:
         adapter = VinnovaAdapter(base_url=vinnova_base_url)
         run_ingestion(
-            session_factory=session_factory, adapter=adapter, alerter=alerter
+            session_factory=session_factory,
+            adapter=adapter,
+            alerter=alerter,
+            embed_client=embed_client,
         )
 
     sched.add_job(

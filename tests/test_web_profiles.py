@@ -710,3 +710,247 @@ def test_profile_edit_admin_post_invalid_scheme_value_silently_dropped(
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
     assert p.ranking_scheme == "v1"  # unchanged — whitelist rejected v3
+
+
+# --- Codex H1: profile-handler embedding refresh tests --------------------
+#
+# Each test below installs a stub embed_client onto app.state.embed_client
+# so the handler doesn't try to hit Ollama. We verify the embedding column
+# state in the DB after the request — which is the only thing the rest of
+# the system actually reads.
+
+
+def _stub_embed_client(*, vec=None, raises=None):
+    from unittest.mock import MagicMock
+    c = MagicMock()
+    c.model = "bge-m3"
+    if raises is not None:
+        c.embed.side_effect = raises
+    else:
+        c.embed.return_value = vec or [0.42] * 1024
+    return c
+
+
+def test_profile_create_triggers_embedding_refresh(
+    monkeypatch, pg_url, pg_session_factory,
+):
+    """Creating a new profile triggers a sync embedding compute. After the
+    POST, profile.embedding is the vector returned by the stub client."""
+    from unittest.mock import patch
+
+    from call_monitor.db.models import Profile
+    from call_monitor.profiles.seed import DraftProfile
+
+    app = _setup(monkeypatch, pg_url)
+    app.state.embed_client = _stub_embed_client(vec=[0.5] * 1024)
+    client = _logged_in(app, pg_session_factory)
+
+    fake_draft = DraftProfile(
+        description="cancer immunotherapy + digital pathology",
+        structured={
+            "areas": ["digital pathology"], "budget_min": None, "budget_max": None,
+            "trl_min": None, "trl_max": None,
+            "must_include": [], "hard_exclusions": [],
+        },
+        publications_fetched=0, publications_skipped=0,
+    )
+    with (
+        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        client,
+    ):
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Embed on create",
+                "kind": "group",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "x",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Embed on create")).scalar_one()
+    # pgvector returns numpy ndarray; cast via list() for length + value check
+    assert p.embedding is not None
+    assert list(p.embedding) == [0.5] * 1024
+    assert p.embedding_model == "bge-m3"
+
+
+def test_profile_edit_changing_description_triggers_embedding_refresh(
+    monkeypatch, pg_url, pg_session_factory, profile_factory,
+):
+    """Editing the description triggers re-embed: the new vector is written
+    over any prior value."""
+    from call_monitor.db.models import Profile
+
+    pid, _ = profile_factory(
+        name="Edit re-embed", description="old description text",
+    )
+    # Pre-seed an old embedding so we can prove it gets overwritten.
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        p.embedding = [0.1] * 1024
+        p.embedding_model = "bge-m3"
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    new_vec = [0.9] * 1024
+    app.state.embed_client = _stub_embed_client(vec=new_vec)
+    client = _logged_in(app, pg_session_factory)
+
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "brand new description text",
+                "areas": "",
+                "budget_min": "", "budget_max": "", "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert list(p.embedding) == new_vec  # overwritten with the new vec
+    assert app.state.embed_client.embed.call_count == 1
+
+
+def test_profile_edit_not_changing_description_skips_embedding_refresh(
+    monkeypatch, pg_url, pg_session_factory, profile_factory,
+):
+    """Editing rubric only (areas/must_include) does NOT re-embed —
+    only description goes into the embedding."""
+    from call_monitor.db.models import Profile
+
+    pid, _ = profile_factory(
+        name="Edit rubric only", description="stable description",
+    )
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        p.embedding = [0.7] * 1024
+        p.embedding_model = "bge-m3"
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    app.state.embed_client = _stub_embed_client(vec=[0.99] * 1024)
+    client = _logged_in(app, pg_session_factory)
+
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "stable description",  # SAME as before
+                "areas": "digital pathology\nfederated learning",  # rubric changed
+                "budget_min": "", "budget_max": "", "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "pathology", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    # Embed was NOT invoked.
+    assert app.state.embed_client.embed.call_count == 0
+    # And the pre-seeded vector is untouched.
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert list(p.embedding) == [0.7] * 1024
+
+
+def test_profile_edit_embed_failure_does_not_block_backfill(
+    monkeypatch, pg_url, pg_session_factory, profile_factory,
+):
+    """Codex H1 robustness: if the embed step raises, the handler logs and
+    proceeds to backfill_profile. The redirect still lands; backfill jobs
+    are still enqueued. (Embedding gate falls through to UNKNOWN → LLM
+    runs as the safe fallback.)"""
+    from datetime import UTC, datetime
+
+    from call_monitor.db.models import Call, Profile, RankingJob, Source
+    from call_monitor.ranking.ollama_client import LLMError
+
+    pid, _ = profile_factory(name="Embed-fails-but-backfill-works")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        s.add(Call(
+            source_id=src.id, external_id="BF-1", url="https://x", title="T",
+            published_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    app.state.embed_client = _stub_embed_client(raises=LLMError("ollama down"))
+    client = _logged_in(app, pg_session_factory)
+
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "freshly changed description",  # triggers embed
+                "areas": "",
+                "budget_min": "", "budget_max": "", "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    # Handler did not 500.
+    assert r.status_code == 303
+    # Description still saved.
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.description == "freshly changed description"
+    assert p.embedding is None  # refresh helper returned False on LLMError
+    # Backfill ran — our seeded recent call has a job.
+    with pg_session_factory() as s:
+        jobs = s.execute(select(RankingJob).where(RankingJob.profile_id == pid)).scalars().all()
+    assert len(jobs) == 1
+
+
+def test_profile_create_embed_failure_does_not_500(
+    monkeypatch, pg_url, pg_session_factory,
+):
+    """Same robustness contract on the create path: an embed failure on a
+    brand-new profile must not block the redirect."""
+    from unittest.mock import patch
+
+    from call_monitor.db.models import Profile
+    from call_monitor.profiles.seed import DraftProfile
+    from call_monitor.ranking.ollama_client import LLMError
+
+    app = _setup(monkeypatch, pg_url)
+    app.state.embed_client = _stub_embed_client(raises=LLMError("ollama down"))
+    client = _logged_in(app, pg_session_factory)
+
+    fake_draft = DraftProfile(
+        description="new description",
+        structured={
+            "areas": [], "budget_min": None, "budget_max": None,
+            "trl_min": None, "trl_max": None,
+            "must_include": [], "hard_exclusions": [],
+        },
+        publications_fetched=0, publications_skipped=0,
+    )
+    with (
+        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        client,
+    ):
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Create-embed-fails",
+                "kind": "group",
+                "orcids": "", "names_affiliations": "", "pasted_grants": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Create-embed-fails")).scalar_one()
+    assert p.embedding is None  # embed failed, but profile exists

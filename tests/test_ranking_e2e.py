@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -59,8 +60,12 @@ def test_end_to_end_ingest_rank_browse(
     # 1. Ingest — auto-enqueues ranking jobs
     sender = InMemoryEmailSender()
     alerter = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email=None)
+    embed_client = MagicMock()
+    embed_client.model = "bge-m3"
+    embed_client.embed.return_value = [0.1] * 1024
     result = run_ingestion(
-        session_factory=pg_session_factory, adapter=_FakeAdapter(), alerter=alerter
+        session_factory=pg_session_factory, adapter=_FakeAdapter(),
+        alerter=alerter, embed_client=embed_client,
     )
     assert result.error is None
     with pg_session_factory() as s:

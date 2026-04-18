@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import select
 
@@ -6,6 +8,16 @@ from call_monitor.db.models import Call, Source
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.sources.types import AdapterError, NormalizedCall
+
+
+def _embed_client():
+    """Per-test embed client mock — returns a usable model name and a fixed
+    1024-dim vector. Tests that care about embed-step behavior build their
+    own; the rest just need this to satisfy the required parameter."""
+    c = MagicMock()
+    c.model = "bge-m3"
+    c.embed.return_value = [0.1] * 1024
+    return c
 
 
 class _StaticAdapter:
@@ -41,6 +53,7 @@ def test_successful_run_persists_and_advances_timestamp(pg_session_factory):
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=_alerter(sender),
+        embed_client=_embed_client(),
     )
     assert result.inserted == 2
     assert result.updated == 0
@@ -56,13 +69,19 @@ def test_successful_run_persists_and_advances_timestamp(pg_session_factory):
 def test_second_run_updates_existing_and_inserts_new(pg_session_factory):
     sender = InMemoryEmailSender()
     a1 = _StaticAdapter([NormalizedCall(external_id="V-1", url="u", title="OLD")])
-    run_ingestion(session_factory=pg_session_factory, adapter=a1, alerter=_alerter(sender))
+    run_ingestion(
+        session_factory=pg_session_factory, adapter=a1,
+        alerter=_alerter(sender), embed_client=_embed_client(),
+    )
 
     a2 = _StaticAdapter([
         NormalizedCall(external_id="V-1", url="u", title="NEW"),
         NormalizedCall(external_id="V-2", url="u", title="Brand new"),
     ])
-    result = run_ingestion(session_factory=pg_session_factory, adapter=a2, alerter=_alerter(sender))
+    result = run_ingestion(
+        session_factory=pg_session_factory, adapter=a2,
+        alerter=_alerter(sender), embed_client=_embed_client(),
+    )
     assert result.inserted == 1
     assert result.updated == 1
 
@@ -78,7 +97,8 @@ def test_failure_rolls_back_and_does_not_advance_timestamp(pg_session_factory):
         ).scalar_one()
 
     result = run_ingestion(
-        session_factory=pg_session_factory, adapter=adapter, alerter=_alerter(sender)
+        session_factory=pg_session_factory, adapter=adapter,
+        alerter=_alerter(sender), embed_client=_embed_client(),
     )
     assert result.error is not None
     assert "network blip" in result.error
@@ -101,7 +121,10 @@ def test_three_consecutive_failures_alert_admin(pg_session_factory):
     alerter = _alerter(sender)
     adapter = _FailingAdapter()
     for _ in range(3):
-        run_ingestion(session_factory=pg_session_factory, adapter=adapter, alerter=alerter)
+        run_ingestion(
+            session_factory=pg_session_factory, adapter=adapter,
+            alerter=alerter, embed_client=_embed_client(),
+        )
     assert len(sender.sent) == 1
     assert "vinnova" in sender.sent[0].subject
 
@@ -120,6 +143,7 @@ def test_unknown_source_slug_raises(pg_session_factory):
             session_factory=pg_session_factory,
             adapter=_BadSlug(),
             alerter=_alerter(sender),
+            embed_client=_embed_client(),
         )
 
 
@@ -155,6 +179,7 @@ def test_orchestrator_enqueues_jobs_with_profile_ranking_scheme(
         session_factory=pg_session_factory,
         adapter=_FakeAdapter(),
         alerter=MagicMock(),
+        embed_client=_embed_client(),
     )
 
     with pg_session_factory() as s:

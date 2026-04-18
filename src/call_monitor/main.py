@@ -10,6 +10,7 @@ from call_monitor.auth.rate_limit import SlidingWindowLimiter
 from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
+from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.logging import configure_logging
 from call_monitor.web.filters import display_date, display_dt
 from call_monitor.web.routes import admin, auth, calls, health, me, profiles
@@ -64,6 +65,7 @@ async def lifespan(app: FastAPI):
         gemma_model=settings.gemma_model,
         ranking_tick_seconds=settings.ranking_tick_seconds,
         ranking_queue_batch=settings.ranking_queue_batch,
+        embed_client=app.state.embed_client,
         digest_email_client=digest_email_client,
         digest_settings=settings,
         start=True,
@@ -143,6 +145,13 @@ def create_app() -> FastAPI:
     )
     app.state.session_signer = SessionSigner(
         secret=settings.session_secret, max_age_seconds=30 * 24 * 3600
+    )
+    # Single shared embed client: handed to the scheduler (ingest tick uses it
+    # to embed touched calls before enqueueing ranking jobs — Codex H1) and to
+    # the profile-edit handler (re-embed on description change). One instance
+    # so connection pooling on httpx.Client is reused across calls.
+    app.state.embed_client = OllamaEmbedClient(
+        base_url=settings.ollama_url, model=settings.embedding_model
     )
 
     # Vendored static assets (htmx.min.js lives here). Serving locally
