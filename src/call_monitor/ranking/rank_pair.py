@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from dataclasses import dataclass
@@ -115,6 +116,31 @@ from call_monitor.ranking.prompt import (  # noqa: E402
 _QUOTED_EVIDENCE_MAX = 200
 
 
+@functools.lru_cache(maxsize=1)
+def _get_threshold() -> float:
+    """Read the embedding pre-gate threshold from Settings, cached.
+
+    Settings() reads env at construction; Settings is not a singleton in
+    this codebase (see main.py — it's instantiated lazily). Without this
+    cache we'd build a fresh Settings on every rank_pair_v2 call, which
+    is wasteful in a 60-s-tick worker. The cache key is empty so env
+    overrides take effect on process restart (or after an explicit
+    `_get_threshold.cache_clear()`, used by env-override tests).
+
+    Settings has several REQUIRED env vars (DATABASE_URL etc.) and unit
+    tests for rank_pair_v2 don't set them — falling back to the module
+    default in that case keeps the unit tests pure (no env needed) while
+    still letting production / e2e tests pick up EMBEDDING_PREGATE_THRESHOLD.
+    """
+    from call_monitor.ranking.criteria import EMBEDDING_PREGATE_THRESHOLD
+
+    try:
+        from call_monitor.config import Settings
+        return Settings().embedding_pregate_threshold
+    except Exception:  # noqa: BLE001 — fall back gracefully on any Settings load failure
+        return EMBEDDING_PREGATE_THRESHOLD
+
+
 @dataclass(frozen=True)
 class RankResultV2:
     """Output of rank_pair_v2 — richer than v1's RankResult so the worker
@@ -168,7 +194,11 @@ def rank_pair_v2(
     # to bring everything to the current model.
     embed_sim = _safe_cosine(profile, call)
 
-    gates = evaluate_gates(profile, call, now=now, embed_similarity=embed_sim)
+    gates = evaluate_gates(
+        profile, call, now=now,
+        embed_similarity=embed_sim,
+        embedding_threshold=_get_threshold(),
+    )
     must_include_match = _call_matches_must_include(profile, call)
 
     # Budget/TRL fail unconditionally (must_include doesn't override these).

@@ -55,6 +55,7 @@ def evaluate_gates(
     *,
     now: datetime,
     embed_similarity: float | None = None,
+    embedding_threshold: float = EMBEDDING_PREGATE_THRESHOLD,
 ) -> Gates:
     """Evaluate the four rule-based gates for a (profile, call) pair.
 
@@ -66,12 +67,17 @@ def evaluate_gates(
     embeddings (caller's responsibility — keeps this module pure). Default
     None means UNKNOWN (callers that don't yet wire up embeddings get the
     same fall-through-to-LLM behaviour as a missing budget).
+
+    `embedding_threshold` lets callers (in practice: rank_pair_v2 reading
+    Settings.embedding_pregate_threshold) override the module-default
+    cosine cutoff. Keeping the default a module constant means this module
+    stays import-time-pure (no env load required for unit tests).
     """
     return Gates(
         timeline=_timeline(call.deadline, now),
         budget=_budget(profile, call),
         trl=_trl(profile, call),
-        embedding=_embedding(embed_similarity),
+        embedding=_embedding(embed_similarity, threshold=embedding_threshold),
     )
 
 
@@ -115,7 +121,11 @@ def _trl(profile, call) -> GateResult:
     return GateResult(GateStatus.FAIL)
 
 
-def _embedding(sim: float | None) -> GateResult:
+def _embedding(
+    sim: float | None,
+    *,
+    threshold: float = EMBEDDING_PREGATE_THRESHOLD,
+) -> GateResult:
     """Cosine-similarity pre-gate.
 
     None  -> UNKNOWN (missing embedding; caller falls through to LLM).
@@ -124,6 +134,6 @@ def _embedding(sim: float | None) -> GateResult:
     """
     if sim is None:
         return GateResult(GateStatus.UNKNOWN)
-    if sim < EMBEDDING_PREGATE_THRESHOLD:
+    if sim < threshold:
         return GateResult(GateStatus.FAIL, reason="topic_dissimilar")
     return GateResult(GateStatus.PASS)
