@@ -40,9 +40,13 @@ def enqueue_for_pair(session: Session, *, call_id: int, profile_id: int) -> bool
     """
     stmt = (
         insert(RankingJob)
-        .values(call_id=call_id, profile_id=profile_id, status=RankingJobStatus.PENDING)
+        .values(
+            call_id=call_id, profile_id=profile_id,
+            scheme="v1",  # v1 worker always enqueues as 'v1'
+            status=RankingJobStatus.PENDING,
+        )
         .on_conflict_do_nothing(
-            index_elements=["call_id", "profile_id"],
+            index_elements=["call_id", "profile_id", "scheme"],
             index_where=text("status IN ('pending', 'running')"),
         )
     )

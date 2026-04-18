@@ -87,7 +87,7 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
         s.flush()
         # Score c2 high for P2; c1 low for both
         s.add(CallRanking(
-            call_id=c2.id, profile_id=p2.id, score=85, rationale="r",
+            call_id=c2.id, profile_id=p2.id, aggregate_score=85, rationale="r",
             model="gemma4:e4b-q8", prompt_version="v1", ranked_at=now,
         ))
         # Bob dismisses c2

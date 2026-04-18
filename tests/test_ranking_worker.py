@@ -71,7 +71,7 @@ def test_drain_runs_pending_jobs_and_writes_rankings(
         rows = s.execute(select(CallRanking)).scalars().all()
         jobs = s.execute(select(RankingJob)).scalars().all()
     assert len(rows) == 1
-    assert rows[0].score == 42
+    assert rows[0].aggregate_score == 42
     assert rows[0].rationale == "Static 42"
     assert jobs[0].status == RankingJobStatus.DONE
 

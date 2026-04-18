@@ -18,8 +18,8 @@ BACKFILL_DAYS = 90
 # unique index byte-for-byte, otherwise PG can't use it.
 _BULK_ENQUEUE_SQL = text(
     """
-    INSERT INTO ranking_jobs (call_id, profile_id, status, attempts)
-    SELECT c.id, :profile_id, 'pending', 0
+    INSERT INTO ranking_jobs (call_id, profile_id, scheme, status, attempts)
+    SELECT c.id, :profile_id, 'v1', 'pending', 0
     FROM calls c
     -- NOTE: WHERE published_at >= :cutoff also excludes calls with
     -- published_at IS NULL (NULL comparisons return NULL, treated as
@@ -28,7 +28,7 @@ _BULK_ENQUEUE_SQL = text(
     -- If we ever surface unranked calls to a new profile, this filter
     -- needs revisiting.
     WHERE c.published_at >= :cutoff
-    ON CONFLICT (call_id, profile_id) WHERE status IN ('pending', 'running')
+    ON CONFLICT (call_id, profile_id, scheme) WHERE status IN ('pending', 'running')
     DO NOTHING
     """
 )

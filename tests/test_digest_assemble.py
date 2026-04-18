@@ -52,7 +52,7 @@ def _seed_call(s, *, title, score=None, profile_id=None, summary=None,
     s.flush()
     if score is not None and profile_id is not None:
         s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, score=score,
+            call_id=c.id, profile_id=profile_id, aggregate_score=score,
             rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
             ranked_at=datetime.now(UTC),
         ))
@@ -171,7 +171,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(
         cid = _seed_call(s, title="Pathology breakthrough", score=85, profile_id=p_top.id)
         # Also a low-score ranking against p_must so the call appears in both candidate sets
         s.add(CallRanking(
-            call_id=cid, profile_id=p_must.id, score=20,
+            call_id=cid, profile_id=p_must.id, aggregate_score=20,
             rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
             ranked_at=datetime.now(UTC),
         ))
@@ -306,7 +306,7 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(
         s.flush()
         cid = _seed_call(s, title="Shared", score=70, profile_id=p_low.id)
         s.add(CallRanking(
-            call_id=cid, profile_id=p_high.id, score=85,
+            call_id=cid, profile_id=p_high.id, aggregate_score=85,
             rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
             ranked_at=datetime.now(UTC),
         ))

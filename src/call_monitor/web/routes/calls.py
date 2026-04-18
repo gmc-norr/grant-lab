@@ -66,7 +66,7 @@ def calls_index(
                     & (CallRanking.profile_id == profile),
                 )
                 .order_by(
-                    CallRanking.score.desc().nullslast(),
+                    CallRanking.aggregate_score.desc().nullslast(),
                     Call.published_at.desc().nullslast(),
                     Call.id.desc(),
                 )

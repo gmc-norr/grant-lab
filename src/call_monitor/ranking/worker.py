@@ -110,7 +110,7 @@ def drain_queue(
                     CallRanking(
                         call_id=call_id,
                         profile_id=profile_id,
-                        score=result.score,
+                        aggregate_score=result.score,
                         rationale=result.rationale,
                         model=result.model,
                         prompt_version=result.prompt_version,

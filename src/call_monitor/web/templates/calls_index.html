@@ -48,7 +48,7 @@
       {% for c, r in calls_with_rankings %}
         <tr>
           {% if selected_profile_id %}
-            <td>{{ r.score if r else '—' }}</td>
+            <td>{{ r.aggregate_score if r else '—' }}</td>
           {% endif %}
           <td><a href="/calls/{{ c.id }}">{{ c.title }}</a></td>
           <td>{{ c.source.name }}</td>

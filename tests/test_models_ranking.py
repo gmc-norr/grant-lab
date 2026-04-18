@@ -51,7 +51,7 @@ def test_call_ranking_composite_pk(pg_session_factory):
             CallRanking(
                 call_id=c.id,
                 profile_id=p.id,
-                score=72,
+                aggregate_score=72,
                 rationale="Good fit",
                 model="gemma4:e4b-q8",
                 prompt_version="v1",
@@ -60,12 +60,13 @@ def test_call_ranking_composite_pk(pg_session_factory):
         )
         s.commit()
     with pg_session_factory() as s, pytest.raises(IntegrityError):
-        # Same (call_id, profile_id) → duplicate PK
+        # Same (call_id, profile_id, scheme) → duplicate PK
         p = s.execute(select(Profile)).scalar_one()
         c = s.execute(select(Call).where(Call.external_id == "C-1")).scalar_one()
         s.add(
             CallRanking(
-                call_id=c.id, profile_id=p.id, score=10, rationale="", model="", prompt_version="v1"
+                call_id=c.id, profile_id=p.id, aggregate_score=10,
+                rationale="", model="", prompt_version="v1",
             )
         )
         s.commit()

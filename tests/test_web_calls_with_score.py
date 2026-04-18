@@ -46,9 +46,9 @@ def _seed(pg_session_factory, profile_id):
         )
         s.add_all([c1, c2, c3])
         s.flush()
-        s.add(CallRanking(call_id=c1.id, profile_id=profile_id, score=85,
+        s.add(CallRanking(call_id=c1.id, profile_id=profile_id, aggregate_score=85,
                           rationale="Great", model="gemma4:e4b-q8", prompt_version="v1"))
-        s.add(CallRanking(call_id=c2.id, profile_id=profile_id, score=15,
+        s.add(CallRanking(call_id=c2.id, profile_id=profile_id, aggregate_score=15,
                           rationale="Poor", model="gemma4:e4b-q8", prompt_version="v1"))
         s.commit()
 
@@ -127,7 +127,7 @@ def test_root_inactive_profile_degrades_to_unranked(
         s.add(c)
         s.flush()
         s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, score=99,
+            call_id=c.id, profile_id=profile_id, aggregate_score=99,
             rationale="hidden", model="gemma4:e4b-q8", prompt_version="v1",
         ))
         # Now soft-delete the profile
