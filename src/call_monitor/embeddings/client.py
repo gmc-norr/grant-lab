@@ -60,6 +60,10 @@ class OllamaEmbedClient:
         if not isinstance(embeddings, list) or not embeddings:
             raise LLMError(f"ollama embed response missing 'embeddings': {data!r}")
         first = embeddings[0]
-        if not isinstance(first, list) or not all(isinstance(x, (int, float)) for x in first):
-            raise LLMError(f"ollama embed response shape unexpected: {first!r:.200}")
+        if (
+            not isinstance(first, list)
+            or not first
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in first)
+        ):
+            raise LLMError(f"ollama embed response shape unexpected: {repr(first)[:200]}")
         return [float(x) for x in first]

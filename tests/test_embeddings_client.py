@@ -50,3 +50,26 @@ def test_embed_raises_llm_error_on_empty_embeddings_list():
     client = _client_returning({"embeddings": []})
     with pytest.raises(LLMError):
         client.embed("anything")
+
+
+def test_embed_raises_llm_error_when_vector_contains_non_numeric():
+    """Vector with strings/None/etc. is rejected — Ollama shouldn't return this,
+    but defend against malformed responses."""
+    client = _client_returning({"embeddings": [["a", "b", "c"]]})
+    with pytest.raises(LLMError):
+        client.embed("anything")
+
+
+def test_embed_raises_llm_error_on_inner_empty_vector():
+    """An inner empty list is meaningless as an embedding — reject it."""
+    client = _client_returning({"embeddings": [[]]})
+    with pytest.raises(LLMError):
+        client.embed("anything")
+
+
+def test_embed_rejects_vector_of_bools():
+    """`isinstance(True, int)` is True in Python; a list of bools would
+    otherwise sneak past validation. Tighten to require real numerics."""
+    client = _client_returning({"embeddings": [[True, False, True, False]]})
+    with pytest.raises(LLMError):
+        client.embed("anything")
