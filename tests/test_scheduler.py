@@ -24,7 +24,13 @@ def test_build_scheduler_returns_one_job_per_active_adapter():
     )
     assert isinstance(sched, BackgroundScheduler)
     job_slugs = sorted(j.id for j in sched.get_jobs())
-    assert job_slugs == ["ingest:eu_portal", "ingest:vinnova", "rank:drain"]
+    assert job_slugs == [
+        "golden_eval:weekly",
+        "ingest:eu_portal",
+        "ingest:vinnova",
+        "rank:drain",
+        "setwise:daily",
+    ]
     sched.shutdown(wait=False)
 
 

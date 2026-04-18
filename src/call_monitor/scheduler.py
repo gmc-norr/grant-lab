@@ -16,6 +16,7 @@ from call_monitor.email.client import EmailClient
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
+from call_monitor.ranking.setwise import run_setwise_for_profile
 from call_monitor.ranking.worker import drain_queue
 from call_monitor.sources.eu_portal import EUPortalAdapter
 from call_monitor.sources.vinnova import VinnovaAdapter
@@ -117,6 +118,72 @@ def build_scheduler(
         trigger=IntervalTrigger(seconds=ranking_tick_seconds),
         id="rank:drain",
         name="Drain ranking job queue",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    def _setwise_tick() -> None:
+        from sqlalchemy import select
+
+        from call_monitor.db.models import Profile
+
+        with session_factory() as session:
+            v2_profile_ids = session.execute(
+                select(Profile.id).where(
+                    Profile.is_active.is_(True),
+                    Profile.ranking_scheme == "v2",
+                )
+            ).scalars().all()
+
+        now = _dt.now(UTC)
+        for pid in v2_profile_ids:
+            try:
+                run_setwise_for_profile(
+                    session_factory=session_factory,
+                    client=ollama,
+                    profile_id=pid,
+                    now=now,
+                )
+            except Exception as e:  # noqa: BLE001
+                _logger.exception(
+                    "ranking.setwise.profile_failed",
+                    extra={
+                        "event": "setwise_profile_failed",
+                        "profile_id": pid,
+                        "error": str(e),
+                    },
+                )
+
+    sched.add_job(
+        _setwise_tick,
+        trigger=CronTrigger(hour=4, minute=0),
+        id="setwise:daily",
+        name="Daily setwise borderline pass",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    def _golden_tick() -> None:
+        # Lazy import: Task 6 ships call_monitor.ranking.eval after this task.
+        # Importing inside the job body lets Task 4 land first; the import
+        # only fires when the scheduled job actually runs.
+        from call_monitor.ranking.eval import run_golden_set_eval
+
+        try:
+            run_golden_set_eval(session_factory=session_factory)
+        except Exception as e:  # noqa: BLE001
+            _logger.exception(
+                "ranking.golden_eval.failed",
+                extra={"event": "golden_eval_failed", "error": str(e)},
+            )
+
+    sched.add_job(
+        _golden_tick,
+        trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),
+        id="golden_eval:weekly",
+        name="Weekly golden-set evaluation",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
