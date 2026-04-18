@@ -213,3 +213,88 @@ def test_compare_view_renders_em_dash_when_only_one_scheme(
         r.text, re.DOTALL,
     )
     assert onlyv2, "OnlyV2 row missing em-dashes for v1 score and delta"
+
+
+def test_compare_view_renders_v2_cosine_column(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """When v2 ranking has embed_similarity=0.42, the v2 cos column shows '0.42'.
+
+    The cosine value is the documented miss-detection signal: surfacing it on
+    the compare view lets the operator eyeball joint LLM/embedding distribution
+    and tune the prefilter threshold accordingly.
+    """
+    pid, _ = profile_factory(name="Cosine v2")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="COS-V2", url="https://x/cosv2",
+            title="CosineV2Call", published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v2",
+            aggregate_score=80, embed_similarity=0.42,
+            rationale="v2 with cosine",
+            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup_admin(monkeypatch, pg_url)
+    client = _admin_cookie(app, pg_session_factory)
+    with client:
+        r = client.get(f"/admin/ranking-compare?profile={pid}")
+    assert r.status_code == 200
+    assert "CosineV2Call" in r.text
+    # Header advertises the v2 cos column
+    assert "v2 cos" in r.text
+    # The 0.42 value renders in the row, formatted to 2 dp
+    assert "0.42" in r.text
+
+
+def test_compare_view_renders_em_dash_for_v1_cosine_column(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """v1 ranking has no embed_similarity → em-dash in v1 cos column.
+
+    Anchored regex: title → v1 score 70 → v2 score (none) em-dash → |Δ|
+    em-dash → v1 cos em-dash → v2 cos em-dash. Confirms the column was
+    actually emitted in the right cell, not just an em-dash hiding in
+    the unrelated rationale text.
+    """
+    pid, _ = profile_factory(name="Cosine v1 only")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="COS-V1", url="https://x/cosv1",
+            title="CosineV1OnlyCall", published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v1",
+            aggregate_score=70,  # embed_similarity left None
+            rationale="v1 baseline",
+            model="m", prompt_version="v1", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    app = _setup_admin(monkeypatch, pg_url)
+    client = _admin_cookie(app, pg_session_factory)
+    with client:
+        r = client.get(f"/admin/ranking-compare?profile={pid}")
+    assert r.status_code == 200
+    assert "CosineV1OnlyCall" in r.text
+    assert "v1 cos" in r.text
+    # Row shape: title, v1=70, v2=—, Δ=—, v1 cos=—, v2 cos=—
+    import re
+    row = re.search(
+        r"CosineV1OnlyCall.*?>70<.*?—.*?—.*?—.*?—",
+        r.text, re.DOTALL,
+    )
+    assert row, (
+        "v1-only row must show em-dash for v2 score, |Δ|, v1 cos, v2 cos. "
+        "Without the new v1/v2 cos cells, only 3 em-dashes would follow the "
+        "v1 score; this regex requires 4."
+    )

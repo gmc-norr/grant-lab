@@ -30,6 +30,9 @@
   <h2>Ranking</h2>
   <p><strong>Score:</strong> {{ ranking.display_score }}</p>
   {% if ranking.rationale %}<p>{{ ranking.rationale }}</p>{% endif %}
+  {% if ranking.scheme == 'v2' and ranking.embed_similarity is not none %}
+    <p><strong>Cosine similarity:</strong> {{ '%.3f' % ranking.embed_similarity }}</p>
+  {% endif %}
   {% if ranking.scheme == 'v2' and criteria %}
     <h2 style="margin-top: 1.5em;">v2 criterion breakdown</h2>
     <dl>
