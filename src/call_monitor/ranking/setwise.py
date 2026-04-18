@@ -36,6 +36,8 @@ def run_setwise_for_profile(
 ) -> int:
     """Run setwise on the v2 borderline band for one profile.
 
+    `now` is reserved for future time-based logging/correlation; currently unused.
+
     Returns the number of groups for which offsets were successfully applied.
     Skips entire pass if the profile has < 4 borderline calls; skips
     individual groups if the LLM's permutation is invalid.
@@ -136,6 +138,12 @@ def _ask_for_permutation(
     A bare-array response would either fail at the provider or push the
     model toward an object anyway. Without response_format, Gemma sometimes
     prepends prose explanations.
+
+    **Prompt scope:** Setwise ranks calls that have already passed v2
+    rubric scoring; TRL/budget/eligibility context lives upstream in
+    `rank_pair_v2`. The setwise prompt only conveys the per-call title +
+    summary truncated, which is enough for relative ordering within a
+    4-element band.
     """
     ids = [cid for cid, _, _ in group]
     items = "\n".join(

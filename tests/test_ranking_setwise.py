@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, datetime
 
 import httpx
@@ -159,17 +160,15 @@ def test_setwise_caps_borderline_at_12(pg_session_factory):
     def handler(req):
         # Echo back the first 4 IDs in JSON; even if they're "wrong",
         # the handler should at least apply offsets to whatever it returns.
-        import json as _json
         # The prompt body contains the IDs — extract them.
-        data = _json.loads(req.read().decode("utf-8"))
+        data = json.loads(req.read().decode("utf-8"))
         # The user message contains the IDs as a list.
         user_text = data["messages"][-1]["content"]
-        import re
         ids_in_prompt = [int(x) for x in re.findall(r"\b(\d+)\b", user_text)][:4]
         return httpx.Response(200, json={
             "model": "m",
             "choices": [{"message": {"role": "assistant",
-                                     "content": _json.dumps({"order": ids_in_prompt})}}],
+                                     "content": json.dumps({"order": ids_in_prompt})}}],
         })
     client = OllamaClient(
         base_url="http://x", model="m",
@@ -258,3 +257,70 @@ def test_setwise_resets_stale_offsets_at_pass_start(pg_session_factory):
         offsets = {r.call_id: r.setwise_offset for r in rows}
     # Every offset is back to 0, including the call that left the band.
     assert all(o == 0 for o in offsets.values()), offsets
+
+
+def test_setwise_returns_zero_for_missing_profile(pg_session_factory):
+    """Early-bail: profile_id doesn't exist → return 0, never call the LLM."""
+    def handler(req):
+        raise AssertionError("LLM should not be called — profile does not exist")
+    client = OllamaClient(
+        base_url="http://x", model="m",
+        transport=httpx.MockTransport(handler),
+    )
+    n = run_setwise_for_profile(
+        session_factory=pg_session_factory,
+        client=client,
+        profile_id=999999,
+        now=datetime.now(UTC),
+    )
+    assert n == 0
+
+
+def test_setwise_returns_zero_for_v1_profile(pg_session_factory):
+    """Early-bail: profile.ranking_scheme == 'v1' → return 0, never call the
+    LLM. The v2 borderline rows we seed below must remain untouched, proving
+    the early-bail fires BEFORE the candidate fetch."""
+    with pg_session_factory() as s:
+        # Seed a v1 profile.
+        u = User(email="v1@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="V1-profile", kind=ProfileKind.GROUP, description="d",
+            structured={"areas": [], "hard_exclusions": []},
+            created_by=u.id, ranking_scheme="v1",
+        )
+        s.add(p)
+        s.flush()
+        # Seed a borderline-band v2 CallRanking row attached to that v1 profile.
+        # If the early-bail were missing, the candidate fetch would still find
+        # this v2 row by profile_id+scheme; the early-bail must fire first.
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="v1-borderline", url="https://x/v1",
+            title="V1 call", summary="x",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=p.id, scheme="v2",
+            aggregate_score=55, rationale="r",
+            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+        pid = p.id
+
+    def handler(req):
+        raise AssertionError("LLM should not be called — profile is v1")
+    client = OllamaClient(
+        base_url="http://x", model="m",
+        transport=httpx.MockTransport(handler),
+    )
+    n = run_setwise_for_profile(
+        session_factory=pg_session_factory,
+        client=client,
+        profile_id=pid,
+        now=datetime.now(UTC),
+    )
+    assert n == 0
