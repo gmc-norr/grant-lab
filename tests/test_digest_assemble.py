@@ -52,8 +52,8 @@ def _seed_call(s, *, title, score=None, profile_id=None, summary=None,
     s.flush()
     if score is not None and profile_id is not None:
         s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, scheme="v1", aggregate_score=score,
-            rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
+            call_id=c.id, profile_id=profile_id, aggregate_score=score,
+            rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
             ranked_at=datetime.now(UTC),
         ))
         s.flush()
@@ -172,7 +172,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(
         # Also a low-score ranking against p_must so the call appears in both candidate sets
         s.add(CallRanking(
             call_id=cid, profile_id=p_must.id, aggregate_score=20,
-            rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
+            rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
             ranked_at=datetime.now(UTC),
         ))
         s.commit()
@@ -307,7 +307,7 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(
         cid = _seed_call(s, title="Shared", score=70, profile_id=p_low.id)
         s.add(CallRanking(
             call_id=cid, profile_id=p_high.id, aggregate_score=85,
-            rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
+            rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
             ranked_at=datetime.now(UTC),
         ))
         s.commit()
@@ -380,113 +380,3 @@ def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     assert payload is None
 
 
-def test_assemble_band_filters_use_display_score_with_setwise_offset(
-    pg_session_factory, now
-):
-    """C1 regression: digest band cutoffs (top >= 60, borderline >= 45)
-    must apply to display_score (= aggregate + setwise_offset, clamped)
-    not the bare aggregate. Otherwise setwise's daily ±5 nudge is invisible
-    to digest emails — the worst possible UX since email is the primary
-    surface for many users.
-
-    Two cases where aggregate vs. display disagree on the bucket:
-
-    Case A: aggregate=58 (borderline) + offset=+5 = display 63 → TOP bucket.
-            Without display-driven filters this would land in BORDERLINE.
-
-    Case B: aggregate=63 (top) + offset=-5 = display 58 → BORDERLINE bucket.
-            Without display-driven filters this would land in TOP.
-    """
-    with pg_session_factory() as s:
-        u = User(email="band@ki.se")
-        s.add(u)
-        s.flush()
-        p = Profile(
-            name="V2band", kind=ProfileKind.GROUP, description="",
-            structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": [], "hard_exclusions": [],
-            },
-            created_by=u.id, ranking_scheme="v2",
-        )
-        s.add(p)
-        s.flush()
-        s.add(Subscription(user_id=u.id, profile_id=p.id, digest_enabled=True))
-        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-
-        # Case A: bare 58 + offset +5 = 63 → TOP via display_score
-        cA = Call(
-            source_id=src.id, external_id="bandA", url="https://x/A",
-            title="BorderLifted", published_at=datetime.now(UTC),
-        )
-        # Case B: bare 63 + offset -5 = 58 → BORDERLINE via display_score
-        cB = Call(
-            source_id=src.id, external_id="bandB", url="https://x/B",
-            title="TopDropped", published_at=datetime.now(UTC),
-        )
-        s.add_all([cA, cB])
-        s.flush()
-        s.add(CallRanking(
-            call_id=cA.id, profile_id=p.id, scheme="v2",
-            aggregate_score=58, setwise_offset=5,
-            rationale="r", model="m", prompt_version="v2.0",
-            ranked_at=datetime.now(UTC),
-        ))
-        s.add(CallRanking(
-            call_id=cB.id, profile_id=p.id, scheme="v2",
-            aggregate_score=63, setwise_offset=-5,
-            rationale="r", model="m", prompt_version="v2.0",
-            ranked_at=datetime.now(UTC),
-        ))
-        s.commit()
-        uid = u.id
-
-    with pg_session_factory() as s:
-        payload = assemble_for_user(s, user_id=uid, now=now)
-    assert payload is not None
-    section = payload.sections[0]
-    by_title = {e.title: e for e in section.entries}
-    # Case A landed in `top` (display 63 >= 60) and shows display score 63.
-    assert by_title["BorderLifted"].bucket == "top", (
-        "BorderLifted has display_score=63 (>=60) → must be in top bucket; "
-        "if filter used bare aggregate=58, it would be borderline."
-    )
-    assert by_title["BorderLifted"].score == 63, (
-        f"digest entry score must be display_score (63), got "
-        f"{by_title['BorderLifted'].score}"
-    )
-    # Case B landed in `borderline` (45 <= display 58 < 60) and shows 58.
-    assert by_title["TopDropped"].bucket == "borderline", (
-        "TopDropped has display_score=58 (45 <= ds < 60) → must be in "
-        "borderline bucket; if filter used bare aggregate=63, it would be top."
-    )
-    assert by_title["TopDropped"].score == 58, (
-        f"digest entry score must be display_score (58), got "
-        f"{by_title['TopDropped'].score}"
-    )
-
-
-def test_assemble_filters_by_profile_ranking_scheme(pg_session_factory, now):
-    """A profile on v1 sees only v1 CallRanking rows, even if v2 rows exist
-    for the same (call, profile) pair (e.g. left over from compare-mode runs)."""
-    with pg_session_factory() as s:
-        uid, pid = _seed_user_with_profile(s)
-        # Profile defaults to ranking_scheme='v1'.
-        cid = _seed_call(s, title="DualSchemeCall", score=80, profile_id=pid)
-        # Same call also has a v2 ranking with a different score.
-        s.add(CallRanking(
-            call_id=cid, profile_id=pid, scheme="v2",
-            aggregate_score=10, rationale="v2",
-            model="m", prompt_version="v2.0",
-            ranked_at=datetime.now(UTC),
-        ))
-        s.commit()
-    with pg_session_factory() as s:
-        payload = assemble_for_user(s, user_id=uid, now=now)
-    assert payload is not None
-    titles_scores = [
-        (e.title, e.score) for sec in payload.sections for e in sec.entries
-    ]
-    assert ("DualSchemeCall", 80) in titles_scores      # v1 row, score 80
-    assert ("DualSchemeCall", 10) not in titles_scores  # v2 row excluded

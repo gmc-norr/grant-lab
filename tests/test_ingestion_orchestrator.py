@@ -147,22 +147,20 @@ def test_unknown_source_slug_raises(pg_session_factory):
         )
 
 
-def test_orchestrator_enqueues_jobs_with_profile_ranking_scheme(
+def test_orchestrator_enqueues_one_job_per_active_profile(
     pg_session_factory, profile_factory
 ):
-    """Each profile contributes its currently-active scheme to the enqueued job."""
+    """The orchestrator enqueues a ranking job for every active profile per
+    touched call."""
     from datetime import UTC, datetime
     from unittest.mock import MagicMock
 
     from sqlalchemy import select
 
-    from call_monitor.db.models import Profile, RankingJob
+    from call_monitor.db.models import RankingJob
 
-    pid_v1, _ = profile_factory(name="P-v1")
-    pid_v2, _ = profile_factory(name="P-v2")
-    with pg_session_factory() as s:
-        s.get(Profile, pid_v2).ranking_scheme = "v2"
-        s.commit()
+    pid_a, _ = profile_factory(name="P-A")
+    pid_b, _ = profile_factory(name="P-B")
 
     class _FakeAdapter:
         slug = "vinnova"
@@ -184,6 +182,7 @@ def test_orchestrator_enqueues_jobs_with_profile_ranking_scheme(
 
     with pg_session_factory() as s:
         jobs = s.execute(select(RankingJob)).scalars().all()
-    by_scheme = {(j.profile_id, j.scheme) for j in jobs}
-    assert (pid_v1, "v1") in by_scheme
-    assert (pid_v2, "v2") in by_scheme
+    profile_ids = {j.profile_id for j in jobs}
+    assert pid_a in profile_ids
+    assert pid_b in profile_ids
+    assert len(jobs) == 2

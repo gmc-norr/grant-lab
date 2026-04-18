@@ -33,7 +33,7 @@ def _seed_profile(s, *, name: str = "P") -> int:
     p = Profile(
         name=name, kind=ProfileKind.GROUP, description=f"{name} description",
         structured={"areas": [], "hard_exclusions": []},
-        created_by=u.id, ranking_scheme="v2",
+        created_by=u.id,
     )
     s.add(p)
     s.flush()

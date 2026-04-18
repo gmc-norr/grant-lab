@@ -68,7 +68,7 @@ def _seed_user_with_payload(s, *, email):
     s.flush()
     s.add(CallRanking(
         call_id=c.id, profile_id=p.id, aggregate_score=80, rationale="r",
-        model="gemma4:e4b-q8", prompt_version="v1", ranked_at=datetime.now(UTC),
+        model="gemma4:e4b-q8", prompt_version="v2.0", ranked_at=datetime.now(UTC),
     ))
     s.flush()
     return u.id

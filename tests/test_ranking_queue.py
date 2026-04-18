@@ -24,7 +24,7 @@ def test_enqueue_creates_pending_job(pg_session_factory, profile_factory):
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        was_new = enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        was_new = enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         s.commit()
     assert was_new is True
     with pg_session_factory() as s:
@@ -37,10 +37,10 @@ def test_enqueue_is_idempotent_on_duplicate_active_pair(pg_session_factory, prof
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         s.commit()
     with pg_session_factory() as s:
-        was_new = enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        was_new = enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         s.commit()
     assert was_new is False
     with pg_session_factory() as s:
@@ -52,7 +52,7 @@ def test_claim_pending_marks_running_and_returns_jobs(pg_session_factory, profil
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         s.commit()
     with pg_session_factory() as s:
         claimed = claim_pending_jobs(s, limit=10)
@@ -65,7 +65,7 @@ def test_claim_skips_already_running(pg_session_factory, profile_factory):
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         s.commit()
     with pg_session_factory() as s:
         claim_pending_jobs(s, limit=10)
@@ -80,7 +80,7 @@ def test_mark_done_terminates_job(pg_session_factory, profile_factory):
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         claimed = claim_pending_jobs(s, limit=1)
         mark_done(s, claimed[0].id)
         s.commit()
@@ -93,7 +93,7 @@ def test_mark_failed_records_error_and_increments_attempts(pg_session_factory, p
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         claimed = claim_pending_jobs(s, limit=1)
         mark_failed(s, claimed[0].id, error="Ollama 503", terminal=False)
         s.commit()
@@ -108,7 +108,7 @@ def test_mark_failed_terminal_dead_letters(pg_session_factory, profile_factory):
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         claimed = claim_pending_jobs(s, limit=1)
         mark_failed(s, claimed[0].id, error="parse error", terminal=True)
         s.commit()
@@ -124,7 +124,7 @@ def test_requeue_stuck_running_recovers_crashed_workers(pg_session_factory, prof
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         claimed = claim_pending_jobs(s, limit=1)
         # Simulate "stuck for >5 minutes": rewind updated_at directly.
         s.execute(
@@ -152,7 +152,7 @@ def test_requeue_stuck_running_leaves_recently_running_alone(pg_session_factory,
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
-        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id, scheme="v1")
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         claim_pending_jobs(s, limit=1)
         s.commit()
 

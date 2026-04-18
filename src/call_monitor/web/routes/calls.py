@@ -72,15 +72,10 @@ def calls_index(
                 .outerjoin(
                     CallRanking,
                     (CallRanking.call_id == Call.id)
-                    & (CallRanking.profile_id == profile)
-                    & (CallRanking.scheme == profile_obj.ranking_scheme),
+                    & (CallRanking.profile_id == profile),
                 )
                 .order_by(
-                    # display_score = aggregate_score + setwise_offset
-                    # clamped to [0, 100] (per spec line 191). Ordering
-                    # by the displayed score keeps the calls index in sync
-                    # with what the user actually sees in the score column.
-                    CallRanking.display_score.desc().nullslast(),
+                    CallRanking.aggregate_score.desc().nullslast(),
                     Call.published_at.desc().nullslast(),
                     Call.id.desc(),
                 )
@@ -152,15 +147,13 @@ def call_detail(
                     select(CallRanking).where(
                         CallRanking.call_id == call_id,
                         CallRanking.profile_id == profile,
-                        CallRanking.scheme == p.ranking_scheme,
                     )
                 ).scalar_one_or_none()
-                if ranking is not None and ranking.scheme == "v2":
+                if ranking is not None:
                     criteria = session.execute(
                         select(CallRankingCriterion).where(
                             CallRankingCriterion.call_id == call_id,
                             CallRankingCriterion.profile_id == profile,
-                            CallRankingCriterion.scheme == "v2",
                         )
                     ).scalars().all()
         # See note in calls_index: detach Call AND its joined `source` together.

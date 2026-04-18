@@ -22,14 +22,14 @@ _STUCK_AFTER = timedelta(minutes=5)
 
 
 def enqueue_for_pair(
-    session: Session, *, call_id: int, profile_id: int, scheme: str
+    session: Session, *, call_id: int, profile_id: int
 ) -> bool:
-    """Enqueue a ranking job for the (call, profile, scheme) triple.
+    """Enqueue a ranking job for the (call, profile) pair.
 
     Idempotent: ON CONFLICT DO NOTHING against the partial unique index
-    on (call_id, profile_id, scheme) WHERE status IN ('pending', 'running').
-    Returns True if a row was inserted, False if a same-scheme active job
-    already existed.
+    on (call_id, profile_id) WHERE status IN ('pending', 'running').
+    Returns True if a row was inserted, False if an active job already
+    existed for the pair.
 
     Why ON CONFLICT (not try/except IntegrityError + rollback): callers
     typically run inside a larger transaction (the orchestrator wraps
@@ -46,11 +46,10 @@ def enqueue_for_pair(
         .values(
             call_id=call_id,
             profile_id=profile_id,
-            scheme=scheme,
             status=RankingJobStatus.PENDING,
         )
         .on_conflict_do_nothing(
-            index_elements=["call_id", "profile_id", "scheme"],
+            index_elements=["call_id", "profile_id"],
             # PG requires the predicate to match the partial unique index
             # (uq_ranking_jobs_active_pair) for the planner to route the
             # conflict resolution. Match the migration's predicate verbatim.

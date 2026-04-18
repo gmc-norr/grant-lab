@@ -45,34 +45,13 @@
   <dt>Disabled users (3+ bounces)</dt>
   <dd>{{ digest_disabled_users }}</dd>
 </dl>
-<h2>Ranking — per-scheme queue depth</h2>
-<dl>
-  <dt>v1</dt><dd>{{ v2_queue_depth.get('v1', 0) }}</dd>
-  <dt>v2</dt><dd>{{ v2_queue_depth.get('v2', 0) }}</dd>
-</dl>
-
-<h2>Profiles — active scheme</h2>
-<table>
-  <thead><tr><th>Profile</th><th>Scheme</th><th>Last ranked</th></tr></thead>
-  <tbody>
-  {% for p in per_profile_scheme %}
-    <tr>
-      <td><a href="/profiles/{{ p.id }}">{{ p.name }}</a></td>
-      <td>{{ p.scheme }}</td>
-      <td>{% if p.last_ranked %}{{ p.last_ranked | display_dt }}{% else %}—{% endif %}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
 
 <h2>Golden-set Kendall's tau (last run)</h2>
 {% if golden_set_report %}
   <dl>
     <dt>Curated triples</dt><dd>{{ golden_set_report.n_fixture }}</dd>
-    <dt>v1 τ (n={{ golden_set_report.n_v1 }})</dt>
-    <dd>{% if golden_set_report.tau_v1 is not none %}{{ '%.3f' % golden_set_report.tau_v1 }}{% else %}—{% endif %}</dd>
-    <dt>v2 τ (n={{ golden_set_report.n_v2 }})</dt>
-    <dd>{% if golden_set_report.tau_v2 is not none %}{{ '%.3f' % golden_set_report.tau_v2 }}{% else %}—{% endif %}</dd>
+    <dt>τ (n={{ golden_set_report.n_compared }})</dt>
+    <dd>{% if golden_set_report.tau is not none %}{{ '%.3f' % golden_set_report.tau }}{% else %}—{% endif %}</dd>
   </dl>
 {% else %}
   <p>(golden eval not yet run)</p>

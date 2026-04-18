@@ -11,8 +11,8 @@ would reject valid calls. Same applies to embedding similarity: a
 missing cosine (model down, backfill incomplete) is UNKNOWN, not FAIL.
 
 The embedding gate is intentionally pure: callers compute the cosine
-elsewhere (see Task 5 / `rank_pair_v2`) and pass the float in. This
-keeps `criteria.py` free of HTTP/DB dependencies.
+elsewhere (see `rank_pair`) and pass the float in. This keeps
+`criteria.py` free of HTTP/DB dependencies.
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def evaluate_gates(
     None means UNKNOWN (callers that don't yet wire up embeddings get the
     same fall-through-to-LLM behaviour as a missing budget).
 
-    `embedding_threshold` lets callers (in practice: rank_pair_v2 reading
+    `embedding_threshold` lets callers (in practice: rank_pair reading
     Settings.embedding_pregate_threshold) override the module-default
     cosine cutoff. Keeping the default a module constant means this module
     stays import-time-pure (no env load required for unit tests).

@@ -8,7 +8,6 @@ from call_monitor.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
-    Profile,
     Source,
     User,
 )
@@ -36,13 +35,11 @@ def _logged_in(app, pg_session_factory):
     return client
 
 
-def test_call_detail_renders_v2_criterion_breakdown(
+def test_call_detail_renders_criterion_breakdown(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    pid, _ = profile_factory(name="V2 detail")
+    pid, _ = profile_factory(name="Detail")
     with pg_session_factory() as s:
-        p = s.get(Profile, pid)
-        p.ranking_scheme = "v2"
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
             source_id=src.id, external_id="DETAIL", url="https://x", title="DetailCall",
@@ -51,26 +48,26 @@ def test_call_detail_renders_v2_criterion_breakdown(
         s.add(c)
         s.flush()
         s.add(CallRanking(
-            call_id=c.id, profile_id=pid, scheme="v2",
+            call_id=c.id, profile_id=pid,
             aggregate_score=82, aggregate_reason=None,
             rationale="Topic 4/5 · Eligibility: pass · Exclusions: pass",
             model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
         ))
         s.add_all([
             CallRankingCriterion(
-                call_id=c.id, profile_id=pid, scheme="v2",
-                criterion="topic_fit", rating="4", rating_expected=4.1,
+                call_id=c.id, profile_id=pid,
+                criterion="topic_fit", rating="4",
                 rationale="strong AI match", quoted_evidence="AI funding call",
                 ranked_at=datetime.now(UTC),
             ),
             CallRankingCriterion(
-                call_id=c.id, profile_id=pid, scheme="v2",
+                call_id=c.id, profile_id=pid,
                 criterion="eligibility", rating="pass",
                 rationale="open to research groups", quoted_evidence=None,
                 ranked_at=datetime.now(UTC),
             ),
             CallRankingCriterion(
-                call_id=c.id, profile_id=pid, scheme="v2",
+                call_id=c.id, profile_id=pid,
                 criterion="exclusions", rating="pass",
                 rationale="no exclusions hit", quoted_evidence=None,
                 ranked_at=datetime.now(UTC),
@@ -91,96 +88,14 @@ def test_call_detail_renders_v2_criterion_breakdown(
     assert "AI funding call" in r.text  # quoted evidence
 
 
-def test_call_detail_renders_display_score_with_setwise_offset(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
-    """C1 regression: call detail page must show display_score (= aggregate
-    + setwise_offset, clamped) in the Score line, not the bare aggregate.
-    Otherwise a v2 borderline call lifted from 55 → 60 by setwise would
-    still render 55 here while showing 60 in the calls index — confusing
-    the operator about which value is canonical."""
-    pid, _ = profile_factory(name="V2 score offset")
-    with pg_session_factory() as s:
-        p = s.get(Profile, pid)
-        p.ranking_scheme = "v2"
-        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        c = Call(
-            source_id=src.id, external_id="DETAIL-OFFSET",
-            url="https://x/detail-offset", title="DetailOffsetCall",
-            published_at=datetime.now(UTC),
-        )
-        s.add(c)
-        s.flush()
-        s.add(CallRanking(
-            call_id=c.id, profile_id=pid, scheme="v2",
-            aggregate_score=55, setwise_offset=5,  # display = 60
-            aggregate_reason=None,
-            rationale="borderline lifted by setwise",
-            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
-        ))
-        s.commit()
-        cid = c.id
-
-    app = _setup(monkeypatch, pg_url)
-    client = _logged_in(app, pg_session_factory)
-    with client:
-        r = client.get(f"/calls/{cid}?profile={pid}")
-    assert r.status_code == 200
-    # Score line shows display_score (60), not bare aggregate (55).
-    assert "<strong>Score:</strong> 60" in r.text, (
-        "call detail Score line must render display_score=60 "
-        "(=aggregate 55 + setwise +5), not the bare aggregate 55"
-    )
-    # Bare aggregate must NOT appear in the Score line specifically. It
-    # may appear elsewhere (e.g. inside other text), so we anchor on the
-    # exact "Score: 55" form.
-    assert "<strong>Score:</strong> 55" not in r.text
-
-
-def test_call_detail_no_breakdown_for_v1_ranking(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
-    """v1-scheme profiles render the v1 view; no criterion breakdown section."""
-    pid, _ = profile_factory(name="V1 detail")  # defaults ranking_scheme='v1'
-    with pg_session_factory() as s:
-        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        c = Call(
-            source_id=src.id, external_id="V1DETAIL", url="https://x", title="V1Call",
-            published_at=datetime.now(UTC),
-        )
-        s.add(c)
-        s.flush()
-        s.add(CallRanking(
-            call_id=c.id, profile_id=pid, scheme="v1",
-            aggregate_score=70, rationale="v1 rationale text",
-            model="m", prompt_version="v1", ranked_at=datetime.now(UTC),
-        ))
-        s.commit()
-        cid = c.id
-
-    app = _setup(monkeypatch, pg_url)
-    client = _logged_in(app, pg_session_factory)
-    with client:
-        r = client.get(f"/calls/{cid}?profile={pid}")
-    assert r.status_code == 200
-    assert "v1 rationale text" in r.text
-    # No v2 breakdown markup — look for the heading/section identifier
-    # the template uses for the v2 block (e.g. "criterion breakdown" or
-    # similar). Adjust the assertion to match what your template emits.
-    # If the template says "v2 criterion breakdown" or "Criterion breakdown":
-    assert "criterion breakdown" not in r.text.lower()
-
-
 def test_call_detail_renders_embed_similarity_when_present(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """When the v2 ranking has embed_similarity=0.55, the call detail page
+    """When the ranking has embed_similarity=0.55, the call detail page
     surfaces it as 'Cosine similarity: 0.550' so the operator can spot
     LLM/embedding disagreements (the documented miss-detection signal)."""
-    pid, _ = profile_factory(name="V2 cosine detail")
+    pid, _ = profile_factory(name="Cosine detail")
     with pg_session_factory() as s:
-        p = s.get(Profile, pid)
-        p.ranking_scheme = "v2"
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
             source_id=src.id, external_id="COSDETAIL", url="https://x/cosdetail",
@@ -189,7 +104,7 @@ def test_call_detail_renders_embed_similarity_when_present(
         s.add(c)
         s.flush()
         s.add(CallRanking(
-            call_id=c.id, profile_id=pid, scheme="v2",
+            call_id=c.id, profile_id=pid,
             aggregate_score=82, embed_similarity=0.55,
             rationale="Topic 4/5 · Eligibility: pass · Exclusions: pass",
             model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
@@ -210,13 +125,11 @@ def test_call_detail_renders_embed_similarity_when_present(
 def test_call_detail_omits_cosine_line_when_embed_similarity_is_none(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """A v2 ranking with embed_similarity=None must not render the
+    """A ranking with embed_similarity=None must not render the
     'Cosine similarity:' line — avoids confusing 'None' or em-dash
     when the value genuinely wasn't computed."""
-    pid, _ = profile_factory(name="V2 no cosine")
+    pid, _ = profile_factory(name="No cosine")
     with pg_session_factory() as s:
-        p = s.get(Profile, pid)
-        p.ranking_scheme = "v2"
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
             source_id=src.id, external_id="NOCOS", url="https://x/nocos",
@@ -225,9 +138,9 @@ def test_call_detail_omits_cosine_line_when_embed_similarity_is_none(
         s.add(c)
         s.flush()
         s.add(CallRanking(
-            call_id=c.id, profile_id=pid, scheme="v2",
+            call_id=c.id, profile_id=pid,
             aggregate_score=70,  # embed_similarity intentionally omitted
-            rationale="v2 without cosine",
+            rationale="ranking without cosine",
             model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
         ))
         s.commit()

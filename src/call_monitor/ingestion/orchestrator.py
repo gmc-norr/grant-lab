@@ -187,18 +187,15 @@ def run_ingestion(
         # in step 1, so the next ingest tick won't re-discover these calls.
         try:
             with session_factory() as session:
-                active_profiles = session.execute(
-                    select(Profile.id, Profile.ranking_scheme).where(
-                        Profile.is_active.is_(True)
-                    )
-                ).all()
+                active_profile_ids = session.execute(
+                    select(Profile.id).where(Profile.is_active.is_(True))
+                ).scalars().all()
                 for cid in touched_call_ids:
-                    for pid, pscheme in active_profiles:
+                    for pid in active_profile_ids:
                         enqueue_for_pair(
                             session,
                             call_id=cid,
                             profile_id=pid,
-                            scheme=pscheme,
                         )
                 session.commit()
         except Exception as e:  # noqa: BLE001 — must not crash the scheduler
