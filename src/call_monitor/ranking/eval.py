@@ -188,14 +188,29 @@ def _persist_report(report: GoldenSetReport) -> None:
 
 
 def load_last_report() -> GoldenSetReport | None:
-    """Read the most recent persisted report, or None if never run."""
+    """Read the most recent persisted report, or None if never run.
+
+    Defensive: if the sidecar file is missing OR corrupted/incomplete,
+    return None and log a warning. /admin must always render — it's the
+    operator's recovery surface."""
     if not _REPORT_PATH.exists():
         return None
-    data = json.loads(_REPORT_PATH.read_text())
-    return GoldenSetReport(
-        n_fixture=data.get("n_fixture", 0),
-        n_v1=data.get("n_v1", 0),
-        tau_v1=data.get("tau_v1"),
-        n_v2=data.get("n_v2", 0),
-        tau_v2=data.get("tau_v2"),
-    )
+    try:
+        data = json.loads(_REPORT_PATH.read_text())
+        return GoldenSetReport(
+            n_fixture=data.get("n_fixture", 0),
+            n_v1=data.get("n_v1", 0),
+            tau_v1=data.get("tau_v1"),
+            n_v2=data.get("n_v2", 0),
+            tau_v2=data.get("tau_v2"),
+        )
+    except (OSError, json.JSONDecodeError, TypeError) as e:
+        _logger.warning(
+            "ranking.golden_eval.load_failed",
+            extra={
+                "event": "golden_load_failed",
+                "path": str(_REPORT_PATH),
+                "error": str(e),
+            },
+        )
+        return None

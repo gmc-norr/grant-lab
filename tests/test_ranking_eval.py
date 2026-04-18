@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 
 from call_monitor.db.models import (
@@ -16,6 +17,19 @@ from call_monitor.ranking.eval import (
     kendalls_tau,
     run_golden_set_eval,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_report_path(monkeypatch, tmp_path):
+    """Redirect _REPORT_PATH to tmp_path for every test in this module so
+    tests don't pollute <cwd>/data/golden_set_last.json. Tests that need
+    to inspect the report file should still override _REPORT_PATH inside
+    the test body to a known path inside tmp_path (which this fixture
+    has already pointed at). The override is harmless because monkeypatch
+    re-applies cleanly inside a fixture scope."""
+    from call_monitor.ranking import eval as eval_mod
+    monkeypatch.setattr(eval_mod, "_REPORT_PATH", tmp_path / "auto_isolated.json")
+    yield
 
 
 def test_kendalls_tau_perfect_correlation():
@@ -312,3 +326,13 @@ def test_load_last_report_reads_persisted_report(monkeypatch, tmp_path):
     assert r.tau_v1 == 0.789
     assert r.n_v2 == 48
     assert r.tau_v2 == 0.812
+
+
+def test_load_last_report_returns_none_on_corrupted_file(monkeypatch, tmp_path):
+    """Corrupted JSON in the report file must not crash /admin — return None."""
+    from call_monitor.ranking import eval as eval_mod
+    p = tmp_path / "corrupt.json"
+    p.write_text("{not json at all")  # truncated/invalid JSON
+    monkeypatch.setattr(eval_mod, "_REPORT_PATH", p)
+    from call_monitor.ranking.eval import load_last_report
+    assert load_last_report() is None

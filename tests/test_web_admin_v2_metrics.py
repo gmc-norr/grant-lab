@@ -169,3 +169,21 @@ def test_admin_renders_placeholder_when_no_report_persisted(
         r = client.get("/admin")
     assert r.status_code == 200
     assert "golden eval not yet run" in r.text
+
+
+def test_admin_tolerates_corrupt_golden_set_report(
+    monkeypatch, pg_url, pg_session_factory, profile_factory, tmp_path,
+):
+    """If data/golden_set_last.json is corrupt, /admin still renders 200
+    with the placeholder. /admin must never 500 on a bad sidecar file."""
+    from call_monitor.ranking import eval as eval_mod
+    bad = tmp_path / "golden_set_last.json"
+    bad.write_text("{not json")
+    monkeypatch.setattr(eval_mod, "_REPORT_PATH", bad)
+
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    assert "golden eval not yet run" in r.text
