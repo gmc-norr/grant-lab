@@ -44,26 +44,28 @@ def calls_index(
         # is soft") requires inactive profiles to be absent from feeds.
         # Unknown or inactive ?profile=<id> degrades to the unranked
         # list so a stale bookmark doesn't error or leak audit data.
+        profile_obj: Profile | None = None
         if profile is not None:
-            exists_and_active = session.execute(
-                select(Profile.id).where(
+            profile_obj = session.execute(
+                select(Profile).where(
                     Profile.id == profile, Profile.is_active.is_(True)
                 )
             ).scalar_one_or_none()
-            if exists_and_active is None:
+            if profile_obj is None:
                 profile = None
 
         # When a profile is selected, LEFT JOIN call_rankings for THAT
         # profile and sort by score desc (nulls last). Without a profile,
         # fall back to the unranked sort (newest/deadline).
-        if profile is not None:
+        if profile is not None and profile_obj is not None:
             stmt = (
                 select(Call, CallRanking)
                 .options(joinedload(Call.source))
                 .outerjoin(
                     CallRanking,
                     (CallRanking.call_id == Call.id)
-                    & (CallRanking.profile_id == profile),
+                    & (CallRanking.profile_id == profile)
+                    & (CallRanking.scheme == profile_obj.ranking_scheme),
                 )
                 .order_by(
                     CallRanking.aggregate_score.desc().nullslast(),
