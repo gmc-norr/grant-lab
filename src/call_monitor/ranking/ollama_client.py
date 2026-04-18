@@ -51,13 +51,27 @@ class OllamaClient:
         self._transport = transport
         self._timeout = timeout
 
-    def chat(self, *, messages: list[dict]) -> dict:
+    def chat(
+        self,
+        *,
+        messages: list[dict],
+        response_format: dict | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
+    ) -> dict:
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            # Default to JSON mode; callers pass response_format to override.
+            "response_format": (
+                response_format if response_format is not None else {"type": "json_object"}
+            ),
         }
+        if logprobs:
+            payload["logprobs"] = True
+            if top_logprobs is not None:
+                payload["top_logprobs"] = top_logprobs
         try:
             with httpx.Client(
                 base_url=self._base_url,

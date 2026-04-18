@@ -26,6 +26,28 @@
   <p>{{ call.summary }}</p>
 {% endif %}
 
+{% if ranking %}
+  <h2>Ranking</h2>
+  <p><strong>Score:</strong> {{ ranking.aggregate_score }}</p>
+  {% if ranking.rationale %}<p>{{ ranking.rationale }}</p>{% endif %}
+  {% if ranking.scheme == 'v2' and criteria %}
+    <h2 style="margin-top: 1.5em;">v2 criterion breakdown</h2>
+    <dl>
+      {% for c in criteria %}
+        <dt>{{ c.criterion }}</dt>
+        <dd>
+          <strong>{% if c.criterion == 'topic_fit' %}{{ c.rating }}/5{% else %}{{ c.rating }}{% endif %}</strong>
+          {% if c.rating_expected is not none and c.criterion == 'topic_fit' %}
+            <small>(expected {{ '%.2f' % c.rating_expected }})</small>
+          {% endif %}
+          {% if c.rationale %}<div>{{ c.rationale }}</div>{% endif %}
+          {% if c.quoted_evidence %}<blockquote style="margin: 0.3em 0 0 1em; color: #555; font-style: italic;">"{{ c.quoted_evidence }}"</blockquote>{% endif %}
+        </dd>
+      {% endfor %}
+    </dl>
+  {% endif %}
+{% endif %}
+
 <form method="post" action="/calls/{{ call.id }}/hide" style="margin-top:1em">
   <button type="submit">Hide this call</button>
   <small>Removes it from your feed permanently. Other users are unaffected.</small>

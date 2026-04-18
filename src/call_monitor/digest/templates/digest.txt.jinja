@@ -7,7 +7,7 @@
 {% set bord = section.entries | selectattr('bucket', 'equalto', 'borderline') | list %}
 {% for e in must + top %}
 - {{ e.title }}{% if e.score is not none %} (score {{ e.score }}){% endif %}{% if e.bucket == 'must_include' %} [must-include match]{% endif %}
-  {{ dashboard_url }}calls/{{ e.call_id }}
+  {{ dashboard_url }}calls/{{ e.call_id }}?profile={{ section.profile_id }}
 {% if e.deadline %}  Deadline: {{ e.deadline | display_date }}{% if days_until(e.deadline) is not none %} (in {{ days_until(e.deadline) }} days){% endif %}
 {% endif %}{% if e.rationale %}  {{ e.rationale }}
 {% endif %}{% if e.also_in_profiles %}  Also matches: {{ e.also_in_profiles | join(', ') }}
@@ -15,7 +15,7 @@
 {% endfor %}
 {% if bord %}-- Borderline ({{ bord | length }}) --
 {% for e in bord %}- {{ e.title }} (score {{ e.score }})
-  {{ dashboard_url }}calls/{{ e.call_id }}
+  {{ dashboard_url }}calls/{{ e.call_id }}?profile={{ section.profile_id }}
 {% endfor %}{% endif %}
 {% endfor %}
 
