@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from dataclasses import replace as _replace
 from datetime import datetime
 
 from call_monitor.ranking.aggregate import (
@@ -20,7 +19,6 @@ from call_monitor.ranking.prompt import (
 )
 
 _logger = logging.getLogger(__name__)
-_QUOTED_EVIDENCE_MAX = 200
 
 
 @dataclass(frozen=True)
@@ -106,8 +104,7 @@ def rank_pair(
         response_format={"type": "json_object"},
     )
     content = envelope["choices"][0]["message"]["content"]
-    parsed = parse_response(content)
-    parsed = _verify_quoted_evidence(parsed, call)
+    parsed = parse_response(content, verification_text=_build_verification_text(call))
 
     llm = LLMResult(
         topic_argmax=parsed.topic_fit_rating,
@@ -172,38 +169,22 @@ def _call_matches_must_include(profile, call) -> bool:
     return any(t in haystack for t in must_terms)
 
 
-def _verify_quoted_evidence(parsed: Parsed, call) -> Parsed:
-    """Defense against ungrounded LLM rationales: null out any quoted_evidence
-    field whose case-insensitive content is not actually in the call text.
-    Truncate over-long quotes to _QUOTED_EVIDENCE_MAX chars.
+def _build_verification_text(call) -> str:
+    """Title + summary + FULL full_text (no truncation).
 
-    We never fail the ranking on a bogus quote — quote-checking is a defense,
-    not a gate. The LLM's rating still stands; only the quote display is
-    sanitized."""
-    haystack = " ".join(filter(None, [
-        (call.title or "").lower(),
-        (call.summary or "").lower(),
-        (getattr(call, "full_text", "") or "").lower(),
-    ]))
-
-    def _verify_one(quote: str | None) -> str | None:
-        if not quote:
-            return None
-        truncated = quote[:_QUOTED_EVIDENCE_MAX]
-        # Whitespace-only quotes match almost any haystack (every haystack
-        # contains whitespace) but are useless to display. Reject them.
-        if not truncated.strip():
-            return None
-        if truncated.lower() in haystack:
-            return truncated
-        return None  # bogus quote — discarded silently
-
-    return _replace(
-        parsed,
-        topic_fit_quoted=_verify_one(parsed.topic_fit_quoted),
-        eligibility_quoted=_verify_one(parsed.eligibility_quoted),
-        exclusions_quoted=_verify_one(parsed.exclusions_quoted),
-    )
+    Used as the haystack for quoted_evidence substring checks in
+    parse_response. Distinct from `embeddings.similarity.build_call_text`,
+    which truncates full_text to 8000 chars for embedding input — we must
+    not truncate here, or quotes from past that point would be falsely
+    nulled.
+    """
+    parts = [call.title or ""]
+    if call.summary:
+        parts.append(call.summary)
+    full_text = getattr(call, "full_text", None)
+    if full_text:
+        parts.append(full_text)
+    return "\n".join(parts)
 
 
 def _safe_cosine(profile, call) -> float | None:

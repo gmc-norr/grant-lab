@@ -113,6 +113,9 @@ def build_messages(*, profile, call) -> list[dict]:
     ]
 
 
+_QUOTED_EVIDENCE_MAX = 200
+
+
 def _validated_quote(block: dict, criterion: str) -> str | None:
     """Extract quoted_evidence with type validation."""
     if "quoted_evidence" not in block:
@@ -127,9 +130,18 @@ def _validated_quote(block: dict, criterion: str) -> str | None:
     return q if q else None  # empty string treated as null
 
 
-def parse_response(content: str) -> Parsed:
+def parse_response(content: str, *, verification_text: str | None = None) -> Parsed:
     """Parse the LLM's JSON criterion output. Raises ParseError on shape
-    violations. Quote verification is done outside (in rank_pair)."""
+    violations.
+
+    When ``verification_text`` is supplied, each quoted_evidence field is
+    truncated to 200 chars and case-insensitive substring-checked against
+    that text. Misses are nulled silently — the LLM's rating still stands;
+    only the displayed quote is sanitized. The caller is responsible for
+    passing the FULL call body (title + summary + full untruncated full_text);
+    don't reuse the embedding helper here, which truncates full_text and
+    would falsely null quotes from past the truncation point.
+    """
     try:
         data = json.loads(content)
     except ValueError as e:
@@ -158,14 +170,30 @@ def parse_response(content: str) -> Parsed:
     if ex_rating not in {"pass", "fail"}:
         raise ParseError(f"exclusions.rating must be 'pass'|'fail'; got {ex_rating!r}")
 
+    haystack_lower = verification_text.lower() if verification_text is not None else None
+
+    def _verified_quote(quote: str | None) -> str | None:
+        if quote is None:
+            return None
+        truncated = quote[:_QUOTED_EVIDENCE_MAX]
+        if haystack_lower is None:
+            # No verification requested — keep the (truncated) quote as-is.
+            return truncated if truncated else None
+        # Whitespace-only quotes match almost any haystack but are useless.
+        if not truncated.strip():
+            return None
+        if truncated.lower() in haystack_lower:
+            return truncated
+        return None  # bogus quote — discarded silently
+
     return Parsed(
         topic_fit_rating=rating,
         topic_fit_rationale=str(tf.get("rationale") or ""),
-        topic_fit_quoted=_validated_quote(tf, "topic_fit"),
+        topic_fit_quoted=_verified_quote(_validated_quote(tf, "topic_fit")),
         eligibility_rating=el_rating,
         eligibility_rationale=str(el.get("rationale") or ""),
-        eligibility_quoted=_validated_quote(el, "eligibility"),
+        eligibility_quoted=_verified_quote(_validated_quote(el, "eligibility")),
         exclusions_rating=ex_rating,
         exclusions_rationale=str(ex.get("rationale") or ""),
-        exclusions_quoted=_validated_quote(ex, "exclusions"),
+        exclusions_quoted=_verified_quote(_validated_quote(ex, "exclusions")),
     )
