@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import UTC, datetime
 
@@ -124,3 +125,47 @@ def test_admin_per_profile_row_shows_em_dash_when_never_ranked(
         r.text,
         re.DOTALL,
     )
+
+
+def test_admin_renders_golden_set_report_when_persisted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory, tmp_path,
+):
+    """When data/golden_set_last.json exists, /admin shows a dl with both
+    scheme taus formatted to 3 decimal places."""
+    from call_monitor.ranking import eval as eval_mod
+    monkeypatch.setattr(
+        eval_mod, "_REPORT_PATH", tmp_path / "golden_set_last.json",
+    )
+    (tmp_path / "golden_set_last.json").write_text(json.dumps({
+        "n_fixture": 50,
+        "n_v1": 50, "tau_v1": 0.789,
+        "n_v2": 48, "tau_v2": 0.812,
+    }))
+
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    assert "Golden-set Kendall" in r.text
+    assert "0.789" in r.text
+    assert "0.812" in r.text
+    assert "n=50" in r.text
+    assert "n=48" in r.text
+
+
+def test_admin_renders_placeholder_when_no_report_persisted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory, tmp_path,
+):
+    """If no report has been persisted yet, show the placeholder text."""
+    from call_monitor.ranking import eval as eval_mod
+    monkeypatch.setattr(
+        eval_mod, "_REPORT_PATH", tmp_path / "never-existed.json",
+    )
+
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    assert "golden eval not yet run" in r.text

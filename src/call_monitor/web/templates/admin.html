@@ -64,4 +64,17 @@
   {% endfor %}
   </tbody>
 </table>
+
+<h2>Golden-set Kendall's tau (last run)</h2>
+{% if golden_set_report %}
+  <dl>
+    <dt>Curated triples</dt><dd>{{ golden_set_report.n_fixture }}</dd>
+    <dt>v1 τ (n={{ golden_set_report.n_v1 }})</dt>
+    <dd>{% if golden_set_report.tau_v1 is not none %}{{ '%.3f' % golden_set_report.tau_v1 }}{% else %}—{% endif %}</dd>
+    <dt>v2 τ (n={{ golden_set_report.n_v2 }})</dt>
+    <dd>{% if golden_set_report.tau_v2 is not none %}{{ '%.3f' % golden_set_report.tau_v2 }}{% else %}—{% endif %}</dd>
+  </dl>
+{% else %}
+  <p>(golden eval not yet run)</p>
+{% endif %}
 {% endblock %}

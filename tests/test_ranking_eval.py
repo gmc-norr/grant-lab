@@ -254,3 +254,61 @@ def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_pat
     )
     assert report.n_fixture == 1  # deduped
     assert report.n_v2 == 1
+
+
+def test_run_golden_set_eval_persists_report_to_disk(
+    pg_session_factory, tmp_path, monkeypatch,
+):
+    """After computing the report, write it to disk so /admin can read
+    the latest result without re-running the eval."""
+    from call_monitor.ranking import eval as eval_mod
+    # Override the persist path to a tmp location.
+    monkeypatch.setattr(
+        eval_mod, "_REPORT_PATH", tmp_path / "golden_set_last.json",
+    )
+
+    # Run with empty fixture → zeroed report; still gets persisted.
+    fixture = tmp_path / "empty.json"
+    fixture.write_text("[]")
+    report = run_golden_set_eval(
+        session_factory=pg_session_factory, fixture_path=str(fixture),
+    )
+    persisted = json.loads((tmp_path / "golden_set_last.json").read_text())
+    assert persisted["n_fixture"] == report.n_fixture == 0
+    assert persisted["tau_v1"] is None
+    assert persisted["tau_v2"] is None
+
+
+def test_load_last_report_returns_none_when_never_persisted(
+    monkeypatch, tmp_path,
+):
+    """If the report file doesn't exist, load_last_report returns None."""
+    from call_monitor.ranking import eval as eval_mod
+    monkeypatch.setattr(
+        eval_mod, "_REPORT_PATH", tmp_path / "nope.json",
+    )
+    from call_monitor.ranking.eval import load_last_report
+    assert load_last_report() is None
+
+
+def test_load_last_report_reads_persisted_report(monkeypatch, tmp_path):
+    """Round-trip: persist then load returns the same report."""
+    from call_monitor.ranking import eval as eval_mod
+    p = tmp_path / "last.json"
+    monkeypatch.setattr(eval_mod, "_REPORT_PATH", p)
+
+    p.write_text(json.dumps({
+        "n_fixture": 50,
+        "n_v1": 50,
+        "tau_v1": 0.789,
+        "n_v2": 48,
+        "tau_v2": 0.812,
+    }))
+    from call_monitor.ranking.eval import load_last_report
+    r = load_last_report()
+    assert r is not None
+    assert r.n_fixture == 50
+    assert r.n_v1 == 50
+    assert r.tau_v1 == 0.789
+    assert r.n_v2 == 48
+    assert r.tau_v2 == 0.812

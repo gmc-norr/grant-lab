@@ -125,6 +125,8 @@ def admin_index(
         context.update(_digest_panel_context(session))
         context["v2_queue_depth"] = _v2_queue_depth(session)
         context["per_profile_scheme"] = _per_profile_scheme(session)
+        from call_monitor.ranking.eval import load_last_report
+        context["golden_set_report"] = load_last_report()
 
     return request.app.state.templates.TemplateResponse(
         request=request,

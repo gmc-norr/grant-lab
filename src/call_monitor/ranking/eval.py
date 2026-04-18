@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,13 @@ _DEFAULT_FIXTURE = (
 # Sanity check the parents[3] math — fail loudly at import time if the
 # repo layout shifts and this constant points somewhere unexpected.
 assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
+
+# Path the weekly eval job writes to and /admin reads from. Computed once
+# at import — env-var override only takes effect on (re-)import. Tests
+# override this constant via monkeypatch.setattr rather than the env var.
+_REPORT_PATH = (
+    Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")) / "golden_set_last.json"
+)
 
 
 @dataclass(frozen=True)
@@ -160,4 +168,34 @@ def run_golden_set_eval(
             "n_v2": len(v2_actual), "tau_v2": tau_v2,
         },
     )
+    _persist_report(report)
     return report
+
+
+def _persist_report(report: GoldenSetReport) -> None:
+    """Write the latest report to disk for /admin to read on each load.
+
+    Overwrite-in-place: only the most recent run is kept. The weekly job
+    bumps this; the admin route never blocks on re-running the eval."""
+    _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _REPORT_PATH.write_text(json.dumps({
+        "n_fixture": report.n_fixture,
+        "n_v1": report.n_v1,
+        "tau_v1": report.tau_v1,
+        "n_v2": report.n_v2,
+        "tau_v2": report.tau_v2,
+    }))
+
+
+def load_last_report() -> GoldenSetReport | None:
+    """Read the most recent persisted report, or None if never run."""
+    if not _REPORT_PATH.exists():
+        return None
+    data = json.loads(_REPORT_PATH.read_text())
+    return GoldenSetReport(
+        n_fixture=data.get("n_fixture", 0),
+        n_v1=data.get("n_v1", 0),
+        tau_v1=data.get("tau_v1"),
+        n_v2=data.get("n_v2", 0),
+        tau_v2=data.get("tau_v2"),
+    )

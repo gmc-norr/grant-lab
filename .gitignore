@@ -22,6 +22,9 @@ venv/
 # Locally-rendered exports of design specs / plans
 docs/**/*.pdf
 
+# Runtime data (e.g. golden_set_last.json written by weekly eval job)
+data/
+
 # OS
 .DS_Store
 Thumbs.db
