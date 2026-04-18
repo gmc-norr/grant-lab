@@ -89,6 +89,36 @@ def test_cli_backfill_loops_until_all_done(pg_session_factory):
     assert fake_client.embed.call_count == 5
 
 
+def test_cli_backfill_terminates_when_only_blank_description_profiles_remain(
+    pg_session_factory, capsys,
+):
+    """CLI must not infinite-loop when blank-description profiles exist —
+    they're skipped at SQL level (Codex regression). Should exit 0
+    (no failures, just nothing to do for those rows)."""
+    with pg_session_factory() as s:
+        u = User(email="blank-cli@ki.se")
+        s.add(u)
+        s.flush()
+        # Add a profile with blank description
+        s.add(Profile(
+            name="BlankCLI", kind=ProfileKind.GROUP, description="",
+            structured={}, created_by=u.id, ranking_scheme="v2",
+        ))
+        s.commit()
+
+    fake_client = MagicMock()
+    fake_client.model = "bge-m3"
+    fake_client.embed.side_effect = AssertionError("embed should not be invoked")
+
+    with patch("call_monitor.embeddings.cli._build_embed_client", return_value=fake_client):
+        exit_code = backfill_main(
+            argv=["backfill"],
+            session_factory=pg_session_factory,
+        )
+    # No failures, no embeds — should exit 0 cleanly
+    assert exit_code == 0
+
+
 def test_cli_backfill_returns_nonzero_on_persistent_failures(pg_session_factory):
     """If any row fails to embed (LLM down etc), exit 1 so deploy scripts catch it."""
     from call_monitor.ranking.ollama_client import LLMError

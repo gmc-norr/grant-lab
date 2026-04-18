@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from call_monitor.db.models import Call, Profile
 from call_monitor.embeddings.similarity import build_call_text, build_profile_text
@@ -114,6 +114,7 @@ def refresh_missing_embeddings_tick(
         call_ids = session.execute(
             select(Call.id)
             .where(or_(Call.embedding.is_(None), Call.embedding_model != current_model))
+            .where(func.length(func.trim(Call.title)) > 0)
             .limit(batch_size)
         ).scalars().all()
     for cid in call_ids:
@@ -129,6 +130,7 @@ def refresh_missing_embeddings_tick(
         profile_ids = session.execute(
             select(Profile.id)
             .where(or_(Profile.embedding.is_(None), Profile.embedding_model != current_model))
+            .where(func.length(func.trim(Profile.description)) > 0)
             .limit(batch_size)
         ).scalars().all()
     for pid in profile_ids:

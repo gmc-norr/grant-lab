@@ -183,6 +183,28 @@ def test_refresh_missing_tick_re_embeds_rows_with_mismatched_model(pg_session_fa
         assert s.get(Call, cid_null).embedding_model == "bge-m3"
 
 
+def test_refresh_missing_tick_skips_blank_description_profiles(pg_session_factory):
+    """Codex regression: a profile with blank description has no text to
+    embed. The tick must not select it (would otherwise infinite-loop:
+    select NULL → no-op clear → still NULL → re-select)."""
+    with pg_session_factory() as s:
+        pid = _seed_profile(s, name="BlankDesc")
+        s.flush()
+        s.get(Profile, pid).description = ""
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    # Embed should NEVER be called — blank-description profile is skipped at SQL level
+    client.embed.side_effect = AssertionError("embed should not be invoked for blank-desc profile")
+
+    summary = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+    )
+    assert summary["profiles_embedded"] == 0
+    assert summary["profiles_failed"] == 0
+
+
 def test_refresh_profile_embedding_clears_when_description_blank(pg_session_factory):
     """Codex M2 regression: clearing description removes the stale embedding."""
     with pg_session_factory() as s:
