@@ -183,3 +183,74 @@ def test_run_golden_set_eval_per_scheme_n_reflects_actual_rows(
     # tau_v2 computed over those 2 rows (could be -1, 0, or 1 with n=2;
     # we just confirm it's not None and the count is honest).
     assert report.tau_v2 is not None
+
+
+def test_run_golden_set_eval_missing_fixture_returns_zeroed_report(
+    pg_session_factory, tmp_path, caplog,
+):
+    """If the fixture file does not exist, the evaluator returns a fully
+    zeroed report (n_fixture=0, n_v1/v2=0, tau_v1/v2=None) and logs a
+    structured warning. The whole pipeline must not crash."""
+    import logging
+
+    nonexistent = tmp_path / "does-not-exist.json"
+    assert not nonexistent.exists()
+
+    with caplog.at_level(logging.WARNING, logger="call_monitor.ranking.eval"):
+        report = run_golden_set_eval(
+            session_factory=pg_session_factory,
+            fixture_path=str(nonexistent),
+        )
+
+    assert report == GoldenSetReport(
+        n_fixture=0, n_v1=0, tau_v1=None, n_v2=0, tau_v2=None,
+    )
+    assert any(
+        "golden_fixture_missing" in (r.getMessage() or "")
+        or "ranking.golden_eval.fixture_missing" in r.message
+        for r in caplog.records
+    )
+
+
+def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_path):
+    """If the fixture lists the same (call_id, profile_id) twice, dedup so
+    tau isn't biased by double-weighting. First occurrence wins."""
+    with pg_session_factory() as s:
+        u = User(email="dup@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="Dup", kind=ProfileKind.GROUP, description="",
+            structured={"areas": [], "hard_exclusions": []},
+            created_by=u.id, ranking_scheme="v2",
+        )
+        s.add(p)
+        s.flush()
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="DUP", url="https://x", title="DUP",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=p.id, scheme="v2",
+            aggregate_score=50, rationale="r",
+            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+        cid, pid = c.id, p.id
+
+    fixture_path = tmp_path / "dups.json"
+    # Same (call_id, profile_id) listed three times.
+    fixture_path.write_text(json.dumps([
+        {"call_id": cid, "profile_id": pid, "expected_score": 80},
+        {"call_id": cid, "profile_id": pid, "expected_score": 70},
+        {"call_id": cid, "profile_id": pid, "expected_score": 60},
+    ]))
+
+    report = run_golden_set_eval(
+        session_factory=pg_session_factory, fixture_path=str(fixture_path),
+    )
+    assert report.n_fixture == 1  # deduped
+    assert report.n_v2 == 1

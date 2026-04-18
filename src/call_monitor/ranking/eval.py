@@ -23,6 +23,9 @@ _logger = logging.getLogger(__name__)
 _DEFAULT_FIXTURE = (
     Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "golden_set.json"
 )
+# Sanity check the parents[3] math — fail loudly at import time if the
+# repo layout shifts and this constant points somewhere unexpected.
+assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
 
 
 @dataclass(frozen=True)
@@ -81,7 +84,11 @@ def run_golden_set_eval(
 
     Reports per-scheme `n_v1` / `n_v2` separately from the curated fixture
     size (`n_fixture`) so the admin panel doesn't display "tau computed
-    over 50 pairs" when only 12 of those 50 had a CallRanking under v2."""
+    over 50 pairs" when only 12 of those 50 had a CallRanking under v2.
+
+    Fixture schema is trusted: each triple must have integer call_id,
+    profile_id, and numeric expected_score. No defensive validation —
+    curated by hospital admins."""
     path = Path(fixture_path) if fixture_path else _DEFAULT_FIXTURE
     if not path.exists():
         _logger.warning(
@@ -92,7 +99,26 @@ def run_golden_set_eval(
             n_fixture=0, n_v1=0, tau_v1=None, n_v2=0, tau_v2=None,
         )
 
-    triples = json.loads(path.read_text())
+    triples_raw = json.loads(path.read_text())
+    # Dedup on (call_id, profile_id) — keep first occurrence. A duplicated
+    # triple would otherwise double-weight that pair in tau, biasing the
+    # result. Log a warning so a curator notices fixture errors.
+    seen: set[tuple[int, int]] = set()
+    triples: list[dict] = []
+    for t in triples_raw:
+        key = (t["call_id"], t["profile_id"])
+        if key in seen:
+            _logger.warning(
+                "ranking.golden_eval.duplicate_triple",
+                extra={
+                    "event": "golden_duplicate_triple",
+                    "call_id": t["call_id"],
+                    "profile_id": t["profile_id"],
+                },
+            )
+            continue
+        seen.add(key)
+        triples.append(t)
     n_fixture = len(triples)
 
     def _scores_for(scheme: str) -> tuple[list[float], list[float]]:
