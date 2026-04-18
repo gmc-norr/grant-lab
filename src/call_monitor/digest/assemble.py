@@ -133,7 +133,9 @@ def assemble_for_user(
                 # need this profile's ranking (if any) for score display
                 rk = session.execute(
                     select(CallRanking).where(
-                        CallRanking.call_id == c.id, CallRanking.profile_id == profile.id
+                        CallRanking.call_id == c.id,
+                        CallRanking.profile_id == profile.id,
+                        CallRanking.scheme == profile.ranking_scheme,
                     )
                 ).scalar_one_or_none()
                 per_call[c.id].append((profile, "must_include", rk))
@@ -145,11 +147,12 @@ def assemble_for_user(
             .join(CallRanking, CallRanking.call_id == Call.id)
             .where(
                 CallRanking.profile_id == profile.id,
-                CallRanking.score >= DIGEST_TOP_THRESHOLD,
+                CallRanking.scheme == profile.ranking_scheme,
+                CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
-            .order_by(CallRanking.score.desc())
+            .order_by(CallRanking.aggregate_score.desc())
             .limit(50)  # over-fetch; dedup may drop some
         )
         for c, rk in session.execute(top_q).all():
@@ -162,12 +165,13 @@ def assemble_for_user(
             .join(CallRanking, CallRanking.call_id == Call.id)
             .where(
                 CallRanking.profile_id == profile.id,
-                CallRanking.score >= DIGEST_BORDERLINE_LOWER,
-                CallRanking.score < DIGEST_TOP_THRESHOLD,
+                CallRanking.scheme == profile.ranking_scheme,
+                CallRanking.aggregate_score >= DIGEST_BORDERLINE_LOWER,
+                CallRanking.aggregate_score < DIGEST_TOP_THRESHOLD,
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
-            .order_by(CallRanking.score.desc())
+            .order_by(CallRanking.aggregate_score.desc())
             .limit(50)
         )
         for c, rk in session.execute(border_q).all():
@@ -185,7 +189,7 @@ def assemble_for_user(
         # Pick "primary": min by (bucket priority, -score, profile_id)
         def _key(item):
             prof, bucket, rk = item
-            score = rk.score if rk else -1
+            score = rk.aggregate_score if rk else -1
             return (_BUCKET_PRIORITY[bucket], -score, prof.id)
         candidates_sorted = sorted(candidates, key=_key)
         primary = candidates_sorted[0]
@@ -206,7 +210,7 @@ def assemble_for_user(
             title=c.title,
             summary=c.summary,
             deadline=c.deadline,
-            score=rk.score if rk else None,
+            score=rk.aggregate_score if rk else None,
             rationale=rk.rationale if rk else None,
             url=c.url,
             bucket=bucket,

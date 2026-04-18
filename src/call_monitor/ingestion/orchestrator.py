@@ -87,12 +87,19 @@ def run_ingestion(
             # Enqueue ranking jobs for every touched call × active profile.
             # This happens INSIDE the same transaction as the upsert + timestamp
             # advance so a failure here rolls back everything atomically.
-            active_profile_ids = session.execute(
-                select(Profile.id).where(Profile.is_active.is_(True))
-            ).scalars().all()
+            active_profiles = session.execute(
+                select(Profile.id, Profile.ranking_scheme).where(
+                    Profile.is_active.is_(True)
+                )
+            ).all()
             for cid in touched_call_ids:
-                for pid in active_profile_ids:
-                    enqueue_for_pair(session, call_id=cid, profile_id=pid)
+                for pid, pscheme in active_profiles:
+                    enqueue_for_pair(
+                        session,
+                        call_id=cid,
+                        profile_id=pid,
+                        scheme=pscheme,
+                    )
             session.commit()
     except AdapterError as e:
         # Expected operational failure (network blip, 5xx, malformed JSON).

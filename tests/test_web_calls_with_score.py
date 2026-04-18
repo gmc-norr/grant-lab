@@ -46,9 +46,9 @@ def _seed(pg_session_factory, profile_id):
         )
         s.add_all([c1, c2, c3])
         s.flush()
-        s.add(CallRanking(call_id=c1.id, profile_id=profile_id, score=85,
+        s.add(CallRanking(call_id=c1.id, profile_id=profile_id, aggregate_score=85,
                           rationale="Great", model="gemma4:e4b-q8", prompt_version="v1"))
-        s.add(CallRanking(call_id=c2.id, profile_id=profile_id, score=15,
+        s.add(CallRanking(call_id=c2.id, profile_id=profile_id, aggregate_score=15,
                           rationale="Poor", model="gemma4:e4b-q8", prompt_version="v1"))
         s.commit()
 
@@ -127,7 +127,7 @@ def test_root_inactive_profile_degrades_to_unranked(
         s.add(c)
         s.flush()
         s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, score=99,
+            call_id=c.id, profile_id=profile_id, aggregate_score=99,
             rationale="hidden", model="gemma4:e4b-q8", prompt_version="v1",
         ))
         # Now soft-delete the profile
@@ -145,3 +145,64 @@ def test_root_inactive_profile_degrades_to_unranked(
     assert "99" not in r.text
     # The call itself still renders (it exists regardless of profile state)
     assert "Should be hidden" in r.text
+
+
+def test_dashboard_ranked_feed_filters_by_profile_ranking_scheme(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """If a (call, profile) pair has both v1 and v2 CallRanking rows, the
+    dashboard for that profile must show only the row matching the profile's
+    active ranking_scheme."""
+    from datetime import UTC, datetime
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from call_monitor.auth.session_cookie import SessionSigner
+    from call_monitor.db.models import Call, CallRanking, Source, User
+    from call_monitor.main import create_app
+
+    pid, _ = profile_factory(name="ProfileX")
+    with pg_session_factory() as s:
+        # Profile is on v1 by default.
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="DUAL", url="https://x", title="DualScheme",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v1",
+            aggregate_score=77, rationale="v1 says 77",
+            model="m", prompt_version="v1", ranked_at=datetime.now(UTC),
+        ))
+        s.add(CallRanking(
+            call_id=c.id, profile_id=pid, scheme="v2",
+            aggregate_score=33, rationale="v2 says 33",
+            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    app = create_app()
+
+    with pg_session_factory() as s:
+        u = User(email="dashboard@ki.se")
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        uid = u.id
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.get(f"/?profile={pid}")
+    assert r.status_code == 200
+    # v1 row (score 77) wins because profile.ranking_scheme defaults to 'v1'.
+    assert "77" in r.text
+    # v2 row (score 33) must NOT appear.
+    assert "33" not in r.text

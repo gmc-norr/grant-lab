@@ -127,7 +127,7 @@ def test_e2e_create_profile_then_rank_then_browse(
                 select(CallRanking).where(CallRanking.profile_id == profile_id)
             ).scalars().all()
         assert len(rankings) == 1
-        assert rankings[0].score == 80
+        assert rankings[0].aggregate_score == 80
 
         # 5. Browse the dashboard filtered by this profile
         r = client.get(f"/?profile={profile_id}")

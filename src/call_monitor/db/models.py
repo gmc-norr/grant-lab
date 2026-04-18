@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -180,6 +181,11 @@ class Profile(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    ranking_scheme: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="v1", server_default=text("'v1'")
+    )
+    # ISO 4217. NULL = unknown — v2's budget gate treats NULL as no penalty.
+    budget_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
 
 
 class Subscription(Base):
@@ -202,16 +208,14 @@ class Subscription(Base):
 class CallRanking(Base):
     __tablename__ = "call_rankings"
     __table_args__ = (
-        # B-tree on (profile_id, score DESC NULLS LAST) — backs the
-        # dashboard's ranked-feed sort literally (ORDER BY score DESC
-        # NULLS LAST). Direction matters: a plain (profile_id, score) ASC
-        # index would be scanned backward, but PG can't combine that with
-        # NULLS LAST without a sort step. Declaring it DESC NULLS LAST
-        # makes the plan free.
+        # New composite index covers WHERE profile_id=? AND scheme=? ORDER
+        # BY aggregate_score DESC. Without scheme in the key, dual-scheme
+        # storage forces the planner to scan both schemes per query.
         Index(
-            "ix_call_rankings_profile_score",
+            "ix_call_rankings_profile_scheme_score",
             "profile_id",
-            text("score DESC NULLS LAST"),
+            "scheme",
+            text("aggregate_score DESC NULLS LAST"),
             postgresql_using="btree",
         ),
     )
@@ -222,7 +226,18 @@ class CallRanking(Base):
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
     )
-    score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    # 'v1' | 'v2' — joins the PK so dual-scheme rows coexist.
+    scheme: Mapped[str] = mapped_column(
+        String(8), primary_key=True, nullable=False, server_default=text("'v1'")
+    )
+    # Renamed from `score` to align with v2 vocabulary.
+    aggregate_score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    # 'timeline' | 'budget' | 'trl' | 'eligibility' | 'exclusion' | NULL
+    aggregate_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Plan C phase 2: setwise pass adjusts displayed score.
+    setwise_offset: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default=text("0")
+    )
     rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -237,14 +252,11 @@ class RankingJob(Base):
     __tablename__ = "ranking_jobs"
     __table_args__ = (
         Index("ix_ranking_jobs_status_updated", "status", "updated_at"),
-        # Partial unique index: one pending/running job per (call, profile) pair.
-        # Terminal states (done, failed) are excluded so re-ranking can coexist
-        # with prior history. Declared here so alembic check/autogenerate stays
-        # consistent with the migration; postgresql_where carries the predicate.
         Index(
             "uq_ranking_jobs_active_pair",
             "call_id",
             "profile_id",
+            "scheme",
             unique=True,
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
@@ -257,6 +269,10 @@ class RankingJob(Base):
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
     )
+    # 'v1' | 'v2' — frozen at enqueue time; worker reads this, NOT the profile.
+    scheme: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default=text("'v1'")
+    )
     status: Mapped[RankingJobStatus] = mapped_column(
         Enum(
             RankingJobStatus,
@@ -264,17 +280,17 @@ class RankingJob(Base):
             values_callable=lambda e: [m.value for m in e],
         ),
         nullable=False,
-        default=RankingJobStatus.PENDING,
+        server_default=text("'pending'"),
     )
-    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+    attempts: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default=text("0")
+    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
         onupdate=func.now(),
     )
 
@@ -311,4 +327,29 @@ class DigestRun(Base):
 
     __table_args__ = (
         Index("ix_digest_runs_user_sent", "user_id", text("sent_at DESC")),
+    )
+
+
+class CallRankingCriterion(Base):
+    __tablename__ = "call_ranking_criteria"
+
+    call_id: Mapped[int] = mapped_column(
+        ForeignKey("calls.id", ondelete="CASCADE"), primary_key=True
+    )
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    scheme: Mapped[str] = mapped_column(
+        String(8), primary_key=True, nullable=False
+    )
+    # 'topic_fit' | 'eligibility' | 'exclusions' | 'timeline' | 'budget' | 'trl'
+    criterion: Mapped[str] = mapped_column(String(20), primary_key=True)
+    # Canonical string. e.g. "5", "pass", "fail", "unclear".
+    rating: Mapped[str] = mapped_column(String(20), nullable=False)
+    # G-Eval expected value for Likert criteria (float in [0, 5]); NULL otherwise.
+    rating_expected: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quoted_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ranked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

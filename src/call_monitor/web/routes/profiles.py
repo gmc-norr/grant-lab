@@ -143,6 +143,7 @@ def profile_edit_submit(
     areas: str = Form(""),
     budget_min: str = Form(""),
     budget_max: str = Form(""),
+    budget_currency: str = Form(""),       # NEW
     trl_min: str = Form(""),
     trl_max: str = Form(""),
     must_include: str = Form(""),
@@ -166,6 +167,13 @@ def profile_edit_submit(
             "must_include": _split_lines(must_include),
             "hard_exclusions": _split_lines(hard_exclusions),
         }
+        # Validate currency. Allow only the documented set (or empty → NULL).
+        # Whitelist enforcement here even though the dropdown only offers
+        # these values — an attacker crafting a different POST gets dropped,
+        # not stored.
+        normalized = (budget_currency or "").strip().upper()
+        if normalized in {"", "SEK", "EUR", "USD", "NOK", "DKK"}:
+            p.budget_currency = normalized or None
         session.commit()
 
     # Trigger backfill so edits flow into re-ranking without the user

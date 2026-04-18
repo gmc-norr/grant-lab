@@ -65,14 +65,41 @@ def drain_queue(
         # Capture identifying fields before commit + close — we'll re-open
         # per-job so a single bad job doesn't poison the whole batch.
         claimed = [
-            (job.id, job.call_id, job.profile_id, job.attempts) for job in jobs
+            (job.id, job.call_id, job.profile_id, job.attempts, job.scheme)
+            for job in jobs
         ]
         session.commit()
 
     processed = 0
-    for job_id, call_id, profile_id, attempts in claimed:
+    for job_id, call_id, profile_id, attempts, scheme in claimed:
         processed += 1
         try:
+            # v2 path is not implemented in Plan A. Mark FAILED-terminal so
+            # the job lands in the dead-letter queue rather than silently
+            # routing to v1. Plan B replaces this branch with the real
+            # rank_pair_v2 call.
+            if scheme != "v1":
+                with session_factory() as session:
+                    mark_failed(
+                        session,
+                        job_id,
+                        error=(
+                            f"rank_pair_v2 not implemented (job scheme={scheme!r}); "
+                            "wait for Plan B or revert profile.ranking_scheme to 'v1'"
+                        ),
+                        terminal=True,
+                    )
+                    session.commit()
+                _logger.warning(
+                    "ranking.job_v2_not_implemented",
+                    extra={
+                        "event": "ranking_job_v2_not_implemented",
+                        "job_id": job_id,
+                        "scheme": scheme,
+                    },
+                )
+                continue
+
             with session_factory() as session:
                 call = session.get(Call, call_id)
                 profile = session.get(Profile, profile_id)
@@ -110,7 +137,8 @@ def drain_queue(
                     CallRanking(
                         call_id=call_id,
                         profile_id=profile_id,
-                        score=result.score,
+                        scheme=scheme,  # always 'v1' here (we continue'd above for v2)
+                        aggregate_score=result.score,
                         rationale=result.rationale,
                         model=result.model,
                         prompt_version=result.prompt_version,

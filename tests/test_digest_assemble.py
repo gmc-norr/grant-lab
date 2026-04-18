@@ -52,7 +52,7 @@ def _seed_call(s, *, title, score=None, profile_id=None, summary=None,
     s.flush()
     if score is not None and profile_id is not None:
         s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, score=score,
+            call_id=c.id, profile_id=profile_id, scheme="v1", aggregate_score=score,
             rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
             ranked_at=datetime.now(UTC),
         ))
@@ -171,7 +171,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(
         cid = _seed_call(s, title="Pathology breakthrough", score=85, profile_id=p_top.id)
         # Also a low-score ranking against p_must so the call appears in both candidate sets
         s.add(CallRanking(
-            call_id=cid, profile_id=p_must.id, score=20,
+            call_id=cid, profile_id=p_must.id, aggregate_score=20,
             rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
             ranked_at=datetime.now(UTC),
         ))
@@ -306,7 +306,7 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(
         s.flush()
         cid = _seed_call(s, title="Shared", score=70, profile_id=p_low.id)
         s.add(CallRanking(
-            call_id=cid, profile_id=p_high.id, score=85,
+            call_id=cid, profile_id=p_high.id, aggregate_score=85,
             rationale="r", model="gemma4:e4b-q8", prompt_version="v1",
             ranked_at=datetime.now(UTC),
         ))
@@ -378,3 +378,28 @@ def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=uid, now=now)
     assert payload is None
+
+
+def test_assemble_filters_by_profile_ranking_scheme(pg_session_factory, now):
+    """A profile on v1 sees only v1 CallRanking rows, even if v2 rows exist
+    for the same (call, profile) pair (e.g. left over from compare-mode runs)."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        # Profile defaults to ranking_scheme='v1'.
+        cid = _seed_call(s, title="DualSchemeCall", score=80, profile_id=pid)
+        # Same call also has a v2 ranking with a different score.
+        s.add(CallRanking(
+            call_id=cid, profile_id=pid, scheme="v2",
+            aggregate_score=10, rationale="v2",
+            model="m", prompt_version="v2.0",
+            ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    titles_scores = [
+        (e.title, e.score) for sec in payload.sections for e in sec.entries
+    ]
+    assert ("DualSchemeCall", 80) in titles_scores      # v1 row, score 80
+    assert ("DualSchemeCall", 10) not in titles_scores  # v2 row excluded
