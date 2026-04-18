@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 
 from call_monitor.auth.dependencies import require_admin
 from call_monitor.db.models import (
     Call,
+    CallRanking,
     DigestRun,
     Profile,
     RankingJob,
@@ -40,6 +42,47 @@ def _digest_panel_context(session) -> dict:
         "digest_runs_this_week": runs_this_week,
         "digest_disabled_users": disabled_users,
     }
+
+
+def _v2_queue_depth(session) -> dict[str, int]:
+    """Count active (pending + running) ranking jobs grouped by scheme.
+
+    Used by /admin to surface dual-scheme rollout health: operators need to
+    see at a glance whether the v2 queue is backing up relative to v1.
+    """
+    rows = session.execute(
+        select(RankingJob.scheme, func.count(RankingJob.id))
+        .where(RankingJob.status.in_([RankingJobStatus.PENDING, RankingJobStatus.RUNNING]))
+        .group_by(RankingJob.scheme)
+    ).all()
+    return dict(rows)
+
+
+def _per_profile_scheme(session) -> list[dict]:
+    """One row per active profile: id, name, ranking_scheme, last ranked_at.
+
+    `last_ranked` is the most recent ranking timestamp for the profile's
+    *active* scheme — joining on scheme avoids the misleading "v1 last
+    ranked yesterday" reading on a profile that flipped to v2 today.
+    """
+    rows = session.execute(
+        select(
+            Profile.id, Profile.name, Profile.ranking_scheme,
+            func.max(CallRanking.ranked_at).label("last_ranked"),
+        )
+        .outerjoin(
+            CallRanking,
+            (CallRanking.profile_id == Profile.id)
+            & (CallRanking.scheme == Profile.ranking_scheme),
+        )
+        .where(Profile.is_active.is_(True))
+        .group_by(Profile.id, Profile.name, Profile.ranking_scheme)
+        .order_by(Profile.name)
+    ).all()
+    return [
+        {"id": pid, "name": name, "scheme": scheme, "last_ranked": last}
+        for pid, name, scheme, last in rows
+    ]
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -80,6 +123,12 @@ def admin_index(
             "user": user,
         }
         context.update(_digest_panel_context(session))
+        context["v2_queue_depth"] = _v2_queue_depth(session)
+        context["per_profile_scheme"] = _per_profile_scheme(session)
+        # Lazy import: keeps admin route module-load cheap and dodges any
+        # potential cycle via ranking → db → web → admin.
+        from call_monitor.ranking.eval import load_last_report
+        context["golden_set_report"] = load_last_report()
 
     return request.app.state.templates.TemplateResponse(
         request=request,
@@ -109,3 +158,89 @@ def admin_rerank(
     for pid in active_profile_ids:
         backfill_profile(session_factory=session_factory, profile_id=pid)
     return RedirectResponse(url="/admin", status_code=303)
+
+
+@router.get("/admin/ranking-compare", response_class=HTMLResponse)
+def ranking_compare(
+    request: Request,
+    profile: int | None = None,
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    if profile is None:
+        raise HTTPException(status_code=400, detail="profile query param required")
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        profile_obj = session.get(Profile, profile)
+        if profile_obj is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        v1 = aliased(CallRanking)
+        v2 = aliased(CallRanking)
+        # Postgres puts NULLs last on DESC by default — exactly what we want
+        # (rows with a v2 score sort first; v1-only rows fall back to v1).
+        # No need to add `.nulls_last()` defensively.
+        #
+        # display_score = aggregate_score + setwise_offset clamped to
+        # [0, 100] (per spec line 191). v1 setwise_offset is always 0 so
+        # v1.display_score == v1.aggregate_score; v2 may differ by ±5.
+        # Using display_score here keeps the compare view in sync with
+        # what calls index / call detail / digest all surface. The WHERE
+        # IS NOT NULL guard remains on aggregate_score because that's the
+        # NOT NULL backing column — display_score is an expression that
+        # only evaluates non-NULL when both inputs are non-NULL (i.e.,
+        # the joined v1/v2 row exists at all).
+        rows = session.execute(
+            select(
+                Call.id, Call.title, Call.url,
+                v1.display_score, v1.rationale,
+                v2.display_score, v2.rationale,
+            )
+            .select_from(Call)
+            .join(
+                v1,
+                (v1.call_id == Call.id)
+                & (v1.profile_id == profile)
+                & (v1.scheme == "v1"),
+                isouter=True,
+            )
+            .join(
+                v2,
+                (v2.call_id == Call.id)
+                & (v2.profile_id == profile)
+                & (v2.scheme == "v2"),
+                isouter=True,
+            )
+            .where(
+                (v1.aggregate_score.is_not(None))
+                | (v2.aggregate_score.is_not(None))
+            )
+            .order_by(func.coalesce(v2.display_score, v1.display_score).desc())
+            .limit(200)
+        ).all()
+        items = [
+            {
+                "call_id": cid,
+                "title": title,
+                "url": url,
+                "v1_score": v1s,
+                "v1_rationale": v1r,
+                "v2_score": v2s,
+                "v2_rationale": v2r,
+                "delta": (
+                    abs(v1s - v2s) if v1s is not None and v2s is not None else None
+                ),
+            }
+            for cid, title, url, v1s, v1r, v2s, v2r in rows
+        ]
+        profile_name = profile_obj.name
+        session.expunge_all()
+
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="ranking_compare.html",
+        context={
+            "profile_id": profile,
+            "profile_name": profile_name,
+            "items": items,
+            "user": user,
+        },
+    )

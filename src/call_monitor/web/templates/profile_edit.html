@@ -4,6 +4,14 @@
 <h1>Edit profile: {{ profile.name }}</h1>
 
 <form method="post" action="/profiles/{{ profile.id }}/edit">
+  {% if user.is_admin %}
+  <p>
+    <label><strong>Ranking scheme (admin only)</strong></label><br>
+    <label><input type="radio" name="ranking_scheme" value="v1" {% if profile.ranking_scheme == 'v1' %}checked{% endif %}> v1 (monolithic LLM score)</label>
+    <label style="margin-left: 1em"><input type="radio" name="ranking_scheme" value="v2" {% if profile.ranking_scheme == 'v2' %}checked{% endif %}> v2 (criterion-rubric)</label>
+    <br><small>Flipping schemes triggers a 90-day backfill under the new scheme. Existing rows under the old scheme are retained for audit.</small>
+  </p>
+  {% endif %}
   <p>
     <label>Description<br>
       <textarea name="description" rows="6" cols="80">{{ profile.description }}</textarea>
