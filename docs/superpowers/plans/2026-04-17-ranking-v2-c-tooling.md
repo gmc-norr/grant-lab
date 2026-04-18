@@ -16,7 +16,9 @@
 
 - **Setwise group size = 4, fixed.** Spec line 188 specifies `{1: +5, 2: +2, 3: -2, 4: -5}` offsets. Don't make it configurable in v2 — additional knobs invite drift.
 - **Setwise runs daily at 04:00 Stockholm**, after ingestion (03:00) and before the workday. One run per profile per day. APScheduler job ID `setwise:daily`.
-- **Setwise prompt format follows RankGPT** (Sun et al., arXiv:2304.09542). The LLM is asked: *"Given the profile above, rank these N calls from most to least relevant. Output a JSON array of their IDs in order."* Parse failure or wrong-length output → log + skip the group (no offset applied).
+- **Setwise prompt asks for a JSON object wrapping the permutation** — `{"order": [<id>, <id>, <id>, <id>]}` — not a bare array. Reason: Ollama's `response_format={"type": "json_object"}` enforces an OBJECT shape; a bare array would either fail validation or push the model toward an object. We use the object wrapper and parse `data["order"]`. Without `response_format`, Gemma sometimes prepends prose explanations.
+- **Setwise offsets are reset to zero for the entire profile at the start of each daily pass.** Without this, a call that drops out of the top-12 borderline band keeps its old offset forever, the displayed score (`aggregate_score + setwise_offset`) drifts from the aggregate, and skipped/remainder groups carry stale data. The pass-start UPDATE is one statement scoped to the profile; cheap.
+- **Stable group membership under score ties.** Scores are integer; ties in the [45, 60) band are common. The candidate query orders by `(aggregate_score DESC, call_id ASC)` — `call_id` as a stable secondary key prevents Postgres from arbitrarily reordering tied rows between runs, which would otherwise cause daily setwise offsets to flap on the same calls.
 - **Compare view is admin-only.** `/admin/ranking-compare` requires `user.is_admin`. Picks a profile via query string (`?profile=<id>`) — no profile picker UI in this plan; admin pastes the URL.
 - **Profile-flip backfill is synchronous.** When admin POSTs `/profiles/<id>/edit` and `ranking_scheme` changed, the route calls `backfill_profile(...)` inline. Idempotent at the DB level (Plan A's partial unique index includes scheme), so over-trigger is safe. Same pattern as Plan 4's edit-triggers-backfill.
 - **Kendall's tau is computed inline** with stdlib only — n is small (~20-50 golden-set pairs), no need for scipy. Helper lives in `ranking/eval.py`.
@@ -527,7 +529,26 @@ def _seed_profile_with_borderline_calls(s, *, scores: list[int]) -> tuple[int, l
 
 
 def _setwise_client_returning(perm: list[int]):
-    """Fake Ollama returning a permutation as JSON array of call_ids."""
+    """Fake Ollama returning a permutation wrapped as {"order": [...]} —
+    matches the actual contract enforced by response_format=json_object."""
+    body = {
+        "model": "gemma4:e4b-it-q4_K_M",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": json.dumps({"order": perm})},
+        }],
+    }
+    def handler(req):
+        return httpx.Response(200, json=body)
+    return OllamaClient(
+        base_url="http://x", model="gemma4:e4b-it-q4_K_M",
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def _setwise_client_returning_bare_array(perm: list[int]):
+    """Adversarial: model returns a bare array instead of {"order": [...]}.
+    Should be rejected (parser only accepts object form)."""
     body = {
         "model": "gemma4:e4b-it-q4_K_M",
         "choices": [{
@@ -664,6 +685,62 @@ def test_setwise_skips_group_on_invalid_permutation(pg_session_factory):
     with pg_session_factory() as s:
         offsets = {r.call_id: r.setwise_offset for r in s.execute(select(CallRanking)).scalars().all()}
     assert all(o == 0 for o in offsets.values())
+
+
+def test_setwise_rejects_bare_array_response(pg_session_factory):
+    """Codex H1 regression: model returning a bare JSON array instead of
+    {"order": [...]} is rejected. Without the rejection, all groups would
+    silently apply offsets from the wrong shape."""
+    with pg_session_factory() as s:
+        pid, cids = _seed_profile_with_borderline_calls(s, scores=[58, 55, 50, 47])
+        s.commit()
+    n = run_setwise_for_profile(
+        session_factory=pg_session_factory,
+        client=_setwise_client_returning_bare_array(cids),
+        profile_id=pid, now=datetime.now(UTC),
+    )
+    assert n == 0
+    with pg_session_factory() as s:
+        offsets = [r.setwise_offset for r in s.execute(select(CallRanking)).scalars().all()]
+    assert all(o == 0 for o in offsets)
+
+
+def test_setwise_resets_stale_offsets_at_pass_start(pg_session_factory):
+    """Codex H2 regression: a call with a stale setwise_offset (left over
+    from a previous pass) gets cleared at the start of the next pass —
+    even if it's no longer in the borderline band, even if its current
+    group is skipped, even if there's no new group at all."""
+    with pg_session_factory() as s:
+        pid, cids = _seed_profile_with_borderline_calls(s, scores=[58, 55, 50, 47])
+        # Manually set stale offsets on all four calls (as if a previous
+        # pass had ranked them). Also push one of them out of the borderline
+        # band by raising its score to 70.
+        for i, cid in enumerate(cids):
+            rk = s.get(CallRanking, (cid, pid, "v2"))
+            rk.setwise_offset = SETWISE_OFFSETS[i + 1]
+        # Bump cids[0] above the borderline upper bound — it shouldn't
+        # participate in this pass and its stale offset must clear.
+        s.get(CallRanking, (cids[0], pid, "v2")).aggregate_score = 70
+        s.commit()
+
+    # Only 3 borderline calls remain → no group of 4 → setwise won't run any group.
+    # But the reset should still fire and clear ALL stale offsets for the profile.
+    def handler(req):
+        raise AssertionError("LLM should not be called — < 4 borderline calls")
+    client = OllamaClient(
+        base_url="http://x", model="m",
+        transport=httpx.MockTransport(handler),
+    )
+    n = run_setwise_for_profile(
+        session_factory=pg_session_factory,
+        client=client, profile_id=pid, now=datetime.now(UTC),
+    )
+    assert n == 0
+    with pg_session_factory() as s:
+        rows = s.execute(select(CallRanking)).scalars().all()
+        offsets = {r.call_id: r.setwise_offset for r in rows}
+    # Every offset is back to 0, including the call that left the band.
+    assert all(o == 0 for o in offsets.values()), offsets
 ```
 
 - [ ] **Step 2: Implement `src/call_monitor/ranking/setwise.py`**
@@ -710,11 +787,38 @@ def run_setwise_for_profile(
     Returns the number of groups for which offsets were successfully applied.
     Skips entire pass if the profile has < 4 borderline calls; skips
     individual groups if the LLM's permutation is invalid.
+
+    **Reset semantics:** at the start of every pass, all setwise_offset
+    values for this profile's v2 rows are zeroed. Then offsets are
+    re-applied for whichever groups the LLM successfully ranked in this
+    run. This prevents stale offsets from accumulating on calls that
+    dropped out of the borderline band (or were in skipped groups, or
+    were dropped as remainder).
+
+    **Stable group membership under ties:** the candidate query orders by
+    (aggregate_score DESC, call_id ASC). Without the stable secondary
+    key, Postgres reorders tied rows between runs and the same call can
+    flip groups daily, making offsets flap.
     """
+    # Pass-start reset. One UPDATE scoped to this profile's v2 rows.
     with session_factory() as session:
         profile = session.get(Profile, profile_id)
         if profile is None or profile.ranking_scheme != "v2":
             return 0
+        from sqlalchemy import update
+        session.execute(
+            update(CallRanking)
+            .where(
+                CallRanking.profile_id == profile_id,
+                CallRanking.scheme == "v2",
+                CallRanking.setwise_offset != 0,
+            )
+            .values(setwise_offset=0)
+        )
+        session.commit()
+
+    # Fetch borderline candidates with stable ordering.
+    with session_factory() as session:
         rows = session.execute(
             select(Call.id, Call.title, Call.summary)
             .join(CallRanking, CallRanking.call_id == Call.id)
@@ -724,7 +828,9 @@ def run_setwise_for_profile(
                 CallRanking.aggregate_score >= SETWISE_BORDERLINE_LOWER,
                 CallRanking.aggregate_score < SETWISE_BORDERLINE_UPPER,
             )
-            .order_by(CallRanking.aggregate_score.desc())
+            # Stable secondary key — prevents Postgres from arbitrarily
+            # reordering tied scores between daily runs (Codex M3).
+            .order_by(CallRanking.aggregate_score.desc(), Call.id.asc())
             .limit(SETWISE_BORDERLINE_CAP)
         ).all()
 
@@ -757,14 +863,22 @@ def _ask_for_permutation(
     profile: Profile,
     group: list[tuple[int, str, str | None]],
 ) -> list[int] | None:
-    """Ask the LLM to rank the 4 calls. Return the permutation as a list
-    of call_ids in best→worst order, or None on parse failure / wrong length /
-    unknown IDs."""
+    """Ask the LLM to rank the calls. Return the permutation as a list of
+    call_ids in best→worst order, or None on parse failure / wrong length /
+    unknown IDs.
+
+    Wraps the response in `{"order": [...]}` because Ollama's
+    `response_format={"type": "json_object"}` enforces an OBJECT shape.
+    A bare-array response would either fail at the provider or push the
+    model toward an object anyway. Without response_format, Gemma sometimes
+    prepends prose explanations.
+    """
     ids = [cid for cid, _, _ in group]
     items = "\n".join(
         f"  ID {cid}: {title} — {(summary or '')[:200]}"
         for cid, title, summary in group
     )
+    example = json.dumps({"order": ids})
     messages = [
         {
             "role": "system",
@@ -772,8 +886,9 @@ def _ask_for_permutation(
                 f"You are a research-funding analyst evaluating calls for the profile "
                 f"'{profile.name}': {profile.description or ''}\n\n"
                 f"Rank the {len(ids)} calls below from MOST to LEAST relevant. "
-                f"Output ONLY a JSON array of the call IDs in order, e.g. "
-                f"{json.dumps(ids)}. No prose."
+                f'Output ONLY a JSON object of the form {{"order": [<id>, ...]}} '
+                f"with the call IDs in best-to-worst order. Example: {example}. "
+                f"No prose, no other keys."
             ),
         },
         {"role": "user", "content": f"CALLS:\n{items}"},
@@ -781,13 +896,20 @@ def _ask_for_permutation(
     try:
         envelope = client.chat(messages=messages, response_format={"type": "json_object"})
         content = envelope["choices"][0]["message"]["content"]
-        perm = json.loads(content)
+        data = json.loads(content)
     except (LLMError, ValueError, KeyError, IndexError) as e:
         _logger.warning(
             "ranking.setwise.parse_failed",
             extra={"event": "setwise_parse_failed", "error": str(e)},
         )
         return None
+    if not isinstance(data, dict):
+        _logger.warning(
+            "ranking.setwise.not_an_object",
+            extra={"event": "setwise_not_an_object", "got": data},
+        )
+        return None
+    perm = data.get("order")
     if not isinstance(perm, list) or len(perm) != len(ids) or set(perm) != set(ids):
         _logger.warning(
             "ranking.setwise.invalid_permutation",
@@ -1218,7 +1340,61 @@ def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_pat
     assert isinstance(report, GoldenSetReport)
     assert report.tau_v1 == 1.0  # perfect correlation
     assert report.tau_v2 < 1.0   # less perfect
-    assert report.n_pairs == 4
+    assert report.n_fixture == 4
+    assert report.n_v1 == 4      # all 4 triples had v1 rows
+    assert report.n_v2 == 4      # all 4 triples had v2 rows
+
+
+def test_run_golden_set_eval_per_scheme_n_reflects_actual_rows(
+    pg_session_factory, tmp_path
+):
+    """Codex M2: when triples are missing CallRanking rows for a scheme,
+    n_<scheme> reports the count of rows actually compared, NOT the
+    fixture size. Otherwise /admin would show tau computed on a much
+    smaller subset than the displayed Pairs count."""
+    with pg_session_factory() as s:
+        u = User(email="m2@ki.se"); s.add(u); s.flush()
+        p = Profile(
+            name="M2", kind=ProfileKind.GROUP, description="",
+            structured={"areas": [], "hard_exclusions": []},
+            created_by=u.id, ranking_scheme="v2",
+        )
+        s.add(p); s.flush()
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        cids = []
+        # Three calls in fixture, but only the first two have v2 rows.
+        for i in range(3):
+            c = Call(
+                source_id=src.id, external_id=f"M2-{i}", url=f"https://x/{i}",
+                title=f"M2 {i}", published_at=datetime.now(UTC),
+            )
+            s.add(c); s.flush(); cids.append(c.id)
+        for cid in cids[:2]:
+            s.add(CallRanking(
+                call_id=cid, profile_id=p.id, scheme="v2",
+                aggregate_score=50, rationale="r",
+                model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
+            ))
+        s.commit()
+        pid = p.id
+
+    golden = [
+        {"call_id": cid, "profile_id": pid, "expected_score": s}
+        for cid, s in zip(cids, [80, 60, 40])
+    ]
+    fixture_path = tmp_path / "golden.json"
+    fixture_path.write_text(json.dumps(golden))
+
+    report = run_golden_set_eval(
+        session_factory=pg_session_factory, fixture_path=str(fixture_path),
+    )
+    assert report.n_fixture == 3
+    assert report.n_v1 == 0      # no v1 rows seeded
+    assert report.tau_v1 is None
+    assert report.n_v2 == 2      # only 2 of 3 fixture triples had v2 rows
+    # tau_v2 computed over those 2 rows (could be -1, 0, or 1 with n=2;
+    # we just confirm it's not None and the count is honest).
+    assert report.tau_v2 is not None
 ```
 
 - [ ] **Step 2: Implement `src/call_monitor/ranking/eval.py`**
@@ -1243,13 +1419,26 @@ from call_monitor.db.models import CallRanking
 
 _logger = logging.getLogger(__name__)
 
-_DEFAULT_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "golden_set.json"
+# From src/call_monitor/ranking/eval.py: parents[0] is `ranking/`, [1] is
+# `call_monitor/`, [2] is `src/`, [3] is the repo root. Fixture lives at
+# <repo>/tests/fixtures/golden_set.json — so parents[3], not [2].
+_DEFAULT_FIXTURE = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "golden_set.json"
 
 
 @dataclass(frozen=True)
 class GoldenSetReport:
-    n_pairs: int
+    """Per-scheme golden-set evaluation result.
+
+    `n_fixture` is the size of the curated triple list. `n_v1` and `n_v2`
+    are the per-scheme counts of triples that actually had a CallRanking
+    row to compare against — usually less than n_fixture if some pairs
+    haven't been ranked under both schemes yet. tau is computed on
+    n_<scheme> rows, NOT n_fixture, so the displayed tau and the count
+    must agree (Codex M2)."""
+    n_fixture: int
+    n_v1: int
     tau_v1: float | None
+    n_v2: int
     tau_v2: float | None
 
 
@@ -1287,19 +1476,27 @@ def run_golden_set_eval(
 ) -> GoldenSetReport:
     """Read the golden-set fixture, query CallRanking under both schemes,
     compute Kendall's tau against expected scores. Logs the report and
-    returns it."""
+    returns it.
+
+    Reports per-scheme `n_v1` / `n_v2` separately from the curated fixture
+    size (`n_fixture`) so the admin panel doesn't display "tau computed
+    over 50 pairs" when only 12 of those 50 had a CallRanking under v2."""
     path = Path(fixture_path) if fixture_path else _DEFAULT_FIXTURE
     if not path.exists():
         _logger.warning(
             "ranking.golden_eval.fixture_missing",
             extra={"event": "golden_fixture_missing", "path": str(path)},
         )
-        return GoldenSetReport(n_pairs=0, tau_v1=None, tau_v2=None)
+        return GoldenSetReport(
+            n_fixture=0, n_v1=0, tau_v1=None, n_v2=0, tau_v2=None,
+        )
 
     triples = json.loads(path.read_text())
-    n = len(triples)
+    n_fixture = len(triples)
 
-    def _scores_for(scheme: str) -> tuple[list[float], list[float]] | None:
+    def _scores_for(scheme: str) -> tuple[list[float], list[float]]:
+        """Returns the (actual, expected) lists for triples that have a
+        CallRanking row under this scheme. May be empty."""
         actual: list[float] = []
         expected: list[float] = []
         with session_factory() as session:
@@ -1315,24 +1512,25 @@ def run_golden_set_eval(
                     continue
                 actual.append(float(row.aggregate_score))
                 expected.append(float(t["expected_score"]))
-        if len(actual) < 2:
-            return None
         return actual, expected
 
-    tau_v1 = tau_v2 = None
-    if (pair := _scores_for("v1")) is not None:
-        tau_v1 = kendalls_tau(pair[0], pair[1])
-    if (pair := _scores_for("v2")) is not None:
-        tau_v2 = kendalls_tau(pair[0], pair[1])
+    v1_actual, v1_expected = _scores_for("v1")
+    v2_actual, v2_expected = _scores_for("v2")
+    tau_v1 = kendalls_tau(v1_actual, v1_expected) if len(v1_actual) >= 2 else None
+    tau_v2 = kendalls_tau(v2_actual, v2_expected) if len(v2_actual) >= 2 else None
 
-    report = GoldenSetReport(n_pairs=n, tau_v1=tau_v1, tau_v2=tau_v2)
+    report = GoldenSetReport(
+        n_fixture=n_fixture,
+        n_v1=len(v1_actual), tau_v1=tau_v1,
+        n_v2=len(v2_actual), tau_v2=tau_v2,
+    )
     _logger.info(
         "ranking.golden_eval.report",
         extra={
             "event": "golden_eval_report",
-            "n_pairs": n,
-            "tau_v1": tau_v1,
-            "tau_v2": tau_v2,
+            "n_fixture": n_fixture,
+            "n_v1": len(v1_actual), "tau_v1": tau_v1,
+            "n_v2": len(v2_actual), "tau_v2": tau_v2,
         },
     )
     return report
@@ -1383,8 +1581,10 @@ _REPORT_PATH = Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")) / "golden_s
 def _persist_report(report: GoldenSetReport) -> None:
     _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _REPORT_PATH.write_text(json.dumps({
-        "n_pairs": report.n_pairs,
+        "n_fixture": report.n_fixture,
+        "n_v1": report.n_v1,
         "tau_v1": report.tau_v1,
+        "n_v2": report.n_v2,
         "tau_v2": report.tau_v2,
     }))
 
@@ -1395,8 +1595,10 @@ def load_last_report() -> GoldenSetReport | None:
         return None
     data = json.loads(_REPORT_PATH.read_text())
     return GoldenSetReport(
-        n_pairs=data.get("n_pairs", 0),
+        n_fixture=data.get("n_fixture", 0),
+        n_v1=data.get("n_v1", 0),
         tau_v1=data.get("tau_v1"),
+        n_v2=data.get("n_v2", 0),
         tau_v2=data.get("tau_v2"),
     )
 ```
@@ -1420,9 +1622,11 @@ In `src/call_monitor/web/templates/admin.html`, append below the per-scheme queu
 <h2>Golden-set Kendall's tau (last run)</h2>
 {% if golden_set_report %}
   <dl>
-    <dt>Pairs</dt><dd>{{ golden_set_report.n_pairs }}</dd>
-    <dt>v1 τ</dt><dd>{% if golden_set_report.tau_v1 is not none %}{{ '%.3f' % golden_set_report.tau_v1 }}{% else %}—{% endif %}</dd>
-    <dt>v2 τ</dt><dd>{% if golden_set_report.tau_v2 is not none %}{{ '%.3f' % golden_set_report.tau_v2 }}{% else %}—{% endif %}</dd>
+    <dt>Curated triples</dt><dd>{{ golden_set_report.n_fixture }}</dd>
+    <dt>v1 τ (n={{ golden_set_report.n_v1 }})</dt>
+    <dd>{% if golden_set_report.tau_v1 is not none %}{{ '%.3f' % golden_set_report.tau_v1 }}{% else %}—{% endif %}</dd>
+    <dt>v2 τ (n={{ golden_set_report.n_v2 }})</dt>
+    <dd>{% if golden_set_report.tau_v2 is not none %}{{ '%.3f' % golden_set_report.tau_v2 }}{% else %}—{% endif %}</dd>
   </dl>
 {% else %}
   <p>(golden eval not yet run)</p>
