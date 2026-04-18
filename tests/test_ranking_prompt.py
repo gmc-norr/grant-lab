@@ -139,3 +139,51 @@ def test_parse_rejects_non_string_quoted_evidence():
     })
     with pytest.raises(ParseError, match="quoted_evidence"):
         parse_response(content)
+
+
+def _verification_payload(topic_quote: str) -> str:
+    """Helper: build a minimal valid LLM JSON response with the given
+    topic_fit quote and null quotes elsewhere — keeps the verification
+    tests focused on the only field they exercise."""
+    return json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": topic_quote},
+        "eligibility": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
+    })
+
+
+def test_parse_response_verification_returns_verbatim_quote_when_in_haystack():
+    """Quote present verbatim in verification_text → returned as-is."""
+    content = _verification_payload("AI for medical imaging")
+    haystack = "Title: A cancer call\n\nSummary: AI for medical imaging in cancer screening"
+    parsed = parse_response(content, verification_text=haystack)
+    assert parsed.topic_fit_quoted == "AI for medical imaging"
+
+
+def test_parse_response_verification_nulls_quote_when_not_in_haystack():
+    """Quote absent from verification_text → None."""
+    content = _verification_payload("fabricated quote that does not exist")
+    haystack = "Title: A cancer call\n\nSummary: real text from the call"
+    parsed = parse_response(content, verification_text=haystack)
+    assert parsed.topic_fit_quoted is None
+
+
+def test_parse_response_verification_is_case_insensitive():
+    """Case mismatch between LLM quote and source → still matched."""
+    content = _verification_payload("CANCER BIOMARKER")
+    haystack = "Funding for cancer biomarker discovery in pathology"
+    parsed = parse_response(content, verification_text=haystack)
+    # Returned quote keeps the LLM's original capitalization
+    assert parsed.topic_fit_quoted == "CANCER BIOMARKER"
+
+
+def test_parse_response_verification_tolerates_whitespace_normalization():
+    """Codex finding: PDF-derived full_text has hard line breaks; LLM quotes
+    are normalized. Substring check must match across whitespace differences."""
+    content = _verification_payload("imaging in cancer screening")
+    # Haystack has the same content with hard line breaks + NBSP — common in
+    # PDF-extracted text. Without whitespace normalization, the substring
+    # check would falsely null the (legitimate) quote.
+    haystack = "AI for medical\nimaging in cancer\xa0screening and treatment"
+    parsed = parse_response(content, verification_text=haystack)
+    assert parsed.topic_fit_quoted == "imaging in cancer screening"

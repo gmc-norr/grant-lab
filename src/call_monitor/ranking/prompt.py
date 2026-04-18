@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 # Bump only when the prompt structure changes in a way that warrants
@@ -170,19 +171,29 @@ def parse_response(content: str, *, verification_text: str | None = None) -> Par
     if ex_rating not in {"pass", "fail"}:
         raise ParseError(f"exclusions.rating must be 'pass'|'fail'; got {ex_rating!r}")
 
-    haystack_lower = verification_text.lower() if verification_text is not None else None
+    # Pre-normalize the haystack once. PDF-derived full_text has hard line
+    # breaks, double newlines, and non-breaking spaces; LLMs typically quote
+    # in normalized form, so collapse all whitespace runs to a single space
+    # for comparison only. The display value returned to the caller is the
+    # LLM's original (un-normalized) quote.
+    normalized_haystack = (
+        re.sub(r"\s+", " ", verification_text).lower()
+        if verification_text is not None
+        else None
+    )
 
     def _verified_quote(quote: str | None) -> str | None:
         if quote is None:
             return None
         truncated = quote[:_QUOTED_EVIDENCE_MAX]
-        if haystack_lower is None:
+        if normalized_haystack is None:
             # No verification requested — keep the (truncated) quote as-is.
             return truncated if truncated else None
         # Whitespace-only quotes match almost any haystack but are useless.
         if not truncated.strip():
             return None
-        if truncated.lower() in haystack_lower:
+        normalized_quote = re.sub(r"\s+", " ", truncated).strip().lower()
+        if normalized_quote in normalized_haystack:
             return truncated
         return None  # bogus quote — discarded silently
 
