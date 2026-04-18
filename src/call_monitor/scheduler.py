@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from call_monitor.digest.send import run_digest
 from call_monitor.email.client import EmailClient
 from call_monitor.embeddings.client import OllamaEmbedClient
+from call_monitor.embeddings.refresh import refresh_missing_embeddings_tick
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
@@ -202,6 +203,31 @@ def build_scheduler(
         trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),
         id="golden_eval:weekly",
         name="Weekly golden-set evaluation",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    def _embeddings_tick() -> None:
+        try:
+            refresh_missing_embeddings_tick(
+                session_factory=session_factory,
+                embed_client=embed_client,
+                batch_size=200,
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.exception(
+                "embeddings.refresh_missing_tick.failed",
+                extra={"event": "embedding_refresh_tick_failed", "error": str(e)},
+            )
+            return
+        # No need to re-log summary — refresh_missing_embeddings_tick already does.
+
+    sched.add_job(
+        _embeddings_tick,
+        trigger=CronTrigger(hour=3, minute=30),
+        id="embeddings:refresh-missing",
+        name="Daily backfill of missing embeddings",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

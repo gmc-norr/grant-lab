@@ -41,6 +41,12 @@ def test_scheduler_registers_golden_eval_weekly(pg_session_factory):
     sched.shutdown(wait=False)
 
 
+def test_scheduler_registers_embeddings_refresh_missing(pg_session_factory):
+    sched = _build(pg_session_factory)
+    assert sched.get_job("embeddings:refresh-missing") is not None
+    sched.shutdown(wait=False)
+
+
 def test_setwise_tick_continues_after_one_profile_fails(
     monkeypatch, pg_session_factory, profile_factory, caplog,
 ):

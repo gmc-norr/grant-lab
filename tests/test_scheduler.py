@@ -28,7 +28,8 @@ def test_build_scheduler_returns_one_job_per_active_adapter():
     assert isinstance(sched, BackgroundScheduler)
     actual_ids = {j.id for j in sched.get_jobs()}
     expected_required = {"ingest:eu_portal", "ingest:vinnova", "rank:drain",
-                         "setwise:daily", "golden_eval:weekly"}
+                         "setwise:daily", "golden_eval:weekly",
+                         "embeddings:refresh-missing"}
     assert expected_required.issubset(actual_ids)
     sched.shutdown(wait=False)
 
