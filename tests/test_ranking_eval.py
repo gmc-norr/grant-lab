@@ -55,8 +55,8 @@ def test_kendalls_tau_handles_ties():
 
 
 def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_path):
-    """Build a golden set as a JSON file, seed CallRanking under both schemes,
-    run eval, verify the report shape."""
+    """Build a golden set as a JSON file, seed CallRanking rows, run eval,
+    verify the report shape."""
     with pg_session_factory() as s:
         u = User(email="ge@ki.se")
         s.add(u)
@@ -67,20 +67,17 @@ def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_pat
             description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,
-            ranking_scheme="v2",
         )
         s.add(p)
         s.flush()
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         cids = []
         # 4 calls with expected scores [80, 60, 40, 20].
-        # v1 ranks them [85, 65, 35, 25] (perfect order).
-        # v2 ranks them [70, 80, 30, 40] (worse).
-        v1_scores = [85, 65, 35, 25]
-        v2_scores = [70, 80, 30, 40]
+        # Actual scores [85, 65, 35, 25] (perfect rank correlation).
+        actual_scores = [85, 65, 35, 25]
         expected_scores = [80, 60, 40, 20]
-        for i, (_e, v1, v2) in enumerate(
-            zip(expected_scores, v1_scores, v2_scores, strict=True)
+        for i, (_e, score) in enumerate(
+            zip(expected_scores, actual_scores, strict=True)
         ):
             c = Call(
                 source_id=src.id,
@@ -92,19 +89,17 @@ def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_pat
             s.add(c)
             s.flush()
             cids.append(c.id)
-            for scheme, score in [("v1", v1), ("v2", v2)]:
-                s.add(
-                    CallRanking(
-                        call_id=c.id,
-                        profile_id=p.id,
-                        scheme=scheme,
-                        aggregate_score=score,
-                        rationale="r",
-                        model="m",
-                        prompt_version=scheme,
-                        ranked_at=datetime.now(UTC),
-                    )
+            s.add(
+                CallRanking(
+                    call_id=c.id,
+                    profile_id=p.id,
+                    aggregate_score=score,
+                    rationale="r",
+                    model="m",
+                    prompt_version="v2.0",
+                    ranked_at=datetime.now(UTC),
                 )
+            )
         s.commit()
         pid = p.id
 
@@ -121,20 +116,18 @@ def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_pat
         fixture_path=str(fixture_path),
     )
     assert isinstance(report, GoldenSetReport)
-    assert report.tau_v1 == 1.0  # perfect correlation
-    assert report.tau_v2 < 1.0   # less perfect
+    assert report.tau == 1.0  # perfect correlation
     assert report.n_fixture == 4
-    assert report.n_v1 == 4      # all 4 triples had v1 rows
-    assert report.n_v2 == 4      # all 4 triples had v2 rows
+    assert report.n_compared == 4
 
 
-def test_run_golden_set_eval_per_scheme_n_reflects_actual_rows(
+def test_run_golden_set_eval_n_compared_reflects_actual_rows(
     pg_session_factory, tmp_path
 ):
-    """Codex M2: when triples are missing CallRanking rows for a scheme,
-    n_<scheme> reports the count of rows actually compared, NOT the
-    fixture size. Otherwise /admin would show tau computed on a much
-    smaller subset than the displayed Pairs count."""
+    """When triples are missing CallRanking rows, n_compared reports the
+    count of rows actually compared, NOT the fixture size. Otherwise
+    /admin would show tau computed on a much smaller subset than the
+    displayed Pairs count."""
     with pg_session_factory() as s:
         u = User(email="m2@ki.se")
         s.add(u)
@@ -145,13 +138,12 @@ def test_run_golden_set_eval_per_scheme_n_reflects_actual_rows(
             description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,
-            ranking_scheme="v2",
         )
         s.add(p)
         s.flush()
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         cids = []
-        # Three calls in fixture, but only the first two have v2 rows.
+        # Three calls in fixture, but only the first two have ranking rows.
         for i in range(3):
             c = Call(
                 source_id=src.id,
@@ -168,7 +160,6 @@ def test_run_golden_set_eval_per_scheme_n_reflects_actual_rows(
                 CallRanking(
                     call_id=cid,
                     profile_id=p.id,
-                    scheme="v2",
                     aggregate_score=50,
                     rationale="r",
                     model="m",
@@ -191,19 +182,17 @@ def test_run_golden_set_eval_per_scheme_n_reflects_actual_rows(
         fixture_path=str(fixture_path),
     )
     assert report.n_fixture == 3
-    assert report.n_v1 == 0      # no v1 rows seeded
-    assert report.tau_v1 is None
-    assert report.n_v2 == 2      # only 2 of 3 fixture triples had v2 rows
-    # tau_v2 computed over those 2 rows (could be -1, 0, or 1 with n=2;
+    assert report.n_compared == 2
+    # tau computed over those 2 rows (could be -1, 0, or 1 with n=2;
     # we just confirm it's not None and the count is honest).
-    assert report.tau_v2 is not None
+    assert report.tau is not None
 
 
 def test_run_golden_set_eval_missing_fixture_returns_zeroed_report(
     pg_session_factory, tmp_path, caplog,
 ):
     """If the fixture file does not exist, the evaluator returns a fully
-    zeroed report (n_fixture=0, n_v1/v2=0, tau_v1/v2=None) and logs a
+    zeroed report (n_fixture=0, n_compared=0, tau=None) and logs a
     structured warning. The whole pipeline must not crash."""
     import logging
 
@@ -216,9 +205,7 @@ def test_run_golden_set_eval_missing_fixture_returns_zeroed_report(
             fixture_path=str(nonexistent),
         )
 
-    assert report == GoldenSetReport(
-        n_fixture=0, n_v1=0, tau_v1=None, n_v2=0, tau_v2=None,
-    )
+    assert report == GoldenSetReport(n_fixture=0, n_compared=0, tau=None)
     assert any(
         "golden_fixture_missing" in (r.getMessage() or "")
         or "ranking.golden_eval.fixture_missing" in r.message
@@ -236,7 +223,7 @@ def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_pat
         p = Profile(
             name="Dup", kind=ProfileKind.GROUP, description="",
             structured={"areas": [], "hard_exclusions": []},
-            created_by=u.id, ranking_scheme="v2",
+            created_by=u.id,
         )
         s.add(p)
         s.flush()
@@ -248,7 +235,7 @@ def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_pat
         s.add(c)
         s.flush()
         s.add(CallRanking(
-            call_id=c.id, profile_id=p.id, scheme="v2",
+            call_id=c.id, profile_id=p.id,
             aggregate_score=50, rationale="r",
             model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
         ))
@@ -267,7 +254,7 @@ def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_pat
         session_factory=pg_session_factory, fixture_path=str(fixture_path),
     )
     assert report.n_fixture == 1  # deduped
-    assert report.n_v2 == 1
+    assert report.n_compared == 1
 
 
 def test_run_golden_set_eval_persists_report_to_disk(
@@ -289,8 +276,7 @@ def test_run_golden_set_eval_persists_report_to_disk(
     )
     persisted = json.loads((tmp_path / "golden_set_last.json").read_text())
     assert persisted["n_fixture"] == report.n_fixture == 0
-    assert persisted["tau_v1"] is None
-    assert persisted["tau_v2"] is None
+    assert persisted["tau"] is None
 
 
 def test_load_last_report_returns_none_when_never_persisted(
@@ -313,19 +299,15 @@ def test_load_last_report_reads_persisted_report(monkeypatch, tmp_path):
 
     p.write_text(json.dumps({
         "n_fixture": 50,
-        "n_v1": 50,
-        "tau_v1": 0.789,
-        "n_v2": 48,
-        "tau_v2": 0.812,
+        "n_compared": 48,
+        "tau": 0.812,
     }))
     from call_monitor.ranking.eval import load_last_report
     r = load_last_report()
     assert r is not None
     assert r.n_fixture == 50
-    assert r.n_v1 == 50
-    assert r.tau_v1 == 0.789
-    assert r.n_v2 == 48
-    assert r.tau_v2 == 0.812
+    assert r.n_compared == 48
+    assert r.tau == 0.812
 
 
 def test_load_last_report_returns_none_on_corrupted_file(monkeypatch, tmp_path):

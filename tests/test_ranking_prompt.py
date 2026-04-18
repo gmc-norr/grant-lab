@@ -1,77 +1,189 @@
-from datetime import UTC, datetime
+import json
 
-from call_monitor.db.models import Call, Profile, ProfileKind
-from call_monitor.ranking.prompt import PROMPT_VERSION, build_messages
+import pytest
+
+from call_monitor.ranking.prompt import (
+    PROMPT_VERSION,
+    Parsed,
+    ParseError,
+    build_messages,
+    parse_response,
+)
 
 
-def _profile():
-    return Profile(
-        id=1,
-        name="Pathology AI",
-        kind=ProfileKind.GROUP,
-        description="Develop AI methods for digital pathology and federated learning.",
-        structured={
-            "areas": ["digital pathology", "federated learning"],
-            "budget_min": 100_000,
-            "budget_max": 5_000_000,
-            "trl_min": 4,
-            "trl_max": 8,
-            "must_include": ["pathology"],
+def test_prompt_version_constant():
+    assert PROMPT_VERSION == "v2.0"
+
+
+def test_build_messages_includes_profile_and_call_blocks():
+    profile = type("P", (), {
+        "name": "Pathology",
+        "kind": type("K", (), {"value": "group"})(),
+        "description": "Digital pathology AI",
+        "structured": {
+            "areas": ["digital pathology", "AI"],
             "hard_exclusions": ["animal studies"],
         },
-        is_active=True,
-        created_by=1,
-    )
-
-
-def _call():
-    return Call(
-        id=42,
-        source_id=1,
-        external_id="HORIZON-X",
-        url="https://x",
-        title="AI for digital pathology",
-        summary="EU funding for AI-based digital pathology research.",
-        full_text=None,
-        deadline=datetime(2026, 9, 1, tzinfo=UTC),
-        budget_max=2_000_000,
-        currency="EUR",
-        programme="Horizon Europe",
-        keywords=["health", "ai", "pathology"],
-        published_at=datetime(2026, 4, 1, tzinfo=UTC),
-        raw={},
-    )
-
-
-def test_prompt_version_is_v1():
-    assert PROMPT_VERSION == "v1"
-
-
-def test_messages_include_profile_in_system_and_call_in_user():
-    msgs = build_messages(_profile(), _call())
+    })()
+    call = type("C", (), {
+        "title": "AI for medical imaging",
+        "summary": "Open call for AI-driven medical imaging research.",
+        "programme": "Vinnova",
+        "deadline": None,
+        "budget_min": None,
+        "budget_max": None,
+        "currency": None,
+        "raw": {},
+    })()
+    msgs = build_messages(profile=profile, call=call)
     assert len(msgs) == 2
     assert msgs[0]["role"] == "system"
     assert msgs[1]["role"] == "user"
-    assert "Pathology AI" in msgs[0]["content"]
-    assert "digital pathology" in msgs[0]["content"]
-    assert "animal studies" in msgs[0]["content"]
-    assert "AI for digital pathology" in msgs[1]["content"]
-    assert "Horizon Europe" in msgs[1]["content"]
+    sys = msgs[0]["content"]
+    assert "Pathology" in sys
+    assert "digital pathology" in sys.lower()
+    assert "animal studies" in sys
+    user = msgs[1]["content"]
+    assert "AI for medical imaging" in user
+    assert "AI-driven medical imaging" in user
 
 
-def test_system_block_is_deterministic_per_profile():
-    """For the inference engine's prefix cache to work, the system block
-    MUST be byte-identical across calls for the same profile."""
-    p = _profile()
-    a = build_messages(p, _call())
-    b = build_messages(p, _call())
-    assert a[0] == b[0]
+def test_build_messages_truncates_call_text_at_4000():
+    long_summary = "x" * 6000
+    profile = type("P", (), {
+        "name": "P", "kind": type("K", (), {"value": "group"})(),
+        "description": "", "structured": {"areas": [], "hard_exclusions": []},
+    })()
+    call = type("C", (), {
+        "title": "T", "summary": long_summary, "programme": None,
+        "deadline": None, "budget_min": None, "budget_max": None, "currency": None,
+        "raw": {},
+    })()
+    msgs = build_messages(profile=profile, call=call)
+    # Count the x's in the user message — should be capped at 4000.
+    assert msgs[1]["content"].count("x") <= 4000
 
 
-def test_summary_is_truncated_when_full_text_long():
-    p = _profile()
-    c = _call()
-    c.full_text = "X" * 5000
-    msgs = build_messages(p, c)
-    # User block contains call body but not the entire 5000-char dump
-    assert len(msgs[1]["content"]) < 5000
+def test_build_messages_falls_back_to_full_text_when_summary_missing():
+    """M1 regression: calls with full_text but no summary must still get
+    their body in the prompt — v1 does this, v2 must too."""
+    profile = type("P", (), {
+        "name": "P", "kind": type("K", (), {"value": "group"})(),
+        "description": "", "structured": {"areas": [], "hard_exclusions": []},
+    })()
+    call = type("C", (), {
+        "title": "T",
+        "summary": None,
+        "full_text": "Detailed eligibility criteria buried in the body.",
+        "programme": None,
+        "deadline": None, "budget_min": None, "budget_max": None, "currency": None,
+        "raw": {},
+    })()
+    msgs = build_messages(profile=profile, call=call)
+    assert "Detailed eligibility criteria" in msgs[1]["content"]
+
+
+def test_parse_clean_response():
+    content = json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "AI for medical"},
+        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+    })
+    out = parse_response(content)
+    assert isinstance(out, Parsed)
+    assert out.topic_fit_rating == 4
+    assert out.topic_fit_rationale == "good"
+    assert out.topic_fit_quoted == "AI for medical"
+    assert out.eligibility_rating == "pass"
+    assert out.exclusions_rating == "pass"
+
+
+def test_parse_invalid_json_raises():
+    with pytest.raises(ParseError):
+        parse_response("not json")
+
+
+def test_parse_missing_topic_fit_raises():
+    content = json.dumps({"eligibility": {"rating": "pass"}, "exclusions": {"rating": "pass"}})
+    with pytest.raises(ParseError, match="topic_fit"):
+        parse_response(content)
+
+
+def test_parse_invalid_topic_rating_raises():
+    content = json.dumps({
+        "topic_fit": {"rating": 9, "rationale": "x"},
+        "eligibility": {"rating": "pass"},
+        "exclusions": {"rating": "pass"},
+    })
+    with pytest.raises(ParseError, match="topic_fit.rating"):
+        parse_response(content)
+
+
+def test_parse_invalid_eligibility_rating_raises():
+    content = json.dumps({
+        "topic_fit": {"rating": 3},
+        "eligibility": {"rating": "maybe"},
+        "exclusions": {"rating": "pass"},
+    })
+    with pytest.raises(ParseError, match="eligibility"):
+        parse_response(content)
+
+
+def test_parse_rejects_non_string_quoted_evidence():
+    """Codex N3: quoted_evidence must be string or null; a list (or other
+    non-string non-null type) must raise ParseError."""
+    content = json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": ["a list"]},
+        "eligibility": {"rating": "pass"},
+        "exclusions": {"rating": "pass"},
+    })
+    with pytest.raises(ParseError, match="quoted_evidence"):
+        parse_response(content)
+
+
+def _verification_payload(topic_quote: str) -> str:
+    """Helper: build a minimal valid LLM JSON response with the given
+    topic_fit quote and null quotes elsewhere — keeps the verification
+    tests focused on the only field they exercise."""
+    return json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": topic_quote},
+        "eligibility": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
+    })
+
+
+def test_parse_response_verification_returns_verbatim_quote_when_in_haystack():
+    """Quote present verbatim in verification_text → returned as-is."""
+    content = _verification_payload("AI for medical imaging")
+    haystack = "Title: A cancer call\n\nSummary: AI for medical imaging in cancer screening"
+    parsed = parse_response(content, verification_text=haystack)
+    assert parsed.topic_fit_quoted == "AI for medical imaging"
+
+
+def test_parse_response_verification_nulls_quote_when_not_in_haystack():
+    """Quote absent from verification_text → None."""
+    content = _verification_payload("fabricated quote that does not exist")
+    haystack = "Title: A cancer call\n\nSummary: real text from the call"
+    parsed = parse_response(content, verification_text=haystack)
+    assert parsed.topic_fit_quoted is None
+
+
+def test_parse_response_verification_is_case_insensitive():
+    """Case mismatch between LLM quote and source → still matched."""
+    content = _verification_payload("CANCER BIOMARKER")
+    haystack = "Funding for cancer biomarker discovery in pathology"
+    parsed = parse_response(content, verification_text=haystack)
+    # Returned quote keeps the LLM's original capitalization
+    assert parsed.topic_fit_quoted == "CANCER BIOMARKER"
+
+
+def test_parse_response_verification_tolerates_whitespace_normalization():
+    """Codex finding: PDF-derived full_text has hard line breaks; LLM quotes
+    are normalized. Substring check must match across whitespace differences."""
+    content = _verification_payload("imaging in cancer screening")
+    # Haystack has the same content with hard line breaks + NBSP — common in
+    # PDF-extracted text. Without whitespace normalization, the substring
+    # check would falsely null the (legitimate) quote.
+    haystack = "AI for medical\nimaging in cancer\xa0screening and treatment"
+    parsed = parse_response(content, verification_text=haystack)
+    assert parsed.topic_fit_quoted == "imaging in cancer screening"

@@ -1,8 +1,8 @@
 """Golden-set evaluation — Kendall's tau between CallRanking scores and
-human-curated expected scores, computed per scheme.
+human-curated expected scores.
 
 Read-only. Logs a structured summary; the admin panel surfaces the most
-recent result (Task 7 — already wired via the v2 metrics block).
+recent result.
 """
 from __future__ import annotations
 
@@ -38,19 +38,16 @@ _REPORT_PATH = (
 
 @dataclass(frozen=True)
 class GoldenSetReport:
-    """Per-scheme golden-set evaluation result.
+    """Golden-set evaluation result.
 
-    `n_fixture` is the size of the curated triple list. `n_v1` and `n_v2`
-    are the per-scheme counts of triples that actually had a CallRanking
-    row to compare against — usually less than n_fixture if some pairs
-    haven't been ranked under both schemes yet. tau is computed on
-    n_<scheme> rows, NOT n_fixture, so the displayed tau and the count
-    must agree (Codex M2)."""
+    `n_fixture` is the size of the curated triple list. `n_compared` is
+    the count of triples that actually had a CallRanking row to compare
+    against — usually less than n_fixture if some pairs haven't been
+    ranked yet. tau is computed on n_compared rows, NOT n_fixture, so the
+    displayed tau and the count must agree."""
     n_fixture: int
-    n_v1: int
-    tau_v1: float | None
-    n_v2: int
-    tau_v2: float | None
+    n_compared: int
+    tau: float | None
 
 
 def kendalls_tau(xs: list[float], ys: list[float]) -> float:
@@ -86,13 +83,12 @@ def run_golden_set_eval(
     session_factory,
     fixture_path: str | None = None,
 ) -> GoldenSetReport:
-    """Read the golden-set fixture, query CallRanking under both schemes,
-    compute Kendall's tau against expected scores. Logs the report and
-    returns it.
+    """Read the golden-set fixture, query CallRanking, compute Kendall's
+    tau against expected scores. Logs the report and returns it.
 
-    Reports per-scheme `n_v1` / `n_v2` separately from the curated fixture
-    size (`n_fixture`) so the admin panel doesn't display "tau computed
-    over 50 pairs" when only 12 of those 50 had a CallRanking under v2.
+    Reports `n_compared` separately from the curated fixture size
+    (`n_fixture`) so the admin panel doesn't display "tau computed over
+    50 pairs" when only 12 of those 50 had a CallRanking row.
 
     Fixture schema is trusted: each triple must have integer call_id,
     profile_id, and numeric expected_score. No defensive validation —
@@ -103,9 +99,7 @@ def run_golden_set_eval(
             "ranking.golden_eval.fixture_missing",
             extra={"event": "golden_fixture_missing", "path": str(path)},
         )
-        return GoldenSetReport(
-            n_fixture=0, n_v1=0, tau_v1=None, n_v2=0, tau_v2=None,
-        )
+        return GoldenSetReport(n_fixture=0, n_compared=0, tau=None)
 
     triples_raw = json.loads(path.read_text())
     # Dedup on (call_id, profile_id) — keep first occurrence. A duplicated
@@ -129,49 +123,35 @@ def run_golden_set_eval(
         triples.append(t)
     n_fixture = len(triples)
 
-    def _scores_for(scheme: str) -> tuple[list[float], list[float]]:
-        """Returns the (actual, expected) lists for triples that have a
-        CallRanking row under this scheme. May be empty."""
-        actual: list[float] = []
-        expected: list[float] = []
-        with session_factory() as session:
-            for t in triples:
-                row = session.execute(
-                    select(CallRanking).where(
-                        CallRanking.call_id == t["call_id"],
-                        CallRanking.profile_id == t["profile_id"],
-                        CallRanking.scheme == scheme,
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    continue
-                # Use display_score (= aggregate + setwise, clamped) so
-                # the golden-set tau measures correlation against what
-                # the user actually sees in the UI. For v1 rows
-                # display_score == aggregate_score (no setwise pass);
-                # for v2 borderline rows the offset is exactly what the
-                # operator should see reflected in tau.
-                actual.append(float(row.display_score))
-                expected.append(float(t["expected_score"]))
-        return actual, expected
+    actual: list[float] = []
+    expected: list[float] = []
+    with session_factory() as session:
+        for t in triples:
+            row = session.execute(
+                select(CallRanking).where(
+                    CallRanking.call_id == t["call_id"],
+                    CallRanking.profile_id == t["profile_id"],
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                continue
+            actual.append(float(row.aggregate_score))
+            expected.append(float(t["expected_score"]))
 
-    v1_actual, v1_expected = _scores_for("v1")
-    v2_actual, v2_expected = _scores_for("v2")
-    tau_v1 = kendalls_tau(v1_actual, v1_expected) if len(v1_actual) >= 2 else None
-    tau_v2 = kendalls_tau(v2_actual, v2_expected) if len(v2_actual) >= 2 else None
+    tau = kendalls_tau(actual, expected) if len(actual) >= 2 else None
 
     report = GoldenSetReport(
         n_fixture=n_fixture,
-        n_v1=len(v1_actual), tau_v1=tau_v1,
-        n_v2=len(v2_actual), tau_v2=tau_v2,
+        n_compared=len(actual),
+        tau=tau,
     )
     _logger.info(
         "ranking.golden_eval.report",
         extra={
             "event": "golden_eval_report",
             "n_fixture": n_fixture,
-            "n_v1": len(v1_actual), "tau_v1": tau_v1,
-            "n_v2": len(v2_actual), "tau_v2": tau_v2,
+            "n_compared": len(actual),
+            "tau": tau,
         },
     )
     _persist_report(report)
@@ -186,10 +166,8 @@ def _persist_report(report: GoldenSetReport) -> None:
     _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _REPORT_PATH.write_text(json.dumps({
         "n_fixture": report.n_fixture,
-        "n_v1": report.n_v1,
-        "tau_v1": report.tau_v1,
-        "n_v2": report.n_v2,
-        "tau_v2": report.tau_v2,
+        "n_compared": report.n_compared,
+        "tau": report.tau,
     }))
 
 
@@ -205,10 +183,8 @@ def load_last_report() -> GoldenSetReport | None:
         data = json.loads(_REPORT_PATH.read_text())
         return GoldenSetReport(
             n_fixture=data.get("n_fixture", 0),
-            n_v1=data.get("n_v1", 0),
-            tau_v1=data.get("tau_v1"),
-            n_v2=data.get("n_v2", 0),
-            tau_v2=data.get("tau_v2"),
+            n_compared=data.get("n_compared", 0),
+            tau=data.get("tau"),
         )
     except (OSError, json.JSONDecodeError, TypeError) as e:
         _logger.warning(

@@ -19,6 +19,7 @@ def _build(session_factory, *, with_digest):
         gemma_model="gemma4:e4b-q8",
         ranking_tick_seconds=60,
         ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
         embed_client=MagicMock(model="bge-m3"),
         start=False,
     )

@@ -1,3 +1,4 @@
+from functools import partial
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -7,20 +8,40 @@ from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.db.models import Call, CallRanking, Profile, RankingJob, Source, User
 from call_monitor.main import create_app
 from call_monitor.profiles.seed import DraftProfile
+from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+from call_monitor.ranking.prompt import Parsed
 from call_monitor.ranking.rank_pair import RankResult
-from call_monitor.ranking.worker import drain_queue
+from call_monitor.ranking.worker import drain_queue as _drain_queue
+
+# drain_queue now requires embedding_threshold (no module-level default).
+drain_queue = partial(_drain_queue, embedding_threshold=0.30)
 
 
-def _static_ranker(score: int = 80):
-    def _rank(*, client, profile, call):
-        return RankResult(
-            score=score,
-            rationale="e2e",
-            model="gemma4:e4b-q8",
-            prompt_version="v1",
-            raw_response={"score": score},
-        )
-    return _rank
+def _stub_rank_pair_returning(score: int = 80):
+    parsed = Parsed(
+        topic_fit_rating=4,
+        topic_fit_rationale="e2e", topic_fit_quoted=None,
+        eligibility_rating="pass", eligibility_rationale="ok", eligibility_quoted=None,
+        exclusions_rating="pass", exclusions_rationale="ok", exclusions_quoted=None,
+    )
+    stub_result = RankResult(
+        score=score, reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="gemma4:e4b-q8", prompt_version="v2.0", raw_response={},
+        embed_similarity=None,
+    )
+
+    def _stub(**_kwargs):
+        return stub_result
+
+    return _stub
 
 
 def test_e2e_create_profile_then_rank_then_browse(
@@ -115,11 +136,12 @@ def test_e2e_create_profile_then_rank_then_browse(
             )
         assert len(jobs) == 1
 
-        # 4. Drain the queue with a static ranker
+        # 4. Drain the queue with a stub rank_pair
+        from call_monitor.ranking import worker as worker_mod
+        monkeypatch.setattr(worker_mod, "rank_pair", _stub_rank_pair_returning(score=80))
         drain_queue(
             session_factory=pg_session_factory,
             client=None,
-            ranker=_static_ranker(score=80),
             batch_size=10,
         )
         with pg_session_factory() as s:

@@ -1,126 +1,22 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-
-from call_monitor.db.models import Call, Profile
 
 # Bump only when the prompt structure changes in a way that warrants
 # re-ranking. Stored on every CallRanking row so historical scores stay
 # attributable to the regime that produced them.
-PROMPT_VERSION = "v1"
-
-_SYSTEM_TEMPLATE = """\
-You are a research-funding analyst for an academic hospital.
-Score how relevant a funding call is to this profile.
-
-PROFILE:
-  Name: {name}
-  Kind: {kind}
-  Description: {description}
-  Structured constraints:
-    Areas: {areas}
-    Budget range: {budget_range}
-    TRL: {trl_range}
-    Must include (force-include keywords): {must_include}
-    Hard exclusions: {hard_exclusions}
-
-Output a single JSON object with two keys:
-  {{"score": <integer 0-100>, "rationale": "<2-3 sentences>"}}
-
-Hard exclusions: if the call clearly hits one, score MUST be <= 10.
-"""
-
-_USER_TEMPLATE = """\
-CALL:
-  Title: {title}
-  Programme: {programme}
-  Deadline: {deadline}
-  Budget: {budget}
-  Summary: {summary}
-"""
+PROMPT_VERSION = "v2.0"
+CALL_TEXT_LIMIT = 4000
 
 
-def _fmt_list(value) -> str:
-    if not value:
-        return "(none)"
-    return ", ".join(str(v) for v in value)
-
-
-def _budget_range(structured: dict) -> str:
-    lo, hi = structured.get("budget_min"), structured.get("budget_max")
-    if lo is None and hi is None:
-        return "(unspecified)"
-    return f"{lo or '—'}–{hi or '—'}"
-
-
-def _trl_range(structured: dict) -> str:
-    lo, hi = structured.get("trl_min"), structured.get("trl_max")
-    if lo is None and hi is None:
-        return "(unspecified)"
-    return f"{lo or '—'}–{hi or '—'}"
-
-
-def _summary_text(call: Call) -> str:
-    """Prefer summary; fall back to first 2000 chars of full_text."""
-    if call.summary:
-        return call.summary
-    if call.full_text:
-        return call.full_text[:2000]
-    return "(no summary)"
-
-
-def build_messages(profile: Profile, call: Call) -> list[dict]:
-    s = profile.structured or {}
-    system = _SYSTEM_TEMPLATE.format(
-        name=profile.name,
-        kind=profile.kind.value if hasattr(profile.kind, "value") else profile.kind,
-        description=profile.description or "(no description)",
-        areas=_fmt_list(s.get("areas")),
-        budget_range=_budget_range(s),
-        trl_range=_trl_range(s),
-        must_include=_fmt_list(s.get("must_include")),
-        hard_exclusions=_fmt_list(s.get("hard_exclusions")),
-    )
-
-    deadline = (
-        call.deadline.isoformat()
-        if call.deadline is not None
-        else "(no deadline)"
-    )
-    budget = (
-        f"{call.budget_min or '—'}–{call.budget_max or '—'} {call.currency or ''}"
-        if (call.budget_min or call.budget_max)
-        else "(unspecified)"
-    )
-    user = _USER_TEMPLATE.format(
-        title=call.title,
-        programme=call.programme or "(unspecified)",
-        deadline=deadline,
-        budget=budget,
-        summary=_summary_text(call),
-    )
-
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-
-
-# ---------------------------------------------------------------------------
-# v2 — criterion-rubric prompt (topic_fit / eligibility / exclusions)
-# ---------------------------------------------------------------------------
-
-PROMPT_VERSION_V2 = "v2.0"
-CALL_TEXT_LIMIT_V2 = 4000
-
-
-class ParseV2Error(Exception):
-    """The LLM response didn't match the v2 schema."""
+class ParseError(Exception):
+    """The LLM response didn't match the criterion schema."""
 
 
 @dataclass(frozen=True)
-class ParsedV2:
+class Parsed:
     topic_fit_rating: int
     topic_fit_rationale: str
     topic_fit_quoted: str | None
@@ -132,7 +28,7 @@ class ParsedV2:
     exclusions_quoted: str | None
 
 
-_SYSTEM_TEMPLATE_V2 = """\
+_SYSTEM_TEMPLATE = """\
 You are a research-funding analyst for an academic hospital.
 Evaluate a funding call against this profile on three criteria.
 
@@ -168,7 +64,7 @@ Output JSON exactly matching this schema:
 }}
 """
 
-_USER_TEMPLATE_V2 = """\
+_USER_TEMPLATE = """\
 CALL:
   Title:     {title}
   Programme: {programme}
@@ -178,19 +74,18 @@ CALL:
 """
 
 
-def build_messages_v2(*, profile, call) -> list[dict]:
-    """Build the v2 criterion-rubric prompt. Profile block first so the
+def build_messages(*, profile, call) -> list[dict]:
+    """Build the criterion-rubric prompt. Profile block first so the
     Ollama prefix cache is reused across calls scored against the same
     profile.
 
-    Text source falls back: summary → full_text. v1's prompt.py already
-    does this; without the fallback, calls with only full_text (e.g.
-    PDF-extracted with no summary field) would be sent to the LLM with
-    just a title — exactly the eligibility/exclusion text v2 is supposed
-    to surface better.
+    Text source falls back: summary → full_text. Without the fallback,
+    calls with only full_text (e.g. PDF-extracted with no summary field)
+    would be sent to the LLM with just a title — exactly the
+    eligibility/exclusion text the rubric is supposed to surface better.
     """
     structured = profile.structured or {}
-    sys = _SYSTEM_TEMPLATE_V2.format(
+    sys = _SYSTEM_TEMPLATE.format(
         name=profile.name,
         kind=profile.kind.value if hasattr(profile.kind, "value") else str(profile.kind),
         description=profile.description or "",
@@ -202,9 +97,9 @@ def build_messages_v2(*, profile, call) -> list[dict]:
         or getattr(call, "full_text", None)
         or ""
     )
-    if len(text_source) > CALL_TEXT_LIMIT_V2:
-        text_source = text_source[:CALL_TEXT_LIMIT_V2]
-    user = _USER_TEMPLATE_V2.format(
+    if len(text_source) > CALL_TEXT_LIMIT:
+        text_source = text_source[:CALL_TEXT_LIMIT]
+    user = _USER_TEMPLATE.format(
         title=call.title or "",
         programme=call.programme or "",
         deadline=call.deadline.isoformat() if call.deadline else "(none)",
@@ -219,6 +114,9 @@ def build_messages_v2(*, profile, call) -> list[dict]:
     ]
 
 
+_QUOTED_EVIDENCE_MAX = 200
+
+
 def _validated_quote(block: dict, criterion: str) -> str | None:
     """Extract quoted_evidence with type validation."""
     if "quoted_evidence" not in block:
@@ -227,51 +125,86 @@ def _validated_quote(block: dict, criterion: str) -> str | None:
     if q is None:
         return None
     if not isinstance(q, str):
-        raise ParseV2Error(
+        raise ParseError(
             f"{criterion}.quoted_evidence must be string or null; got {type(q).__name__}"
         )
     return q if q else None  # empty string treated as null
 
 
-def parse_v2_response(content: str) -> ParsedV2:
-    """Parse the LLM's JSON criterion output. Raises ParseV2Error on shape
-    violations. Quote verification is done outside (in rank_pair_v2)."""
+def parse_response(content: str, *, verification_text: str | None = None) -> Parsed:
+    """Parse the LLM's JSON criterion output. Raises ParseError on shape
+    violations.
+
+    When ``verification_text`` is supplied, each quoted_evidence field is
+    truncated to 200 chars and case-insensitive substring-checked against
+    that text. Misses are nulled silently — the LLM's rating still stands;
+    only the displayed quote is sanitized. The caller is responsible for
+    passing the FULL call body (title + summary + full untruncated full_text);
+    don't reuse the embedding helper here, which truncates full_text and
+    would falsely null quotes from past the truncation point.
+    """
     try:
         data = json.loads(content)
     except ValueError as e:
-        raise ParseV2Error(f"invalid JSON: {e}") from e
+        raise ParseError(f"invalid JSON: {e}") from e
     if not isinstance(data, dict):
-        raise ParseV2Error("response is not a JSON object")
+        raise ParseError("response is not a JSON object")
 
     tf = data.get("topic_fit")
     if not isinstance(tf, dict):
-        raise ParseV2Error("topic_fit missing or not an object")
+        raise ParseError("topic_fit missing or not an object")
     rating = tf.get("rating")
     if isinstance(rating, bool) or not isinstance(rating, int) or not 0 <= rating <= 5:
-        raise ParseV2Error(f"topic_fit.rating must be int 0-5; got {rating!r}")
+        raise ParseError(f"topic_fit.rating must be int 0-5; got {rating!r}")
 
     el = data.get("eligibility")
     if not isinstance(el, dict):
-        raise ParseV2Error("eligibility missing or not an object")
+        raise ParseError("eligibility missing or not an object")
     el_rating = el.get("rating")
     if el_rating not in {"pass", "fail", "unclear"}:
-        raise ParseV2Error(f"eligibility.rating must be 'pass'|'fail'|'unclear'; got {el_rating!r}")
+        raise ParseError(f"eligibility.rating must be 'pass'|'fail'|'unclear'; got {el_rating!r}")
 
     ex = data.get("exclusions")
     if not isinstance(ex, dict):
-        raise ParseV2Error("exclusions missing or not an object")
+        raise ParseError("exclusions missing or not an object")
     ex_rating = ex.get("rating")
     if ex_rating not in {"pass", "fail"}:
-        raise ParseV2Error(f"exclusions.rating must be 'pass'|'fail'; got {ex_rating!r}")
+        raise ParseError(f"exclusions.rating must be 'pass'|'fail'; got {ex_rating!r}")
 
-    return ParsedV2(
+    # Pre-normalize the haystack once. PDF-derived full_text has hard line
+    # breaks, double newlines, and non-breaking spaces; LLMs typically quote
+    # in normalized form, so collapse all whitespace runs to a single space
+    # for comparison only. The display value returned to the caller is the
+    # LLM's original (un-normalized) quote.
+    normalized_haystack = (
+        re.sub(r"\s+", " ", verification_text).lower()
+        if verification_text is not None
+        else None
+    )
+
+    def _verified_quote(quote: str | None) -> str | None:
+        if quote is None:
+            return None
+        truncated = quote[:_QUOTED_EVIDENCE_MAX]
+        if normalized_haystack is None:
+            # No verification requested — keep the (truncated) quote as-is.
+            return truncated if truncated else None
+        # Whitespace-only quotes match almost any haystack but are useless.
+        if not truncated.strip():
+            return None
+        normalized_quote = re.sub(r"\s+", " ", truncated).strip().lower()
+        if normalized_quote in normalized_haystack:
+            return truncated
+        return None  # bogus quote — discarded silently
+
+    return Parsed(
         topic_fit_rating=rating,
         topic_fit_rationale=str(tf.get("rationale") or ""),
-        topic_fit_quoted=_validated_quote(tf, "topic_fit"),
+        topic_fit_quoted=_verified_quote(_validated_quote(tf, "topic_fit")),
         eligibility_rating=el_rating,
         eligibility_rationale=str(el.get("rationale") or ""),
-        eligibility_quoted=_validated_quote(el, "eligibility"),
+        eligibility_quoted=_verified_quote(_validated_quote(el, "eligibility")),
         exclusions_rating=ex_rating,
         exclusions_rationale=str(ex.get("rationale") or ""),
-        exclusions_quoted=_validated_quote(ex, "exclusions"),
+        exclusions_quoted=_verified_quote(_validated_quote(ex, "exclusions")),
     )

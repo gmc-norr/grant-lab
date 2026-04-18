@@ -1,4 +1,4 @@
-"""Rule-based gates for ranking v2.
+"""Rule-based gates for ranking.
 
 Four deterministic checks (timeline, budget, TRL, embedding) evaluated
 in Python before any LLM call. A FAIL on any gate short-circuits the
@@ -11,8 +11,8 @@ would reject valid calls. Same applies to embedding similarity: a
 missing cosine (model down, backfill incomplete) is UNKNOWN, not FAIL.
 
 The embedding gate is intentionally pure: callers compute the cosine
-elsewhere (see Task 5 / `rank_pair_v2`) and pass the float in. This
-keeps `criteria.py` free of HTTP/DB dependencies.
+elsewhere (see `rank_pair`) and pass the float in. This keeps
+`criteria.py` free of HTTP/DB dependencies.
 """
 from __future__ import annotations
 
@@ -21,12 +21,6 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 TIMELINE_MIN_DAYS = 14
-# Default cosine-similarity threshold for the embedding pre-gate. Mirrors
-# the default in `Settings.embedding_pregate_threshold` (config.py); kept
-# as a module constant so this module stays import-time-pure (does not
-# require env-loaded Settings()). Production callers thread the env value
-# through their own paths if they need to override.
-EMBEDDING_PREGATE_THRESHOLD = 0.30
 
 
 class GateStatus(StrEnum):
@@ -54,8 +48,8 @@ def evaluate_gates(
     call,
     *,
     now: datetime,
+    embedding_threshold: float,
     embed_similarity: float | None = None,
-    embedding_threshold: float = EMBEDDING_PREGATE_THRESHOLD,
 ) -> Gates:
     """Evaluate the four rule-based gates for a (profile, call) pair.
 
@@ -68,10 +62,11 @@ def evaluate_gates(
     None means UNKNOWN (callers that don't yet wire up embeddings get the
     same fall-through-to-LLM behaviour as a missing budget).
 
-    `embedding_threshold` lets callers (in practice: rank_pair_v2 reading
-    Settings.embedding_pregate_threshold) override the module-default
-    cosine cutoff. Keeping the default a module constant means this module
-    stays import-time-pure (no env load required for unit tests).
+    `embedding_threshold` is the cosine cutoff for the embedding pre-gate.
+    Required: callers must thread the value (in practice from
+    Settings.embedding_pregate_threshold) — there is no module-level
+    default to fall back on. This keeps the Settings field as the single
+    source of truth for the threshold.
     """
     return Gates(
         timeline=_timeline(call.deadline, now),
@@ -121,11 +116,7 @@ def _trl(profile, call) -> GateResult:
     return GateResult(GateStatus.FAIL)
 
 
-def _embedding(
-    sim: float | None,
-    *,
-    threshold: float = EMBEDDING_PREGATE_THRESHOLD,
-) -> GateResult:
+def _embedding(sim: float | None, *, threshold: float) -> GateResult:
     """Cosine-similarity pre-gate.
 
     None  -> UNKNOWN (missing embedding; caller falls through to LLM).

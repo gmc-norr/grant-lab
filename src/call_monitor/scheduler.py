@@ -18,7 +18,6 @@ from call_monitor.embeddings.refresh import refresh_missing_embeddings_tick
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
-from call_monitor.ranking.setwise import run_setwise_for_profile
 from call_monitor.ranking.worker import drain_queue
 from call_monitor.sources.eu_portal import EUPortalAdapter
 from call_monitor.sources.vinnova import VinnovaAdapter
@@ -56,6 +55,7 @@ def build_scheduler(
     gemma_model: str,
     ranking_tick_seconds: int,
     ranking_queue_batch: int,
+    embedding_pregate_threshold: float,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
@@ -121,6 +121,7 @@ def build_scheduler(
         drain_queue(
             session_factory=session_factory,
             client=ollama,
+            embedding_threshold=embedding_pregate_threshold,
             batch_size=ranking_queue_batch,
         )
 
@@ -129,56 +130,6 @@ def build_scheduler(
         trigger=IntervalTrigger(seconds=ranking_tick_seconds),
         id="rank:drain",
         name="Drain ranking job queue",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-
-    def _setwise_tick() -> None:
-        from sqlalchemy import select
-
-        from call_monitor.db.models import Profile
-
-        with session_factory() as session:
-            v2_profile_ids = session.execute(
-                select(Profile.id).where(
-                    Profile.is_active.is_(True),
-                    Profile.ranking_scheme == "v2",
-                )
-            ).scalars().all()
-
-        now = _dt.now(UTC)
-        for pid in v2_profile_ids:
-            try:
-                run_setwise_for_profile(
-                    session_factory=session_factory,
-                    client=ollama,
-                    profile_id=pid,
-                    now=now,
-                )
-            except Exception as e:  # noqa: BLE001
-                _logger.exception(
-                    "ranking.setwise.profile_failed",
-                    extra={
-                        "event": "setwise_profile_failed",
-                        "profile_id": pid,
-                        "error": str(e),
-                    },
-                )
-
-    # Concurrency note: setwise UPDATEs `setwise_offset` while `rank:drain`
-    # may concurrently INSERT/UPDATE the same CallRanking row. APScheduler's
-    # `max_instances=1` only prevents this job overlapping itself, not
-    # serialization with other jobs. The 04:00 trigger is chosen to fall
-    # outside peak ingestion windows; row-level Postgres locks provide the
-    # baseline correctness guarantee. If contention shows up in production,
-    # add `SELECT ... FOR UPDATE` to setwise.py's per-row update or move
-    # this trigger further from the rank:drain tick window.
-    sched.add_job(
-        _setwise_tick,
-        trigger=CronTrigger(hour=4, minute=0),
-        id="setwise:daily",
-        name="Daily setwise borderline pass",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

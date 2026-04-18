@@ -135,47 +135,40 @@ def assemble_for_user(
                     select(CallRanking).where(
                         CallRanking.call_id == c.id,
                         CallRanking.profile_id == profile.id,
-                        CallRanking.scheme == profile.ranking_scheme,
                     )
                 ).scalar_one_or_none()
                 per_call[c.id].append((profile, "must_include", rk))
                 call_objs[c.id] = c
 
-        # 3b. top candidates: display_score >= threshold
-        # display_score = aggregate_score + setwise_offset (clamped). The
-        # band cutoffs apply to the user-visible value per spec line 191
-        # so a v2 borderline call lifted to 60 by setwise lands in `top`
-        # (and a v2 top call dropped to 59 lands in `borderline`).
+        # 3b. top candidates: aggregate_score >= threshold
         top_q = (
             select(Call, CallRanking)
             .join(CallRanking, CallRanking.call_id == Call.id)
             .where(
                 CallRanking.profile_id == profile.id,
-                CallRanking.scheme == profile.ranking_scheme,
-                CallRanking.display_score >= DIGEST_TOP_THRESHOLD,
+                CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
-            .order_by(CallRanking.display_score.desc())
+            .order_by(CallRanking.aggregate_score.desc())
             .limit(50)  # over-fetch; dedup may drop some
         )
         for c, rk in session.execute(top_q).all():
             per_call[c.id].append((profile, "top", rk))
             call_objs[c.id] = c
 
-        # 3c. borderline candidates: 45 <= display_score < threshold
+        # 3c. borderline candidates: 45 <= aggregate_score < threshold
         border_q = (
             select(Call, CallRanking)
             .join(CallRanking, CallRanking.call_id == Call.id)
             .where(
                 CallRanking.profile_id == profile.id,
-                CallRanking.scheme == profile.ranking_scheme,
-                CallRanking.display_score >= DIGEST_BORDERLINE_LOWER,
-                CallRanking.display_score < DIGEST_TOP_THRESHOLD,
+                CallRanking.aggregate_score >= DIGEST_BORDERLINE_LOWER,
+                CallRanking.aggregate_score < DIGEST_TOP_THRESHOLD,
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
-            .order_by(CallRanking.display_score.desc())
+            .order_by(CallRanking.aggregate_score.desc())
             .limit(50)
         )
         for c, rk in session.execute(border_q).all():
@@ -191,12 +184,9 @@ def assemble_for_user(
     secondary_profile_names: dict[int, list[str]] = defaultdict(list)
     for cid, candidates in per_call.items():
         # Pick "primary": min by (bucket priority, -score, profile_id).
-        # Use display_score so a v2 setwise-bumped call wins ties / ordering
-        # against an unbumped call in another profile, matching what the
-        # user sees in the UI.
         def _key(item):
             prof, bucket, rk = item
-            score = rk.display_score if rk else -1
+            score = rk.aggregate_score if rk else -1
             return (_BUCKET_PRIORITY[bucket], -score, prof.id)
         candidates_sorted = sorted(candidates, key=_key)
         primary = candidates_sorted[0]
@@ -217,9 +207,7 @@ def assemble_for_user(
             title=c.title,
             summary=c.summary,
             deadline=c.deadline,
-            # display_score (= aggregate + setwise, clamped) so the digest
-            # email shows the same number as the dashboard.
-            score=rk.display_score if rk else None,
+            score=rk.aggregate_score if rk else None,
             rationale=rk.rationale if rk else None,
             url=c.url,
             bucket=bucket,

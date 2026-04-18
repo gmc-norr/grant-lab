@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q8_0", alias="GEMMA_MODEL")
     embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
-    # Cosine-similarity threshold for the v2 embedding pre-gate. Pairs
+    # Cosine-similarity threshold for the embedding pre-gate. Pairs
     # below this (computed by the caller, not the gate) are zeroed out
     # before the LLM is invoked. Default 0.30 chosen from BGE-M3's typical
     # similarity distribution (see ranking-v2 spec).

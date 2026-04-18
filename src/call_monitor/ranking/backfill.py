@@ -13,9 +13,9 @@ BACKFILL_DAYS = 90
 
 def backfill_profile(*, session_factory: sessionmaker, profile_id: int) -> int:
     """Enqueue ranking jobs for the last BACKFILL_DAYS of calls against this
-    profile, using the profile's currently-active ranking scheme.
+    profile.
 
-    Idempotent against the partial unique index per (call, profile, scheme).
+    Idempotent against the partial unique index per (call, profile).
 
     Uses a bulk INSERT ... SELECT ... ON CONFLICT DO NOTHING: one round-trip
     per profile instead of N per-row INSERTs (~600 calls × per-row INSERT was
@@ -27,13 +27,12 @@ def backfill_profile(*, session_factory: sessionmaker, profile_id: int) -> int:
         profile = session.get(Profile, profile_id)
         if profile is None or not profile.is_active:
             return 0
-        scheme = profile.ranking_scheme
         cutoff = datetime.now(UTC) - timedelta(days=BACKFILL_DAYS)
         result = session.execute(
             text(
                 """
-                INSERT INTO ranking_jobs (call_id, profile_id, scheme, status)
-                SELECT c.id, :profile_id, :scheme, 'pending'
+                INSERT INTO ranking_jobs (call_id, profile_id, status)
+                SELECT c.id, :profile_id, 'pending'
                 FROM calls c
                 -- NOTE: WHERE published_at >= :cutoff also excludes calls with
                 -- published_at IS NULL (NULL comparisons return NULL, treated
@@ -42,11 +41,11 @@ def backfill_profile(*, session_factory: sessionmaker, profile_id: int) -> int:
                 -- them. If we ever surface unranked calls to a new profile,
                 -- this filter needs revisiting.
                 WHERE c.published_at >= :cutoff
-                ON CONFLICT (call_id, profile_id, scheme)
+                ON CONFLICT (call_id, profile_id)
                   WHERE status IN ('pending', 'running') DO NOTHING
                 """
             ),
-            {"profile_id": profile_id, "scheme": scheme, "cutoff": cutoff},
+            {"profile_id": profile_id, "cutoff": cutoff},
         )
         session.commit()
         enqueued = result.rowcount or 0

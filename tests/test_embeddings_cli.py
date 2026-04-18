@@ -25,7 +25,7 @@ def _seed(s, *, n_calls: int = 3, n_profiles: int = 2) -> None:
         s.add(Profile(
             name=f"P{i}", kind=ProfileKind.GROUP,
             description=f"Description for P{i}",
-            structured={}, created_by=u.id, ranking_scheme="v2",
+            structured={}, created_by=u.id,
         ))
 
 
@@ -102,7 +102,7 @@ def test_cli_backfill_terminates_when_only_blank_description_profiles_remain(
         # Add a profile with blank description
         s.add(Profile(
             name="BlankCLI", kind=ProfileKind.GROUP, description="",
-            structured={}, created_by=u.id, ranking_scheme="v2",
+            structured={}, created_by=u.id,
         ))
         s.commit()
 
