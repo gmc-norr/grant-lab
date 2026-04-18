@@ -27,7 +27,11 @@ def cosine(a: list[float] | None, b: list[float] | None) -> float | None:
         nb += y * y
     if na == 0 or nb == 0:
         return None
-    return dot / math.sqrt(na * nb)
+    # Coerce to Python float — pgvector-loaded numpy arrays would otherwise
+    # promote the accumulator to numpy.float32 and we'd return numpy.float32,
+    # violating the `float | None` annotation. Cheap and keeps the type
+    # contract honest at the call boundary.
+    return float(dot / math.sqrt(na * nb))
 
 
 def build_call_text(call) -> str:

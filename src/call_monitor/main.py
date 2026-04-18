@@ -148,8 +148,10 @@ def create_app() -> FastAPI:
     )
     # Single shared embed client: handed to the scheduler (ingest tick uses it
     # to embed touched calls before enqueueing ranking jobs — Codex H1) and to
-    # the profile-edit handler (re-embed on description change). One instance
-    # so connection pooling on httpx.Client is reused across calls.
+    # the profile-edit handler (re-embed on description change). Each
+    # .embed() call opens its own httpx.Client (matches OllamaClient's
+    # per-call pattern); for localhost Ollama the TCP cost is negligible.
+    # Worth revisiting if we ever serve embeddings from a remote endpoint.
     app.state.embed_client = OllamaEmbedClient(
         base_url=settings.ollama_url, model=settings.embedding_model
     )

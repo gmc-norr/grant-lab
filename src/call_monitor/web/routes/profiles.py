@@ -186,6 +186,11 @@ def profile_edit_submit(
         # re-embed (build_profile_text strips anyway).
         old_description = p.description or ""
         p.description = description
+        # Capture the change-detection flag at the moment of mutation so
+        # intent isn't load-bearing on commit ordering — a future contributor
+        # adding work between this assignment and the commit (or moving the
+        # commit earlier) won't accidentally invalidate the comparison.
+        description_changed = old_description.strip() != description.strip()
         p.structured = {
             "areas": _split_lines(areas),
             "budget_min": _int_or_none(budget_min),
@@ -209,7 +214,6 @@ def profile_edit_submit(
             requested = (ranking_scheme or "").strip().lower()
             if requested in {"v1", "v2"}:
                 p.ranking_scheme = requested
-        description_changed = old_description.strip() != description.strip()
         session.commit()
 
     # Re-embed sync if the description actually changed. Codex H1: this MUST

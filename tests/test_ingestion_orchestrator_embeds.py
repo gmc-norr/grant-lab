@@ -237,3 +237,59 @@ def test_orchestrator_step1_failure_skips_embed_and_enqueue(
         jobs = s.execute(select(RankingJob)).scalars().all()
     assert calls == []
     assert jobs == []
+
+
+def test_orchestrator_step3_failure_invokes_alerter(
+    pg_session_factory, profile_factory, monkeypatch,
+):
+    """Codex regression-guard: if step 3 (enqueue ranking jobs) fails
+    (e.g. DB constraint violation, OperationalError), the orchestrator
+    must call alerter.record_failure with a clear error message. Without
+    the wrapping try/except added in the bug-review fix, the exception
+    would propagate out of run_ingestion, bypassing the alerter entirely
+    and crashing the scheduler tick."""
+    profile_factory(name="Group Q")
+    adapter = _StaticAdapter([
+        NormalizedCall(
+            external_id="EM-Q", url="https://x", title="Step3 boom",
+            published_at=datetime.now(UTC),
+        ),
+    ])
+    embed_client = _embed_client()
+
+    # Force step 3's enqueue_for_pair to raise a DB-shaped error. We patch
+    # the binding *inside* the orchestrator module (where it's looked up at
+    # call time) — patching call_monitor.ranking.queue.enqueue_for_pair
+    # would not affect the already-imported reference in orchestrator.
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated step-3 DB failure")
+
+    import call_monitor.ingestion.orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "enqueue_for_pair", _boom)
+
+    alerter = MagicMock()
+
+    run_ingestion(
+        session_factory=pg_session_factory,
+        adapter=adapter,
+        alerter=alerter,
+        embed_client=embed_client,
+    )
+
+    # Alerter must have been invoked — exactly once, with the source slug
+    # and an error message that mentions the step-3 failure context so
+    # operators can tell this apart from a step-1 adapter failure.
+    alerter.record_failure.assert_called_once()
+    args, kwargs = alerter.record_failure.call_args
+    assert "vinnova" in args or kwargs.get("source") == "vinnova" or args[0] == "vinnova"
+    err = kwargs.get("error", "")
+    assert "step 3" in err and "simulated step-3 DB failure" in err
+    # And record_success must NOT have been called.
+    alerter.record_success.assert_not_called()
+
+    # Step 1 + 2 still happened: call exists with embedding; no jobs queued.
+    with pg_session_factory() as s:
+        c = s.execute(select(Call).where(Call.external_id == "EM-Q")).scalar_one()
+        jobs = s.execute(select(RankingJob)).scalars().all()
+    assert c.embedding is not None
+    assert jobs == []

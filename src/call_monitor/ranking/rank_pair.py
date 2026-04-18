@@ -137,7 +137,18 @@ def _get_threshold() -> float:
     try:
         from call_monitor.config import Settings
         return Settings().embedding_pregate_threshold
-    except Exception:  # noqa: BLE001 — fall back gracefully on any Settings load failure
+    except Exception as e:  # noqa: BLE001 — fall back gracefully on any Settings load failure
+        # WARN (not exception) — no stack trace needed; this is an expected
+        # path when Settings env vars aren't set (unit tests). In production
+        # we want operator visibility if Settings ever fails to load.
+        _logger.warning(
+            "ranking.embedding_threshold_fallback",
+            extra={
+                "event": "embedding_threshold_fallback",
+                "reason": str(e),
+                "fallback_value": EMBEDDING_PREGATE_THRESHOLD,
+            },
+        )
         return EMBEDDING_PREGATE_THRESHOLD
 
 
