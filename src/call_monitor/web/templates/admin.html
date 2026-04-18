@@ -45,4 +45,23 @@
   <dt>Disabled users (3+ bounces)</dt>
   <dd>{{ digest_disabled_users }}</dd>
 </dl>
+<h2>Ranking — per-scheme queue depth</h2>
+<dl>
+  <dt>v1</dt><dd>{{ v2_queue_depth.get('v1', 0) }}</dd>
+  <dt>v2</dt><dd>{{ v2_queue_depth.get('v2', 0) }}</dd>
+</dl>
+
+<h2>Profiles — active scheme</h2>
+<table>
+  <thead><tr><th>Profile</th><th>Scheme</th><th>Last ranked</th></tr></thead>
+  <tbody>
+  {% for p in per_profile_scheme %}
+    <tr>
+      <td><a href="/profiles/{{ p.id }}">{{ p.name }}</a></td>
+      <td>{{ p.scheme }}</td>
+      <td>{% if p.last_ranked %}{{ p.last_ranked | display_dt }}{% else %}—{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
 {% endblock %}

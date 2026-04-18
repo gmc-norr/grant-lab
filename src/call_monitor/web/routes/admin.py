@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from call_monitor.auth.dependencies import require_admin
 from call_monitor.db.models import (
     Call,
+    CallRanking,
     DigestRun,
     Profile,
     RankingJob,
@@ -40,6 +41,47 @@ def _digest_panel_context(session) -> dict:
         "digest_runs_this_week": runs_this_week,
         "digest_disabled_users": disabled_users,
     }
+
+
+def _v2_queue_depth(session) -> dict[str, int]:
+    """Count active (pending + running) ranking jobs grouped by scheme.
+
+    Used by /admin to surface dual-scheme rollout health: operators need to
+    see at a glance whether the v2 queue is backing up relative to v1.
+    """
+    rows = session.execute(
+        select(RankingJob.scheme, func.count(RankingJob.id))
+        .where(RankingJob.status.in_([RankingJobStatus.PENDING, RankingJobStatus.RUNNING]))
+        .group_by(RankingJob.scheme)
+    ).all()
+    return {scheme: n for scheme, n in rows}
+
+
+def _per_profile_scheme(session) -> list[dict]:
+    """One row per active profile: id, name, ranking_scheme, last ranked_at.
+
+    `last_ranked` is the most recent ranking timestamp for the profile's
+    *active* scheme — joining on scheme avoids the misleading "v1 last
+    ranked yesterday" reading on a profile that flipped to v2 today.
+    """
+    rows = session.execute(
+        select(
+            Profile.id, Profile.name, Profile.ranking_scheme,
+            func.max(CallRanking.ranked_at).label("last_ranked"),
+        )
+        .outerjoin(
+            CallRanking,
+            (CallRanking.profile_id == Profile.id)
+            & (CallRanking.scheme == Profile.ranking_scheme),
+        )
+        .where(Profile.is_active.is_(True))
+        .group_by(Profile.id, Profile.name, Profile.ranking_scheme)
+        .order_by(Profile.name)
+    ).all()
+    return [
+        {"id": pid, "name": name, "scheme": scheme, "last_ranked": last}
+        for pid, name, scheme, last in rows
+    ]
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -80,6 +122,8 @@ def admin_index(
             "user": user,
         }
         context.update(_digest_panel_context(session))
+        context["v2_queue_depth"] = _v2_queue_depth(session)
+        context["per_profile_scheme"] = _per_profile_scheme(session)
 
     return request.app.state.templates.TemplateResponse(
         request=request,
