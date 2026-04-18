@@ -230,3 +230,51 @@ def test_aggregate_unknown_gates_do_not_short_circuit():
     r = aggregate(g, _llm_clean(topic_expected=4.0))
     assert r.score == 80
     assert r.reason is None
+
+
+def test_logprob_expected_anchors_on_rating_token_when_rationale_first():
+    """Codex I2 regression: if the JSON key order is rationale→rating
+    (Gemma may reorder), the walk must NOT pick up integers from the
+    rationale text. The "rating" anchor guards against this."""
+    content = _content_tokens(
+        ('{', [('{', -0.0)]),
+        ('"topic_fit"', [('"topic_fit"', -0.1)]),
+        (':', [(':', -0.0)]),
+        (' {', [(' {', -0.0)]),
+        # rationale comes FIRST and contains a digit "4"
+        ('"rationale"', [('"rationale"', -0.1)]),
+        (':', [(':', -0.0)]),
+        ('"4-year', [
+            ('"4-year', -0.1),
+            ('"3-year', -1.5),  # SHOULD NOT be used as rating logprobs
+            ('"5-year', -2.0),
+        ]),
+        (' project"', [(' project"', -0.1)]),
+        (',', [(',', -0.0)]),
+        # NOW the actual rating
+        ('"rating"', [('"rating"', -0.1)]),
+        (':', [(':', -0.0)]),
+        ('5', [
+            ('5', -0.05),
+            ('4', -3.0),
+            ('3', -4.0),
+        ]),
+    )
+    e = logprob_expected(content)
+    assert e is not None
+    # The rating's logprobs strongly favor "5", not the "4-year" alternatives.
+    # Without the anchor, walk would grab "4" (in "4-year") and use the
+    # rationale's alternatives → wrong expected value.
+    assert e > 4.5  # essentially 5.0
+
+
+def test_logprob_expected_returns_none_when_no_rating_anchor():
+    """If no token in the stream contains 'rating', no expected value
+    can be computed — return None for argmax fallback."""
+    content = _content_tokens(
+        ('{', [('{', -0.0)]),
+        ('"topic_fit"', [('"topic_fit"', -0.1)]),
+        (':', [(':', -0.0)]),
+        ('4', [('4', -0.1)]),  # bare integer with no preceding "rating" anchor
+    )
+    assert logprob_expected(content) is None

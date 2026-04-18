@@ -231,14 +231,21 @@ def drain_queue(
 
 def _v2_summary(r: RankResultV2) -> str:
     """One-line summary for the rationale column (v2's free-form text is
-    the per-criterion rationales, which live in CallRankingCriterion)."""
+    the per-criterion rationales, which live in CallRankingCriterion).
+
+    When must_include overrode a failing timeline gate, the summary
+    explicitly notes that — otherwise users see a high score on a
+    deadline-imminent call with no warning."""
     if r.parsed is None:
         return f"Short-circuited: {r.reason}"
-    return (
+    base = (
         f"Topic {r.parsed.topic_fit_rating}/5 · "
         f"Eligibility: {r.parsed.eligibility_rating} · "
         f"Exclusions: {r.parsed.exclusions_rating}"
     )
+    if r.must_include_override and r.gates.timeline.status == GateStatus.FAIL:
+        base += f" · (must-include override; timeline: {r.gates.timeline.reason})"
+    return base
 
 
 def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV2) -> None:
@@ -249,7 +256,27 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
     Special case: when r.must_include_override is True AND the failing gate
     was timeline, we DO continue past the timeline row to write the LLM
     criterion rows, because the LLM was actually called (rank_pair_v2's
-    must_include bypass)."""
+    must_include bypass).
+
+    Deletes prior-run rows first so the breakdown UI never displays a
+    mix of fresh and stale criteria. Wrapped in the same transaction as
+    the matching CallRanking.merge() so the headline score and the
+    breakdown can never diverge."""
+    from sqlalchemy import delete
+
+    # Wipe any prior-run rows for this (call, profile, scheme=v2). Sparse
+    # writes that follow re-establish the current state. Without this,
+    # a previous run's LLM rows persist when this run gate-fails before
+    # the LLM step (e.g. profile budget changed and now budget gate FAILs).
+    session.execute(
+        delete(CallRankingCriterion).where(
+            CallRankingCriterion.call_id == job_call_id,
+            CallRankingCriterion.profile_id == job_profile_id,
+            CallRankingCriterion.scheme == "v2",
+        )
+    )
+    session.flush()
+
     now = datetime.now(UTC)
 
     # Gate rows — write up to and including the failing one (or all if no gate failed).
@@ -259,7 +286,7 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
         ("trl",      r.gates.trl),
     ]
     for name, gr in gate_results:
-        session.merge(CallRankingCriterion(
+        session.add(CallRankingCriterion(
             call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
             criterion=name,
             rating=gr.status.value,
@@ -278,7 +305,7 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
     # LLM rows — only if we got that far (parsed is not None).
     if r.parsed is None:
         return
-    session.merge(CallRankingCriterion(
+    session.add(CallRankingCriterion(
         call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
         criterion="topic_fit",
         rating=str(r.parsed.topic_fit_rating),
@@ -287,7 +314,7 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
         quoted_evidence=r.parsed.topic_fit_quoted,
         ranked_at=now,
     ))
-    session.merge(CallRankingCriterion(
+    session.add(CallRankingCriterion(
         call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
         criterion="eligibility",
         rating=r.parsed.eligibility_rating,
@@ -296,7 +323,7 @@ def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV
         quoted_evidence=r.parsed.eligibility_quoted,
         ranked_at=now,
     ))
-    session.merge(CallRankingCriterion(
+    session.add(CallRankingCriterion(
         call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
         criterion="exclusions",
         rating=r.parsed.exclusions_rating,

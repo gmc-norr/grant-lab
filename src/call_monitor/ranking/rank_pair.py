@@ -234,6 +234,8 @@ def _call_matches_must_include(profile, call) -> bool:
     haystack = " ".join(filter(None, [
         (call.title or "").lower(),
         (call.summary or "").lower(),
+        # `keywords` is non-nullable on the real Call ORM model; this hasattr
+        # accommodates duck-typed test doubles that omit it.
         " ".join(call.keywords or []).lower() if hasattr(call, "keywords") else "",
     ]))
     return any(t in haystack for t in must_terms)
@@ -257,6 +259,10 @@ def _verify_quoted_evidence(parsed: ParsedV2, call) -> ParsedV2:
         if not quote:
             return None
         truncated = quote[:_QUOTED_EVIDENCE_MAX]
+        # Whitespace-only quotes match almost any haystack (every haystack
+        # contains whitespace) but are useless to display. Reject them.
+        if not truncated.strip():
+            return None
         if truncated.lower() in haystack:
             return truncated
         return None  # bogus quote — discarded silently

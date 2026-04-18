@@ -219,6 +219,20 @@ def build_messages_v2(*, profile, call) -> list[dict]:
     ]
 
 
+def _validated_quote(block: dict, criterion: str) -> str | None:
+    """Extract quoted_evidence with type validation."""
+    if "quoted_evidence" not in block:
+        return None
+    q = block["quoted_evidence"]
+    if q is None:
+        return None
+    if not isinstance(q, str):
+        raise ParseV2Error(
+            f"{criterion}.quoted_evidence must be string or null; got {type(q).__name__}"
+        )
+    return q if q else None  # empty string treated as null
+
+
 def parse_v2_response(content: str) -> ParsedV2:
     """Parse the LLM's JSON criterion output. Raises ParseV2Error on shape
     violations. Quote verification is done outside (in rank_pair_v2)."""
@@ -253,11 +267,11 @@ def parse_v2_response(content: str) -> ParsedV2:
     return ParsedV2(
         topic_fit_rating=rating,
         topic_fit_rationale=str(tf.get("rationale") or ""),
-        topic_fit_quoted=str(tf["quoted_evidence"]) if tf.get("quoted_evidence") else None,
+        topic_fit_quoted=_validated_quote(tf, "topic_fit"),
         eligibility_rating=el_rating,
         eligibility_rationale=str(el.get("rationale") or ""),
-        eligibility_quoted=str(el["quoted_evidence"]) if el.get("quoted_evidence") else None,
+        eligibility_quoted=_validated_quote(el, "eligibility"),
         exclusions_rating=ex_rating,
         exclusions_rationale=str(ex.get("rationale") or ""),
-        exclusions_quoted=str(ex["quoted_evidence"]) if ex.get("quoted_evidence") else None,
+        exclusions_quoted=_validated_quote(ex, "exclusions"),
     )

@@ -63,10 +63,11 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            # Default to JSON mode; callers pass response_format to override.
+            "response_format": (
+                response_format if response_format is not None else {"type": "json_object"}
+            ),
         }
-        if response_format is not None:
-            payload["response_format"] = response_format
         if logprobs:
             payload["logprobs"] = True
             if top_logprobs is not None:

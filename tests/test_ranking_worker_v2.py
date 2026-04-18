@@ -222,3 +222,95 @@ def test_worker_v2_must_include_with_failing_timeline_persists_llm_score(
     assert by_name["topic_fit"].rating == "4"
     assert by_name["eligibility"].rating == "pass"
     assert by_name["exclusions"].rating == "pass"
+
+
+def test_worker_v2_rerank_clears_stale_criterion_rows(pg_session_factory):
+    """Codex I1 regression: a re-rank that gate-fails earlier than the
+    previous run must NOT leave the previous run's LLM criterion rows
+    behind."""
+    with pg_session_factory() as s:
+        cid, pid = _seed(s, scheme="v2")
+        s.commit()
+
+    # First run: clean pass, all 6 criteria written.
+    drain_queue(session_factory=pg_session_factory, client=_ollama_v2_clean(), batch_size=10)
+
+    with pg_session_factory() as s:
+        criteria_after_first = s.execute(select(CallRankingCriterion)).scalars().all()
+    assert len(criteria_after_first) == 6  # 3 gates + 3 LLM rows
+    by_name = {c.criterion: c for c in criteria_after_first}
+    assert by_name["topic_fit"].rating == "4"
+
+    # Mutate the call so the timeline gate will FAIL on the next run.
+    from datetime import timedelta
+    with pg_session_factory() as s:
+        call = s.get(Call, cid)
+        # Make timeline FAIL — deadline in the past.
+        call.deadline = datetime.now(UTC) - timedelta(days=1)
+        s.commit()
+        # Re-enqueue.
+        s.add(RankingJob(
+            call_id=cid, profile_id=pid, scheme="v2",
+            status=RankingJobStatus.PENDING,
+        ))
+        s.commit()
+
+    # Second run: timeline FAILs early; LLM must NOT be called.
+    def boom(request):
+        raise AssertionError("LLM should not be called for gate-failed pair")
+    bad_client = OllamaClient(
+        base_url="http://x", model="m",
+        transport=httpx.MockTransport(boom),
+    )
+    drain_queue(session_factory=pg_session_factory, client=bad_client, batch_size=10)
+
+    with pg_session_factory() as s:
+        criteria_after_second = s.execute(select(CallRankingCriterion)).scalars().all()
+    by_name = {c.criterion: c for c in criteria_after_second}
+    # CRITICAL: stale topic_fit / eligibility / exclusions / budget / trl rows are GONE.
+    assert set(by_name.keys()) == {"timeline"}
+    assert by_name["timeline"].rating == "fail"
+
+
+def test_worker_v2_must_include_override_appears_in_summary(pg_session_factory):
+    """Codex N1: when must_include bypasses the timeline gate, the rationale
+    one-line summary must surface that fact so users aren't surprised by a
+    high score on a deadline-imminent call."""
+    from datetime import timedelta
+
+    with pg_session_factory() as s:
+        u = User(email="ovr@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="OVR", kind=ProfileKind.GROUP, description="",
+            structured={
+                "areas": ["pathology"], "hard_exclusions": [],
+                "must_include": ["pathology"],
+            },
+            created_by=u.id, ranking_scheme="v2",
+        )
+        s.add(p)
+        s.flush()
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="OVR", url="https://x",
+            title="Pathology funding",
+            summary="Open call.",
+            deadline=datetime.now(UTC) + timedelta(days=1),
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(RankingJob(
+            call_id=c.id, profile_id=p.id, scheme="v2",
+            status=RankingJobStatus.PENDING,
+        ))
+        s.commit()
+
+    drain_queue(session_factory=pg_session_factory, client=_ollama_v2_clean(), batch_size=10)
+
+    with pg_session_factory() as s:
+        ranking = s.execute(select(CallRanking)).scalar_one()
+    assert "must-include override" in ranking.rationale
+    assert "timeline" in ranking.rationale

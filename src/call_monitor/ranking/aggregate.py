@@ -67,17 +67,18 @@ def aggregate(
 
 
 def logprob_expected(content_logprobs: list[dict] | None) -> float | None:
-    """G-Eval expected value from top-k logprobs at the rating-token position.
+    """G-Eval expected value from top-k logprobs at the topic_fit.rating
+    token position.
 
-    `content_logprobs` is the OpenAI-shape `choices[0].logprobs.content` list,
-    one entry per OUTPUT TOKEN. The LLM emits a JSON object like
-    `{"topic_fit": {"rating": 4, ...}, ...}`, so the rating token is buried
-    several tokens deep — past `{`, `"topic_fit"`, `:`, ` {`, `"rating"`, etc.
+    The LLM emits a JSON object like
+    `{"topic_fit": {"rating": 4, ...}, ...}`, so the rating numeral is
+    buried after JSON syntax tokens. We anchor the walk on a token whose
+    text contains `"rating"` (case-insensitive) — this guards against
+    Gemma reordering JSON keys and putting `rationale` first (which could
+    also contain digits 0-5 in its text and trick a naive first-integer walk).
 
-    We walk the content stream looking for the first token whose stripped
-    value is a single-digit integer in [0, 5]. That token is unambiguously
-    the topic_fit.rating (the only int 0-5 the v2 schema produces). At
-    that position, use its `top_logprobs` to compute the expected value.
+    After passing the rating sentinel, find the first integer-in-[0,5] token
+    and use ITS top_logprobs.
 
     Returns the expected value (float in [0, 5]) or None if no usable
     rating-position is found. Caller falls back to argmax on None.
@@ -86,12 +87,21 @@ def logprob_expected(content_logprobs: list[dict] | None) -> float | None:
         return None
 
     rating_top: list[dict] | None = None
+    seen_rating_anchor = False
     for entry in content_logprobs:
         if not isinstance(entry, dict):
             continue
         tok = entry.get("token")
         if not isinstance(tok, str):
             continue
+        # Anchor: walk past tokens until we see one containing "rating"
+        # (the JSON key, case-insensitive). The token may be exactly
+        # `"rating"`, ` "rating"`, `rating`, etc. depending on tokenizer.
+        if not seen_rating_anchor:
+            if "rating" in tok.lower():
+                seen_rating_anchor = True
+            continue
+        # After the anchor, look for the first integer-in-[0,5] token.
         stripped = tok.strip()
         if stripped.isdigit() and 0 <= int(stripped) <= 5:
             rating_top = entry.get("top_logprobs")

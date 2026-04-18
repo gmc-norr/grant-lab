@@ -127,3 +127,15 @@ def test_parse_v2_invalid_eligibility_rating_raises():
     })
     with pytest.raises(ParseV2Error, match="eligibility"):
         parse_v2_response(content)
+
+
+def test_parse_v2_rejects_non_string_quoted_evidence():
+    """Codex N3: quoted_evidence must be string or null; a list (or other
+    non-string non-null type) must raise ParseV2Error."""
+    content = json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": ["a list"]},
+        "eligibility": {"rating": "pass"},
+        "exclusions": {"rating": "pass"},
+    })
+    with pytest.raises(ParseV2Error, match="quoted_evidence"):
+        parse_v2_response(content)
