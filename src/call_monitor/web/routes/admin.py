@@ -54,7 +54,7 @@ def _v2_queue_depth(session) -> dict[str, int]:
         .where(RankingJob.status.in_([RankingJobStatus.PENDING, RankingJobStatus.RUNNING]))
         .group_by(RankingJob.scheme)
     ).all()
-    return {scheme: n for scheme, n in rows}
+    return dict(rows)
 
 
 def _per_profile_scheme(session) -> list[dict]:

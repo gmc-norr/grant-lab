@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -61,7 +62,6 @@ def test_admin_shows_per_scheme_queue_depth(
         r = client.get("/admin")
     assert r.status_code == 200
     # Per-scheme queue depth section
-    import re
     m = re.search(r"v1[^<]*</dt>\s*<dd>\s*(\d+)\s*</dd>", r.text)
     assert m and int(m.group(1)) >= 1
     m = re.search(r"v2[^<]*</dt>\s*<dd>\s*(\d+)\s*</dd>", r.text)
@@ -95,4 +95,32 @@ def test_admin_shows_per_profile_scheme_and_last_rank_time(
         r = client.get("/admin")
     assert r.status_code == 200
     assert "HasRanking" in r.text
-    assert "v2" in r.text  # active scheme rendered next to profile name
+    # Anchor on the actual table row: profile link cell directly followed by
+    # the scheme cell. Plain "v2 in r.text" would also match the per-scheme
+    # queue-depth <dl> above, masking a broken row render.
+    assert re.search(
+        r"<a [^>]*>HasRanking</a></td>\s*<td>v2</td>",
+        r.text,
+        re.DOTALL,
+    )
+
+
+def test_admin_per_profile_row_shows_em_dash_when_never_ranked(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    # Default ranking_scheme from profile_factory is "v1" (model default);
+    # no CallRanking rows are seeded, so the outer-join's NULL branch must
+    # render an em dash in the "Last ranked" column.
+    profile_factory(name="NeverRanked")
+
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    assert "NeverRanked" in r.text
+    assert re.search(
+        r"<a [^>]*>NeverRanked</a></td>\s*<td>v1</td>\s*<td>\s*—\s*</td>",
+        r.text,
+        re.DOTALL,
+    )
