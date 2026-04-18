@@ -148,6 +148,7 @@ def profile_edit_submit(
     trl_max: str = Form(""),
     must_include: str = Form(""),
     hard_exclusions: str = Form(""),
+    ranking_scheme: str = Form(""),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     if len(description) > 50_000:
@@ -174,10 +175,19 @@ def profile_edit_submit(
         normalized = (budget_currency or "").strip().upper()
         if normalized in {"", "SEK", "EUR", "USD", "NOK", "DKK"}:
             p.budget_currency = normalized or None
+        # Admin-only operational toggle. Silently ignore non-admin attempts —
+        # the radio is only rendered for admins, but a researcher could still
+        # craft a POST with this field. Drop the value rather than 400ing.
+        if user.is_admin:
+            requested = (ranking_scheme or "").strip().lower()
+            if requested in {"v1", "v2"}:
+                p.ranking_scheme = requested
         session.commit()
 
-    # Trigger backfill so edits flow into re-ranking without the user
-    # having to wait for the nightly scheduler tick.
+    # Backfill is unconditional on every save (idempotent at DB level via
+    # the partial unique index on (call_id, profile_id, scheme)). When
+    # the admin flips ranking_scheme above, this re-enqueues the last 90
+    # days of calls under the NEW scheme — no extra wiring needed.
     backfill_profile(session_factory=session_factory, profile_id=profile_id)
 
     return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)

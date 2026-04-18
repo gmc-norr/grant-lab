@@ -493,3 +493,81 @@ def test_profile_detail_renders_currency_when_set(
         r = client.get(f"/profiles/{pid}")
     assert r.status_code == 200
     assert "EUR" in r.text
+
+
+def test_profile_edit_flipping_scheme_enqueues_backfill(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Admin flips ranking_scheme=v2 → backfill_profile runs synchronously,
+    enqueueing v2 jobs for the last 90 days of calls."""
+    from datetime import UTC, datetime
+
+    from call_monitor.db.models import Call, RankingJob, Source
+
+    pid, _ = profile_factory(name="FlipMe")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        s.add(Call(
+            source_id=src.id, external_id="FB", url="https://x", title="T",
+            published_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("INITIAL_ADMIN_EMAIL", "admin@ki.se")
+    app = create_app()
+    with TestClient(app):
+        pass  # bootstrap admin
+    with pg_session_factory() as s:
+        admin = s.execute(select(User).where(User.email == "admin@ki.se")).scalar_one()
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=admin.id))
+
+    with client:
+        client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "budget_currency": "", "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+                "ranking_scheme": "v2",
+            },
+            follow_redirects=False,
+        )
+
+    # A v2 RankingJob should now exist for the seeded call.
+    with pg_session_factory() as s:
+        jobs = s.execute(
+            select(RankingJob).where(
+                RankingJob.profile_id == pid, RankingJob.scheme == "v2"
+            )
+        ).scalars().all()
+    assert len(jobs) == 1
+
+
+def test_profile_edit_non_admin_cannot_flip_ranking_scheme(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Non-admin POST with ranking_scheme=v2 is silently ignored — scheme stays v1."""
+    pid, _ = profile_factory(name="Scheme protect")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)  # creates a non-admin user
+    with client:
+        client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "budget_currency": "", "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+                "ranking_scheme": "v2",  # attempted
+            },
+            follow_redirects=False,
+        )
+    from call_monitor.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.ranking_scheme == "v1"  # unchanged — non-admin's flip was dropped
