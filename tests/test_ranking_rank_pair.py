@@ -110,7 +110,7 @@ def test_rank_pair_eligibility_fail_zeros_score():
     assert r.reason == "eligibility"
 
 
-def test_rank_pair_logprob_unavailable_falls_back_to_argmax():
+def test_rank_pair_uses_argmax_times_20():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
     client = _ollama_mock(
@@ -119,13 +119,12 @@ def test_rank_pair_logprob_unavailable_falls_back_to_argmax():
             "eligibility": {"rating": "pass"},
             "exclusions": {"rating": "pass"},
         },
-        logprobs=None,  # Ollama edge case: no logprobs
+        logprobs=None,
     )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
     # argmax 3 × 20 = 60
     assert r.score == 60
     assert r.reason is None
-    assert r.logprob_fallback is True
 
 
 def test_rank_pair_must_include_bypasses_timeline_gate():

@@ -29,7 +29,6 @@ def _stub_rank_pair_returning(score: int = 80):
             embedding=GateResult(GateStatus.PASS),
         ),
         parsed=parsed,
-        topic_expected=4.0, logprob_fallback=False,
         must_include_override=False,
         model="gemma4:e4b-q8", prompt_version="v2.0", raw_response={},
         embed_similarity=None,

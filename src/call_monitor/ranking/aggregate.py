@@ -1,8 +1,7 @@
-"""G-Eval logprob weighting + ranking v2 aggregation."""
+"""Ranking v2 aggregation (gates + LLM rubric → 0-100 score)."""
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 
 from call_monitor.ranking.criteria import Gates, GateStatus
@@ -12,14 +11,12 @@ _logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LLMResult:
-    """The parsed LLM rubric output, after logprob expansion.
+    """The parsed LLM rubric output.
 
-    `topic_expected` is the G-Eval expected value (float in [0, 5]).
-    `topic_argmax` is the argmax integer rating used as fallback.
+    `topic_argmax` is the integer 0-5 rating from the LLM.
     `eligibility` is 'pass' | 'fail' | 'unclear'.
     `exclusions` is 'pass' | 'fail'.
     """
-    topic_expected: float
     topic_argmax: int
     eligibility: str
     exclusions: str
@@ -64,90 +61,11 @@ def aggregate(
         return AggregateResult(0, "eligibility")
 
     if llm.exclusions == "fail":
-        # Spec: min(10, topic_expected * 2). Matches v1's "≤ 10" behavior.
-        return AggregateResult(min(10, int(llm.topic_expected * 2)), "exclusion")
+        # Spec: min(10, topic_argmax * 2). Matches v1's "≤ 10" behavior.
+        return AggregateResult(min(10, llm.topic_argmax * 2), "exclusion")
 
-    # Clean path: topic-expected × 20.
-    base = int(round(llm.topic_expected * 20))
+    # Clean path: topic_argmax × 20.
+    base = llm.topic_argmax * 20
     if llm.eligibility == "unclear":
         base = min(base, 50)
     return AggregateResult(base, None)
-
-
-def logprob_expected(content_logprobs: list[dict] | None) -> float | None:
-    """G-Eval expected value from top-k logprobs at the topic_fit.rating
-    token position.
-
-    The LLM emits a JSON object like
-    `{"topic_fit": {"rating": 4, ...}, ...}`, so the rating numeral is
-    buried after JSON syntax tokens. We anchor the walk on a token whose
-    text contains `"rating"` (case-insensitive) — this guards against
-    Gemma reordering JSON keys and putting `rationale` first (which could
-    also contain digits 0-5 in its text and trick a naive first-integer walk).
-
-    After passing the rating sentinel, find the first integer-in-[0,5] token
-    and use ITS top_logprobs.
-
-    Returns the expected value (float in [0, 5]) or None if no usable
-    rating-position is found. Caller falls back to argmax on None.
-    """
-    if not content_logprobs:
-        return None
-
-    rating_top: list[dict] | None = None
-    seen_rating_anchor = False
-    for entry in content_logprobs:
-        if not isinstance(entry, dict):
-            continue
-        tok = entry.get("token")
-        if not isinstance(tok, str):
-            continue
-        # Anchor: walk past tokens until we see one containing "rating"
-        # (the JSON key, case-insensitive). The token may be exactly
-        # `"rating"`, ` "rating"`, `rating`, etc. depending on tokenizer.
-        if not seen_rating_anchor:
-            if "rating" in tok.lower():
-                seen_rating_anchor = True
-            continue
-        # After the anchor, look for the first integer-in-[0,5] token.
-        stripped = tok.strip()
-        if stripped.isdigit() and 0 <= int(stripped) <= 5:
-            rating_top = entry.get("top_logprobs")
-            break
-
-    if not rating_top:
-        _logger.warning(
-            "ranking.logprob_rating_token_not_found",
-            extra={
-                "event": "logprob_rating_token_not_found",
-                "stream_tokens": [
-                    e.get("token") for e in content_logprobs if isinstance(e, dict)
-                ][:30],
-            },
-        )
-        return None
-
-    pairs: list[tuple[int, float]] = []
-    for entry in rating_top:
-        if not isinstance(entry, dict):
-            continue
-        tok = entry.get("token")
-        lp = entry.get("logprob")
-        if not isinstance(tok, str) or not isinstance(lp, (int, float)):
-            continue
-        stripped = tok.strip()
-        if not stripped.isdigit():
-            continue
-        n = int(stripped)
-        if not 0 <= n <= 5:
-            continue
-        pairs.append((n, float(lp)))
-
-    if not pairs:
-        return None
-
-    # Softmax-normalize, then weighted sum.
-    max_lp = max(lp for _, lp in pairs)
-    exps = [(n, math.exp(lp - max_lp)) for n, lp in pairs]
-    z = sum(x for _, x in exps)
-    return sum(n * (x / z) for n, x in exps)

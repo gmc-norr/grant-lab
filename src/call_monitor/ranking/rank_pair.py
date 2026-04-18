@@ -10,7 +10,6 @@ from call_monitor.ranking.aggregate import (
     AggregateResult,
     LLMResult,
     aggregate,
-    logprob_expected,
 )
 from call_monitor.ranking.criteria import Gates, GateStatus, evaluate_gates
 from call_monitor.ranking.ollama_client import OllamaClient
@@ -70,8 +69,6 @@ class RankResult:
     reason: str | None
     gates: Gates
     parsed: Parsed | None  # None if a gate short-circuited before LLM call
-    topic_expected: float | None  # G-Eval expected; None if logprobs unavailable
-    logprob_fallback: bool         # True iff we fell back to argmax
     must_include_override: bool    # True iff the call matched a must_include term
     model: str
     prompt_version: str
@@ -143,20 +140,12 @@ def rank_pair(
     envelope = client.chat(
         messages=messages,
         response_format={"type": "json_object"},
-        logprobs=True,
-        top_logprobs=6,
     )
     content = envelope["choices"][0]["message"]["content"]
     parsed = parse_response(content)
     parsed = _verify_quoted_evidence(parsed, call)
-    content_lp = (envelope["choices"][0].get("logprobs") or {}).get("content")
-    expected = logprob_expected(content_lp)
-    logprob_fallback = expected is None
-    if expected is None:
-        expected = float(parsed.topic_fit_rating)
 
     llm = LLMResult(
-        topic_expected=expected,
         topic_argmax=parsed.topic_fit_rating,
         eligibility=parsed.eligibility_rating,
         exclusions=parsed.exclusions_rating,
@@ -167,8 +156,6 @@ def rank_pair(
         reason=agg.reason,
         gates=gates,
         parsed=parsed,
-        topic_expected=expected,
-        logprob_fallback=logprob_fallback,
         must_include_override=must_include_match,
         model=client.model,
         prompt_version=PROMPT_VERSION,
@@ -189,8 +176,6 @@ def _gate_fail_result(
         reason=reason,
         gates=gates,
         parsed=None,
-        topic_expected=None,
-        logprob_fallback=False,
         must_include_override=must_include_match,
         model="",
         prompt_version=PROMPT_VERSION,
