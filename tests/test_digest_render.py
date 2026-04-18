@@ -103,6 +103,8 @@ def test_html_link_goes_to_in_app_not_external_source():
     # External URL should NOT be the primary clickable link — it's the source URL
     # that bypasses the in-app Hide button flow. Verify we're not linking to it.
     assert 'href="https://vinnova.se/external-call-page"' not in html
+    # Profile context preserved so call detail can render v2 criterion breakdown.
+    assert "?profile=1" in html
 
 
 def test_text_link_goes_to_in_app():

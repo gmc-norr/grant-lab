@@ -9,7 +9,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
 from call_monitor.auth.dependencies import get_current_user
-from call_monitor.db.models import Call, CallRanking, Profile, Source, User, UserCallDismissal
+from call_monitor.db.models import (
+    Call,
+    CallRanking,
+    CallRankingCriterion,
+    Profile,
+    Source,
+    User,
+    UserCallDismissal,
+)
 
 router = APIRouter()
 
@@ -121,6 +129,7 @@ def calls_index(
 def call_detail(
     request: Request,
     call_id: int,
+    profile: int | None = None,
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     session_factory = request.app.state.session_factory
@@ -130,13 +139,33 @@ def call_detail(
         ).scalar_one_or_none()
         if call is None:
             raise HTTPException(status_code=404, detail="call not found")
+        ranking = None
+        criteria = []
+        if profile is not None:
+            p = session.get(Profile, profile)
+            if p is not None and p.is_active:
+                ranking = session.execute(
+                    select(CallRanking).where(
+                        CallRanking.call_id == call_id,
+                        CallRanking.profile_id == profile,
+                        CallRanking.scheme == p.ranking_scheme,
+                    )
+                ).scalar_one_or_none()
+                if ranking is not None and ranking.scheme == "v2":
+                    criteria = session.execute(
+                        select(CallRankingCriterion).where(
+                            CallRankingCriterion.call_id == call_id,
+                            CallRankingCriterion.profile_id == profile,
+                            CallRankingCriterion.scheme == "v2",
+                        )
+                    ).scalars().all()
         # See note in calls_index: detach Call AND its joined `source` together.
         session.expunge_all()
 
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="call_detail.html",
-        context={"call": call, "user": user},
+        context={"call": call, "ranking": ranking, "criteria": criteria, "user": user},
     )
 
 
