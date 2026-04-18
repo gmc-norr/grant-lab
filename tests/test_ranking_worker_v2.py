@@ -232,12 +232,12 @@ def test_worker_v2_rerank_clears_stale_criterion_rows(pg_session_factory):
         cid, pid = _seed(s, scheme="v2")
         s.commit()
 
-    # First run: clean pass, all 6 criteria written.
+    # First run: clean pass, all 7 criteria written.
     drain_queue(session_factory=pg_session_factory, client=_ollama_v2_clean(), batch_size=10)
 
     with pg_session_factory() as s:
         criteria_after_first = s.execute(select(CallRankingCriterion)).scalars().all()
-    assert len(criteria_after_first) == 6  # 3 gates + 3 LLM rows
+    assert len(criteria_after_first) == 7  # 4 gates (timeline/budget/trl/embedding) + 3 LLM rows
     by_name = {c.criterion: c for c in criteria_after_first}
     assert by_name["topic_fit"].rating == "4"
 
@@ -426,3 +426,122 @@ def test_worker_v2_must_include_override_appears_in_summary(pg_session_factory):
         ranking = s.execute(select(CallRanking)).scalar_one()
     assert "must-include override" in ranking.rationale
     assert "timeline" in ranking.rationale
+
+
+def test_worker_writes_embedding_criterion_row_on_gate_fail(
+    pg_session_factory, monkeypatch,
+):
+    """When the embedding gate FAILs (cosine below threshold, no must_include
+    override), the CallRankingCriterion table must include a row for
+    'embedding' with rating='fail'. Without this row, the call-detail page
+    would render three "pass" rows for timeline/budget/trl and leave the
+    operator wondering why the headline score is 0 — Codex finding from
+    Plan D bug review."""
+    from call_monitor.ranking import worker as worker_mod
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_monitor.ranking.rank_pair import RankResultV2
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s, scheme="v2")
+        s.commit()
+
+    stub_result = RankResultV2(
+        score=0, reason="embedding",
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.FAIL, reason="topic_dissimilar"),
+        ),
+        parsed=None,
+        topic_expected=None, logprob_fallback=False,
+        must_include_override=False,
+        model="", prompt_version="v2.0", raw_response={},
+        embed_similarity=0.18,
+    )
+
+    def _stub_rank_pair_v2(**_kwargs):
+        return stub_result
+
+    monkeypatch.setattr(worker_mod, "rank_pair_v2", _stub_rank_pair_v2)
+
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+
+    with pg_session_factory() as s:
+        criteria = s.execute(select(CallRankingCriterion)).scalars().all()
+    by_name = {c.criterion: c for c in criteria}
+    # Exactly four gate rows — the three preceding gates that PASSed plus
+    # the failing embedding row. No LLM rows because parsed is None.
+    assert set(by_name.keys()) == {"timeline", "budget", "trl", "embedding"}
+    assert by_name["timeline"].rating == "pass"
+    assert by_name["budget"].rating == "pass"
+    assert by_name["trl"].rating == "pass"
+    assert by_name["embedding"].rating == "fail"
+    assert by_name["embedding"].rationale == "topic_dissimilar"
+
+
+def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
+    pg_session_factory, monkeypatch,
+):
+    """Codex regression: a degraded re-rank (e.g., embedding model swap →
+    profile/call vectors disagree → _safe_cosine returns None → UNKNOWN gate
+    → LLM still runs) yields RankResultV2 with embed_similarity=None.
+
+    The worker must NOT clobber the previously-recorded value with NULL —
+    operators tuning the cosine pre-gate threshold rely on the historical
+    diagnostic signal."""
+    from call_monitor.ranking import worker as worker_mod
+    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_monitor.ranking.prompt import ParsedV2
+    from call_monitor.ranking.rank_pair import RankResultV2
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s, scheme="v2")
+        # Pre-seed a CallRanking row with embed_similarity=0.83 — the value
+        # we want to verify is preserved across the degraded re-rank.
+        s.add(CallRanking(
+            call_id=cid, profile_id=pid, scheme="v2",
+            aggregate_score=72, aggregate_reason=None,
+            rationale="prior run", model="m", prompt_version="v2.0",
+            raw_response={}, embed_similarity=0.83,
+            ranked_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+    parsed = ParsedV2(
+        topic_fit_rating=4,
+        topic_fit_rationale="ok", topic_fit_quoted=None,
+        eligibility_rating="pass", eligibility_rationale="ok", eligibility_quoted=None,
+        exclusions_rating="pass", exclusions_rationale="ok", exclusions_quoted=None,
+    )
+    # Simulate degraded re-rank: embedding gate UNKNOWN (cosine returned
+    # None due to model mismatch), LLM ran, non-zero score, but
+    # embed_similarity=None on the new result.
+    stub_result = RankResultV2(
+        score=80, reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.UNKNOWN),
+        ),
+        parsed=parsed,
+        topic_expected=4.0, logprob_fallback=False,
+        must_include_override=False,
+        model="m", prompt_version="v2.0", raw_response={},
+        embed_similarity=None,
+    )
+
+    def _stub_rank_pair_v2(**_kwargs):
+        return stub_result
+
+    monkeypatch.setattr(worker_mod, "rank_pair_v2", _stub_rank_pair_v2)
+
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+
+    with pg_session_factory() as s:
+        r = s.execute(select(CallRanking).where(CallRanking.scheme == "v2")).scalar_one()
+    # The prior diagnostic value MUST be preserved. The new score, model,
+    # rationale etc. all updated normally (verified by the score change).
+    assert r.embed_similarity == 0.83
+    assert r.aggregate_score == 80

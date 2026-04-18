@@ -73,3 +73,32 @@ def test_embed_rejects_vector_of_bools():
     client = _client_returning({"embeddings": [[True, False, True, False]]})
     with pytest.raises(LLMError):
         client.embed("anything")
+
+
+def test_embed_raises_llm_error_on_wrong_dimension():
+    """Defensive: if Ollama returns a 768-dim vector when we expected 1024
+    (operator pulled bge-base/bge-large by mistake), fail with a clear error
+    rather than silently committing a vector that pgvector will reject at
+    INSERT time with a far less actionable error message."""
+    wrong_dim = [0.5] * 768
+    client = _client_returning({"embeddings": [wrong_dim]})
+    with pytest.raises(LLMError) as exc:
+        client.embed("anything")
+    msg = str(exc.value).lower()
+    assert "wrong dimension" in msg or "768" in msg
+
+
+def test_embed_accepts_custom_expected_dim():
+    """The dimension check is configurable via the constructor — useful
+    when an operator wires the client to a model with a non-1024 native
+    dim (e.g. bge-base at 768) without having to monkeypatch."""
+    vec = [0.1] * 768
+    def handler(_req):
+        return httpx.Response(200, json={"embeddings": [vec]})
+    client = OllamaEmbedClient(
+        base_url="http://x", model="bge-base",
+        transport=httpx.MockTransport(handler),
+        expected_dim=768,
+    )
+    out = client.embed("anything")
+    assert len(out) == 768

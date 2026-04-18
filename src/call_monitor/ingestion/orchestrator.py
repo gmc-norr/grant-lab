@@ -68,14 +68,20 @@ def run_ingestion(
 
     Atomicity caveats — worth being explicit about, since the previous version
     was atomic across upsert+enqueue:
-      - Step 1 succeeds, step 2/3 crash (process killed) → calls inserted,
+      - Step 1 succeeds, process killed before step 2/3 → calls inserted,
         no jobs queued. Next ingest tick won't re-discover the same calls
-        (they exist; upsert is a no-op on conflict). The daily refresh-missing
-        tick eventually catches the missing embeddings; manual rerank re-queues.
-      - Step 1+2 succeed, step 3 crash → calls embedded, no jobs queued.
-        Same recovery path.
-      - Step 2 partial failure → step 3 still runs; failed-embed calls go
-        through LLM via the UNKNOWN gate when their job drains.
+        (last_fetched_at was advanced atomically with the inserts; upsert
+        is a no-op on no-change anyway). The daily refresh-missing tick
+        eventually catches the missing embeddings; an admin must manually
+        rerank to queue ranking jobs.
+      - Step 2 partial failure (one embed call raises) → loop continues to
+        next call; step 3 still runs; failed-embed calls go through LLM
+        via the UNKNOWN gate when their job drains.
+      - Step 3 crash (DB error during enqueue) → calls embedded, no jobs
+        queued. Caught and recorded as `error_msg`; the alerter fires via
+        record_failure. Admin must manually rerank to recover (the next
+        ingest tick won't re-discover these calls because last_fetched_at
+        was advanced in step 1).
 
     This matches the prior single-commit's behavior under mid-flight crash
     (which also left no jobs queued), so no atomicity regression.
@@ -174,21 +180,38 @@ def run_ingestion(
                 # Don't abort — enqueue the job anyway. UNKNOWN gate → LLM runs.
 
         # --- Step 3: enqueue ranking jobs (one transaction) ---
-        with session_factory() as session:
-            active_profiles = session.execute(
-                select(Profile.id, Profile.ranking_scheme).where(
-                    Profile.is_active.is_(True)
-                )
-            ).all()
-            for cid in touched_call_ids:
-                for pid, pscheme in active_profiles:
-                    enqueue_for_pair(
-                        session,
-                        call_id=cid,
-                        profile_id=pid,
-                        scheme=pscheme,
+        # Wrap in try/except so an enqueue-time DB error (lock contention,
+        # transient connection drop) is recorded as `error_msg` rather than
+        # propagating out and bypassing the alerter below. Recovery on this
+        # branch requires a manual rerank — last_fetched_at already advanced
+        # in step 1, so the next ingest tick won't re-discover these calls.
+        try:
+            with session_factory() as session:
+                active_profiles = session.execute(
+                    select(Profile.id, Profile.ranking_scheme).where(
+                        Profile.is_active.is_(True)
                     )
-            session.commit()
+                ).all()
+                for cid in touched_call_ids:
+                    for pid, pscheme in active_profiles:
+                        enqueue_for_pair(
+                            session,
+                            call_id=cid,
+                            profile_id=pid,
+                            scheme=pscheme,
+                        )
+                session.commit()
+        except Exception as e:  # noqa: BLE001 — must not crash the scheduler
+            error_msg = f"step 3 (enqueue) failed: {e}"
+            _logger.exception(
+                "ingestion.enqueue_failed",
+                extra={
+                    "event": "ingestion_enqueue_failed",
+                    "source": adapter.slug,
+                    "error": str(e),
+                },
+            )
+            # Fall through — error_msg is now set so the alerter check below fires.
 
     if error_msg is not None:
         alerter.record_failure(adapter.slug, error=error_msg)

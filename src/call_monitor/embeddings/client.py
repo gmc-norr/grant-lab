@@ -33,14 +33,17 @@ class OllamaEmbedClient:
         model: str,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 60.0,
+        expected_dim: int = 1024,
     ):
         self._base_url = base_url.rstrip("/")
         self.model = model
         self._transport = transport
         self._timeout = timeout
+        self._expected_dim = expected_dim
 
     def embed(self, text: str) -> list[float]:
-        """Embed a single string. Returns the 1024-dim float vector."""
+        """Embed a single string. Returns a `expected_dim`-length float vector
+        (default 1024 — bge-m3's native dimension)."""
         try:
             with httpx.Client(
                 base_url=self._base_url,
@@ -66,4 +69,14 @@ class OllamaEmbedClient:
             or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in first)
         ):
             raise LLMError(f"ollama embed response shape unexpected: {repr(first)[:200]}")
+        # Defend against a wrong-model install: e.g. operator pulled bge-large
+        # (1024-dim oh wait that's also 1024 — the real risk is bge-base/768
+        # or a different family) when we expected bge-m3 / 1024. Without this
+        # check, the failure surfaces only at DB commit time as an opaque
+        # "pgvector dimension mismatch" error far from the root cause.
+        if len(first) != self._expected_dim:
+            raise LLMError(
+                f"ollama embed returned wrong dimension: got {len(first)}, "
+                f"expected {self._expected_dim}. Wrong model installed?"
+            )
         return [float(x) for x in first]
