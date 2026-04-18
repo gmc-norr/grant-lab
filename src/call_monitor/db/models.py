@@ -19,12 +19,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    case,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -195,9 +193,6 @@ class Profile(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
-    ranking_scheme: Mapped[str] = mapped_column(
-        String(8), nullable=False, default="v1", server_default=text("'v1'")
-    )
     # ISO 4217. NULL = unknown — v2's budget gate treats NULL as no penalty.
     budget_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(
@@ -226,13 +221,11 @@ class Subscription(Base):
 class CallRanking(Base):
     __tablename__ = "call_rankings"
     __table_args__ = (
-        # New composite index covers WHERE profile_id=? AND scheme=? ORDER
-        # BY aggregate_score DESC. Without scheme in the key, dual-scheme
-        # storage forces the planner to scan both schemes per query.
+        # Covers WHERE profile_id=? ORDER BY aggregate_score DESC, the hot
+        # dashboard query. NULLS LAST so unranked calls sort to the bottom.
         Index(
-            "ix_call_rankings_profile_scheme_score",
+            "ix_call_rankings_profile_score",
             "profile_id",
-            "scheme",
             text("aggregate_score DESC NULLS LAST"),
             postgresql_using="btree",
         ),
@@ -244,18 +237,10 @@ class CallRanking(Base):
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
     )
-    # 'v1' | 'v2' — joins the PK so dual-scheme rows coexist.
-    scheme: Mapped[str] = mapped_column(
-        String(8), primary_key=True, nullable=False, server_default=text("'v1'")
-    )
     # Renamed from `score` to align with v2 vocabulary.
     aggregate_score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     # 'timeline' | 'budget' | 'trl' | 'eligibility' | 'exclusion' | NULL
     aggregate_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Plan C phase 2: setwise pass adjusts displayed score.
-    setwise_offset: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, default=0, server_default=text("0")
-    )
     rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -266,46 +251,6 @@ class CallRanking(Base):
     )
     embed_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    @hybrid_property
-    def display_score(self) -> int:
-        """User-visible score = aggregate_score + setwise_offset, clamped to
-        [0, 100]. v1 rows always have setwise_offset == 0 (no setwise pass
-        runs against v1) so display_score == aggregate_score there. v2 rows
-        in the borderline band may differ by ±5 after the daily setwise pass.
-
-        Per spec line 191: "final displayed score is `aggregate_score +
-        setwise_offset`, clamped to [0, 100]". All render and ordering
-        paths read this; the BARE `aggregate_score` is reserved for write
-        paths and the setwise borderline-band membership filter (the
-        membership is intentionally defined on the un-offset score so
-        offsets can't oscillate calls in/out of the band on subsequent
-        passes).
-        """
-        raw = (self.aggregate_score or 0) + (self.setwise_offset or 0)
-        return max(0, min(100, raw))
-
-    @display_score.expression
-    def display_score(cls):
-        """SQL form of display_score so ORDER BY / WHERE clauses can use it.
-        GREATEST(0, LEAST(100, aggregate_score + setwise_offset)) is the
-        Postgres clamp idiom.
-
-        Critical: Postgres `GREATEST` / `LEAST` IGNORE NULL inputs (unlike
-        arithmetic, which propagates them). A bare LEFT JOIN to
-        call_rankings produces NULL aggregate_score for unranked calls;
-        without the CASE guard, GREATEST(0, LEAST(100, NULL)) collapses
-        to 0 and unranked rows sort as score=0 instead of NULLS LAST.
-        The CASE makes display_score NULL whenever aggregate_score is
-        NULL, restoring the same NULL semantics as the bare column.
-        """
-        return case(
-            (cls.aggregate_score.is_(None), None),
-            else_=func.greatest(
-                0,
-                func.least(100, cls.aggregate_score + cls.setwise_offset),
-            ),
-        )
-
 
 class RankingJob(Base):
     __tablename__ = "ranking_jobs"
@@ -315,7 +260,6 @@ class RankingJob(Base):
             "uq_ranking_jobs_active_pair",
             "call_id",
             "profile_id",
-            "scheme",
             unique=True,
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
@@ -327,10 +271,6 @@ class RankingJob(Base):
     )
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
-    )
-    # 'v1' | 'v2' — frozen at enqueue time; worker reads this, NOT the profile.
-    scheme: Mapped[str] = mapped_column(
-        String(8), nullable=False, server_default=text("'v1'")
     )
     status: Mapped[RankingJobStatus] = mapped_column(
         Enum(
@@ -398,15 +338,10 @@ class CallRankingCriterion(Base):
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
     )
-    scheme: Mapped[str] = mapped_column(
-        String(8), primary_key=True, nullable=False
-    )
     # 'topic_fit' | 'eligibility' | 'exclusions' | 'timeline' | 'budget' | 'trl'
     criterion: Mapped[str] = mapped_column(String(20), primary_key=True)
     # Canonical string. e.g. "5", "pass", "fail", "unclear".
     rating: Mapped[str] = mapped_column(String(20), nullable=False)
-    # G-Eval expected value for Likert criteria (float in [0, 5]); NULL otherwise.
-    rating_expected: Mapped[float | None] = mapped_column(Float, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     quoted_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     ranked_at: Mapped[datetime] = mapped_column(

@@ -1,5 +1,13 @@
-"""Verify that 0006 can be applied, rolled back, and re-applied without
-schema corruption — and that v2 row deletion in the down path is explicit."""
+"""Verify that v2-era migrations (0006, 0007, 0008) can be applied, rolled
+back, and re-applied without schema corruption.
+
+Plan E (0008) drops v1 entirely. The round-trip test no longer asserts
+"v1 rows survive" (no v1 schema at head) but does still verify:
+  - schema round-trips cleanly across the full v2 chain;
+  - 0006's documented v2-row-deletion behavior triggers on the way down,
+    so any rows seeded at head (which become scheme='v2' rows after 0008's
+    down restores the column with that server_default) are dropped at
+    0006→0005 and the schema is left clean for re-upgrade."""
 import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, text
@@ -16,8 +24,12 @@ def alembic_cfg(pg_url):
 
 
 def test_round_trip_upgrade_downgrade_upgrade(pg_url, alembic_cfg):
-    """Migration is bidirectional. v1 rows survive a round trip; v2 rows
-    are deleted on down (documented behavior)."""
+    """Migration chain (0006 → 0007 → 0008) is bidirectional and clean.
+
+    With v1 entirely removed at head (Plan E / 0008), seeded rows that are
+    promoted to scheme='v2' on the way down get deleted by 0006's down-
+    migration. The test verifies that the schema is left intact and re-
+    upgradable; row preservation is no longer in scope."""
     engine = create_engine(pg_url)
     try:
         _run_round_trip(engine, alembic_cfg)
@@ -43,7 +55,8 @@ def _run_round_trip(engine, alembic_cfg):
         conn.execute(text("DELETE FROM users"))
         conn.execute(text("DELETE FROM calls"))
 
-        # Seed: one user, one profile, one call, one v1 ranking, one v2 ranking.
+        # Seed: one user, one profile, one call, one ranking — all using the
+        # post-0008 schema (no scheme / setwise_offset / ranking_scheme).
         conn.execute(text(
             "INSERT INTO users (email, is_admin, created_at) "
             "VALUES ('rt@ki.se', false, now())"
@@ -53,9 +66,9 @@ def _run_round_trip(engine, alembic_cfg):
         )).scalar_one()
         conn.execute(text(
             "INSERT INTO profiles (name, kind, description, structured, "
-            "                       created_by, ranking_scheme, is_active, "
+            "                       created_by, is_active, "
             "                       created_at, updated_at) "
-            "VALUES ('RT', 'group', '', '{}'::jsonb, :uid, 'v1', true, now(), now())"
+            "VALUES ('RT', 'group', '', '{}'::jsonb, :uid, true, now(), now())"
         ), {"uid": uid})
         pid = conn.execute(text(
             "SELECT id FROM profiles WHERE name = 'RT'"
@@ -72,32 +85,29 @@ def _run_round_trip(engine, alembic_cfg):
             "SELECT id FROM calls WHERE external_id = 'RT-1'"
         )).scalar_one()
         conn.execute(text(
-            "INSERT INTO call_rankings (call_id, profile_id, scheme, "
+            "INSERT INTO call_rankings (call_id, profile_id, "
             "                            aggregate_score, rationale, "
             "                            model, prompt_version, ranked_at) "
-            "VALUES (:cid, :pid, 'v1', 70, 'v1', 'm', 'v1', now()), "
-            "       (:cid, :pid, 'v2', 22, 'v2', 'm', 'v2.0', now())"
+            "VALUES (:cid, :pid, 22, 'v2', 'm', 'v2.0', now())"
         ), {"cid": cid, "pid": pid})
 
-    # Down one revision (0006 → 0005). Should drop v2 rows + new schema.
+    # Down to 0005 — exercises 0008→0007→0006→0005. After 0008's downgrade,
+    # the seeded row gets scheme='v2' (server_default); 0006's downgrade then
+    # deletes all v2 rows by design.
     command.downgrade(alembic_cfg, "0005")
     with engine.begin() as conn:
-        # After downgrade, the `scheme` column is gone — query without it.
-        # The v1 row from the seed must survive; the v2 row was deleted.
         n_rows = conn.execute(text("SELECT count(*) FROM call_rankings")).scalar_one()
-        # The pre-rename column name is `score` (downgrade renamed back).
-        scores = conn.execute(text("SELECT score FROM call_rankings")).scalars().all()
-    assert n_rows == 1, "expected exactly the v1 row to survive the down-migration"
-    assert scores == [70], "v1 row's score column should hold the seeded value"
+    assert n_rows == 0, "0006's down-migration deletes the v2-tagged seed row"
 
-    # Up again (0005 → 0006). Schema restored; the surviving v1 row picks up
-    # scheme='v1' from the server_default.
-    command.upgrade(alembic_cfg, "0006")
-    with engine.begin() as conn:
-        rows = conn.execute(text("SELECT scheme, aggregate_score FROM call_rankings")).fetchall()
-    assert rows == [("v1", 70)]
-    # Restore head so subsequent tests see the full schema.
+    # Re-upgrade to head. Schema must reach the post-0008 state cleanly.
     command.upgrade(alembic_cfg, "head")
+    with engine.begin() as conn:
+        cols = conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'call_rankings'"
+        )).scalars().all()
+    assert "scheme" not in cols
+    assert "setwise_offset" not in cols
 
 
 def test_0007_adds_pgvector_columns_and_partial_indexes(migrated_engine):
@@ -136,6 +146,35 @@ def test_0007_extension_vector_installed(migrated_engine):
             text("SELECT extname FROM pg_extension WHERE extname='vector'")
         ).all()
     assert len(rows) == 1
+
+
+def test_0008_drops_v1_and_setwise_machinery(migrated_engine):
+    """After 0008 (which is now head), dual-scheme + setwise columns are gone."""
+    from sqlalchemy import inspect
+
+    insp = inspect(migrated_engine)
+
+    cols_calls = {c["name"] for c in insp.get_columns("call_rankings")}
+    cols_profiles = {c["name"] for c in insp.get_columns("profiles")}
+    cols_jobs = {c["name"] for c in insp.get_columns("ranking_jobs")}
+    cols_criteria = {c["name"] for c in insp.get_columns("call_ranking_criteria")}
+
+    assert "scheme" not in cols_calls
+    assert "scheme" not in cols_jobs
+    assert "scheme" not in cols_criteria
+    assert "ranking_scheme" not in cols_profiles
+    assert "setwise_offset" not in cols_calls
+    assert "rating_expected" not in cols_criteria
+
+    pk_rankings = insp.get_pk_constraint("call_rankings")["constrained_columns"]
+    assert pk_rankings == ["call_id", "profile_id"]
+
+    pk_criteria = insp.get_pk_constraint("call_ranking_criteria")["constrained_columns"]
+    assert pk_criteria == ["call_id", "profile_id", "criterion"]
+
+    idx_names = {ix["name"] for ix in insp.get_indexes("call_rankings")}
+    assert "ix_call_rankings_profile_score" in idx_names
+    assert "ix_call_rankings_profile_scheme_score" not in idx_names
 
 
 def test_0007_check_constraint_rejects_orphan_embedding(pg_session_factory):
