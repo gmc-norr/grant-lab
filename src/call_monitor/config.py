@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
-    gemma_model: str = Field(default="gemma4:e4b-it-q8_0", alias="GEMMA_MODEL")
+    gemma_model: str = Field(default="gemma4:e4b-it-q4_K_M", alias="GEMMA_MODEL")
     embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
     # Cosine-similarity threshold for the embedding pre-gate. Pairs
     # below this (computed by the caller, not the gate) are zeroed out

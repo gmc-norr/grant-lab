@@ -36,6 +36,20 @@
 <form method="post" action="/admin/rerank" style="margin-top: 1em;">
   <button type="submit">Re-rank everything (last 90 days × active profiles)</button>
 </form>
+<h2>Embedding coverage</h2>
+<dl>
+  <dt>Calls</dt>
+  <dd>
+    {{ embedding_coverage.call_embedded }}/{{ embedding_coverage.call_total }} embedded
+    ({{ embedding_coverage.call_stale }} stale, model <code>{{ embedding_coverage.current_model }}</code>)
+  </dd>
+  <dt>Profiles</dt>
+  <dd>
+    {{ embedding_coverage.profile_embedded }}/{{ embedding_coverage.profile_total }} embedded
+    ({{ embedding_coverage.profile_stale }} stale, model <code>{{ embedding_coverage.current_model }}</code>)
+  </dd>
+</dl>
+
 <h2>Digest</h2>
 <dl>
   <dt>Last digest sent</dt>
