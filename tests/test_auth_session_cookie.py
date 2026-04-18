@@ -17,7 +17,11 @@ def test_roundtrip():
 def test_tampered_cookie_rejected():
     signer = SessionSigner(secret="x" * 32, max_age_seconds=3600)
     cookie = signer.make(user_id=42)
-    tampered = cookie[:-1] + ("A" if cookie[-1] != "A" else "B")
+    # Flip the FIRST char (in the payload segment), not the last byte of
+    # the signature: base64url's trailing character holds only 4 effective
+    # bits and the 2 padding bits can decode to the same byte, leaving the
+    # signature valid against an unchanged payload (~1-in-32 flake rate).
+    tampered = ("A" if cookie[0] != "A" else "B") + cookie[1:]
     with pytest.raises(InvalidSession):
         signer.verify(tampered)
 
