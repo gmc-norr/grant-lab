@@ -133,7 +133,9 @@ def assemble_for_user(
                 # need this profile's ranking (if any) for score display
                 rk = session.execute(
                     select(CallRanking).where(
-                        CallRanking.call_id == c.id, CallRanking.profile_id == profile.id
+                        CallRanking.call_id == c.id,
+                        CallRanking.profile_id == profile.id,
+                        CallRanking.scheme == profile.ranking_scheme,
                     )
                 ).scalar_one_or_none()
                 per_call[c.id].append((profile, "must_include", rk))
@@ -145,6 +147,7 @@ def assemble_for_user(
             .join(CallRanking, CallRanking.call_id == Call.id)
             .where(
                 CallRanking.profile_id == profile.id,
+                CallRanking.scheme == profile.ranking_scheme,
                 CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
@@ -162,6 +165,7 @@ def assemble_for_user(
             .join(CallRanking, CallRanking.call_id == Call.id)
             .where(
                 CallRanking.profile_id == profile.id,
+                CallRanking.scheme == profile.ranking_scheme,
                 CallRanking.aggregate_score >= DIGEST_BORDERLINE_LOWER,
                 CallRanking.aggregate_score < DIGEST_TOP_THRESHOLD,
                 Call.id.notin_(excluded) if excluded else True,
