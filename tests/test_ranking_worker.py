@@ -45,7 +45,7 @@ def _seed_call_and_pending_job(s, profile_id):
     c = Call(source_id=src.id, external_id="W-1", url="https://x", title="T")
     s.add(c)
     s.flush()
-    enqueue_for_pair(s, call_id=c.id, profile_id=profile_id)
+    enqueue_for_pair(s, call_id=c.id, profile_id=profile_id, scheme="v1")
     s.commit()
     return c.id
 

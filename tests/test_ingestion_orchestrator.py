@@ -121,3 +121,44 @@ def test_unknown_source_slug_raises(pg_session_factory):
             adapter=_BadSlug(),
             alerter=_alerter(sender),
         )
+
+
+def test_orchestrator_enqueues_jobs_with_profile_ranking_scheme(
+    pg_session_factory, profile_factory
+):
+    """Each profile contributes its currently-active scheme to the enqueued job."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from sqlalchemy import select
+
+    from call_monitor.db.models import Profile, RankingJob
+
+    pid_v1, _ = profile_factory(name="P-v1")
+    pid_v2, _ = profile_factory(name="P-v2")
+    with pg_session_factory() as s:
+        s.get(Profile, pid_v2).ranking_scheme = "v2"
+        s.commit()
+
+    class _FakeAdapter:
+        slug = "vinnova"
+
+        def fetch_new_calls(self, since):
+            yield NormalizedCall(
+                external_id="X-1",
+                url="https://x",
+                title="X",
+                published_at=datetime.now(UTC),
+            )
+
+    run_ingestion(
+        session_factory=pg_session_factory,
+        adapter=_FakeAdapter(),
+        alerter=MagicMock(),
+    )
+
+    with pg_session_factory() as s:
+        jobs = s.execute(select(RankingJob)).scalars().all()
+    by_scheme = {(j.profile_id, j.scheme) for j in jobs}
+    assert (pid_v1, "v1") in by_scheme
+    assert (pid_v2, "v2") in by_scheme
