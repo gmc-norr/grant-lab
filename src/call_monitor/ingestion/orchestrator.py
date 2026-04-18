@@ -52,14 +52,14 @@ def run_ingestion(
 
       Step 2 (per-row transactions, best-effort): embed every touched call.
         A single embed failure is logged and skipped; the loop continues.
-        We do NOT abort the run on embed failure — the v2 worker has an
+        We do NOT abort the run on embed failure — the ranking worker has an
         UNKNOWN gate that falls through to the LLM, so a missing embedding
         is a graceful degradation (LLM still runs as the safe fallback).
 
       Step 3 (one transaction): enqueue ranking jobs for touched calls
         × active profiles.
 
-    The split exists so the v2 ranking worker (which polls every 60s) never
+    The split exists so the ranking worker (which polls every 60s) never
     sees a job whose call/profile pair has a NULL embedding because the
     embedding refresh hadn't happened yet. Before this split, upsert + enqueue
     shared one transaction and the embed step was done post-commit, leaving
@@ -160,7 +160,7 @@ def run_ingestion(
     # are no touched calls to embed and nothing legitimate to enqueue.
     if error_msg is None:
         # --- Step 2: embed touched calls (best-effort, per-row transaction) ---
-        # Codex H1: must complete BEFORE enqueue so the v2 worker never sees
+        # Codex H1: must complete BEFORE enqueue so the ranking worker never sees
         # a job whose call has NULL embedding (except the rare embed-fail
         # case, which falls through to LLM via the UNKNOWN gate).
         for cid in touched_call_ids:

@@ -1,4 +1,4 @@
-"""Rule-based gates for ranking v2.
+"""Rule-based gates for ranking.
 
 Four deterministic checks (timeline, budget, TRL, embedding) evaluated
 in Python before any LLM call. A FAIL on any gate short-circuits the

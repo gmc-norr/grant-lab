@@ -1,4 +1,4 @@
-"""Ranking v2 aggregation (gates + LLM rubric → 0-100 score)."""
+"""Ranking aggregation (gates + LLM rubric → 0-100 score)."""
 from __future__ import annotations
 
 import logging
