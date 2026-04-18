@@ -155,6 +155,14 @@ def build_scheduler(
                     },
                 )
 
+    # Concurrency note: setwise UPDATEs `setwise_offset` while `rank:drain`
+    # may concurrently INSERT/UPDATE the same CallRanking row. APScheduler's
+    # `max_instances=1` only prevents this job overlapping itself, not
+    # serialization with other jobs. The 04:00 trigger is chosen to fall
+    # outside peak ingestion windows; row-level Postgres locks provide the
+    # baseline correctness guarantee. If contention shows up in production,
+    # add `SELECT ... FOR UPDATE` to setwise.py's per-row update or move
+    # this trigger further from the rank:drain tick window.
     sched.add_job(
         _setwise_tick,
         trigger=CronTrigger(hour=4, minute=0),
