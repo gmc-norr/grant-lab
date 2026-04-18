@@ -19,8 +19,9 @@
 - **Criterion prompt is fixed; bump `prompt_version` to bump it.** v2.0 is the initial criterion prompt. Edits ship as v2.1, v2.2, etc. The constant lives in `ranking/prompt.py`.
 - **`rank_pair_v2` returns a richer dataclass** than v1's `RankResult` — include the per-criterion breakdown so the worker can persist criteria rows without re-parsing. Name: `RankResultV2`. Includes the rule-based gate outputs (so the worker can write timeline/budget/TRL criteria rows when relevant).
 - **Currency-aware budget gate is the only place currency is touched.** `profiles.budget_currency` is read by `criteria.budget_gate`; nowhere else in this plan reads or writes the field. Plan A's profile edit form already exposes the dropdown.
-- **Quoted evidence is enforced at parse time, not at rendering.** If the LLM returns `quoted_evidence` for `topic_fit`, but the substring is not present in the call's title/summary/full_text, the parser logs a warning, sets `quoted_evidence=None`, and continues. We do NOT fail the ranking — quote-checking is a defense, not a gate.
-- **Token cap for the prompt's call text is 4000 chars** (vs v1's 2000). Tests use shorter fixtures, but the constant `CALL_TEXT_LIMIT_V2 = 4000` lives at the top of `prompt.py`.
+- **Quoted evidence is verified inside `rank_pair_v2`, not inside the parser.** The parser produces a `ParsedV2` from the LLM string. `rank_pair_v2` then calls a `_verify_quoted_evidence(parsed, call)` helper that nulls out any quote whose case-insensitive substring is absent from `call.title + call.summary + call.full_text`, and truncates each remaining quote to 200 chars. The parser itself doesn't take call text — keeps `parse_v2_response` pure-string-input for unit testability. Quote-checking is a defense, not a gate; we never fail the ranking on a bogus quote.
+- **must_include bypass is timeline-only (per spec line 282).** A must_include match bypasses ONLY the timeline gate; budget and TRL still hard-fail (a user typing `must_include=["pathology"]` doesn't also want to see calls outside their budget range). The bypass propagates as `must_include_override: bool` on `RankResultV2`, consumed by `aggregate()` and `_write_v2_criteria_rows()` so the LLM's work isn't discarded.
+- **Token cap for the prompt's call text is 4000 chars** (vs v1's 2000), source order: `call.summary or call.full_text or ""`. v1's `prompt.py` already does this fallback chain — v2 must too, otherwise calls with only `full_text` (PDF-extracted, no summary) lose their entire body.
 - **Templates additions are minimal and behind a flag.** The call detail page renders the criterion breakdown ONLY for v2 rows (detected via `ranking.scheme == 'v2'`). v1 rendering is untouched.
 
 ---
@@ -459,41 +460,79 @@ from call_monitor.ranking.criteria import GateResult, GateStatus, Gates
 
 
 # --- logprob_expected ---
+#
+# Critical correctness note (Codex H2): the LLM emits a JSON object like
+# `{"topic_fit": {"rating": 4, ...}, "eligibility": {"rating": "pass", ...}, ...}`.
+# The first content tokens are `{`, `"`, `topic_fit`, `"`, `:`, ` `, `{`, etc.
+# The numeric rating is buried several tokens deep. logprob_expected MUST
+# walk the content stream looking for the first integer token in [0, 5]
+# (which is unambiguous: topic_fit.rating is the only int 0-5 in the
+# output). Tests use realistic token sequences, not synthetic [single-token].
 
-def test_logprob_expected_basic():
-    """Top-k logprobs with all integers — softmax, weighted sum."""
-    # token "4" with logprob -0.1, "3" with -1.5, "5" with -2.0
-    # softmax([-0.1, -1.5, -2.0]) ≈ [0.74, 0.18, 0.08]
-    # E = 4*0.74 + 3*0.18 + 5*0.08 ≈ 3.90
-    content = [{"token": "4", "logprob": -0.1, "top_logprobs": [
-        {"token": "4", "logprob": -0.1},
-        {"token": "3", "logprob": -1.5},
-        {"token": "5", "logprob": -2.0},
-    ]}]
+
+def _content_tokens(*tokens_with_top: tuple[str, list[tuple[str, float]]]) -> list[dict]:
+    """Build a content_logprobs list mimicking what Ollama returns."""
+    out = []
+    for token, top in tokens_with_top:
+        out.append({
+            "token": token,
+            "logprob": next((lp for t, lp in top if t == token), 0.0),
+            "top_logprobs": [{"token": t, "logprob": lp} for t, lp in top],
+        })
+    return out
+
+
+def test_logprob_expected_finds_rating_token_in_realistic_json_stream():
+    """Mimic Ollama's tokenization of `{"topic_fit": {"rating": 4, ...}}`.
+    The integer rating shows up several tokens in; the function must walk
+    until it finds it."""
+    content = _content_tokens(
+        ('{',           [('{', -0.0)]),
+        ('"topic_fit"', [('"topic_fit"', -0.1)]),
+        (':',           [(':', -0.0)]),
+        (' {',          [(' {', -0.0)]),
+        ('"rating"',    [('"rating"', -0.1)]),
+        (':',           [(':', -0.0)]),
+        (' ',           [(' ', -0.0)]),
+        # Here's the rating token — top_logprobs gives the G-Eval signal.
+        ('4', [
+            ('4', -0.1),
+            ('3', -1.5),
+            ('5', -2.0),
+        ]),
+        (',',           [(',', -0.0)]),
+    )
     e = logprob_expected(content)
     assert e is not None
-    assert 3.7 < e < 4.1  # near 3.9
+    # softmax([-0.1, -1.5, -2.0]) ≈ [0.74, 0.18, 0.08]
+    # E = 4*0.74 + 3*0.18 + 5*0.08 ≈ 3.90
+    assert 3.7 < e < 4.1
 
 
-def test_logprob_expected_filters_non_integer_tokens():
-    """Tokens like ' ' or 'four' are skipped; only integer tokens contribute."""
-    content = [{"token": "4", "logprob": -0.1, "top_logprobs": [
-        {"token": "4", "logprob": -0.1},
-        {"token": " ",  "logprob": -1.5},   # skipped
-        {"token": "five", "logprob": -1.6}, # skipped
-        {"token": "3", "logprob": -2.0},
-    ]}]
+def test_logprob_expected_skips_non_integer_alternatives_at_rating_position():
+    """At the rating token's top_logprobs, ignore tokens like ' ' or 'four';
+    only integer tokens in [0, 5] contribute."""
+    content = _content_tokens(
+        ('"rating"', [('"rating"', -0.1)]),
+        (':', [(':', -0.0)]),
+        ('4', [
+            ('4', -0.1),
+            (' ', -1.5),     # skipped — non-integer
+            ('five', -1.6),  # skipped — non-integer
+            ('3', -2.0),
+        ]),
+    )
     e = logprob_expected(content)
     assert e is not None
     assert 3.5 < e < 4.0
 
 
-def test_logprob_expected_returns_none_when_no_integer_tokens():
-    """No usable signal → None; caller falls back to argmax."""
-    content = [{"token": "x", "logprob": -0.1, "top_logprobs": [
-        {"token": "x", "logprob": -0.1},
-        {"token": "y", "logprob": -1.5},
-    ]}]
+def test_logprob_expected_returns_none_when_no_integer_token_found():
+    """Whole content stream has no integer in [0, 5] — caller falls back to argmax."""
+    content = _content_tokens(
+        ('{', [('{', -0.0)]),
+        ('"oops"', [('"oops"', -0.1)]),
+    )
     assert logprob_expected(content) is None
 
 
@@ -502,13 +541,18 @@ def test_logprob_expected_handles_empty_or_malformed():
     assert logprob_expected(None) is None
 
 
-def test_logprob_expected_clamps_to_0_5_range():
-    """If somehow integers outside [0,5] appear (e.g. '6'), filter them out."""
-    content = [{"token": "4", "logprob": -0.1, "top_logprobs": [
-        {"token": "4", "logprob": -0.1},
-        {"token": "6", "logprob": -1.5},  # out of range, skipped
-        {"token": "9", "logprob": -2.0},  # out of range, skipped
-    ]}]
+def test_logprob_expected_filters_out_of_range_integers():
+    """Token alternatives like '6' or '9' (or random IDs from elsewhere)
+    are ignored at the rating position."""
+    content = _content_tokens(
+        ('"rating"', [('"rating"', -0.1)]),
+        (':', [(':', -0.0)]),
+        ('4', [
+            ('4', -0.1),
+            ('6', -1.5),  # skipped — out of range
+            ('9', -2.0),  # skipped — out of range
+        ]),
+    )
     e = logprob_expected(content)
     assert e is not None
     assert e == pytest.approx(4.0, rel=0.01)
@@ -548,6 +592,34 @@ def test_aggregate_timeline_fail_short_circuits():
     r = aggregate(g, _llm_clean(topic_expected=4.5))
     assert r.score == 0
     assert r.reason == "timeline"
+
+
+def test_aggregate_timeline_fail_ignored_with_must_include_override():
+    """Spec line 282: must_include calls bypass the timeline gate. The
+    LLM's verdict carries through even though timeline FAILED."""
+    g = Gates(
+        timeline=GateResult(GateStatus.FAIL, reason="too_soon"),
+        budget=GateResult(GateStatus.PASS),
+        trl=GateResult(GateStatus.PASS),
+    )
+    r = aggregate(g, _llm_clean(topic_expected=4.5), must_include_override=True)
+    # 4.5 × 20 = 90, not 0.
+    assert r.score == 90
+    assert r.reason is None
+
+
+def test_aggregate_budget_fail_still_short_circuits_even_with_override():
+    """must_include only bypasses TIMELINE per spec, not budget/TRL.
+    A user typing must_include=['pathology'] doesn't also want calls
+    outside their budget range."""
+    g = Gates(
+        timeline=GateResult(GateStatus.PASS),
+        budget=GateResult(GateStatus.FAIL),
+        trl=GateResult(GateStatus.PASS),
+    )
+    r = aggregate(g, _llm_clean(topic_expected=4.5), must_include_override=True)
+    assert r.score == 0
+    assert r.reason == "budget"
 
 
 def test_aggregate_budget_fail_short_circuits():
@@ -650,10 +722,20 @@ class AggregateResult:
     reason: str | None  # 'timeline'|'budget'|'trl'|'eligibility'|'exclusion'|None
 
 
-def aggregate(gates: Gates, llm: LLMResult) -> AggregateResult:
-    """Combine gates + LLM into a final score per the v2 spec's aggregation table."""
-    # Rule-based gates short-circuit.
-    if gates.timeline.status == GateStatus.FAIL:
+def aggregate(
+    gates: Gates,
+    llm: LLMResult,
+    *,
+    must_include_override: bool = False,
+) -> AggregateResult:
+    """Combine gates + LLM into a final score per the v2 spec's aggregation table.
+
+    `must_include_override=True` skips ONLY the timeline-FAIL short-circuit
+    (spec line 282 — must_include is a force-include for topic, not for
+    budget/TRL). Budget/TRL FAILs still zero the score even with override.
+    """
+    # Rule-based gates short-circuit (timeline conditional on override).
+    if not must_include_override and gates.timeline.status == GateStatus.FAIL:
         return AggregateResult(0, "timeline")
     if gates.budget.status == GateStatus.FAIL:
         return AggregateResult(0, "budget")
@@ -678,41 +760,66 @@ def aggregate(gates: Gates, llm: LLMResult) -> AggregateResult:
 def logprob_expected(content_logprobs: list[dict] | None) -> float | None:
     """G-Eval expected value from top-k logprobs at the rating-token position.
 
-    `content_logprobs` is the OpenAI-shape `choices[0].logprobs.content` list.
-    The rating token is assumed to be the first content token.
+    `content_logprobs` is the OpenAI-shape `choices[0].logprobs.content` list,
+    one entry per OUTPUT TOKEN. The LLM emits a JSON object like
+    `{"topic_fit": {"rating": 4, ...}, ...}`, so the rating token is buried
+    several tokens deep — past `{`, `"topic_fit"`, `:`, ` {`, `"rating"`, etc.
 
-    Returns the expected value (float in [0, 5]) or None if no integer tokens
-    in [0, 5] appear in the top-k. Caller falls back to argmax on None.
+    We walk the content stream looking for the first token whose stripped
+    value is a single-digit integer in [0, 5]. That token is unambiguously
+    the topic_fit.rating (the only int 0-5 the v2 schema produces). At
+    that position, use its `top_logprobs` to compute the expected value.
+
+    Returns the expected value (float in [0, 5]) or None if no usable
+    rating-position is found. Caller falls back to argmax on None.
     """
     if not content_logprobs:
         return None
-    first = content_logprobs[0]
-    top = first.get("top_logprobs") if isinstance(first, dict) else None
-    if not top:
+
+    rating_top: list[dict] | None = None
+    for entry in content_logprobs:
+        if not isinstance(entry, dict):
+            continue
+        tok = entry.get("token")
+        if not isinstance(tok, str):
+            continue
+        stripped = tok.strip()
+        if stripped.isdigit() and 0 <= int(stripped) <= 5:
+            rating_top = entry.get("top_logprobs")
+            break
+
+    if not rating_top:
+        _logger.warning(
+            "ranking.logprob_rating_token_not_found",
+            extra={
+                "event": "logprob_rating_token_not_found",
+                "stream_tokens": [
+                    e.get("token") for e in content_logprobs if isinstance(e, dict)
+                ][:30],
+            },
+        )
         return None
 
     pairs: list[tuple[int, float]] = []
-    for entry in top:
+    for entry in rating_top:
         if not isinstance(entry, dict):
             continue
         tok = entry.get("token")
         lp = entry.get("logprob")
-        if not isinstance(tok, str) or not tok.strip().isdigit() or not isinstance(lp, (int, float)):
+        if not isinstance(tok, str) or not isinstance(lp, (int, float)):
             continue
-        n = int(tok.strip())
+        stripped = tok.strip()
+        if not stripped.isdigit():
+            continue
+        n = int(stripped)
         if not 0 <= n <= 5:
             continue
         pairs.append((n, float(lp)))
 
     if not pairs:
-        _logger.warning(
-            "ranking.logprob_no_integer_tokens",
-            extra={"event": "logprob_no_integer_tokens",
-                   "tokens": [e.get("token") for e in top if isinstance(e, dict)]},
-        )
         return None
 
-    # Softmax-normalize.
+    # Softmax-normalize, then weighted sum.
     max_lp = max(lp for _, lp in pairs)
     exps = [(n, math.exp(lp - max_lp)) for n, lp in pairs]
     z = sum(x for _, x in exps)
@@ -932,7 +1039,14 @@ CALL:
 def build_messages_v2(*, profile, call) -> list[dict]:
     """Build the v2 criterion-rubric prompt. Profile block first so the
     Ollama prefix cache is reused across calls scored against the same
-    profile."""
+    profile.
+
+    Text source falls back: summary → full_text. v1's prompt.py already
+    does this; without the fallback, calls with only full_text (e.g.
+    PDF-extracted with no summary field) would be sent to the LLM with
+    just a title — exactly the eligibility/exclusion text v2 is supposed
+    to surface better.
+    """
     structured = profile.structured or {}
     sys = _SYSTEM_TEMPLATE_V2.format(
         name=profile.name,
@@ -941,7 +1055,11 @@ def build_messages_v2(*, profile, call) -> list[dict]:
         areas=", ".join(structured.get("areas") or []) or "(none)",
         hard_exclusions=", ".join(structured.get("hard_exclusions") or []) or "(none)",
     )
-    text_source = call.summary or ""
+    text_source = (
+        call.summary
+        or getattr(call, "full_text", None)
+        or ""
+    )
     if len(text_source) > CALL_TEXT_LIMIT_V2:
         text_source = text_source[:CALL_TEXT_LIMIT_V2]
     user = _USER_TEMPLATE_V2.format(
@@ -1195,9 +1313,13 @@ class RankResultV2:
     parsed: ParsedV2 | None  # None if a gate short-circuited before LLM call
     topic_expected: float | None  # G-Eval expected; None if logprobs unavailable
     logprob_fallback: bool         # True iff we fell back to argmax
+    must_include_override: bool    # True iff the call matched a must_include term
     model: str
     prompt_version: str
     raw_response: dict             # full LLM envelope (for debugging) or {} on short-circuit
+
+
+_QUOTED_EVIDENCE_MAX = 200
 
 
 def rank_pair_v2(
@@ -1207,27 +1329,32 @@ def rank_pair_v2(
     call,
     now: datetime,
 ) -> RankResultV2:
-    """Run gates → LLM → parse → aggregate. Returns a structured RankResultV2.
+    """Run gates → LLM → parse → verify quotes → aggregate. Returns a
+    structured RankResultV2.
 
-    On rule-based-gate FAIL, short-circuits without an LLM call — UNLESS
-    the call matches one of the profile's must_include keywords, in which
-    case the gates are evaluated for diagnostic display but cannot
-    short-circuit the pair (spec line 282: must-include is the user's
-    explicit force-include and overrides the rule-based safety nets).
-    The LLM still evaluates eligibility/exclusions/topic_fit normally.
+    Rule-based-gate handling:
+      - Budget FAIL or TRL FAIL → short-circuit, no LLM call.
+      - Timeline FAIL → short-circuit UNLESS the call matches one of the
+        profile's must_include keywords, in which case timeline is bypassed
+        (spec line 282) and the LLM is consulted. The bypass is propagated
+        as `must_include_override=True` to aggregate() and through the
+        result so the worker's criteria-row writer doesn't bail at the
+        timeline-fail row either.
 
     On LLM parse failure, raises ParseV2Error (caller decides retry /
     dead-letter). On Ollama failure, raises LLMError.
     """
     gates = evaluate_gates(profile, call, now=now)
     must_include_match = _call_matches_must_include(profile, call)
-    if not must_include_match:
-        if gates.timeline.status == GateStatus.FAIL:
-            return _gate_fail_result(gates, "timeline")
-        if gates.budget.status == GateStatus.FAIL:
-            return _gate_fail_result(gates, "budget")
-        if gates.trl.status == GateStatus.FAIL:
-            return _gate_fail_result(gates, "trl")
+
+    # Budget/TRL fail unconditionally (must_include doesn't override these).
+    if gates.budget.status == GateStatus.FAIL:
+        return _gate_fail_result(gates, "budget", must_include_match)
+    if gates.trl.status == GateStatus.FAIL:
+        return _gate_fail_result(gates, "trl", must_include_match)
+    # Timeline fail short-circuits ONLY when must_include doesn't match.
+    if gates.timeline.status == GateStatus.FAIL and not must_include_match:
+        return _gate_fail_result(gates, "timeline", must_include_match)
 
     messages = build_messages_v2(profile=profile, call=call)
     envelope = client.chat(
@@ -1238,6 +1365,7 @@ def rank_pair_v2(
     )
     content = envelope["choices"][0]["message"]["content"]
     parsed = parse_v2_response(content)
+    parsed = _verify_quoted_evidence(parsed, call)
     content_lp = (envelope["choices"][0].get("logprobs") or {}).get("content")
     expected = logprob_expected(content_lp)
     logprob_fallback = expected is None
@@ -1250,7 +1378,7 @@ def rank_pair_v2(
         eligibility=parsed.eligibility_rating,
         exclusions=parsed.exclusions_rating,
     )
-    agg: AggregateResult = aggregate(gates, llm)
+    agg: AggregateResult = aggregate(gates, llm, must_include_override=must_include_match)
     return RankResultV2(
         score=agg.score,
         reason=agg.reason,
@@ -1258,13 +1386,14 @@ def rank_pair_v2(
         parsed=parsed,
         topic_expected=expected,
         logprob_fallback=logprob_fallback,
+        must_include_override=must_include_match,
         model=client.model,
         prompt_version=PROMPT_VERSION_V2,
         raw_response=envelope,
     )
 
 
-def _gate_fail_result(gates: Gates, reason: str) -> RankResultV2:
+def _gate_fail_result(gates: Gates, reason: str, must_include_match: bool) -> RankResultV2:
     return RankResultV2(
         score=0,
         reason=reason,
@@ -1272,6 +1401,7 @@ def _gate_fail_result(gates: Gates, reason: str) -> RankResultV2:
         parsed=None,
         topic_expected=None,
         logprob_fallback=False,
+        must_include_override=must_include_match,
         model="",
         prompt_version=PROMPT_VERSION_V2,
         raw_response={},
@@ -1279,10 +1409,11 @@ def _gate_fail_result(gates: Gates, reason: str) -> RankResultV2:
 
 
 def _call_matches_must_include(profile, call) -> bool:
-    """Spec line 282: must-include calls bypass the rule-based gates.
+    """Case-insensitive substring match of profile.must_include keywords
+    against title + summary + keywords. Same logic as the digest
+    must-include bucket (assemble.py).
 
-    Case-insensitive substring match against title + summary + keywords,
-    same logic as the digest must-include bucket (assemble.py)."""
+    Spec line 282: must-include calls bypass the timeline gate (only)."""
     structured = profile.structured or {}
     must_terms = [
         t.strip().lower()
@@ -1297,6 +1428,38 @@ def _call_matches_must_include(profile, call) -> bool:
         " ".join((call.keywords or [])).lower() if hasattr(call, "keywords") else "",
     ]))
     return any(t in haystack for t in must_terms)
+
+
+def _verify_quoted_evidence(parsed: ParsedV2, call) -> ParsedV2:
+    """Defense against ungrounded LLM rationales: null out any quoted_evidence
+    field whose case-insensitive content is not actually in the call text.
+    Truncate over-long quotes to _QUOTED_EVIDENCE_MAX chars.
+
+    We never fail the ranking on a bogus quote — quote-checking is a defense,
+    not a gate. The LLM's rating still stands; only the quote display is
+    sanitized."""
+    from dataclasses import replace as _replace
+
+    haystack = " ".join(filter(None, [
+        (call.title or "").lower(),
+        (call.summary or "").lower(),
+        (getattr(call, "full_text", "") or "").lower(),
+    ]))
+
+    def _verify_one(quote: str | None) -> str | None:
+        if not quote:
+            return None
+        truncated = quote[:_QUOTED_EVIDENCE_MAX]
+        if truncated.lower() in haystack:
+            return truncated
+        return None  # bogus quote — discarded silently
+
+    return _replace(
+        parsed,
+        topic_fit_quoted=_verify_one(parsed.topic_fit_quoted),
+        eligibility_quoted=_verify_one(parsed.eligibility_quoted),
+        exclusions_quoted=_verify_one(parsed.exclusions_quoted),
+    )
 ```
 
 Add a regression test case in `tests/test_ranking_rank_pair_v2.py` for this behavior:
@@ -1334,6 +1497,9 @@ def test_rank_pair_v2_must_include_bypasses_timeline_gate():
     assert r.reason is None
     # Gates were still evaluated (for diagnostic display).
     assert r.gates.timeline.status.value == "fail"
+    # The override flag is set so the worker's criteria-row writer knows to
+    # continue past the timeline-fail row instead of bailing.
+    assert r.must_include_override is True
 
 
 def test_rank_pair_v2_must_include_match_requires_term_in_text():
@@ -1496,8 +1662,68 @@ def test_worker_v2_writes_sparse_criterion_rows_clean_path(pg_session_factory):
     assert by_name["timeline"].rating == "pass"
 
 
+def test_worker_v2_must_include_with_failing_timeline_persists_llm_score(
+    pg_session_factory,
+):
+    """Regression for Codex H1: a must_include match with a failing timeline
+    gate must (a) get an LLM call, (b) persist a non-zero CallRanking score
+    based on the LLM topic_fit, NOT zero from the timeline-fail short-circuit,
+    and (c) have all four criterion rows (timeline=fail + LLM topic/eligibility/
+    exclusions) — NOT just the timeline row."""
+    from datetime import timedelta
+
+    with pg_session_factory() as s:
+        u = User(email="mi@ki.se"); s.add(u); s.flush()
+        # Profile has must_include=["pathology"].
+        p = Profile(
+            name="MI", kind=ProfileKind.GROUP, description="",
+            structured={
+                "areas": ["pathology"],
+                "hard_exclusions": [],
+                "must_include": ["pathology"],
+            },
+            created_by=u.id, ranking_scheme="v2",
+        )
+        s.add(p); s.flush()
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        # Title contains "pathology" → must_include match.
+        # Deadline tomorrow → timeline gate FAILs.
+        c = Call(
+            source_id=src.id, external_id="MI", url="https://x",
+            title="Pathology funding announcement",
+            summary="Open call.",
+            deadline=datetime.now(UTC) + timedelta(days=1),
+            published_at=datetime.now(UTC),
+        )
+        s.add(c); s.flush()
+        s.add(RankingJob(
+            call_id=c.id, profile_id=p.id, scheme="v2",
+            status=RankingJobStatus.PENDING,
+        ))
+        s.commit()
+
+    drain_queue(session_factory=pg_session_factory, client=_ollama_v2_clean(), batch_size=10)
+
+    with pg_session_factory() as s:
+        ranking = s.execute(select(CallRanking)).scalar_one()
+        criteria = s.execute(select(CallRankingCriterion)).scalars().all()
+
+    # The LLM ran, so the score is the LLM topic_fit ≈ 80 (4/5 × 20),
+    # NOT zero (which is what would happen without the override).
+    assert ranking.aggregate_score >= 70
+    assert ranking.aggregate_reason is None
+    by_name = {c.criterion: c for c in criteria}
+    # All criteria present — the timeline=fail row exists for diagnostics
+    # AND the LLM rows are written despite the gate failure.
+    assert by_name["timeline"].rating == "fail"
+    assert by_name["topic_fit"].rating == "4"
+    assert by_name["eligibility"].rating == "pass"
+    assert by_name["exclusions"].rating == "pass"
+
+
 def test_worker_v2_short_circuit_writes_only_failing_gate_row(pg_session_factory):
-    """If timeline fails, only timeline criterion row is written. No LLM row."""
+    """If timeline fails AND no must_include match, only timeline criterion row
+    is written. No LLM row."""
     with pg_session_factory() as s:
         u = User(email="sc@ki.se"); s.add(u); s.flush()
         p = Profile(
@@ -1544,51 +1770,96 @@ def test_worker_v2_short_circuit_writes_only_failing_gate_row(pg_session_factory
 
 - [ ] **Step 3: Update `src/call_monitor/ranking/worker.py`**
 
-Find Plan A's `NotImplementedError` block. Replace it with real v2 dispatch.
+Find Plan A's v2-NotImplementedError block (Plan A Task 3 inserts an `if scheme != "v1":` early-continue before the per-job session opens). Replace it with the real v2 dispatch path.
 
-Add imports at the top:
+After Plan A's reshape, the per-job loop unpacks tuples:
+
+```python
+for job_id, call_id, profile_id, attempts, scheme in claimed:
+    try:
+        # Plan A's v2 dead-letter block was here. Replace.
+```
+
+Add imports at the top of `worker.py`:
 
 ```python
 from call_monitor.ranking.criteria import GateStatus
+from call_monitor.ranking.prompt import ParseV2Error
 from call_monitor.ranking.rank_pair import RankResultV2, rank_pair_v2
 from call_monitor.db.models import CallRankingCriterion
 ```
 
-Inside the per-job loop, replace the `if job.scheme != "v1":` block with:
+Replace Plan A's `if scheme != "v1":` block with:
 
 ```python
-        if job.scheme == "v2":
+        if scheme == "v2":
             try:
-                v2_result = rank_pair_v2(
-                    client=client,
-                    profile=profile,
-                    call=call,
-                    now=datetime.now(UTC),
+                with session_factory() as session:
+                    call = session.get(Call, call_id)
+                    profile = session.get(Profile, profile_id)
+                    if call is None or profile is None:
+                        mark_failed(
+                            session, job_id,
+                            error="call or profile vanished",
+                            terminal=True,
+                        )
+                        session.commit()
+                        continue
+                    if not profile.is_active:
+                        mark_done(session, job_id)
+                        session.commit()
+                        continue
+                    try:
+                        v2_result = rank_pair_v2(
+                            client=client,
+                            profile=profile,
+                            call=call,
+                            now=datetime.now(UTC),
+                        )
+                    except (LLMError, ParseV2Error) as e:
+                        terminal = (attempts + 1) >= MAX_ATTEMPTS
+                        mark_failed(
+                            session, job_id,
+                            error=f"v2 ranking failed: {e}",
+                            terminal=terminal,
+                        )
+                        session.commit()
+                        continue
+
+                    session.merge(CallRanking(
+                        call_id=call_id,
+                        profile_id=profile_id,
+                        scheme="v2",
+                        aggregate_score=v2_result.score,
+                        aggregate_reason=v2_result.reason,
+                        rationale=_v2_summary(v2_result),
+                        model=v2_result.model,
+                        prompt_version=v2_result.prompt_version,
+                        raw_response=v2_result.raw_response or {},
+                        ranked_at=datetime.now(UTC),
+                    ))
+                    _write_v2_criteria_rows(session, call_id, profile_id, v2_result)
+                    mark_done(session, job_id)
+                    session.commit()
+            except Exception as e:  # noqa: BLE001 — worker must not crash the scheduler
+                terminal = (attempts + 1) >= MAX_ATTEMPTS
+                with session_factory() as session:
+                    mark_failed(
+                        session, job_id,
+                        error=f"{type(e).__name__}: {e}",
+                        terminal=terminal,
+                    )
+                    session.commit()
+                _logger.exception(
+                    "ranking.v2_job_unexpected",
+                    extra={"event": "ranking_v2_job_unexpected", "job_id": job_id,
+                           "attempts": attempts + 1, "terminal": terminal},
                 )
-            except (LLMError, ParseV2Error) as e:
-                mark_failed(
-                    session, job_id=job.id,
-                    error=f"v2 ranking failed: {e}",
-                    max_attempts=MAX_ATTEMPTS,
-                )
-                continue
-            session.merge(CallRanking(
-                call_id=job.call_id,
-                profile_id=job.profile_id,
-                scheme="v2",
-                aggregate_score=v2_result.score,
-                aggregate_reason=v2_result.reason,
-                rationale=_v2_summary(v2_result),
-                model=v2_result.model,
-                prompt_version=v2_result.prompt_version,
-                raw_response=v2_result.raw_response or {},
-                ranked_at=datetime.now(UTC),
-            ))
-            _write_v2_criteria_rows(session, job, v2_result)
-            mark_done(session, job_id=job.id)
             continue
         # ... existing v1 path follows
 ```
+
+Note the corrected `mark_failed` signature (positional `job_id`, keyword-only `error=` and `terminal=`) — it does NOT take `max_attempts`. Terminal logic is computed by the caller (`(attempts + 1) >= MAX_ATTEMPTS`), matching the existing v1 path.
 
 Add helpers at module scope:
 
@@ -1605,10 +1876,17 @@ def _v2_summary(r: RankResultV2) -> str:
     )
 
 
-def _write_v2_criteria_rows(session, job, r: RankResultV2) -> None:
+def _write_v2_criteria_rows(session, job_call_id, job_profile_id, r: RankResultV2) -> None:
     """Write sparse CallRankingCriterion rows. Only the criteria actually
     evaluated up to (and including) the failing gate are inserted. Plan A's
-    schema makes the table accept inserts; this function is the only writer."""
+    schema makes the table accept inserts; this function is the only writer.
+
+    Special case: when r.must_include_override is True AND the failing gate
+    was timeline, we DO continue past the timeline row to write the LLM
+    criterion rows, because the LLM was actually called (rank_pair_v2's
+    must_include bypass). Without this exception, must_include calls with
+    near deadlines would lose their LLM criteria rows even though the LLM
+    ran."""
     now = datetime.now(UTC)
 
     # Gate rows — write up to and including the failing one (or all if no gate failed).
@@ -1620,7 +1898,7 @@ def _write_v2_criteria_rows(session, job, r: RankResultV2) -> None:
     for name, gr in gate_results:
         # Use upsert to be re-rank-safe.
         session.merge(CallRankingCriterion(
-            call_id=job.call_id, profile_id=job.profile_id, scheme="v2",
+            call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
             criterion=name,
             rating=gr.status.value,
             rating_expected=None,
@@ -1629,13 +1907,17 @@ def _write_v2_criteria_rows(session, job, r: RankResultV2) -> None:
             ranked_at=now,
         ))
         if gr.status == GateStatus.FAIL:
+            # Continue past timeline FAIL when must_include_override is set —
+            # the LLM was called, so we have parsed criteria to write.
+            if name == "timeline" and r.must_include_override:
+                continue
             return  # stop — subsequent criteria not evaluated
 
     # LLM rows — only if we got that far (parsed is not None).
     if r.parsed is None:
         return
     session.merge(CallRankingCriterion(
-        call_id=job.call_id, profile_id=job.profile_id, scheme="v2",
+        call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
         criterion="topic_fit",
         rating=str(r.parsed.topic_fit_rating),
         rating_expected=r.topic_expected,
@@ -1644,7 +1926,7 @@ def _write_v2_criteria_rows(session, job, r: RankResultV2) -> None:
         ranked_at=now,
     ))
     session.merge(CallRankingCriterion(
-        call_id=job.call_id, profile_id=job.profile_id, scheme="v2",
+        call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
         criterion="eligibility",
         rating=r.parsed.eligibility_rating,
         rating_expected=None,
@@ -1653,7 +1935,7 @@ def _write_v2_criteria_rows(session, job, r: RankResultV2) -> None:
         ranked_at=now,
     ))
     session.merge(CallRankingCriterion(
-        call_id=job.call_id, profile_id=job.profile_id, scheme="v2",
+        call_id=job_call_id, profile_id=job_profile_id, scheme="v2",
         criterion="exclusions",
         rating=r.parsed.exclusions_rating,
         rating_expected=None,
@@ -1675,12 +1957,23 @@ git commit -m "feat: worker runs rank_pair_v2 + writes sparse criteria rows"
 
 ---
 
-## Task 7: Call detail page renders v2 criterion breakdown
+## Task 7: Call detail page renders v2 criterion breakdown + linked-from-context plumbing
 
 **Files:**
 - Modify: `src/call_monitor/web/routes/calls.py` (call detail context: load criteria rows for v2)
 - Modify: `src/call_monitor/web/templates/call_detail.html` (v2 breakdown block)
+- Modify: `src/call_monitor/web/templates/calls_index.html` (preserve `?profile=<id>` in dashboard links)
+- Modify: `src/call_monitor/digest/templates/digest.html.jinja` (preserve `?profile=<section.profile_id>`)
+- Modify: `src/call_monitor/digest/templates/digest.txt.jinja` (preserve `?profile=<section.profile_id>`)
 - Create: `tests/test_web_call_detail_v2.py`
+
+The v2 breakdown is only visible when the route knows the active profile (it's how we filter `CallRanking` by scheme + load `CallRankingCriterion` rows). Three navigation surfaces lead to call detail and ALL of them must carry the profile context:
+
+1. **Dashboard ranked feed** (`calls_index.html`) — currently links plain `/calls/{{ c.id }}`. Add `?profile={{ profile.id }}` when the dashboard is filtered.
+2. **Digest HTML email** — `digest.html.jinja` currently builds `{{ dashboard_url }}calls/{{ e.call_id }}`. Add `?profile={{ section.profile_id }}` (each entry's primary profile per the dedup rule).
+3. **Digest text email** — same change in `digest.txt.jinja`.
+
+Without these link fixes, clicking through from a ranked view loses the profile context and the call detail can't render the v2 breakdown.
 
 - [ ] **Step 1: Failing test `tests/test_web_call_detail_v2.py`**
 
@@ -1849,14 +2142,65 @@ After the existing aggregate display (where `ranking.score` / `ranking.aggregate
 {% endif %}
 ```
 
-- [ ] **Step 5: Verify and commit**
+- [ ] **Step 5: Update navigation surfaces to preserve `?profile=<id>`**
+
+**`src/call_monitor/web/templates/calls_index.html`** — find the line that builds the per-call link in the dashboard's call list. Currently:
+
+```html
+<a href="/calls/{{ c.id }}">{{ c.title }}</a>
+```
+
+Change to:
+
+```html
+<a href="/calls/{{ c.id }}{% if profile %}?profile={{ profile.id }}{% endif %}">{{ c.title }}</a>
+```
+
+(`profile` is the active-profile context object the dashboard handler already passes — verify by reading the existing template + handler.)
+
+**`src/call_monitor/digest/templates/digest.html.jinja`** — find the entry link. Currently:
+
+```jinja
+<a href="{{ dashboard_url }}calls/{{ e.call_id }}" ...>{{ e.title }}</a>
+```
+
+Change to:
+
+```jinja
+<a href="{{ dashboard_url }}calls/{{ e.call_id }}?profile={{ section.profile_id }}" ...>{{ e.title }}</a>
+```
+
+Apply the same change in both the top/must-include block AND the borderline `<details>` block.
+
+**`src/call_monitor/digest/templates/digest.txt.jinja`** — same:
+
+```jinja
+  {{ dashboard_url }}calls/{{ e.call_id }}?profile={{ section.profile_id }}
+```
+
+In both the top/must-include and borderline blocks.
+
+- [ ] **Step 6: Update existing dashboard + digest link tests if any**
+
+`tests/test_web_calls_with_score.py` (Plan 3's dashboard tests) and `tests/test_digest_render.py` (Plan 5's render tests) may include link assertions like `assert "/calls/1" in r.text`. Those still pass under the new format (`/calls/1?profile=...` contains `/calls/1`). Add new positive assertions confirming the profile param IS present:
+
+In `test_digest_render.py`'s `test_html_link_goes_to_in_app_not_external_source` (Plan 5 added it), append:
+
+```python
+    # Profile context preserved so call detail can render v2 criterion breakdown.
+    assert "?profile=1" in html
+```
+
+(`section.profile_id=1` is set by the test fixture.)
+
+- [ ] **Step 7: Verify and commit**
 
 ```bash
-uv run pytest tests/test_web_call_detail_v2.py -v
+uv run pytest tests/test_web_call_detail_v2.py tests/test_web_calls_with_score.py tests/test_digest_render.py -v
 uv run pytest -v
 uv run ruff check .
-git add src/call_monitor/web/routes/calls.py src/call_monitor/web/templates/call_detail.html tests/test_web_call_detail_v2.py
-git commit -m "feat: call detail renders v2 criterion breakdown"
+git add src/call_monitor/web/routes/calls.py src/call_monitor/web/templates/ src/call_monitor/digest/templates/ tests/
+git commit -m "feat: call detail v2 criterion breakdown + ?profile preservation in links"
 ```
 
 ---
