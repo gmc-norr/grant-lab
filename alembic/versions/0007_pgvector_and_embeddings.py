@@ -53,8 +53,22 @@ def upgrade() -> None:
         postgresql_where=sa.text("embedding IS NULL"),
     )
 
+    # Embedding + model are set together. Either both NULL (not yet embedded)
+    # or both non-NULL (embedded with a known model). Prevents orphan vectors
+    # whose model is unknown.
+    op.create_check_constraint(
+        "ck_calls_embedding_model_paired", "calls",
+        "(embedding IS NULL) = (embedding_model IS NULL)",
+    )
+    op.create_check_constraint(
+        "ck_profiles_embedding_model_paired", "profiles",
+        "(embedding IS NULL) = (embedding_model IS NULL)",
+    )
+
 
 def downgrade() -> None:
+    op.drop_constraint("ck_profiles_embedding_model_paired", "profiles", type_="check")
+    op.drop_constraint("ck_calls_embedding_model_paired", "calls", type_="check")
     op.drop_index("ix_profiles_embedding_null", table_name="profiles")
     op.drop_index("ix_calls_embedding_null", table_name="calls")
     op.drop_column("call_rankings", "embed_similarity")
