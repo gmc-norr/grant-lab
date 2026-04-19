@@ -23,9 +23,25 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-def refresh_call_embedding(session, embed_client: OllamaEmbedClient, call_id: int) -> bool:
+def refresh_call_embedding(
+    session,
+    embed_client: OllamaEmbedClient,
+    call_id: int,
+    *,
+    force: bool = False,
+) -> bool:
     """Embed a single call. Returns True on success, False on LLM error
     or missing call. Caller commits the session.
+
+    When `force=True` and the embed call raises LLMError, BOTH `embedding`
+    and `embedding_model` are nulled out. Force mode means "the existing
+    vector is no longer correct" (e.g., the embedded text format changed).
+    Leaving the row with its OLD vector AND current `embedding_model` would
+    make it invisible to the daily refresh tick (which selects on
+    NULL-or-mismatched-model) — silent permanent staleness. Nulling lets
+    the daily tick retry tomorrow; meanwhile the embedding gate sees None
+    → UNKNOWN → falls back to the LLM, which is safer than ranking against
+    a known-stale vector.
     """
     call = session.get(Call, call_id)
     if call is None:
@@ -42,15 +58,25 @@ def refresh_call_embedding(session, embed_client: OllamaEmbedClient, call_id: in
             extra={
                 "event": "embedding_compute_failed",
                 "kind": "call", "id": call_id, "error": str(e),
+                "force": force,
             },
         )
+        if force:
+            call.embedding = None
+            call.embedding_model = None
         return False
     call.embedding = vec
     call.embedding_model = embed_client.model
     return True
 
 
-def refresh_profile_embedding(session, embed_client: OllamaEmbedClient, profile_id: int) -> bool:
+def refresh_profile_embedding(
+    session,
+    embed_client: OllamaEmbedClient,
+    profile_id: int,
+    *,
+    force: bool = False,
+) -> bool:
     """Embed a single profile (description only). Returns True on success.
 
     Codex M2 fix: when the description is blank or whitespace, NULL out
@@ -58,6 +84,10 @@ def refresh_profile_embedding(session, embed_client: OllamaEmbedClient, profile_
     used to have description='Cancer research' but was edited to '' would
     keep its stale 'cancer' vector and be silently gated against future
     on-topic calls.
+
+    Same `force=True` semantics as refresh_call_embedding: on LLMError
+    in force mode, NULL both columns so the daily tick can re-pick the
+    row up via its NULL filter. See that helper for the full rationale.
     """
     profile = session.get(Profile, profile_id)
     if profile is None:
@@ -82,8 +112,12 @@ def refresh_profile_embedding(session, embed_client: OllamaEmbedClient, profile_
             extra={
                 "event": "embedding_compute_failed",
                 "kind": "profile", "id": profile_id, "error": str(e),
+                "force": force,
             },
         )
+        if force:
+            profile.embedding = None
+            profile.embedding_model = None
         return False
     profile.embedding = vec
     profile.embedding_model = embed_client.model
@@ -142,7 +176,7 @@ def refresh_missing_embeddings_tick(
         call_ids = session.execute(call_q).scalars().all()
     for cid in call_ids:
         with session_factory() as session:
-            ok = refresh_call_embedding(session, embed_client, cid)
+            ok = refresh_call_embedding(session, embed_client, cid, force=force)
             session.commit()
         if ok:
             summary["calls_embedded"] += 1
@@ -166,7 +200,7 @@ def refresh_missing_embeddings_tick(
         profile_ids = session.execute(profile_q).scalars().all()
     for pid in profile_ids:
         with session_factory() as session:
-            ok = refresh_profile_embedding(session, embed_client, pid)
+            ok = refresh_profile_embedding(session, embed_client, pid, force=force)
             session.commit()
         if ok:
             summary["profiles_embedded"] += 1

@@ -45,19 +45,34 @@ def _digest_panel_context(session) -> dict:
 def _embedding_coverage_context(session, *, current_model: str) -> dict:
     """Counts of Calls/Profiles missing embeddings or embedded against an
     older model. Lets ops see at a glance when the embedding pre-gate is
-    silently degrading to UNKNOWN (which masks topic-fit signal)."""
+    silently degrading to UNKNOWN (which masks topic-fit signal).
+
+    Mirrors the refresh-missing tick's blank-text filter. The tick (see
+    refresh_missing_embeddings_tick) explicitly excludes rows with empty
+    title/description because there's nothing to embed — counting them
+    here would surface permanent false-stale and train operators to
+    ignore the badge.
+    """
+    non_blank_call = func.length(func.trim(Call.title)) > 0
+    non_blank_profile = func.length(func.trim(Profile.description)) > 0
     call_stale = session.execute(
         select(func.count(Call.id)).where(
-            or_(Call.embedding.is_(None), Call.embedding_model != current_model)
+            non_blank_call,
+            or_(Call.embedding.is_(None), Call.embedding_model != current_model),
         )
     ).scalar_one()
-    call_total = session.execute(select(func.count(Call.id))).scalar_one()
+    call_total = session.execute(
+        select(func.count(Call.id)).where(non_blank_call)
+    ).scalar_one()
     profile_stale = session.execute(
         select(func.count(Profile.id)).where(
-            or_(Profile.embedding.is_(None), Profile.embedding_model != current_model)
+            non_blank_profile,
+            or_(Profile.embedding.is_(None), Profile.embedding_model != current_model),
         )
     ).scalar_one()
-    profile_total = session.execute(select(func.count(Profile.id))).scalar_one()
+    profile_total = session.execute(
+        select(func.count(Profile.id)).where(non_blank_profile)
+    ).scalar_one()
     return {
         "embedding_coverage": {
             "call_stale": call_stale,

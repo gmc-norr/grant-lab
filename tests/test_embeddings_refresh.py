@@ -262,6 +262,169 @@ def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_sess
         assert list(s.get(Profile, pid).embedding) == [0.9] * 1024
 
 
+def test_refresh_call_embedding_clears_columns_on_force_mode_failure(pg_session_factory):
+    """Codex regression: in --force mode, an LLMError must NULL both
+    embedding columns so the daily refresh tick can see the row needs
+    a retry. Without this, the row keeps its OLD vector AND its current
+    model name — invisible to the daily tick's NULL/mismatched filter
+    and silently scoring against a known-stale vector."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="ForceFailRow")
+        s.flush()
+        # Pre-seed an OLD-but-current-model embedding (simulates the state
+        # right before a --force run that fails).
+        s.get(Call, cid).embedding = [0.5] * 1024
+        s.get(Call, cid).embedding_model = "bge-m3"
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    client.embed.side_effect = LLMError("ollama down")
+
+    with pg_session_factory() as s:
+        ok = refresh_call_embedding(s, client, cid, force=True)
+        s.commit()
+    assert ok is False
+
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        # Both columns nulled — daily tick can re-select on embedding IS NULL
+        assert c.embedding is None
+        assert c.embedding_model is None
+
+
+def test_refresh_call_embedding_default_mode_failure_preserves_columns(pg_session_factory):
+    """Default (non-force) behavior unchanged: on LLMError, the row's
+    existing columns are LEFT untouched. (In default mode, the row's
+    prior state was already either NULL or mismatched-model — the daily
+    tick will retry regardless. Preserving means 'no progress', not
+    'overwrite with NULL'.)"""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="DefaultFailRow")
+        s.flush()
+        s.get(Call, cid).embedding = [0.5] * 1024
+        s.get(Call, cid).embedding_model = "bge-m3"
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    client.embed.side_effect = LLMError("ollama down")
+
+    with pg_session_factory() as s:
+        ok = refresh_call_embedding(s, client, cid)  # default force=False
+        s.commit()
+    assert ok is False
+
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        # Existing values preserved
+        assert list(c.embedding) == [0.5] * 1024
+        assert c.embedding_model == "bge-m3"
+
+
+def test_refresh_profile_embedding_clears_columns_on_force_mode_failure(pg_session_factory):
+    """Mirror of the call-side test for profiles."""
+    with pg_session_factory() as s:
+        pid = _seed_profile(s, name="ForceFailProf")
+        s.flush()
+        s.get(Profile, pid).embedding = [0.5] * 1024
+        s.get(Profile, pid).embedding_model = "bge-m3"
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    client.embed.side_effect = LLMError("ollama down")
+
+    with pg_session_factory() as s:
+        ok = refresh_profile_embedding(s, client, pid, force=True)
+        s.commit()
+    assert ok is False
+
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        assert p.embedding is None
+        assert p.embedding_model is None
+
+
+def test_refresh_profile_embedding_default_mode_failure_preserves_columns(pg_session_factory):
+    """Mirror of the call-side default-mode test."""
+    with pg_session_factory() as s:
+        pid = _seed_profile(s, name="DefaultFailProf")
+        s.flush()
+        s.get(Profile, pid).embedding = [0.5] * 1024
+        s.get(Profile, pid).embedding_model = "bge-m3"
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    client.embed.side_effect = LLMError("ollama down")
+
+    with pg_session_factory() as s:
+        ok = refresh_profile_embedding(s, client, pid)  # default force=False
+        s.commit()
+    assert ok is False
+
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        assert list(p.embedding) == [0.5] * 1024
+        assert p.embedding_model == "bge-m3"
+
+
+def test_refresh_missing_tick_force_propagates_to_per_row_helpers(pg_session_factory):
+    """When the tick is invoked with force=True, per-row LLM failures must
+    clear columns; the daily tick (force=False) on the next pass should
+    then re-select the cleared rows via its NULL filter and succeed once
+    Ollama recovers."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="ForceTickFail")
+        s.flush()
+        s.get(Call, cid).embedding = [0.5] * 1024
+        s.get(Call, cid).embedding_model = "bge-m3"
+        pid = _seed_profile(s, name="ForceTickFailProf")
+        s.flush()
+        s.get(Profile, pid).embedding = [0.5] * 1024
+        s.get(Profile, pid).embedding_model = "bge-m3"
+        s.commit()
+
+    # First pass — force=True with a failing client.
+    failing = MagicMock()
+    failing.model = "bge-m3"
+    failing.embed.side_effect = LLMError("ollama transient")
+
+    summary = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory,
+        embed_client=failing,
+        batch_size=200,
+        force=True,
+    )
+    assert summary["calls_failed"] == 1
+    assert summary["profiles_failed"] == 1
+
+    # Both rows should now have cleared columns
+    with pg_session_factory() as s:
+        assert s.get(Call, cid).embedding is None
+        assert s.get(Call, cid).embedding_model is None
+        assert s.get(Profile, pid).embedding is None
+        assert s.get(Profile, pid).embedding_model is None
+
+    # Second pass — default (force=False) with a working client.
+    # The cleared rows are picked up via the NULL filter.
+    working = _fake_client(vec=[0.7] * 1024)
+    summary2 = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory,
+        embed_client=working,
+        batch_size=200,
+    )
+    assert summary2["calls_embedded"] == 1
+    assert summary2["profiles_embedded"] == 1
+
+    with pg_session_factory() as s:
+        assert list(s.get(Call, cid).embedding) == [0.7] * 1024
+        assert s.get(Call, cid).embedding_model == "bge-m3"
+        assert list(s.get(Profile, pid).embedding) == [0.7] * 1024
+        assert s.get(Profile, pid).embedding_model == "bge-m3"
+
+
 def test_refresh_profile_embedding_clears_when_description_blank(pg_session_factory):
     """Codex M2 regression: clearing description removes the stale embedding."""
     with pg_session_factory() as s:
