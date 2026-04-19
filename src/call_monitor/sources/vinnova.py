@@ -32,25 +32,37 @@ def _parse_iso_stockholm(s: str | None) -> datetime | None:
 
 
 def _build_summary(item: dict) -> str | None:
-    """Compose a richer ranker-facing summary from the round payload.
+    """Compose a brief summary from `Beskrivning` (+ English blurb if distinct).
 
-    Vinnova's `Beskrivning` is title-length (40-70 chars); the actual
-    substantive prose lives in `WebTextLista[*].TextSv`. We concatenate
-    both so the LLM has something to discriminate on beyond the title.
+    Vinnova's `Beskrivning` is title-length (40-70 chars). The substantive
+    body lives in `WebTextLista[*].TextSv` and is now routed to `full_text`
+    by `_build_full_text` — keeping `summary` lightweight for list views and
+    leaving full body text for the ranker / detail page.
     """
     parts: list[str] = []
     beskr = item.get("Beskrivning")
     if isinstance(beskr, str) and beskr.strip():
         parts.append(beskr.strip())
+    eng = item.get("BeskrivningEngelska")
+    if isinstance(eng, str) and eng.strip() and eng.strip() != (beskr or "").strip():
+        parts.append(eng.strip())
+    return "\n\n".join(parts) if parts else None
+
+
+def _build_full_text(item: dict) -> str | None:
+    """Join `WebTextLista[*].TextSv` paragraphs into the call body.
+
+    Vinnova's API returns the full call body inline, so no scraping is
+    required — we just concatenate the Swedish paragraphs in order. Returns
+    None if the list is missing, empty, or contains no usable text.
+    """
+    parts: list[str] = []
     for entry in item.get("WebTextLista") or []:
         if not isinstance(entry, dict):
             continue
         text = entry.get("TextSv")
         if isinstance(text, str) and text.strip():
             parts.append(text.strip())
-    eng = item.get("BeskrivningEngelska")
-    if isinstance(eng, str) and eng.strip() and eng.strip() != (beskr or "").strip():
-        parts.append(eng.strip())
     return "\n\n".join(parts) if parts else None
 
 
@@ -61,6 +73,10 @@ class VinnovaAdapter:
     Stage 2: ``GET /api/ansokningsomgangar/{Dnr}`` — one round per call.
 
     Both endpoints are unauthenticated (no API key required).
+
+    The API returns the full call body inline in ``WebTextLista[*].TextSv``
+    on the round endpoint; that prose is populated into ``full_text``. No
+    HTML scraping or PDF extraction is needed for this source.
     """
 
     slug = "vinnova"
@@ -200,6 +216,7 @@ class VinnovaAdapter:
             return None
 
         summary = _build_summary(item)
+        full_text = _build_full_text(item)
         published_at = _parse_iso_stockholm(item.get("Oppningsdatum"))
 
         return NormalizedCall(
@@ -207,6 +224,7 @@ class VinnovaAdapter:
             url=url,
             title=str(title),
             summary=summary,
+            full_text=full_text,
             deadline=deadline,
             budget_min=None,
             budget_max=None,
