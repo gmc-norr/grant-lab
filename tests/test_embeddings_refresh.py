@@ -205,6 +205,63 @@ def test_refresh_missing_tick_skips_blank_description_profiles(pg_session_factor
     assert summary["profiles_failed"] == 0
 
 
+def test_refresh_missing_tick_force_true_re_embeds_already_embedded_rows(pg_session_factory):
+    """Plan F Task 7: force=True drops the NULL/mismatch filter and re-embeds
+    every row. Used after deploys that change the text being embedded
+    (e.g., Plan F's full_text rollout)."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="ForceRe1")
+        s.flush()
+        # Already embedded with the CURRENT model — would be skipped by default
+        s.get(Call, cid).embedding = [0.9] * 1024
+        s.get(Call, cid).embedding_model = "bge-m3"
+        pid = _seed_profile(s, name="ForceRe2")
+        s.flush()
+        s.get(Profile, pid).embedding = [0.9] * 1024
+        s.get(Profile, pid).embedding_model = "bge-m3"
+        s.commit()
+
+    client = _fake_client(vec=[0.1] * 1024)
+    summary = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory, embed_client=client,
+        batch_size=200, force=True,
+    )
+    assert summary["calls_embedded"] == 1
+    assert summary["profiles_embedded"] == 1
+
+    with pg_session_factory() as s:
+        # Vectors were overwritten with the new (0.1) values
+        assert list(s.get(Call, cid).embedding) == [0.1] * 1024
+        assert list(s.get(Profile, pid).embedding) == [0.1] * 1024
+
+
+def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_session_factory):
+    """Regression guard: default behavior (force=False) is byte-identical to
+    today — already-embedded same-model rows are NOT re-embedded."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="ForceFalse1")
+        s.flush()
+        s.get(Call, cid).embedding = [0.9] * 1024
+        s.get(Call, cid).embedding_model = "bge-m3"
+        pid = _seed_profile(s, name="ForceFalse2")
+        s.flush()
+        s.get(Profile, pid).embedding = [0.9] * 1024
+        s.get(Profile, pid).embedding_model = "bge-m3"
+        s.commit()
+
+    client = _fake_client(vec=[0.1] * 1024)
+    summary = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+    )
+    assert summary["calls_embedded"] == 0
+    assert summary["profiles_embedded"] == 0
+
+    with pg_session_factory() as s:
+        # Vectors untouched
+        assert list(s.get(Call, cid).embedding) == [0.9] * 1024
+        assert list(s.get(Profile, pid).embedding) == [0.9] * 1024
+
+
 def test_refresh_profile_embedding_clears_when_description_blank(pg_session_factory):
     """Codex M2 regression: clearing description removes the stale embedding."""
     with pg_session_factory() as s:

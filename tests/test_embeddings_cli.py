@@ -119,6 +119,74 @@ def test_cli_backfill_terminates_when_only_blank_description_profiles_remain(
     assert exit_code == 0
 
 
+def test_cli_backfill_force_flag_re_embeds_already_embedded_rows(pg_session_factory):
+    """Plan F Task 7: --force flag passes through to refresh tick and re-embeds
+    rows even when they're already embedded under the current model."""
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id, external_id="force-cli-1", url="https://x/f1",
+            title="ForceCLI", summary="x",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        # Pre-embed under the current model — default would skip
+        c.embedding = [0.9] * 1024
+        c.embedding_model = "bge-m3"
+        s.commit()
+        cid = c.id
+
+    fake_client = MagicMock()
+    fake_client.model = "bge-m3"
+    fake_client.embed.return_value = [0.1] * 1024
+
+    with patch("call_monitor.embeddings.cli._build_embed_client", return_value=fake_client):
+        exit_code = backfill_main(
+            argv=["backfill", "--force"],
+            session_factory=pg_session_factory,
+        )
+    assert exit_code == 0
+    # embed was called for the row (would have been 0 without --force)
+    assert fake_client.embed.call_count >= 1
+    with pg_session_factory() as s:
+        # Vector was overwritten
+        assert list(s.get(Call, cid).embedding) == [0.1] * 1024
+
+
+def test_cli_backfill_force_terminates_with_small_batch_size(pg_session_factory):
+    """Plan F Task 7: --force must NOT infinite-loop when batch_size < total rows.
+    Cursor-based pagination advances past each batch."""
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        for i in range(5):
+            c = Call(
+                source_id=src.id, external_id=f"force-page-{i}", url=f"https://x/{i}",
+                title=f"FP{i}", summary="x",
+                published_at=datetime.now(UTC),
+            )
+            s.add(c)
+            s.flush()
+            # All pre-embedded under current model — without cursor pagination,
+            # --force would infinite-loop on the first batch.
+            c.embedding = [0.9] * 1024
+            c.embedding_model = "bge-m3"
+        s.commit()
+
+    fake_client = MagicMock()
+    fake_client.model = "bge-m3"
+    fake_client.embed.return_value = [0.1] * 1024
+
+    with patch("call_monitor.embeddings.cli._build_embed_client", return_value=fake_client):
+        exit_code = backfill_main(
+            argv=["backfill", "--force", "--batch-size", "2"],
+            session_factory=pg_session_factory,
+        )
+    assert exit_code == 0
+    # Each row re-embedded exactly once
+    assert fake_client.embed.call_count == 5
+
+
 def test_cli_backfill_returns_nonzero_on_persistent_failures(pg_session_factory):
     """If any row fails to embed (LLM down etc), exit 1 so deploy scripts catch it."""
     from call_monitor.ranking.ollama_client import LLMError
