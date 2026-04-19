@@ -58,6 +58,10 @@ def upsert_call(
     update_cols = {
         c: stmt.excluded[c] for c in payload if c not in {"source_id", "external_id"}
     }
+    # Preserve existing full_text on transient scrape failures (None in new payload).
+    # Same intent as worker.py's embed_similarity preservation: don't clobber good
+    # diagnostic/content data with NULL just because one fetch went bad.
+    update_cols["full_text"] = func.coalesce(stmt.excluded.full_text, Call.full_text)
     update_cols["fetched_at"] = func.now()  # refresh "last seen" on every encounter
     stmt = stmt.on_conflict_do_update(
         constraint="uq_calls_source_external",
