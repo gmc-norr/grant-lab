@@ -33,10 +33,22 @@ def _mock_transport(status: int = 200, body=None, raise_exc=None):
     return httpx.MockTransport(handler)
 
 
+def _mock_html_transport(status: int = 200, html: str = ""):
+    """Mock transport for the topic-detail page scrape (full_text).
+
+    Default returns a 404 so existing tests stay hermetic without caring
+    about full_text. Pass html=... to assert extraction.
+    """
+    def handler(request):
+        return httpx.Response(status, text=html)
+    return httpx.MockTransport(handler)
+
+
 def test_fetch_yields_normalized_calls():
     adapter = EUPortalAdapter(
         base_url="https://ec.europa.eu",
         transport=_mock_transport(),
+        extraction_transport=_mock_html_transport(status=404),
     )
     out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
     assert len(out) == 1
@@ -60,7 +72,9 @@ def test_fetch_skips_records_missing_required_fields():
         ]
     }
     adapter = EUPortalAdapter(
-        base_url="https://x", transport=_mock_transport(body=body)
+        base_url="https://x",
+        transport=_mock_transport(body=body),
+        extraction_transport=_mock_html_transport(status=404),
     )
     out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
     assert [c.external_id for c in out] == ["OK-1"]
@@ -89,7 +103,9 @@ def test_fetch_skips_records_with_unsafe_url_scheme():
         ]
     }
     adapter = EUPortalAdapter(
-        base_url="https://x", transport=_mock_transport(body=body)
+        base_url="https://x",
+        transport=_mock_transport(body=body),
+        extraction_transport=_mock_html_transport(status=404),
     )
     out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
     assert [c.external_id for c in out] == ["OK-1"]
@@ -110,3 +126,54 @@ def test_network_failure_raises_adapter_error():
     )
     with pytest.raises(AdapterError):
         list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+
+
+def test_eu_portal_adapter_populates_full_text():
+    """Plan F: the topic-detail HTML page is scraped for the call body and
+    its main content lands in `full_text`."""
+    html = """
+    <html>
+      <head><title>Topic detail</title></head>
+      <body>
+        <nav>nav junk we should not see</nav>
+        <main>
+          <article>
+            <h1>AI for early disease detection</h1>
+            <p>This topic supports the development of AI-driven methods
+            for detecting diseases at an early stage in clinical care.</p>
+            <p>Eligible projects must demonstrate translational potential
+            and a clear plan for hospital-scale validation.</p>
+          </article>
+        </main>
+        <footer>footer junk we should not see</footer>
+      </body>
+    </html>
+    """
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(),
+        extraction_transport=_mock_html_transport(status=200, html=html),
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert len(out) == 1
+    nc = out[0]
+    assert nc.full_text is not None
+    assert "AI-driven methods" in nc.full_text
+    assert "translational potential" in nc.full_text
+
+
+def test_eu_portal_adapter_full_text_none_on_failure():
+    """If the topic-detail page returns 404, full_text is None and the
+    NormalizedCall is still produced — ranking can fall back to summary."""
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(),
+        extraction_transport=_mock_html_transport(status=404),
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert len(out) == 1
+    nc = out[0]
+    assert nc.full_text is None
+    # The rest of the normalized record is unaffected.
+    assert nc.external_id == "HORIZON-HLTH-2026-DISEASE-03-15"
+    assert nc.summary is not None

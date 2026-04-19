@@ -83,3 +83,60 @@ def test_upsert_is_per_source(pg_session_factory):
         s.commit()
         n = s.execute(select(Call).where(Call.external_id == "X-1")).scalars().all()
     assert len(n) == 2
+
+
+def test_upsert_preserves_full_text_when_new_payload_is_none(pg_session_factory):
+    """Transient scrape failure must not erase previously-captured body text.
+
+    Adapters may return full_text=None on a one-off detail-page fetch error.
+    The upsert COALESCEs the new value with the existing column so good
+    content survives a bad fetch — same intent as worker.py's
+    embed_similarity preservation.
+    """
+    with pg_session_factory() as s:
+        sid = _vinnova_id(s)
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(
+                external_id="V-1", url="u", title="T", full_text="rich body"
+            ),
+        )
+        s.commit()
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text=None),
+        )
+        s.commit()
+        row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()
+    assert row.full_text == "rich body"
+
+
+def test_upsert_overwrites_full_text_when_new_payload_is_non_none(pg_session_factory):
+    """A successful re-scrape with new body content must replace the old one.
+
+    Preservation only kicks in for None (transient failure). Real updates
+    still overwrite — otherwise the column would freeze at first capture
+    and never reflect upstream edits.
+    """
+    with pg_session_factory() as s:
+        sid = _vinnova_id(s)
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(
+                external_id="V-1", url="u", title="T", full_text="OLD body"
+            ),
+        )
+        s.commit()
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(
+                external_id="V-1", url="u", title="T", full_text="NEW body"
+            ),
+        )
+        s.commit()
+        row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()
+    assert row.full_text == "NEW body"

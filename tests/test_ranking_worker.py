@@ -91,7 +91,7 @@ def test_worker_writes_call_ranking_with_aggregate_and_reason(pg_session_factory
     # Topic 4 (logprob expected ≈ 4.0 with strong probability) × 20 ≈ 80
     assert 75 <= r.aggregate_score <= 85
     assert r.aggregate_reason is None
-    assert r.prompt_version == "v2.0"
+    assert r.prompt_version == "v3.0"
 
 
 def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):
@@ -304,7 +304,7 @@ def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkey
         ),
         parsed=parsed,
         must_include_override=False,
-        model="m", prompt_version="v2.0", raw_response={},
+        model="m", prompt_version="v3.0", raw_response={},
         embed_similarity=0.45,
     )
 
@@ -342,7 +342,7 @@ def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, mo
         ),
         parsed=None,
         must_include_override=False,
-        model="", prompt_version="v2.0", raw_response={},
+        model="", prompt_version="v3.0", raw_response={},
         embed_similarity=0.18,
     )
 
@@ -377,7 +377,7 @@ def test_worker_summary_renders_embedding_fail_reason():
         ),
         parsed=None,
         must_include_override=False,
-        model="m", prompt_version="v2.0", raw_response={},
+        model="m", prompt_version="v3.0", raw_response={},
         embed_similarity=0.18,
     )
     summary = _rank_summary(r)
@@ -456,7 +456,7 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
         ),
         parsed=None,
         must_include_override=False,
-        model="", prompt_version="v2.0", raw_response={},
+        model="", prompt_version="v3.0", raw_response={},
         embed_similarity=0.18,
     )
 
@@ -527,7 +527,7 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
         ),
         parsed=parsed,
         must_include_override=False,
-        model="m", prompt_version="v2.0", raw_response={},
+        model="m", prompt_version="v3.0", raw_response={},
         embed_similarity=None,
     )
 

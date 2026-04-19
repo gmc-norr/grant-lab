@@ -187,40 +187,6 @@ def test_https_required():
         VinnovaAdapter(base_url="http://insecure.example/")
 
 
-def test_summary_includes_webtextlista_and_english_blurb():
-    """The ranker needs more signal than Vinnova's 40-char Beskrivning.
-    WebTextLista carries the real prose; BeskrivningEngelska is bonus."""
-    routes = {
-        "/api/utlysningar/2026-01-01": [
-            {"Diarienummer": "P", "Titel": "T",
-             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "RICH"}]},
-        ],
-        "/api/ansokningsomgangar/RICH": [{
-            "Diarienummer": "RICH", "Titel": "Title",
-            "Beskrivning": "Short tagline.",
-            "BeskrivningEngelska": "Short tagline (en).",
-            "WebTextLista": [
-                {"TextID": 1, "TextSv": "Detaljerad svensk beskrivning av projektet."},
-                {"TextID": 2, "TextSv": "Mer detaljer om finansieringen."},
-            ],
-            "Oppningsdatum": "2026-04-01T00:00:00",
-            "Stangningsdatum": "2099-12-31T14:00:00",
-            "LankLista": [{"URL": "https://www.vinnova.se/e/rich"}],
-            "Publik": 1, "Webbsida": 1,
-        }],
-    }
-    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC)
-    ))
-    assert len(out) == 1
-    summary = out[0].summary
-    assert summary is not None
-    assert "Short tagline." in summary
-    assert "Detaljerad svensk beskrivning av projektet." in summary
-    assert "Mer detaljer om finansieringen." in summary
-    assert "Short tagline (en)." in summary
-
-
 def test_summary_falls_back_to_just_beskrivning_when_no_webtext():
     """Round with only the short Beskrivning should still produce a summary."""
     routes = {
@@ -241,3 +207,70 @@ def test_summary_falls_back_to_just_beskrivning_when_no_webtext():
         since=datetime(2026, 1, 1, tzinfo=UTC)
     ))
     assert out[0].summary == "Just a tagline."
+
+
+def test_vinnova_adapter_splits_summary_and_full_text():
+    """After Plan F: Beskrivning -> summary; WebTextLista[*].TextSv -> full_text."""
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {"Diarienummer": "P", "Titel": "T",
+             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "TEST-123"}]},
+        ],
+        "/api/ansokningsomgangar/TEST-123": [{
+            "Diarienummer": "TEST-123",
+            "Titel": "Test programme",
+            "Beskrivning": "A brief description.",
+            "BeskrivningEngelska": "A brief description in English.",
+            "WebTextLista": [
+                {"TextSv": "First substantive paragraph about the call."},
+                {"TextSv": "Second paragraph with more detail and eligibility."},
+            ],
+            "Stangningsdatum": "2099-12-31T14:00:00",
+            "Oppningsdatum": "2026-04-01T00:00:00",
+            "Publik": 1, "Webbsida": 1,
+            "LankLista": [{"URL": "https://vinnova.se/test"}],
+        }],
+    }
+    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC)
+    ))
+    assert len(out) == 1
+    nc = out[0]
+
+    assert nc.summary is not None
+    assert "A brief description." in nc.summary
+    # Body lives in full_text now, not summary.
+    assert "First substantive paragraph" not in nc.summary
+    # English blurb still rides along in summary (distinct from Beskrivning).
+    assert "A brief description in English." in nc.summary
+
+    assert nc.full_text is not None
+    assert "First substantive paragraph about the call." in nc.full_text
+    assert "Second paragraph with more detail" in nc.full_text
+
+
+def test_vinnova_adapter_full_text_none_when_no_webtextlista():
+    """If the source provides no WebTextLista, full_text is None."""
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {"Diarienummer": "P", "Titel": "T",
+             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "TEST-456"}]},
+        ],
+        "/api/ansokningsomgangar/TEST-456": [{
+            "Diarienummer": "TEST-456",
+            "Titel": "Test programme",
+            "Beskrivning": "Just a description.",
+            "WebTextLista": [],
+            "Stangningsdatum": "2099-12-31T14:00:00",
+            "Oppningsdatum": "2026-04-01T00:00:00",
+            "Publik": 1, "Webbsida": 1,
+            "LankLista": [{"URL": "https://vinnova.se/test"}],
+        }],
+    }
+    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC)
+    ))
+    assert len(out) == 1
+    nc = out[0]
+    assert nc.summary == "Just a description."
+    assert nc.full_text is None

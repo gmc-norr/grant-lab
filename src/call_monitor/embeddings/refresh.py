@@ -95,6 +95,9 @@ def refresh_missing_embeddings_tick(
     session_factory,
     embed_client: OllamaEmbedClient,
     batch_size: int = 200,
+    force: bool = False,
+    after_call_id: int = 0,
+    after_profile_id: int = 0,
 ) -> dict[str, int]:
     """Daily tick: scan for NULL-embedding rows AND rows whose embedding_model
     differs from the currently-configured model — embed both. Per-row
@@ -105,18 +108,38 @@ def refresh_missing_embeddings_tick(
     means a model swap (env change of EMBEDDING_MODEL) is recovered by the
     daily tick within at most 24 h. Operators can run the backfill CLI
     (`python -m call_monitor.embeddings.cli backfill`) for immediate refresh.
+
+    Plan F Task 7: when `force=True`, the NULL/mismatch filter is dropped and
+    every row is re-embedded. Used after deploys that change the text being
+    embedded (e.g., Plan F's full_text rollout). The blank-title and
+    blank-description guards are KEPT under force=True — otherwise rows with
+    no embeddable text would infinite-loop the backfill (select NULL → no-op
+    early-return → still NULL → re-select).
+
+    `after_call_id` / `after_profile_id` are id-cursors used by the backfill
+    CLI to walk forward through the table when force=True (without them, the
+    same rows would be re-selected every iteration). The summary includes
+    `max_call_id` / `max_profile_id` so the caller can advance the cursor.
+    Default 0 = start from the beginning (matches the daily-tick behavior).
     """
     current_model = embed_client.model
     summary = {"calls_embedded": 0, "calls_failed": 0,
-               "profiles_embedded": 0, "profiles_failed": 0}
+               "profiles_embedded": 0, "profiles_failed": 0,
+               "max_call_id": after_call_id, "max_profile_id": after_profile_id}
 
     with session_factory() as session:
-        call_ids = session.execute(
-            select(Call.id)
-            .where(or_(Call.embedding.is_(None), Call.embedding_model != current_model))
+        call_q = select(Call.id)
+        if not force:
+            call_q = call_q.where(
+                or_(Call.embedding.is_(None), Call.embedding_model != current_model)
+            )
+        call_q = (
+            call_q.where(Call.id > after_call_id)
             .where(func.length(func.trim(Call.title)) > 0)
+            .order_by(Call.id)
             .limit(batch_size)
-        ).scalars().all()
+        )
+        call_ids = session.execute(call_q).scalars().all()
     for cid in call_ids:
         with session_factory() as session:
             ok = refresh_call_embedding(session, embed_client, cid)
@@ -125,14 +148,22 @@ def refresh_missing_embeddings_tick(
             summary["calls_embedded"] += 1
         else:
             summary["calls_failed"] += 1
+    if call_ids:
+        summary["max_call_id"] = max(call_ids)
 
     with session_factory() as session:
-        profile_ids = session.execute(
-            select(Profile.id)
-            .where(or_(Profile.embedding.is_(None), Profile.embedding_model != current_model))
+        profile_q = select(Profile.id)
+        if not force:
+            profile_q = profile_q.where(
+                or_(Profile.embedding.is_(None), Profile.embedding_model != current_model)
+            )
+        profile_q = (
+            profile_q.where(Profile.id > after_profile_id)
             .where(func.length(func.trim(Profile.description)) > 0)
+            .order_by(Profile.id)
             .limit(batch_size)
-        ).scalars().all()
+        )
+        profile_ids = session.execute(profile_q).scalars().all()
     for pid in profile_ids:
         with session_factory() as session:
             ok = refresh_profile_embedding(session, embed_client, pid)
@@ -141,6 +172,8 @@ def refresh_missing_embeddings_tick(
             summary["profiles_embedded"] += 1
         else:
             summary["profiles_failed"] += 1
+    if profile_ids:
+        summary["max_profile_id"] = max(profile_ids)
 
     _logger.info(
         "embeddings.refresh_missing_tick.summary",

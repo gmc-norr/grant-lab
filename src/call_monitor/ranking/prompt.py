@@ -7,8 +7,8 @@ from dataclasses import dataclass
 # Bump only when the prompt structure changes in a way that warrants
 # re-ranking. Stored on every CallRanking row so historical scores stay
 # attributable to the regime that produced them.
-PROMPT_VERSION = "v2.0"
-CALL_TEXT_LIMIT = 4000
+PROMPT_VERSION = "v3.0"
+CALL_TEXT_LIMIT = 16000
 
 
 class ParseError(Exception):
@@ -79,10 +79,11 @@ def build_messages(*, profile, call) -> list[dict]:
     Ollama prefix cache is reused across calls scored against the same
     profile.
 
-    Text source falls back: summary → full_text. Without the fallback,
-    calls with only full_text (e.g. PDF-extracted with no summary field)
-    would be sent to the LLM with just a title — exactly the
-    eligibility/exclusion text the rubric is supposed to surface better.
+    Plan F: summary AND full_text are concatenated (when both present)
+    so the LLM sees both signals, then truncated to ``CALL_TEXT_LIMIT``
+    as a whole. The OR-pick fallback predates Plan F, when full_text was
+    rarely populated; with full-text ingestion live, OR-picking would
+    silently drop full_text whenever summary is non-empty.
     """
     structured = profile.structured or {}
     sys = _SYSTEM_TEMPLATE.format(
@@ -92,11 +93,13 @@ def build_messages(*, profile, call) -> list[dict]:
         areas=", ".join(structured.get("areas") or []) or "(none)",
         hard_exclusions=", ".join(structured.get("hard_exclusions") or []) or "(none)",
     )
-    text_source = (
-        call.summary
-        or getattr(call, "full_text", None)
-        or ""
-    )
+    parts: list[str] = []
+    if call.summary:
+        parts.append(call.summary)
+    full_text = getattr(call, "full_text", None)
+    if full_text:
+        parts.append(full_text)
+    text_source = "\n\n".join(parts) if parts else ""
     if len(text_source) > CALL_TEXT_LIMIT:
         text_source = text_source[:CALL_TEXT_LIMIT]
     user = _USER_TEMPLATE.format(

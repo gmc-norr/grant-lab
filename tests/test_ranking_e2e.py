@@ -99,7 +99,7 @@ def test_e2e_pipeline(pg_session_factory):
     # Topic 5 (logprob expected ~5.0) × 20 = 100, no penalty.
     assert ranking.aggregate_score >= 99
     assert ranking.aggregate_reason is None
-    assert ranking.prompt_version == "v2.0"
+    assert ranking.prompt_version == "v3.0"
 
     by_name = {c.criterion: c for c in criteria}
     assert set(by_name.keys()) >= {"topic_fit", "eligibility", "exclusions", "timeline"}

@@ -11,8 +11,9 @@ from call_monitor.ranking.prompt import (
 )
 
 
-def test_prompt_version_constant():
-    assert PROMPT_VERSION == "v2.0"
+def test_prompt_version_bumped_to_v3():
+    """The prompt's input shape changed — bump PROMPT_VERSION for audit/A-B."""
+    assert PROMPT_VERSION == "v3.0"
 
 
 def test_build_messages_includes_profile_and_call_blocks():
@@ -48,39 +49,129 @@ def test_build_messages_includes_profile_and_call_blocks():
     assert "AI-driven medical imaging" in user
 
 
-def test_build_messages_truncates_call_text_at_4000():
-    long_summary = "x" * 6000
-    profile = type("P", (), {
-        "name": "P", "kind": type("K", (), {"value": "group"})(),
-        "description": "", "structured": {"areas": [], "hard_exclusions": []},
-    })()
-    call = type("C", (), {
-        "title": "T", "summary": long_summary, "programme": None,
-        "deadline": None, "budget_min": None, "budget_max": None, "currency": None,
-        "raw": {},
-    })()
-    msgs = build_messages(profile=profile, call=call)
-    # Count the x's in the user message — should be capped at 4000.
-    assert msgs[1]["content"].count("x") <= 4000
+def test_build_messages_concatenates_summary_and_full_text():
+    """Plan F prompt change: summary AND full_text both reach the LLM,
+    not just one or the other (was: OR-pick)."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        name="Cancer Research", description="cancer biomarkers",
+        kind=SimpleNamespace(value="group"),
+        structured={"areas": [], "hard_exclusions": []},
+    )
+    call = SimpleNamespace(
+        title="A relevant call",
+        summary="Brief abstract.",
+        full_text="Substantive body paragraph 1.\n\nSubstantive body paragraph 2.",
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None, programme=None,
+    )
+    messages = build_messages(profile=profile, call=call)
+    user_text = messages[1]["content"]
+    # Both reach the LLM
+    assert "Brief abstract." in user_text
+    assert "Substantive body paragraph 1." in user_text
+    assert "Substantive body paragraph 2." in user_text
 
 
-def test_build_messages_falls_back_to_full_text_when_summary_missing():
-    """M1 regression: calls with full_text but no summary must still get
-    their body in the prompt — v1 does this, v2 must too."""
-    profile = type("P", (), {
-        "name": "P", "kind": type("K", (), {"value": "group"})(),
-        "description": "", "structured": {"areas": [], "hard_exclusions": []},
-    })()
-    call = type("C", (), {
-        "title": "T",
-        "summary": None,
-        "full_text": "Detailed eligibility criteria buried in the body.",
-        "programme": None,
-        "deadline": None, "budget_min": None, "budget_max": None, "currency": None,
-        "raw": {},
-    })()
-    msgs = build_messages(profile=profile, call=call)
-    assert "Detailed eligibility criteria" in msgs[1]["content"]
+def test_build_messages_uses_summary_only_when_full_text_is_none():
+    """Backwards-compat: when full_text is None, prompt still uses summary alone."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        name="P", description="d", kind=SimpleNamespace(value="group"),
+        structured={"areas": [], "hard_exclusions": []},
+    )
+    call = SimpleNamespace(
+        title="t", summary="only summary here", full_text=None,
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None, programme=None,
+    )
+    messages = build_messages(profile=profile, call=call)
+    assert "only summary here" in messages[1]["content"]
+
+
+def test_build_messages_uses_full_text_only_when_summary_is_none():
+    """And vice versa — full_text alone when summary is None."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        name="P", description="d", kind=SimpleNamespace(value="group"),
+        structured={"areas": [], "hard_exclusions": []},
+    )
+    call = SimpleNamespace(
+        title="t", summary=None, full_text="only the body",
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None, programme=None,
+    )
+    messages = build_messages(profile=profile, call=call)
+    assert "only the body" in messages[1]["content"]
+
+
+def test_build_messages_truncates_at_call_text_limit():
+    """CALL_TEXT_LIMIT bumped to 16000 — verify the cap.
+
+    Note: the cap is on the COMBINED summary+full_text after concat. To make
+    the assertion crisp, we leave summary=None so the entire budget is
+    available for the body of x's.
+    """
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from call_monitor.ranking.prompt import CALL_TEXT_LIMIT
+
+    assert CALL_TEXT_LIMIT == 16000
+
+    profile = SimpleNamespace(
+        name="P", description="d", kind=SimpleNamespace(value="group"),
+        structured={"areas": [], "hard_exclusions": []},
+    )
+    huge_full_text = "x" * 30_000
+    call = SimpleNamespace(
+        title="t", summary=None, full_text=huge_full_text,
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None, programme=None,
+    )
+    messages = build_messages(profile=profile, call=call)
+    user_text = messages[1]["content"]
+    # The body section should be exactly CALL_TEXT_LIMIT chars of x.
+    assert "x" * CALL_TEXT_LIMIT in user_text
+    assert "x" * (CALL_TEXT_LIMIT + 1) not in user_text
+
+
+def test_build_messages_truncates_combined_summary_plus_full_text():
+    """When BOTH summary and full_text are provided, the truncation cap
+    applies to their CONCATENATION (summary + '\\n\\n' + full_text), not
+    to full_text alone. The available x-budget is reduced by the summary
+    + separator length."""
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from call_monitor.ranking.prompt import CALL_TEXT_LIMIT
+
+    profile = SimpleNamespace(
+        name="P", description="d", kind=SimpleNamespace(value="group"),
+        structured={"areas": [], "hard_exclusions": []},
+    )
+    summary = "Short abstract."
+    huge_full_text = "x" * 30_000
+    call = SimpleNamespace(
+        title="t", summary=summary, full_text=huge_full_text,
+        deadline=datetime.now(UTC) + timedelta(days=30),
+        budget_min=None, budget_max=None, currency=None, programme=None,
+    )
+    messages = build_messages(profile=profile, call=call)
+    user_text = messages[1]["content"]
+    # Summary appears verbatim
+    assert summary in user_text
+    # Body x-run is shorter than CALL_TEXT_LIMIT by exactly len(summary) + 2
+    # (the "\n\n" separator). Verify the budget accounting.
+    expected_body_len = CALL_TEXT_LIMIT - len(summary) - 2
+    assert "x" * expected_body_len in user_text
+    assert "x" * (expected_body_len + 1) not in user_text
 
 
 def test_parse_clean_response():

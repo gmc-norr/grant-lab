@@ -147,8 +147,13 @@ def _gate_fail_result(
 
 def _call_matches_must_include(profile, call) -> bool:
     """Case-insensitive substring match of profile.must_include keywords
-    against title + summary + keywords. Same logic as the digest
-    must-include bucket (assemble.py).
+    against title + summary + full_text + keywords. Same logic as the
+    digest must-include bucket (assemble.py).
+
+    Codex Plan F regression fix: `full_text` MUST be in the haystack —
+    after Plan F moved Vinnova's substantive prose out of `summary` and
+    into `full_text`, a must_include term that lives only in the body
+    text would otherwise be silently missed.
 
     Spec line 282: must-include calls bypass the timeline gate (only)."""
     structured = profile.structured or {}
@@ -159,9 +164,11 @@ def _call_matches_must_include(profile, call) -> bool:
     ]
     if not must_terms:
         return False
+    full_text = getattr(call, "full_text", None)
     haystack = " ".join(filter(None, [
         (call.title or "").lower(),
         (call.summary or "").lower(),
+        (full_text or "").lower(),
         # `keywords` is non-nullable on the real Call ORM model; this hasattr
         # accommodates duck-typed test doubles that omit it.
         " ".join(call.keywords or []).lower() if hasattr(call, "keywords") else "",
