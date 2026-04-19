@@ -433,6 +433,26 @@ def test_rank_pair_threshold_kwarg_actually_changes_the_gate_cutoff():
     assert 0.30 < result.embed_similarity < 0.50
 
 
+def test_call_matches_must_include_searches_full_text():
+    """Codex Plan F regression: after Plan F moved Vinnova's substantive
+    prose from `summary` into `full_text`, must_include keywords must
+    match against the call's body text — not just title+summary+keywords.
+    A term that lives only in `full_text` would otherwise be silently
+    missed by both the timeline-bypass logic and the digest bucket."""
+    from types import SimpleNamespace
+
+    from call_monitor.ranking.rank_pair import _call_matches_must_include
+
+    profile = SimpleNamespace(structured={"must_include": ["ferroptosis"]})
+    call = SimpleNamespace(
+        title="A study on cell death",
+        summary="Brief abstract with no special terms.",
+        full_text="Detailed paragraph mentioning ferroptosis as a key mechanism.",
+        keywords=[],
+    )
+    assert _call_matches_must_include(profile, call) is True
+
+
 def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     """The Settings field that callers (worker → rank_pair) read is the
     single source of truth — it picks up EMBEDDING_PREGATE_THRESHOLD from

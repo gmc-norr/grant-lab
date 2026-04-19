@@ -123,6 +123,11 @@ def assemble_for_user(
         # this keeps the SQL simple and lets PG's text matching handle
         # case-insensitivity. The GIN index on keywords is bypassed (full
         # scan), but at v1 corpus size (thousands of calls) this is fine.
+        #
+        # Codex Plan F regression fix: also ilike against `Call.full_text`.
+        # After Plan F moved Vinnova's substantive prose out of `summary`
+        # and into `full_text`, a must-include term that lives only in the
+        # body text would otherwise be silently missed by the digest bucket.
         if must_terms:
             keywords_str = func.array_to_string(Call.keywords, " ")
             # OUTER JOIN against this profile's ranking — must-include calls
@@ -142,6 +147,7 @@ def assemble_for_user(
                     or_(*[
                         Call.title.ilike(f"%{_escape_like(t)}%", escape="\\")
                         | Call.summary.ilike(f"%{_escape_like(t)}%", escape="\\")
+                        | Call.full_text.ilike(f"%{_escape_like(t)}%", escape="\\")
                         | keywords_str.ilike(f"%{_escape_like(t)}%", escape="\\")
                         for t in must_terms
                     ]),

@@ -52,7 +52,18 @@ def fetch_html_main_content(
         )
         return None
 
-    extracted = trafilatura.extract(html)  # returns str | None
+    # Codex Plan F fix: Trafilatura/lxml can raise a variety of exceptions
+    # on malformed HTML (RuntimeError, lxml.etree.* errors, encoding errors,
+    # etc). Catch broadly here — we never want a single bad page to abort
+    # the whole ingest run; degrade to None like every other failure path.
+    try:
+        extracted = trafilatura.extract(html)  # returns str | None
+    except Exception as e:  # noqa: BLE001 — Trafilatura/lxml raise many types
+        _logger.warning(
+            "extraction.html_failed",
+            extra={"event": "html_failed", "url": url, "error": str(e)},
+        )
+        return None
     if not extracted or not extracted.strip():
         _logger.warning(
             "extraction.html_failed",

@@ -100,6 +100,14 @@ def backfill_main(argv: list[str] | None = None, *, session_factory=None) -> int
                   "profiles_embedded", "profiles_failed"):
             total[k] += summary[k]
         progress = summary["calls_embedded"] + summary["profiles_embedded"]
+        # Codex Plan F fix: in --force mode the termination signal must be
+        # "no rows were processed this batch" (i.e. cursors exhausted both
+        # tables) — NOT "no successful embeds". A first batch of all-failed
+        # rows previously caused immediate exit before later rows were
+        # tried. In force mode the cursor advances regardless of success,
+        # so checking processed-count is safe.
+        processed = (summary["calls_embedded"] + summary["calls_failed"]
+                     + summary["profiles_embedded"] + summary["profiles_failed"])
         print(
             f"  batch: calls_embedded={summary['calls_embedded']} "
             f"profiles_embedded={summary['profiles_embedded']} "
@@ -110,10 +118,16 @@ def backfill_main(argv: list[str] | None = None, *, session_factory=None) -> int
             # Advance the cursors so the next iteration picks up later rows.
             after_call_id = summary["max_call_id"]
             after_profile_id = summary["max_profile_id"]
-        if progress == 0:
-            # No progress in this batch — either everything is embedded,
-            # or all remaining rows are failing. Either way, stop looping.
-            break
+            if processed == 0:
+                # Cursors have walked past the end of both tables — done.
+                break
+        else:
+            # Default mode: there's no cursor, so the same NULL/mismatched
+            # rows are re-selected every iteration. "No successful embeds"
+            # is the only safe termination — otherwise persistent failures
+            # would infinite-loop.
+            if progress == 0:
+                break
 
     print(f"backfill done — totals: {total}")
     has_failures = total["calls_failed"] > 0 or total["profiles_failed"] > 0

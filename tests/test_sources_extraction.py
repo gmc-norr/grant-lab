@@ -131,3 +131,24 @@ def test_fetch_pdf_text_logs_warning_on_failure(caplog):
         )
     assert any("pdf_failed" in (r.getMessage() or "") or "pdf_failed" in r.message
                for r in caplog.records)
+
+
+def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
+    """Codex Plan F regression: a Trafilatura/lxml exception during
+    extract() must NOT propagate — the helper must degrade to None like
+    every other failure path. Otherwise a single pathological page would
+    abort the whole ingest run."""
+    import logging
+    from unittest.mock import patch
+
+    with (
+        patch("trafilatura.extract", side_effect=RuntimeError("simulated parser error")),
+        caplog.at_level(logging.WARNING, logger="call_monitor.sources.extraction"),
+    ):
+        text = fetch_html_main_content(
+            "https://example.test/call",
+            transport=_html_transport(_SAMPLE_HTML),
+        )
+    assert text is None
+    assert any("html_failed" in (r.getMessage() or "") or "html_failed" in r.message
+               for r in caplog.records)

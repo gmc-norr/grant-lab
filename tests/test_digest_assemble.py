@@ -41,11 +41,11 @@ def _seed_user_with_profile(s, *, email="u@ki.se", profile_name="P", must_includ
 
 
 def _seed_call(s, *, title, score=None, profile_id=None, summary=None,
-               keywords=None, deadline=None, published_at=None):
+               keywords=None, deadline=None, published_at=None, full_text=None):
     src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
     c = Call(
         source_id=src.id, external_id=title, url=f"https://x/{title}",
-        title=title, summary=summary, keywords=keywords or [],
+        title=title, summary=summary, full_text=full_text, keywords=keywords or [],
         deadline=deadline, published_at=published_at or datetime.now(UTC),
     )
     s.add(c)
@@ -134,6 +134,29 @@ def test_assemble_must_include_unranked_call_still_surfaced(pg_session_factory, 
     assert must[0].title == "Genomics call (unranked)"
     assert must[0].score is None
     assert must[0].rationale is None
+
+
+def test_assemble_must_include_finds_match_in_full_text(pg_session_factory, now):
+    """Codex Plan F regression: after Plan F moved Vinnova's substantive
+    prose out of `summary` and into `full_text`, the digest must-include
+    bucket MUST surface calls where the keyword appears only in the body
+    text. Otherwise the user's hard filter silently misses real matches."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["ferroptosis"])
+        # Title/summary deliberately don't contain the keyword — only full_text does.
+        _seed_call(
+            s,
+            title="A study on cell death",
+            summary="Brief abstract with no special terms.",
+            full_text="Detailed paragraph mentioning ferroptosis as a key mechanism.",
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    must = [e for e in payload.sections[0].entries if e.bucket == "must_include"]
+    assert len(must) == 1
+    assert must[0].title == "A study on cell death"
 
 
 def test_assemble_must_include_matches_keywords(pg_session_factory, now):

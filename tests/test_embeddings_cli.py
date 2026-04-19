@@ -205,3 +205,44 @@ def test_cli_backfill_returns_nonzero_on_persistent_failures(pg_session_factory)
             session_factory=pg_session_factory,
         )
     assert exit_code == 1
+
+
+def test_cli_backfill_force_keeps_going_after_first_all_failed_batch(pg_session_factory):
+    """Codex Plan F regression: in --force mode, the CLI must NOT stop
+    after a batch of all-failed rows. Old termination ("no successful
+    embeds") caused immediate exit when the first cursor-paginated batch
+    had only failures, leaving later rows untried. New termination uses
+    "no rows processed" (cursors exhausted) in force mode."""
+    call_count = {"n": 0}
+
+    def fake_tick(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First batch: all-failed (5 calls). Cursor advances to id=5.
+            return {"calls_embedded": 0, "calls_failed": 5,
+                    "profiles_embedded": 0, "profiles_failed": 0,
+                    "max_call_id": 5, "max_profile_id": 0}
+        if call_count["n"] == 2:
+            # Second batch (would have been skipped by old logic): all succeeded.
+            return {"calls_embedded": 5, "calls_failed": 0,
+                    "profiles_embedded": 0, "profiles_failed": 0,
+                    "max_call_id": 10, "max_profile_id": 0}
+        # Third batch: nothing left to process — terminate.
+        return {"calls_embedded": 0, "calls_failed": 0,
+                "profiles_embedded": 0, "profiles_failed": 0,
+                "max_call_id": 10, "max_profile_id": 0}
+
+    fake_client = MagicMock()
+    fake_client.model = "bge-m3"
+
+    with patch("call_monitor.embeddings.cli._build_embed_client", return_value=fake_client), \
+         patch("call_monitor.embeddings.cli.refresh_missing_embeddings_tick",
+               side_effect=fake_tick):
+        exit_code = backfill_main(
+            argv=["backfill", "--force"],
+            session_factory=pg_session_factory,
+        )
+    # 3 ticks total: failed batch did NOT stop us, success batch ran, empty batch ended loop.
+    assert call_count["n"] == 3
+    # Exit 1 because there were failures (5 failed in batch 1).
+    assert exit_code == 1
