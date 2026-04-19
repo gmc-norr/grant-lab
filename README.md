@@ -132,20 +132,57 @@ Required env: `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAINS`, `INITIA
 
 ## Deploy procedure
 
-The supported deploy sequence is:
+The supported deploy sequence depends on what the new code touches:
+
+### Routine deploy (schema or app changes only)
 
 ```bash
 alembic upgrade head
 python -m call_monitor.embeddings.cli backfill
-# (only after the CLI exits 0:)
-systemctl restart call-monitor   # or however your unit boots the app
+systemctl restart call-monitor    # only after the CLI exits 0
+```
+
+### Content-rollout deploy (changes to ingestion content, prompt, or embedding model)
+
+When a deploy alters what the LLM/embedding sees — e.g., new adapter fields populated into `Call.full_text`, a `PROMPT_VERSION` bump, or an `EMBEDDING_MODEL` swap — existing rows are **stale** and must be refreshed. The full sequence:
+
+```bash
+# 1. Schema (no-op when there are no migrations).
+alembic upgrade head
+
+# 2. Reset the per-source incremental-fetch cursor so the next ingest re-fetches
+#    the historical window. NULL is correct: the orchestrator falls back to
+#    epoch when last_fetched_at IS NULL, guaranteeing every historical row
+#    is re-fetched regardless of when it first appeared.
+psql -c "UPDATE sources SET last_fetched_at = NULL WHERE slug IN ('vinnova', 'eu_portal')"
+
+# 3. Force-ingest both sources to repopulate Call rows under the new adapter logic.
+#    Both CLIs exit 1 on adapter or DB failure, so chaining with && is safe.
+python -m call_monitor.ingestion.cli run --source vinnova && \
+python -m call_monitor.ingestion.cli run --source eu_portal
+
+# 4. Re-embed every call + profile under the now-richer text or new model.
+#    --force drops the NULL/mismatched filter so already-embedded rows are
+#    re-embedded too. Exits 0 on full success / 1 if any row failed.
+python -m call_monitor.embeddings.cli backfill --force
+
+# 5. Re-rank existing CallRanking rows under the new prompt. Hit /admin/rerank
+#    from the admin UI after step 4 completes; it enqueues every (active
+#    profile × call from the last 90 days) and the drain tick processes them
+#    over the next ~hour at typical scale.
+
+# 6. Restart the app.
+systemctl restart call-monitor
 ```
 
 **Why this order:**
 
 1. **`alembic upgrade head` runs first** so the schema matches the new code. Migrations are intentionally schema-only — they never call out to Ollama. Embedding backfills used to be tempted into Alembic data migrations, but a migration that depends on an external HTTP service makes deploys fragile (Ollama down → schema deploy stuck mid-migration). The CLI is the explicit, separate, retryable step.
-2. **`embeddings.cli backfill` runs second** to populate `calls.embedding` and `profiles.embedding` for any rows that are NULL or were embedded under an older `EMBEDDING_MODEL`. Without this, the embedding pre-gate degrades to UNKNOWN — ranking still works, but the cheap topic-similarity short-circuit doesn't fire and every (call × profile) pair pays for an LLM round-trip. The CLI loops until a batch makes no progress (everything left is failing), exits 0 on full success / 1 otherwise.
-3. **Restart the app last**, after the CLI has reported success. The new code is now backed by an up-to-date schema and a fully-populated embedding column.
+2. **Cursor reset (`UPDATE sources … = NULL`)** undoes the modified-since optimization for one ingest cycle. Without it, the next ingest only fetches programmes modified after the previous run — historical rows would silently retain their old `summary`/`full_text` values forever.
+3. **`ingestion.cli run --source X`** drives a one-shot ingest immediately rather than waiting for the next 03:00/03:15 cron. With cursors at NULL, this re-fetches every historical row and runs the new adapter logic against it.
+4. **`embeddings.cli backfill --force`** re-embeds everything — both NULL/mismatched rows AND already-embedded rows whose source text has changed. The default (no `--force`) only handles NULL/mismatched.
+5. **`/admin/rerank`** re-runs the ranking pipeline against the fresh content under the new `prompt_version`. Without this step, existing CallRanking rows still reflect the OLD prompt's view.
+6. **Restart the app last**, after the CLIs have reported success. The new code is now backed by an up-to-date schema, fully-populated content, fresh embeddings, and re-ranked outputs.
 
 The `/admin` page surfaces an embedding-coverage badge — a quick post-deploy sanity check that the backfill succeeded.
 
@@ -155,7 +192,7 @@ The `/admin` page surfaces an embedding-coverage badge — a quick post-deploy s
 uv run pytest -q
 ```
 
-430 tests across 71 files; full suite runs in ~20s against testcontainers Postgres (pgvector image).
+455 tests across 71 files; full suite runs in ~20s against testcontainers Postgres (pgvector image).
 
 ## Project size (post Plan E simplification)
 
@@ -166,5 +203,5 @@ uv run pytest -q
 | Templates (Jinja2 / HTML) | 400 |
 | Alembic migrations (8 revisions) | 892 |
 | **Test files** | **71** |
-| **Tests passing** | **430** |
+| **Tests passing** | **455** |
 | **Commits on this branch** | **195** |
