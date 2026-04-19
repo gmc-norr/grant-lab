@@ -67,15 +67,18 @@ def test_admin_shows_embedding_coverage_counts(monkeypatch, pg_url, pg_session_f
         owner = User(email="owner@ki.se")
         s.add(owner)
         s.flush()
-        # Profile 1: current model
+        # Profile 1: current model. Non-empty description so it counts toward
+        # coverage (blank-description profiles are excluded by the tick filter
+        # — see _embedding_coverage_context for the rationale).
         s.add(Profile(
-            name="P1", kind=ProfileKind.GROUP, description="",
+            name="P1", kind=ProfileKind.GROUP, description="P1 desc",
             structured={}, created_by=owner.id,
             embedding=vec_zero, embedding_model="bge-m3",
         ))
-        # Profile 2: NULL embedding
+        # Profile 2: NULL embedding (also non-empty description so it appears
+        # as legitimately stale rather than getting filtered out).
         s.add(Profile(
-            name="P2", kind=ProfileKind.GROUP, description="",
+            name="P2", kind=ProfileKind.GROUP, description="P2 desc",
             structured={}, created_by=owner.id,
             embedding=None, embedding_model=None,
         ))
@@ -93,3 +96,53 @@ def test_admin_shows_embedding_coverage_counts(monkeypatch, pg_url, pg_session_f
     assert "(1 stale, model" in r.text
     # Current model name appears
     assert "bge-m3" in r.text
+
+
+def test_admin_embedding_coverage_excludes_blank_description_profiles(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Regression: blank-description profiles can never be embedded because
+    the refresh-missing tick filters them out by design (Plan D Task 9 —
+    they would otherwise infinite-loop the tick: select NULL → no-op clear
+    → still NULL → re-select). The /admin coverage badge must mirror that
+    filter so operators see a stable 'fully covered' state instead of
+    permanent false-stale."""
+    app = _setup(monkeypatch, pg_url)
+    vec_zero = [0.0] * 1024
+    with pg_session_factory() as s:
+        owner = User(email="owner-blank@ki.se")
+        s.add(owner)
+        s.flush()
+        # Profile A: non-empty description, embedded current model → counts
+        s.add(Profile(
+            name="PA", kind=ProfileKind.GROUP, description="actual desc",
+            structured={}, created_by=owner.id,
+            embedding=vec_zero, embedding_model="bge-m3",
+        ))
+        # Profile B: blank description → MUST be excluded from both stale
+        # and total (the tick will never embed it, so it's not "stale").
+        s.add(Profile(
+            name="PB", kind=ProfileKind.GROUP, description="",
+            structured={}, created_by=owner.id,
+            embedding=None, embedding_model=None,
+        ))
+        # Profile C: whitespace-only description → also excluded (the tick
+        # uses func.length(func.trim(...)) > 0 which strips whitespace).
+        s.add(Profile(
+            name="PC", kind=ProfileKind.GROUP, description="   ",
+            structured={}, created_by=owner.id,
+            embedding=None, embedding_model=None,
+        ))
+        s.commit()
+
+    client = _logged_in(app, pg_session_factory, is_admin=True)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    # 1 of 1 embedded: blank/whitespace profiles excluded from total
+    assert "1/1 embedded" in r.text
+    # And NOT 1/2 or 1/3 — guard against re-introduction of the bug
+    assert "1/2 embedded" not in r.text
+    assert "1/3 embedded" not in r.text
+    # 0 stale (the only counted profile is current-model)
+    assert "(0 stale, model" in r.text
