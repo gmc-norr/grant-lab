@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import sessionmaker
 
+from call_monitor.config import Settings
 from call_monitor.digest.send import run_digest
 from call_monitor.email.client import EmailClient
 from call_monitor.embeddings.client import OllamaEmbedClient
@@ -19,8 +20,7 @@ from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
 from call_monitor.ranking.ollama_client import OllamaClient
 from call_monitor.ranking.worker import drain_queue
-from call_monitor.sources.eu_portal import EUPortalAdapter
-from call_monitor.sources.vinnova import VinnovaAdapter
+from call_monitor.sources.registry import SOURCES
 
 _logger = logging.getLogger(__name__)
 
@@ -48,8 +48,7 @@ class _Alerter(Protocol):
 def build_scheduler(
     *,
     session_factory: sessionmaker,
-    eu_portal_base_url: str,
-    vinnova_base_url: str,
+    settings: Settings,
     alerter: ConsecutiveFailureTracker | _Alerter,
     ollama_url: str,
     gemma_model: str,
@@ -77,43 +76,30 @@ def build_scheduler(
     """
     sched = _SafeBackgroundScheduler(timezone="Europe/Stockholm")
 
-    def _eu_job() -> None:
-        adapter = EUPortalAdapter(base_url=eu_portal_base_url)
-        run_ingestion(
-            session_factory=session_factory,
-            adapter=adapter,
-            alerter=alerter,
-            embed_client=embed_client,
+    for cfg in SOURCES:
+        # Capture cfg by default-arg to avoid late-binding in the closure.
+        # Without `_cfg=cfg`, every job's closure would resolve `cfg` at
+        # call time and find the LAST value the loop variable held — i.e.
+        # all jobs would run the last source. Default args are bound at
+        # def-time, so each closure gets its own snapshot.
+        def _ingest_job(_cfg=cfg) -> None:
+            adapter = _cfg.build(settings)
+            run_ingestion(
+                session_factory=session_factory,
+                adapter=adapter,
+                alerter=alerter,
+                embed_client=embed_client,
+            )
+
+        sched.add_job(
+            _ingest_job,
+            trigger=CronTrigger(hour=cfg.cron_hour, minute=cfg.cron_minute),
+            id=f"ingest:{cfg.slug}",
+            name=cfg.cron_name,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
-
-    sched.add_job(
-        _eu_job,
-        trigger=CronTrigger(hour=3, minute=0),
-        id="ingest:eu_portal",
-        name="Ingest EU Funding & Tenders Portal",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-
-    def _vinnova_job() -> None:
-        adapter = VinnovaAdapter(base_url=vinnova_base_url)
-        run_ingestion(
-            session_factory=session_factory,
-            adapter=adapter,
-            alerter=alerter,
-            embed_client=embed_client,
-        )
-
-    sched.add_job(
-        _vinnova_job,
-        trigger=CronTrigger(hour=3, minute=15),
-        id="ingest:vinnova",
-        name="Ingest Vinnova",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
 

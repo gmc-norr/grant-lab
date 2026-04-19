@@ -27,26 +27,9 @@ from call_monitor.config import Settings
 from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import IngestionResult, run_ingestion
-from call_monitor.sources.eu_portal import EUPortalAdapter
-from call_monitor.sources.vinnova import VinnovaAdapter
+from call_monitor.sources.registry import build_adapter, known_slugs
 
 _logger = logging.getLogger(__name__)
-
-_SOURCE_SLUGS = ("vinnova", "eu_portal")
-
-
-def _build_adapter(slug: str, settings: Settings):
-    """Return a SourceAdapter for `slug`, or None if the slug is unknown.
-
-    Hardcoded today (only two sources exist). If/when a third source is
-    added, extract this into a registry — but a 3-line if/elif keeps the
-    cognitive load down for now.
-    """
-    if slug == "vinnova":
-        return VinnovaAdapter(base_url=settings.vinnova_base_url)
-    if slug == "eu_portal":
-        return EUPortalAdapter(base_url=settings.eu_portal_base_url)
-    return None
 
 
 def _build_embed_client(settings: Settings) -> OllamaEmbedClient:
@@ -73,7 +56,7 @@ def _run_for_source(
     typo, not an operational failure), so it gets a different exit path
     than an `IngestionResult` with `.error` set.
     """
-    adapter = _build_adapter(slug, settings)
+    adapter = build_adapter(slug, settings)
     if adapter is None:
         raise ValueError(f"unknown source: {slug}")
     embed_client = _build_embed_client(settings)
@@ -119,13 +102,13 @@ def ingest_main(argv: list[str] | None = None, *, session_factory=None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "list-sources":
-        for slug in _SOURCE_SLUGS:
+        for slug in known_slugs():
             print(slug)
         return 0
 
     if args.cmd == "run":
         # Settings is required regardless of injection: even when the test
-        # supplies a session_factory, _build_adapter needs the source
+        # supplies a session_factory, registry.build_adapter needs the source
         # base_urls and _build_embed_client needs ollama config.
         settings = Settings()
         if session_factory is None:  # pragma: no cover — production path
@@ -148,7 +131,7 @@ def ingest_main(argv: list[str] | None = None, *, session_factory=None) -> int:
             # operator doesn't have to consult `list-sources` separately.
             print(f"error: {e}", file=sys.stderr)
             print(
-                f"available sources: {', '.join(_SOURCE_SLUGS)}",
+                f"available sources: {', '.join(known_slugs())}",
                 file=sys.stderr,
             )
             return 1

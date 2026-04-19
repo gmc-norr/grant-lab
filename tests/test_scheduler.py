@@ -1,7 +1,9 @@
 from unittest.mock import MagicMock
 
+import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from call_monitor.config import Settings
 from call_monitor.scheduler import build_scheduler
 
 
@@ -10,13 +12,26 @@ class _NullAlerter:
     def record_success(self, *a, **kw): pass
 
 
-def test_build_scheduler_returns_one_job_per_active_adapter():
+@pytest.fixture
+def _settings_env(monkeypatch):
+    """Populate the env vars Settings() requires.
+
+    Source base_urls fall back to the Settings defaults when EU_PORTAL_BASE_URL /
+    VINNOVA_BASE_URL are unset, which is fine for these smoke tests — we don't
+    actually start the scheduler.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@localhost/z")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+
+
+def test_build_scheduler_returns_one_job_per_active_adapter(_settings_env):
     """Smoke: the scheduler is constructed with a job per source. We don't
     actually start it — that would fire HTTP requests."""
     sched = build_scheduler(
         session_factory=lambda: None,  # not invoked because we don't start
-        eu_portal_base_url="https://ec.europa.eu",
-        vinnova_base_url="https://data.vinnova.se",
+        settings=Settings(),
         alerter=_NullAlerter(),
         ollama_url="http://localhost:11434",
         gemma_model="gemma4:e4b-q8",
@@ -35,11 +50,10 @@ def test_build_scheduler_returns_one_job_per_active_adapter():
     sched.shutdown(wait=False)
 
 
-def test_build_scheduler_includes_rank_drain_job():
+def test_build_scheduler_includes_rank_drain_job(_settings_env):
     sched = build_scheduler(
         session_factory=lambda: None,
-        eu_portal_base_url="https://ec.europa.eu",
-        vinnova_base_url="https://data.vinnova.se",
+        settings=Settings(),
         alerter=_NullAlerter(),
         ollama_url="http://localhost:11434",
         gemma_model="gemma4:e4b-q8",

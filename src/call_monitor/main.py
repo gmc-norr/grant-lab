@@ -58,8 +58,7 @@ async def lifespan(app: FastAPI):
 
     app.state.scheduler = build_scheduler(
         session_factory=app.state.session_factory,
-        eu_portal_base_url=settings.eu_portal_base_url,
-        vinnova_base_url=settings.vinnova_base_url,
+        settings=settings,
         alerter=alerter,
         ollama_url=settings.ollama_url,
         gemma_model=settings.gemma_model,
