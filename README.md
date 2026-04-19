@@ -282,10 +282,10 @@ The score is written to `call_rankings.aggregate_score` along with: rationale (a
 
 ### Operational tooling
 
-- **`/admin`** shows source health (per-source last-fetched + call count), ranking-queue depth by status, **embedding coverage** (calls and profiles embedded vs stale, against the currently-configured embedding model), digest panel (last sent, runs this week, disabled users from bounce-handling), and the most recent golden-set Kendall's τ.
+- **`/admin`** shows source health (per-source last-fetched + call count), ranking-queue depth by status, **embedding coverage** (calls and profiles embedded vs stale, against the currently-configured embedding model — blank-description profiles are excluded since they can't be embedded by design), digest panel (last sent, runs this week, disabled users from bounce-handling), and the most recent golden-set Kendall's τ.
 - **`/admin/rerank`** enqueues jobs for every active profile × every Call from the last 90 days. Idempotent (partial unique index dedups in-flight jobs).
 - **Weekly golden-set evaluator** at Mon 06:00: reads `tests/fixtures/golden_set.json` (curated `(call_id, profile_id, expected_score)` triples), queries `call_rankings`, computes Kendall's τ-b inline (pure stdlib, ties-aware), persists the result to `data/golden_set_last.json` for `/admin` to read.
-- **Embeddings backfill CLI** ([src/call_monitor/embeddings/cli.py](src/call_monitor/embeddings/cli.py)) — `python -m call_monitor.embeddings.cli backfill` walks every call + profile with NULL or model-mismatched embedding, calls Ollama in batches, exits 0 on full success / 1 if any row failed. Pass `--force` to re-embed every row regardless (used in content-rollout deploys; see "Deploy procedure" below). Pagination via id-cursor in force mode so a transient batch of failed rows doesn't stop the run.
+- **Embeddings backfill CLI** ([src/call_monitor/embeddings/cli.py](src/call_monitor/embeddings/cli.py)) — `python -m call_monitor.embeddings.cli backfill` walks every call + profile with NULL or model-mismatched embedding, calls Ollama in batches, exits 0 on full success / 1 if any row failed. Pass `--force` to re-embed every row regardless (used in content-rollout deploys; see "Deploy procedure" below). Pagination via id-cursor in force mode so a transient batch of failed rows doesn't stop the run. **In `--force` mode, an Ollama failure on a row clears both `embedding` and `embedding_model` to NULL** — the daily refresh tick will then re-select the row via its `IS NULL` filter and retry. Trade-off: that row degrades to LLM-only ranking until the next successful embed, which is safer than ranking against a known-stale vector.
 - **Forced-ingest CLI** ([src/call_monitor/ingestion/cli.py](src/call_monitor/ingestion/cli.py)) — `python -m call_monitor.ingestion.cli run --source <slug>` triggers a single ingest tick from the command line (without waiting for the 03:00 / 03:15 cron). `… list-sources` prints registered slugs from `sources/registry.SOURCES`. Exit 1 on adapter or DB failure so deploy scripts can chain on `&&`.
 
 ## Stack
@@ -395,16 +395,16 @@ The `/admin` page surfaces an embedding-coverage badge — a quick post-deploy s
 uv run pytest -q
 ```
 
-462 tests across 72 files; full suite runs in ~20s against testcontainers Postgres (pgvector image).
+468 tests across 72 files; full suite runs in ~20s against testcontainers Postgres (pgvector image).
 
 ## Project size (current)
 
 | Area | LOC |
 |---|---|
-| Production Python (`src/call_monitor`) | 6,545 |
-| Tests | 10,688 |
+| Production Python (`src/call_monitor`) | 6,594 |
+| Tests | 10,904 |
 | Templates (Jinja2 / HTML) | 460 |
 | Alembic migrations (8 revisions) | 959 |
 | **Test files** | **72** |
-| **Tests passing** | **462** |
-| **Commits on `master`** | **211** |
+| **Tests passing** | **468** |
+| **Commits on `master`** | **215** |
