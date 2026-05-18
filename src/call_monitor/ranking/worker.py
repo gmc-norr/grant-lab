@@ -150,6 +150,26 @@ def drain_queue(
                     if existing is not None:
                         new_sim = existing.embed_similarity
 
+                # Preserve a previously-recorded analysis when this run
+                # produced None (e.g. a re-rank under Gemma after a
+                # previous Sonnet run, or a gate-fail re-rank where the
+                # LLM never ran). Without this, dropping below the
+                # cosine threshold or short-circuiting on a new gate
+                # would silently clobber the richer Sonnet analysis with
+                # NULLs. Same defensive pattern as the embed_similarity
+                # preserve above.
+                new_summary = result.summary
+                new_notes = result.applicant_notes
+                if new_summary is None or new_notes is None:
+                    existing = session.get(
+                        CallRanking, (call_id, profile_id)
+                    )
+                    if existing is not None:
+                        if new_summary is None:
+                            new_summary = existing.summary
+                        if new_notes is None:
+                            new_notes = existing.applicant_notes
+
                 session.merge(CallRanking(
                     call_id=call_id,
                     profile_id=profile_id,
@@ -160,6 +180,8 @@ def drain_queue(
                     prompt_version=result.prompt_version,
                     raw_response=result.raw_response or {},
                     embed_similarity=new_sim,
+                    summary=new_summary,
+                    applicant_notes=new_notes,
                     ranked_at=datetime.now(UTC),
                 ))
                 _write_criteria_rows(session, call_id, profile_id, result)

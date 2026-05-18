@@ -189,6 +189,118 @@ def test_parse_clean_response():
     assert out.exclusions_rating == "pass"
 
 
+def test_build_messages_includes_analysis_block_when_enabled():
+    """Sonnet path requests summary + applicant_notes via the prompt."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _P:
+        name = "Test"
+        description = "x"
+        structured = {"areas": ["a"], "hard_exclusions": []}
+        @property
+        def kind(self): return type("K", (), {"value": "group"})()
+    @dataclass
+    class _C:
+        title = "T"
+        summary = "S"
+        full_text = None
+        deadline = None
+        budget_min = None
+        budget_max = None
+        currency = None
+        programme = None
+
+    sys_no_analysis = build_messages(profile=_P(), call=_C())[0]["content"]
+    sys_with_analysis = build_messages(
+        profile=_P(), call=_C(), enable_analysis=True
+    )[0]["content"]
+    assert "summary" not in sys_no_analysis.lower() or "summary:" not in sys_no_analysis
+    assert "applicant_notes" not in sys_no_analysis
+    assert "applicant_notes" in sys_with_analysis
+    assert "summary" in sys_with_analysis
+    # Categories must appear so the model knows the closed set
+    for cat in ("deadline", "eligibility", "budget", "team"):
+        assert cat in sys_with_analysis
+
+
+def test_parse_response_extracts_summary_and_applicant_notes_when_present():
+    """Sonnet path: when enable_analysis=True is wired into the prompt,
+    Sonnet returns a `summary` string + an `applicant_notes` list of
+    {category, text} objects alongside the rating fields. The parser
+    surfaces them on the Parsed dataclass."""
+    content = json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "x"},
+        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "summary": "Horizon call for federated AI; budget 2-5 MSEK; deadline ~90 days.",
+        "applicant_notes": [
+            {"category": "deadline", "text": "Hard cap, no extensions."},
+            {"category": "eligibility", "text": "Open to consortia with ≥3 EU states."},
+            {"category": "budget", "text": "20% mandatory co-funding from clinical partners."},
+        ],
+    })
+    out = parse_response(content)
+    assert out.summary == (
+        "Horizon call for federated AI; budget 2-5 MSEK; deadline ~90 days."
+    )
+    assert out.applicant_notes is not None
+    assert len(out.applicant_notes) == 3
+    assert out.applicant_notes[0] == {
+        "category": "deadline", "text": "Hard cap, no extensions."
+    }
+
+
+def test_parse_response_tolerates_missing_analysis_fields():
+    """Gemma path: the existing prompt doesn't ask for summary or
+    applicant_notes. Their absence must not raise — fields default to
+    None so the column stays NULL and the UI skips the analysis block."""
+    content = json.dumps({
+        "topic_fit": {"rating": 3, "rationale": "ok", "quoted_evidence": None},
+        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+    })
+    out = parse_response(content)
+    assert out.summary is None
+    assert out.applicant_notes is None
+
+
+def test_parse_response_silently_drops_malformed_applicant_notes():
+    """A wrong shape (list of strings, list of objects missing fields,
+    or not-a-list) must NOT crash the worker — the rating fields are
+    still valid and worth persisting. Drop the analysis instead."""
+    content = json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "applicant_notes": ["string instead of dict", "another bad entry"],
+    })
+    out = parse_response(content)
+    assert out.applicant_notes is None  # malformed → dropped
+
+
+def test_parse_response_drops_unknown_categories_keeps_valid_ones():
+    """Sonnet sometimes invents categories beyond the documented set.
+    Don't reject the whole list — keep the good entries and drop the
+    bad. This is a UX call: better to surface 2 useful notes than zero."""
+    content = json.dumps({
+        "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "applicant_notes": [
+            {"category": "deadline", "text": "Tight 30-day window."},
+            {"category": "vibes", "text": "Seems friendly."},   # bogus category
+            {"category": "budget", "text": "Co-funding required."},
+            {"category": "deadline"},                            # missing text
+            {"text": "Missing category."},                        # missing category
+        ],
+    })
+    out = parse_response(content)
+    assert out.applicant_notes is not None
+    assert len(out.applicant_notes) == 2
+    assert {n["category"] for n in out.applicant_notes} == {"deadline", "budget"}
+
+
 def test_parse_invalid_json_raises():
     with pytest.raises(ParseError):
         parse_response("not json")

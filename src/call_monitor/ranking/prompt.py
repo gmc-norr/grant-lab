@@ -15,6 +15,19 @@ class ParseError(Exception):
     """The LLM response didn't match the criterion schema."""
 
 
+_ANALYSIS_CATEGORIES = frozenset({
+    "deadline",
+    "eligibility",
+    "budget",
+    "team",
+    "ip",
+    "data",
+    "evaluation",
+    "process",
+    "other",
+})
+
+
 @dataclass(frozen=True)
 class Parsed:
     topic_fit_rating: int
@@ -26,6 +39,15 @@ class Parsed:
     exclusions_rating: str   # 'pass' | 'fail'
     exclusions_rationale: str
     exclusions_quoted: str | None
+    # Optional applicant-facing analysis. Populated only when the model
+    # was prompted with enable_analysis=True (currently the Sonnet path).
+    # `summary`: 2-3 sentence plain-language overview of the call.
+    # `applicant_notes`: list of {category, text} objects flagging
+    # specific things the applicant should know — odd requirements,
+    # tight deadlines, mandatory co-funding, IP/data clauses, etc.
+    # Categories outside `_ANALYSIS_CATEGORIES` are dropped at parse time.
+    summary: str | None = None
+    applicant_notes: list[dict] | None = None
 
 
 _SYSTEM_TEMPLATE = """\
@@ -60,9 +82,37 @@ Output JSON exactly matching this schema:
   "eligibility": {{"rating": "pass" | "fail" | "unclear",
                    "rationale": str, "quoted_evidence": str | null}},
   "exclusions":  {{"rating": "pass" | "fail",
-                   "rationale": str, "quoted_evidence": str | null}}
-}}
+                   "rationale": str, "quoted_evidence": str | null}}{analysis_schema}
+}}{analysis_instructions}
 """
+
+# Appended to _SYSTEM_TEMPLATE when enable_analysis=True (Sonnet path).
+# Kept out of the Gemma prompt because:
+#  (a) free-form prose is what Sonnet is meaningfully better at, and
+#  (b) Gemma's lower-quality summaries would just clutter the UI.
+# Categories are constrained — see _ANALYSIS_CATEGORIES — so the UI can
+# group / colour notes consistently and downstream filters work.
+_ANALYSIS_SCHEMA_FRAGMENT = """,
+  "summary":         "a 2-3 sentence plain-language overview of the call",
+  "applicant_notes": [
+    {{"category": "deadline" | "eligibility" | "budget" | "team" | "ip"
+                  | "data" | "evaluation" | "process" | "other",
+      "text": "one sentence on something the applicant should know"}}
+  ]"""
+
+_ANALYSIS_INSTRUCTIONS_FRAGMENT = """
+
+In addition to the rating fields, populate `summary` and `applicant_notes`:
+  - `summary`: a neutral 2-3 sentence overview of what the call funds,
+    who it targets, and the headline budget + timing. Do not editorialize
+    on fit — the rating fields cover that.
+  - `applicant_notes`: 3-7 entries flagging things a prospective applicant
+    should know that aren't already obvious from the title and budget:
+    odd eligibility constraints, tight deadlines, mandatory co-funding,
+    consortium / team-composition requirements, IP or open-data clauses,
+    pre-registration steps, two-stage submission processes, evaluation
+    criteria weightings. Skip categories with nothing notable; do not
+    pad. Each `text` should be one concise sentence."""
 
 _USER_TEMPLATE = """\
 CALL:
@@ -74,7 +124,7 @@ CALL:
 """
 
 
-def build_messages(*, profile, call) -> list[dict]:
+def build_messages(*, profile, call, enable_analysis: bool = False) -> list[dict]:
     """Build the criterion-rubric prompt. Profile block first so the
     Ollama prefix cache is reused across calls scored against the same
     profile.
@@ -84,6 +134,12 @@ def build_messages(*, profile, call) -> list[dict]:
     as a whole. The OR-pick fallback predates Plan F, when full_text was
     rarely populated; with full-text ingestion live, OR-picking would
     silently drop full_text whenever summary is non-empty.
+
+    When `enable_analysis=True`, the system prompt also asks the model
+    for a `summary` string and a list of `applicant_notes` flagging
+    deadlines, eligibility quirks, co-funding rules, etc. We currently
+    set this only when the Sonnet path runs (high-cosine pairs) — Gemma
+    is too small to produce prose worth showing.
     """
     structured = profile.structured or {}
     sys = _SYSTEM_TEMPLATE.format(
@@ -92,6 +148,8 @@ def build_messages(*, profile, call) -> list[dict]:
         description=profile.description or "",
         areas=", ".join(structured.get("areas") or []) or "(none)",
         hard_exclusions=", ".join(structured.get("hard_exclusions") or []) or "(none)",
+        analysis_schema=_ANALYSIS_SCHEMA_FRAGMENT if enable_analysis else "",
+        analysis_instructions=_ANALYSIS_INSTRUCTIONS_FRAGMENT if enable_analysis else "",
     )
     parts: list[str] = []
     if call.summary:
@@ -200,6 +258,15 @@ def parse_response(content: str, *, verification_text: str | None = None) -> Par
             return truncated
         return None  # bogus quote — discarded silently
 
+    # Optional analysis fields (Sonnet path only).
+    summary = data.get("summary")
+    if summary is not None and not isinstance(summary, str):
+        summary = None
+    if isinstance(summary, str) and not summary.strip():
+        summary = None
+
+    applicant_notes = _sanitize_applicant_notes(data.get("applicant_notes"))
+
     return Parsed(
         topic_fit_rating=rating,
         topic_fit_rationale=str(tf.get("rationale") or ""),
@@ -210,4 +277,34 @@ def parse_response(content: str, *, verification_text: str | None = None) -> Par
         exclusions_rating=ex_rating,
         exclusions_rationale=str(ex.get("rationale") or ""),
         exclusions_quoted=_verified_quote(_validated_quote(ex, "exclusions")),
+        summary=summary,
+        applicant_notes=applicant_notes,
     )
+
+
+def _sanitize_applicant_notes(raw) -> list[dict] | None:
+    """Filter `applicant_notes` to well-formed entries with known categories.
+
+    A note is kept iff it is a dict carrying a `category` in our documented
+    set AND a non-empty `text`. Everything else is silently dropped — we
+    surface fewer notes rather than make the worker dead-letter a job over
+    a small schema deviation from the model. Returns None when the whole
+    list is missing or yields zero valid entries (NULL in DB → UI hides
+    the analysis section)."""
+    if not isinstance(raw, list):
+        return None
+    cleaned: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        category = entry.get("category")
+        text = entry.get("text")
+        if (
+            not isinstance(category, str)
+            or category not in _ANALYSIS_CATEGORIES
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            continue
+        cleaned.append({"category": category, "text": text.strip()})
+    return cleaned if cleaned else None

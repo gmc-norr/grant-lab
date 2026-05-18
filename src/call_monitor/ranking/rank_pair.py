@@ -41,6 +41,12 @@ class RankResult:
     # bypass) for downstream analysis. Default None so existing
     # constructors don't break.
     embed_similarity: float | None = None
+    # Optional applicant-facing analysis. Populated only when the Sonnet
+    # path ran with enable_analysis=True. Gemma + gate-fail paths leave
+    # both fields None and the worker writes NULL to the DB columns,
+    # which the UI uses to decide whether to show the analysis section.
+    summary: str | None = None
+    applicant_notes: list[dict] | None = None
 
 
 def rank_pair(
@@ -113,11 +119,11 @@ def rank_pair(
         return _gate_fail_result(gates, "embedding", must_include_match,
                                  embed_similarity=embed_sim)
 
-    messages = build_messages(profile=profile, call=call)
     # Cosine-based router. `remote_client is None` (no API key) or
     # `embed_sim is None` (no embedding to compare) both keep us local.
     # `remote_cosine_threshold is None` is the same as remote disabled.
     selected_client = client
+    routed_to_remote = False
     if (
         remote_client is not None
         and remote_cosine_threshold is not None
@@ -125,6 +131,7 @@ def rank_pair(
         and embed_sim >= remote_cosine_threshold
     ):
         selected_client = remote_client
+        routed_to_remote = True
         _logger.info(
             "ranking.routed_to_remote",
             extra={
@@ -134,6 +141,12 @@ def rank_pair(
                 "remote_model": getattr(remote_client, "model", "?"),
             },
         )
+    # enable_analysis is the remote-only signal that asks the prompt to
+    # produce summary + applicant_notes. Gemma's smaller capacity
+    # produces lower-quality prose; cheaper to leave it as rating-only.
+    messages = build_messages(
+        profile=profile, call=call, enable_analysis=routed_to_remote,
+    )
     envelope = selected_client.chat(
         messages=messages,
         response_format={"type": "json_object"},
@@ -161,6 +174,8 @@ def rank_pair(
         prompt_version=PROMPT_VERSION,
         raw_response=envelope,
         embed_similarity=embed_sim,
+        summary=parsed.summary,
+        applicant_notes=parsed.applicant_notes,
     )
 
 

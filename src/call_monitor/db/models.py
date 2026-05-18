@@ -263,6 +263,14 @@ class CallRanking(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     embed_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Populated only when the high-cosine pair was scored by the remote
+    # (Sonnet) backend with enable_analysis=True. NULL for Gemma rows
+    # and for gate-short-circuited rows (no LLM ran). See
+    # ranking/prompt.py::_sanitize_applicant_notes for the shape contract.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    applicant_notes: Mapped[list[dict] | None] = mapped_column(
+        JSONB, nullable=True,
+    )
 
 
 class RankingJob(Base):

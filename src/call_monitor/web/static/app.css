@@ -197,6 +197,50 @@ button.compact {
   margin: 4rem auto;
 }
 
+/* ===== Sonnet analysis section (summary + applicant notes) ===== */
+.analysis-section {
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 1rem 1.2rem;
+  margin: 1rem 0 1.5rem;
+}
+.analysis-section h2 { margin-top: 0; }
+.analysis-section .summary-paragraph {
+  font-size: 1.02em;
+  line-height: 1.5;
+  margin-bottom: 1rem;
+}
+.analysis-notes {
+  display: grid;
+  gap: 0.5rem;
+}
+.analysis-note {
+  display: grid;
+  grid-template-columns: 5.5em 1fr;
+  gap: 0.7rem;
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid var(--pico-muted-border-color);
+  background: var(--pico-background-color, transparent);
+}
+.analysis-note .note-cat {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.72em;
+  font-weight: 700;
+  color: var(--pico-muted-color);
+  padding-top: 0.15em;
+}
+.analysis-note.cat-deadline   { border-left-color: var(--cm-deadline-soon); }
+.analysis-note.cat-eligibility{ border-left-color: var(--cm-score-mid); }
+.analysis-note.cat-budget     { border-left-color: var(--cm-score-strong); }
+.analysis-note.cat-team       { border-left-color: #0d6efd; }
+.analysis-note.cat-ip         { border-left-color: #6f42c1; }
+.analysis-note.cat-data       { border-left-color: #20c997; }
+.analysis-note.cat-evaluation { border-left-color: #d63384; }
+.analysis-note.cat-process    { border-left-color: #6c757d; }
+.analysis-note.cat-other      { border-left-color: var(--pico-muted-border-color); }
+
 /* ===== Criterion breakdown on call detail ===== */
 .criterion-list {
   display: grid;
