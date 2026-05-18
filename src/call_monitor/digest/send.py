@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import distinct, select
+from sqlalchemy.exc import IntegrityError
 
 from call_monitor.db.models import DigestRun, Subscription, User
 from call_monitor.digest.assemble import assemble_for_user
@@ -143,7 +144,25 @@ def run_digest(
                     included_call_ids=[e.call_id for sec in payload.sections for e in sec.entries],
                     sent_at=now,
                 ))
-                session.commit()
+                try:
+                    session.commit()
+                except IntegrityError:
+                    # uq_digest_runs_user_week tripped — another run
+                    # already recorded a DigestRun for this (user, UTC
+                    # week). Under the single-instance invariant this
+                    # shouldn't happen, but the DB-level guard turns a
+                    # would-be double-send into a loud-rollback instead
+                    # of a silent duplicate email.
+                    session.rollback()
+                    _logger.warning(
+                        "digest.duplicate_week_rejected_by_db",
+                        extra={
+                            "event": "digest_duplicate_week_rejected",
+                            "user_id": uid,
+                            "week_start": week_start_dt.isoformat(),
+                        },
+                    )
+                    continue
                 summary.emails_sent += 1
             except Exception as e:  # noqa: BLE001
                 _logger.exception(

@@ -255,6 +255,32 @@ def test_trusted_proxy_reads_x_forwarded_for(monkeypatch, pg_url, pg_session_fac
     assert "2.2.2.2" in app.state.ip_limiter._events
 
 
+def test_trusted_proxy_picks_rightmost_xff_to_resist_spoofing(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """With `$proxy_add_x_forwarded_for` (Nginx default), the trusted proxy
+    APPENDS the connecting-peer IP at the end of XFF. A client that sends
+    its own XFF header gets the spoofed value in the leftmost slot and the
+    real peer IP in the rightmost slot. Rate-limit bucketing must key off
+    the real peer IP (rightmost) or a spoofed XFF defeats rate limiting.
+    """
+    monkeypatch.setenv("TRUSTED_PROXY", "true")
+    app, _ = _mk_app(monkeypatch, pg_url)
+    app.state.ip_limiter = SlidingWindowLimiter(max_requests=1, window_seconds=60)
+
+    with TestClient(app) as client:
+        client.post(
+            "/login",
+            data={"email": "a@ki.se"},
+            # Attacker spoofs "1.1.1.1" at the head; proxy appended the real
+            # peer "9.9.9.9" at the tail. The bucket key must be 9.9.9.9.
+            headers={"X-Forwarded-For": "1.1.1.1, 9.9.9.9"},
+        )
+
+    assert "9.9.9.9" in app.state.ip_limiter._events
+    assert "1.1.1.1" not in app.state.ip_limiter._events
+
+
 def test_untrusted_proxy_ignores_x_forwarded_for(
     monkeypatch, pg_url, pg_session_factory
 ):

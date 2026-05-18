@@ -20,6 +20,11 @@ _LAST_ERROR_MAX = 2000
 # under 60s per ranking, but bursts of dozens at once could queue up).
 _STUCK_AFTER = timedelta(minutes=5)
 
+# How far back reconcile looks. Matches backfill_profile's BACKFILL_DAYS
+# so a pair missed by the orchestrator gets caught within the same window
+# a manual /admin/rerank would recover it over.
+_RECONCILE_DAYS = 90
+
 
 def enqueue_for_pair(
     session: Session, *, call_id: int, profile_id: int
@@ -62,6 +67,56 @@ def enqueue_for_pair(
     # driver to treat it as a query rather than DML). Use inserted_primary_key
     # instead: it is a non-None tuple on insert, None on conflict-skip.
     return result.inserted_primary_key is not None
+
+
+def reconcile_missing_rankings(session: Session) -> int:
+    """Enqueue ranking jobs for (recent call × active profile) pairs that
+    have no CallRanking and no active RankingJob. Returns the number of
+    jobs created.
+
+    Closes the orchestrator recovery gap documented in orchestrator.py:
+    if step 3 (enqueue) fails or the process is killed between step 1
+    (calls inserted, source timestamp advanced) and step 3, the affected
+    calls are ingested but never ranked. Without this job an admin has
+    to manually click `/admin/rerank` to recover. Running this daily
+    keeps the lag under 24h without requiring human intervention.
+
+    SQL strategy: one bulk INSERT ... SELECT per tick. The `NOT EXISTS`
+    on CallRanking skips pairs we've already ranked; the ON CONFLICT on
+    the partial unique index (status IN ('pending','running')) skips
+    pairs we're already about to rank. The predicate must match the
+    index's WHERE clause verbatim or PG can't route the conflict.
+
+    Excludes calls with NULL published_at (same as backfill_profile —
+    we can't bound their age, so we defer to the manual-rerank path).
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=_RECONCILE_DAYS)
+    result = session.execute(
+        text(
+            """
+            INSERT INTO ranking_jobs (call_id, profile_id, status)
+            SELECT c.id, p.id, 'pending'
+            FROM calls c
+            CROSS JOIN profiles p
+            WHERE p.is_active = true
+              AND c.published_at >= :cutoff
+              AND NOT EXISTS (
+                SELECT 1 FROM call_rankings cr
+                WHERE cr.call_id = c.id AND cr.profile_id = p.id
+              )
+            ON CONFLICT (call_id, profile_id)
+              WHERE status IN ('pending', 'running') DO NOTHING
+            """
+        ),
+        {"cutoff": cutoff},
+    )
+    n = result.rowcount or 0
+    if n:
+        _logger.info(
+            "ranking.reconcile_enqueued",
+            extra={"event": "ranking_reconcile_enqueued", "count": n},
+        )
+    return n
 
 
 def claim_pending_jobs(session: Session, *, limit: int) -> list[RankingJob]:

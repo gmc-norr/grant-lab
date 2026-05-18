@@ -1,43 +1,45 @@
 {% extends "base.html" %}
 {% block title %}New profile — Call Monitor{% endblock %}
 {% block content %}
-<h1>Create a profile</h1>
-<p>
-  The app fetches each listed member's recent PubMed publications and
-  asks the local LLM to draft a 1–2 paragraph description plus suggested
-  structured fields (areas, budget range, must-include keywords, hard
-  exclusions). You can then edit the draft before it goes live. This
-  usually takes 10–30 seconds.
-</p>
+<p><a href="/profiles">&larr; All profiles</a></p>
+
+<hgroup>
+  <h1>Create a profile</h1>
+  <p>The app fetches each member's recent PubMed publications and asks the local LLM to draft a description plus rubric (areas, budget range, must-include keywords, exclusions). You can edit before it goes live. Usually 10–30 seconds.</p>
+</hgroup>
 
 <form method="post" action="/profiles/new">
-  <p>
-    <label>Profile name <input type="text" name="name" required maxlength="200"></label>
-  </p>
-  <p>
-    <label>Kind
-      <select name="kind">
-        <option value="group" selected>Research group</option>
-        <option value="org">Organization</option>
-        <option value="user">Individual user</option>
-      </select>
-    </label>
-  </p>
-  <p>
-    <label>Member ORCIDs (one per line)
-      <textarea name="orcids" rows="3" placeholder="0000-0001-2345-6789"></textarea>
-    </label>
-  </p>
-  <p>
-    <label>Members by name (one per line, format: <code>Last F | Affiliation</code>)
-      <textarea name="names_affiliations" rows="3" placeholder="Smith J | Karolinska Institutet"></textarea>
-    </label>
-  </p>
-  <p>
-    <label>Pasted past grants (optional, titles + abstracts)
-      <textarea name="pasted_grants" rows="6"></textarea>
-    </label>
-  </p>
-  <p><button type="submit">Bootstrap profile</button></p>
+  <label>
+    Profile name
+    <input type="text" name="name" required maxlength="200"
+           placeholder="e.g. Digital Pathology & Imaging AI">
+  </label>
+
+  <label>
+    Kind
+    <select name="kind">
+      <option value="group" selected>Research group</option>
+      <option value="org">Organization</option>
+      <option value="user">Individual user</option>
+    </select>
+  </label>
+
+  <label>
+    Member ORCIDs <small class="muted">(one per line)</small>
+    <textarea name="orcids" rows="3" placeholder="0000-0001-2345-6789"></textarea>
+  </label>
+
+  <label>
+    Members by name <small class="muted">(one per line, format: <code>Last F | Affiliation</code>)</small>
+    <textarea name="names_affiliations" rows="3"
+              placeholder="Smith J | Karolinska Institutet"></textarea>
+  </label>
+
+  <label>
+    Pasted past grants <small class="muted">(optional, titles + abstracts)</small>
+    <textarea name="pasted_grants" rows="6"></textarea>
+  </label>
+
+  <button type="submit">Bootstrap profile</button>
 </form>
 {% endblock %}

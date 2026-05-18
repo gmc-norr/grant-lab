@@ -1,19 +1,41 @@
 {% extends "base.html" %}
 {% block title %}Profiles — Call Monitor{% endblock %}
 {% block content %}
-<h1>Ranking profiles</h1>
-<p><a href="/profiles/new">+ Create a new profile</a></p>
+<header style="display:flex;justify-content:space-between;align-items:start;gap:1rem">
+  <hgroup>
+    <h1>Ranking profiles</h1>
+    <p>Each profile defines who you are and what you fund-hunt for. The LLM ranks calls against the description and rubric.</p>
+  </hgroup>
+  <a href="/profiles/new" role="button">+ New profile</a>
+</header>
 
 {% if not profiles %}
-  <p><em>No profiles yet. Create one to see ranked calls on the dashboard.</em></p>
+  <div class="empty-state">
+    <h3>No profiles yet</h3>
+    <p>Create one to see ranked calls on the dashboard.</p>
+    <a href="/profiles/new" role="button">Create your first profile</a>
+  </div>
 {% else %}
-  <ul>
+  <div class="profile-cards">
     {% for p in profiles %}
-      <li>
-        <a href="/profiles/{{ p.id }}">{{ p.name }}</a>
-        <small>({{ p.kind.value if p.kind.value is defined else p.kind }})</small>
-      </li>
+      <article class="profile-card">
+        <h3><a href="/profiles/{{ p.id }}">{{ p.name }}</a></h3>
+        <div class="meta">
+          {{ p.kind.value if p.kind.value is defined else p.kind }}
+          {% if p.structured and p.structured.get('areas') %}
+            · {{ p.structured['areas'] | length }} areas
+          {% endif %}
+          {% if p.budget_currency %}· {{ p.budget_currency }}{% endif %}
+        </div>
+        {% if p.description %}
+          <p style="font-size:0.95em">{{ p.description[:160] }}{% if p.description|length > 160 %}…{% endif %}</p>
+        {% endif %}
+        <div>
+          <a href="/?profile={{ p.id }}">Ranked feed →</a>
+          · <a href="/profiles/{{ p.id }}/edit">Edit</a>
+        </div>
+      </article>
     {% endfor %}
-  </ul>
+  </div>
 {% endif %}
 {% endblock %}

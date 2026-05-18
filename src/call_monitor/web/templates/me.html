@@ -1,33 +1,41 @@
 {% extends "base.html" %}
-{% block title %}Your profile — Call Monitor{% endblock %}
+{% block title %}Settings — Call Monitor{% endblock %}
 {% block content %}
-<h1>Your profile</h1>
-<p>Signed in as <code>{{ user.email }}</code>{% if user.is_admin %} (admin){% endif %}.</p>
+<hgroup>
+  <h1>Settings</h1>
+  <p>Signed in as <code>{{ user.email }}</code>{% if user.is_admin %} · <span class="muted">admin</span>{% endif %}.</p>
+</hgroup>
 
-<form method="post" action="/me/name">
-  <label>Display name
-    <input type="text" name="name" value="{{ user.name or '' }}" maxlength="200">
-  </label>
-  <button type="submit">Save</button>
-</form>
+<article>
+  <header><strong>Display name</strong></header>
+  <form method="post" action="/me/name">
+    <label>
+      How should we address you?
+      <input type="text" name="name" value="{{ user.name or '' }}" maxlength="200"
+             placeholder="e.g. Pär Larsson">
+    </label>
+    <button type="submit">Save name</button>
+  </form>
+</article>
 
-<h2>Profile subscriptions</h2>
-<p>Check profiles whose weekly digest you want to receive.</p>
-<form method="post" action="/me/subscriptions">
-  <table>
-    <thead><tr><th></th><th>Profile</th></tr></thead>
-    <tbody>
-      {% for p in profiles %}
-        <tr>
-          <td>
+<article>
+  <header><strong>Weekly digest subscriptions</strong></header>
+  <p class="muted">Check the profiles whose Monday-morning digest you want emailed to you.</p>
+  <form method="post" action="/me/subscriptions">
+    {% if not profiles %}
+      <p class="muted"><em>No profiles to subscribe to yet — <a href="/profiles/new">create one</a>.</em></p>
+    {% else %}
+      <fieldset>
+        {% for p in profiles %}
+          <label>
             <input type="checkbox" name="subscribe_{{ p.id }}"
                    {% if p.id in subscribed_ids %}checked{% endif %}>
-          </td>
-          <td>{{ p.name }}</td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p><button type="submit">Save subscriptions</button></p>
-</form>
+            {{ p.name }}
+          </label>
+        {% endfor %}
+      </fieldset>
+      <button type="submit">Save subscriptions</button>
+    {% endif %}
+  </form>
+</article>
 {% endblock %}

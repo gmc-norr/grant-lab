@@ -116,6 +116,124 @@ def test_rank_pair_eligibility_fail_zeros_score():
     assert r.reason == "eligibility"
 
 
+def _remote_mock(*, model: str = "claude-sonnet-4-6", content: dict | None = None):
+    """Stand-in for AnthropicClient — exposes .chat() + .model, records calls.
+    Used so router-routing tests don't depend on the real Anthropic SDK
+    being installed or reachable (they assert routing behaviour only)."""
+    from unittest.mock import MagicMock
+    payload = json.dumps(content or {
+        "topic_fit": {"rating": 5, "rationale": "ideal", "quoted_evidence": "match"},
+        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+    })
+    client = MagicMock()
+    client.model = model
+    client.chat.return_value = {
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": payload}}],
+    }
+    return client
+
+
+def _profile_with_vector(*, sim_with_call: float):
+    """Build a profile + matching call whose stored vectors produce the
+    requested cosine. Uses a 4-D vector to keep arithmetic mental — the
+    embedding gate doesn't care about dimension, only matching across
+    profile + call."""
+    import math
+    # Profile vector along x-axis, call vector at angle whose cos = target.
+    theta = math.acos(max(min(sim_with_call, 1.0), -1.0))
+    p_vec = [1.0, 0.0, 0.0, 0.0]
+    c_vec = [math.cos(theta), math.sin(theta), 0.0, 0.0]
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    profile.embedding = p_vec
+    profile.embedding_model = "test-model"
+    call = _Call(deadline=_NOW.replace(year=2099))
+    call.embedding = c_vec
+    call.embedding_model = "test-model"
+    return profile, call
+
+
+def test_rank_pair_routes_to_remote_when_cosine_above_threshold():
+    """High cosine ⇒ Sonnet path. The local client must NOT be called;
+    the result's .model must report the remote model so the UI badge
+    and audit trail attribute the score to the right backend."""
+    profile, call = _profile_with_vector(sim_with_call=0.85)
+    local = _ollama_mock(content={  # would-fail asserts if called
+        "topic_fit": {"rating": 1, "rationale": "wrong client"},
+        "eligibility": {"rating": "fail", "rationale": "wrong client"},
+        "exclusions": {"rating": "fail", "rationale": "wrong client"},
+    })
+    local.chat = lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("local client must not be called when cosine ≥ threshold")
+    )
+    local.model = "gemma4-stub"
+    remote = _remote_mock()
+
+    r = rank_pair(
+        client=local, profile=profile, call=call, now=_NOW,
+        remote_client=remote, remote_cosine_threshold=0.50,
+    )
+    assert remote.chat.call_count == 1
+    assert r.model == "claude-sonnet-4-6"
+    assert r.score == 100  # 5 × 20
+
+
+def test_rank_pair_stays_local_when_cosine_below_threshold():
+    """Pairs below the escalation cutoff use the local Gemma — saves
+    the API call entirely."""
+    profile, call = _profile_with_vector(sim_with_call=0.35)
+    local = _ollama_mock(content={
+        "topic_fit": {"rating": 3, "rationale": "ok"},
+        "eligibility": {"rating": "pass"},
+        "exclusions": {"rating": "pass"},
+    })
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local, profile=profile, call=call, now=_NOW,
+        remote_client=remote, remote_cosine_threshold=0.50,
+    )
+    assert remote.chat.call_count == 0
+    assert r.model.startswith("gemma4")
+
+
+def test_rank_pair_stays_local_when_remote_disabled():
+    """No remote_client (anthropic_api_key unset) ⇒ never escalate,
+    even on a 0.9 cosine. This is the prod-safe default for dev/CI."""
+    profile, call = _profile_with_vector(sim_with_call=0.90)
+    local = _ollama_mock(content={
+        "topic_fit": {"rating": 3, "rationale": "ok"},
+        "eligibility": {"rating": "pass"},
+        "exclusions": {"rating": "pass"},
+    })
+    r = rank_pair(
+        client=local, profile=profile, call=call, now=_NOW,
+        remote_client=None, remote_cosine_threshold=0.50,
+    )
+    assert r.model.startswith("gemma4")
+
+
+def test_rank_pair_stays_local_when_cosine_missing():
+    """No embedding (NULL profile or call vector) ⇒ no router decision
+    possible ⇒ stay local. Avoids wasting a Sonnet call on a pair we
+    couldn't even semantically pre-filter."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    # Neither has a vector ⇒ cosine = None ⇒ embedding gate UNKNOWN
+    local = _ollama_mock(content={
+        "topic_fit": {"rating": 3, "rationale": "ok"},
+        "eligibility": {"rating": "pass"},
+        "exclusions": {"rating": "pass"},
+    })
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local, profile=profile, call=call, now=_NOW,
+        remote_client=remote, remote_cosine_threshold=0.50,
+    )
+    assert remote.chat.call_count == 0
+    assert r.embed_similarity is None
+
+
 def test_rank_pair_uses_argmax_times_20():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))

@@ -14,9 +14,13 @@ def _setup(monkeypatch, pg_url):
     return create_app()
 
 
-def _logged_in(app, pg_session_factory):
+def _logged_in(app, pg_session_factory, *, is_admin: bool = True):
+    """Default `is_admin=True` so existing tests that edit profiles they
+    didn't create still work under the owner-or-admin gate. Tests that
+    exercise the non-admin path should pass `is_admin=False` explicitly.
+    """
     with pg_session_factory() as s:
-        u = User(email="u@ki.se")
+        u = User(email="u@ki.se", is_admin=is_admin)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -451,6 +455,146 @@ def test_profile_edit_round_trips_budget_currency(
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
     assert p.budget_currency == "SEK"
+
+
+def test_profile_edit_rejects_non_owner_non_admin(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """A non-admin hospital user can't edit a profile they don't own.
+    The profile_factory gives the profile its own owner; _logged_in with
+    is_admin=False makes the request user a stranger. Must 403.
+    """
+    pid, _owner_uid = profile_factory(name="Someone else's")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory, is_admin=False)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "hostile edit", "areas": "",
+                "budget_min": "", "budget_max": "", "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 403
+
+    # And the description must not have been written.
+    from call_monitor.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.description != "hostile edit"
+
+
+def test_profile_edit_allows_owner(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """The creator can edit even as a non-admin (policy: owner-or-admin)."""
+    from call_monitor.db.models import Profile, ProfileKind, User
+
+    app = _setup(monkeypatch, pg_url)
+    # Register u@ki.se as a non-admin, then make them the creator of the
+    # profile before generating the logged-in client. _logged_in creates
+    # u@ki.se itself, so pre-seed the user here and mirror its email.
+    with pg_session_factory() as s:
+        u = User(email="owner-only@ki.se", is_admin=False)
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="My profile", kind=ProfileKind.GROUP,
+            description="mine", structured={}, created_by=u.id,
+        )
+        s.add(p)
+        s.commit()
+        pid = p.id
+        uid = u.id
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "owner-updated", "areas": "",
+                "budget_min": "", "budget_max": "", "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert p.description == "owner-updated"
+
+
+def test_profile_edit_rejects_unknown_currency(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """An unlisted currency must 400 rather than silently leaving the old
+    value. The dropdown only offers whitelisted currencies, but a crafted
+    POST should fail loudly so the user isn't told "saved" when it wasn't."""
+    pid, _ = profile_factory(name="Bad currency")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "budget_currency": "XYZ",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+
+
+def test_profile_edit_rejects_out_of_range_trl(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """TRL is a 1–9 scale; 999 is garbage. Reject so the stored rubric
+    stays sensible."""
+    pid, _ = profile_factory(name="TRL bounds")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "1", "trl_max": "999",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+
+
+def test_profile_edit_rejects_obscenely_large_budget(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """budget_max=10**18 is implausible; reject so the rubric's numeric
+    gate doesn't operate on junk inputs."""
+    pid, _ = profile_factory(name="Budget bounds")
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "x", "areas": "",
+                "budget_min": "0", "budget_max": "1000000000000000",
+                "budget_currency": "",
+                "trl_min": "", "trl_max": "",
+                "must_include": "", "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
 
 
 def test_profile_edit_accepts_empty_currency_as_null(

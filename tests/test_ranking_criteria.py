@@ -168,6 +168,42 @@ def test_embedding_gate_passes_at_exact_threshold():
     assert g.status == GateStatus.PASS
 
 
+def test_embedding_gate_unknown_in_review_band():
+    """Two-band gate: a similarity between hard_fail and pass thresholds
+    returns UNKNOWN so the LLM adjudicates rather than silently zeroing
+    a potentially-on-topic pair. The hard FAIL stays reserved for
+    obviously-off-topic pairs (sim < hard_fail)."""
+    from call_monitor.ranking.criteria import GateStatus, _embedding
+    # 0.25 is between hard_fail=0.20 and threshold=0.30 → UNKNOWN
+    g = _embedding(0.25, threshold=0.30, hard_fail_threshold=0.20)
+    assert g.status == GateStatus.UNKNOWN
+
+
+def test_embedding_gate_fails_below_hard_threshold():
+    """Sim below the hard-fail threshold still short-circuits the LLM."""
+    from call_monitor.ranking.criteria import GateStatus, _embedding
+    g = _embedding(0.10, threshold=0.30, hard_fail_threshold=0.20)
+    assert g.status == GateStatus.FAIL
+    assert g.reason == "topic_dissimilar"
+
+
+def test_embedding_gate_passes_above_pass_threshold():
+    from call_monitor.ranking.criteria import GateStatus, _embedding
+    g = _embedding(0.50, threshold=0.30, hard_fail_threshold=0.20)
+    assert g.status == GateStatus.PASS
+
+
+def test_embedding_gate_fails_when_hard_and_pass_collapse():
+    """Legacy behavior: when hard_fail_threshold == threshold the gate
+    is strictly two-state (FAIL below, PASS at/above) — no UNKNOWN band.
+    Tests that construct `_embedding` without hard_fail must keep working."""
+    from call_monitor.ranking.criteria import GateStatus, _embedding
+    g_below = _embedding(0.29, threshold=0.30, hard_fail_threshold=0.30)
+    g_at = _embedding(0.30, threshold=0.30, hard_fail_threshold=0.30)
+    assert g_below.status == GateStatus.FAIL
+    assert g_at.status == GateStatus.PASS
+
+
 def test_embedding_gate_unknown_when_similarity_is_none():
     """Missing embedding (model down or backfill incomplete) -> UNKNOWN,
     not FAIL. Caller falls through to LLM."""

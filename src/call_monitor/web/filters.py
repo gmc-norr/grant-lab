@@ -32,3 +32,54 @@ def display_date(value: datetime | None) -> str:
     if value is None:
         return "—"
     return value.astimezone(_STOCKHOLM).strftime("%Y-%m-%d")
+
+
+# Internal codes used for `CallRanking.aggregate_reason` and the
+# `CallRankingCriterion.criterion` PK. Kept as compact snake-case in the
+# DB; rendered as proper labels for the UI. Unmapped values fall through
+# to a Title-cased version of the raw code so a future criterion doesn't
+# disappear — it just looks slightly less polished until we add it here.
+_CRITERION_LABELS: dict[str, str] = {
+    "topic_fit": "Topic fit",
+    "eligibility": "Eligibility",
+    "exclusions": "Exclusions",
+    "timeline": "Timeline",
+    "budget": "Budget",
+    "trl": "Technology Readiness Level",
+    "embedding": "Topic similarity",
+}
+
+
+def criterion_label(value: str | None) -> str:
+    if value is None:
+        return "—"
+    return _CRITERION_LABELS.get(value, value.replace("_", " ").title())
+
+
+def model_label(value: str | None) -> str:
+    """Pretty name for the LLM that produced a CallRanking. Stored value
+    is the raw model ID (e.g. 'claude-sonnet-4-6', 'gemma4:e4b-it-q4_K_M');
+    UI wants something a non-engineer can read.
+
+    Unmapped models fall through to the raw string so a new backend isn't
+    silently mislabelled — easier to spot in the UI than a hardcoded
+    'Unknown'.
+    """
+    if not value:
+        return "—"
+    pretty = {
+        "claude-sonnet-4-6": "Sonnet 4.6",
+        "claude-sonnet-4-7": "Sonnet 4.7",
+        "claude-opus-4-6": "Opus 4.6",
+        "claude-opus-4-7": "Opus 4.7",
+        "claude-haiku-4-5": "Haiku 4.5",
+    }.get(value)
+    if pretty:
+        return pretty
+    if value.startswith("gemma4:e4b-it-q4"):
+        return "Gemma 4 E4B (Q4_K_M, local)"
+    if value.startswith("gemma4:e4b-it-q8"):
+        return "Gemma 4 E4B (Q8, local)"
+    if value.startswith("gemma4"):
+        return f"Gemma 4 ({value}, local)"
+    return value

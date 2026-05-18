@@ -47,11 +47,45 @@ class Settings(BaseSettings):
     embedding_pregate_threshold: float = Field(
         default=0.30, alias="EMBEDDING_PREGATE_THRESHOLD"
     )
+    # Two-band embedding gate (Codex #1):
+    #   sim < EMBEDDING_HARD_FAIL_THRESHOLD  -> short-circuit FAIL, no LLM
+    #   hard_fail <= sim < pregate_threshold -> UNKNOWN, LLM adjudicates
+    #   sim >= pregate_threshold             -> PASS
+    # Defaults to 0.20 so any pair whose BGE-M3 cosine is in [0.20, 0.30)
+    # reaches the LLM instead of being silently zeroed. Tighten (raise
+    # toward the pregate) once the golden set has enough examples to
+    # calibrate the cutoff against observed false negatives.
+    embedding_hard_fail_threshold: float = Field(
+        default=0.20, alias="EMBEDDING_HARD_FAIL_THRESHOLD"
+    )
+    # Remote-rank escalation: pairs with cosine >= threshold go to a
+    # hosted model (Anthropic) for a deeper analysis instead of the local
+    # Gemma. Leave anthropic_api_key unset (None or "") to disable —
+    # rank_pair then routes every pair to the local client and the
+    # threshold + model fields are ignored. The threshold defaults to
+    # 0.50; tune up to skip more, down to send more pairs to Sonnet.
+    anthropic_api_key: str | None = Field(
+        default=None, alias="ANTHROPIC_API_KEY"
+    )
+    remote_rank_model: str = Field(
+        default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL"
+    )
+    remote_rank_cosine_threshold: float = Field(
+        default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD"
+    )
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_user: str | None = Field(default=None, alias="SMTP_USER")
     smtp_password: str | None = Field(default=None, alias="SMTP_PASSWORD")
+    # Session cookie TTL. Drives both the itsdangerous signer's max_age
+    # and the Set-Cookie max-age; keep these in lockstep or a valid
+    # signed session will outlast the cookie (or vice versa). 30 days is
+    # the hospital-internal default; shorten via env for high-security
+    # deployments.
+    session_max_age_seconds: int = Field(
+        default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS"
+    )
     digest_dry_run: bool = Field(default=False, alias="DIGEST_DRY_RUN")
     admin_dashboard_url: str = Field(
         default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL"

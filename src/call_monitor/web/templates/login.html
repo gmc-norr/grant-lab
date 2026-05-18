@@ -1,9 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Sign in — Call Monitor{% endblock %}
 {% block content %}
-<h1>Sign in</h1>
-<form method="post" action="/login">
-  <label>Email <input type="email" name="email" required></label>
-  <button type="submit">Send login link</button>
-</form>
+<div class="narrow">
+  <hgroup style="text-align:center">
+    <h1>Sign in</h1>
+    <p>Enter your hospital email. We'll send a one-time login link, valid for 15 minutes.</p>
+  </hgroup>
+  <form method="post" action="/login">
+    <label>
+      Email
+      <input type="email" name="email" required autofocus autocomplete="email"
+             placeholder="you@ki.se">
+    </label>
+    <button type="submit">Send login link</button>
+  </form>
+</div>
 {% endblock %}

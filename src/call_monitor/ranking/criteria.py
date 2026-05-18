@@ -50,6 +50,7 @@ def evaluate_gates(
     now: datetime,
     embedding_threshold: float,
     embed_similarity: float | None = None,
+    embedding_hard_fail_threshold: float | None = None,
 ) -> Gates:
     """Evaluate the four rule-based gates for a (profile, call) pair.
 
@@ -62,17 +63,33 @@ def evaluate_gates(
     None means UNKNOWN (callers that don't yet wire up embeddings get the
     same fall-through-to-LLM behaviour as a missing budget).
 
-    `embedding_threshold` is the cosine cutoff for the embedding pre-gate.
-    Required: callers must thread the value (in practice from
-    Settings.embedding_pregate_threshold) — there is no module-level
-    default to fall back on. This keeps the Settings field as the single
-    source of truth for the threshold.
+    `embedding_threshold` is the cosine cutoff at which the pre-gate PASSES.
+    Pairs below this (but at/above `embedding_hard_fail_threshold`) surface
+    as UNKNOWN so the LLM can adjudicate. Required: callers must thread the
+    value (in practice from Settings.embedding_pregate_threshold) — there
+    is no module-level default to fall back on. This keeps the Settings
+    field as the single source of truth.
+
+    `embedding_hard_fail_threshold` is the cutoff below which the gate
+    short-circuits to FAIL (no LLM call). Codex finding #1: splitting the
+    cutoff into a two-band gate (PASS / UNKNOWN-review / FAIL) leaves the
+    "obviously off-topic" short-circuit in place while letting borderline
+    pairs reach the LLM rather than being silently zeroed. Defaults to
+    `embedding_threshold` when not provided, preserving legacy single-cut
+    behaviour for callers that haven't plumbed the new setting through.
     """
+    hard = (embedding_hard_fail_threshold
+            if embedding_hard_fail_threshold is not None
+            else embedding_threshold)
     return Gates(
         timeline=_timeline(call.deadline, now),
         budget=_budget(profile, call),
         trl=_trl(profile, call),
-        embedding=_embedding(embed_similarity, threshold=embedding_threshold),
+        embedding=_embedding(
+            embed_similarity,
+            threshold=embedding_threshold,
+            hard_fail_threshold=hard,
+        ),
     )
 
 
@@ -116,15 +133,30 @@ def _trl(profile, call) -> GateResult:
     return GateResult(GateStatus.FAIL)
 
 
-def _embedding(sim: float | None, *, threshold: float) -> GateResult:
+def _embedding(
+    sim: float | None,
+    *,
+    threshold: float,
+    hard_fail_threshold: float | None = None,
+) -> GateResult:
     """Cosine-similarity pre-gate.
 
-    None  -> UNKNOWN (missing embedding; caller falls through to LLM).
-    >= threshold -> PASS.
-    <  threshold -> FAIL with reason='topic_dissimilar'.
+    None                       -> UNKNOWN (missing embedding; caller -> LLM).
+    sim < hard_fail_threshold  -> FAIL with reason='topic_dissimilar'.
+    hard <= sim < threshold    -> UNKNOWN (review band — LLM adjudicates).
+    sim >= threshold           -> PASS.
+
+    When `hard_fail_threshold` is omitted (or equals `threshold`), the
+    gate collapses back to a strict two-state FAIL/PASS — the legacy
+    behaviour before Codex finding #1 split the cutoff. This keeps old
+    tests (and callers that haven't plumbed the new setting through) green.
     """
     if sim is None:
         return GateResult(GateStatus.UNKNOWN)
-    if sim < threshold:
+    hard = hard_fail_threshold if hard_fail_threshold is not None else threshold
+    if sim < hard:
         return GateResult(GateStatus.FAIL, reason="topic_dissimilar")
+    if sim < threshold:
+        # In the review band: don't zero the pair, let the LLM weigh in.
+        return GateResult(GateStatus.UNKNOWN, reason="topic_borderline")
     return GateResult(GateStatus.PASS)

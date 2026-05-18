@@ -1,73 +1,82 @@
 {% extends "base.html" %}
 {% block title %}Admin — Call Monitor{% endblock %}
 {% block content %}
-<h1>Admin</h1>
-<h2>Source health</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Source</th>
-      <th>Last fetched</th>
-      <th>Calls in DB</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for s in sources %}
+<hgroup>
+  <h1>Admin</h1>
+  <p>Operational health: ingestion, ranking queue, embeddings, weekly digest, ranking quality.</p>
+</hgroup>
+
+<article>
+  <header><strong>Source health</strong></header>
+  <table>
+    <thead>
       <tr>
-        <td>{{ s.name }} (<code>{{ s.slug }}</code>)</td>
-        <td>{% if s.last_fetched_at %}{{ s.last_fetched_at | display_dt }}{% else %}— never{% endif %}</td>
-        <td>{{ s.call_count }}</td>
+        <th>Source</th>
+        <th>Last fetched</th>
+        <th>Calls in DB</th>
       </tr>
-    {% endfor %}
-  </tbody>
-</table>
-<h2>Ranking queue</h2>
-<table>
-  <thead>
-    <tr><th>Status</th><th>Jobs</th></tr>
-  </thead>
-  <tbody>
-    <tr><td>Pending</td><td>{{ queue_counts.get(queue_status_pending, 0) }}</td></tr>
-    <tr><td>Running</td><td>{{ queue_counts.get(queue_status_running, 0) }}</td></tr>
-    <tr><td>Failed (dead-letter)</td><td>{{ queue_counts.get(queue_status_failed, 0) }}</td></tr>
-    <tr><td>Done</td><td>{{ queue_counts.get(queue_status_done, 0) }}</td></tr>
-  </tbody>
-</table>
-<form method="post" action="/admin/rerank" style="margin-top: 1em;">
-  <button type="submit">Re-rank everything (last 90 days × active profiles)</button>
-</form>
-<h2>Embedding coverage</h2>
-<dl>
-  <dt>Calls</dt>
-  <dd>
-    {{ embedding_coverage.call_embedded }}/{{ embedding_coverage.call_total }} embedded
-    ({{ embedding_coverage.call_stale }} stale, model <code>{{ embedding_coverage.current_model }}</code>)
-  </dd>
-  <dt>Profiles</dt>
-  <dd>
-    {{ embedding_coverage.profile_embedded }}/{{ embedding_coverage.profile_total }} embedded
-    ({{ embedding_coverage.profile_stale }} stale, model <code>{{ embedding_coverage.current_model }}</code>)
-  </dd>
-</dl>
+    </thead>
+    <tbody>
+      {% for s in sources %}
+        <tr>
+          <td>{{ s.name }} <code class="muted">{{ s.slug }}</code></td>
+          <td>{% if s.last_fetched_at %}{{ s.last_fetched_at | display_dt }}{% else %}<span class="muted">never</span>{% endif %}</td>
+          <td><strong>{{ s.call_count }}</strong></td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</article>
 
-<h2>Digest</h2>
-<dl>
-  <dt>Last digest sent</dt>
-  <dd>{% if digest_last_sent_at %}{{ digest_last_sent_at | display_dt }}{% else %}No digests sent{% endif %}</dd>
-  <dt>Runs this week</dt>
-  <dd>{{ digest_runs_this_week }}</dd>
-  <dt>Disabled users (3+ bounces)</dt>
-  <dd>{{ digest_disabled_users }}</dd>
-</dl>
+<article>
+  <header><strong>Ranking queue</strong></header>
+  <div class="summary-cards">
+    <div class="summary-card"><div class="label">Pending</div><div class="value">{{ queue_counts.get(queue_status_pending, 0) }}</div></div>
+    <div class="summary-card"><div class="label">Running</div><div class="value">{{ queue_counts.get(queue_status_running, 0) }}</div></div>
+    <div class="summary-card"><div class="label">Done</div><div class="value accent-strong">{{ queue_counts.get(queue_status_done, 0) }}</div></div>
+    <div class="summary-card"><div class="label">Failed (dead-letter)</div><div class="value {% if queue_counts.get(queue_status_failed, 0) %}accent-soon{% endif %}">{{ queue_counts.get(queue_status_failed, 0) }}</div></div>
+  </div>
+  <form method="post" action="/admin/rerank">
+    <button type="submit" class="secondary">Re-rank everything (last 90 days × active profiles)</button>
+  </form>
+</article>
 
-<h2>Golden-set Kendall's tau (last run)</h2>
-{% if golden_set_report %}
+<article>
+  <header><strong>Embedding coverage</strong></header>
   <dl>
-    <dt>Curated triples</dt><dd>{{ golden_set_report.n_fixture }}</dd>
-    <dt>τ (n={{ golden_set_report.n_compared }})</dt>
-    <dd>{% if golden_set_report.tau is not none %}{{ '%.3f' % golden_set_report.tau }}{% else %}—{% endif %}</dd>
+    <dt>Calls</dt>
+    <dd>
+      <strong>{{ embedding_coverage.call_embedded }}/{{ embedding_coverage.call_total }} embedded</strong>
+      <span class="muted">({{ embedding_coverage.call_stale }} stale, model <code>{{ embedding_coverage.current_model }}</code>)</span>
+    </dd>
+    <dt>Profiles</dt>
+    <dd>
+      <strong>{{ embedding_coverage.profile_embedded }}/{{ embedding_coverage.profile_total }} embedded</strong>
+      <span class="muted">({{ embedding_coverage.profile_stale }} stale, model <code>{{ embedding_coverage.current_model }}</code>)</span>
+    </dd>
   </dl>
-{% else %}
-  <p>(golden eval not yet run)</p>
-{% endif %}
+</article>
+
+<article>
+  <header><strong>Digest (weekly)</strong></header>
+  <dl>
+    <dt>Last digest sent</dt>
+    <dd>{% if digest_last_sent_at %}{{ digest_last_sent_at | display_dt }}{% else %}<span class="muted">No digests sent</span>{% endif %}</dd>
+    <dt>Runs this week</dt><dd>{{ digest_runs_this_week }}</dd>
+    <dt>Disabled users (3+ bounces)</dt><dd>{{ digest_disabled_users }}</dd>
+  </dl>
+</article>
+
+<article>
+  <header><strong>Ranking quality — Kendall's τ (last run)</strong></header>
+  {% if golden_set_report %}
+    <dl>
+      <dt>Curated triples</dt><dd>{{ golden_set_report.n_fixture }}</dd>
+      <dt>τ (n={{ golden_set_report.n_compared }})</dt>
+      <dd>{% if golden_set_report.tau is not none %}<strong>{{ '%.3f' % golden_set_report.tau }}</strong>{% else %}—{% endif %}</dd>
+    </dl>
+  {% else %}
+    <p class="muted">Golden-set evaluation hasn't run yet — happens Mondays at 06:00 Europe/Stockholm.</p>
+  {% endif %}
+</article>
 {% endblock %}

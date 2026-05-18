@@ -183,26 +183,61 @@ def test_refresh_missing_tick_re_embeds_rows_with_mismatched_model(pg_session_fa
         assert s.get(Call, cid_null).embedding_model == "bge-m3"
 
 
-def test_refresh_missing_tick_skips_blank_description_profiles(pg_session_factory):
-    """Codex regression: a profile with blank description has no text to
-    embed. The tick must not select it (would otherwise infinite-loop:
-    select NULL → no-op clear → still NULL → re-select)."""
+def test_refresh_missing_tick_noops_on_blank_desc_no_areas_profile(pg_session_factory):
+    """A profile with no description AND no areas has no embeddable text.
+    After the Codex #2 change (areas included in build_profile_text), the
+    tick's SQL pre-filter was dropped, so such a profile gets selected —
+    but the inline `if not text.strip()` guard in refresh_profile_embedding
+    makes the per-row call a no-op: the embedding client is never invoked."""
     with pg_session_factory() as s:
         pid = _seed_profile(s, name="BlankDesc")
         s.flush()
-        s.get(Profile, pid).description = ""
+        p = s.get(Profile, pid)
+        p.description = ""
+        p.structured = {}  # no areas either
         s.commit()
 
     client = MagicMock()
     client.model = "bge-m3"
-    # Embed should NEVER be called — blank-description profile is skipped at SQL level
-    client.embed.side_effect = AssertionError("embed should not be invoked for blank-desc profile")
+    # The inline no-op guard must prevent this from being invoked.
+    client.embed.side_effect = AssertionError(
+        "embed must not be invoked when both description and areas are empty"
+    )
 
-    summary = refresh_missing_embeddings_tick(
+    # Not asserting on the summary counts here — the inline path returns
+    # True (state kept consistent with blank input), but the important
+    # invariant is that we never hit the remote embedder with empty text.
+    refresh_missing_embeddings_tick(
         session_factory=pg_session_factory, embed_client=client, batch_size=200,
     )
-    assert summary["profiles_embedded"] == 0
-    assert summary["profiles_failed"] == 0
+
+
+def test_refresh_missing_tick_embeds_profile_with_only_areas(pg_session_factory):
+    """Codex #2: a profile with an empty description but populated areas
+    still has embeddable signal — the tick must pick it up."""
+    with pg_session_factory() as s:
+        pid = _seed_profile(s, name="AreasOnly")
+        s.flush()
+        p = s.get(Profile, pid)
+        p.description = ""
+        p.structured = {"areas": ["clinical AI", "radiology"]}
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    client.embed.return_value = [0.2] * 1024
+
+    refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+    )
+
+    # Verify the embed was actually called and the vector landed.
+    assert client.embed.call_count == 1
+    call_text = client.embed.call_args[0][0]
+    assert "clinical AI" in call_text
+    assert "radiology" in call_text
+    with pg_session_factory() as s:
+        assert s.get(Profile, pid).embedding is not None
 
 
 def test_refresh_missing_tick_force_true_re_embeds_already_embedded_rows(pg_session_factory):

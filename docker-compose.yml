@@ -1,6 +1,10 @@
 services:
   db:
-    image: postgres:16
+    # pgvector/pgvector:pg16 = Postgres 16 with the `vector` extension
+    # preinstalled. Migration 0007 (pgvector + embedding columns) requires
+    # it; vanilla `postgres:16` will fail at `CREATE EXTENSION vector`.
+    # Matches the image used by tests/conftest.py so dev and CI agree.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: call_monitor
       POSTGRES_PASSWORD: call_monitor

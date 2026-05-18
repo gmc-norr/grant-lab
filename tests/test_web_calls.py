@@ -93,6 +93,31 @@ def test_root_sort_by_deadline(monkeypatch, pg_url, pg_session_factory):
     assert body.index("Vin one") < body.index("EU two") < body.index("EU one")
 
 
+def test_root_treats_empty_profile_as_unfiltered(monkeypatch, pg_url, pg_session_factory):
+    """Browsers submit `?profile=` (empty string) when the profile <select>
+    is set to its 'all' option. The route must treat that the same as the
+    param being absent — not 422 with int-parsing error."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?profile=")
+    assert r.status_code == 200
+
+
+def test_call_detail_treats_empty_profile_as_unfiltered(
+    monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with pg_session_factory() as s:
+        cid = s.execute(select(Call.id).where(Call.external_id == "V-1")).scalar_one()
+    with client:
+        r = client.get(f"/calls/{cid}?profile=")
+    assert r.status_code == 200
+
+
 def test_root_rejects_invalid_sort(monkeypatch, pg_url, pg_session_factory):
     """FastAPI Literal type rejects unknown sort values with 422."""
     app = _setup(monkeypatch, pg_url)

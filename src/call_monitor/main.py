@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from call_monitor.auth.csrf import OriginCSRFMiddleware
 from call_monitor.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
 from call_monitor.auth.rate_limit import SlidingWindowLimiter
 from call_monitor.auth.session_cookie import SessionSigner
@@ -12,7 +14,7 @@ from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
 from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.logging import configure_logging
-from call_monitor.web.filters import display_date, display_dt
+from call_monitor.web.filters import criterion_label, display_date, display_dt, model_label
 from call_monitor.web.routes import admin, auth, calls, health, me, profiles
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
@@ -65,9 +67,14 @@ async def lifespan(app: FastAPI):
         ranking_tick_seconds=settings.ranking_tick_seconds,
         ranking_queue_batch=settings.ranking_queue_batch,
         embedding_pregate_threshold=settings.embedding_pregate_threshold,
+        embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
+        anthropic_api_key=settings.anthropic_api_key,
+        remote_rank_model=settings.remote_rank_model,
+        remote_rank_cosine_threshold=settings.remote_rank_cosine_threshold,
         embed_client=app.state.embed_client,
         digest_email_client=digest_email_client,
         digest_settings=settings,
+        limiters=[app.state.email_limiter, app.state.ip_limiter],
         start=True,
     )
     try:
@@ -125,6 +132,34 @@ def create_app() -> FastAPI:
     session_factory = make_session_factory(engine)
 
     app = FastAPI(lifespan=lifespan)
+    # CSRF defense: Origin/Referer enforcement for state-changing requests.
+    # Sits below FastAPI's routing but above handlers — see auth/csrf.py
+    # for the design rationale. Layers on top of the session cookie's
+    # SameSite=lax (set in routes/auth.py).
+    app.add_middleware(
+        OriginCSRFMiddleware, expected_base_url=settings.app_base_url
+    )
+
+    # Redirect unauthenticated HTML requests to /login instead of returning
+    # the raw JSON 401 from get_current_user. The auth dependency raises
+    # HTTPException(401) for both API-ish and HTML routes; only the browser
+    # case should redirect. Detect via the Accept header — curl / fetch
+    # without Accept: text/html still gets the JSON 401, which keeps
+    # api-ish callers and the test suite happy.
+    @app.exception_handler(HTTPException)
+    async def _redirect_html_401(request: Request, exc: HTTPException):
+        if exc.status_code == 401 and "text/html" in request.headers.get("accept", ""):
+            # Preserve the originally-requested path so the user lands back
+            # there post-login. /login itself doesn't read this yet — but
+            # encoding it now means the next-URL feature is a one-line
+            # change in the login_verify handler.
+            return RedirectResponse(url="/login", status_code=303)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None) or {},
+        )
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
@@ -135,6 +170,8 @@ def create_app() -> FastAPI:
     # render UTC and display 1–2 hours wrong half the year).
     templates.env.filters["display_dt"] = display_dt
     templates.env.filters["display_date"] = display_date
+    templates.env.filters["criterion_label"] = criterion_label
+    templates.env.filters["model_label"] = model_label
     app.state.templates = templates
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(
@@ -144,7 +181,8 @@ def create_app() -> FastAPI:
         max_requests=30, window_seconds=15 * 60, name="ip"
     )
     app.state.session_signer = SessionSigner(
-        secret=settings.session_secret, max_age_seconds=30 * 24 * 3600
+        secret=settings.session_secret,
+        max_age_seconds=settings.session_max_age_seconds,
     )
     # Single shared embed client: handed to the scheduler (ingest tick uses it
     # to embed touched calls before enqueueing ranking jobs — Codex H1) and to

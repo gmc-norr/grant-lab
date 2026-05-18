@@ -74,8 +74,24 @@ class OllamaClient:
             ) as client:
                 resp = client.post("/v1/chat/completions", json=payload)
                 resp.raise_for_status()
-                return resp.json()
+                envelope = resp.json()
         except httpx.HTTPError as e:
             raise LLMError(f"Ollama HTTP error: {e}") from e
         except ValueError as e:  # JSON decode of envelope
             raise LLMError(f"Ollama returned non-JSON envelope: {e}") from e
+
+        # Validate envelope shape before returning. Callers destructure
+        # envelope["choices"][0]["message"]["content"] assuming OpenAI
+        # semantics; a malformed body (e.g. {"error": "..."}) would crash
+        # the rank worker with a bare KeyError/IndexError that isn't LLMError
+        # and dead-letters the job with a misleading trace. Fail fast here.
+        choices = envelope.get("choices") if isinstance(envelope, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise LLMError(f"Ollama envelope missing non-empty 'choices': {envelope!r}")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(message, dict):
+            raise LLMError(f"Ollama envelope missing 'message' in first choice: {envelope!r}")
+        content = message.get("content")
+        if not isinstance(content, str) or not content:
+            raise LLMError(f"Ollama envelope missing non-empty message.content: {envelope!r}")
+        return envelope

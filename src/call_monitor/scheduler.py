@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import sessionmaker
 
+from call_monitor.auth.rate_limit import SlidingWindowLimiter
 from call_monitor.config import Settings
 from call_monitor.digest.send import run_digest
 from call_monitor.email.client import EmailClient
@@ -18,7 +19,9 @@ from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.embeddings.refresh import refresh_missing_embeddings_tick
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
+from call_monitor.ranking.anthropic_client import AnthropicClient
 from call_monitor.ranking.ollama_client import OllamaClient
+from call_monitor.ranking.queue import reconcile_missing_rankings
 from call_monitor.ranking.worker import drain_queue
 from call_monitor.sources.registry import SOURCES
 
@@ -55,9 +58,14 @@ def build_scheduler(
     ranking_tick_seconds: int,
     ranking_queue_batch: int,
     embedding_pregate_threshold: float,
+    embedding_hard_fail_threshold: float | None = None,
+    anthropic_api_key: str | None = None,
+    remote_rank_model: str = "claude-sonnet-4-6",
+    remote_rank_cosine_threshold: float = 0.50,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
+    limiters: list[SlidingWindowLimiter] | None = None,
     start: bool = True,
 ) -> BackgroundScheduler:
     """Build (and optionally start) the daily ingestion scheduler.
@@ -102,12 +110,25 @@ def build_scheduler(
         )
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
+    # Build the remote rank client once if an API key is configured.
+    # None ⇒ rank_pair never escalates regardless of cosine — the safe
+    # default for environments without billing or network access to
+    # Anthropic. See ranking/anthropic_client.py for the routing
+    # semantics inside rank_pair.
+    anthropic_client: AnthropicClient | None = None
+    if anthropic_api_key:
+        anthropic_client = AnthropicClient(
+            api_key=anthropic_api_key, model=remote_rank_model
+        )
 
     def _rank_drain_job() -> None:
         drain_queue(
             session_factory=session_factory,
             client=ollama,
             embedding_threshold=embedding_pregate_threshold,
+            embedding_hard_fail_threshold=embedding_hard_fail_threshold,
+            remote_client=anthropic_client,
+            remote_cosine_threshold=remote_rank_cosine_threshold,
             batch_size=ranking_queue_batch,
         )
 
@@ -170,6 +191,43 @@ def build_scheduler(
         coalesce=True,
     )
 
+    def _reconcile_rankings_tick() -> None:
+        # Closes the orchestrator's step-1-succeeded-but-step-3-failed gap
+        # (see ingestion/orchestrator.py atomicity caveats). A mid-flight
+        # crash leaves calls ingested but no ranking jobs queued; this
+        # daily sweep enqueues any (recent call × active profile) pair
+        # that has no CallRanking and no active RankingJob.
+        try:
+            with session_factory() as session:
+                n = reconcile_missing_rankings(session)
+                session.commit()
+                if n:
+                    _logger.info(
+                        "ranking.reconcile.tick_done",
+                        extra={
+                            "event": "ranking_reconcile_tick_done",
+                            "enqueued": n,
+                        },
+                    )
+        except Exception as e:  # noqa: BLE001
+            _logger.exception(
+                "ranking.reconcile.failed",
+                extra={"event": "ranking_reconcile_failed", "error": str(e)},
+            )
+
+    sched.add_job(
+        _reconcile_rankings_tick,
+        # Run after the nightly ingest (Vinnova+EU are typically 2/3 AM)
+        # and embedding refresh (3:30) so we catch any gaps those left
+        # behind on the same day rather than a day late.
+        trigger=CronTrigger(hour=4, minute=0),
+        id="ranking:reconcile",
+        name="Daily reconcile of orphaned ranking pairs",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     if digest_email_client is not None and digest_settings is not None:
         def _digest_tick() -> None:
             now = _dt.now(UTC)
@@ -217,6 +275,43 @@ def build_scheduler(
                 "event": "digest_skipped",
                 "reason": "no_email_config",
             },
+        )
+
+    if limiters:
+        def _rate_limit_sweep(_ls=tuple(limiters)) -> None:
+            # Each limiter's dict of per-key deques grows with unique
+            # (email|ip) attempts. Sweep reclaims any key whose entire
+            # window has expired so memory stays bounded in a long-running
+            # process.
+            for lim in _ls:
+                try:
+                    removed = lim.sweep()
+                    if removed:
+                        _logger.info(
+                            "rate_limit.sweep",
+                            extra={
+                                "event": "rate_limit_sweep",
+                                "limiter": lim.name,
+                                "removed": removed,
+                            },
+                        )
+                except Exception as e:  # noqa: BLE001
+                    _logger.exception(
+                        "rate_limit.sweep.failed",
+                        extra={"event": "rate_limit_sweep_failed",
+                               "limiter": lim.name, "error": str(e)},
+                    )
+
+        sched.add_job(
+            _rate_limit_sweep,
+            # Hourly is plenty — the windows are minutes, so stale keys
+            # don't accumulate fast. Running more often just wastes cycles.
+            trigger=IntervalTrigger(hours=1),
+            id="rate_limit:sweep",
+            name="Sweep expired rate-limit keys",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
 
     if start:

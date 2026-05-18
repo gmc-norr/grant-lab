@@ -60,6 +60,48 @@ def test_chat_network_failure_raises_llm_error():
         client.chat(messages=[{"role": "user", "content": "hi"}])
 
 
+def test_chat_raises_on_missing_choices():
+    """Malformed envelope (e.g. `{"error": "..."}`) must raise LLMError,
+    not let a KeyError bubble up to the caller and crash the rank worker."""
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=_mock(body={"error": "model not loaded"}),
+    )
+    with pytest.raises(LLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}])
+
+
+def test_chat_raises_on_empty_choices_list():
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=_mock(body={"choices": []}),
+    )
+    with pytest.raises(LLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}])
+
+
+def test_chat_raises_on_missing_message_content():
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=_mock(body={"choices": [{"index": 0, "message": {"role": "assistant"}}]}),
+    )
+    with pytest.raises(LLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}])
+
+
+def test_chat_raises_on_null_message_content():
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=_mock(body={"choices": [{"index": 0, "message": {"content": None}}]}),
+    )
+    with pytest.raises(LLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}])
+
+
 def test_chat_request_shape_is_openai_compatible():
     """Verify model + temperature + response_format reach the wire as
     the OpenAI-compatible API expects them."""

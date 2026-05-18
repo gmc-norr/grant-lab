@@ -37,16 +37,26 @@ def drain_queue(
     session_factory: sessionmaker,
     client: OllamaClient | None,
     embedding_threshold: float,
+    embedding_hard_fail_threshold: float | None = None,
+    remote_client=None,                             # AnthropicClient | None
+    remote_cosine_threshold: float | None = None,
     batch_size: int = 10,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
     done-or-failed. Returns the number of jobs processed (whether or not
     they succeeded).
 
-    `embedding_threshold` is the cosine cutoff for the embedding
-    pre-gate, threaded through to rank_pair → evaluate_gates. Sole source
-    of truth: Settings.embedding_pregate_threshold (callers in
-    scheduler.py / main.py read it from there).
+    `embedding_threshold` is the cosine cutoff at which the embedding
+    pre-gate PASSES. Sole source of truth:
+    Settings.embedding_pregate_threshold (callers in scheduler.py /
+    main.py read it from there).
+
+    `embedding_hard_fail_threshold` is the cutoff below which the gate
+    short-circuits to FAIL (no LLM). Pairs in the [hard_fail, threshold)
+    band surface as UNKNOWN and are adjudicated by the LLM — Codex
+    finding #1. When None the gate collapses to single-cut legacy
+    behaviour; in production this is always threaded from
+    Settings.embedding_hard_fail_threshold.
     """
     # First: requeue any RUNNING jobs that have been stuck past the
     # threshold (a previous worker crashed mid-tick and never reached
@@ -109,6 +119,9 @@ def drain_queue(
                         call=call,
                         now=datetime.now(UTC),
                         embedding_threshold=embedding_threshold,
+                        embedding_hard_fail_threshold=embedding_hard_fail_threshold,
+                        remote_client=remote_client,
+                        remote_cosine_threshold=remote_cosine_threshold,
                     )
                 except (LLMError, ParseError) as e:
                     terminal = (attempts + 1) >= MAX_ATTEMPTS

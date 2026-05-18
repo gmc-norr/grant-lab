@@ -50,10 +50,30 @@ def build_call_text(call) -> str:
 
 
 def build_profile_text(profile) -> str:
-    """Embedding input for a profile: description ONLY.
+    """Embedding input for a profile: description + `areas`.
 
-    The structured rubric (areas, must_include, hard_exclusions) is
-    keyword-exact, not semantic — embedding it would dilute the
-    description's signal.
+    Codex #2: `areas` is the structured signal of what the group actually
+    works on — a terse description ("Hepatology group") next to areas
+    like `["liver cancer", "transplant rejection"]` should embed with
+    both signals, otherwise a broad funding call on "transplant rejection"
+    would cosine-miss a group that in fact does exactly that.
+
+    Still excluded:
+    - `must_include` / `hard_exclusions` — keyword-exact, handled by the
+      must-include bypass + hard-exclusion gate; embedding them would
+      make one tagged keyword drown out the profile's real topic surface.
+    - `budget_min/max`, `trl_min/max` — numeric, handled by their own
+      deterministic gates; embedding numbers is a hashing exercise.
+
+    Changing this function changes every profile's stored vector.
+    Callers that persist embeddings (daily refresh tick, profile-edit
+    handler) must re-embed profiles for the new text to take effect —
+    see Alembic migration 0010 which NULLs existing profile vectors so
+    the daily tick picks them up.
     """
-    return profile.description or ""
+    description = (profile.description or "").strip()
+    structured = profile.structured or {}
+    areas = structured.get("areas") or []
+    areas_text = "\n".join(a.strip() for a in areas if a and a.strip())
+    parts = [p for p in (description, areas_text) if p]
+    return "\n\n".join(parts)

@@ -2,54 +2,134 @@
 {% block title %}{{ call.title }} — Call Monitor{% endblock %}
 {% block content %}
 <p><a href="/">&larr; All calls</a></p>
-<h1>{{ call.title }}</h1>
-<p><strong>Source:</strong> {{ call.source.name }}
-   {% if call.programme %}· <strong>Programme:</strong> {{ call.programme }}{% endif %}</p>
 
-<dl>
-  <dt>External ID</dt><dd><code>{{ call.external_id }}</code></dd>
-  <dt>URL</dt><dd><a href="{{ call.url }}" target="_blank" rel="noopener">{{ call.url }}</a></dd>
-  <dt>Published</dt><dd>{{ call.published_at | display_date }}</dd>
-  <dt>Deadline</dt><dd>{{ call.deadline | display_dt }}</dd>
-  <dt>Budget</dt>
-  <dd>
-    {% if call.budget_min or call.budget_max %}
-      {{ '{:,}'.format(call.budget_min) if call.budget_min else '—' }} –
-      {{ '{:,}'.format(call.budget_max) if call.budget_max else '—' }} {{ call.currency or '' }}
-    {% else %}—{% endif %}
-  </dd>
-  <dt>Keywords</dt><dd>{{ ', '.join(call.keywords) if call.keywords else '—' }}</dd>
-</dl>
-
-{% if call.summary %}
-  <h2>Summary</h2>
-  <p>{{ call.summary }}</p>
-{% endif %}
+<header>
+  <hgroup>
+    <h1>{{ call.title }}</h1>
+    <p>
+      {{ call.source.name }}
+      {% if call.programme %}· {{ call.programme }}{% endif %}
+      {% if call.external_id %}· <code>{{ call.external_id }}</code>{% endif %}
+    </p>
+  </hgroup>
+</header>
 
 {% if ranking %}
-  <h2>Ranking</h2>
-  <p><strong>Score:</strong> {{ ranking.aggregate_score }}</p>
-  {% if ranking.rationale %}<p>{{ ranking.rationale }}</p>{% endif %}
-  {% if ranking.embed_similarity is not none %}
-    <p><strong>Cosine similarity:</strong> {{ '%.3f' % ranking.embed_similarity }}</p>
-  {% endif %}
-  {% if criteria %}
-    <h2 style="margin-top: 1.5em;">Criterion breakdown</h2>
-    <dl>
-      {% for c in criteria %}
-        <dt>{{ c.criterion }}</dt>
-        <dd>
-          <strong>{% if c.criterion == 'topic_fit' %}{{ c.rating }}/5{% else %}{{ c.rating }}{% endif %}</strong>
-          {% if c.rationale %}<div>{{ c.rationale }}</div>{% endif %}
-          {% if c.quoted_evidence %}<blockquote style="margin: 0.3em 0 0 1em; color: #555; font-style: italic;">"{{ c.quoted_evidence }}"</blockquote>{% endif %}
-        </dd>
-      {% endfor %}
-    </dl>
-  {% endif %}
+<section aria-label="Ranking">
+  <article style="display:flex;gap:1.2rem;align-items:center;">
+    <div style="font-size:3rem;font-weight:700;line-height:1;">{{ ranking.aggregate_score }}</div>
+    <div style="flex:1">
+      <strong>Aggregate score</strong>
+      {% if ranking.aggregate_reason %}
+        <span class="gate-tag">{{ ranking.aggregate_reason | criterion_label }}</span>
+      {% endif %}
+      {% if ranking.model %}
+        <span class="gate-tag" title="LLM that produced this ranking">
+          Analyzed by {{ ranking.model | model_label }}
+        </span>
+      {% endif %}
+      {# The DB-stored rationale duplicates the badge in the gate-fail
+         case ("Short-circuited: trl" vs the badge "Technology Readiness
+         Level"). Show it only for the LLM-evaluated rankings where it
+         carries the per-criterion ratings the badge can't convey. #}
+      {% if ranking.rationale and not ranking.aggregate_reason %}
+        <div style="margin-top:0.3em">{{ ranking.rationale }}</div>
+      {% endif %}
+      {% if ranking.embed_similarity is not none %}
+        <div class="muted" style="font-size:0.85em;margin-top:0.3em">
+          Cosine similarity: {{ '%.3f' % ranking.embed_similarity }}
+        </div>
+      {% endif %}
+    </div>
+  </article>
+</section>
 {% endif %}
 
-<form method="post" action="/calls/{{ call.id }}/hide" style="margin-top:1em">
-  <button type="submit">Hide this call</button>
-  <small>Removes it from your feed permanently. Other users are unaffected.</small>
-</form>
+<section aria-label="Call details">
+  <h2>Details</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem">
+    <div>
+      <small class="muted">Published</small><br>
+      <strong>{{ call.published_at | display_date or '—' }}</strong>
+    </div>
+    <div>
+      <small class="muted">Deadline</small><br>
+      <strong>{{ call.deadline | display_dt or '—' }}</strong>
+    </div>
+    <div>
+      <small class="muted">Budget</small><br>
+      <strong>
+        {% if call.budget_min or call.budget_max %}
+          {{ '{:,}'.format(call.budget_min) if call.budget_min else '—' }} –
+          {{ '{:,}'.format(call.budget_max) if call.budget_max else '—' }} {{ call.currency or '' }}
+        {% else %}—{% endif %}
+      </strong>
+    </div>
+    <div>
+      <small class="muted">External link</small><br>
+      <a href="{{ call.url }}" target="_blank" rel="noopener">Open at source &rarr;</a>
+    </div>
+  </div>
+
+  {% if call.keywords %}
+    <p style="margin-top:1rem"><small class="muted">Keywords:</small>
+      {% for kw in call.keywords %}<code style="margin-right:0.3em">{{ kw }}</code>{% endfor %}
+    </p>
+  {% endif %}
+</section>
+
+{% if call.summary %}
+  <section>
+    <h2>Summary</h2>
+    <p>{{ call.summary }}</p>
+  </section>
+{% endif %}
+
+{% if criteria %}
+  <section>
+    <h2>Criterion breakdown</h2>
+    <div class="criterion-list">
+      {% for c in criteria %}
+        <div class="criterion-card">
+          <div class="head">
+            <span>{{ c.criterion | criterion_label }}</span>
+            <span>
+              {% if c.criterion == 'topic_fit' %}<strong>{{ c.rating }}/5</strong>{% else %}<strong>{{ c.rating }}</strong>{% endif %}
+            </span>
+          </div>
+          {# Two sources of explanation, in priority order:
+             1. `criterion_details[c.criterion]` — derived at render time
+                from the live call + profile, surfaces ranges/deadlines/
+                cosines for deterministic gates.
+             2. `c.rationale` — LLM-authored prose for topic_fit /
+                eligibility / exclusions, or a short reason code
+                ('too_soon', 'currency_mismatch') for FAILing gates.
+             They're not mutually exclusive (a FAIL gate has both a code
+             and the live ranges), so render both when present. #}
+          {% set detail = criterion_details.get(c.criterion) %}
+          {% if detail %}<div class="rationale">{{ detail }}</div>{% endif %}
+          {% if c.rationale and (not detail or c.rationale not in detail) %}
+            <div class="rationale muted" style="font-size:0.9em">
+              {% if c.criterion in ('budget','timeline','trl','embedding') %}
+                Reason code: <code>{{ c.rationale }}</code>
+              {% else %}
+                {{ c.rationale }}
+              {% endif %}
+            </div>
+          {% endif %}
+          {% if c.quoted_evidence %}
+            <blockquote>"{{ c.quoted_evidence }}"</blockquote>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}
+
+<section style="margin-top:2rem">
+  <form method="post" action="/calls/{{ call.id }}/hide">
+    <button type="submit" class="secondary outline">Hide this call</button>
+    <small class="muted" style="margin-left:0.6em">Removes it from your feed permanently. Other users are unaffected.</small>
+  </form>
+</section>
 {% endblock %}

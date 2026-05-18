@@ -186,18 +186,34 @@ def refresh_missing_embeddings_tick(
         summary["max_call_id"] = max(call_ids)
 
     with session_factory() as session:
-        profile_q = select(Profile.id)
+        # Codex #2: `build_profile_text` now uses description + areas, so
+        # the old SQL pre-filter on `length(trim(description)) > 0` would
+        # incorrectly skip an areas-only profile. Selecting all candidates
+        # and filtering in Python via `build_profile_text` is robust to
+        # future text-composition changes (no duplicated rules in SQL) and
+        # keeps the CLI's "no progress ⇒ break" termination correct: a
+        # truly blank profile isn't selected, so `profiles_embedded` stays
+        # at 0 and the CLI breaks. Batch-size overshoot is fine — callers
+        # aren't counting rows returned, they're counting embeds performed.
+        profile_q = select(Profile)
         if not force:
             profile_q = profile_q.where(
                 or_(Profile.embedding.is_(None), Profile.embedding_model != current_model)
             )
         profile_q = (
             profile_q.where(Profile.id > after_profile_id)
-            .where(func.length(func.trim(Profile.description)) > 0)
             .order_by(Profile.id)
             .limit(batch_size)
         )
-        profile_ids = session.execute(profile_q).scalars().all()
+        profiles = session.execute(profile_q).scalars().all()
+        profile_ids = [
+            p.id for p in profiles if build_profile_text(p).strip()
+        ]
+        if profiles and not profile_ids:
+            # We paged past the end of the embeddable set — advance the
+            # cursor anyway so the next CLI iteration doesn't re-read the
+            # same blank profiles and infinite-loop in force mode.
+            summary["max_profile_id"] = max(p.id for p in profiles)
     for pid in profile_ids:
         with session_factory() as session:
             ok = refresh_profile_embedding(session, embed_client, pid, force=force)

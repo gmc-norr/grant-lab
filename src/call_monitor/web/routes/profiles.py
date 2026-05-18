@@ -3,9 +3,10 @@ from __future__ import annotations
 import contextlib
 import logging
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from call_monitor.auth.dependencies import get_current_user
 from call_monitor.db.models import Profile, ProfileKind, User
@@ -55,6 +56,7 @@ def profile_new_form(
 @router.post("/profiles/new")
 def profile_new_submit(
     request: Request,
+    background: BackgroundTasks,
     name: str = Form(...),
     kind: str = Form("group"),
     orcids: str = Form(""),
@@ -67,6 +69,10 @@ def profile_new_submit(
     if len(pasted_grants) > 100_000:
         raise HTTPException(status_code=413, detail="pasted grants too large (max 100 KB)")
     session_factory = request.app.state.session_factory
+    # Early bail-out for an existing active name — saves an expensive LLM
+    # round-trip for the obvious duplicate case. The DB-level partial unique
+    # index (uq_profiles_active_name) remains the source of truth and
+    # catches the concurrent-submit race below.
     with session_factory() as session:
         existing = session.execute(
             select(Profile.id).where(
@@ -85,36 +91,39 @@ def profile_new_submit(
     ollama = OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model)
     draft = bootstrap_profile(seed=seed, pubmed=pubmed, ollama=ollama)
 
-    with session_factory() as session:
-        profile = Profile(
-            name=name,
-            kind=ProfileKind(kind),
-            description=draft.description,
-            structured=draft.structured,
-            created_by=user.id,
-        )
-        session.add(profile)
-        session.commit()
-        session.refresh(profile)
-        new_id = profile.id
-
-    # Embed the new profile sync so the next ingest tick (which enqueues jobs
-    # against every active profile) sees a populated embedding. Best-effort:
-    # on failure we log and proceed; the daily refresh-missing tick re-tries.
-    embed_client = request.app.state.embed_client
     try:
-        with session_factory() as s:
-            refresh_profile_embedding(s, embed_client, new_id)
-            s.commit()
-    except Exception as e:  # noqa: BLE001
-        _logger.warning(
-            "profile.embedding_refresh_failed",
-            extra={
-                "event": "profile_embedding_refresh_failed",
-                "profile_id": new_id,
-                "error": str(e),
-            },
-        )
+        with session_factory() as session:
+            profile = Profile(
+                name=name,
+                kind=ProfileKind(kind),
+                description=draft.description,
+                structured=draft.structured,
+                created_by=user.id,
+            )
+            session.add(profile)
+            session.commit()
+            session.refresh(profile)
+            new_id = profile.id
+    except IntegrityError as e:
+        # Lost the race with a concurrent submit of the same name. The
+        # partial unique index rejected us; surface the same 409 the
+        # pre-check would have.
+        raise HTTPException(
+            status_code=409, detail="profile name already exists"
+        ) from e
+
+    # Embed the new profile in a background task so the user gets a snappy
+    # redirect instead of a 30s+ wait on Ollama. Best-effort: on failure
+    # we log and the daily refresh-missing tick re-tries. This used to run
+    # synchronously; an Ollama cold-start can take close to the reverse-proxy
+    # timeout and was leaving the user on a hung submit.
+    embed_client = request.app.state.embed_client
+    background.add_task(
+        _refresh_embedding_in_background,
+        session_factory=session_factory,
+        embed_client=embed_client,
+        profile_id=new_id,
+    )
 
     return RedirectResponse(url=f"/profiles/{new_id}/edit", status_code=303)
 
@@ -161,6 +170,7 @@ def profile_edit_form(
 def profile_edit_submit(
     request: Request,
     profile_id: int,
+    background: BackgroundTasks,
     description: str = Form(""),
     areas: str = Form(""),
     budget_min: str = Form(""),
@@ -174,12 +184,37 @@ def profile_edit_submit(
 ):
     if len(description) > 50_000:
         raise HTTPException(status_code=413, detail="description too long (max 50 KB)")
+    # Validate rubric inputs before opening a DB session so a rejection
+    # doesn't leave the handler holding an unused connection. All bounds
+    # return 400 (not 422) to match the legacy behavior on oversized
+    # name/description.
+    parsed_budget_min = _bounded_int(budget_min, field="budget_min",
+                                     low=_BUDGET_MIN, high=_BUDGET_MAX)
+    parsed_budget_max = _bounded_int(budget_max, field="budget_max",
+                                     low=_BUDGET_MIN, high=_BUDGET_MAX)
+    parsed_trl_min = _bounded_int(trl_min, field="trl_min",
+                                  low=_TRL_MIN, high=_TRL_MAX)
+    parsed_trl_max = _bounded_int(trl_max, field="trl_max",
+                                  low=_TRL_MIN, high=_TRL_MAX)
+    normalized_currency = (budget_currency or "").strip().upper()
+    if normalized_currency not in _ALLOWED_CURRENCIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown currency: {budget_currency!r}",
+        )
     session_factory = request.app.state.session_factory
     description_changed = False
     with session_factory() as session:
         p = session.get(Profile, profile_id)
         if p is None:
             raise HTTPException(status_code=404, detail="profile not found")
+        # Owner-or-admin policy. The profile `created_by` column records
+        # the creator; admins can edit anyone's. Returning 403 (not 404)
+        # is fine here — this is an internal hospital tool where profile
+        # existence isn't a secret, and 403 is less confusing to the
+        # legitimate user who mis-types a URL.
+        if p.created_by != user.id and not user.is_admin:
+            raise HTTPException(status_code=403, detail="not authorized")
         # Capture pre-mutation value for the change-detection below. Compare
         # on stripped form so whitespace-only edits don't trigger a needless
         # re-embed (build_profile_text strips anyway).
@@ -192,67 +227,119 @@ def profile_edit_submit(
         description_changed = old_description.strip() != description.strip()
         p.structured = {
             "areas": _split_lines(areas),
-            "budget_min": _int_or_none(budget_min),
-            "budget_max": _int_or_none(budget_max),
-            "trl_min": _int_or_none(trl_min),
-            "trl_max": _int_or_none(trl_max),
+            "budget_min": parsed_budget_min,
+            "budget_max": parsed_budget_max,
+            "trl_min": parsed_trl_min,
+            "trl_max": parsed_trl_max,
             "must_include": _split_lines(must_include),
             "hard_exclusions": _split_lines(hard_exclusions),
         }
-        # Validate currency. Allow only the documented set (or empty → NULL).
-        # Whitelist enforcement here even though the dropdown only offers
-        # these values — an attacker crafting a different POST gets dropped,
-        # not stored.
-        normalized = (budget_currency or "").strip().upper()
-        if normalized in {"", "SEK", "EUR", "USD", "NOK", "DKK"}:
-            p.budget_currency = normalized or None
+        p.budget_currency = normalized_currency or None
         session.commit()
 
-    # Re-embed sync if the description actually changed. Codex H1: this MUST
-    # happen BEFORE backfill_profile() so the freshly-enqueued ranking jobs
-    # see the new embedding (and not the stale one from the pre-edit
-    # description). Skip when only the rubric (areas/must_include/etc.)
-    # changed — those don't feed into the embedding text.
-    if description_changed:
-        embed_client = request.app.state.embed_client
-        try:
-            with session_factory() as s:
-                refresh_profile_embedding(s, embed_client, profile_id)
-                s.commit()
-        except Exception as e:  # noqa: BLE001
-            _logger.warning(
-                "profile.embedding_refresh_failed",
-                extra={
-                    "event": "profile_embedding_refresh_failed",
-                    "profile_id": profile_id,
-                    "error": str(e),
-                },
-            )
-            # Don't abort — backfill still runs, embedding gate becomes UNKNOWN
-            # and the LLM runs as the safe fallback. Daily refresh tick re-tries.
-
-    # Backfill is unconditional on every save (idempotent at DB level via
-    # the partial unique index on (call_id, profile_id)).
-    backfill_profile(session_factory=session_factory, profile_id=profile_id)
+    # Re-embed + backfill run in a background task so the user gets a snappy
+    # redirect. Both used to block the request: refresh_profile_embedding
+    # can hit a 120s Ollama timeout, and backfill_profile scans 90 days of
+    # calls and enqueues one job per (call, profile). A single task drives
+    # both so order is preserved — Codex H1 requires the embedding refresh
+    # to complete BEFORE backfill enqueues ranking jobs (otherwise the
+    # jobs see the stale pre-edit vector). Skip embedding refresh when the
+    # rubric changed but the description didn't.
+    embed_client = request.app.state.embed_client
+    background.add_task(
+        _refresh_and_backfill_in_background,
+        session_factory=session_factory,
+        embed_client=embed_client,
+        profile_id=profile_id,
+        refresh_embedding=description_changed,
+    )
 
     return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)
 
 
+def _refresh_embedding_in_background(
+    *, session_factory, embed_client, profile_id: int
+) -> None:
+    """Run refresh_profile_embedding outside the request lifecycle so a slow
+    Ollama doesn't stall the user. Swallow all errors — the daily
+    refresh-missing tick will retry, and the embedding gate treats a
+    missing vector as UNKNOWN (safe fallback to LLM)."""
+    try:
+        with session_factory() as s:
+            refresh_profile_embedding(s, embed_client, profile_id)
+            s.commit()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning(
+            "profile.embedding_refresh_failed",
+            extra={
+                "event": "profile_embedding_refresh_failed",
+                "profile_id": profile_id,
+                "error": str(e),
+            },
+        )
+
+
+def _refresh_and_backfill_in_background(
+    *, session_factory, embed_client, profile_id: int, refresh_embedding: bool
+) -> None:
+    """Background driver for the profile-edit path. Refresh first (if the
+    description changed), then enqueue backfill. Order matters: the ranking
+    jobs must see the post-edit vector, not the pre-edit one."""
+    if refresh_embedding:
+        _refresh_embedding_in_background(
+            session_factory=session_factory,
+            embed_client=embed_client,
+            profile_id=profile_id,
+        )
+    try:
+        backfill_profile(session_factory=session_factory, profile_id=profile_id)
+    except Exception as e:  # noqa: BLE001
+        _logger.warning(
+            "profile.backfill_failed",
+            extra={
+                "event": "profile_backfill_failed",
+                "profile_id": profile_id,
+                "error": str(e),
+            },
+        )
+
+
 _MAX_LIST_ENTRIES = 100
+_ALLOWED_CURRENCIES = {"", "SEK", "EUR", "USD", "NOK", "DKK"}
+# Sanity bounds on rubric inputs. Budget is in major units (SEK/EUR/etc.);
+# 10**12 covers any realistic hospital grant with room to spare while
+# rejecting obvious garbage. TRL is the 1–9 Technology Readiness Level
+# scale.
+_BUDGET_MIN = 0
+_BUDGET_MAX = 10**12
+_TRL_MIN = 1
+_TRL_MAX = 9
 
 
 def _split_lines(raw: str) -> list[str]:
     return [ln.strip() for ln in raw.splitlines() if ln.strip()][:_MAX_LIST_ENTRIES]
 
 
-def _int_or_none(raw: str) -> int | None:
+def _bounded_int(raw: str, *, field: str, low: int, high: int) -> int | None:
+    """Parse an optional integer, reject if out of [low, high].
+
+    Empty input → None. Non-numeric input → None (UX choice: a user who
+    types "n/a" in an optional numeric box shouldn't see a 400).
+    Out-of-range numeric input → HTTPException, because that's the shape
+    of an attack / garbage we don't want silently persisted."""
     raw = (raw or "").strip()
     if not raw:
         return None
     try:
-        return int(raw)
+        v = int(raw)
     except ValueError:
         return None
+    if v < low or v > high:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} out of range ({low}..{high}): {v}",
+        )
+    return v
 
 
 def _parse_members(orcids: str, names_affiliations: str) -> list[Member]:

@@ -64,14 +64,60 @@ def test_build_call_text_handles_null_summary_and_full_text():
     assert text.strip() == "Just a title"
 
 
-def test_build_profile_text_uses_description_only():
+def test_build_profile_text_includes_description_and_areas():
+    """Codex #2: profile.areas is the structured signal of what the group
+    does. Embedding description alone misses that signal when descriptions
+    are terse — include areas so semantic similarity reflects both the
+    prose summary and the tagged topic surface."""
     profile = SimpleNamespace(
         description="Pathology research focus.",
-        structured={"areas": ["pathology"], "must_include": ["xyz"]},
+        structured={
+            "areas": ["digital pathology", "federated learning"],
+            "must_include": ["xyz"],
+            "hard_exclusions": ["animal studies"],
+            "budget_min": 100, "budget_max": 500,
+            "trl_min": 3, "trl_max": 7,
+        },
     )
-    assert build_profile_text(profile) == "Pathology research focus."
+    text = build_profile_text(profile)
+    assert "Pathology research focus." in text
+    assert "digital pathology" in text
+    assert "federated learning" in text
+    # must_include, hard_exclusions, budget, TRL are keyword/numeric —
+    # not semantic; including them would dilute the signal.
+    assert "xyz" not in text
+    assert "animal studies" not in text
+    assert "100" not in text
 
 
-def test_build_profile_text_empty_description_returns_empty_string():
+def test_build_profile_text_works_with_only_areas():
+    """A profile with empty description but populated areas still has
+    signal — embed it rather than treating it as unembeddable."""
+    profile = SimpleNamespace(
+        description="",
+        structured={"areas": ["clinical AI"]},
+    )
+    text = build_profile_text(profile)
+    assert "clinical AI" in text
+
+
+def test_build_profile_text_works_with_only_description():
+    """Backwards-compat: profiles that have no `areas` still get their
+    description embedded exactly as before (modulo trailing whitespace)."""
+    profile = SimpleNamespace(
+        description="Pathology research focus.",
+        structured={},
+    )
+    assert build_profile_text(profile).strip() == "Pathology research focus."
+
+
+def test_build_profile_text_empty_profile_returns_empty_string():
     profile = SimpleNamespace(description="", structured={})
     assert build_profile_text(profile) == ""
+
+
+def test_build_profile_text_tolerates_none_structured():
+    """Profiles before structured was populated may have NULL `structured`
+    from older rows — treat as empty rubric."""
+    profile = SimpleNamespace(description="X", structured=None)
+    assert build_profile_text(profile).strip() == "X"

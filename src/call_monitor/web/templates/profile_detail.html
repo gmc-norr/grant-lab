@@ -2,34 +2,67 @@
 {% block title %}{{ profile.name }} — Call Monitor{% endblock %}
 {% block content %}
 <p><a href="/profiles">&larr; All profiles</a></p>
-<h1>{{ profile.name }}
-  <small>({{ profile.kind.value if profile.kind.value is defined else profile.kind }})</small>
-  {% if not profile.is_active %}<span style="color:#999">(inactive)</span>{% endif %}
-</h1>
 
-<p><a href="/profiles/{{ profile.id }}/edit">Edit</a> · <a href="/?profile={{ profile.id }}">Ranked feed</a></p>
+<header style="display:flex;justify-content:space-between;align-items:start;gap:1rem;flex-wrap:wrap">
+  <hgroup>
+    <h1>
+      {{ profile.name }}
+      {% if not profile.is_active %}<small class="muted">(inactive)</small>{% endif %}
+    </h1>
+    <p>{{ profile.kind.value if profile.kind.value is defined else profile.kind }}</p>
+  </hgroup>
+  <div role="group">
+    <a href="/?profile={{ profile.id }}" role="button">Ranked feed →</a>
+    <a href="/profiles/{{ profile.id }}/edit" role="button" class="secondary">Edit</a>
+  </div>
+</header>
 
-<h2>Description</h2>
-<p>{{ profile.description or '— (no description)' }}</p>
+<article>
+  <header><strong>Description</strong></header>
+  <p>{{ profile.description or '— (no description yet)' }}</p>
+</article>
 
-<h2>Structured fields</h2>
-<dl>
-  <dt>Areas</dt><dd>{{ profile.structured.areas | join(', ') if profile.structured.areas else '—' }}</dd>
-  <dt>Budget</dt>
-  <dd>
-    {% if profile.structured.budget_min is not none or profile.structured.budget_max is not none %}
-      {{ profile.structured.budget_min if profile.structured.budget_min is not none else '—' }} – {{ profile.structured.budget_max if profile.structured.budget_max is not none else '—' }}{% if profile.budget_currency %} {{ profile.budget_currency }}{% endif %}
-    {% else %}—{% endif %}
-  </dd>
-  <dt>TRL</dt>
-  <dd>
-    {% if profile.structured.trl_min is not none or profile.structured.trl_max is not none %}
-      {{ profile.structured.trl_min if profile.structured.trl_min is not none else '—' }} – {{ profile.structured.trl_max if profile.structured.trl_max is not none else '—' }}
-    {% else %}—{% endif %}
-  </dd>
-  <dt>Must include</dt>
-  <dd>{{ profile.structured.must_include | join(', ') if profile.structured.must_include else '—' }}</dd>
-  <dt>Hard exclusions</dt>
-  <dd>{{ profile.structured.hard_exclusions | join(', ') if profile.structured.hard_exclusions else '—' }}</dd>
-</dl>
+<article>
+  <header><strong>Ranking rubric</strong></header>
+  <dl>
+    <dt>Areas</dt>
+    <dd>
+      {% if profile.structured.areas %}
+        {% for a in profile.structured.areas %}<code style="margin-right:0.3em">{{ a }}</code>{% endfor %}
+      {% else %}—{% endif %}
+    </dd>
+    {# Defensive: profile.structured may omit keys entirely (Undefined),
+       not just set them to None. The original template's `is not none`
+       only catches None, so use .get to normalize. #}
+    {% set bmin = profile.structured.get('budget_min') %}
+    {% set bmax = profile.structured.get('budget_max') %}
+    <dt>Budget</dt>
+    <dd>
+      {% if bmin is not none or bmax is not none %}
+        {{ '{:,}'.format(bmin) if bmin is not none else '—' }}
+        – {{ '{:,}'.format(bmax) if bmax is not none else '—' }}
+        {% if profile.budget_currency %} {{ profile.budget_currency }}{% endif %}
+      {% else %}—{% endif %}
+    </dd>
+    <dt>Technology Readiness Level</dt>
+    <dd>
+      {% if profile.structured.trl_min is not none or profile.structured.trl_max is not none %}
+        {{ profile.structured.trl_min if profile.structured.trl_min is not none else '—' }}
+        – {{ profile.structured.trl_max if profile.structured.trl_max is not none else '—' }}
+      {% else %}—{% endif %}
+    </dd>
+    <dt>Must include</dt>
+    <dd>
+      {% if profile.structured.must_include %}
+        {% for k in profile.structured.must_include %}<code style="margin-right:0.3em">{{ k }}</code>{% endfor %}
+      {% else %}—{% endif %}
+    </dd>
+    <dt>Hard exclusions</dt>
+    <dd>
+      {% if profile.structured.hard_exclusions %}
+        {% for k in profile.structured.hard_exclusions %}<code style="margin-right:0.3em">{{ k }}</code>{% endfor %}
+      {% else %}—{% endif %}
+    </dd>
+  </dl>
+</article>
 {% endblock %}

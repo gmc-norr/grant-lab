@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     Enum,
     Float,
@@ -171,6 +172,18 @@ class RankingJobStatus(enum.StrEnum):
 
 class Profile(Base):
     __tablename__ = "profiles"
+    __table_args__ = (
+        # Partial UNIQUE on active names. Closes the race in the handler
+        # that pre-checks, releases the session, then inserts. Archived
+        # profiles (is_active=false) can reuse the name — that's why it's
+        # partial. See alembic/versions/0009_*.
+        Index(
+            "uq_profiles_active_name",
+            "name",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -323,9 +336,19 @@ class DigestRun(Base):
     included_call_ids: Mapped[list[int]] = mapped_column(
         ARRAY(BigInteger), nullable=False, default=list
     )
+    # Populated by the DB via `GENERATED ALWAYS AS (date_trunc('week',
+    # sent_at, 'UTC')) STORED`. The Computed() marker tells SQLAlchemy
+    # to leave it out of INSERT/UPDATE statements. Backs the unique
+    # index that enforces one-digest-per-user-per-UTC-week idempotency.
+    week_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        Computed("date_trunc('week', sent_at, 'UTC')", persisted=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("ix_digest_runs_user_sent", "user_id", text("sent_at DESC")),
+        Index("uq_digest_runs_user_week", "user_id", "week_start", unique=True),
     )
 
 

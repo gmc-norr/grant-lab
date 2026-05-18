@@ -50,6 +50,9 @@ def rank_pair(
     call,
     now: datetime,
     embedding_threshold: float,
+    embedding_hard_fail_threshold: float | None = None,
+    remote_client=None,                              # AnthropicClient | None
+    remote_cosine_threshold: float | None = None,    # escalate above this cosine
 ) -> RankResult:
     """Run gates → LLM → parse → verify quotes → aggregate. Returns a
     structured RankResult.
@@ -63,8 +66,19 @@ def rank_pair(
         result so the worker's criteria-row writer doesn't bail at the
         timeline-fail row either.
 
+    Cosine-based escalation router:
+      When `remote_client` is non-None and the pair's cosine similarity
+      is at or above `remote_cosine_threshold`, the LLM step routes to
+      the remote client (Anthropic Sonnet) instead of the local Ollama
+      one. Pairs without an embedding (cosine None — embedding gate
+      UNKNOWN), or below the threshold, stay on local. This is a pure
+      router decision — the gate logic, prompt, parser, aggregator,
+      and result shape are all identical regardless of which LLM ran.
+      `CallRanking.model` records which one was used; the UI displays
+      that for transparency.
+
     On LLM parse failure, raises ParseError (caller decides retry /
-    dead-letter). On Ollama failure, raises LLMError.
+    dead-letter). On LLM API failure (either backend), raises LLMError.
     """
     # Embedding pre-gate input: cosine of the two stored vectors. Returns
     # None (→ UNKNOWN gate → LLM runs) when either vector is missing OR
@@ -78,6 +92,7 @@ def rank_pair(
         profile, call, now=now,
         embed_similarity=embed_sim,
         embedding_threshold=embedding_threshold,
+        embedding_hard_fail_threshold=embedding_hard_fail_threshold,
     )
     must_include_match = _call_matches_must_include(profile, call)
 
@@ -99,7 +114,27 @@ def rank_pair(
                                  embed_similarity=embed_sim)
 
     messages = build_messages(profile=profile, call=call)
-    envelope = client.chat(
+    # Cosine-based router. `remote_client is None` (no API key) or
+    # `embed_sim is None` (no embedding to compare) both keep us local.
+    # `remote_cosine_threshold is None` is the same as remote disabled.
+    selected_client = client
+    if (
+        remote_client is not None
+        and remote_cosine_threshold is not None
+        and embed_sim is not None
+        and embed_sim >= remote_cosine_threshold
+    ):
+        selected_client = remote_client
+        _logger.info(
+            "ranking.routed_to_remote",
+            extra={
+                "event": "ranking_routed_to_remote",
+                "cosine": round(embed_sim, 4),
+                "threshold": remote_cosine_threshold,
+                "remote_model": getattr(remote_client, "model", "?"),
+            },
+        )
+    envelope = selected_client.chat(
         messages=messages,
         response_format={"type": "json_object"},
     )
@@ -112,13 +147,17 @@ def rank_pair(
         exclusions=parsed.exclusions_rating,
     )
     agg: AggregateResult = aggregate(gates, llm, must_include_override=must_include_match)
+    # Record which model actually scored this pair so the UI can show
+    # "Analyzed by Sonnet 4.6" / "Analyzed by Gemma 4 E4B" alongside the
+    # score, and downstream audits can split evals by backend.
+    model_used = getattr(selected_client, "model", "")
     return RankResult(
         score=agg.score,
         reason=agg.reason,
         gates=gates,
         parsed=parsed,
         must_include_override=must_include_match,
-        model=client.model,
+        model=model_used or client.model,
         prompt_version=PROMPT_VERSION,
         raw_response=envelope,
         embed_similarity=embed_sim,
