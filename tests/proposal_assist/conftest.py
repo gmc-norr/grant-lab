@@ -48,3 +48,14 @@ def make_call(
     session.add(call)
     session.flush()
     return call
+
+
+def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
+    """Build a User row. Each call uses a unique email by default so multiple
+    callers in the same test don't UNIQUE-collide. Callers that care about a
+    specific email pass it explicitly."""
+    from call_monitor.db.models import User
+    u = User(email=email)
+    session.add(u)
+    session.flush()
+    return u

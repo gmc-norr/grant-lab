@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
@@ -23,7 +24,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from call_monitor.db.base import Base
@@ -419,3 +420,47 @@ class CallRubric(Base):
     extracted_by_model: Mapped[str] = mapped_column(Text, nullable=False)
     extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
     source_text_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('drafting','submitted','awarded','rejected','abandoned')",
+            name="ck_workspaces_status",
+        ),
+        Index(
+            "ix_workspaces_owner_status",
+            "owner_id", "status",
+            postgresql_where=text("soft_deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=False,
+    )
+    call_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("calls.id", ondelete="SET NULL"), nullable=True,
+    )
+    profile_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="drafting",
+    )
+    deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    soft_deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
