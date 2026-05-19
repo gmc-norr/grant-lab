@@ -1,0 +1,23 @@
+from call_monitor.config import Settings
+
+
+def test_proposal_assist_settings_have_defaults(monkeypatch, _settings_env):
+    # _settings_env provides DATABASE_URL etc.; clear only the new keys
+    # to verify they take their declared defaults.
+    monkeypatch.delenv("EXTRACTOR_VERSION", raising=False)
+    monkeypatch.delenv("RUBRIC_EXTRACTOR_VERSION", raising=False)
+    monkeypatch.delenv("PROPOSAL_ASSIST_LLM_MODEL", raising=False)
+    s = Settings()
+    assert s.extractor_version == "sections-v1"
+    assert s.rubric_extractor_version == "rubric-v1"
+    assert s.proposal_assist_llm_model == "claude-opus-4-7"
+
+
+def test_proposal_assist_settings_override_via_env(monkeypatch, _settings_env):
+    monkeypatch.setenv("EXTRACTOR_VERSION", "sections-v2")
+    monkeypatch.setenv("RUBRIC_EXTRACTOR_VERSION", "rubric-v2")
+    monkeypatch.setenv("PROPOSAL_ASSIST_LLM_MODEL", "claude-sonnet-4-6")
+    s = Settings()
+    assert s.extractor_version == "sections-v2"
+    assert s.rubric_extractor_version == "rubric-v2"
+    assert s.proposal_assist_llm_model == "claude-sonnet-4-6"
