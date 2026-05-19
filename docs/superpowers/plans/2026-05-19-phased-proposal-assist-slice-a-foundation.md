@@ -1,0 +1,3601 @@
+# Phased Proposal-Assist — Slice A (Foundation) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Land the schema, ingestion-time extractors, and Phase 0 background worker for the phased proposal-assist workflow. End state: a workspace can be created, Phase 0 snapshots call body + profile description, ensures section extracts + call rubric are fresh (re-extracting if stale), copies both into per-workspace columns, writes a `rubric_initialized` audit event, and blocks at `waiting_for_rubric_review` until the workspace owner confirms the rubric — at which point `current_phase` advances to `spec`.
+
+**Architecture:** Module-isolated package at `src/call_monitor/proposal_assist/` with submodules for extractors, the Phase 0 worker, and the owner-facing rubric review endpoint. Templates in `call_section_extracts` and `call_rubrics` are per-call (shared) and re-extracted only when `source_text_hash` or `extractor_version` changes; workspaces snapshot from those templates at Phase 0 and never see them again. The rubric audit reproducibility surface is a pair of `workspace_events` rows (`rubric_initialized` + `rubric_edited`) replayed forward from the seed payload.
+
+**Tech Stack:** Python 3.12, SQLAlchemy 2.x + Alembic, FastAPI + Jinja2 + HTMX, Anthropic SDK (via existing `AnthropicClient`), pytest + testcontainers (real Postgres in tests, mocked LLM via stubbed `AnthropicClient.chat`).
+
+**Spec:** [docs/superpowers/specs/2026-05-19-proposal-assist-phased-workflow-design.md](../specs/2026-05-19-proposal-assist-phased-workflow-design.md)
+
+---
+
+## Prerequisites and scope honesty
+
+This slice has two parts with different blockers:
+
+**Part 1 — Buildable today** (Tasks 1–8): Settings, hashing utility, `call_section_extracts` template + extractor, `call_rubrics` template + extractor. These touch only `calls` (which exists) and add isolated new tables. Mappable directly onto the spec's "Implementation gate item 3 — section-aware extractor in production."
+
+**Part 2 — Blocked on base spec** (Tasks 9–26): everything that references `workspaces`, `workspace_viewers`, or `workspace_events`. The base spec ([2026-04-18-call-manager-proposal-assist-design.md](../specs/2026-04-18-call-manager-proposal-assist-design.md)) defines those tables, the Agent SDK adapter, the per-workspace subprocess, and the `call-monitor → call-manager` rename. **Do not attempt Tasks 9+ until base spec has shipped at minimum** `workspaces`, `workspace_viewers`, `workspace_events`, and any structural change required by the renamed `src/call_manager/` package layout. If executing under the un-renamed `call-monitor` package, use `src/call_monitor/proposal_assist/` paths and update the import roots when the rename happens.
+
+When you reach the Part 2 boundary, stop and surface this to the user before proceeding.
+
+---
+
+## File map
+
+**Created:**
+- `src/call_monitor/proposal_assist/__init__.py`
+- `src/call_monitor/proposal_assist/hashing.py`
+- `src/call_monitor/proposal_assist/db.py`
+- `src/call_monitor/proposal_assist/extractors/__init__.py`
+- `src/call_monitor/proposal_assist/extractors/sections.py`
+- `src/call_monitor/proposal_assist/extractors/rubric.py`
+- `src/call_monitor/proposal_assist/phases/__init__.py`
+- `src/call_monitor/proposal_assist/phases/setup.py`
+- `src/call_monitor/proposal_assist/web/__init__.py`
+- `src/call_monitor/proposal_assist/web/rubric_review.py`
+- `src/call_monitor/web/templates/proposal_assist/rubric_review.html`
+- `alembic/versions/0012_call_section_extracts.py`
+- `alembic/versions/0013_call_rubrics.py`
+- `alembic/versions/0014_workspaces_phase_columns.py`
+- `alembic/versions/0015_phase_approvals.py`
+- `alembic/versions/0016_workspace_setup_jobs.py`
+- `alembic/versions/0017_review_runs_and_items.py`
+- `tests/proposal_assist/__init__.py`
+- `tests/proposal_assist/conftest.py`
+- `tests/proposal_assist/test_models.py`
+- `tests/proposal_assist/test_hashing.py`
+- `tests/proposal_assist/test_extractors_sections.py`
+- `tests/proposal_assist/test_extractors_rubric.py`
+- `tests/proposal_assist/test_phase0_setup.py`
+- `tests/proposal_assist/test_rubric_review_endpoint.py`
+
+**Modified:**
+- `src/call_monitor/config.py` — add `EXTRACTOR_VERSION`, `RUBRIC_EXTRACTOR_VERSION`, `PROPOSAL_ASSIST_LLM_MODEL` settings.
+- `src/call_monitor/db/models.py` — add new models OR re-export from `proposal_assist/db.py` (pick the existing pattern — current codebase has one `models.py`; we add to it for symmetry).
+- `src/call_monitor/main.py` — register the rubric-review router.
+
+---
+
+# Part 1 — Buildable today (no base-spec dependency)
+
+## Task 1: Settings additions
+
+**Files:**
+- Modify: `src/call_monitor/config.py`
+- Test: `tests/proposal_assist/test_config.py` (created in this task)
+
+- [ ] **Step 1: Create test file with failing test**
+
+Create `tests/proposal_assist/__init__.py` (empty) and `tests/proposal_assist/test_config.py`:
+
+```python
+from call_monitor.config import Settings
+
+
+def test_proposal_assist_settings_have_defaults(monkeypatch):
+    monkeypatch.delenv("EXTRACTOR_VERSION", raising=False)
+    monkeypatch.delenv("RUBRIC_EXTRACTOR_VERSION", raising=False)
+    monkeypatch.delenv("PROPOSAL_ASSIST_LLM_MODEL", raising=False)
+    s = Settings()
+    assert s.extractor_version == "sections-v1"
+    assert s.rubric_extractor_version == "rubric-v1"
+    assert s.proposal_assist_llm_model == "claude-opus-4-7"
+
+
+def test_proposal_assist_settings_override_via_env(monkeypatch):
+    monkeypatch.setenv("EXTRACTOR_VERSION", "sections-v2")
+    monkeypatch.setenv("RUBRIC_EXTRACTOR_VERSION", "rubric-v2")
+    monkeypatch.setenv("PROPOSAL_ASSIST_LLM_MODEL", "claude-sonnet-4-6")
+    s = Settings()
+    assert s.extractor_version == "sections-v2"
+    assert s.rubric_extractor_version == "rubric-v2"
+    assert s.proposal_assist_llm_model == "claude-sonnet-4-6"
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_config.py -v
+```
+
+Expected: `AttributeError: 'Settings' object has no attribute 'extractor_version'`.
+
+- [ ] **Step 3: Add the three fields to `src/call_monitor/config.py`**
+
+Inside the existing `class Settings(BaseSettings):` block, add (after the existing `ANTHROPIC_API_KEY` field — pick a stable location):
+
+```python
+    extractor_version: str = Field(
+        default="sections-v1",
+        alias="EXTRACTOR_VERSION",
+        description="Bump when the section extractor prompt or output schema changes; "
+                    "stored on call_section_extracts.extractor_version and used by Phase 0 "
+                    "to decide whether to re-extract.",
+    )
+    rubric_extractor_version: str = Field(
+        default="rubric-v1",
+        alias="RUBRIC_EXTRACTOR_VERSION",
+        description="Bump when the rubric extractor prompt or output schema changes.",
+    )
+    proposal_assist_llm_model: str = Field(
+        default="claude-opus-4-7",
+        alias="PROPOSAL_ASSIST_LLM_MODEL",
+        description="Anthropic model id used for proposal-assist extractors, "
+                    "score_against_rubric, fit-check, persona scoring, and consolidation.",
+    )
+```
+
+- [ ] **Step 4: Run to confirm passing**
+
+```bash
+uv run pytest tests/proposal_assist/test_config.py -v
+```
+
+Expected: both tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/config.py tests/proposal_assist/__init__.py tests/proposal_assist/test_config.py
+git commit -m "feat(proposal-assist): add extractor + LLM-model settings"
+```
+
+---
+
+## Task 2: sha256 hashing utility
+
+**Files:**
+- Create: `src/call_monitor/proposal_assist/__init__.py` (empty)
+- Create: `src/call_monitor/proposal_assist/hashing.py`
+- Test: `tests/proposal_assist/test_hashing.py`
+
+- [ ] **Step 1: Write failing test**
+
+`tests/proposal_assist/test_hashing.py`:
+
+```python
+import pytest
+
+from call_monitor.proposal_assist.hashing import source_text_hash
+
+
+def test_source_text_hash_is_64_lowercase_hex():
+    h = source_text_hash("hello world")
+    assert len(h) == 64
+    assert h == h.lower()
+    int(h, 16)  # raises ValueError if not valid hex
+
+
+def test_source_text_hash_stable():
+    assert source_text_hash("hello") == source_text_hash("hello")
+
+
+def test_source_text_hash_differs_on_content():
+    assert source_text_hash("a") != source_text_hash("b")
+
+
+def test_source_text_hash_treats_empty_string():
+    h = source_text_hash("")
+    # sha256("") is well-known
+    assert h == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def test_source_text_hash_rejects_non_str():
+    with pytest.raises(TypeError):
+        source_text_hash(b"bytes are not allowed")
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_hashing.py -v
+```
+
+Expected: `ModuleNotFoundError: No module named 'call_monitor.proposal_assist'`.
+
+- [ ] **Step 3: Implement**
+
+Create `src/call_monitor/proposal_assist/__init__.py` as empty file. Create `src/call_monitor/proposal_assist/hashing.py`:
+
+```python
+from __future__ import annotations
+
+import hashlib
+
+
+def source_text_hash(text: str) -> str:
+    """Stable sha256 hex digest of a UTF-8 string. Used by both extractors to
+    decide whether their cached output is fresh against the current call body.
+
+    Non-str input raises TypeError eagerly so callers don't silently store the
+    wrong hash for bytes / None / etc.
+    """
+    if not isinstance(text, str):
+        raise TypeError(f"source_text_hash expects str, got {type(text).__name__}")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+```
+
+- [ ] **Step 4: Run to confirm passing**
+
+```bash
+uv run pytest tests/proposal_assist/test_hashing.py -v
+```
+
+Expected: 5 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/__init__.py src/call_monitor/proposal_assist/hashing.py tests/proposal_assist/test_hashing.py
+git commit -m "feat(proposal-assist): add source_text_hash sha256 utility"
+```
+
+---
+
+## Task 3: `call_section_extracts` migration + model
+
+**Files:**
+- Create: `alembic/versions/0012_call_section_extracts.py`
+- Modify: `src/call_monitor/db/models.py`
+- Test: `tests/proposal_assist/test_models.py` (created here)
+
+- [ ] **Step 1: Write failing test for the model**
+
+`tests/proposal_assist/test_models.py`:
+
+```python
+from datetime import datetime
+
+import pytest
+from sqlalchemy import select
+
+from call_monitor.db.models import Call, CallSectionExtract
+
+
+def test_call_section_extract_can_be_inserted(db_session, sample_call):
+    row = CallSectionExtract(
+        call_id=sample_call.id,
+        section="eligibility",
+        extract_text="Open to Swedish universities.",
+        extracted_by_model="claude-opus-4-7",
+        extractor_version="sections-v1",
+        source_text_hash="0" * 64,
+    )
+    db_session.add(row)
+    db_session.commit()
+    fetched = db_session.scalar(
+        select(CallSectionExtract).where(
+            CallSectionExtract.call_id == sample_call.id,
+            CallSectionExtract.section == "eligibility",
+        )
+    )
+    assert fetched is not None
+    assert fetched.extract_text == "Open to Swedish universities."
+    assert fetched.extractor_version == "sections-v1"
+    assert isinstance(fetched.extracted_at, datetime)
+
+
+def test_call_section_extract_section_check_constraint(db_session, sample_call):
+    bad = CallSectionExtract(
+        call_id=sample_call.id,
+        section="not_a_real_section",  # not in CHECK list
+        extract_text="x",
+        extracted_by_model="m",
+        extractor_version="sections-v1",
+        source_text_hash="0" * 64,
+    )
+    db_session.add(bad)
+    with pytest.raises(Exception):
+        db_session.commit()
+```
+
+- [ ] **Step 2: Write the conftest fixtures the tests need**
+
+`tests/proposal_assist/conftest.py`:
+
+```python
+"""Shared fixtures for proposal_assist tests.
+
+Uses the project's existing testcontainers Postgres fixture (db_session) and
+adds a `sample_call` fixture so each test gets a real calls row to FK against.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from call_monitor.db.models import Call, Source
+
+
+@pytest.fixture
+def sample_source(db_session) -> Source:
+    src = Source(
+        slug="test_src",
+        name="Test Source",
+        kind="vinnova",  # match whatever the existing Source.kind enum accepts;
+                          # adjust to a valid value in your codebase before running
+        is_active=True,
+    )
+    db_session.add(src)
+    db_session.commit()
+    return src
+
+
+@pytest.fixture
+def sample_call(db_session, sample_source) -> Call:
+    call = Call(
+        source_id=sample_source.id,
+        external_id="EXT-1",
+        title="Precision medicine programme",
+        url="https://example.org/calls/1",
+        summary="Funding for AI-based diagnostics.",
+        full_text="Long call body about eligibility, scope, budget, "
+                  "expected outcomes, restrictions, and mandatory items.",
+        deadline=datetime(2026, 12, 1, tzinfo=timezone.utc),
+        fetched_at=datetime.now(timezone.utc),
+    )
+    db_session.add(call)
+    db_session.commit()
+    return call
+```
+
+Note: the existing `tests/conftest.py` should already provide `db_session`. If `Source.kind` or `Call` constructor fields differ from what's shown here, adjust the fixture to use the real signatures — verify with `grep -n "class Call\|class Source" src/call_monitor/db/models.py`.
+
+- [ ] **Step 3: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: `ImportError: cannot import name 'CallSectionExtract' from 'call_monitor.db.models'`.
+
+- [ ] **Step 4: Write the migration**
+
+Create `alembic/versions/0012_call_section_extracts.py`:
+
+```python
+"""call_section_extracts template table
+
+Revision ID: 0012
+Revises: 0011
+Create Date: 2026-05-19
+"""
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision = "0012"
+down_revision = "0011"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "call_section_extracts",
+        sa.Column("call_id", sa.BigInteger(), nullable=False),
+        sa.Column("section", sa.Text(), nullable=False),
+        sa.Column("extract_text", sa.Text(), nullable=False),
+        sa.Column(
+            "extracted_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column("extracted_by_model", sa.Text(), nullable=False),
+        sa.Column("extractor_version", sa.Text(), nullable=False),
+        sa.Column("source_text_hash", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["call_id"], ["calls.id"], ondelete="CASCADE"
+        ),
+        sa.PrimaryKeyConstraint("call_id", "section"),
+        sa.CheckConstraint(
+            "section IN ('eligibility','scope','budget',"
+            "'expected_outcomes','restrictions','mandatory')",
+            name="ck_call_section_extracts_section",
+        ),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("call_section_extracts")
+```
+
+- [ ] **Step 5: Add the SQLAlchemy model**
+
+Edit `src/call_monitor/db/models.py`, near the bottom of the file (after the last existing model). Add:
+
+```python
+class CallSectionExtract(Base):
+    __tablename__ = "call_section_extracts"
+
+    call_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("calls.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    section: Mapped[str] = mapped_column(Text, primary_key=True)
+    extract_text: Mapped[str] = mapped_column(Text, nullable=False)
+    extracted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    extracted_by_model: Mapped[str] = mapped_column(Text, nullable=False)
+    extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(Text, nullable=False)
+```
+
+Verify the existing imports at the top of `models.py` already include `Text`, `func`, `DateTime`, `BigInteger`, `ForeignKey`, `Mapped`, `mapped_column`. If any are missing, add them.
+
+- [ ] **Step 6: Apply the migration in the test DB and run tests**
+
+```bash
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: 2 tests pass. If the testcontainers fixture spins up a fresh DB and runs migrations automatically, just the pytest command suffices — confirm by reading the project's existing `tests/conftest.py`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add alembic/versions/0012_call_section_extracts.py src/call_monitor/db/models.py tests/proposal_assist/conftest.py tests/proposal_assist/test_models.py
+git commit -m "feat(proposal-assist): add call_section_extracts template table"
+```
+
+---
+
+## Task 4: Section extractor module
+
+**Files:**
+- Create: `src/call_monitor/proposal_assist/extractors/__init__.py` (empty)
+- Create: `src/call_monitor/proposal_assist/extractors/sections.py`
+- Test: `tests/proposal_assist/test_extractors_sections.py`
+
+- [ ] **Step 1: Write failing tests**
+
+`tests/proposal_assist/test_extractors_sections.py`:
+
+```python
+import json
+from unittest.mock import Mock
+
+import pytest
+
+from call_monitor.proposal_assist.extractors.sections import (
+    SECTION_NAMES,
+    extract_sections,
+)
+
+
+def _envelope(content: str) -> dict:
+    """Build the OpenAI-shaped envelope AnthropicClient.chat returns."""
+    return {
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "model": "claude-opus-4-7",
+    }
+
+
+def test_extract_sections_returns_six_named_keys():
+    payload = {section: f"text for {section}" for section in SECTION_NAMES}
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps(payload))
+    client.model = "claude-opus-4-7"
+
+    result = extract_sections(call_text="dummy call body", client=client)
+
+    assert set(result.keys()) == set(SECTION_NAMES)
+    for section, text in result.items():
+        assert text == f"text for {section}"
+
+
+def test_extract_sections_fills_missing_sections_with_empty_string():
+    # Real LLM output sometimes omits a section entirely; the extractor must
+    # backfill so callers always see all six keys.
+    partial = {"eligibility": "stuff"}
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps(partial))
+    client.model = "claude-opus-4-7"
+
+    result = extract_sections(call_text="dummy", client=client)
+
+    assert result["eligibility"] == "stuff"
+    assert all(result[s] == "" for s in SECTION_NAMES if s != "eligibility")
+
+
+def test_extract_sections_raises_on_malformed_json():
+    client = Mock()
+    client.chat.return_value = _envelope("not json at all")
+    client.model = "claude-opus-4-7"
+
+    with pytest.raises(ValueError, match="malformed JSON"):
+        extract_sections(call_text="dummy", client=client)
+
+
+def test_extract_sections_raises_on_non_str_value():
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps({"eligibility": 42}))
+    client.model = "claude-opus-4-7"
+
+    with pytest.raises(ValueError, match="expected str"):
+        extract_sections(call_text="dummy", client=client)
+
+
+def test_extract_sections_passes_call_text_in_user_message():
+    client = Mock()
+    client.chat.return_value = _envelope(
+        json.dumps({s: "" for s in SECTION_NAMES})
+    )
+    client.model = "claude-opus-4-7"
+
+    extract_sections(call_text="UNIQUE-CALL-BODY-TEXT", client=client)
+
+    messages = client.chat.call_args.kwargs["messages"]
+    user_msg = next(m for m in messages if m["role"] == "user")
+    assert "UNIQUE-CALL-BODY-TEXT" in user_msg["content"]
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_extractors_sections.py -v
+```
+
+Expected: `ModuleNotFoundError` for `call_monitor.proposal_assist.extractors.sections`.
+
+- [ ] **Step 3: Implement the module**
+
+Create `src/call_monitor/proposal_assist/extractors/__init__.py` (empty).
+
+Create `src/call_monitor/proposal_assist/extractors/sections.py`:
+
+```python
+"""Section-aware extractor — single Opus call that splits a call body into
+six named sections. Per-call, ingestion-time. Output shape is fixed; the
+Phase 0 worker persists the result into `call_section_extracts` (template)
+and then copies it into `workspaces.section_extracts`.
+"""
+from __future__ import annotations
+
+import json
+from typing import Protocol
+
+SECTION_NAMES: tuple[str, ...] = (
+    "eligibility",
+    "scope",
+    "budget",
+    "expected_outcomes",
+    "restrictions",
+    "mandatory",
+)
+
+_SYSTEM_PROMPT = """You are an extractor. You receive a funding-call body and
+return a JSON object that splits its content into six named sections.
+
+Output schema — STRICTLY this shape, no other keys, no prose around the JSON:
+
+{
+  "eligibility": "...",      // who can apply
+  "scope": "...",            // what the call funds
+  "budget": "...",           // budget ranges, currencies, durations
+  "expected_outcomes": "...", // deliverables / impact targets
+  "restrictions": "...",     // exclusions, ineligibilities, dual-use rules
+  "mandatory": "..."         // must-include items (forms, signatures, etc.)
+}
+
+If a section is absent from the source, return an empty string for that key —
+do NOT omit the key, do NOT invent content. Quote sparingly; the goal is a
+faithful extract, not a paraphrase. Each value: at most 1500 characters.
+"""
+
+
+class _Client(Protocol):
+    model: str
+
+    def chat(
+        self,
+        *,
+        messages: list[dict],
+        response_format: dict | None = None,
+    ) -> dict: ...
+
+
+def extract_sections(*, call_text: str, client: _Client) -> dict[str, str]:
+    """Run the extractor against `call_text`. Returns a dict keyed by every
+    name in SECTION_NAMES (missing ones backfilled to ""). Raises ValueError
+    on malformed JSON or wrong value types.
+
+    Does NOT persist — the caller is responsible for writing rows + computing
+    `source_text_hash` of the input.
+    """
+    envelope = client.chat(
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": call_text},
+        ],
+        response_format={"type": "json_object"},
+    )
+    content = envelope["choices"][0]["message"]["content"]
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"malformed JSON from section extractor: {e}") from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"expected JSON object, got {type(parsed).__name__}")
+
+    result: dict[str, str] = {}
+    for section in SECTION_NAMES:
+        value = parsed.get(section, "")
+        if not isinstance(value, str):
+            raise ValueError(
+                f"section {section!r}: expected str, got {type(value).__name__}"
+            )
+        result[section] = value
+    return result
+```
+
+- [ ] **Step 4: Run to confirm passing**
+
+```bash
+uv run pytest tests/proposal_assist/test_extractors_sections.py -v
+```
+
+Expected: 5 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/extractors/__init__.py src/call_monitor/proposal_assist/extractors/sections.py tests/proposal_assist/test_extractors_sections.py
+git commit -m "feat(proposal-assist): add section extractor (sections-v1)"
+```
+
+---
+
+## Task 5: `call_rubrics` migration + model
+
+**Files:**
+- Create: `alembic/versions/0013_call_rubrics.py`
+- Modify: `src/call_monitor/db/models.py`
+- Test: extend `tests/proposal_assist/test_models.py`
+
+- [ ] **Step 1: Append failing test**
+
+Append to `tests/proposal_assist/test_models.py`:
+
+```python
+from call_monitor.db.models import CallRubric
+
+
+def test_call_rubric_can_be_inserted(db_session, sample_call):
+    row = CallRubric(
+        call_id=sample_call.id,
+        criteria=[
+            {"name": "Scientific excellence", "description": "...",
+             "weight": 0.4, "scale_max": 5},
+            {"name": "Clinical impact", "description": "...",
+             "weight": 0.6, "scale_max": 5},
+        ],
+        funder_notes="See FAQ on funder website.",
+        extracted_at=__import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ),
+        extracted_by_model="claude-opus-4-7",
+        extractor_version="rubric-v1",
+        source_text_hash="0" * 64,
+    )
+    db_session.add(row)
+    db_session.commit()
+    fetched = db_session.get(CallRubric, sample_call.id)
+    assert fetched is not None
+    assert len(fetched.criteria) == 2
+    assert fetched.criteria[0]["name"] == "Scientific excellence"
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_models.py::test_call_rubric_can_be_inserted -v
+```
+
+Expected: `ImportError: cannot import name 'CallRubric'`.
+
+- [ ] **Step 3: Write the migration**
+
+Create `alembic/versions/0013_call_rubrics.py`:
+
+```python
+"""call_rubrics template table
+
+Revision ID: 0013
+Revises: 0012
+Create Date: 2026-05-19
+"""
+
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+from alembic import op
+
+revision = "0013"
+down_revision = "0012"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "call_rubrics",
+        sa.Column("call_id", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "criteria",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+        ),
+        sa.Column("funder_notes", sa.Text(), nullable=True),
+        sa.Column("extracted_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("extracted_by_model", sa.Text(), nullable=False),
+        sa.Column("extractor_version", sa.Text(), nullable=False),
+        sa.Column("source_text_hash", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["call_id"], ["calls.id"], ondelete="CASCADE"
+        ),
+        sa.PrimaryKeyConstraint("call_id"),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("call_rubrics")
+```
+
+- [ ] **Step 4: Add the model**
+
+In `src/call_monitor/db/models.py`, after the `CallSectionExtract` class:
+
+```python
+class CallRubric(Base):
+    __tablename__ = "call_rubrics"
+
+    call_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("calls.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    criteria: Mapped[list[dict]] = mapped_column(
+        postgresql.JSONB, nullable=False
+    )
+    funder_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extracted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    extracted_by_model: Mapped[str] = mapped_column(Text, nullable=False)
+    extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(Text, nullable=False)
+```
+
+If `postgresql` isn't already imported, add at the top of the file:
+
+```python
+from sqlalchemy.dialects import postgresql
+```
+
+- [ ] **Step 5: Migrate + run tests**
+
+```bash
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: all model tests pass (3 now).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add alembic/versions/0013_call_rubrics.py src/call_monitor/db/models.py tests/proposal_assist/test_models.py
+git commit -m "feat(proposal-assist): add call_rubrics template table"
+```
+
+---
+
+## Task 6: Rubric extractor module
+
+**Files:**
+- Create: `src/call_monitor/proposal_assist/extractors/rubric.py`
+- Test: `tests/proposal_assist/test_extractors_rubric.py`
+
+- [ ] **Step 1: Write failing tests**
+
+`tests/proposal_assist/test_extractors_rubric.py`:
+
+```python
+import json
+from unittest.mock import Mock
+
+import pytest
+
+from call_monitor.proposal_assist.extractors.rubric import (
+    extract_rubric,
+)
+
+
+def _envelope(content: str) -> dict:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "model": "claude-opus-4-7",
+    }
+
+
+def test_extract_rubric_returns_criteria_and_notes():
+    payload = {
+        "criteria": [
+            {"name": "Excellence", "description": "Scientific quality",
+             "weight": 0.5, "scale_max": 5},
+            {"name": "Impact", "description": "Translational potential",
+             "weight": 0.5, "scale_max": 5},
+        ],
+        "funder_notes": "Note: late submissions rejected.",
+    }
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps(payload))
+    client.model = "claude-opus-4-7"
+
+    result = extract_rubric(call_text="dummy", client=client)
+
+    assert result["funder_notes"] == "Note: late submissions rejected."
+    assert len(result["criteria"]) == 2
+    assert result["criteria"][0]["name"] == "Excellence"
+
+
+def test_extract_rubric_defaults_funder_notes_to_empty_string():
+    payload = {
+        "criteria": [
+            {"name": "X", "description": "x", "weight": 1.0, "scale_max": 5},
+        ],
+    }
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps(payload))
+    client.model = "claude-opus-4-7"
+
+    result = extract_rubric(call_text="dummy", client=client)
+
+    assert result["funder_notes"] == ""
+
+
+def test_extract_rubric_raises_on_malformed_json():
+    client = Mock()
+    client.chat.return_value = _envelope("not json")
+    client.model = "claude-opus-4-7"
+    with pytest.raises(ValueError, match="malformed JSON"):
+        extract_rubric(call_text="dummy", client=client)
+
+
+def test_extract_rubric_raises_on_empty_criteria():
+    payload = {"criteria": [], "funder_notes": ""}
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps(payload))
+    client.model = "claude-opus-4-7"
+    with pytest.raises(ValueError, match="at least one criterion"):
+        extract_rubric(call_text="dummy", client=client)
+
+
+def test_extract_rubric_raises_on_missing_required_criterion_fields():
+    payload = {
+        "criteria": [{"name": "Only a name"}],  # missing description/weight/scale_max
+        "funder_notes": "",
+    }
+    client = Mock()
+    client.chat.return_value = _envelope(json.dumps(payload))
+    client.model = "claude-opus-4-7"
+    with pytest.raises(ValueError, match="missing required field"):
+        extract_rubric(call_text="dummy", client=client)
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_extractors_rubric.py -v
+```
+
+Expected: ModuleNotFoundError.
+
+- [ ] **Step 3: Implement**
+
+Create `src/call_monitor/proposal_assist/extractors/rubric.py`:
+
+```python
+"""Rubric extractor — single Opus call that turns a funder's evaluation
+criteria (usually buried in the call body) into a structured JSON rubric.
+
+Per-call, ingestion-time. The Phase 0 worker copies the result into
+workspaces.rubric_criteria + workspaces.rubric_funder_notes.
+"""
+from __future__ import annotations
+
+import json
+from typing import Protocol, TypedDict
+
+_REQUIRED_CRITERION_FIELDS = ("name", "description", "weight", "scale_max")
+
+_SYSTEM_PROMPT = """You are an extractor. You receive a funding-call body and
+return a JSON object that captures the FUNDER'S OWN evaluation criteria — the
+rubric their reviewers will use to score proposals.
+
+Output schema — STRICTLY this shape:
+
+{
+  "criteria": [
+    {
+      "name": "<short name, e.g. Scientific excellence>",
+      "description": "<one sentence explaining what this criterion measures>",
+      "weight": <float 0..1; if the funder publishes percentages, normalize so
+                 weights across criteria sum to ~1.0>,
+      "scale_max": <int; the upper end of the rating scale, usually 5>,
+      "subcriteria": [   // optional
+        {"name": "...", "description": "..."}
+      ]
+    },
+    ...
+  ],
+  "funder_notes": "<free text capturing eligibility-adjacent notes the rubric
+                    consumer should see (FAQ links, late-submission policy,
+                    review-panel composition). Empty string if none.>"
+}
+
+Return at least one criterion. If the call body doesn't publish explicit
+criteria, infer the rubric from what the call asks proposers to demonstrate.
+Do not invent weights — if the funder doesn't publish them, distribute evenly.
+No prose around the JSON.
+"""
+
+
+class _Client(Protocol):
+    model: str
+
+    def chat(
+        self,
+        *,
+        messages: list[dict],
+        response_format: dict | None = None,
+    ) -> dict: ...
+
+
+class RubricPayload(TypedDict):
+    criteria: list[dict]
+    funder_notes: str
+
+
+def extract_rubric(*, call_text: str, client: _Client) -> RubricPayload:
+    """Run the extractor against `call_text`. Returns `{criteria, funder_notes}`.
+    Raises ValueError on malformed JSON, empty criteria, or missing required
+    criterion fields. Does NOT persist.
+    """
+    envelope = client.chat(
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": call_text},
+        ],
+        response_format={"type": "json_object"},
+    )
+    content = envelope["choices"][0]["message"]["content"]
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"malformed JSON from rubric extractor: {e}") from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"expected JSON object, got {type(parsed).__name__}")
+
+    criteria = parsed.get("criteria")
+    if not isinstance(criteria, list) or len(criteria) == 0:
+        raise ValueError("rubric must have at least one criterion")
+
+    for i, crit in enumerate(criteria):
+        if not isinstance(crit, dict):
+            raise ValueError(f"criterion {i}: expected object, got {type(crit).__name__}")
+        for required in _REQUIRED_CRITERION_FIELDS:
+            if required not in crit:
+                raise ValueError(
+                    f"criterion {i}: missing required field {required!r}"
+                )
+
+    notes = parsed.get("funder_notes", "")
+    if not isinstance(notes, str):
+        raise ValueError(f"funder_notes: expected str, got {type(notes).__name__}")
+
+    return {"criteria": criteria, "funder_notes": notes}
+```
+
+- [ ] **Step 4: Run to confirm passing**
+
+```bash
+uv run pytest tests/proposal_assist/test_extractors_rubric.py -v
+```
+
+Expected: 5 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/extractors/rubric.py tests/proposal_assist/test_extractors_rubric.py
+git commit -m "feat(proposal-assist): add rubric extractor (rubric-v1)"
+```
+
+---
+
+## Task 7: Ingestion-time hook — template seeding
+
+The spec says templates are auto-extracted "at ingestion." For Part 1's executable scope this means: when a Call row lands or its `full_text` changes, queue a background job that ensures the templates are fresh.
+
+For Slice A we keep this dead simple: a synchronous helper that, given a Call row, checks freshness and re-extracts if needed. Hooking it into the actual ingestion pipeline (APScheduler tick or per-source post-fetch callback) is left for Slice E (observability) — for now, exposing it as a callable lets Phase 0 (Tasks 19–20) drive it on first use.
+
+**Files:**
+- Create: `src/call_monitor/proposal_assist/extractors/refresh.py`
+- Test: `tests/proposal_assist/test_extractors_refresh.py`
+
+- [ ] **Step 1: Write failing tests**
+
+`tests/proposal_assist/test_extractors_refresh.py`:
+
+```python
+import json
+from unittest.mock import Mock
+
+from sqlalchemy import select
+
+from call_monitor.db.models import CallRubric, CallSectionExtract
+from call_monitor.proposal_assist.extractors.refresh import (
+    ensure_rubric_fresh,
+    ensure_section_extracts_fresh,
+)
+from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
+
+
+def _section_envelope() -> dict:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps(
+            {s: f"extract for {s}" for s in SECTION_NAMES}
+        )}}],
+        "model": "claude-opus-4-7",
+    }
+
+
+def _rubric_envelope() -> dict:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps({
+            "criteria": [{"name": "X", "description": "x",
+                          "weight": 1.0, "scale_max": 5}],
+            "funder_notes": "",
+        })}}],
+        "model": "claude-opus-4-7",
+    }
+
+
+def test_ensure_section_extracts_fresh_creates_six_rows_first_time(
+    db_session, sample_call
+):
+    client = Mock()
+    client.chat.return_value = _section_envelope()
+    client.model = "claude-opus-4-7"
+
+    ensure_section_extracts_fresh(
+        session=db_session,
+        call=sample_call,
+        client=client,
+        extractor_version="sections-v1",
+    )
+    db_session.commit()
+
+    rows = db_session.scalars(
+        select(CallSectionExtract).where(
+            CallSectionExtract.call_id == sample_call.id
+        )
+    ).all()
+    assert len(rows) == 6
+    assert {r.section for r in rows} == set(SECTION_NAMES)
+    assert client.chat.call_count == 1
+
+
+def test_ensure_section_extracts_fresh_skips_when_hash_and_version_match(
+    db_session, sample_call
+):
+    client = Mock()
+    client.chat.return_value = _section_envelope()
+    client.model = "claude-opus-4-7"
+
+    ensure_section_extracts_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="sections-v1",
+    )
+    db_session.commit()
+    assert client.chat.call_count == 1
+
+    # second call against unchanged call.full_text + version
+    ensure_section_extracts_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="sections-v1",
+    )
+    db_session.commit()
+    assert client.chat.call_count == 1  # NOT re-called
+
+
+def test_ensure_section_extracts_fresh_re_extracts_on_version_bump(
+    db_session, sample_call
+):
+    client = Mock()
+    client.chat.return_value = _section_envelope()
+    client.model = "claude-opus-4-7"
+
+    ensure_section_extracts_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="sections-v1",
+    )
+    db_session.commit()
+    assert client.chat.call_count == 1
+
+    ensure_section_extracts_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="sections-v2",  # bumped
+    )
+    db_session.commit()
+    assert client.chat.call_count == 2
+
+    rows = db_session.scalars(
+        select(CallSectionExtract).where(
+            CallSectionExtract.call_id == sample_call.id
+        )
+    ).all()
+    assert all(r.extractor_version == "sections-v2" for r in rows)
+
+
+def test_ensure_section_extracts_fresh_re_extracts_on_source_text_change(
+    db_session, sample_call
+):
+    client = Mock()
+    client.chat.return_value = _section_envelope()
+    client.model = "claude-opus-4-7"
+
+    ensure_section_extracts_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="sections-v1",
+    )
+    db_session.commit()
+
+    sample_call.full_text = sample_call.full_text + " (RE-INGESTED)"
+    db_session.commit()
+
+    ensure_section_extracts_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="sections-v1",
+    )
+    db_session.commit()
+    assert client.chat.call_count == 2
+
+
+def test_ensure_rubric_fresh_creates_row_first_time(db_session, sample_call):
+    client = Mock()
+    client.chat.return_value = _rubric_envelope()
+    client.model = "claude-opus-4-7"
+
+    ensure_rubric_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="rubric-v1",
+    )
+    db_session.commit()
+
+    row = db_session.get(CallRubric, sample_call.id)
+    assert row is not None
+    assert row.extractor_version == "rubric-v1"
+    assert client.chat.call_count == 1
+
+
+def test_ensure_rubric_fresh_skips_when_fresh(db_session, sample_call):
+    client = Mock()
+    client.chat.return_value = _rubric_envelope()
+    client.model = "claude-opus-4-7"
+
+    ensure_rubric_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="rubric-v1",
+    )
+    db_session.commit()
+    ensure_rubric_fresh(
+        session=db_session, call=sample_call, client=client,
+        extractor_version="rubric-v1",
+    )
+    db_session.commit()
+    assert client.chat.call_count == 1
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_extractors_refresh.py -v
+```
+
+Expected: ModuleNotFoundError.
+
+- [ ] **Step 3: Implement**
+
+Create `src/call_monitor/proposal_assist/extractors/refresh.py`:
+
+```python
+"""Freshness helpers — idempotent template seeding driven by source_text_hash
++ extractor_version. Phase 0 calls these to guarantee both templates are
+up-to-date before snapshotting them into the workspace.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from call_monitor.db.models import Call, CallRubric, CallSectionExtract
+from call_monitor.proposal_assist.extractors.rubric import extract_rubric
+from call_monitor.proposal_assist.extractors.sections import (
+    SECTION_NAMES,
+    extract_sections,
+)
+from call_monitor.proposal_assist.hashing import source_text_hash
+
+
+def ensure_section_extracts_fresh(
+    *,
+    session: Session,
+    call: Call,
+    client,
+    extractor_version: str,
+) -> None:
+    """Idempotent: if all six rows exist with matching `source_text_hash` AND
+    matching `extractor_version`, no LLM call is made. Otherwise the prior
+    rows are deleted, the extractor runs once, and six fresh rows are
+    inserted.
+
+    Caller commits.
+    """
+    current_hash = source_text_hash(call.full_text or "")
+
+    existing = session.scalars(
+        select(CallSectionExtract).where(
+            CallSectionExtract.call_id == call.id
+        )
+    ).all()
+
+    if (
+        len(existing) == len(SECTION_NAMES)
+        and all(r.source_text_hash == current_hash for r in existing)
+        and all(r.extractor_version == extractor_version for r in existing)
+    ):
+        return
+
+    if existing:
+        session.execute(
+            delete(CallSectionExtract).where(
+                CallSectionExtract.call_id == call.id
+            )
+        )
+
+    sections = extract_sections(call_text=call.full_text or "", client=client)
+    now = datetime.now(timezone.utc)
+    for section_name in SECTION_NAMES:
+        session.add(CallSectionExtract(
+            call_id=call.id,
+            section=section_name,
+            extract_text=sections[section_name],
+            extracted_at=now,
+            extracted_by_model=client.model,
+            extractor_version=extractor_version,
+            source_text_hash=current_hash,
+        ))
+
+
+def ensure_rubric_fresh(
+    *,
+    session: Session,
+    call: Call,
+    client,
+    extractor_version: str,
+) -> None:
+    """Idempotent: if the row exists with matching hash + version, no LLM
+    call is made. Otherwise the row is upserted.
+
+    Caller commits.
+    """
+    current_hash = source_text_hash(call.full_text or "")
+    existing = session.get(CallRubric, call.id)
+    if (
+        existing is not None
+        and existing.source_text_hash == current_hash
+        and existing.extractor_version == extractor_version
+    ):
+        return
+
+    payload = extract_rubric(call_text=call.full_text or "", client=client)
+    now = datetime.now(timezone.utc)
+
+    if existing is None:
+        session.add(CallRubric(
+            call_id=call.id,
+            criteria=payload["criteria"],
+            funder_notes=payload["funder_notes"],
+            extracted_at=now,
+            extracted_by_model=client.model,
+            extractor_version=extractor_version,
+            source_text_hash=current_hash,
+        ))
+    else:
+        existing.criteria = payload["criteria"]
+        existing.funder_notes = payload["funder_notes"]
+        existing.extracted_at = now
+        existing.extracted_by_model = client.model
+        existing.extractor_version = extractor_version
+        existing.source_text_hash = current_hash
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_extractors_refresh.py -v
+```
+
+Expected: 6 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/extractors/refresh.py tests/proposal_assist/test_extractors_refresh.py
+git commit -m "feat(proposal-assist): template freshness helpers driven by hash + version"
+```
+
+---
+
+## Task 8: Part 1 milestone checkpoint
+
+- [ ] **Step 1: Run the full proposal_assist suite**
+
+```bash
+uv run pytest tests/proposal_assist/ -v
+```
+
+Expected: all Tasks 1–7 tests pass (~25 tests).
+
+- [ ] **Step 2: Lint + format**
+
+```bash
+uv run ruff check src/call_monitor/proposal_assist tests/proposal_assist
+uv run ruff format src/call_monitor/proposal_assist tests/proposal_assist
+```
+
+Fix any issues; commit with `chore: ruff fixes for Part 1` if `format` changed anything.
+
+- [ ] **Step 3: Stop here and check in with the user**
+
+Part 1 is complete. The codebase now has:
+- Two new tables (`call_section_extracts`, `call_rubrics`) with freshness metadata
+- Two extractor modules with thorough unit-test coverage
+- Idempotent freshness helpers that re-extract on `source_text_hash` or `extractor_version` change
+
+This satisfies the spec's implementation gate item 3 (section-aware extractor in production) for the call corpus. Surface to the user before proceeding to Part 2 — Part 2 depends on the base spec (`workspaces`, `workspace_viewers`, `workspace_events`) being in place.
+
+---
+
+# Part 2 — Blocked on base spec
+
+**Do not start these tasks until** `workspaces` (with `id uuid PK`, `owner_id bigint FK users`, `call_id`, `profile_id`, `created_at`), `workspace_viewers`, and `workspace_events` exist in the schema. If running under `src/call_monitor/` (no rename yet), use the imports in this plan as-is; if the base spec has done the `call-monitor → call-manager` rename, the paths shift to `src/call_manager/proposal_assist/...` and the Python imports change accordingly — adjust at execution time.
+
+## Task 9: `workspaces` column additions
+
+**Files:**
+- Create: `alembic/versions/0014_workspaces_phase_columns.py`
+- Modify: `src/call_monitor/db/models.py` (the existing `Workspace` model, added by base spec)
+- Test: extend `tests/proposal_assist/test_models.py`
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `tests/proposal_assist/test_models.py`:
+
+```python
+from datetime import datetime, timezone
+
+
+def test_workspace_has_phase_columns_with_defaults(db_session, sample_workspace):
+    # `sample_workspace` is a fixture added by base spec's test suite; reuse it.
+    # The workspace is created without explicit values for the new columns.
+    db_session.refresh(sample_workspace)
+    assert sample_workspace.current_phase == "setup"
+    assert sample_workspace.call_body_snapshot == ""
+    assert sample_workspace.profile_desc_snapshot == ""
+    assert isinstance(sample_workspace.snapshot_refreshed_at, datetime)
+    assert sample_workspace.rubric_criteria == []
+    assert sample_workspace.rubric_funder_notes is None
+    assert isinstance(sample_workspace.rubric_updated_at, datetime)
+    assert sample_workspace.section_extracts == {}
+    assert sample_workspace.review_runs_per_day_override is None
+    assert sample_workspace.review_dollar_cap_override is None
+
+
+def test_workspace_current_phase_rejects_bad_value(db_session, sample_workspace):
+    sample_workspace.current_phase = "not_a_phase"
+    with pytest.raises(Exception):
+        db_session.commit()
+```
+
+If the base spec hasn't yet shipped a `sample_workspace` fixture, define one in `tests/proposal_assist/conftest.py` that creates a `Workspace` row owned by a fresh User.
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_models.py::test_workspace_has_phase_columns_with_defaults -v
+```
+
+Expected: `AttributeError` on `current_phase` or similar.
+
+- [ ] **Step 3: Write the migration**
+
+Create `alembic/versions/0014_workspaces_phase_columns.py`:
+
+```python
+"""workspaces: phase + snapshot + rubric + section_extracts + overrides
+
+Revision ID: 0014
+Revises: 0013
+Create Date: 2026-05-19
+"""
+
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+from alembic import op
+
+revision = "0014"
+down_revision = "0013"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "current_phase", sa.Text(),
+            nullable=False, server_default="setup",
+        ),
+    )
+    op.create_check_constraint(
+        "ck_workspaces_current_phase",
+        "workspaces",
+        "current_phase IN ('setup','spec','plan','draft','review')",
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "call_body_snapshot", sa.Text(),
+            nullable=False, server_default="",
+        ),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "profile_desc_snapshot", sa.Text(),
+            nullable=False, server_default="",
+        ),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "snapshot_refreshed_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "rubric_criteria", postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False, server_default=sa.text("'[]'::jsonb"),
+        ),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column("rubric_funder_notes", sa.Text(), nullable=True),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "rubric_updated_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column(
+            "section_extracts", postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False, server_default=sa.text("'{}'::jsonb"),
+        ),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column("review_runs_per_day_override", sa.Integer(), nullable=True),
+    )
+    op.add_column(
+        "workspaces",
+        sa.Column("review_dollar_cap_override", sa.Numeric(6, 3), nullable=True),
+    )
+
+
+def downgrade() -> None:
+    for col in (
+        "review_dollar_cap_override",
+        "review_runs_per_day_override",
+        "section_extracts",
+        "rubric_updated_at",
+        "rubric_funder_notes",
+        "rubric_criteria",
+        "snapshot_refreshed_at",
+        "profile_desc_snapshot",
+        "call_body_snapshot",
+    ):
+        op.drop_column("workspaces", col)
+    op.drop_constraint("ck_workspaces_current_phase", "workspaces", type_="check")
+    op.drop_column("workspaces", "current_phase")
+```
+
+- [ ] **Step 4: Add fields to the `Workspace` model**
+
+In `src/call_monitor/db/models.py`, edit the existing `Workspace` class (added by base spec) to include:
+
+```python
+    current_phase: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="setup",
+    )
+    call_body_snapshot: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="",
+    )
+    profile_desc_snapshot: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="",
+    )
+    snapshot_refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    rubric_criteria: Mapped[list[dict]] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+    )
+    rubric_funder_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rubric_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    section_extracts: Mapped[dict] = mapped_column(
+        postgresql.JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+    )
+    review_runs_per_day_override: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    review_dollar_cap_override: Mapped[float | None] = mapped_column(
+        Numeric(6, 3), nullable=True,
+    )
+```
+
+Confirm `text` and `Numeric` are imported at the top of `models.py`; add if missing.
+
+- [ ] **Step 5: Migrate + run tests**
+
+```bash
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: model tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add alembic/versions/0014_workspaces_phase_columns.py src/call_monitor/db/models.py tests/proposal_assist/test_models.py
+git commit -m "feat(proposal-assist): add phase + snapshot + rubric + section_extracts columns to workspaces"
+```
+
+---
+
+## Task 10: `phase_approvals` migration + model
+
+**Files:**
+- Create: `alembic/versions/0015_phase_approvals.py`
+- Modify: `src/call_monitor/db/models.py`
+- Test: extend `tests/proposal_assist/test_models.py`
+
+- [ ] **Step 1: Append failing test**
+
+```python
+from call_monitor.db.models import PhaseApproval
+
+
+def test_phase_approval_can_be_inserted(db_session, sample_workspace, sample_user):
+    pa = PhaseApproval(
+        workspace_id=sample_workspace.id,
+        phase="spec",
+        approving_user_id=sample_user.id,
+        approved_artifact_sha="a" * 40,
+    )
+    db_session.add(pa)
+    db_session.commit()
+    assert pa.id is not None
+    assert isinstance(pa.approved_at, datetime)
+
+
+def test_phase_approval_phase_check(db_session, sample_workspace, sample_user):
+    pa = PhaseApproval(
+        workspace_id=sample_workspace.id,
+        phase="not_a_phase",
+        approving_user_id=sample_user.id,
+        approved_artifact_sha="a" * 40,
+    )
+    db_session.add(pa)
+    with pytest.raises(Exception):
+        db_session.commit()
+```
+
+- [ ] **Step 2: Run to confirm failure** — `ImportError`.
+
+- [ ] **Step 3: Write the migration**
+
+Create `alembic/versions/0015_phase_approvals.py`:
+
+```python
+"""phase_approvals
+
+Revision ID: 0015
+Revises: 0014
+Create Date: 2026-05-19
+"""
+
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+from alembic import op
+
+revision = "0015"
+down_revision = "0014"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "phase_approvals",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("workspace_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("phase", sa.Text(), nullable=False),
+        sa.Column(
+            "approved_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column("approving_user_id", sa.BigInteger(), nullable=False),
+        sa.Column("approved_artifact_sha", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["workspace_id"], ["workspaces.id"], ondelete="CASCADE"
+        ),
+        sa.ForeignKeyConstraint(["approving_user_id"], ["users.id"]),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "phase IN ('spec','plan','draft','review')",
+            name="ck_phase_approvals_phase",
+        ),
+    )
+    op.create_index(
+        "ix_phase_approvals_ws_phase_at",
+        "phase_approvals",
+        ["workspace_id", "phase", sa.text("approved_at DESC")],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_phase_approvals_ws_phase_at", table_name="phase_approvals")
+    op.drop_table("phase_approvals")
+```
+
+- [ ] **Step 4: Add the model**
+
+In `src/call_monitor/db/models.py`:
+
+```python
+import uuid
+from sqlalchemy.dialects.postgresql import UUID
+
+
+class PhaseApproval(Base):
+    __tablename__ = "phase_approvals"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    approving_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=False,
+    )
+    approved_artifact_sha: Mapped[str] = mapped_column(Text, nullable=False)
+```
+
+- [ ] **Step 5: Migrate + test**
+
+```bash
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: model tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add alembic/versions/0015_phase_approvals.py src/call_monitor/db/models.py tests/proposal_assist/test_models.py
+git commit -m "feat(proposal-assist): add phase_approvals table"
+```
+
+---
+
+## Task 11: `workspace_setup_jobs` migration + model
+
+**Files:**
+- Create: `alembic/versions/0016_workspace_setup_jobs.py`
+- Modify: `src/call_monitor/db/models.py`
+- Test: extend `tests/proposal_assist/test_models.py`
+
+- [ ] **Step 1: Append failing test**
+
+```python
+from call_monitor.db.models import WorkspaceSetupJob
+
+
+def test_workspace_setup_job_unique_per_workspace(db_session, sample_workspace):
+    job1 = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
+    db_session.add(job1)
+    db_session.commit()
+
+    job2 = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
+    db_session.add(job2)
+    with pytest.raises(Exception):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_workspace_setup_job_status_check(db_session, sample_workspace):
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="bogus")
+    db_session.add(job)
+    with pytest.raises(Exception):
+        db_session.commit()
+```
+
+- [ ] **Step 2: Run to confirm failure** — `ImportError`.
+
+- [ ] **Step 3: Migration**
+
+Create `alembic/versions/0016_workspace_setup_jobs.py`:
+
+```python
+"""workspace_setup_jobs
+
+Revision ID: 0016
+Revises: 0015
+Create Date: 2026-05-19
+"""
+
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+from alembic import op
+
+revision = "0016"
+down_revision = "0015"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "workspace_setup_jobs",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("workspace_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column(
+            "attempts", sa.SmallInteger(),
+            nullable=False, server_default=sa.text("0"),
+        ),
+        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["workspace_id"], ["workspaces.id"], ondelete="CASCADE"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("workspace_id", name="uq_workspace_setup_jobs_ws"),
+        sa.CheckConstraint(
+            "status IN ('queued','running','waiting_for_rubric_review',"
+            "'done','failed')",
+            name="ck_workspace_setup_jobs_status",
+        ),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("workspace_setup_jobs")
+```
+
+- [ ] **Step 4: Model**
+
+```python
+class WorkspaceSetupJob(Base):
+    __tablename__ = "workspace_setup_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0"),
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+```
+
+Add `SmallInteger` to the imports in `models.py` if not present.
+
+- [ ] **Step 5: Migrate + test**
+
+```bash
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: model tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add alembic/versions/0016_workspace_setup_jobs.py src/call_monitor/db/models.py tests/proposal_assist/test_models.py
+git commit -m "feat(proposal-assist): add workspace_setup_jobs table"
+```
+
+---
+
+## Task 12: `review_runs` + `review_run_items` migration + models
+
+**Files:**
+- Create: `alembic/versions/0017_review_runs_and_items.py`
+- Modify: `src/call_monitor/db/models.py`
+- Test: extend `tests/proposal_assist/test_models.py`
+
+- [ ] **Step 1: Append failing tests**
+
+```python
+from call_monitor.db.models import ReviewRun, ReviewRunItem
+
+
+def test_review_run_active_lock_blocks_double_queued(
+    db_session, sample_workspace
+):
+    rr1 = ReviewRun(
+        workspace_id=sample_workspace.id,
+        status="queued",
+        draft_sha="d" * 40,
+    )
+    db_session.add(rr1)
+    db_session.commit()
+
+    rr2 = ReviewRun(
+        workspace_id=sample_workspace.id,
+        status="queued",
+        draft_sha="d" * 40,
+    )
+    db_session.add(rr2)
+    with pytest.raises(Exception):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_review_run_active_lock_allows_after_terminal(
+    db_session, sample_workspace
+):
+    rr1 = ReviewRun(
+        workspace_id=sample_workspace.id,
+        status="done",  # terminal
+        draft_sha="d" * 40,
+    )
+    db_session.add(rr1)
+    db_session.commit()
+
+    rr2 = ReviewRun(
+        workspace_id=sample_workspace.id,
+        status="queued",
+        draft_sha="d" * 40,
+    )
+    db_session.add(rr2)
+    db_session.commit()  # should NOT raise
+
+
+def test_review_run_item_kind_unique_per_run(db_session, sample_workspace):
+    rr = ReviewRun(
+        workspace_id=sample_workspace.id,
+        status="running",
+        draft_sha="d" * 40,
+    )
+    db_session.add(rr)
+    db_session.commit()
+
+    item1 = ReviewRunItem(
+        review_run_id=rr.id, kind="fit_check", status="queued",
+    )
+    db_session.add(item1)
+    db_session.commit()
+
+    item2 = ReviewRunItem(
+        review_run_id=rr.id, kind="fit_check", status="queued",
+    )
+    db_session.add(item2)
+    with pytest.raises(Exception):
+        db_session.commit()
+```
+
+- [ ] **Step 2: Run to confirm failure** — `ImportError`.
+
+- [ ] **Step 3: Migration**
+
+Create `alembic/versions/0017_review_runs_and_items.py`:
+
+```python
+"""review_runs + review_run_items
+
+Revision ID: 0017
+Revises: 0016
+Create Date: 2026-05-19
+"""
+
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+from alembic import op
+
+revision = "0017"
+down_revision = "0016"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "review_runs",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("workspace_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column(
+            "triggered_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("draft_sha", sa.Text(), nullable=False),
+        sa.Column("fit_check_sha", sa.Text(), nullable=True),
+        sa.Column("rubric_review_sha", sa.Text(), nullable=True),
+        sa.Column(
+            "waived_from_review_run_id", postgresql.UUID(as_uuid=True),
+            nullable=True,
+        ),
+        sa.Column("input_tokens", sa.Integer(), nullable=True),
+        sa.Column("output_tokens", sa.Integer(), nullable=True),
+        sa.Column("cache_read_input_tokens", sa.Integer(), nullable=True),
+        sa.Column("estimated_dollars", sa.Numeric(6, 3), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["workspace_id"], ["workspaces.id"], ondelete="CASCADE"
+        ),
+        sa.ForeignKeyConstraint(
+            ["waived_from_review_run_id"], ["review_runs.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "status IN ('queued','running','done','failed','cancelled',"
+            "'partial')",
+            name="ck_review_runs_status",
+        ),
+    )
+    op.create_index(
+        "ix_review_runs_ws_triggered",
+        "review_runs",
+        ["workspace_id", sa.text("triggered_at DESC")],
+    )
+    # Active-review lock: at most one queued/running run per workspace.
+    op.create_index(
+        "uq_review_runs_active",
+        "review_runs",
+        ["workspace_id"],
+        unique=True,
+        postgresql_where=sa.text("status IN ('queued','running')"),
+    )
+
+    op.create_table(
+        "review_run_items",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("review_run_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("kind", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("model", sa.Text(), nullable=True),
+        sa.Column("input_tokens", sa.Integer(), nullable=True),
+        sa.Column("output_tokens", sa.Integer(), nullable=True),
+        sa.Column("cache_read_input_tokens", sa.Integer(), nullable=True),
+        sa.Column("estimated_dollars", sa.Numeric(6, 4), nullable=True),
+        sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column(
+            "raw_response_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+        ),
+        sa.ForeignKeyConstraint(
+            ["review_run_id"], ["review_runs.id"], ondelete="CASCADE"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "review_run_id", "kind", name="uq_review_run_items_run_kind"
+        ),
+        sa.CheckConstraint(
+            "kind IN ('fit_check',"
+            "'persona_domain_skeptic',"
+            "'persona_methodology_critic',"
+            "'persona_translation_skeptic',"
+            "'persona_devils_advocate',"
+            "'consolidation')",
+            name="ck_review_run_items_kind",
+        ),
+        sa.CheckConstraint(
+            "status IN ('queued','running','done','failed','skipped',"
+            "'cancelled')",
+            name="ck_review_run_items_status",
+        ),
+    )
+    op.create_index(
+        "ix_review_run_items_run",
+        "review_run_items",
+        ["review_run_id"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_review_run_items_run", table_name="review_run_items")
+    op.drop_table("review_run_items")
+    op.drop_index("uq_review_runs_active", table_name="review_runs")
+    op.drop_index("ix_review_runs_ws_triggered", table_name="review_runs")
+    op.drop_table("review_runs")
+```
+
+- [ ] **Step 4: Models**
+
+```python
+class ReviewRun(Base):
+    __tablename__ = "review_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    draft_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    fit_check_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rubric_review_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    waived_from_review_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("review_runs.id"),
+        nullable=True,
+    )
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    estimated_dollars: Mapped[float | None] = mapped_column(
+        Numeric(6, 3), nullable=True,
+    )
+
+
+class ReviewRunItem(Base):
+    __tablename__ = "review_run_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("review_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    estimated_dollars: Mapped[float | None] = mapped_column(
+        Numeric(6, 4), nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response_json: Mapped[dict | None] = mapped_column(
+        postgresql.JSONB, nullable=True,
+    )
+```
+
+- [ ] **Step 5: Migrate + test**
+
+```bash
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Expected: model tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add alembic/versions/0017_review_runs_and_items.py src/call_monitor/db/models.py tests/proposal_assist/test_models.py
+git commit -m "feat(proposal-assist): add review_runs + review_run_items with active-review lock"
+```
+
+---
+
+## Task 13: Phase 0 worker scaffold — job claim + state transitions
+
+The Phase 0 worker polls `workspace_setup_jobs` rows, claims them under `SELECT ... FOR UPDATE SKIP LOCKED`, and runs the 7-step sequence from the spec. This task lands the scaffold: claim logic, state transitions (queued → running → ... → done/failed), retries on transient failure (up to 5 attempts), and the `waiting_for_rubric_review` yield (where the worker releases the row and exits its loop, letting a separate trigger advance it when the owner confirms).
+
+**Files:**
+- Create: `src/call_monitor/proposal_assist/phases/__init__.py` (empty)
+- Create: `src/call_monitor/proposal_assist/phases/setup.py`
+- Test: `tests/proposal_assist/test_phase0_setup.py`
+
+- [ ] **Step 1: Write failing tests for the scaffold**
+
+`tests/proposal_assist/test_phase0_setup.py`:
+
+```python
+from unittest.mock import Mock
+
+import pytest
+
+from call_monitor.db.models import WorkspaceSetupJob
+from call_monitor.proposal_assist.phases.setup import (
+    Phase0Worker,
+    claim_next_setup_job,
+)
+
+
+def test_claim_next_returns_oldest_queued(db_session, sample_workspace):
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
+    db_session.add(job)
+    db_session.commit()
+
+    claimed = claim_next_setup_job(session=db_session)
+    db_session.commit()
+
+    assert claimed is not None
+    assert claimed.id == job.id
+    assert claimed.status == "running"
+    assert claimed.started_at is not None
+
+
+def test_claim_next_returns_none_when_nothing_queued(db_session):
+    assert claim_next_setup_job(session=db_session) is None
+
+
+def test_phase0_worker_transitions_to_done_on_success(
+    db_session, sample_workspace, monkeypatch
+):
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
+    db_session.add(job)
+    db_session.commit()
+
+    worker = Phase0Worker(
+        session=db_session,
+        client=Mock(model="claude-opus-4-7"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root="/tmp/proposal_assist_test_repos",
+    )
+
+    # Stub the long sub-steps so this test isolates the lifecycle wrapper.
+    monkeypatch.setattr(worker, "_run_steps", lambda job: None)
+
+    worker.run_one()
+    db_session.refresh(job)
+    assert job.status == "done"
+    assert job.completed_at is not None
+
+
+def test_phase0_worker_increments_attempts_and_marks_failed_after_5(
+    db_session, sample_workspace, monkeypatch
+):
+    job = WorkspaceSetupJob(
+        workspace_id=sample_workspace.id, status="queued", attempts=4,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    worker = Phase0Worker(
+        session=db_session, client=Mock(model="m"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root="/tmp/proposal_assist_test_repos",
+    )
+
+    def boom(_job):
+        raise RuntimeError("transient")
+    monkeypatch.setattr(worker, "_run_steps", boom)
+
+    worker.run_one()
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 5
+    assert "transient" in (job.last_error or "")
+
+
+def test_phase0_worker_requeues_on_transient_failure_below_attempt_cap(
+    db_session, sample_workspace, monkeypatch
+):
+    job = WorkspaceSetupJob(
+        workspace_id=sample_workspace.id, status="queued", attempts=0,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    worker = Phase0Worker(
+        session=db_session, client=Mock(model="m"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root="/tmp/proposal_assist_test_repos",
+    )
+
+    def boom(_job):
+        raise RuntimeError("transient")
+    monkeypatch.setattr(worker, "_run_steps", boom)
+
+    worker.run_one()
+    db_session.refresh(job)
+    assert job.status == "queued"  # back to queued for next tick
+    assert job.attempts == 1
+    assert "transient" in (job.last_error or "")
+```
+
+- [ ] **Step 2: Run to confirm failure** — `ModuleNotFoundError`.
+
+- [ ] **Step 3: Implement scaffold**
+
+Create `src/call_monitor/proposal_assist/phases/__init__.py` (empty).
+
+Create `src/call_monitor/proposal_assist/phases/setup.py`:
+
+```python
+"""Phase 0 worker — runs the workspace_setup_jobs queue.
+
+Lifecycle:
+    queued
+      └─ claim_next_setup_job (FOR UPDATE SKIP LOCKED) → running, started_at
+            ├─ run_steps OK + rubric review pending → waiting_for_rubric_review
+            ├─ run_steps OK + rubric reviewed       → done, completed_at
+            ├─ run_steps raises + attempts < 5      → queued, attempts++
+            └─ run_steps raises + attempts == 5     → failed, completed_at
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Protocol
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from call_monitor.db.models import WorkspaceSetupJob
+
+logger = logging.getLogger(__name__)
+
+MAX_SETUP_ATTEMPTS = 5
+
+
+class _AnthropicClientLike(Protocol):
+    model: str
+    def chat(self, *, messages: list[dict], response_format: dict | None = None) -> dict: ...
+
+
+def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
+    """Claim the oldest queued job under SELECT FOR UPDATE SKIP LOCKED.
+
+    Caller commits.
+    """
+    stmt = (
+        select(WorkspaceSetupJob)
+        .where(WorkspaceSetupJob.status == "queued")
+        .order_by(WorkspaceSetupJob.id)  # FIFO-ish; UUIDs sort lexically
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    job = session.scalar(stmt)
+    if job is None:
+        return None
+    job.status = "running"
+    job.started_at = datetime.now(timezone.utc)
+    return job
+
+
+@dataclass
+class Phase0Worker:
+    """Single-threaded worker; one instance per process.
+
+    `_run_steps` is the long-running sub-step sequence — split out so tests
+    can monkeypatch it. Tasks 14–17 fill in its implementation.
+    """
+    session: Session
+    client: _AnthropicClientLike
+    extractor_version: str
+    rubric_extractor_version: str
+    workspace_repo_root: str
+
+    def run_one(self) -> bool:
+        """Claim one job, execute it, advance its status. Returns True if a
+        job was processed (regardless of success/failure), False if the queue
+        was empty."""
+        job = claim_next_setup_job(session=self.session)
+        if job is None:
+            return False
+        self.session.commit()  # release the FOR UPDATE row lock early
+
+        try:
+            self._run_steps(job)
+        except Exception as exc:
+            job.attempts += 1
+            job.last_error = f"{type(exc).__name__}: {exc}"
+            if job.attempts >= MAX_SETUP_ATTEMPTS:
+                job.status = "failed"
+                job.completed_at = datetime.now(timezone.utc)
+                logger.exception(
+                    "phase0 setup job %s failed permanently after %d attempts",
+                    job.id, job.attempts,
+                )
+            else:
+                job.status = "queued"
+                logger.warning(
+                    "phase0 setup job %s transient failure (attempt %d/%d): %s",
+                    job.id, job.attempts, MAX_SETUP_ATTEMPTS, exc,
+                )
+            self.session.commit()
+            return True
+
+        # Success path. _run_steps decides between waiting_for_rubric_review
+        # and done by mutating job.status directly. If it left status as
+        # 'running', treat that as 'done'.
+        if job.status == "running":
+            job.status = "done"
+            job.completed_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return True
+
+    def _run_steps(self, job: WorkspaceSetupJob) -> None:
+        """Filled in by Tasks 14–17. Raises on transient/permanent failure;
+        mutates job.status to 'waiting_for_rubric_review' to yield."""
+        raise NotImplementedError("filled in by Tasks 14–17")
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_setup.py -v
+```
+
+Expected: 5 scaffold tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/phases/__init__.py src/call_monitor/proposal_assist/phases/setup.py tests/proposal_assist/test_phase0_setup.py
+git commit -m "feat(proposal-assist): Phase 0 worker scaffold (claim + lifecycle)"
+```
+
+---
+
+## Task 14: Phase 0 — git init + snapshot call body + snapshot profile description (steps 1–3)
+
+**Files:**
+- Modify: `src/call_monitor/proposal_assist/phases/setup.py`
+- Test: extend `tests/proposal_assist/test_phase0_setup.py`
+
+- [ ] **Step 1: Append failing test**
+
+```python
+import os
+import subprocess
+
+from call_monitor.db.models import Workspace
+
+
+def test_phase0_steps_1_3_init_repo_and_snapshot(
+    db_session, sample_workspace, sample_call, sample_profile, tmp_path
+):
+    # arrange: link workspace to the sample call + profile
+    sample_workspace.call_id = sample_call.id
+    sample_workspace.profile_id = sample_profile.id
+    sample_workspace.call_body_snapshot = ""
+    sample_workspace.profile_desc_snapshot = ""
+    db_session.commit()
+
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="running")
+    db_session.add(job)
+    db_session.commit()
+
+    worker = Phase0Worker(
+        session=db_session,
+        client=Mock(model="claude-opus-4-7"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+
+    worker._snapshot_and_init_repo(job)
+    db_session.commit()
+
+    # repo exists with three empty artifact files
+    repo_dir = tmp_path / "repos" / str(sample_workspace.id) / "repo"
+    assert (repo_dir / ".git").is_dir()
+    for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
+        assert (repo_dir / fname).is_file()
+        assert (repo_dir / fname).read_text() == ""
+
+    # one initial commit exists
+    out = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    assert int(out.stdout.strip()) == 1
+
+    # snapshots populated
+    db_session.refresh(sample_workspace)
+    assert sample_call.full_text in sample_workspace.call_body_snapshot
+    assert sample_workspace.profile_desc_snapshot == sample_profile.description
+```
+
+Add the missing `sample_profile` fixture to `tests/proposal_assist/conftest.py`:
+
+```python
+from call_monitor.db.models import Profile
+
+
+@pytest.fixture
+def sample_profile(db_session) -> Profile:
+    p = Profile(
+        slug="test-profile",
+        name="Test PI Profile",
+        description="AI-assisted diagnosis of cancer biopsies, histopathology.",
+        is_active=True,
+    )
+    db_session.add(p)
+    db_session.commit()
+    return p
+```
+
+(Adjust the Profile constructor to match your codebase — verify with `grep -n "class Profile" src/call_monitor/db/models.py`.)
+
+- [ ] **Step 2: Run to confirm failure** — `AttributeError: '_snapshot_and_init_repo'`.
+
+- [ ] **Step 3: Implement step 1–3 helper**
+
+In `src/call_monitor/proposal_assist/phases/setup.py`, add:
+
+```python
+import os
+import subprocess
+from pathlib import Path
+
+from call_monitor.db.models import Call, Profile, Workspace
+```
+
+Inside `Phase0Worker`, add:
+
+```python
+    _PHASE_ARTIFACT_FILES: tuple[str, ...] = (
+        "proposal-spec.md",
+        "proposal-plan.md",
+        "proposal.md",
+    )
+
+    def _workspace_repo_dir(self, workspace_id) -> Path:
+        return Path(self.workspace_repo_root) / str(workspace_id) / "repo"
+
+    def _snapshot_and_init_repo(self, job: WorkspaceSetupJob) -> None:
+        ws = self.session.get(Workspace, job.workspace_id)
+        if ws is None:
+            raise RuntimeError(f"workspace {job.workspace_id} vanished")
+
+        # Step 1: init git repo with empty phase artifacts.
+        repo_dir = self._workspace_repo_dir(ws.id)
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        if not (repo_dir / ".git").is_dir():
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main"],
+                cwd=repo_dir, check=True,
+            )
+            # Identity for the initial commit — match the project's git author
+            # convention; override via env if the running user has no global
+            # gitconfig (common in CI / containers).
+            env = os.environ.copy()
+            env.setdefault("GIT_AUTHOR_NAME", "call-manager")
+            env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
+            env.setdefault("GIT_COMMITTER_NAME", "call-manager")
+            env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
+            for fname in self._PHASE_ARTIFACT_FILES:
+                (repo_dir / fname).write_text("")
+            subprocess.run(
+                ["git", "add", "-A"], cwd=repo_dir, check=True, env=env,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "phase0: initialize empty artifacts"],
+                cwd=repo_dir, check=True, env=env,
+            )
+
+        # Step 2: snapshot call body.
+        if ws.call_id is None:
+            raise RuntimeError(
+                f"workspace {ws.id} has no call_id — Phase 0 requires one"
+            )
+        call = self.session.get(Call, ws.call_id)
+        if call is None:
+            raise RuntimeError(f"call {ws.call_id} not found")
+        ws.call_body_snapshot = (call.summary or "") + "\n\n" + (call.full_text or "")
+
+        # Step 3: snapshot profile description (if profile linked).
+        if ws.profile_id is not None:
+            profile = self.session.get(Profile, ws.profile_id)
+            if profile is not None:
+                ws.profile_desc_snapshot = profile.description or ""
+
+        ws.snapshot_refreshed_at = datetime.now(timezone.utc)
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_setup.py -v
+```
+
+Expected: scaffold tests + the new step 1–3 test pass. Verify the repo dir is created under `tmp_path` (no leakage into real filesystem).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/phases/setup.py tests/proposal_assist/conftest.py tests/proposal_assist/test_phase0_setup.py
+git commit -m "feat(proposal-assist): Phase 0 steps 1-3 (git init + snapshot call body + profile)"
+```
+
+---
+
+## Task 15: Phase 0 — ensure templates fresh + copy to workspace (steps 4–5)
+
+**Files:**
+- Modify: `src/call_monitor/proposal_assist/phases/setup.py`
+- Test: extend `tests/proposal_assist/test_phase0_setup.py`
+
+- [ ] **Step 1: Append failing test**
+
+```python
+import json
+
+
+def test_phase0_step_4_copies_section_extracts_into_workspace(
+    db_session, sample_workspace, sample_call, tmp_path
+):
+    sample_workspace.call_id = sample_call.id
+    db_session.commit()
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="running")
+    db_session.add(job)
+    db_session.commit()
+
+    client = Mock()
+    client.model = "claude-opus-4-7"
+    client.chat.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps({
+            "eligibility": "E", "scope": "S", "budget": "B",
+            "expected_outcomes": "O", "restrictions": "R", "mandatory": "M",
+        })}}],
+        "model": "claude-opus-4-7",
+    }
+
+    worker = Phase0Worker(
+        session=db_session, client=client,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+    worker._ensure_section_extracts_snapshot(job)
+    db_session.commit()
+    db_session.refresh(sample_workspace)
+
+    assert set(sample_workspace.section_extracts.keys()) == {
+        "eligibility", "scope", "budget",
+        "expected_outcomes", "restrictions", "mandatory",
+    }
+    assert sample_workspace.section_extracts["eligibility"] == "E"
+
+
+def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
+    db_session, sample_workspace, sample_call, tmp_path
+):
+    from call_monitor.db.models import WorkspaceEvent
+
+    sample_workspace.call_id = sample_call.id
+    db_session.commit()
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="running")
+    db_session.add(job)
+    db_session.commit()
+
+    client = Mock()
+    client.model = "claude-opus-4-7"
+    client.chat.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps({
+            "criteria": [{"name": "X", "description": "x",
+                          "weight": 1.0, "scale_max": 5}],
+            "funder_notes": "see FAQ",
+        })}}],
+        "model": "claude-opus-4-7",
+    }
+
+    worker = Phase0Worker(
+        session=db_session, client=client,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+    worker._ensure_rubric_snapshot(job)
+    db_session.commit()
+    db_session.refresh(sample_workspace)
+
+    assert len(sample_workspace.rubric_criteria) == 1
+    assert sample_workspace.rubric_criteria[0]["name"] == "X"
+    assert sample_workspace.rubric_funder_notes == "see FAQ"
+
+    # Audit event: rubric_initialized written exactly once with the seed payload.
+    events = (
+        db_session.query(WorkspaceEvent)
+        .filter(
+            WorkspaceEvent.workspace_id == sample_workspace.id,
+            WorkspaceEvent.kind == "rubric_initialized",
+        )
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].payload["criteria"][0]["name"] == "X"
+    assert events[0].payload["funder_notes"] == "see FAQ"
+```
+
+(Adjust `WorkspaceEvent` constructor / payload-column name to match base spec's actual model — verify with `grep -n "class WorkspaceEvent" src/call_monitor/db/models.py`.)
+
+- [ ] **Step 2: Run to confirm failure** — `AttributeError`.
+
+- [ ] **Step 3: Implement steps 4–5**
+
+In `src/call_monitor/proposal_assist/phases/setup.py`, add:
+
+```python
+from call_monitor.db.models import WorkspaceEvent
+from call_monitor.proposal_assist.extractors.refresh import (
+    ensure_rubric_fresh,
+    ensure_section_extracts_fresh,
+)
+from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
+```
+
+Inside `Phase0Worker`:
+
+```python
+    def _ensure_section_extracts_snapshot(self, job: WorkspaceSetupJob) -> None:
+        ws = self.session.get(Workspace, job.workspace_id)
+        if ws is None or ws.call_id is None:
+            raise RuntimeError("workspace or call missing for section extracts")
+        call = self.session.get(Call, ws.call_id)
+        if call is None:
+            raise RuntimeError(f"call {ws.call_id} not found")
+
+        ensure_section_extracts_fresh(
+            session=self.session, call=call, client=self.client,
+            extractor_version=self.extractor_version,
+        )
+        # Read back into a dict the workspace owns from now on.
+        from call_monitor.db.models import CallSectionExtract
+        rows = (
+            self.session.query(CallSectionExtract)
+            .filter(CallSectionExtract.call_id == call.id)
+            .all()
+        )
+        ws.section_extracts = {r.section: r.extract_text for r in rows}
+        # All six keys must be present.
+        for name in SECTION_NAMES:
+            ws.section_extracts.setdefault(name, "")
+
+    def _ensure_rubric_snapshot(self, job: WorkspaceSetupJob) -> None:
+        from call_monitor.db.models import CallRubric
+        ws = self.session.get(Workspace, job.workspace_id)
+        if ws is None or ws.call_id is None:
+            raise RuntimeError("workspace or call missing for rubric")
+        call = self.session.get(Call, ws.call_id)
+
+        ensure_rubric_fresh(
+            session=self.session, call=call, client=self.client,
+            extractor_version=self.rubric_extractor_version,
+        )
+        template = self.session.get(CallRubric, call.id)
+        ws.rubric_criteria = template.criteria
+        ws.rubric_funder_notes = template.funder_notes
+        ws.rubric_updated_at = datetime.now(timezone.utc)
+
+        # Audit: write the canonical starting state for forward-replay.
+        self.session.add(WorkspaceEvent(
+            workspace_id=ws.id,
+            kind="rubric_initialized",
+            payload={
+                "criteria": template.criteria,
+                "funder_notes": template.funder_notes,
+                "seeded_from_call_rubrics_extracted_at": (
+                    template.extracted_at.isoformat()
+                ),
+            },
+        ))
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_setup.py -v
+```
+
+Expected: all phase0 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/phases/setup.py tests/proposal_assist/test_phase0_setup.py
+git commit -m "feat(proposal-assist): Phase 0 steps 4-5 (extracts + rubric snapshot + init event)"
+```
+
+---
+
+## Task 16: Phase 0 — `waiting_for_rubric_review` gate (step 6)
+
+**Files:**
+- Modify: `src/call_monitor/proposal_assist/phases/setup.py`
+- Test: extend `tests/proposal_assist/test_phase0_setup.py`
+
+- [ ] **Step 1: Append failing test**
+
+```python
+def test_phase0_yields_to_waiting_for_rubric_review(
+    db_session, sample_workspace, sample_call, tmp_path
+):
+    sample_workspace.call_id = sample_call.id
+    db_session.commit()
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
+    db_session.add(job)
+    db_session.commit()
+
+    client = Mock()
+    client.model = "claude-opus-4-7"
+    # Two chat calls expected: sections + rubric.
+    client.chat.side_effect = [
+        {"choices": [{"message": {"role": "assistant", "content": json.dumps(
+            {s: f"x_{s}" for s in (
+                "eligibility","scope","budget",
+                "expected_outcomes","restrictions","mandatory")}
+        )}}], "model": "claude-opus-4-7"},
+        {"choices": [{"message": {"role": "assistant", "content": json.dumps({
+            "criteria": [{"name": "C", "description": "c",
+                          "weight": 1.0, "scale_max": 5}],
+            "funder_notes": "",
+        })}}], "model": "claude-opus-4-7"},
+    ]
+
+    worker = Phase0Worker(
+        session=db_session, client=client,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+    worker.run_one()
+    db_session.refresh(job)
+    db_session.refresh(sample_workspace)
+
+    assert job.status == "waiting_for_rubric_review"
+    assert job.completed_at is None
+    assert sample_workspace.current_phase == "setup"
+```
+
+- [ ] **Step 2: Run to confirm failure** — job ends up in "done" not "waiting".
+
+- [ ] **Step 3: Implement step 6 + wire into `_run_steps`**
+
+In `src/call_monitor/proposal_assist/phases/setup.py`, replace the `_run_steps` placeholder:
+
+```python
+    def _run_steps(self, job: WorkspaceSetupJob) -> None:
+        # Steps 1-3: git init + snapshots
+        self._snapshot_and_init_repo(job)
+        # Step 4: section extracts
+        self._ensure_section_extracts_snapshot(job)
+        # Step 5: rubric + rubric_initialized event
+        self._ensure_rubric_snapshot(job)
+        # Step 6: yield to owner rubric review.
+        # The job stays at status='waiting_for_rubric_review' until the owner
+        # confirms via the rubric-review endpoint (Task 18), which sets
+        # status='done' and advances workspaces.current_phase.
+        job.status = "waiting_for_rubric_review"
+        # NOT setting completed_at — the job isn't terminal yet.
+```
+
+Also update `run_one` to skip the "running → done" auto-promotion if `_run_steps` set the status to `waiting_for_rubric_review`. In `run_one`, replace:
+
+```python
+        if job.status == "running":
+            job.status = "done"
+            job.completed_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return True
+```
+
+with:
+
+```python
+        if job.status == "running":
+            # _run_steps didn't transition explicitly — treat as terminal done.
+            job.status = "done"
+            job.completed_at = datetime.now(timezone.utc)
+        elif job.status == "waiting_for_rubric_review":
+            # Yield: do NOT set completed_at; the rubric review endpoint will
+            # advance to 'done' when the owner confirms.
+            pass
+        self.session.commit()
+        return True
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_setup.py -v
+```
+
+Expected: all phase0 tests pass; the new test confirms the waiting state.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/phases/setup.py tests/proposal_assist/test_phase0_setup.py
+git commit -m "feat(proposal-assist): Phase 0 step 6 (yield to waiting_for_rubric_review)"
+```
+
+---
+
+## Task 17: Owner rubric-review endpoint — GET form
+
+**Files:**
+- Create: `src/call_monitor/proposal_assist/web/__init__.py` (empty)
+- Create: `src/call_monitor/proposal_assist/web/rubric_review.py`
+- Create: `src/call_monitor/web/templates/proposal_assist/rubric_review.html`
+- Test: `tests/proposal_assist/test_rubric_review_endpoint.py`
+
+- [ ] **Step 1: Write failing tests**
+
+`tests/proposal_assist/test_rubric_review_endpoint.py`:
+
+```python
+import uuid
+
+import pytest
+from starlette.testclient import TestClient
+
+from call_monitor.main import create_app
+from call_monitor.db.models import WorkspaceSetupJob
+
+
+@pytest.fixture
+def client(db_session):
+    # Use the project's existing auth-bypass / test client fixture pattern;
+    # this assumes create_app supports a test-mode flag. If not, adjust to
+    # match the existing pattern in tests/test_*.py.
+    app = create_app(test_mode=True)
+    return TestClient(app)
+
+
+def _login_as(client, user):
+    """Reuse the project's existing test-login helper. If one doesn't exist,
+    seed a session cookie matching what /login produces in test mode."""
+    # ... project-specific; e.g. client.post("/auth/test-login", json={"user_id": user.id})
+    pass
+
+
+def test_rubric_review_get_returns_form_for_owner(
+    client, db_session, sample_workspace, sample_user
+):
+    sample_workspace.owner_id = sample_user.id
+    sample_workspace.rubric_criteria = [
+        {"name": "Excellence", "description": "x",
+         "weight": 1.0, "scale_max": 5},
+    ]
+    db_session.commit()
+    _login_as(client, sample_user)
+
+    resp = client.get(f"/workspaces/{sample_workspace.id}/rubric-review")
+    assert resp.status_code == 200
+    assert "Excellence" in resp.text
+
+
+def test_rubric_review_get_returns_403_for_non_owner(
+    client, db_session, sample_workspace, sample_user, another_user
+):
+    sample_workspace.owner_id = another_user.id  # someone else owns it
+    db_session.commit()
+    _login_as(client, sample_user)
+
+    resp = client.get(f"/workspaces/{sample_workspace.id}/rubric-review")
+    assert resp.status_code == 403
+
+
+def test_rubric_review_get_returns_404_for_missing_workspace(
+    client, sample_user
+):
+    _login_as(client, sample_user)
+    resp = client.get(f"/workspaces/{uuid.uuid4()}/rubric-review")
+    assert resp.status_code == 404
+```
+
+Note: this task assumes the existing auth/login test pattern (the project uses magic links). Read `tests/test_*.py` for the convention before writing `_login_as`.
+
+- [ ] **Step 2: Run to confirm failure**
+
+- [ ] **Step 3: Implement endpoint + template**
+
+Create `src/call_monitor/proposal_assist/web/__init__.py` (empty).
+
+Create `src/call_monitor/proposal_assist/web/rubric_review.py`:
+
+```python
+from __future__ import annotations
+
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
+
+from call_monitor.db.models import Workspace
+# Reuse the project's existing auth + session dependencies.
+from call_monitor.web.auth import get_current_user  # adjust path to match project
+from call_monitor.db.session import get_db_session   # adjust path to match project
+
+router = APIRouter(prefix="/workspaces", tags=["proposal-assist"])
+
+
+def _require_owner(*, workspace_id: uuid.UUID, user, session: Session) -> Workspace:
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    if ws.owner_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="only the workspace owner may view or edit the rubric",
+        )
+    return ws
+
+
+@router.get(
+    "/{workspace_id}/rubric-review",
+    response_class=HTMLResponse,
+)
+def get_rubric_review(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+):
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    # Reuse the project's existing Jinja2Templates instance.
+    from call_monitor.web.templates import templates  # adjust path to match
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/rubric_review.html",
+        {"workspace": ws, "criteria": ws.rubric_criteria,
+         "funder_notes": ws.rubric_funder_notes or ""},
+    )
+```
+
+Create `src/call_monitor/web/templates/proposal_assist/rubric_review.html`:
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Rubric review — {{ workspace.title }}{% endblock %}
+
+{% block content %}
+<h1>Review the funder's rubric</h1>
+<p>
+  The system extracted these criteria from the call. Edit anything that looks
+  wrong — your edits stay scoped to this workspace.
+</p>
+
+<form method="post"
+      action="/workspaces/{{ workspace.id }}/rubric-review"
+      hx-post="/workspaces/{{ workspace.id }}/rubric-review"
+      hx-swap="outerHTML">
+  <ol id="criteria-list">
+    {% for crit in criteria %}
+      <li>
+        <input type="text" name="criteria[{{ loop.index0 }}][name]"
+               value="{{ crit.name }}" required>
+        <textarea name="criteria[{{ loop.index0 }}][description]"
+                  rows="2" required>{{ crit.description }}</textarea>
+        <label>weight
+          <input type="number" step="0.01" min="0" max="1"
+                 name="criteria[{{ loop.index0 }}][weight]"
+                 value="{{ crit.weight }}" required>
+        </label>
+        <label>scale max
+          <input type="number" min="1" max="10"
+                 name="criteria[{{ loop.index0 }}][scale_max]"
+                 value="{{ crit.scale_max }}" required>
+        </label>
+      </li>
+    {% endfor %}
+  </ol>
+  <label for="funder-notes">Funder notes (optional)</label>
+  <textarea id="funder-notes" name="funder_notes" rows="4">{{ funder_notes }}</textarea>
+  <button type="submit">Confirm rubric and proceed to Spec</button>
+</form>
+{% endblock %}
+```
+
+Register the router in `src/call_monitor/main.py`:
+
+```python
+from call_monitor.proposal_assist.web.rubric_review import router as rubric_review_router
+
+# inside create_app():
+app.include_router(rubric_review_router)
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_rubric_review_endpoint.py::test_rubric_review_get_returns_form_for_owner -v
+uv run pytest tests/proposal_assist/test_rubric_review_endpoint.py::test_rubric_review_get_returns_403_for_non_owner -v
+uv run pytest tests/proposal_assist/test_rubric_review_endpoint.py::test_rubric_review_get_returns_404_for_missing_workspace -v
+```
+
+Expected: 3 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/web/__init__.py src/call_monitor/proposal_assist/web/rubric_review.py src/call_monitor/web/templates/proposal_assist/rubric_review.html src/call_monitor/main.py tests/proposal_assist/test_rubric_review_endpoint.py
+git commit -m "feat(proposal-assist): rubric review GET endpoint (owner-only)"
+```
+
+---
+
+## Task 18: Owner rubric-review endpoint — POST submit + advance Phase 0 + write `rubric_edited`
+
+**Files:**
+- Modify: `src/call_monitor/proposal_assist/web/rubric_review.py`
+- Test: extend `tests/proposal_assist/test_rubric_review_endpoint.py`
+
+- [ ] **Step 1: Append failing tests**
+
+```python
+def test_rubric_review_post_writes_edited_event_and_advances_phase(
+    client, db_session, sample_workspace, sample_user
+):
+    from call_monitor.db.models import WorkspaceEvent
+
+    sample_workspace.owner_id = sample_user.id
+    sample_workspace.rubric_criteria = [
+        {"name": "Old", "description": "old", "weight": 1.0, "scale_max": 5},
+    ]
+    sample_workspace.rubric_funder_notes = ""
+    sample_workspace.current_phase = "setup"
+    db_session.commit()
+
+    job = WorkspaceSetupJob(
+        workspace_id=sample_workspace.id,
+        status="waiting_for_rubric_review",
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    _login_as(client, sample_user)
+    resp = client.post(
+        f"/workspaces/{sample_workspace.id}/rubric-review",
+        data={
+            "criteria[0][name]": "New",
+            "criteria[0][description]": "new",
+            "criteria[0][weight]": "1.0",
+            "criteria[0][scale_max]": "5",
+            "funder_notes": "updated",
+        },
+    )
+    assert resp.status_code == 200
+
+    db_session.refresh(sample_workspace)
+    assert sample_workspace.rubric_criteria[0]["name"] == "New"
+    assert sample_workspace.rubric_funder_notes == "updated"
+    assert sample_workspace.current_phase == "spec"
+
+    db_session.refresh(job)
+    assert job.status == "done"
+    assert job.completed_at is not None
+
+    edits = (
+        db_session.query(WorkspaceEvent)
+        .filter(
+            WorkspaceEvent.workspace_id == sample_workspace.id,
+            WorkspaceEvent.kind == "rubric_edited",
+        )
+        .all()
+    )
+    assert len(edits) == 1
+    assert edits[0].payload["old_criteria"][0]["name"] == "Old"
+    assert edits[0].payload["new_criteria"][0]["name"] == "New"
+    assert edits[0].payload["edited_by_user_id"] == sample_user.id
+
+
+def test_rubric_review_post_confirm_without_edits_still_advances_phase(
+    client, db_session, sample_workspace, sample_user
+):
+    sample_workspace.owner_id = sample_user.id
+    sample_workspace.rubric_criteria = [
+        {"name": "X", "description": "x", "weight": 1.0, "scale_max": 5},
+    ]
+    sample_workspace.current_phase = "setup"
+    db_session.commit()
+    job = WorkspaceSetupJob(
+        workspace_id=sample_workspace.id,
+        status="waiting_for_rubric_review",
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    _login_as(client, sample_user)
+    # Resubmit identical criteria
+    resp = client.post(
+        f"/workspaces/{sample_workspace.id}/rubric-review",
+        data={
+            "criteria[0][name]": "X",
+            "criteria[0][description]": "x",
+            "criteria[0][weight]": "1.0",
+            "criteria[0][scale_max]": "5",
+            "funder_notes": "",
+        },
+    )
+    assert resp.status_code == 200
+
+    db_session.refresh(sample_workspace)
+    db_session.refresh(job)
+    assert sample_workspace.current_phase == "spec"
+    assert job.status == "done"
+
+
+def test_rubric_review_post_returns_403_for_non_owner(
+    client, db_session, sample_workspace, sample_user, another_user
+):
+    sample_workspace.owner_id = another_user.id
+    db_session.commit()
+    _login_as(client, sample_user)
+    resp = client.post(
+        f"/workspaces/{sample_workspace.id}/rubric-review",
+        data={"criteria[0][name]": "X", "criteria[0][description]": "x",
+              "criteria[0][weight]": "1.0", "criteria[0][scale_max]": "5",
+              "funder_notes": ""},
+    )
+    assert resp.status_code == 403
+```
+
+- [ ] **Step 2: Run to confirm failure** — endpoint returns 405 or doesn't exist.
+
+- [ ] **Step 3: Implement the POST handler**
+
+In `src/call_monitor/proposal_assist/web/rubric_review.py`, add:
+
+```python
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import Form
+from fastapi.responses import HTMLResponse, RedirectResponse
+import re
+
+from call_monitor.db.models import WorkspaceEvent, WorkspaceSetupJob
+
+
+def _parse_form_criteria(form: dict[str, str]) -> list[dict[str, Any]]:
+    """Parse criteria[N][field] form keys into a list[dict].
+
+    FastAPI's Form() decoding gives flat key/value pairs; we re-nest by index.
+    """
+    pattern = re.compile(r"^criteria\[(\d+)\]\[(\w+)\]$")
+    rows: dict[int, dict[str, Any]] = {}
+    for key, value in form.items():
+        m = pattern.match(key)
+        if not m:
+            continue
+        idx, field = int(m.group(1)), m.group(2)
+        rows.setdefault(idx, {})[field] = value
+
+    out: list[dict[str, Any]] = []
+    for idx in sorted(rows.keys()):
+        crit = rows[idx]
+        # Cast numeric fields.
+        try:
+            crit["weight"] = float(crit.get("weight", 0))
+            crit["scale_max"] = int(crit.get("scale_max", 5))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, f"criterion {idx}: bad numeric value ({e})")
+        # Ensure required keys present.
+        for required in ("name", "description", "weight", "scale_max"):
+            if required not in crit:
+                raise HTTPException(400, f"criterion {idx}: missing {required}")
+        out.append(crit)
+    if not out:
+        raise HTTPException(400, "rubric must have at least one criterion")
+    return out
+
+
+@router.post(
+    "/{workspace_id}/rubric-review",
+    response_class=HTMLResponse,
+)
+async def post_rubric_review(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user = Depends(get_current_user),
+    session: Session = Depends(get_db_session),
+):
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+
+    form = dict(await request.form())
+    new_criteria = _parse_form_criteria(form)
+    new_funder_notes = form.get("funder_notes", "")
+
+    old_criteria = ws.rubric_criteria
+    old_funder_notes = ws.rubric_funder_notes or ""
+
+    # Only write a rubric_edited event when content actually changed.
+    content_changed = (
+        new_criteria != old_criteria
+        or new_funder_notes != old_funder_notes
+    )
+
+    ws.rubric_criteria = new_criteria
+    ws.rubric_funder_notes = new_funder_notes
+    if content_changed:
+        ws.rubric_updated_at = datetime.now(timezone.utc)
+        session.add(WorkspaceEvent(
+            workspace_id=ws.id,
+            kind="rubric_edited",
+            payload={
+                "old_criteria": old_criteria,
+                "new_criteria": new_criteria,
+                "old_funder_notes": old_funder_notes,
+                "new_funder_notes": new_funder_notes,
+                "edited_by_user_id": user.id,
+            },
+        ))
+
+    # Advance Phase 0 if this is the first review beat (job exists and is
+    # waiting_for_rubric_review).
+    job = (
+        session.query(WorkspaceSetupJob)
+        .filter(WorkspaceSetupJob.workspace_id == ws.id)
+        .one_or_none()
+    )
+    if job is not None and job.status == "waiting_for_rubric_review":
+        job.status = "done"
+        job.completed_at = datetime.now(timezone.utc)
+        ws.current_phase = "spec"
+
+    session.commit()
+
+    # Render the form again with the updated content (HTMX swap target),
+    # or redirect to the workspace's Spec phase page when current_phase == 'spec'.
+    if ws.current_phase == "spec":
+        # Reuse project's URL helper if it exists; otherwise hard-code.
+        return HTMLResponse(
+            content=f'<meta http-equiv="refresh" content="0; url=/workspaces/{ws.id}">',
+            status_code=200,
+        )
+    from call_monitor.web.templates import templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/rubric_review.html",
+        {"workspace": ws, "criteria": ws.rubric_criteria,
+         "funder_notes": ws.rubric_funder_notes or ""},
+    )
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_rubric_review_endpoint.py -v
+```
+
+Expected: all rubric-review tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/call_monitor/proposal_assist/web/rubric_review.py tests/proposal_assist/test_rubric_review_endpoint.py
+git commit -m "feat(proposal-assist): rubric review POST (owner-only, advances Phase 0 to spec)"
+```
+
+---
+
+## Task 19: Phase 0 happy-path end-to-end test
+
+**Files:**
+- Test: `tests/proposal_assist/test_phase0_e2e.py`
+
+- [ ] **Step 1: Write the test**
+
+`tests/proposal_assist/test_phase0_e2e.py`:
+
+```python
+"""End-to-end happy path: workspace created → Phase 0 runs → owner confirms
+rubric → workspace.current_phase = 'spec', setup job is done.
+
+LLM is mocked: AnthropicClient.chat returns canned section + rubric envelopes.
+Git operations run for real against a tmp_path repo root.
+"""
+import json
+from unittest.mock import Mock
+
+import pytest
+
+from call_monitor.db.models import (
+    CallRubric,
+    CallSectionExtract,
+    Workspace,
+    WorkspaceEvent,
+    WorkspaceSetupJob,
+)
+from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
+from call_monitor.proposal_assist.phases.setup import Phase0Worker
+
+
+def _section_envelope() -> dict:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps(
+            {s: f"section text for {s}" for s in SECTION_NAMES}
+        )}}],
+        "model": "claude-opus-4-7",
+    }
+
+
+def _rubric_envelope() -> dict:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps({
+            "criteria": [
+                {"name": "Excellence", "description": "Scientific quality",
+                 "weight": 0.5, "scale_max": 5},
+                {"name": "Impact", "description": "Translational potential",
+                 "weight": 0.5, "scale_max": 5},
+            ],
+            "funder_notes": "See FAQ.",
+        })}}],
+        "model": "claude-opus-4-7",
+    }
+
+
+def test_phase0_happy_path_to_waiting_for_rubric_review(
+    db_session, sample_workspace, sample_call, sample_profile,
+    sample_user, tmp_path, client,
+):
+    # arrange
+    sample_workspace.owner_id = sample_user.id
+    sample_workspace.call_id = sample_call.id
+    sample_workspace.profile_id = sample_profile.id
+    db_session.commit()
+    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
+    db_session.add(job)
+    db_session.commit()
+
+    llm = Mock()
+    llm.model = "claude-opus-4-7"
+    llm.chat.side_effect = [_section_envelope(), _rubric_envelope()]
+
+    worker = Phase0Worker(
+        session=db_session, client=llm,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+
+    # act: run Phase 0
+    processed = worker.run_one()
+    assert processed is True
+
+    # assert: lifecycle pause + side effects
+    db_session.refresh(job)
+    db_session.refresh(sample_workspace)
+    assert job.status == "waiting_for_rubric_review"
+    assert job.completed_at is None
+    assert sample_workspace.current_phase == "setup"
+
+    # call template tables populated
+    assert db_session.query(CallSectionExtract).filter_by(
+        call_id=sample_call.id).count() == 6
+    assert db_session.get(CallRubric, sample_call.id) is not None
+
+    # workspace snapshot populated
+    assert sample_workspace.call_body_snapshot != ""
+    assert sample_workspace.profile_desc_snapshot != ""
+    assert set(sample_workspace.section_extracts.keys()) == set(SECTION_NAMES)
+    assert len(sample_workspace.rubric_criteria) == 2
+    assert sample_workspace.rubric_funder_notes == "See FAQ."
+
+    # init event written
+    init_events = db_session.query(WorkspaceEvent).filter_by(
+        workspace_id=sample_workspace.id,
+        kind="rubric_initialized",
+    ).all()
+    assert len(init_events) == 1
+
+    # repo on disk
+    repo_dir = tmp_path / "repos" / str(sample_workspace.id) / "repo"
+    assert (repo_dir / "proposal-spec.md").exists()
+    assert (repo_dir / ".git").is_dir()
+
+    # === owner confirms rubric via the endpoint ===
+    _login_as(client, sample_user)
+    resp = client.post(
+        f"/workspaces/{sample_workspace.id}/rubric-review",
+        data={
+            "criteria[0][name]": "Excellence",
+            "criteria[0][description]": "Scientific quality",
+            "criteria[0][weight]": "0.5",
+            "criteria[0][scale_max]": "5",
+            "criteria[1][name]": "Impact",
+            "criteria[1][description]": "Translational potential",
+            "criteria[1][weight]": "0.5",
+            "criteria[1][scale_max]": "5",
+            "funder_notes": "See FAQ.",
+        },
+    )
+    assert resp.status_code == 200
+
+    db_session.refresh(sample_workspace)
+    db_session.refresh(job)
+    assert sample_workspace.current_phase == "spec"
+    assert job.status == "done"
+    assert job.completed_at is not None
+```
+
+Add an `another_user` fixture to `conftest.py` if not already present:
+
+```python
+@pytest.fixture
+def another_user(db_session) -> User:
+    from call_monitor.db.models import User
+    u = User(email="another@example.org", name="Another")
+    db_session.add(u)
+    db_session.commit()
+    return u
+
+
+@pytest.fixture
+def sample_user(db_session) -> User:
+    from call_monitor.db.models import User
+    u = User(email="owner@example.org", name="Owner")
+    db_session.add(u)
+    db_session.commit()
+    return u
+```
+
+- [ ] **Step 2: Run**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_e2e.py -v
+```
+
+Expected: the happy-path test passes.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/proposal_assist/conftest.py tests/proposal_assist/test_phase0_e2e.py
+git commit -m "test(proposal-assist): Phase 0 happy-path end-to-end"
+```
+
+---
+
+## Task 20: Slice A milestone
+
+- [ ] **Step 1: Full suite + lint**
+
+```bash
+uv run pytest tests/proposal_assist/ -v
+uv run ruff check src/call_monitor/proposal_assist tests/proposal_assist
+uv run ruff format src/call_monitor/proposal_assist tests/proposal_assist
+```
+
+Expected: ~35 tests pass, no lint issues.
+
+- [ ] **Step 2: Migration round-trip check**
+
+```bash
+uv run alembic downgrade 0011
+uv run alembic upgrade head
+uv run pytest tests/proposal_assist/test_models.py -v
+```
+
+Verifies that the migrations are reversible and that re-applying them gives the same schema. If downgrade fails, the migration's `downgrade()` is incomplete — fix and re-commit.
+
+- [ ] **Step 3: Stop and surface to user**
+
+Slice A is complete. The codebase now has:
+- All 7 new tables/column-additions migrated
+- Section + rubric extractors with idempotent freshness gating
+- Phase 0 worker that snapshots, extracts, copies templates, writes the `rubric_initialized` audit event, and yields at `waiting_for_rubric_review`
+- Owner-only rubric review GET + POST that advances Phase 0 to `done` and the workspace to `current_phase='spec'`
+- An end-to-end happy-path test exercising the full lifecycle with mocked LLM and real git operations
+
+End state matches the goal: a workspace can be created, Phase 0 runs to the rubric-review gate, the owner confirms, `current_phase` advances to `spec`.
+
+**Next slice:** Slice B (Spec/Plan/Draft phases + state machine + staleness + rubric editing UI). That builds the interactive chat phases on top of the Phase 0 foundation. Surface to the user before starting it.
+
+---
+
+## Self-review notes (for the engineer running this plan)
+
+1. **`sample_workspace`, `sample_user`, `another_user`, `sample_profile` fixtures** — these reference base spec / project test conventions that may not yet exist in your branch. Verify against `tests/conftest.py` and `tests/test_*.py` before running; adapt to the existing pattern instead of inventing new fixtures.
+
+2. **`get_current_user` / `get_db_session` / `templates` imports** — the paths shown (`call_monitor.web.auth`, `call_monitor.db.session`, `call_monitor.web.templates`) are best guesses based on FastAPI convention; verify with `grep -n "Depends.*current_user\|Jinja2Templates" src/call_monitor/`.
+
+3. **`WorkspaceEvent` model shape** — the plan assumes a `workspaces`-FK + `kind` + `payload (jsonb)` columns. If base spec ships a different shape, the audit-event writes in Tasks 15 and 18 need re-shaping.
+
+4. **`Source.kind` / `Profile.slug`** — the conftest fixtures use placeholder field names that match the spec but may not match the current models. Run `grep` and adjust before first test invocation.
+
+5. **Migration revision numbers** — 0012–0017 assume no other branch is also adding migrations after 0011. If a concurrent branch has bumped past 0011, renumber accordingly (and update `down_revision` chains).
