@@ -507,3 +507,31 @@ class WorkspaceEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
+
+
+class ChatTurn(Base):
+    __tablename__ = "chat_turns"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('user','assistant','tool')",
+            name="ck_chat_turns_role",
+        ),
+        Index("ix_chat_turns_ws_created", "workspace_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    tokens_in: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
