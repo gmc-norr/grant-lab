@@ -60,3 +60,27 @@ def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
     session.add(u)
     session.flush()
     return u
+
+
+def make_workspace(
+    session,
+    *,
+    owner=None,
+    title: str = "Test workspace",
+    call_id: int | None = None,
+    profile_id: int | None = None,
+) -> "Workspace":  # noqa: F821
+    """Build a Workspace row. If `owner` not provided, creates a fresh User."""
+    from call_monitor.db.models import Workspace
+
+    if owner is None:
+        owner = make_user(session)
+    ws = Workspace(
+        title=title,
+        owner_id=owner.id,
+        call_id=call_id,
+        profile_id=profile_id,
+    )
+    session.add(ws)
+    session.flush()
+    return ws

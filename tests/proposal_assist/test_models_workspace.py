@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Workspace
-from tests.proposal_assist.conftest import make_call, make_user
+from call_monitor.db.models import Workspace, WorkspaceViewer
+from tests.proposal_assist.conftest import make_call, make_user, make_workspace
 
 
 def test_workspace_insert_minimum_fields(pg_session_factory):
@@ -60,3 +60,38 @@ def test_workspace_owner_fk_required(pg_session_factory):
         s.add(Workspace(title="no owner"))
         with pytest.raises(IntegrityError):
             s.commit()
+
+
+def test_workspace_viewer_composite_pk(pg_session_factory):
+    """The (workspace_id, user_id) composite PK is enforced — inserting the
+    same pair twice raises IntegrityError."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        viewer = make_user(s, email="viewer@ki.se")
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=viewer.id))
+        s.commit()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=viewer.id))
+        with pytest.raises(IntegrityError):
+            s.commit()
+
+
+def test_workspace_viewer_cascade_on_workspace_delete(pg_session_factory):
+    """Deleting a workspace cascades to its viewers."""
+    from sqlalchemy import delete
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        viewer = make_user(s, email="viewer2@ki.se")
+        ws_id = ws.id
+        viewer_id = viewer.id
+        s.add(WorkspaceViewer(workspace_id=ws_id, user_id=viewer_id))
+        s.commit()
+        s.execute(delete(Workspace).where(Workspace.id == ws_id))
+        s.commit()
+        remaining = s.scalar(
+            select(WorkspaceViewer).where(
+                WorkspaceViewer.workspace_id == ws_id,
+                WorkspaceViewer.user_id == viewer_id,
+            )
+        )
+        assert remaining is None
