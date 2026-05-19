@@ -59,10 +59,10 @@
   {% if ranking.applicant_notes %}
     <div class="analysis-notes">
       {% for note in ranking.applicant_notes %}
-        <div class="analysis-note cat-{{ note.category }}">
-          <div class="note-cat">{{ note.category }}</div>
-          <div class="note-text">{{ note.text }}</div>
-        </div>
+        <article class="analysis-note cat-{{ note.category }}">
+          <h3>{{ note.category | note_category_heading }}</h3>
+          <p>{{ note.text }}</p>
+        </article>
       {% endfor %}
     </div>
   {% endif %}

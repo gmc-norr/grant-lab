@@ -202,44 +202,71 @@ button.compact {
   background: var(--pico-card-background-color);
   border: 1px solid var(--pico-muted-border-color);
   border-radius: var(--pico-border-radius);
-  padding: 1rem 1.2rem;
-  margin: 1rem 0 1.5rem;
+  padding: 1.25rem 1.5rem;
+  margin: 1rem 0 1.75rem;
 }
-.analysis-section h2 { margin-top: 0; }
+.analysis-section h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.25rem;
+}
 .analysis-section .summary-paragraph {
   font-size: 1.02em;
-  line-height: 1.5;
-  margin-bottom: 1rem;
+  line-height: 1.55;
+  margin: 0 0 1.4rem;
+  padding: 0.85rem 1rem;
+  background: var(--pico-background-color, rgba(127,127,127,0.06));
+  border-radius: var(--pico-border-radius);
 }
 .analysis-notes {
+  /* Cards stack one per row — keeps the heading + body legible.
+     The earlier two-column grid (category in a 5.5em rail) read as
+     stray labels rather than headings; promoting the category to a
+     real <h3> works because heading hierarchy already exists on the
+     page (the section's h2). */
   display: grid;
-  gap: 0.5rem;
+  gap: 0.75rem;
 }
 .analysis-note {
-  display: grid;
-  grid-template-columns: 5.5em 1fr;
-  gap: 0.7rem;
-  padding: 0.5rem 0.7rem;
-  border-left: 3px solid var(--pico-muted-border-color);
-  background: var(--pico-background-color, transparent);
+  padding: 0.85rem 1.1rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-left: 4px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-background-color, rgba(127,127,127,0.04));
+  margin: 0;
 }
-.analysis-note .note-cat {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.72em;
+.analysis-note h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.92rem;
   font-weight: 700;
-  color: var(--pico-muted-color);
-  padding-top: 0.15em;
+  letter-spacing: 0.01em;
+  color: var(--pico-color);
 }
-.analysis-note.cat-deadline   { border-left-color: var(--cm-deadline-soon); }
-.analysis-note.cat-eligibility{ border-left-color: var(--cm-score-mid); }
-.analysis-note.cat-budget     { border-left-color: var(--cm-score-strong); }
-.analysis-note.cat-team       { border-left-color: #0d6efd; }
-.analysis-note.cat-ip         { border-left-color: #6f42c1; }
-.analysis-note.cat-data       { border-left-color: #20c997; }
-.analysis-note.cat-evaluation { border-left-color: #d63384; }
-.analysis-note.cat-process    { border-left-color: #6c757d; }
-.analysis-note.cat-other      { border-left-color: var(--pico-muted-border-color); }
+.analysis-note p {
+  margin: 0;
+  font-size: 0.96em;
+  line-height: 1.5;
+  color: var(--pico-color);
+}
+/* Category palette — applied to the strong left border + the heading,
+   so the eye can scan to the categories most likely to be load-bearing
+   (deadline / eligibility / budget) without reading every body. */
+.analysis-note.cat-deadline    { border-left-color: var(--cm-deadline-soon); }
+.analysis-note.cat-deadline h3 { color: var(--cm-deadline-soon); }
+.analysis-note.cat-eligibility    { border-left-color: var(--cm-score-mid); }
+.analysis-note.cat-eligibility h3 { color: var(--cm-score-mid); }
+.analysis-note.cat-budget      { border-left-color: var(--cm-score-strong); }
+.analysis-note.cat-budget h3   { color: var(--cm-score-strong); }
+.analysis-note.cat-team        { border-left-color: #0d6efd; }
+.analysis-note.cat-team h3     { color: #0d6efd; }
+.analysis-note.cat-ip          { border-left-color: #6f42c1; }
+.analysis-note.cat-ip h3       { color: #6f42c1; }
+.analysis-note.cat-data        { border-left-color: #20c997; }
+.analysis-note.cat-data h3     { color: #20c997; }
+.analysis-note.cat-evaluation  { border-left-color: #d63384; }
+.analysis-note.cat-evaluation h3 { color: #d63384; }
+.analysis-note.cat-process     { border-left-color: #6c757d; }
+.analysis-note.cat-process h3  { color: #6c757d; }
+.analysis-note.cat-other       { border-left-color: var(--pico-muted-border-color); }
 
 /* ===== Criterion breakdown on call detail ===== */
 .criterion-list {

@@ -56,6 +56,28 @@ def criterion_label(value: str | None) -> str:
     return _CRITERION_LABELS.get(value, value.replace("_", " ").title())
 
 
+def note_category_heading(value: str | None) -> str:
+    """Pretty heading for an applicant_notes category. Stored vocabulary
+    is single-token snake_case ('budget', 'ip', 'data', etc.) — UI wants
+    a fuller, capitalized heading per card. Unknown categories pass
+    through Title-cased so a future Sonnet-invented label isn't silently
+    swallowed."""
+    if not value:
+        return "Note"
+    mapping = {
+        "deadline":    "Deadline",
+        "eligibility": "Eligibility",
+        "budget":      "Budget & funding",
+        "team":        "Team & consortium",
+        "ip":          "IP & licensing",
+        "data":        "Data & open access",
+        "evaluation":  "Evaluation criteria",
+        "process":     "Process & timing",
+        "other":       "Other",
+    }
+    return mapping.get(value, value.replace("_", " ").title())
+
+
 def model_label(value: str | None) -> str:
     """Pretty name for the LLM that produced a CallRanking. Stored value
     is the raw model ID (e.g. 'claude-sonnet-4-6', 'gemma4:e4b-it-q4_K_M');
