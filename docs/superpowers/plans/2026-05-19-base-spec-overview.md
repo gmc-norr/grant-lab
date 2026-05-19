@@ -37,8 +37,11 @@ B6 (workspace web UX)
   └─ unblocks: end-user workflow
 
 B7 (figures + attachments + vision)
-  ├─ requires: B1, B4 (turn machinery for vision tool-use rounds)
-  └─ orthogonal to B5/B6 — can run in parallel with them
+  ├─ requires: B1, B4 (turn machinery for tool-use rounds)
+  ├─ requires: B5 for the agent-tool half (look_at_figure / read_preliminary_data
+  │            register through the same tool-registration surface B5 defines)
+  └─ upload-and-describe half (REST upload + attachment_jobs drain) is orthogonal
+     to B5 and can run in parallel with B5/B6
 
 B8 (disclosure + kill switch + spend guardrails)
   ├─ requires: B1, B4 (for the per-turn token banner)
@@ -53,15 +56,19 @@ The shortest path to "an end-user can chat with the agent to draft a proposal" i
 
 ### B1 — Schema foundation + workspace creation
 
-**Goal:** Land all 9 base-spec tables (`workspaces`, `workspace_viewers`, `workspace_events`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`) with SQLAlchemy models, plus a `create_workspace()` service function that enqueues a Phase 0 setup job and writes a `created` audit event.
+**Goal:** Land all 9 base-spec tables (`workspaces`, `workspace_viewers`, `workspace_events`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`) with SQLAlchemy models, plus a `create_workspace()` service function that inserts a workspace row and writes a `created` audit event.
 
-**End state:** A test (or CLI) can call `create_workspace(session, owner_id=..., call_id=..., profile_id=...)`, get a Workspace back, see a `workspace_setup_jobs` row queued (Slice A's table), and a `workspace_events(kind='created')` row written. **Slice A Part 2 unblocks here** — the Phase 0 worker can now drain real setup jobs.
+**End state:** A test (or CLI) can call `create_workspace(session, owner_id=..., call_id=..., profile_id=...)`, get a Workspace back, and see a `workspace_events(kind='created')` row written. **Slice A Part 2 can now start** — its imports work, its FKs to `workspaces` resolve. Phase 0 actually draining requires Slice A Part 2's own additional migrations (phased columns ALTER, `workspace_setup_jobs` table, Phase 0 worker code).
 
 **Scope (in):** 9 migrations, 9 models, `create_workspace()` + tests.
 
-**Scope (out):** Web endpoints (B6), chat (B4), agent (B3), tools (B5), figures (B7).
+**Scope (out, deliberately):**
+- `workspace_setup_jobs` table + model — owned by Slice A Part 2 (its Task 11).
+- Phased-workflow columns on `workspaces` (`current_phase`, `call_body_snapshot`, `rubric_criteria`, etc.) — owned by Slice A Part 2 as an ALTER TABLE (its Task 9).
+- Phase 0 enqueue from `create_workspace()` — Slice A Part 2 either extends `create_workspace()` or adds a separate `enqueue_phase0()` helper after its `workspace_setup_jobs` migration lands.
+- Web endpoints (B6), chat (B4), agent (B3), tools (B5), figures (B7).
 
-**Estimated tasks:** ~12.
+**Estimated tasks:** ~11.
 
 **File:** `docs/superpowers/plans/2026-05-19-base-spec-1-schema-foundation.md` (this is the first plan written in full).
 
@@ -127,10 +134,10 @@ The shortest path to "an end-user can chat with the agent to draft a proposal" i
 - Turn drain logic in the subprocess (claim oldest queued, transition, generate response, write assistant/tool turns, transition to terminal state).
 - Compaction job (cron-style, in APScheduler).
 - Token telemetry (`chat_turns.tokens_in`, `tokens_out`).
-- Daily per-workspace token cap with graceful pause.
-- Tests for queueing, drain, compaction, and cap behavior.
+- **Daily per-workspace token cap — enforcement only**: pre-enqueue check that rejects new turns once the day's cap is reached. The "you've hit the cap, paused until midnight" UX surfacing (banner, admin override, status display) is **B8's** responsibility, not B4's.
+- Tests for queueing, drain, compaction, and the enforcement gate.
 
-**Scope (out):** Tool implementations (B5), chat UI (B6).
+**Scope (out):** Tool implementations (B5), chat UI (B6), daily-cap UX surfacing (B8).
 
 **Estimated tasks:** ~20–25.
 
@@ -142,18 +149,24 @@ The shortest path to "an end-user can chat with the agent to draft a proposal" i
 
 ### B5 — Tool surface for the agent
 
-**Goal:** Implement the custom tools the drafting agent invokes: artifact editing (`edit_proposal`, `replace_proposal`), version history (`get_artifact_history`, `read_artifact_at`, `diff_artifact`), branching (`create_branch`, `switch_branch`, `list_branches`), and context retrieval (`get_call_details`, `get_profile`, `list_past_grants`, `read_past_grant`).
+**Goal:** Implement the custom tools the drafting agent invokes: artifact editing (`edit_proposal`, `replace_proposal`), version history (`get_artifact_history`, `read_artifact_at`, `diff_artifact`), and context retrieval (`get_call_details`, `get_profile`).
 
-**End state:** The SDK can invoke each tool by name during a turn. Tool calls auto-commit artifact changes to the workspace's git repo and write `artifact_versions` rows. Branching tools manipulate git branches. Context tools query the existing `calls` / `profiles` tables.
+**End state:** The SDK can invoke each tool by name during a turn. Tool calls auto-commit artifact changes to the workspace's git repo and write `artifact_versions` rows. Context tools query the existing `calls` / `profiles` tables.
 
 **Scope (in):**
 - Tool definitions (JSON schema for the SDK).
+- Tool registration surface (a small registry that B7 can also plug into for figure/attachment tools).
 - Tool handlers in the subprocess.
 - Git operations via `subprocess` (matches Slice A's Phase 0 pattern).
 - Atomic "commit-and-write-row" for artifact edits.
 - Tests for each tool against a real git repo + mocked SDK call site.
 
-**Scope (out):** `search_pubmed` (deferred by phased spec), describe_figure/look_at_figure (B7), chat UI (B6).
+**Scope (out — deliberately dropped because the phased workflow doesn't use them):**
+- **Branching** (`create_branch`, `switch_branch`, `list_branches`) — base spec line 217–218, dropped by phased spec line 33.
+- **Past-grant tools** (`list_past_grants`, `read_past_grant`) — base spec line 224, dropped by phased spec line 35.
+- **`search_pubmed`** — base spec line 224, dropped by phased spec line 32.
+- **Figure/attachment tools** (`describe_figure`, `look_at_figure`, `read_preliminary_data`) — owned by B7, but they register through B5's tool surface (see dependency graph above).
+- Chat UI (B6).
 
 **Estimated tasks:** ~25–30.
 
@@ -221,9 +234,9 @@ The shortest path to "an end-user can chat with the agent to draft a proposal" i
 
 **Scope (in):**
 - Disclosure modal + Jinja partial + ack endpoint.
-- Kill switch flag (settings table or env-flagged, TBD in plan).
+- Kill switch flag (settings table or env-flagged — decided in B8's plan).
 - Per-turn token banner (chat UI fragment).
-- Daily per-workspace token cap (state machine in `turn_jobs` enqueue path).
+- **Daily per-workspace token cap — surfacing only** (banner, admin override UI, "resumes in N hours" status). The enforcement gate that actually blocks new turns lives in B4's enqueue path.
 - Admin view (`/admin`) showing per-workspace token usage + kill-switch toggle.
 - Tests for each.
 

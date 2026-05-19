@@ -2,9 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land all 9 base-spec tables (`workspaces`, `workspace_viewers`, `workspace_events`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`) with SQLAlchemy models, plus a `create_workspace()` service function that enqueues a Phase 0 setup job (Slice A's `workspace_setup_jobs`) and writes a `created` audit event. End state: Slice A Part 2's Phase 0 worker can drain real setup jobs created by this function.
+**Goal:** Land all 9 base-spec tables (`workspaces`, `workspace_viewers`, `workspace_events`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`) with SQLAlchemy models, plus a `create_workspace()` service function that inserts a workspace row and writes a `created` audit event. End state: Slice A Part 2 can reference `Workspace`, `WorkspaceViewer`, and `WorkspaceEvent` to build the rest of its Phase 0 wiring.
 
-**Architecture:** Pure data layer. Nine migrations (one per table, following Slice A's one-table-per-migration convention) + nine models in the existing single-file `src/call_monitor/db/models.py`. The service function lives in a new top-level module `src/call_monitor/workspaces.py` — it composes the new `Workspace` model with Slice A's `WorkspaceSetupJob` to provide a single "create workspace and queue Phase 0" entrypoint. No web endpoints, no chat machinery, no agent SDK — those are deferred to B3/B4/B5/B6.
+**Architecture:** Pure data layer for the base spec only. Nine migrations (one per table, following Slice A's one-table-per-migration convention) + nine models in the existing single-file `src/call_monitor/db/models.py`. The service function lives in a new top-level module `src/call_monitor/workspaces.py` — it creates a workspace and writes an audit event in one transaction. No web endpoints, no chat machinery, no agent SDK — those are deferred to B3/B4/B5/B6.
+
+**What B1 deliberately does NOT do:**
+- **`workspace_setup_jobs` table + `WorkspaceSetupJob` model** — these are Slice A Part 2 territory (its own plan, Task 11). Without that table, `create_workspace()` in B1 cannot enqueue a Phase 0 job. Slice A Part 2 either extends `create_workspace()` or supplies its own `enqueue_phase0(workspace_id)` helper after landing its migration.
+- **Phased-workflow columns on `workspaces`** (`current_phase`, `call_body_snapshot`, `profile_desc_snapshot`, `snapshot_refreshed_at`, `rubric_criteria`, `rubric_funder_notes`, `rubric_updated_at`, `section_extracts`, `review_runs_per_day_override`, `review_dollar_cap_override`) — these are documented in the **phased** spec, not the base spec. Slice A Part 2's plan already includes its own `ALTER TABLE workspaces` migration to add them (its Task 9). B1's `workspaces` table has only the base-spec columns.
+
+So "B1 unblocks Slice A Part 2" means: Slice A Part 2 can begin (its imports work, its FKs to `workspaces` resolve). Phase 0 actually draining requires Slice A Part 2's additional migrations to land too — namely the phased-column ALTER, the `workspace_setup_jobs` table, and the Phase 0 worker code. B1 is the **first** of two prerequisites for Phase 0; Slice A Part 2 itself is the second.
 
 **Tech Stack:** Python 3.12, SQLAlchemy 2.x + Alembic, PostgreSQL 16 with pgvector, pytest + testcontainers (real Postgres in tests).
 
@@ -257,13 +263,18 @@ def downgrade() -> None:
 
 - [ ] **Step 5: Add `Workspace` model to `models.py`**
 
-In `src/call_monitor/db/models.py`, append after the last existing class:
+First, **merge these into the existing top-level import block** at the top of `src/call_monitor/db/models.py` (ruff/isort will fight you if you append them mid-file):
 
 ```python
-import uuid
-from sqlalchemy.dialects.postgresql import UUID
+import uuid                                             # stdlib, near other stdlib imports
+from sqlalchemy.dialects.postgresql import UUID         # group with the existing JSONB import
+```
 
+Slice A may have already added either — check before adding. If `UUID` is already imported alongside `JSONB`, just confirm.
 
+Then append the new model class after the last existing class in the file:
+
+```python
 class Workspace(Base):
     __tablename__ = "workspaces"
     __table_args__ = (
@@ -308,7 +319,7 @@ class Workspace(Base):
     )
 ```
 
-If `uuid` (the stdlib module) or `UUID` (from `sqlalchemy.dialects.postgresql`) aren't already imported at the top of `models.py`, add them. Slice A may have already imported them via `CallSectionExtract` or another model — check before adding.
+(Imports already handled at the top of this step — `uuid` + `UUID` should be in the top-level import block before this class is added.)
 
 - [ ] **Step 6: Run tests**
 
@@ -374,11 +385,16 @@ def make_workspace(
 
 - [ ] **Step 2: Append failing tests**
 
-Append to `tests/proposal_assist/test_models_workspace.py`:
+First merge these into the existing top-level imports of `tests/proposal_assist/test_models_workspace.py` (don't drop them mid-file — ruff/isort will object):
 
 ```python
-from call_monitor.db.models import WorkspaceViewer
-from tests.proposal_assist.conftest import make_workspace
+from call_monitor.db.models import WorkspaceViewer  # merge into the existing models-import line
+from tests.proposal_assist.conftest import make_workspace  # merge into the existing conftest-import line
+```
+
+Then append the two test functions at the bottom of the file:
+
+```python
 
 
 def test_workspace_viewer_composite_pk(pg_session_factory):
@@ -1579,10 +1595,15 @@ git commit -m "feat(base-spec): add attachments table + model"
 
 - [ ] **Step 1: Append failing tests**
 
+Merge `AttachmentJob` into the existing models-import line at the top of `tests/proposal_assist/test_models_attachments.py` (don't drop the import mid-file):
+
 ```python
-from call_monitor.db.models import AttachmentJob
+from call_monitor.db.models import Attachment, AttachmentJob  # merged
+```
 
+Then append the helper + tests at the bottom:
 
+```python
 def _add_attachment(s, ws_id, user_id, *, filename="fig.png"):
     a = Attachment(
         workspace_id=ws_id, kind="figure",
@@ -1806,7 +1827,7 @@ git commit -m "feat(base-spec): add attachment_jobs table + unique-active-job in
 
 ## Task 10: `create_workspace()` service function
 
-The function that ties Slice A back into the rest of the system: given an owner + optional call + optional profile, insert a Workspace row, enqueue a `workspace_setup_jobs` row (Slice A's table), and write a `workspace_events(kind='created')` audit row — all in one transaction.
+Given an owner + optional call + optional profile, insert a Workspace row and write a `workspace_events(kind='created')` audit row — both in one transaction. **B1 does not enqueue Phase 0 jobs** (the `workspace_setup_jobs` table is Slice A Part 2 territory and doesn't exist on master). Slice A Part 2 will either extend `create_workspace()` or add a separate `enqueue_phase0(workspace_id)` helper called immediately after.
 
 **Files:**
 - Create: `src/call_monitor/workspaces.py`
@@ -1819,12 +1840,9 @@ The function that ties Slice A back into the rest of the system: given an owner 
 ```python
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import (
-    Workspace,
-    WorkspaceEvent,
-    WorkspaceSetupJob,
-)
+from call_monitor.db.models import Workspace, WorkspaceEvent
 from call_monitor.workspaces import create_workspace
 from tests.proposal_assist.conftest import make_call, make_user
 
@@ -1849,25 +1867,6 @@ def test_create_workspace_inserts_workspace_row(pg_session_factory):
         assert fetched.status == "drafting"
 
 
-def test_create_workspace_enqueues_phase0_setup_job(pg_session_factory):
-    """Phase 0 (Slice A) drains workspace_setup_jobs. create_workspace
-    must enqueue a row so the next tick picks it up."""
-    with pg_session_factory() as s:
-        owner = make_user(s)
-        s.commit()
-        ws = create_workspace(session=s, owner_id=owner.id, title="x")
-        s.commit()
-
-        job = s.scalar(
-            select(WorkspaceSetupJob).where(
-                WorkspaceSetupJob.workspace_id == ws.id
-            )
-        )
-        assert job is not None
-        assert job.status == "queued"
-        assert job.attempts == 0
-
-
 def test_create_workspace_writes_created_audit_event(pg_session_factory):
     with pg_session_factory() as s:
         owner = make_user(s)
@@ -1888,9 +1887,42 @@ def test_create_workspace_writes_created_audit_event(pg_session_factory):
         assert events[0].payload["title"] == "audit-test"
 
 
+def test_create_workspace_does_not_enqueue_phase0_setup_job(
+    pg_session_factory,
+):
+    """B1 deliberately leaves Phase 0 enqueueing to Slice A Part 2, which
+    owns the `workspace_setup_jobs` table. If a future revision adds the
+    enqueue here without also pulling in WorkspaceSetupJob, this regression
+    test will catch the resulting import/runtime error.
+
+    Note: this test only proves the absence of the enqueue at B1's
+    boundaries. It cannot import WorkspaceSetupJob (doesn't exist yet).
+    Slice A Part 2 should add the positive test that asserts the row IS
+    enqueued via its own helper / extended create_workspace.
+    """
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        s.commit()
+        ws = create_workspace(session=s, owner_id=owner.id, title="x")
+        s.commit()
+
+        # Only base-spec tables should have rows for this workspace:
+        # workspaces (1) + workspace_events (1, the 'created' row).
+        # If a future commit adds a WorkspaceSetupJob enqueue without
+        # also moving that table into B1, the import in create_workspace
+        # will fail at import time and this test will fail to collect.
+        events = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws.id
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].kind == "created"
+
+
 def test_create_workspace_with_call_and_profile(pg_session_factory):
-    """Optional call_id + profile_id propagate to the row. The Phase 0
-    worker uses these to know which call to snapshot."""
+    """Optional call_id + profile_id propagate to the row. Slice A Part 2's
+    Phase 0 worker uses these to know which call to snapshot."""
     with pg_session_factory() as s:
         owner = make_user(s)
         call = make_call(s)
@@ -1908,8 +1940,6 @@ def test_create_workspace_with_call_and_profile(pg_session_factory):
 def test_create_workspace_raises_for_unknown_owner(pg_session_factory):
     """If owner_id doesn't exist, the workspace insert fails (FK).
     No partial state is left behind."""
-    from sqlalchemy.exc import IntegrityError
-
     with pg_session_factory() as s:
         with pytest.raises(IntegrityError):
             create_workspace(
@@ -1917,8 +1947,6 @@ def test_create_workspace_raises_for_unknown_owner(pg_session_factory):
             )
             s.commit()
         s.rollback()
-        # No setup job, no event, no workspace.
-        assert s.scalar(select(WorkspaceSetupJob)) is None
         assert s.scalar(select(WorkspaceEvent)) is None
         assert s.scalar(select(Workspace)) is None
 ```
@@ -1930,29 +1958,28 @@ def test_create_workspace_raises_for_unknown_owner(pg_session_factory):
 Create `src/call_monitor/workspaces.py`:
 
 ```python
-"""Workspace lifecycle service functions.
+"""Workspace lifecycle service functions (base spec).
 
-Single entrypoint today: `create_workspace`. It does three things in one
+Single entrypoint today: `create_workspace`. It does two things in one
 unit of work:
 
   1. Insert a Workspace row.
-  2. Enqueue a `workspace_setup_jobs` row (Slice A's Phase 0 worker drains
-     this on its scheduler tick — see
-     src/call_monitor/proposal_assist/phases/setup.py).
-  3. Write a workspace_events(kind='created') audit row.
+  2. Write a workspace_events(kind='created') audit row.
 
-The caller commits. If any of the three fails, the caller rolls back and
-no partial state lands.
+The caller commits. If either fails, the caller rolls back and no partial
+state lands.
+
+This module deliberately does NOT enqueue a Phase 0 setup job —
+`workspace_setup_jobs` is owned by Slice A Part 2's plan, which will add
+its own `enqueue_phase0(workspace_id)` helper or extend `create_workspace`
+once its migration lands. Keeping that coupling out of B1 lets B1 ship
+without dragging Slice A Part 2's tables into the base-spec scope.
 """
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from call_monitor.db.models import (
-    Workspace,
-    WorkspaceEvent,
-    WorkspaceSetupJob,
-)
+from call_monitor.db.models import Workspace, WorkspaceEvent
 
 
 def create_workspace(
@@ -1963,8 +1990,8 @@ def create_workspace(
     call_id: int | None = None,
     profile_id: int | None = None,
 ) -> Workspace:
-    """Create a new workspace and enqueue Phase 0 setup. Returns the
-    Workspace (with `.id` populated via session.flush())."""
+    """Create a new workspace and write the 'created' audit event.
+    Returns the Workspace (with `.id` populated via session.flush())."""
     ws = Workspace(
         owner_id=owner_id,
         title=title,
@@ -1974,10 +2001,6 @@ def create_workspace(
     session.add(ws)
     session.flush()  # populates ws.id from the DB default
 
-    session.add(WorkspaceSetupJob(
-        workspace_id=ws.id,
-        status="queued",
-    ))
     session.add(WorkspaceEvent(
         workspace_id=ws.id,
         kind="created",
@@ -2049,11 +2072,14 @@ uv run ruff check src/call_monitor tests/proposal_assist
 B1 delivers:
 - 9 new tables (`workspaces`, `workspace_viewers`, `workspace_events`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`) — migrations `0014`–`0022`
 - 9 new SQLAlchemy models in `src/call_monitor/db/models.py`
-- `create_workspace()` service function at `src/call_monitor/workspaces.py` that wires workspace creation into Slice A's Phase 0 queue
+- `create_workspace()` service function at `src/call_monitor/workspaces.py` — inserts a workspace row + writes the `created` audit event. **Does not enqueue Phase 0** (that's Slice A Part 2's job; see goal section).
 
-**Slice A Part 2 is now unblocked.** The Phase 0 worker can drain real setup jobs created via `create_workspace()`.
+**Slice A Part 2 can now start.** Its plan's Task 9 (phased columns on `workspaces`) lands as an `ALTER TABLE` on top of B1's `workspaces` table; its Task 11 (`workspace_setup_jobs`) creates that table fresh; its Task 17 onward (Phase 0 worker, scheduler tick) wires everything up. Once those land, an extended/wrapped `create_workspace()` will enqueue the Phase 0 job and the worker will drain it.
 
 **What's NOT in B1:**
+- Phased-workflow columns on `workspaces` (`current_phase`, `call_body_snapshot`, `rubric_criteria`, etc.) — Slice A Part 2 Task 9
+- `workspace_setup_jobs` table + model — Slice A Part 2 Task 11
+- `phase_approvals`, `review_runs`, `review_run_items` — Slice A Part 2 Tasks 10, 12
 - Web endpoints (POST /workspaces, etc.) — B6
 - Agent SDK adapter + drafting subprocess — B3
 - Turn queue logic, chat machinery, compaction — B4
@@ -2062,7 +2088,7 @@ B1 delivers:
 - Disclosure, kill switch, spend guardrails — B8
 - Rename `call-monitor` → `call-manager` — B2
 
-Surface to the user; ask whether to continue with **Slice A Part 2** (now that it's unblocked) or move to **B2/B3/...** next.
+Surface to the user; ask whether to continue with **Slice A Part 2** (now that its prerequisites are landed) or move to **B2/B3/...** next.
 
 ---
 
