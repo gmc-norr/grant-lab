@@ -378,3 +378,21 @@ class CallRankingCriterion(Base):
     ranked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class CallSectionExtract(Base):
+    __tablename__ = "call_section_extracts"
+
+    call_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("calls.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    section: Mapped[str] = mapped_column(Text, primary_key=True)
+    extract_text: Mapped[str] = mapped_column(Text, nullable=False)
+    extracted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    extracted_by_model: Mapped[str] = mapped_column(Text, nullable=False)
+    extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(Text, nullable=False)
