@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the schema, ingestion-time extractors, and Phase 0 background worker for the phased proposal-assist workflow. End state: a workspace can be created, Phase 0 snapshots call body + profile description, ensures section extracts + call rubric are fresh (re-extracting if stale), copies both into per-workspace columns, writes a `rubric_initialized` audit event, and blocks at `waiting_for_rubric_review` until the workspace owner confirms the rubric — at which point `current_phase` advances to `spec`.
+**Goal:** Land the schema, ingestion-time extractor modules, and Phase 0 background worker (plus its scheduler tick) for the phased proposal-assist workflow. End state: given a `workspace_setup_jobs` row in status `queued` (whoever enqueues it — workspace-create hook is base-spec territory), the in-process scheduler ticks the worker, the worker snapshots call body + profile description, ensures section extracts + call rubric are fresh (re-extracting if stale), copies both into per-workspace columns, writes a `rubric_initialized` audit event, and blocks at `waiting_for_rubric_review` until the workspace owner confirms the rubric — at which point `current_phase` advances to `spec`.
+
+**Not in this slice:** the workspace-create hook that enqueues the setup job (base spec owns workspace creation, so the enqueue site lives in that PR). Slice A delivers a *drainable* Phase 0 queue; whoever creates the workspace inserts the job row.
 
 **Architecture:** Module-isolated package at `src/call_monitor/proposal_assist/` with submodules for extractors, the Phase 0 worker, and the owner-facing rubric review endpoint. Templates in `call_section_extracts` and `call_rubrics` are per-call (shared) and re-extracted only when `source_text_hash` or `extractor_version` changes; workspaces snapshot from those templates at Phase 0 and never see them again. The rubric audit reproducibility surface is a pair of `workspace_events` rows (`rubric_initialized` + `rubric_edited`) replayed forward from the seed payload.
 
@@ -15,6 +17,8 @@
 ## Revision history
 
 - **rev2 (2026-05-19)** — Codex review fixed: test snippets now use the real `pg_session_factory` fixture (not the imaginary `db_session`); `Source`/`Profile` constructors match the actual models; Settings tests use the project's `_settings_env` env-var fixture; `ensure_section_extracts_fresh` reorders to "extract first, then atomically replace" so a transient LLM failure cannot wipe cached rows; `Phase0Worker.run_one` rolls back before mutating job status on the failure path; web-endpoint imports use the real paths (`call_monitor.auth.dependencies`, `call_monitor.db.session.get_db_dependency`, app-state `templates` and `session_signer`); TestClient pattern matches `tests/test_web_admin_digest_panel.py`; Task 8 milestone language softened (ingestion-tick integration is Slice E, not Slice A); manual-paste rubric fallback explicitly deferred (spec lines 290, 517).
+
+- **rev3 (2026-05-19)** — Codex round 2 fixed: Phase 0 worker now wired into the existing APScheduler via a new Task 19 (registers an interval job + adds a `phase0_tick_seconds` setting); workspace-create enqueue called out as base-spec territory in the goal; Part 2 migration IDs (`0014`–`0017`) called out as placeholders with a discovery instruction at the top of Part 2; rubric-review GET handler dropped the broken `parents[3]` path math in favor of `request.app.state.templates`, with a new wire-up step that adds `app.state.templates` and `app.state.session_factory` to `create_app()`; POST handler dropped the unused `Form`/`RedirectResponse` imports and replaced the body-level meta-refresh with proper HX-Redirect (HTMX) / 303 (non-HTMX) handling (tests updated to `follow_redirects=False` + expect 303); file map no longer lists a non-existent `proposal_assist/db.py`; task range corrected from `9–26` to `9–21`; Part 1 milestone wording no longer claims "in production."
 
 ---
 
@@ -136,9 +140,9 @@ Snippets in Tasks 9–19 use `make_owner_and_workspace` for the owner+workspace 
 
 This slice has two parts with different blockers:
 
-**Part 1 — Buildable today** (Tasks 1–8): Settings, hashing utility, `call_section_extracts` template + extractor, `call_rubrics` template + extractor. These touch only `calls` (which exists) and add isolated new tables. Mappable directly onto the spec's "Implementation gate item 3 — section-aware extractor in production."
+**Part 1 — Buildable today** (Tasks 1–8): Settings, hashing utility, `call_section_extracts` template + extractor, `call_rubrics` template + extractor. These touch only `calls` (which exists) and add isolated new tables. Constitutes the *module* side of the spec's implementation-gate item 3 (section-aware extractor); the ingestion-tick integration that would make it "in production" is owned by Slice E and explicitly out of Slice A scope (see Out of Scope at the bottom).
 
-**Part 2 — Blocked on base spec** (Tasks 9–26): everything that references `workspaces`, `workspace_viewers`, or `workspace_events`. The base spec ([2026-04-18-call-manager-proposal-assist-design.md](../specs/2026-04-18-call-manager-proposal-assist-design.md)) defines those tables, the Agent SDK adapter, the per-workspace subprocess, and the `call-monitor → call-manager` rename. **Do not attempt Tasks 9+ until base spec has shipped at minimum** `workspaces`, `workspace_viewers`, `workspace_events`, and any structural change required by the renamed `src/call_manager/` package layout. If executing under the un-renamed `call-monitor` package, use `src/call_monitor/proposal_assist/` paths and update the import roots when the rename happens.
+**Part 2 — Blocked on base spec** (Tasks 9–21): everything that references `workspaces`, `workspace_viewers`, or `workspace_events`. The base spec ([2026-04-18-call-manager-proposal-assist-design.md](../specs/2026-04-18-call-manager-proposal-assist-design.md)) defines those tables, the Agent SDK adapter, the per-workspace subprocess, and the `call-monitor → call-manager` rename. **Do not attempt Tasks 9+ until base spec has shipped at minimum** `workspaces`, `workspace_viewers`, `workspace_events`, and any structural change required by the renamed `src/call_manager/` package layout. If executing under the un-renamed `call-monitor` package, use `src/call_monitor/proposal_assist/` paths and update the import roots when the rename happens.
 
 When you reach the Part 2 boundary, stop and surface this to the user before proceeding.
 
@@ -149,7 +153,6 @@ When you reach the Part 2 boundary, stop and surface this to the user before pro
 **Created:**
 - `src/call_monitor/proposal_assist/__init__.py`
 - `src/call_monitor/proposal_assist/hashing.py`
-- `src/call_monitor/proposal_assist/db.py`
 - `src/call_monitor/proposal_assist/extractors/__init__.py`
 - `src/call_monitor/proposal_assist/extractors/sections.py`
 - `src/call_monitor/proposal_assist/extractors/rubric.py`
@@ -175,7 +178,7 @@ When you reach the Part 2 boundary, stop and surface this to the user before pro
 
 **Modified:**
 - `src/call_monitor/config.py` — add `EXTRACTOR_VERSION`, `RUBRIC_EXTRACTOR_VERSION`, `PROPOSAL_ASSIST_LLM_MODEL` settings.
-- `src/call_monitor/db/models.py` — add new models OR re-export from `proposal_assist/db.py` (pick the existing pattern — current codebase has one `models.py`; we add to it for symmetry).
+- `src/call_monitor/db/models.py` — add all new SQLAlchemy models here. The existing codebase keeps every model in this one file; we follow that pattern (no separate `proposal_assist/db.py`).
 - `src/call_monitor/main.py` — register the rubric-review router.
 
 ---
@@ -1634,6 +1637,15 @@ Surface to the user before proceeding to Part 2 — Part 2 depends on the base s
 # Part 2 — Blocked on base spec
 
 **Do not start these tasks until** `workspaces` (with `id uuid PK`, `owner_id bigint FK users`, `call_id`, `profile_id`, `created_at`), `workspace_viewers`, and `workspace_events` exist in the schema. If running under `src/call_monitor/` (no rename yet), use the imports in this plan as-is; if the base spec has done the `call-monitor → call-manager` rename, the paths shift to `src/call_manager/proposal_assist/...` and the Python imports change accordingly — adjust at execution time.
+
+**Migration revision IDs in Part 2 are placeholders.** The plan shows `0014`–`0017` to keep the chain readable, but base spec will land its own migrations (workspaces / workspace_viewers / workspace_events) between `0013` and the first Part 2 migration. Before writing each Part 2 migration:
+
+1. Run `ls alembic/versions/` and find the current head.
+2. Rename the migration file to `<head + 1>_<topic>.py` (zero-padded 4-digit).
+3. Set `revision = "<head + 1>"` and `down_revision = "<current head>"`.
+4. Repeat with the new head for the next migration in the chain.
+
+The body of each migration (the `upgrade()` / `downgrade()` SQL) does not change — only the IDs.
 
 ## Task 9: `workspaces` column additions
 
@@ -3319,17 +3331,15 @@ Note: the `Workspace` model (with `owner_id`, `title`, `rubric_criteria`) is add
 
 Create `src/call_monitor/proposal_assist/web/__init__.py` (empty).
 
-Create `src/call_monitor/proposal_assist/web/rubric_review.py`. The endpoint reads its session factory and templates instance from `app.state` (set up during `create_app()`); this is the same pattern the existing routes use — see `src/call_monitor/main.py` for where `app.state.session_factory` and the templates env get stored.
+Create `src/call_monitor/proposal_assist/web/rubric_review.py`. The endpoint reads its session factory and templates instance from `app.state`. Both are populated during `create_app()` — `session_signer` is already there; you'll add `session_factory` and `templates` next to it (see Step 4 below).
 
 ```python
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from call_monitor.auth.dependencies import get_current_user
@@ -3337,16 +3347,6 @@ from call_monitor.db.models import Workspace
 from call_monitor.db.session import get_db_dependency
 
 router = APIRouter(prefix="/workspaces", tags=["proposal-assist"])
-
-
-def _templates() -> Jinja2Templates:
-    """Module-local Jinja2 env. Resolves the templates directory the same way
-    main.py does (the `templates/` sibling of the app package). Re-using the
-    app's central env via app.state would couple this router to FastAPI app
-    construction in a way that complicates testing; an independent env is
-    fine because both envs read the same on-disk templates directory."""
-    templates_dir = Path(__file__).resolve().parents[3] / "web" / "templates"
-    return Jinja2Templates(directory=str(templates_dir))
 
 
 def _require_owner(
@@ -3365,10 +3365,8 @@ def _require_owner(
 
 def _session_dep(request: Request):
     """Resolve the per-request session dependency from the app's factory.
-
     `get_db_dependency` is a factory that returns the actual dependency
-    callable; we wire it via app.state to avoid a global at import time.
-    """
+    callable; we wire it via app.state to avoid a global at import time."""
     factory = request.app.state.session_factory
     yield from get_db_dependency(factory)()
 
@@ -3386,7 +3384,7 @@ def get_rubric_review(
     ws = _require_owner(
         workspace_id=workspace_id, user=user, session=session,
     )
-    return _templates().TemplateResponse(
+    return request.app.state.templates.TemplateResponse(
         request,
         "proposal_assist/rubric_review.html",
         {"workspace": ws, "criteria": ws.rubric_criteria,
@@ -3394,7 +3392,17 @@ def get_rubric_review(
     )
 ```
 
-**Verify `app.state.session_factory` exists.** If `create_app()` doesn't currently expose the session factory on `app.state`, the simplest patch is to add `app.state.session_factory = session_factory` inside the existing `create_app()` body — there's already an `app.state.session_signer` assignment to model after. If `session_factory` isn't constructible inside `create_app()` either (i.e. the existing app uses a different DI shape), surface back to the user before continuing.
+**Step 4 — wire `app.state.session_factory` and `app.state.templates` in `create_app()`.**
+
+In `src/call_monitor/main.py`, find the existing block that constructs the templates env and the session signer (search for `Jinja2Templates` and `session_signer = `). Add immediately after them:
+
+```python
+    app.state.templates = templates
+    app.state.session_factory = session_factory  # the sessionmaker created
+                                                  # elsewhere in create_app()
+```
+
+If `session_factory` isn't bound as a local name in `create_app()` (i.e., the existing app uses a different DI shape), surface back to the user before continuing — Slice A's web endpoint depends on it.
 
 Create `src/call_monitor/web/templates/proposal_assist/rubric_review.html`:
 
@@ -3511,10 +3519,13 @@ def test_rubric_review_post_writes_edited_event_and_advances_phase(
                 "criteria[0][scale_max]": "5",
                 "funder_notes": "updated",
             },
+            follow_redirects=False,
         )
     finally:
         client.__exit__(None, None, None)
-    assert resp.status_code == 200
+    # Successful confirm → 303 to the workspace page (non-HTMX path).
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/workspaces/{wsid}"
 
     with pg_session_factory() as s:
         ws = s.get(Workspace, wsid)
@@ -3568,10 +3579,11 @@ def test_rubric_review_post_confirm_without_edits_still_advances_phase(
                 "criteria[0][scale_max]": "5",
                 "funder_notes": "",
             },
+            follow_redirects=False,
         )
     finally:
         client.__exit__(None, None, None)
-    assert resp.status_code == 200
+    assert resp.status_code == 303  # confirms phase advanced even without edits
 
     with pg_session_factory() as s:
         ws = s.get(Workspace, wsid)
@@ -3617,12 +3629,12 @@ Add `from sqlalchemy import select` and `from call_monitor.db.models import Work
 In `src/call_monitor/proposal_assist/web/rubric_review.py`, add:
 
 ```python
+import re
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Form
-from fastapi.responses import HTMLResponse, RedirectResponse
-import re
+from fastapi import Response
+from fastapi.responses import HTMLResponse
 
 from call_monitor.db.models import WorkspaceEvent, WorkspaceSetupJob
 
@@ -3715,16 +3727,17 @@ async def post_rubric_review(
 
     session.commit()
 
-    # Render the form again with the updated content (HTMX swap target),
-    # or redirect to the workspace's Spec phase page when current_phase == 'spec'.
+    # After advancing to Spec, redirect the browser to the workspace's main
+    # view. HTMX recognizes the HX-Redirect header and performs a client-
+    # side navigation; non-HTMX (full-page form post) gets a normal 303.
     if ws.current_phase == "spec":
-        # Reuse project's URL helper if it exists; otherwise hard-code.
-        return HTMLResponse(
-            content=f'<meta http-equiv="refresh" content="0; url=/workspaces/{ws.id}">',
-            status_code=200,
-        )
-    from call_monitor.web.templates import templates
-    return templates.TemplateResponse(
+        target = f"/workspaces/{ws.id}"
+        if "HX-Request" in request.headers:
+            return Response(status_code=204, headers={"HX-Redirect": target})
+        return Response(status_code=303, headers={"Location": target})
+
+    # Otherwise re-render the form with the updated content (HTMX swap target).
+    return request.app.state.templates.TemplateResponse(
         request,
         "proposal_assist/rubric_review.html",
         {"workspace": ws, "criteria": ws.rubric_criteria,
@@ -3749,7 +3762,216 @@ git commit -m "feat(proposal-assist): rubric review POST (owner-only, advances P
 
 ---
 
-## Task 19: Phase 0 happy-path end-to-end test
+## Task 19: Register the Phase 0 scheduler tick
+
+The worker is drainable now, but nothing drives it. The project's existing
+`build_scheduler` (in `src/call_monitor/scheduler.py`) is an APScheduler
+`BackgroundScheduler`; add an interval job that calls `Phase0Worker.run_one`
+on a configurable cadence.
+
+**Files:**
+- Modify: `src/call_monitor/config.py` — add `phase0_tick_seconds`
+- Modify: `src/call_monitor/scheduler.py` — register the Phase 0 job
+- Modify: `src/call_monitor/proposal_assist/phases/setup.py` — add a top-level
+  `run_phase0_tick(session_factory, client_factory, settings)` driver
+- Test: `tests/proposal_assist/test_phase0_scheduler_tick.py`
+
+- [ ] **Step 1: Add the setting**
+
+In `Settings`:
+
+```python
+    phase0_tick_seconds: int = Field(
+        default=30, alias="PHASE0_TICK_SECONDS",
+        description="How often the in-process Phase 0 worker drains "
+                    "workspace_setup_jobs. Lowering this shortens the gap "
+                    "between workspace creation and rubric-review prompt; "
+                    "raising it reduces idle DB churn when the queue is empty.",
+    )
+```
+
+- [ ] **Step 2: Write the failing test**
+
+`tests/proposal_assist/test_phase0_scheduler_tick.py`:
+
+```python
+"""The scheduler-tick driver: on each tick, claims one job and runs it. The
+driver is sync (matches BackgroundScheduler's worker pool) and opens its own
+session per tick so APScheduler isn't holding a long-lived one."""
+from unittest.mock import Mock
+
+from sqlalchemy import select
+
+from call_monitor.db.models import WorkspaceSetupJob
+from call_monitor.proposal_assist.phases.setup import run_phase0_tick
+from tests.proposal_assist.conftest import (
+    make_call, make_owner_and_workspace,
+)
+
+
+def test_run_phase0_tick_drains_one_queued_job(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        _, wsid = make_owner_and_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="queued"))
+        s.commit()
+
+    client = Mock(model="claude-opus-4-7")
+    # _run_steps stub keeps this test scoped to the driver wiring.
+    captured: dict = {}
+
+    def fake_run_steps(worker, job):
+        captured["worker_seen"] = True
+
+    from call_monitor.proposal_assist.phases.setup import Phase0Worker
+    Phase0Worker._run_steps = fake_run_steps  # type: ignore[method-assign]
+
+    run_phase0_tick(
+        session_factory=pg_session_factory,
+        client_factory=lambda: client,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+
+    with pg_session_factory() as s:
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        assert job.status == "done"
+        assert captured.get("worker_seen") is True
+
+
+def test_run_phase0_tick_is_a_noop_when_queue_empty(pg_session_factory, tmp_path):
+    # No jobs in the queue. The driver should return cleanly.
+    run_phase0_tick(
+        session_factory=pg_session_factory,
+        client_factory=lambda: Mock(model="m"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspace_repo_root=str(tmp_path / "repos"),
+    )
+    # No assertion needed — absence of exception is the contract.
+```
+
+- [ ] **Step 3: Implement the driver**
+
+Append to `src/call_monitor/proposal_assist/phases/setup.py`:
+
+```python
+from typing import Callable
+
+from sqlalchemy.orm import sessionmaker
+
+
+def run_phase0_tick(
+    *,
+    session_factory: sessionmaker,
+    client_factory: Callable[[], _AnthropicClientLike],
+    extractor_version: str,
+    rubric_extractor_version: str,
+    workspace_repo_root: str,
+) -> None:
+    """Scheduler-friendly tick: open one session, claim+drain at most one job.
+
+    A single-job-per-tick discipline keeps individual ticks short (so the
+    BackgroundScheduler worker pool doesn't pile up), gives Postgres' FOR
+    UPDATE SKIP LOCKED a clean release point, and bounds the cost of a
+    failed LLM call to one workspace per tick.
+
+    Multiple ticks per second are fine — claim_next_setup_job returns None
+    when the queue is empty and the function returns immediately.
+    """
+    with session_factory() as session:
+        worker = Phase0Worker(
+            session=session,
+            client=client_factory(),
+            extractor_version=extractor_version,
+            rubric_extractor_version=rubric_extractor_version,
+            workspace_repo_root=workspace_repo_root,
+        )
+        worker.run_one()
+```
+
+- [ ] **Step 4: Register in `build_scheduler`**
+
+In `src/call_monitor/scheduler.py`, after the existing `sched.add_job(...)`
+calls for ingestion / ranking, add:
+
+```python
+    # Phase 0 (proposal-assist) drain tick.
+    sched.add_job(
+        _phase0_tick_job,
+        trigger=IntervalTrigger(seconds=settings.phase0_tick_seconds),
+        id="proposal_assist_phase0_tick",
+        max_instances=1,        # single in-flight tick at a time
+        coalesce=True,           # collapse missed runs
+    )
+```
+
+And define `_phase0_tick_job` (at module scope, alongside the other job
+callables in this file):
+
+```python
+def _phase0_tick_job(settings, session_factory) -> None:
+    """Closure wired up in build_scheduler. Lazy-import the worker to keep
+    scheduler module-load cheap and avoid importing the Anthropic SDK at
+    process start (mirrors the existing ranking-tick pattern)."""
+    from call_monitor.proposal_assist.phases.setup import run_phase0_tick
+    from call_monitor.ranking.anthropic_client import AnthropicClient
+
+    if not settings.anthropic_api_key:
+        # No key configured → Phase 0 cannot run. Log once per tick at INFO
+        # so the operator sees it but it doesn't spam at WARNING.
+        logger.info(
+            "phase0 tick skipped: ANTHROPIC_API_KEY not set"
+        )
+        return
+
+    def make_client():
+        return AnthropicClient(
+            api_key=settings.anthropic_api_key,
+            model=settings.proposal_assist_llm_model,
+        )
+
+    run_phase0_tick(
+        session_factory=session_factory,
+        client_factory=make_client,
+        extractor_version=settings.extractor_version,
+        rubric_extractor_version=settings.rubric_extractor_version,
+        workspace_repo_root=settings.workspace_repo_root,  # NEW SETTING
+    )
+```
+
+The `WORKSPACE_REPO_ROOT` setting belongs to the base spec (it points at
+`var/workspaces/`). If base spec hasn't added it yet, add a `workspace_repo_root`
+field to `Settings` here with default `"var/workspaces"`.
+
+Pass `settings` + `session_factory` into the closure when calling
+`sched.add_job` — the existing scheduler functions already curry these in;
+mirror that pattern.
+
+- [ ] **Step 5: Run tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_scheduler_tick.py -v
+```
+
+Expected: 2 tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/call_monitor/config.py src/call_monitor/scheduler.py src/call_monitor/proposal_assist/phases/setup.py tests/proposal_assist/test_phase0_scheduler_tick.py
+git commit -m "feat(proposal-assist): register Phase 0 drain tick in scheduler"
+```
+
+---
+
+## Task 20: Phase 0 happy-path end-to-end test
 
 **Files:**
 - Test: `tests/proposal_assist/test_phase0_e2e.py`
@@ -3900,8 +4122,9 @@ def test_phase0_happy_path_to_waiting_for_rubric_review(
                 "criteria[1][scale_max]": "5",
                 "funder_notes": "See FAQ.",
             },
+            follow_redirects=False,
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 303
     finally:
         client.__exit__(None, None, None)
 
@@ -3936,7 +4159,7 @@ git commit -m "test(proposal-assist): Phase 0 happy-path end-to-end"
 
 ---
 
-## Task 20: Slice A milestone
+## Task 21: Slice A milestone
 
 - [ ] **Step 1: Full suite + lint**
 
@@ -3964,10 +4187,11 @@ Slice A is complete. The codebase now has:
 - All 7 new tables/column-additions migrated
 - Section + rubric extractors with idempotent freshness gating
 - Phase 0 worker that snapshots, extracts, copies templates, writes the `rubric_initialized` audit event, and yields at `waiting_for_rubric_review`
+- Phase 0 scheduler tick registered in `build_scheduler` — given a queued `workspace_setup_jobs` row, the worker drains it on the next interval
 - Owner-only rubric review GET + POST that advances Phase 0 to `done` and the workspace to `current_phase='spec'`
 - An end-to-end happy-path test exercising the full lifecycle with mocked LLM and real git operations
 
-End state matches the goal: a workspace can be created, Phase 0 runs to the rubric-review gate, the owner confirms, `current_phase` advances to `spec`.
+End state: given a queued `workspace_setup_jobs` row (the workspace-create site that enqueues it is base-spec territory — see the goal at the top), Phase 0 runs to the rubric-review gate, the owner confirms, `current_phase` advances to `spec`.
 
 **Next slice:** Slice B (Spec/Plan/Draft phases + state machine + staleness + rubric editing UI). That builds the interactive chat phases on top of the Phase 0 foundation. Surface to the user before starting it.
 
