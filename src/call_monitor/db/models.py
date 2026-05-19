@@ -601,3 +601,38 @@ class ChatSummary(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
+
+
+class ArtifactVersion(Base):
+    __tablename__ = "artifact_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "created_by IN ('agent','user','system','reconciled','unrecoverable')",
+            name="ck_artifact_versions_created_by",
+        ),
+        Index(
+            "ix_artifact_versions_ws_created",
+            "workspace_id",
+            text("created_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    triggering_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_turns.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
