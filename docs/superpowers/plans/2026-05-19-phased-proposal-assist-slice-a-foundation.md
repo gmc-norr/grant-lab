@@ -12,6 +12,126 @@
 
 ---
 
+## Revision history
+
+- **rev2 (2026-05-19)** — Codex review fixed: test snippets now use the real `pg_session_factory` fixture (not the imaginary `db_session`); `Source`/`Profile` constructors match the actual models; Settings tests use the project's `_settings_env` env-var fixture; `ensure_section_extracts_fresh` reorders to "extract first, then atomically replace" so a transient LLM failure cannot wipe cached rows; `Phase0Worker.run_one` rolls back before mutating job status on the failure path; web-endpoint imports use the real paths (`call_monitor.auth.dependencies`, `call_monitor.db.session.get_db_dependency`, app-state `templates` and `session_signer`); TestClient pattern matches `tests/test_web_admin_digest_panel.py`; Task 8 milestone language softened (ingestion-tick integration is Slice E, not Slice A); manual-paste rubric fallback explicitly deferred (spec lines 290, 517).
+
+---
+
+## Project Conventions Reference
+
+Read this once before executing any task. Every test snippet below assumes these patterns.
+
+### Session / DB fixture
+
+The repo's `tests/conftest.py` provides `pg_session_factory: () -> SessionContextManager`. Use it like this:
+
+```python
+def test_something(pg_session_factory, _settings_env):
+    with pg_session_factory() as s:
+        s.add(some_row)
+        s.commit()
+        # ... assertions on the same session
+```
+
+**There is no `db_session` fixture.** When the snippets below say `with pg_session_factory() as s`, that's the entire session lifetime for that test step.
+
+The factory's teardown TRUNCATEs every table (`Base.metadata.sorted_tables`, CASCADE, RESTART IDENTITY) and re-seeds the two `sources` rows (`eu_portal`, `vinnova`) — so every test starts with those two sources present and IDs reset to 1.
+
+### Settings env vars
+
+`Settings()` requires `DATABASE_URL`, `SESSION_SECRET` (≥16 chars), `ALLOWED_EMAIL_DOMAINS`, `APP_BASE_URL`. Any test that instantiates `Settings()` directly needs the project's `_settings_env` helper. Copy this verbatim into `tests/proposal_assist/conftest.py`:
+
+```python
+@pytest.fixture
+def _settings_env(monkeypatch, pg_url):
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+```
+
+Use it as a function-scoped dependency: any test that calls `Settings()` or `create_app()` declares `_settings_env` in its arg list.
+
+### Model constructor shapes
+
+Verified against `src/call_monitor/db/models.py`:
+
+- `Source(id, name, slug, last_fetched_at, config, created_at)` — **no `kind`, no `is_active`**. Rows auto-seeded by `pg_session_factory` teardown; tests look them up by slug rather than constructing new ones.
+- `Call(source_id, external_id, url, title, summary, full_text, deadline, fetched_at, ...)` — `full_text` is nullable; `external_id` and `url` and `title` are required.
+- `Profile(name, kind: ProfileKind, description, created_by: FK users.id, ...)` — **no `slug`**, **`kind` required (enum)**, **`created_by` required**. Use `ProfileKind.GROUP` / `.ORG` / `.USER`. The repo's existing `profile_factory` fixture (`tests/conftest.py`) demonstrates the construction.
+- `User(email, name=None, is_admin=False, ...)` — `id` is `BigInteger`, not UUID.
+
+### Web app construction
+
+`create_app()` takes **no `test_mode` argument**. The pattern for TestClient-based tests (from `tests/test_web_admin_digest_panel.py`):
+
+```python
+from fastapi.testclient import TestClient
+from call_monitor.auth.session_cookie import SessionSigner
+from call_monitor.main import create_app
+
+
+def _setup(monkeypatch, pg_url):
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    return create_app()
+
+
+def _authed_client(app, user_id: int) -> TestClient:
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()  # lifespan runs (admin bootstrap, scheduler, etc.)
+    signer: SessionSigner = app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=user_id))
+    return client
+```
+
+The client must be exited (`client.__exit__(None, None, None)`) after the test request.
+
+### Web infrastructure imports
+
+- Auth dependency: `from call_monitor.auth.dependencies import get_current_user`
+- DB session dependency: `from call_monitor.db.session import get_db_dependency` — call as `Depends(get_db_dependency(app.state.session_factory))`, or store the session factory on `app.state` at startup and access it from a thin module-level helper.
+- Templates: `Jinja2Templates` is instantiated locally in `create_app()` (search `src/call_monitor/main.py` for the `templates = Jinja2Templates(...)` line). For new endpoints, the simplest pattern is to instantiate a module-local `Jinja2Templates(directory=TEMPLATES_DIR)` and pass `request` into `templates.TemplateResponse(request, ...)`. See `src/call_monitor/web/routes.py` or wherever the existing routes render HTML.
+
+### Session signer for cookie creation
+
+`app.state.session_signer: SessionSigner` is set during `create_app()`. Use `signer.make(user_id=u.id)` to produce a session-cookie value.
+
+### Pattern for Part 2 test snippets
+
+Every Part 2 test that touches a workspace follows this shape (factor into `tests/proposal_assist/conftest.py`):
+
+```python
+def make_owner_and_workspace(
+    session, *, owner_email: str = "owner@ki.se",
+    call_id: int | None = None, profile_id: int | None = None,
+) -> tuple[int, "uuid.UUID"]:
+    """Create a User + a Workspace owned by them; return their IDs.
+
+    Workspace defaults: current_phase='setup', rubric_criteria=[],
+    section_extracts={}. Optionally link to a Call (created via make_call)
+    and/or a Profile.
+    """
+    from call_monitor.db.models import User, Workspace
+    u = User(email=owner_email)
+    session.add(u)
+    session.flush()
+    ws = Workspace(
+        owner_id=u.id, title="Test workspace",
+        call_id=call_id, profile_id=profile_id,
+    )
+    session.add(ws)
+    session.commit()
+    return u.id, ws.id
+```
+
+Snippets in Tasks 9–19 use `make_owner_and_workspace` for the owner+workspace setup and `make_call` (defined in Task 3) for the call. Both return only IDs so tests can use them across separate `pg_session_factory()` blocks without dealing with detached-instance errors.
+
+---
+
 ## Prerequisites and scope honesty
 
 This slice has two parts with different blockers:
@@ -68,15 +188,40 @@ When you reach the Part 2 boundary, stop and surface this to the user before pro
 - Modify: `src/call_monitor/config.py`
 - Test: `tests/proposal_assist/test_config.py` (created in this task)
 
-- [ ] **Step 1: Create test file with failing test**
+- [ ] **Step 1: Create test files with failing test**
 
-Create `tests/proposal_assist/__init__.py` (empty) and `tests/proposal_assist/test_config.py`:
+Create `tests/proposal_assist/__init__.py` (empty).
+
+Create `tests/proposal_assist/conftest.py`:
+
+```python
+"""Shared fixtures for proposal_assist tests. See plan's
+'Project Conventions Reference' section for context."""
+import pytest
+
+
+@pytest.fixture
+def _settings_env(monkeypatch, pg_url):
+    """Populate the env vars Settings() requires.
+
+    Without these, pydantic validation raises during Settings(), so any test
+    that constructs Settings directly OR via create_app() must depend on this.
+    """
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+```
+
+Create `tests/proposal_assist/test_config.py`:
 
 ```python
 from call_monitor.config import Settings
 
 
-def test_proposal_assist_settings_have_defaults(monkeypatch):
+def test_proposal_assist_settings_have_defaults(monkeypatch, _settings_env):
+    # _settings_env provides DATABASE_URL etc.; clear only the new keys
+    # to verify they take their declared defaults.
     monkeypatch.delenv("EXTRACTOR_VERSION", raising=False)
     monkeypatch.delenv("RUBRIC_EXTRACTOR_VERSION", raising=False)
     monkeypatch.delenv("PROPOSAL_ASSIST_LLM_MODEL", raising=False)
@@ -86,7 +231,7 @@ def test_proposal_assist_settings_have_defaults(monkeypatch):
     assert s.proposal_assist_llm_model == "claude-opus-4-7"
 
 
-def test_proposal_assist_settings_override_via_env(monkeypatch):
+def test_proposal_assist_settings_override_via_env(monkeypatch, _settings_env):
     monkeypatch.setenv("EXTRACTOR_VERSION", "sections-v2")
     monkeypatch.setenv("RUBRIC_EXTRACTOR_VERSION", "rubric-v2")
     monkeypatch.setenv("PROPOSAL_ASSIST_LLM_MODEL", "claude-sonnet-4-6")
@@ -140,7 +285,7 @@ Expected: both tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/call_monitor/config.py tests/proposal_assist/__init__.py tests/proposal_assist/test_config.py
+git add src/call_monitor/config.py tests/proposal_assist/__init__.py tests/proposal_assist/conftest.py tests/proposal_assist/test_config.py
 git commit -m "feat(proposal-assist): add extractor + LLM-model settings"
 ```
 
@@ -243,7 +388,45 @@ git commit -m "feat(proposal-assist): add source_text_hash sha256 utility"
 - Modify: `src/call_monitor/db/models.py`
 - Test: `tests/proposal_assist/test_models.py` (created here)
 
-- [ ] **Step 1: Write failing test for the model**
+- [ ] **Step 1: Extend conftest.py with a call-builder helper**
+
+Append to `tests/proposal_assist/conftest.py`:
+
+```python
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from call_monitor.db.models import Call, Source
+
+
+def make_call(session, *, external_id: str = "EXT-1",
+              full_text: str = "Body about eligibility, scope, budget, "
+                               "expected outcomes, restrictions, mandatory.",
+              source_slug: str = "vinnova") -> Call:
+    """Build a Call row attached to one of the auto-seeded sources.
+
+    `vinnova` and `eu_portal` are seeded by pg_session_factory's teardown;
+    look them up by slug rather than constructing a new Source.
+    """
+    src = session.execute(
+        select(Source).where(Source.slug == source_slug)
+    ).scalar_one()
+    call = Call(
+        source_id=src.id,
+        external_id=external_id,
+        title="Precision medicine programme",
+        url="https://example.org/calls/" + external_id,
+        summary="Funding for AI-based diagnostics.",
+        full_text=full_text,
+        deadline=datetime(2026, 12, 1, tzinfo=timezone.utc),
+    )
+    session.add(call)
+    session.flush()
+    return call
+```
+
+- [ ] **Step 2: Write the failing test**
 
 `tests/proposal_assist/test_models.py`:
 
@@ -253,98 +436,49 @@ from datetime import datetime
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import Call, CallSectionExtract
+from call_monitor.db.models import CallSectionExtract
+from tests.proposal_assist.conftest import make_call
 
 
-def test_call_section_extract_can_be_inserted(db_session, sample_call):
-    row = CallSectionExtract(
-        call_id=sample_call.id,
-        section="eligibility",
-        extract_text="Open to Swedish universities.",
-        extracted_by_model="claude-opus-4-7",
-        extractor_version="sections-v1",
-        source_text_hash="0" * 64,
-    )
-    db_session.add(row)
-    db_session.commit()
-    fetched = db_session.scalar(
-        select(CallSectionExtract).where(
-            CallSectionExtract.call_id == sample_call.id,
-            CallSectionExtract.section == "eligibility",
+def test_call_section_extract_can_be_inserted(pg_session_factory):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.add(CallSectionExtract(
+            call_id=call.id,
+            section="eligibility",
+            extract_text="Open to Swedish universities.",
+            extracted_by_model="claude-opus-4-7",
+            extractor_version="sections-v1",
+            source_text_hash="0" * 64,
+        ))
+        s.commit()
+
+        fetched = s.scalar(
+            select(CallSectionExtract).where(
+                CallSectionExtract.call_id == call.id,
+                CallSectionExtract.section == "eligibility",
+            )
         )
-    )
-    assert fetched is not None
-    assert fetched.extract_text == "Open to Swedish universities."
-    assert fetched.extractor_version == "sections-v1"
-    assert isinstance(fetched.extracted_at, datetime)
+        assert fetched is not None
+        assert fetched.extract_text == "Open to Swedish universities."
+        assert fetched.extractor_version == "sections-v1"
+        assert isinstance(fetched.extracted_at, datetime)
 
 
-def test_call_section_extract_section_check_constraint(db_session, sample_call):
-    bad = CallSectionExtract(
-        call_id=sample_call.id,
-        section="not_a_real_section",  # not in CHECK list
-        extract_text="x",
-        extracted_by_model="m",
-        extractor_version="sections-v1",
-        source_text_hash="0" * 64,
-    )
-    db_session.add(bad)
-    with pytest.raises(Exception):
-        db_session.commit()
+def test_call_section_extract_section_check_constraint(pg_session_factory):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.add(CallSectionExtract(
+            call_id=call.id,
+            section="not_a_real_section",  # CHECK violation
+            extract_text="x",
+            extracted_by_model="m",
+            extractor_version="sections-v1",
+            source_text_hash="0" * 64,
+        ))
+        with pytest.raises(Exception):
+            s.commit()
 ```
-
-- [ ] **Step 2: Write the conftest fixtures the tests need**
-
-`tests/proposal_assist/conftest.py`:
-
-```python
-"""Shared fixtures for proposal_assist tests.
-
-Uses the project's existing testcontainers Postgres fixture (db_session) and
-adds a `sample_call` fixture so each test gets a real calls row to FK against.
-"""
-from __future__ import annotations
-
-from datetime import datetime, timezone
-
-import pytest
-
-from call_monitor.db.models import Call, Source
-
-
-@pytest.fixture
-def sample_source(db_session) -> Source:
-    src = Source(
-        slug="test_src",
-        name="Test Source",
-        kind="vinnova",  # match whatever the existing Source.kind enum accepts;
-                          # adjust to a valid value in your codebase before running
-        is_active=True,
-    )
-    db_session.add(src)
-    db_session.commit()
-    return src
-
-
-@pytest.fixture
-def sample_call(db_session, sample_source) -> Call:
-    call = Call(
-        source_id=sample_source.id,
-        external_id="EXT-1",
-        title="Precision medicine programme",
-        url="https://example.org/calls/1",
-        summary="Funding for AI-based diagnostics.",
-        full_text="Long call body about eligibility, scope, budget, "
-                  "expected outcomes, restrictions, and mandatory items.",
-        deadline=datetime(2026, 12, 1, tzinfo=timezone.utc),
-        fetched_at=datetime.now(timezone.utc),
-    )
-    db_session.add(call)
-    db_session.commit()
-    return call
-```
-
-Note: the existing `tests/conftest.py` should already provide `db_session`. If `Source.kind` or `Call` constructor fields differ from what's shown here, adjust the fixture to use the real signatures — verify with `grep -n "class Call\|class Source" src/call_monitor/db/models.py`.
 
 - [ ] **Step 3: Run to confirm failure**
 
@@ -670,32 +804,33 @@ git commit -m "feat(proposal-assist): add section extractor (sections-v1)"
 Append to `tests/proposal_assist/test_models.py`:
 
 ```python
+from datetime import datetime, timezone
+
 from call_monitor.db.models import CallRubric
 
 
-def test_call_rubric_can_be_inserted(db_session, sample_call):
-    row = CallRubric(
-        call_id=sample_call.id,
-        criteria=[
-            {"name": "Scientific excellence", "description": "...",
-             "weight": 0.4, "scale_max": 5},
-            {"name": "Clinical impact", "description": "...",
-             "weight": 0.6, "scale_max": 5},
-        ],
-        funder_notes="See FAQ on funder website.",
-        extracted_at=__import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        ),
-        extracted_by_model="claude-opus-4-7",
-        extractor_version="rubric-v1",
-        source_text_hash="0" * 64,
-    )
-    db_session.add(row)
-    db_session.commit()
-    fetched = db_session.get(CallRubric, sample_call.id)
-    assert fetched is not None
-    assert len(fetched.criteria) == 2
-    assert fetched.criteria[0]["name"] == "Scientific excellence"
+def test_call_rubric_can_be_inserted(pg_session_factory):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.add(CallRubric(
+            call_id=call.id,
+            criteria=[
+                {"name": "Scientific excellence", "description": "...",
+                 "weight": 0.4, "scale_max": 5},
+                {"name": "Clinical impact", "description": "...",
+                 "weight": 0.6, "scale_max": 5},
+            ],
+            funder_notes="See FAQ on funder website.",
+            extracted_at=datetime.now(timezone.utc),
+            extracted_by_model="claude-opus-4-7",
+            extractor_version="rubric-v1",
+            source_text_hash="0" * 64,
+        ))
+        s.commit()
+        fetched = s.get(CallRubric, call.id)
+        assert fetched is not None
+        assert len(fetched.criteria) == 2
+        assert fetched.criteria[0]["name"] == "Scientific excellence"
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -1047,6 +1182,7 @@ For Slice A we keep this dead simple: a synchronous helper that, given a Call ro
 import json
 from unittest.mock import Mock
 
+import pytest
 from sqlalchemy import select
 
 from call_monitor.db.models import CallRubric, CallSectionExtract
@@ -1055,6 +1191,7 @@ from call_monitor.proposal_assist.extractors.refresh import (
     ensure_section_extracts_fresh,
 )
 from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
+from tests.proposal_assist.conftest import make_call
 
 
 def _section_envelope() -> dict:
@@ -1078,139 +1215,232 @@ def _rubric_envelope() -> dict:
 
 
 def test_ensure_section_extracts_fresh_creates_six_rows_first_time(
-    db_session, sample_call
+    pg_session_factory,
 ):
     client = Mock()
     client.chat.return_value = _section_envelope()
     client.model = "claude-opus-4-7"
 
-    ensure_section_extracts_fresh(
-        session=db_session,
-        call=sample_call,
-        client=client,
-        extractor_version="sections-v1",
-    )
-    db_session.commit()
-
-    rows = db_session.scalars(
-        select(CallSectionExtract).where(
-            CallSectionExtract.call_id == sample_call.id
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v1",
         )
-    ).all()
-    assert len(rows) == 6
-    assert {r.section for r in rows} == set(SECTION_NAMES)
-    assert client.chat.call_count == 1
+        s.commit()
+        rows = s.scalars(
+            select(CallSectionExtract).where(
+                CallSectionExtract.call_id == call.id
+            )
+        ).all()
+        assert len(rows) == 6
+        assert {r.section for r in rows} == set(SECTION_NAMES)
+        assert client.chat.call_count == 1
 
 
 def test_ensure_section_extracts_fresh_skips_when_hash_and_version_match(
-    db_session, sample_call
+    pg_session_factory,
 ):
     client = Mock()
     client.chat.return_value = _section_envelope()
     client.model = "claude-opus-4-7"
 
-    ensure_section_extracts_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="sections-v1",
-    )
-    db_session.commit()
-    assert client.chat.call_count == 1
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v1",
+        )
+        s.commit()
+        assert client.chat.call_count == 1
 
-    # second call against unchanged call.full_text + version
-    ensure_section_extracts_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="sections-v1",
-    )
-    db_session.commit()
-    assert client.chat.call_count == 1  # NOT re-called
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v1",
+        )
+        s.commit()
+        assert client.chat.call_count == 1  # NOT re-called
 
 
 def test_ensure_section_extracts_fresh_re_extracts_on_version_bump(
-    db_session, sample_call
+    pg_session_factory,
 ):
     client = Mock()
     client.chat.return_value = _section_envelope()
     client.model = "claude-opus-4-7"
 
-    ensure_section_extracts_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="sections-v1",
-    )
-    db_session.commit()
-    assert client.chat.call_count == 1
-
-    ensure_section_extracts_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="sections-v2",  # bumped
-    )
-    db_session.commit()
-    assert client.chat.call_count == 2
-
-    rows = db_session.scalars(
-        select(CallSectionExtract).where(
-            CallSectionExtract.call_id == sample_call.id
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v1",
         )
-    ).all()
-    assert all(r.extractor_version == "sections-v2" for r in rows)
+        s.commit()
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v2",  # bumped
+        )
+        s.commit()
+        assert client.chat.call_count == 2
+        rows = s.scalars(
+            select(CallSectionExtract).where(
+                CallSectionExtract.call_id == call.id
+            )
+        ).all()
+        assert all(r.extractor_version == "sections-v2" for r in rows)
 
 
 def test_ensure_section_extracts_fresh_re_extracts_on_source_text_change(
-    db_session, sample_call
+    pg_session_factory,
 ):
     client = Mock()
     client.chat.return_value = _section_envelope()
     client.model = "claude-opus-4-7"
 
-    ensure_section_extracts_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="sections-v1",
-    )
-    db_session.commit()
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v1",
+        )
+        s.commit()
 
-    sample_call.full_text = sample_call.full_text + " (RE-INGESTED)"
-    db_session.commit()
+        call.full_text = (call.full_text or "") + " (RE-INGESTED)"
+        s.commit()
 
-    ensure_section_extracts_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="sections-v1",
-    )
-    db_session.commit()
-    assert client.chat.call_count == 2
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=client,
+            extractor_version="sections-v1",
+        )
+        s.commit()
+        assert client.chat.call_count == 2
 
 
-def test_ensure_rubric_fresh_creates_row_first_time(db_session, sample_call):
+def test_ensure_section_extracts_fresh_preserves_existing_on_extractor_failure(
+    pg_session_factory,
+):
+    """Regression: a transient LLM failure must NOT wipe the previously-cached
+    rows. Extract-first ordering means the LLM call is attempted before any
+    DELETE; on failure, existing rows are untouched."""
+    good_client = Mock()
+    good_client.chat.return_value = _section_envelope()
+    good_client.model = "claude-opus-4-7"
+
+    failing_client = Mock()
+    failing_client.chat.side_effect = RuntimeError("LLM 503")
+    failing_client.model = "claude-opus-4-7"
+
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+
+        # Seed with good extracts.
+        ensure_section_extracts_fresh(
+            session=s, call=call, client=good_client,
+            extractor_version="sections-v1",
+        )
+        s.commit()
+        before = sorted(
+            (r.section, r.extract_text)
+            for r in s.scalars(
+                select(CallSectionExtract).where(
+                    CallSectionExtract.call_id == call.id
+                )
+            ).all()
+        )
+
+        # Bump version to force re-extract; the client raises.
+        with pytest.raises(RuntimeError):
+            ensure_section_extracts_fresh(
+                session=s, call=call, client=failing_client,
+                extractor_version="sections-v2",
+            )
+
+        # Existing rows survive.
+        after = sorted(
+            (r.section, r.extract_text)
+            for r in s.scalars(
+                select(CallSectionExtract).where(
+                    CallSectionExtract.call_id == call.id
+                )
+            ).all()
+        )
+        assert before == after
+
+
+def test_ensure_rubric_fresh_creates_row_first_time(pg_session_factory):
     client = Mock()
     client.chat.return_value = _rubric_envelope()
     client.model = "claude-opus-4-7"
 
-    ensure_rubric_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="rubric-v1",
-    )
-    db_session.commit()
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_rubric_fresh(
+            session=s, call=call, client=client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+        row = s.get(CallRubric, call.id)
+        assert row is not None
+        assert row.extractor_version == "rubric-v1"
+        assert client.chat.call_count == 1
 
-    row = db_session.get(CallRubric, sample_call.id)
-    assert row is not None
-    assert row.extractor_version == "rubric-v1"
-    assert client.chat.call_count == 1
 
-
-def test_ensure_rubric_fresh_skips_when_fresh(db_session, sample_call):
+def test_ensure_rubric_fresh_skips_when_fresh(pg_session_factory):
     client = Mock()
     client.chat.return_value = _rubric_envelope()
     client.model = "claude-opus-4-7"
 
-    ensure_rubric_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="rubric-v1",
-    )
-    db_session.commit()
-    ensure_rubric_fresh(
-        session=db_session, call=sample_call, client=client,
-        extractor_version="rubric-v1",
-    )
-    db_session.commit()
-    assert client.chat.call_count == 1
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_rubric_fresh(
+            session=s, call=call, client=client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+        ensure_rubric_fresh(
+            session=s, call=call, client=client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+        assert client.chat.call_count == 1
+
+
+def test_ensure_rubric_fresh_preserves_existing_on_extractor_failure(
+    pg_session_factory,
+):
+    good_client = Mock()
+    good_client.chat.return_value = _rubric_envelope()
+    good_client.model = "claude-opus-4-7"
+
+    failing_client = Mock()
+    failing_client.chat.side_effect = RuntimeError("LLM 503")
+    failing_client.model = "claude-opus-4-7"
+
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+
+        ensure_rubric_fresh(
+            session=s, call=call, client=good_client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+        before_criteria = s.get(CallRubric, call.id).criteria
+
+        with pytest.raises(RuntimeError):
+            ensure_rubric_fresh(
+                session=s, call=call, client=failing_client,
+                extractor_version="rubric-v2",
+            )
+        # Row content unchanged.
+        assert s.get(CallRubric, call.id).criteria == before_criteria
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -1254,11 +1484,13 @@ def ensure_section_extracts_fresh(
     extractor_version: str,
 ) -> None:
     """Idempotent: if all six rows exist with matching `source_text_hash` AND
-    matching `extractor_version`, no LLM call is made. Otherwise the prior
-    rows are deleted, the extractor runs once, and six fresh rows are
-    inserted.
+    matching `extractor_version`, no LLM call is made. Otherwise the extractor
+    is run **first** (so a transient LLM failure cannot wipe cached rows),
+    then prior rows are deleted and six fresh rows inserted in the same unit
+    of work.
 
-    Caller commits.
+    Caller commits. If the extractor raises, the caller's session should
+    rollback — no destructive state has been written yet.
     """
     current_hash = source_text_hash(call.full_text or "")
 
@@ -1275,14 +1507,20 @@ def ensure_section_extracts_fresh(
     ):
         return
 
+    # EXTRACT FIRST — if this raises, we haven't touched the DB yet.
+    sections = extract_sections(call_text=call.full_text or "", client=client)
+
+    # Now safe to mutate. Delete + insert happen in the same transaction;
+    # neither lands without the other because the caller commits once.
     if existing:
         session.execute(
             delete(CallSectionExtract).where(
                 CallSectionExtract.call_id == call.id
             )
         )
+        # Flush so the DELETE lands before our INSERTs hit the PK constraint.
+        session.flush()
 
-    sections = extract_sections(call_text=call.full_text or "", client=client)
     now = datetime.now(timezone.utc)
     for section_name in SECTION_NAMES:
         session.add(CallSectionExtract(
@@ -1304,9 +1542,11 @@ def ensure_rubric_fresh(
     extractor_version: str,
 ) -> None:
     """Idempotent: if the row exists with matching hash + version, no LLM
-    call is made. Otherwise the row is upserted.
+    call is made. Otherwise the extractor is run **first** (so a transient
+    LLM failure cannot mutate the cached row), then the row is upserted.
 
-    Caller commits.
+    Caller commits. If the extractor raises, the caller's session should
+    rollback — no destructive state has been written yet.
     """
     current_hash = source_text_hash(call.full_text or "")
     existing = session.get(CallRubric, call.id)
@@ -1317,6 +1557,7 @@ def ensure_rubric_fresh(
     ):
         return
 
+    # EXTRACT FIRST — if this raises, the existing row is untouched.
     payload = extract_rubric(call_text=call.full_text or "", client=client)
     now = datetime.now(timezone.utc)
 
@@ -1377,12 +1618,16 @@ Fix any issues; commit with `chore: ruff fixes for Part 1` if `format` changed a
 
 - [ ] **Step 3: Stop here and check in with the user**
 
-Part 1 is complete. The codebase now has:
+Part 1 delivers:
 - Two new tables (`call_section_extracts`, `call_rubrics`) with freshness metadata
-- Two extractor modules with thorough unit-test coverage
-- Idempotent freshness helpers that re-extract on `source_text_hash` or `extractor_version` change
+- Two extractor modules + idempotent freshness helpers with thorough unit-test coverage
+- Safe-under-failure ordering: extractor runs **before** any destructive DB write, so a transient LLM error cannot wipe a previously-cached row
 
-This satisfies the spec's implementation gate item 3 (section-aware extractor in production) for the call corpus. Surface to the user before proceeding to Part 2 — Part 2 depends on the base spec (`workspaces`, `workspace_viewers`, `workspace_events`) being in place.
+**What Part 1 does NOT deliver toward the spec's implementation-gate item 3:**
+- The freshness helpers are *callable* but not yet *invoked* at ingestion. There's no APScheduler tick wiring or per-source post-fetch callback that runs them against every newly-ingested call. Slice E (observability + ops hooks) owns that integration. Until then, the extractor modules behave as pull-on-demand utilities — Phase 0 (Part 2) will be the first real consumer.
+- Validation against the existing call corpus (the spec's "validated against the existing call corpus" language) is data work, not engineering — it lives outside this plan. Treat Part 1 as "production-shaped extractor modules, ready to be hooked into ingestion" rather than "in production."
+
+Surface to the user before proceeding to Part 2 — Part 2 depends on the base spec (`workspaces`, `workspace_viewers`, `workspace_events`) being in place.
 
 ---
 
@@ -1405,29 +1650,40 @@ Append to `tests/proposal_assist/test_models.py`:
 from datetime import datetime, timezone
 
 
-def test_workspace_has_phase_columns_with_defaults(db_session, sample_workspace):
-    # `sample_workspace` is a fixture added by base spec's test suite; reuse it.
-    # The workspace is created without explicit values for the new columns.
-    db_session.refresh(sample_workspace)
-    assert sample_workspace.current_phase == "setup"
-    assert sample_workspace.call_body_snapshot == ""
-    assert sample_workspace.profile_desc_snapshot == ""
-    assert isinstance(sample_workspace.snapshot_refreshed_at, datetime)
-    assert sample_workspace.rubric_criteria == []
-    assert sample_workspace.rubric_funder_notes is None
-    assert isinstance(sample_workspace.rubric_updated_at, datetime)
-    assert sample_workspace.section_extracts == {}
-    assert sample_workspace.review_runs_per_day_override is None
-    assert sample_workspace.review_dollar_cap_override is None
+def test_workspace_has_phase_columns_with_defaults(pg_session_factory):
+    from datetime import datetime
+
+    from call_monitor.db.models import Workspace
+    from tests.proposal_assist.conftest import make_owner_and_workspace
+
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        assert ws.current_phase == "setup"
+        assert ws.call_body_snapshot == ""
+        assert ws.profile_desc_snapshot == ""
+        assert isinstance(ws.snapshot_refreshed_at, datetime)
+        assert ws.rubric_criteria == []
+        assert ws.rubric_funder_notes is None
+        assert isinstance(ws.rubric_updated_at, datetime)
+        assert ws.section_extracts == {}
+        assert ws.review_runs_per_day_override is None
+        assert ws.review_dollar_cap_override is None
 
 
-def test_workspace_current_phase_rejects_bad_value(db_session, sample_workspace):
-    sample_workspace.current_phase = "not_a_phase"
-    with pytest.raises(Exception):
-        db_session.commit()
+def test_workspace_current_phase_rejects_bad_value(pg_session_factory):
+    from call_monitor.db.models import Workspace
+    from tests.proposal_assist.conftest import make_owner_and_workspace
+
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        ws.current_phase = "not_a_phase"
+        with pytest.raises(Exception):
+            s.commit()
 ```
 
-If the base spec hasn't yet shipped a `sample_workspace` fixture, define one in `tests/proposal_assist/conftest.py` that creates a `Workspace` row owned by a fresh User.
+Add `make_owner_and_workspace` to `tests/proposal_assist/conftest.py` per the canonical pattern in the conventions section.
 
 - [ ] **Step 2: Run to confirm failure**
 
@@ -1614,29 +1870,32 @@ git commit -m "feat(proposal-assist): add phase + snapshot + rubric + section_ex
 from call_monitor.db.models import PhaseApproval
 
 
-def test_phase_approval_can_be_inserted(db_session, sample_workspace, sample_user):
-    pa = PhaseApproval(
-        workspace_id=sample_workspace.id,
-        phase="spec",
-        approving_user_id=sample_user.id,
-        approved_artifact_sha="a" * 40,
-    )
-    db_session.add(pa)
-    db_session.commit()
-    assert pa.id is not None
-    assert isinstance(pa.approved_at, datetime)
+def test_phase_approval_can_be_inserted(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
+
+    with pg_session_factory() as s:
+        uid, wsid = make_owner_and_workspace(s)
+        pa = PhaseApproval(
+            workspace_id=wsid, phase="spec",
+            approving_user_id=uid, approved_artifact_sha="a" * 40,
+        )
+        s.add(pa)
+        s.commit()
+        assert pa.id is not None
+        assert isinstance(pa.approved_at, datetime)
 
 
-def test_phase_approval_phase_check(db_session, sample_workspace, sample_user):
-    pa = PhaseApproval(
-        workspace_id=sample_workspace.id,
-        phase="not_a_phase",
-        approving_user_id=sample_user.id,
-        approved_artifact_sha="a" * 40,
-    )
-    db_session.add(pa)
-    with pytest.raises(Exception):
-        db_session.commit()
+def test_phase_approval_phase_check(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
+
+    with pg_session_factory() as s:
+        uid, wsid = make_owner_and_workspace(s)
+        s.add(PhaseApproval(
+            workspace_id=wsid, phase="not_a_phase",
+            approving_user_id=uid, approved_artifact_sha="a" * 40,
+        ))
+        with pytest.raises(Exception):
+            s.commit()
 ```
 
 - [ ] **Step 2: Run to confirm failure** — `ImportError`.
@@ -1759,23 +2018,27 @@ git commit -m "feat(proposal-assist): add phase_approvals table"
 from call_monitor.db.models import WorkspaceSetupJob
 
 
-def test_workspace_setup_job_unique_per_workspace(db_session, sample_workspace):
-    job1 = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
-    db_session.add(job1)
-    db_session.commit()
+def test_workspace_setup_job_unique_per_workspace(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
 
-    job2 = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
-    db_session.add(job2)
-    with pytest.raises(Exception):
-        db_session.commit()
-    db_session.rollback()
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="queued"))
+        s.commit()
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="queued"))
+        with pytest.raises(Exception):
+            s.commit()
+        s.rollback()
 
 
-def test_workspace_setup_job_status_check(db_session, sample_workspace):
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="bogus")
-    db_session.add(job)
-    with pytest.raises(Exception):
-        db_session.commit()
+def test_workspace_setup_job_status_check(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
+
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="bogus"))
+        with pytest.raises(Exception):
+            s.commit()
 ```
 
 - [ ] **Step 2: Run to confirm failure** — `ImportError`.
@@ -1893,69 +2156,50 @@ git commit -m "feat(proposal-assist): add workspace_setup_jobs table"
 from call_monitor.db.models import ReviewRun, ReviewRunItem
 
 
-def test_review_run_active_lock_blocks_double_queued(
-    db_session, sample_workspace
-):
-    rr1 = ReviewRun(
-        workspace_id=sample_workspace.id,
-        status="queued",
-        draft_sha="d" * 40,
-    )
-    db_session.add(rr1)
-    db_session.commit()
+def test_review_run_active_lock_blocks_double_queued(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
 
-    rr2 = ReviewRun(
-        workspace_id=sample_workspace.id,
-        status="queued",
-        draft_sha="d" * 40,
-    )
-    db_session.add(rr2)
-    with pytest.raises(Exception):
-        db_session.commit()
-    db_session.rollback()
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(ReviewRun(workspace_id=wsid, status="queued",
+                        draft_sha="d" * 40))
+        s.commit()
+        s.add(ReviewRun(workspace_id=wsid, status="queued",
+                        draft_sha="d" * 40))
+        with pytest.raises(Exception):
+            s.commit()
+        s.rollback()
 
 
-def test_review_run_active_lock_allows_after_terminal(
-    db_session, sample_workspace
-):
-    rr1 = ReviewRun(
-        workspace_id=sample_workspace.id,
-        status="done",  # terminal
-        draft_sha="d" * 40,
-    )
-    db_session.add(rr1)
-    db_session.commit()
+def test_review_run_active_lock_allows_after_terminal(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
 
-    rr2 = ReviewRun(
-        workspace_id=sample_workspace.id,
-        status="queued",
-        draft_sha="d" * 40,
-    )
-    db_session.add(rr2)
-    db_session.commit()  # should NOT raise
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(ReviewRun(workspace_id=wsid, status="done",
+                        draft_sha="d" * 40))
+        s.commit()
+        s.add(ReviewRun(workspace_id=wsid, status="queued",
+                        draft_sha="d" * 40))
+        s.commit()  # should NOT raise
 
 
-def test_review_run_item_kind_unique_per_run(db_session, sample_workspace):
-    rr = ReviewRun(
-        workspace_id=sample_workspace.id,
-        status="running",
-        draft_sha="d" * 40,
-    )
-    db_session.add(rr)
-    db_session.commit()
+def test_review_run_item_kind_unique_per_run(pg_session_factory):
+    from tests.proposal_assist.conftest import make_owner_and_workspace
 
-    item1 = ReviewRunItem(
-        review_run_id=rr.id, kind="fit_check", status="queued",
-    )
-    db_session.add(item1)
-    db_session.commit()
-
-    item2 = ReviewRunItem(
-        review_run_id=rr.id, kind="fit_check", status="queued",
-    )
-    db_session.add(item2)
-    with pytest.raises(Exception):
-        db_session.commit()
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        rr = ReviewRun(workspace_id=wsid, status="running",
+                       draft_sha="d" * 40)
+        s.add(rr)
+        s.commit()
+        s.add(ReviewRunItem(review_run_id=rr.id, kind="fit_check",
+                            status="queued"))
+        s.commit()
+        s.add(ReviewRunItem(review_run_id=rr.id, kind="fit_check",
+                            status="queued"))
+        with pytest.raises(Exception):
+            s.commit()
 ```
 
 - [ ] **Step 2: Run to confirm failure** — `ImportError`.
@@ -2204,100 +2448,118 @@ from call_monitor.proposal_assist.phases.setup import (
 )
 
 
-def test_claim_next_returns_oldest_queued(db_session, sample_workspace):
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
-    db_session.add(job)
-    db_session.commit()
-
-    claimed = claim_next_setup_job(session=db_session)
-    db_session.commit()
-
-    assert claimed is not None
-    assert claimed.id == job.id
-    assert claimed.status == "running"
-    assert claimed.started_at is not None
+from tests.proposal_assist.conftest import make_owner_and_workspace
 
 
-def test_claim_next_returns_none_when_nothing_queued(db_session):
-    assert claim_next_setup_job(session=db_session) is None
+def test_claim_next_returns_oldest_queued(pg_session_factory):
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        job = WorkspaceSetupJob(workspace_id=wsid, status="queued")
+        s.add(job)
+        s.commit()
+        claimed = claim_next_setup_job(session=s)
+        s.commit()
+        assert claimed is not None
+        assert claimed.id == job.id
+        assert claimed.status == "running"
+        assert claimed.started_at is not None
+
+
+def test_claim_next_returns_none_when_nothing_queued(pg_session_factory):
+    with pg_session_factory() as s:
+        assert claim_next_setup_job(session=s) is None
 
 
 def test_phase0_worker_transitions_to_done_on_success(
-    db_session, sample_workspace, monkeypatch
+    pg_session_factory, monkeypatch, tmp_path,
 ):
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
-    db_session.add(job)
-    db_session.commit()
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="queued"))
+        s.commit()
 
-    worker = Phase0Worker(
-        session=db_session,
-        client=Mock(model="claude-opus-4-7"),
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root="/tmp/proposal_assist_test_repos",
-    )
+        worker = Phase0Worker(
+            session=s,
+            client=Mock(model="claude-opus-4-7"),
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
+        # Stub the long sub-steps so this test isolates the lifecycle wrapper.
+        monkeypatch.setattr(worker, "_run_steps", lambda job: None)
 
-    # Stub the long sub-steps so this test isolates the lifecycle wrapper.
-    monkeypatch.setattr(worker, "_run_steps", lambda job: None)
-
-    worker.run_one()
-    db_session.refresh(job)
-    assert job.status == "done"
-    assert job.completed_at is not None
+        worker.run_one()
+        s.expire_all()
+        job = (
+            s.query(WorkspaceSetupJob)
+            .filter(WorkspaceSetupJob.workspace_id == wsid).one()
+        )
+        assert job.status == "done"
+        assert job.completed_at is not None
 
 
 def test_phase0_worker_increments_attempts_and_marks_failed_after_5(
-    db_session, sample_workspace, monkeypatch
+    pg_session_factory, monkeypatch, tmp_path,
 ):
-    job = WorkspaceSetupJob(
-        workspace_id=sample_workspace.id, status="queued", attempts=4,
-    )
-    db_session.add(job)
-    db_session.commit()
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(WorkspaceSetupJob(
+            workspace_id=wsid, status="queued", attempts=4,
+        ))
+        s.commit()
 
-    worker = Phase0Worker(
-        session=db_session, client=Mock(model="m"),
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root="/tmp/proposal_assist_test_repos",
-    )
+        worker = Phase0Worker(
+            session=s, client=Mock(model="m"),
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
 
-    def boom(_job):
-        raise RuntimeError("transient")
-    monkeypatch.setattr(worker, "_run_steps", boom)
+        def boom(_job):
+            raise RuntimeError("transient")
+        monkeypatch.setattr(worker, "_run_steps", boom)
 
-    worker.run_one()
-    db_session.refresh(job)
-    assert job.status == "failed"
-    assert job.attempts == 5
-    assert "transient" in (job.last_error or "")
+        worker.run_one()
+        s.expire_all()
+        job = (
+            s.query(WorkspaceSetupJob)
+            .filter(WorkspaceSetupJob.workspace_id == wsid).one()
+        )
+        assert job.status == "failed"
+        assert job.attempts == 5
+        assert "transient" in (job.last_error or "")
 
 
 def test_phase0_worker_requeues_on_transient_failure_below_attempt_cap(
-    db_session, sample_workspace, monkeypatch
+    pg_session_factory, monkeypatch, tmp_path,
 ):
-    job = WorkspaceSetupJob(
-        workspace_id=sample_workspace.id, status="queued", attempts=0,
-    )
-    db_session.add(job)
-    db_session.commit()
+    with pg_session_factory() as s:
+        _, wsid = make_owner_and_workspace(s)
+        s.add(WorkspaceSetupJob(
+            workspace_id=wsid, status="queued", attempts=0,
+        ))
+        s.commit()
 
-    worker = Phase0Worker(
-        session=db_session, client=Mock(model="m"),
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root="/tmp/proposal_assist_test_repos",
-    )
+        worker = Phase0Worker(
+            session=s, client=Mock(model="m"),
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
 
-    def boom(_job):
-        raise RuntimeError("transient")
-    monkeypatch.setattr(worker, "_run_steps", boom)
+        def boom(_job):
+            raise RuntimeError("transient")
+        monkeypatch.setattr(worker, "_run_steps", boom)
 
-    worker.run_one()
-    db_session.refresh(job)
-    assert job.status == "queued"  # back to queued for next tick
-    assert job.attempts == 1
-    assert "transient" in (job.last_error or "")
+        worker.run_one()
+        s.expire_all()
+        job = (
+            s.query(WorkspaceSetupJob)
+            .filter(WorkspaceSetupJob.workspace_id == wsid).one()
+        )
+        assert job.status == "queued"  # back to queued for next tick
+        assert job.attempts == 1
+        assert "transient" in (job.last_error or "")
 ```
 
 - [ ] **Step 2: Run to confirm failure** — `ModuleNotFoundError`.
@@ -2382,10 +2644,26 @@ class Phase0Worker:
         if job is None:
             return False
         self.session.commit()  # release the FOR UPDATE row lock early
+        job_id = job.id  # capture before potential rollback detaches `job`
 
         try:
             self._run_steps(job)
         except Exception as exc:
+            # CRITICAL: rollback any partial work (e.g. half-written extracts,
+            # filesystem writes excluded — git ops outside the txn are a
+            # known acceptable looseness, see Task 14). Without rollback we
+            # would commit destructive intermediate state alongside the new
+            # job-status row.
+            self.session.rollback()
+
+            # Re-fetch the job in a fresh transaction so we can write its
+            # failure state without depending on a now-detached instance.
+            job = self.session.get(WorkspaceSetupJob, job_id)
+            if job is None:
+                logger.error(
+                    "phase0 setup job %s vanished after rollback", job_id,
+                )
+                return True
             job.attempts += 1
             job.last_error = f"{type(exc).__name__}: {exc}"
             if job.attempts >= MAX_SETUP_ATTEMPTS:
@@ -2397,6 +2675,7 @@ class Phase0Worker:
                 )
             else:
                 job.status = "queued"
+                job.started_at = None  # ready to be re-claimed on next tick
                 logger.warning(
                     "phase0 setup job %s transient failure (attempt %d/%d): %s",
                     job.id, job.attempts, MAX_SETUP_ATTEMPTS, exc,
@@ -2410,6 +2689,10 @@ class Phase0Worker:
         if job.status == "running":
             job.status = "done"
             job.completed_at = datetime.now(timezone.utc)
+        elif job.status == "waiting_for_rubric_review":
+            # Yield: do NOT set completed_at; the rubric review endpoint
+            # will advance to 'done' when the owner confirms.
+            pass
         self.session.commit()
         return True
 
@@ -2444,78 +2727,86 @@ git commit -m "feat(proposal-assist): Phase 0 worker scaffold (claim + lifecycle
 
 - [ ] **Step 1: Append failing test**
 
-```python
-import os
-import subprocess
-
-from call_monitor.db.models import Workspace
-
-
-def test_phase0_steps_1_3_init_repo_and_snapshot(
-    db_session, sample_workspace, sample_call, sample_profile, tmp_path
-):
-    # arrange: link workspace to the sample call + profile
-    sample_workspace.call_id = sample_call.id
-    sample_workspace.profile_id = sample_profile.id
-    sample_workspace.call_body_snapshot = ""
-    sample_workspace.profile_desc_snapshot = ""
-    db_session.commit()
-
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="running")
-    db_session.add(job)
-    db_session.commit()
-
-    worker = Phase0Worker(
-        session=db_session,
-        client=Mock(model="claude-opus-4-7"),
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
-    )
-
-    worker._snapshot_and_init_repo(job)
-    db_session.commit()
-
-    # repo exists with three empty artifact files
-    repo_dir = tmp_path / "repos" / str(sample_workspace.id) / "repo"
-    assert (repo_dir / ".git").is_dir()
-    for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
-        assert (repo_dir / fname).is_file()
-        assert (repo_dir / fname).read_text() == ""
-
-    # one initial commit exists
-    out = subprocess.run(
-        ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
-        check=True, capture_output=True, text=True,
-    )
-    assert int(out.stdout.strip()) == 1
-
-    # snapshots populated
-    db_session.refresh(sample_workspace)
-    assert sample_call.full_text in sample_workspace.call_body_snapshot
-    assert sample_workspace.profile_desc_snapshot == sample_profile.description
-```
-
-Add the missing `sample_profile` fixture to `tests/proposal_assist/conftest.py`:
+First, add a profile-builder helper to `tests/proposal_assist/conftest.py`:
 
 ```python
-from call_monitor.db.models import Profile
-
-
-@pytest.fixture
-def sample_profile(db_session) -> Profile:
+def make_profile(session, *, name: str = "Test PI Profile") -> "Profile":
+    """Build a Profile owned by a fresh User. Real Profile requires
+    `kind: ProfileKind` and `created_by` FK — no `slug`, no top-level
+    is_active enforcement at constructor time (defaults to True)."""
+    from call_monitor.db.models import Profile, ProfileKind, User
+    u = User(email=f"profile-owner-{name}@ki.se")
+    session.add(u)
+    session.flush()
     p = Profile(
-        slug="test-profile",
-        name="Test PI Profile",
+        name=name,
+        kind=ProfileKind.GROUP,
         description="AI-assisted diagnosis of cancer biopsies, histopathology.",
-        is_active=True,
+        created_by=u.id,
     )
-    db_session.add(p)
-    db_session.commit()
+    session.add(p)
+    session.flush()
     return p
 ```
 
-(Adjust the Profile constructor to match your codebase — verify with `grep -n "class Profile" src/call_monitor/db/models.py`.)
+Now the failing test:
+
+```python
+import subprocess
+
+from sqlalchemy import select
+
+from call_monitor.db.models import Workspace
+from tests.proposal_assist.conftest import (
+    make_call, make_owner_and_workspace, make_profile,
+)
+
+
+def test_phase0_steps_1_3_init_repo_and_snapshot(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        profile = make_profile(s)
+        s.commit()
+        _, wsid = make_owner_and_workspace(
+            s, call_id=call.id, profile_id=profile.id,
+        )
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="running"))
+        s.commit()
+
+        worker = Phase0Worker(
+            session=s,
+            client=Mock(model="claude-opus-4-7"),
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        worker._snapshot_and_init_repo(job)
+        s.commit()
+
+        # repo exists with three empty artifact files
+        repo_dir = tmp_path / "repos" / str(wsid) / "repo"
+        assert (repo_dir / ".git").is_dir()
+        for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
+            assert (repo_dir / fname).is_file()
+            assert (repo_dir / fname).read_text() == ""
+
+        # one initial commit exists
+        out = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        assert int(out.stdout.strip()) == 1
+
+        # snapshots populated
+        ws = s.get(Workspace, wsid)
+        assert (call.full_text or "") in ws.call_body_snapshot
+        assert ws.profile_desc_snapshot == profile.description
+```
 
 - [ ] **Step 2: Run to confirm failure** — `AttributeError: '_snapshot_and_init_repo'`.
 
@@ -2621,91 +2912,101 @@ git commit -m "feat(proposal-assist): Phase 0 steps 1-3 (git init + snapshot cal
 ```python
 import json
 
+from sqlalchemy import select
+
 
 def test_phase0_step_4_copies_section_extracts_into_workspace(
-    db_session, sample_workspace, sample_call, tmp_path
+    pg_session_factory, tmp_path,
 ):
-    sample_workspace.call_id = sample_call.id
-    db_session.commit()
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="running")
-    db_session.add(job)
-    db_session.commit()
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        _, wsid = make_owner_and_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="running"))
+        s.commit()
 
-    client = Mock()
-    client.model = "claude-opus-4-7"
-    client.chat.return_value = {
-        "choices": [{"message": {"role": "assistant", "content": json.dumps({
-            "eligibility": "E", "scope": "S", "budget": "B",
-            "expected_outcomes": "O", "restrictions": "R", "mandatory": "M",
-        })}}],
-        "model": "claude-opus-4-7",
-    }
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        client.chat.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({
+                "eligibility": "E", "scope": "S", "budget": "B",
+                "expected_outcomes": "O", "restrictions": "R", "mandatory": "M",
+            })}}],
+            "model": "claude-opus-4-7",
+        }
 
-    worker = Phase0Worker(
-        session=db_session, client=client,
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
-    )
-    worker._ensure_section_extracts_snapshot(job)
-    db_session.commit()
-    db_session.refresh(sample_workspace)
-
-    assert set(sample_workspace.section_extracts.keys()) == {
-        "eligibility", "scope", "budget",
-        "expected_outcomes", "restrictions", "mandatory",
-    }
-    assert sample_workspace.section_extracts["eligibility"] == "E"
+        worker = Phase0Worker(
+            session=s, client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        worker._ensure_section_extracts_snapshot(job)
+        s.commit()
+        ws = s.get(Workspace, wsid)
+        assert set(ws.section_extracts.keys()) == {
+            "eligibility", "scope", "budget",
+            "expected_outcomes", "restrictions", "mandatory",
+        }
+        assert ws.section_extracts["eligibility"] == "E"
 
 
 def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
-    db_session, sample_workspace, sample_call, tmp_path
+    pg_session_factory, tmp_path,
 ):
     from call_monitor.db.models import WorkspaceEvent
 
-    sample_workspace.call_id = sample_call.id
-    db_session.commit()
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="running")
-    db_session.add(job)
-    db_session.commit()
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        _, wsid = make_owner_and_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="running"))
+        s.commit()
 
-    client = Mock()
-    client.model = "claude-opus-4-7"
-    client.chat.return_value = {
-        "choices": [{"message": {"role": "assistant", "content": json.dumps({
-            "criteria": [{"name": "X", "description": "x",
-                          "weight": 1.0, "scale_max": 5}],
-            "funder_notes": "see FAQ",
-        })}}],
-        "model": "claude-opus-4-7",
-    }
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        client.chat.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({
+                "criteria": [{"name": "X", "description": "x",
+                              "weight": 1.0, "scale_max": 5}],
+                "funder_notes": "see FAQ",
+            })}}],
+            "model": "claude-opus-4-7",
+        }
 
-    worker = Phase0Worker(
-        session=db_session, client=client,
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
-    )
-    worker._ensure_rubric_snapshot(job)
-    db_session.commit()
-    db_session.refresh(sample_workspace)
-
-    assert len(sample_workspace.rubric_criteria) == 1
-    assert sample_workspace.rubric_criteria[0]["name"] == "X"
-    assert sample_workspace.rubric_funder_notes == "see FAQ"
-
-    # Audit event: rubric_initialized written exactly once with the seed payload.
-    events = (
-        db_session.query(WorkspaceEvent)
-        .filter(
-            WorkspaceEvent.workspace_id == sample_workspace.id,
-            WorkspaceEvent.kind == "rubric_initialized",
+        worker = Phase0Worker(
+            session=s, client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
         )
-        .all()
-    )
-    assert len(events) == 1
-    assert events[0].payload["criteria"][0]["name"] == "X"
-    assert events[0].payload["funder_notes"] == "see FAQ"
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        worker._ensure_rubric_snapshot(job)
+        s.commit()
+        ws = s.get(Workspace, wsid)
+        assert len(ws.rubric_criteria) == 1
+        assert ws.rubric_criteria[0]["name"] == "X"
+        assert ws.rubric_funder_notes == "see FAQ"
+
+        # Audit event: rubric_initialized written exactly once with the seed payload.
+        events = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "rubric_initialized",
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].payload["criteria"][0]["name"] == "X"
+        assert events[0].payload["funder_notes"] == "see FAQ"
 ```
 
 (Adjust `WorkspaceEvent` constructor / payload-column name to match base spec's actual model — verify with `grep -n "class WorkspaceEvent" src/call_monitor/db/models.py`.)
@@ -2809,43 +3110,48 @@ git commit -m "feat(proposal-assist): Phase 0 steps 4-5 (extracts + rubric snaps
 
 ```python
 def test_phase0_yields_to_waiting_for_rubric_review(
-    db_session, sample_workspace, sample_call, tmp_path
+    pg_session_factory, tmp_path,
 ):
-    sample_workspace.call_id = sample_call.id
-    db_session.commit()
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
-    db_session.add(job)
-    db_session.commit()
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        _, wsid = make_owner_and_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="queued"))
+        s.commit()
 
-    client = Mock()
-    client.model = "claude-opus-4-7"
-    # Two chat calls expected: sections + rubric.
-    client.chat.side_effect = [
-        {"choices": [{"message": {"role": "assistant", "content": json.dumps(
-            {s: f"x_{s}" for s in (
-                "eligibility","scope","budget",
-                "expected_outcomes","restrictions","mandatory")}
-        )}}], "model": "claude-opus-4-7"},
-        {"choices": [{"message": {"role": "assistant", "content": json.dumps({
-            "criteria": [{"name": "C", "description": "c",
-                          "weight": 1.0, "scale_max": 5}],
-            "funder_notes": "",
-        })}}], "model": "claude-opus-4-7"},
-    ]
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        # Two chat calls expected: sections + rubric.
+        client.chat.side_effect = [
+            {"choices": [{"message": {"role": "assistant", "content": json.dumps(
+                {sec: f"x_{sec}" for sec in (
+                    "eligibility","scope","budget",
+                    "expected_outcomes","restrictions","mandatory")}
+            )}}], "model": "claude-opus-4-7"},
+            {"choices": [{"message": {"role": "assistant", "content": json.dumps({
+                "criteria": [{"name": "C", "description": "c",
+                              "weight": 1.0, "scale_max": 5}],
+                "funder_notes": "",
+            })}}], "model": "claude-opus-4-7"},
+        ]
 
-    worker = Phase0Worker(
-        session=db_session, client=client,
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
-    )
-    worker.run_one()
-    db_session.refresh(job)
-    db_session.refresh(sample_workspace)
-
-    assert job.status == "waiting_for_rubric_review"
-    assert job.completed_at is None
-    assert sample_workspace.current_phase == "setup"
+        worker = Phase0Worker(
+            session=s, client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
+        worker.run_one()
+        s.expire_all()
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        ws = s.get(Workspace, wsid)
+        assert job.status == "waiting_for_rubric_review"
+        assert job.completed_at is None
+        assert ws.current_phase == "setup"
 ```
 
 - [ ] **Step 2: Run to confirm failure** — job ends up in "done" not "waiting".
@@ -2870,30 +3176,7 @@ In `src/call_monitor/proposal_assist/phases/setup.py`, replace the `_run_steps` 
         # NOT setting completed_at — the job isn't terminal yet.
 ```
 
-Also update `run_one` to skip the "running → done" auto-promotion if `_run_steps` set the status to `waiting_for_rubric_review`. In `run_one`, replace:
-
-```python
-        if job.status == "running":
-            job.status = "done"
-            job.completed_at = datetime.now(timezone.utc)
-        self.session.commit()
-        return True
-```
-
-with:
-
-```python
-        if job.status == "running":
-            # _run_steps didn't transition explicitly — treat as terminal done.
-            job.status = "done"
-            job.completed_at = datetime.now(timezone.utc)
-        elif job.status == "waiting_for_rubric_review":
-            # Yield: do NOT set completed_at; the rubric review endpoint will
-            # advance to 'done' when the owner confirms.
-            pass
-        self.session.commit()
-        return True
-```
+(Task 13's `run_one` already handles the `waiting_for_rubric_review` branch — no further edit to `run_one` is needed here.)
 
 - [ ] **Step 4: Run tests**
 
@@ -2925,67 +3208,110 @@ git commit -m "feat(proposal-assist): Phase 0 step 6 (yield to waiting_for_rubri
 `tests/proposal_assist/test_rubric_review_endpoint.py`:
 
 ```python
+"""Owner-only rubric review endpoint. TestClient pattern mirrors
+tests/test_web_admin_digest_panel.py — see plan's 'Project Conventions
+Reference' for the auth shape."""
 import uuid
 
 import pytest
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 
+from call_monitor.auth.session_cookie import SessionSigner
+from call_monitor.db.models import User, Workspace, WorkspaceSetupJob
 from call_monitor.main import create_app
-from call_monitor.db.models import WorkspaceSetupJob
 
 
-@pytest.fixture
-def client(db_session):
-    # Use the project's existing auth-bypass / test client fixture pattern;
-    # this assumes create_app supports a test-mode flag. If not, adjust to
-    # match the existing pattern in tests/test_*.py.
-    app = create_app(test_mode=True)
-    return TestClient(app)
+def _build_app(monkeypatch, pg_url):
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    return create_app()
 
 
-def _login_as(client, user):
-    """Reuse the project's existing test-login helper. If one doesn't exist,
-    seed a session cookie matching what /login produces in test mode."""
-    # ... project-specific; e.g. client.post("/auth/test-login", json={"user_id": user.id})
-    pass
+def _authed_client(app, *, user_id: int) -> TestClient:
+    """Authenticated TestClient. Caller must client.__exit__ on cleanup
+    (we enter the context manager here to fire lifespan)."""
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    signer: SessionSigner = app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=user_id))
+    return client
+
+
+def _make_owner_and_workspace(session, *, owner_email: str = "owner@ki.se"):
+    """Create a User + a Workspace owned by them. Returns (user_id, workspace_id)
+    — IDs only so callers can use them after the session closes."""
+    owner = User(email=owner_email)
+    session.add(owner)
+    session.flush()
+    ws = Workspace(
+        owner_id=owner.id,
+        title="Test workspace",
+        rubric_criteria=[
+            {"name": "Excellence", "description": "x",
+             "weight": 1.0, "scale_max": 5},
+        ],
+    )
+    session.add(ws)
+    session.commit()
+    return owner.id, ws.id
 
 
 def test_rubric_review_get_returns_form_for_owner(
-    client, db_session, sample_workspace, sample_user
+    monkeypatch, pg_url, pg_session_factory,
 ):
-    sample_workspace.owner_id = sample_user.id
-    sample_workspace.rubric_criteria = [
-        {"name": "Excellence", "description": "x",
-         "weight": 1.0, "scale_max": 5},
-    ]
-    db_session.commit()
-    _login_as(client, sample_user)
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
 
-    resp = client.get(f"/workspaces/{sample_workspace.id}/rubric-review")
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/rubric-review")
+    finally:
+        client.__exit__(None, None, None)
     assert resp.status_code == 200
     assert "Excellence" in resp.text
 
 
 def test_rubric_review_get_returns_403_for_non_owner(
-    client, db_session, sample_workspace, sample_user, another_user
+    monkeypatch, pg_url, pg_session_factory,
 ):
-    sample_workspace.owner_id = another_user.id  # someone else owns it
-    db_session.commit()
-    _login_as(client, sample_user)
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        _, wsid = _make_owner_and_workspace(s, owner_email="owner@ki.se")
+        other = User(email="other@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
 
-    resp = client.get(f"/workspaces/{sample_workspace.id}/rubric-review")
+    client = _authed_client(app, user_id=other_id)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/rubric-review")
+    finally:
+        client.__exit__(None, None, None)
     assert resp.status_code == 403
 
 
 def test_rubric_review_get_returns_404_for_missing_workspace(
-    client, sample_user
+    monkeypatch, pg_url, pg_session_factory,
 ):
-    _login_as(client, sample_user)
-    resp = client.get(f"/workspaces/{uuid.uuid4()}/rubric-review")
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="x@ki.se")
+        s.add(u)
+        s.commit()
+        uid = u.id
+
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{uuid.uuid4()}/rubric-review")
+    finally:
+        client.__exit__(None, None, None)
     assert resp.status_code == 404
 ```
 
-Note: this task assumes the existing auth/login test pattern (the project uses magic links). Read `tests/test_*.py` for the convention before writing `_login_as`.
+Note: the `Workspace` model (with `owner_id`, `title`, `rubric_criteria`) is added by the base spec / earlier tasks in this plan. If `Workspace` doesn't yet exist when running this task, surface back to the user — Part 2 ordering requires the workspace columns from Task 9 to be in place first.
 
 - [ ] **Step 2: Run to confirm failure**
 
@@ -2993,26 +3319,39 @@ Note: this task assumes the existing auth/login test pattern (the project uses m
 
 Create `src/call_monitor/proposal_assist/web/__init__.py` (empty).
 
-Create `src/call_monitor/proposal_assist/web/rubric_review.py`:
+Create `src/call_monitor/proposal_assist/web/rubric_review.py`. The endpoint reads its session factory and templates instance from `app.state` (set up during `create_app()`); this is the same pattern the existing routes use — see `src/call_monitor/main.py` for where `app.state.session_factory` and the templates env get stored.
 
 ```python
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from call_monitor.auth.dependencies import get_current_user
 from call_monitor.db.models import Workspace
-# Reuse the project's existing auth + session dependencies.
-from call_monitor.web.auth import get_current_user  # adjust path to match project
-from call_monitor.db.session import get_db_session   # adjust path to match project
+from call_monitor.db.session import get_db_dependency
 
 router = APIRouter(prefix="/workspaces", tags=["proposal-assist"])
 
 
-def _require_owner(*, workspace_id: uuid.UUID, user, session: Session) -> Workspace:
+def _templates() -> Jinja2Templates:
+    """Module-local Jinja2 env. Resolves the templates directory the same way
+    main.py does (the `templates/` sibling of the app package). Re-using the
+    app's central env via app.state would couple this router to FastAPI app
+    construction in a way that complicates testing; an independent env is
+    fine because both envs read the same on-disk templates directory."""
+    templates_dir = Path(__file__).resolve().parents[3] / "web" / "templates"
+    return Jinja2Templates(directory=str(templates_dir))
+
+
+def _require_owner(
+    *, workspace_id: uuid.UUID, user, session: Session,
+) -> Workspace:
     ws = session.get(Workspace, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
@@ -3024,6 +3363,16 @@ def _require_owner(*, workspace_id: uuid.UUID, user, session: Session) -> Worksp
     return ws
 
 
+def _session_dep(request: Request):
+    """Resolve the per-request session dependency from the app's factory.
+
+    `get_db_dependency` is a factory that returns the actual dependency
+    callable; we wire it via app.state to avoid a global at import time.
+    """
+    factory = request.app.state.session_factory
+    yield from get_db_dependency(factory)()
+
+
 @router.get(
     "/{workspace_id}/rubric-review",
     response_class=HTMLResponse,
@@ -3032,18 +3381,20 @@ def get_rubric_review(
     workspace_id: uuid.UUID,
     request: Request,
     user = Depends(get_current_user),
-    session: Session = Depends(get_db_session),
+    session: Session = Depends(_session_dep),
 ):
-    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
-    # Reuse the project's existing Jinja2Templates instance.
-    from call_monitor.web.templates import templates  # adjust path to match
-    return templates.TemplateResponse(
+    ws = _require_owner(
+        workspace_id=workspace_id, user=user, session=session,
+    )
+    return _templates().TemplateResponse(
         request,
         "proposal_assist/rubric_review.html",
         {"workspace": ws, "criteria": ws.rubric_criteria,
          "funder_notes": ws.rubric_funder_notes or ""},
     )
 ```
+
+**Verify `app.state.session_factory` exists.** If `create_app()` doesn't currently expose the session factory on `app.state`, the simplest patch is to add `app.state.session_factory = session_factory` inside the existing `create_app()` body — there's already an `app.state.session_signer` assignment to model after. If `session_factory` isn't constructible inside `create_app()` either (i.e. the existing app uses a different DI shape), surface back to the user before continuing.
 
 Create `src/call_monitor/web/templates/proposal_assist/rubric_review.html`:
 
@@ -3128,111 +3479,136 @@ git commit -m "feat(proposal-assist): rubric review GET endpoint (owner-only)"
 
 ```python
 def test_rubric_review_post_writes_edited_event_and_advances_phase(
-    client, db_session, sample_workspace, sample_user
+    monkeypatch, pg_url, pg_session_factory,
 ):
     from call_monitor.db.models import WorkspaceEvent
 
-    sample_workspace.owner_id = sample_user.id
-    sample_workspace.rubric_criteria = [
-        {"name": "Old", "description": "old", "weight": 1.0, "scale_max": 5},
-    ]
-    sample_workspace.rubric_funder_notes = ""
-    sample_workspace.current_phase = "setup"
-    db_session.commit()
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+        # Override rubric/criteria to a known starting state and put the
+        # workspace in setup with a waiting job.
+        ws = s.get(Workspace, wsid)
+        ws.rubric_criteria = [
+            {"name": "Old", "description": "old",
+             "weight": 1.0, "scale_max": 5},
+        ]
+        ws.rubric_funder_notes = ""
+        ws.current_phase = "setup"
+        s.add(WorkspaceSetupJob(
+            workspace_id=wsid, status="waiting_for_rubric_review",
+        ))
+        s.commit()
 
-    job = WorkspaceSetupJob(
-        workspace_id=sample_workspace.id,
-        status="waiting_for_rubric_review",
-    )
-    db_session.add(job)
-    db_session.commit()
-
-    _login_as(client, sample_user)
-    resp = client.post(
-        f"/workspaces/{sample_workspace.id}/rubric-review",
-        data={
-            "criteria[0][name]": "New",
-            "criteria[0][description]": "new",
-            "criteria[0][weight]": "1.0",
-            "criteria[0][scale_max]": "5",
-            "funder_notes": "updated",
-        },
-    )
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "New",
+                "criteria[0][description]": "new",
+                "criteria[0][weight]": "1.0",
+                "criteria[0][scale_max]": "5",
+                "funder_notes": "updated",
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
     assert resp.status_code == 200
 
-    db_session.refresh(sample_workspace)
-    assert sample_workspace.rubric_criteria[0]["name"] == "New"
-    assert sample_workspace.rubric_funder_notes == "updated"
-    assert sample_workspace.current_phase == "spec"
-
-    db_session.refresh(job)
-    assert job.status == "done"
-    assert job.completed_at is not None
-
-    edits = (
-        db_session.query(WorkspaceEvent)
-        .filter(
-            WorkspaceEvent.workspace_id == sample_workspace.id,
-            WorkspaceEvent.kind == "rubric_edited",
-        )
-        .all()
-    )
-    assert len(edits) == 1
-    assert edits[0].payload["old_criteria"][0]["name"] == "Old"
-    assert edits[0].payload["new_criteria"][0]["name"] == "New"
-    assert edits[0].payload["edited_by_user_id"] == sample_user.id
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wsid)
+        assert ws.rubric_criteria[0]["name"] == "New"
+        assert ws.rubric_funder_notes == "updated"
+        assert ws.current_phase == "spec"
+        job = s.execute(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        ).scalar_one()
+        assert job.status == "done"
+        assert job.completed_at is not None
+        edits = s.execute(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "rubric_edited",
+            )
+        ).scalars().all()
+        assert len(edits) == 1
+        assert edits[0].payload["old_criteria"][0]["name"] == "Old"
+        assert edits[0].payload["new_criteria"][0]["name"] == "New"
+        assert edits[0].payload["edited_by_user_id"] == uid
 
 
 def test_rubric_review_post_confirm_without_edits_still_advances_phase(
-    client, db_session, sample_workspace, sample_user
+    monkeypatch, pg_url, pg_session_factory,
 ):
-    sample_workspace.owner_id = sample_user.id
-    sample_workspace.rubric_criteria = [
-        {"name": "X", "description": "x", "weight": 1.0, "scale_max": 5},
-    ]
-    sample_workspace.current_phase = "setup"
-    db_session.commit()
-    job = WorkspaceSetupJob(
-        workspace_id=sample_workspace.id,
-        status="waiting_for_rubric_review",
-    )
-    db_session.add(job)
-    db_session.commit()
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        ws.rubric_criteria = [
+            {"name": "X", "description": "x",
+             "weight": 1.0, "scale_max": 5},
+        ]
+        ws.current_phase = "setup"
+        s.add(WorkspaceSetupJob(
+            workspace_id=wsid, status="waiting_for_rubric_review",
+        ))
+        s.commit()
 
-    _login_as(client, sample_user)
-    # Resubmit identical criteria
-    resp = client.post(
-        f"/workspaces/{sample_workspace.id}/rubric-review",
-        data={
-            "criteria[0][name]": "X",
-            "criteria[0][description]": "x",
-            "criteria[0][weight]": "1.0",
-            "criteria[0][scale_max]": "5",
-            "funder_notes": "",
-        },
-    )
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "X",
+                "criteria[0][description]": "x",
+                "criteria[0][weight]": "1.0",
+                "criteria[0][scale_max]": "5",
+                "funder_notes": "",
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
     assert resp.status_code == 200
 
-    db_session.refresh(sample_workspace)
-    db_session.refresh(job)
-    assert sample_workspace.current_phase == "spec"
-    assert job.status == "done"
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wsid)
+        job = s.execute(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        ).scalar_one()
+        assert ws.current_phase == "spec"
+        assert job.status == "done"
 
 
 def test_rubric_review_post_returns_403_for_non_owner(
-    client, db_session, sample_workspace, sample_user, another_user
+    monkeypatch, pg_url, pg_session_factory,
 ):
-    sample_workspace.owner_id = another_user.id
-    db_session.commit()
-    _login_as(client, sample_user)
-    resp = client.post(
-        f"/workspaces/{sample_workspace.id}/rubric-review",
-        data={"criteria[0][name]": "X", "criteria[0][description]": "x",
-              "criteria[0][weight]": "1.0", "criteria[0][scale_max]": "5",
-              "funder_notes": ""},
-    )
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        _, wsid = _make_owner_and_workspace(s, owner_email="owner@ki.se")
+        other = User(email="other@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+
+    client = _authed_client(app, user_id=other_id)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={"criteria[0][name]": "X", "criteria[0][description]": "x",
+                  "criteria[0][weight]": "1.0", "criteria[0][scale_max]": "5",
+                  "funder_notes": ""},
+        )
+    finally:
+        client.__exit__(None, None, None)
     assert resp.status_code == 403
 ```
+
+Add `from sqlalchemy import select` and `from call_monitor.db.models import WorkspaceSetupJob` to the imports at the top of the test file if not already present.
 
 - [ ] **Step 2: Run to confirm failure** — endpoint returns 405 or doesn't exist.
 
@@ -3292,7 +3668,7 @@ async def post_rubric_review(
     workspace_id: uuid.UUID,
     request: Request,
     user = Depends(get_current_user),
-    session: Session = Depends(get_db_session),
+    session: Session = Depends(_session_dep),
 ):
     ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
 
@@ -3392,8 +3768,10 @@ Git operations run for real against a tmp_path repo root.
 import json
 from unittest.mock import Mock
 
-import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from call_monitor.auth.session_cookie import SessionSigner
 from call_monitor.db.models import (
     CallRubric,
     CallSectionExtract,
@@ -3401,8 +3779,12 @@ from call_monitor.db.models import (
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
+from call_monitor.main import create_app
 from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
 from call_monitor.proposal_assist.phases.setup import Phase0Worker
+from tests.proposal_assist.conftest import (
+    make_call, make_owner_and_workspace, make_profile,
+)
 
 
 def _section_envelope() -> dict:
@@ -3430,109 +3812,112 @@ def _rubric_envelope() -> dict:
 
 
 def test_phase0_happy_path_to_waiting_for_rubric_review(
-    db_session, sample_workspace, sample_call, sample_profile,
-    sample_user, tmp_path, client,
+    monkeypatch, pg_url, pg_session_factory, tmp_path,
 ):
-    # arrange
-    sample_workspace.owner_id = sample_user.id
-    sample_workspace.call_id = sample_call.id
-    sample_workspace.profile_id = sample_profile.id
-    db_session.commit()
-    job = WorkspaceSetupJob(workspace_id=sample_workspace.id, status="queued")
-    db_session.add(job)
-    db_session.commit()
+    # Phase 0 part: run the worker directly against the test DB.
+    with pg_session_factory() as s:
+        call = make_call(s)
+        profile = make_profile(s)
+        s.commit()
+        uid, wsid = make_owner_and_workspace(
+            s, call_id=call.id, profile_id=profile.id,
+        )
+        s.add(WorkspaceSetupJob(workspace_id=wsid, status="queued"))
+        s.commit()
+        call_id = call.id
 
-    llm = Mock()
-    llm.model = "claude-opus-4-7"
-    llm.chat.side_effect = [_section_envelope(), _rubric_envelope()]
+        llm = Mock()
+        llm.model = "claude-opus-4-7"
+        llm.chat.side_effect = [_section_envelope(), _rubric_envelope()]
 
-    worker = Phase0Worker(
-        session=db_session, client=llm,
-        extractor_version="sections-v1",
-        rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
-    )
+        worker = Phase0Worker(
+            session=s, client=llm,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspace_repo_root=str(tmp_path / "repos"),
+        )
+        processed = worker.run_one()
+        assert processed is True
 
-    # act: run Phase 0
-    processed = worker.run_one()
-    assert processed is True
+        s.expire_all()
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        ws = s.get(Workspace, wsid)
+        assert job.status == "waiting_for_rubric_review"
+        assert job.completed_at is None
+        assert ws.current_phase == "setup"
 
-    # assert: lifecycle pause + side effects
-    db_session.refresh(job)
-    db_session.refresh(sample_workspace)
-    assert job.status == "waiting_for_rubric_review"
-    assert job.completed_at is None
-    assert sample_workspace.current_phase == "setup"
+        # call template tables populated
+        assert s.query(CallSectionExtract).filter_by(
+            call_id=call_id).count() == 6
+        assert s.get(CallRubric, call_id) is not None
 
-    # call template tables populated
-    assert db_session.query(CallSectionExtract).filter_by(
-        call_id=sample_call.id).count() == 6
-    assert db_session.get(CallRubric, sample_call.id) is not None
+        # workspace snapshot populated
+        assert ws.call_body_snapshot != ""
+        assert ws.profile_desc_snapshot != ""
+        assert set(ws.section_extracts.keys()) == set(SECTION_NAMES)
+        assert len(ws.rubric_criteria) == 2
+        assert ws.rubric_funder_notes == "See FAQ."
 
-    # workspace snapshot populated
-    assert sample_workspace.call_body_snapshot != ""
-    assert sample_workspace.profile_desc_snapshot != ""
-    assert set(sample_workspace.section_extracts.keys()) == set(SECTION_NAMES)
-    assert len(sample_workspace.rubric_criteria) == 2
-    assert sample_workspace.rubric_funder_notes == "See FAQ."
+        # init event written
+        init_events = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "rubric_initialized",
+            )
+        ).all()
+        assert len(init_events) == 1
 
-    # init event written
-    init_events = db_session.query(WorkspaceEvent).filter_by(
-        workspace_id=sample_workspace.id,
-        kind="rubric_initialized",
-    ).all()
-    assert len(init_events) == 1
+        # repo on disk
+        repo_dir = tmp_path / "repos" / str(wsid) / "repo"
+        assert (repo_dir / "proposal-spec.md").exists()
+        assert (repo_dir / ".git").is_dir()
 
-    # repo on disk
-    repo_dir = tmp_path / "repos" / str(sample_workspace.id) / "repo"
-    assert (repo_dir / "proposal-spec.md").exists()
-    assert (repo_dir / ".git").is_dir()
+    # Endpoint part: spin up the FastAPI app and POST as the owner.
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    app = create_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    try:
+        signer: SessionSigner = app.state.session_signer
+        client.cookies.set("session", signer.make(user_id=uid))
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "Excellence",
+                "criteria[0][description]": "Scientific quality",
+                "criteria[0][weight]": "0.5",
+                "criteria[0][scale_max]": "5",
+                "criteria[1][name]": "Impact",
+                "criteria[1][description]": "Translational potential",
+                "criteria[1][weight]": "0.5",
+                "criteria[1][scale_max]": "5",
+                "funder_notes": "See FAQ.",
+            },
+        )
+        assert resp.status_code == 200
+    finally:
+        client.__exit__(None, None, None)
 
-    # === owner confirms rubric via the endpoint ===
-    _login_as(client, sample_user)
-    resp = client.post(
-        f"/workspaces/{sample_workspace.id}/rubric-review",
-        data={
-            "criteria[0][name]": "Excellence",
-            "criteria[0][description]": "Scientific quality",
-            "criteria[0][weight]": "0.5",
-            "criteria[0][scale_max]": "5",
-            "criteria[1][name]": "Impact",
-            "criteria[1][description]": "Translational potential",
-            "criteria[1][weight]": "0.5",
-            "criteria[1][scale_max]": "5",
-            "funder_notes": "See FAQ.",
-        },
-    )
-    assert resp.status_code == 200
-
-    db_session.refresh(sample_workspace)
-    db_session.refresh(job)
-    assert sample_workspace.current_phase == "spec"
-    assert job.status == "done"
-    assert job.completed_at is not None
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wsid)
+        job = s.scalar(
+            select(WorkspaceSetupJob).where(
+                WorkspaceSetupJob.workspace_id == wsid
+            )
+        )
+        assert ws.current_phase == "spec"
+        assert job.status == "done"
+        assert job.completed_at is not None
 ```
 
-Add an `another_user` fixture to `conftest.py` if not already present:
-
-```python
-@pytest.fixture
-def another_user(db_session) -> User:
-    from call_monitor.db.models import User
-    u = User(email="another@example.org", name="Another")
-    db_session.add(u)
-    db_session.commit()
-    return u
-
-
-@pytest.fixture
-def sample_user(db_session) -> User:
-    from call_monitor.db.models import User
-    u = User(email="owner@example.org", name="Owner")
-    db_session.add(u)
-    db_session.commit()
-    return u
-```
+Note: the `make_owner_and_workspace`, `make_call`, and `make_profile` helpers are defined in `tests/proposal_assist/conftest.py` per the Project Conventions Reference. No additional `sample_user` / `another_user` fixtures are needed in conftest — the helpers create them inline.
 
 - [ ] **Step 2: Run**
 
@@ -3590,12 +3975,20 @@ End state matches the goal: a workspace can be created, Phase 0 runs to the rubr
 
 ## Self-review notes (for the engineer running this plan)
 
-1. **`sample_workspace`, `sample_user`, `another_user`, `sample_profile` fixtures** — these reference base spec / project test conventions that may not yet exist in your branch. Verify against `tests/conftest.py` and `tests/test_*.py` before running; adapt to the existing pattern instead of inventing new fixtures.
+1. **`WorkspaceEvent` model shape** — the plan assumes a `workspaces`-FK + `kind` + `payload (jsonb)` columns. If base spec ships a different shape, the audit-event writes in Tasks 15 and 18 need re-shaping.
 
-2. **`get_current_user` / `get_db_session` / `templates` imports** — the paths shown (`call_monitor.web.auth`, `call_monitor.db.session`, `call_monitor.web.templates`) are best guesses based on FastAPI convention; verify with `grep -n "Depends.*current_user\|Jinja2Templates" src/call_monitor/`.
+2. **`app.state.session_factory`** — Tasks 17/18 assume `create_app()` puts the session factory on `app.state` next to the existing `session_signer`. If it doesn't, the simplest patch is a one-line addition inside `create_app()`; if the existing app uses a different DI shape, surface back to the user before continuing.
 
-3. **`WorkspaceEvent` model shape** — the plan assumes a `workspaces`-FK + `kind` + `payload (jsonb)` columns. If base spec ships a different shape, the audit-event writes in Tasks 15 and 18 need re-shaping.
+3. **Migration revision numbers** — `0012`–`0017` assume no other branch is also adding migrations after `0011`. If a concurrent branch has bumped past `0011`, renumber accordingly (and update `down_revision` chains).
 
-4. **`Source.kind` / `Profile.slug`** — the conftest fixtures use placeholder field names that match the spec but may not match the current models. Run `grep` and adjust before first test invocation.
+4. **Slice rename to `call_manager`** — base spec calls for a `call-monitor → call-manager` rename. This plan uses the un-renamed `src/call_monitor/proposal_assist/` paths. If the rename has happened by the time Part 2 starts, update all `call_monitor` imports to `call_manager`.
 
-5. **Migration revision numbers** — 0012–0017 assume no other branch is also adding migrations after 0011. If a concurrent branch has bumped past 0011, renumber accordingly (and update `down_revision` chains).
+---
+
+## Explicitly out of Slice A scope
+
+- **Manual-paste rubric fallback** (spec lines 290, 517 — "Permanent failure surfaces with option to manually paste rubric"; "user must paste rubric UI flag"). If the rubric extractor fails 5 times, `workspace_setup_jobs` ends in `failed` and the workspace cannot proceed. The recovery UX — a route that accepts user-pasted criteria + funder notes, validates the same shape the extractor outputs, writes them to `workspaces.rubric_criteria` + a `rubric_initialized` event, and advances Phase 0 to `done` — is a follow-on task. It is not blocked by Slice A; it can be added once an operator hits a real extractor failure. Track this as a known gap when surfacing Slice A completion to the user.
+
+- **APScheduler ingestion hook** — the freshness helpers from Task 7 are callable but not invoked at ingestion. Slice E (observability + ops hooks) owns wiring them into the existing 03:00 / 03:15 Stockholm cron ticks so newly-ingested calls get extracts + rubric without a workspace having to trigger them.
+
+- **Spec/Plan/Draft phase modules, Review fan-out, cost guardrails, MODIFIED/OUTDATED computation, rubric-edit settings UI** — Slices B / C / D / E respectively.
