@@ -403,3 +403,19 @@ class CallSectionExtract(Base):
     extracted_by_model: Mapped[str] = mapped_column(Text, nullable=False)
     extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
     source_text_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class CallRubric(Base):
+    __tablename__ = "call_rubrics"
+
+    call_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("calls.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    criteria: Mapped[list[dict]] = mapped_column(JSONB, nullable=False)
+    funder_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    extracted_by_model: Mapped[str] = mapped_column(Text, nullable=False)
+    extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_text_hash: Mapped[str] = mapped_column(Text, nullable=False)
