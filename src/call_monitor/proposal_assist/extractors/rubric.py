@@ -72,10 +72,7 @@ def extract_rubric(*, call_text: str, client: _Client) -> RubricPayload:
         ],
         response_format={"type": "json_object"},
     )
-    try:
-        content = envelope["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as e:
-        raise ValueError(f"unexpected envelope shape from LLM client: {e}") from e
+    content = envelope["choices"][0]["message"]["content"]
 
     try:
         parsed = json.loads(content)
