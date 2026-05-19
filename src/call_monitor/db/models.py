@@ -431,38 +431,55 @@ class Workspace(Base):
         ),
         Index(
             "ix_workspaces_owner_status",
-            "owner_id", "status",
+            "owner_id",
+            "status",
             postgresql_where=text("soft_deleted_at IS NULL"),
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     title: Mapped[str] = mapped_column(Text, nullable=False)
     owner_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id"), nullable=False,
+        BigInteger,
+        ForeignKey("users.id"),
+        nullable=False,
     )
     call_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("calls.id", ondelete="SET NULL"), nullable=True,
+        BigInteger,
+        ForeignKey("calls.id", ondelete="SET NULL"),
+        nullable=True,
     )
     profile_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True,
+        BigInteger,
+        ForeignKey("profiles.id", ondelete="SET NULL"),
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="drafting",
+        Text,
+        nullable=False,
+        server_default="drafting",
     )
     deadline: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 
@@ -480,15 +497,26 @@ class WorkspaceViewer(Base):
         primary_key=True,
     )
     added_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
 class WorkspaceEvent(Base):
     __tablename__ = "workspace_events"
+    __table_args__ = (
+        Index(
+            "ix_workspace_events_ws_created",
+            "workspace_id",
+            text("created_at DESC"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -497,7 +525,9 @@ class WorkspaceEvent(Base):
     )
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
     )
     actor_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -505,7 +535,9 @@ class WorkspaceEvent(Base):
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -520,7 +552,9 @@ class ChatTurn(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -533,7 +567,9 @@ class ChatTurn(Base):
     tokens_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -554,7 +590,9 @@ class TurnJob(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -569,21 +607,34 @@ class TurnJob(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 
 class ChatSummary(Base):
     __tablename__ = "chat_summaries"
+    __table_args__ = (
+        Index(
+            "ix_chat_summaries_ws_created",
+            "workspace_id",
+            text("created_at DESC"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -599,7 +650,9 @@ class ChatSummary(Base):
     tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -618,7 +671,9 @@ class ArtifactVersion(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -634,7 +689,9 @@ class ArtifactVersion(Base):
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -649,7 +706,9 @@ class Attachment(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -662,10 +721,14 @@ class Attachment(Base):
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id"), nullable=False,
+        BigInteger,
+        ForeignKey("users.id"),
+        nullable=False,
     )
     uploaded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -681,18 +744,23 @@ class AttachmentJob(Base):
             name="ck_attachment_jobs_kind",
         ),
         Index(
-            "ix_attachment_jobs_status_updated", "status", "updated_at",
+            "ix_attachment_jobs_status_updated",
+            "status",
+            "updated_at",
         ),
         Index(
             "uq_attachment_jobs_active",
-            "attachment_id", "kind",
+            "attachment_id",
+            "kind",
             unique=True,
             postgresql_where=text("status IN ('queued', 'running')"),
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -707,12 +775,18 @@ class AttachmentJob(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     attempts: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0"),
+        Integer,
+        nullable=False,
+        server_default=text("0"),
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
