@@ -2034,7 +2034,7 @@ uv run ruff check src/call_monitor/workspaces.py tests/proposal_assist/test_work
 ```bash
 git add src/call_monitor/workspaces.py tests/proposal_assist/test_workspaces.py
 git diff --cached --stat   # 2 files
-git commit -m "feat(base-spec): create_workspace() service — inserts row, enqueues Phase 0 job, writes audit event"
+git commit -m "feat(base-spec): create_workspace() service — inserts workspace row and writes 'created' audit event"
 ```
 
 ---

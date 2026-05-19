@@ -180,7 +180,7 @@ The shortest path to "an end-user can chat with the agent to draft a proposal" i
 
 **Goal:** Build the web UI for workspaces: list, create, view (chat + artifact panes), settings (viewer management, export), and the "Start drafting workspace" button on `/calls/<id>`.
 
-**End state:** A logged-in user can create a workspace from a call ranking, chat with the agent, see the artifact rendered as markdown (raw toggle, version selector, diff view, branch indicator), add a viewer, export the proposal as Word/PDF/markdown, and see disclosure banner + per-turn token banner.
+**End state:** A logged-in user can create a workspace from a call ranking, chat with the agent, see the artifact rendered as markdown (raw toggle, version selector, diff view), add a viewer, export the proposal as Word/PDF/markdown, and see disclosure banner + per-turn token banner.
 
 **Scope (in):**
 - `/workspaces` (list, filter by status)
@@ -220,7 +220,7 @@ The shortest path to "an end-user can chat with the agent to draft a proposal" i
 
 **Estimated tasks:** ~20–25.
 
-**Dependencies:** B1, B4 (turn machinery for the tool-result attachment-reference blocks).
+**Dependencies:** B1, B4 (turn machinery for the tool-result attachment-reference blocks), and **B5 for the agent-tool handlers** (`look_at_figure`, `read_preliminary_data`) which register through B5's tool surface. The upload/storage half + `describe_figure` background job are parallel-safe with B5.
 
 **File:** Not yet written.
 
