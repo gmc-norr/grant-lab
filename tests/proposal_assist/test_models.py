@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from call_monitor.db.models import CallSectionExtract
 from tests.proposal_assist.conftest import make_call
@@ -47,5 +48,5 @@ def test_call_section_extract_section_check_constraint(pg_session_factory):
                 source_text_hash="0" * 64,
             )
         )
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(IntegrityError):
             s.commit()

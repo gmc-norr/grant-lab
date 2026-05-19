@@ -382,6 +382,13 @@ class CallRankingCriterion(Base):
 
 class CallSectionExtract(Base):
     __tablename__ = "call_section_extracts"
+    __table_args__ = (
+        CheckConstraint(
+            "section IN ('eligibility','scope','budget',"
+            "'expected_outcomes','restrictions','mandatory')",
+            name="ck_call_section_extracts_section",
+        ),
+    )
 
     call_id: Mapped[int] = mapped_column(
         BigInteger,
