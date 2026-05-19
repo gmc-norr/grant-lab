@@ -88,10 +88,39 @@ def test_extract_rubric_raises_on_missing_required_criterion_fields():
         extract_rubric(call_text="dummy", client=client)
 
 
-def test_extract_rubric_raises_on_bad_envelope_shape():
+@pytest.mark.parametrize(
+    "bad_envelope,expected_inner_exc",
+    [
+        # Missing "choices" → KeyError on the first subscript.
+        ({}, KeyError),
+        # Empty choices list → IndexError on [0].
+        ({"choices": []}, IndexError),
+        # Non-subscriptable "choices" → TypeError on [0].
+        ({"choices": None}, TypeError),
+        # Empty message dict → KeyError on ["content"].
+        ({"choices": [{"message": {}}]}, KeyError),
+        # Non-subscriptable inner element → TypeError on ["message"].
+        ({"choices": [None]}, TypeError),
+    ],
+    ids=[
+        "missing-choices-key",
+        "empty-choices-list",
+        "choices-is-none",
+        "missing-content-key",
+        "choices-element-is-none",
+    ],
+)
+def test_extract_rubric_raises_on_bad_envelope_shape(
+    bad_envelope,
+    expected_inner_exc,
+):
+    """The envelope-shape guard wraps (KeyError, IndexError, TypeError) so
+    that a misbehaving client surfaces as ValueError. Each parametrized case
+    triggers a different one of those three inner exceptions."""
     client = Mock()
-    client.chat.return_value = {}  # missing "choices"
+    client.chat.return_value = bad_envelope
     client.model = "claude-opus-4-7"
 
-    with pytest.raises(ValueError, match="unexpected envelope shape"):
+    with pytest.raises(ValueError, match="unexpected envelope shape") as exc_info:
         extract_rubric(call_text="dummy", client=client)
+    assert isinstance(exc_info.value.__cause__, expected_inner_exc)

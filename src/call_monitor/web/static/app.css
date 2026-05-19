@@ -247,25 +247,20 @@ button.compact {
   line-height: 1.5;
   color: var(--pico-color);
 }
-/* Category palette — applied to the strong left border + the heading,
-   so the eye can scan to the categories most likely to be load-bearing
-   (deadline / eligibility / budget) without reading every body. */
+/* Category palette — applied only to the strong left rail. The h3 text
+   stays on var(--pico-color) so the heading contrast is whatever Pico's
+   theme already guarantees. Earlier rev colored the h3 too, but several
+   palette entries (#20c997, #fd7e14, #6c757d) fail WCAG AA against the
+   light-theme card background at 0.92rem, and dark-theme contrast was
+   uneven too. The rail color alone is enough for category scanning. */
 .analysis-note.cat-deadline    { border-left-color: var(--cm-deadline-soon); }
-.analysis-note.cat-deadline h3 { color: var(--cm-deadline-soon); }
-.analysis-note.cat-eligibility    { border-left-color: var(--cm-score-mid); }
-.analysis-note.cat-eligibility h3 { color: var(--cm-score-mid); }
+.analysis-note.cat-eligibility { border-left-color: var(--cm-score-mid); }
 .analysis-note.cat-budget      { border-left-color: var(--cm-score-strong); }
-.analysis-note.cat-budget h3   { color: var(--cm-score-strong); }
 .analysis-note.cat-team        { border-left-color: #0d6efd; }
-.analysis-note.cat-team h3     { color: #0d6efd; }
 .analysis-note.cat-ip          { border-left-color: #6f42c1; }
-.analysis-note.cat-ip h3       { color: #6f42c1; }
 .analysis-note.cat-data        { border-left-color: #20c997; }
-.analysis-note.cat-data h3     { color: #20c997; }
 .analysis-note.cat-evaluation  { border-left-color: #d63384; }
-.analysis-note.cat-evaluation h3 { color: #d63384; }
 .analysis-note.cat-process     { border-left-color: #6c757d; }
-.analysis-note.cat-process h3  { color: #6c757d; }
 .analysis-note.cat-other       { border-left-color: var(--pico-muted-border-color); }
 
 /* ===== Criterion breakdown on call detail ===== */
