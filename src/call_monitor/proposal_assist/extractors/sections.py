@@ -39,6 +39,9 @@ faithful extract, not a paraphrase. Each value: at most 1500 characters.
 
 
 class _Client(Protocol):
+    # `model` is not read by extract_sections itself, but the persistence
+    # caller (e.g. ensure_section_extracts_fresh) stamps it onto the
+    # call_section_extracts.extracted_by_model column.
     model: str
 
     def chat(
@@ -64,7 +67,10 @@ def extract_sections(*, call_text: str, client: _Client) -> dict[str, str]:
         ],
         response_format={"type": "json_object"},
     )
-    content = envelope["choices"][0]["message"]["content"]
+    try:
+        content = envelope["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError(f"unexpected envelope shape from LLM client: {e}") from e
 
     try:
         parsed = json.loads(content)

@@ -6,6 +6,7 @@ up-to-date before snapshotting them into the workspace.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Protocol
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -19,18 +20,36 @@ from call_monitor.proposal_assist.extractors.sections import (
 from call_monitor.proposal_assist.hashing import source_text_hash
 
 
+class LlmClient(Protocol):
+    """Minimum interface required by the freshness helpers.
+
+    Matches both call_monitor.ranking.anthropic_client.AnthropicClient
+    and the local Ollama client. The `model` attribute is stamped onto
+    the persisted row's `extracted_by_model` column.
+    """
+
+    model: str
+
+    def chat(
+        self,
+        *,
+        messages: list[dict],
+        response_format: dict | None = None,
+    ) -> dict: ...
+
+
 def ensure_section_extracts_fresh(
     *,
     session: Session,
     call: Call,
-    client,
+    client: LlmClient,
     extractor_version: str,
 ) -> None:
-    """Idempotent: if all six rows exist with matching `source_text_hash` AND
+    """Idempotent: if all len(SECTION_NAMES) rows exist with matching `source_text_hash` AND
     matching `extractor_version`, no LLM call is made. Otherwise the extractor
     is run **first** (so a transient LLM failure cannot wipe cached rows),
-    then prior rows are deleted and six fresh rows inserted in the same unit
-    of work.
+    then prior rows are deleted and len(SECTION_NAMES) fresh rows inserted in
+    the same unit of work.
 
     Caller commits. If the extractor raises, the caller's session should
     rollback — no destructive state has been written yet.
@@ -57,6 +76,7 @@ def ensure_section_extracts_fresh(
         session.execute(delete(CallSectionExtract).where(CallSectionExtract.call_id == call.id))
         # Flush so the DELETE lands before our INSERTs hit the PK constraint.
         session.flush()
+        # `existing` is now stale (rows deleted from DB); do not read it below.
 
     now = datetime.now(UTC)
     for section_name in SECTION_NAMES:
@@ -77,7 +97,7 @@ def ensure_rubric_fresh(
     *,
     session: Session,
     call: Call,
-    client,
+    client: LlmClient,
     extractor_version: str,
 ) -> None:
     """Idempotent: if the row exists with matching hash + version, no LLM

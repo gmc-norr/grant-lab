@@ -45,6 +45,9 @@ No prose around the JSON.
 
 
 class _Client(Protocol):
+    # `model` is not read by extract_rubric itself, but the persistence
+    # caller (e.g. ensure_rubric_fresh) stamps it onto the
+    # call_rubrics.extracted_by_model column.
     model: str
 
     def chat(
@@ -72,7 +75,10 @@ def extract_rubric(*, call_text: str, client: _Client) -> RubricPayload:
         ],
         response_format={"type": "json_object"},
     )
-    content = envelope["choices"][0]["message"]["content"]
+    try:
+        content = envelope["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError(f"unexpected envelope shape from LLM client: {e}") from e
 
     try:
         parsed = json.loads(content)

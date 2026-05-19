@@ -265,6 +265,9 @@ def test_ensure_rubric_fresh_skips_when_fresh(pg_session_factory):
 def test_ensure_rubric_fresh_preserves_existing_on_extractor_failure(
     pg_session_factory,
 ):
+    """Regression: a transient LLM failure must NOT wipe the previously-cached
+    rubric row. Extract-first ordering means the LLM call is attempted before
+    any DB mutation; on failure, the existing row is untouched."""
     good_client = Mock()
     good_client.chat.return_value = _rubric_envelope()
     good_client.model = "claude-opus-4-7"
