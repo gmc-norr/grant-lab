@@ -18,6 +18,8 @@
 
 - **rev2 (2026-05-19)** — Codex review fixed: test snippets now use the real `pg_session_factory` fixture (not the imaginary `db_session`); `Source`/`Profile` constructors match the actual models; Settings tests use the project's `_settings_env` env-var fixture; `ensure_section_extracts_fresh` reorders to "extract first, then atomically replace" so a transient LLM failure cannot wipe cached rows; `Phase0Worker.run_one` rolls back before mutating job status on the failure path; web-endpoint imports use the real paths (`call_monitor.auth.dependencies`, `call_monitor.db.session.get_db_dependency`, app-state `templates` and `session_signer`); TestClient pattern matches `tests/test_web_admin_digest_panel.py`; Task 8 milestone language softened (ingestion-tick integration is Slice E, not Slice A); manual-paste rubric fallback explicitly deferred (spec lines 290, 517).
 
+- **rev4 (2026-05-19)** — Codex round 3 fixed: scheduler registration converted to a zero-arg closure that captures `settings` + `session_factory` from `build_scheduler`'s scope (`add_job` no longer passes args the callable can't unpack); logger renamed to `_logger` to match `scheduler.py`'s convention; new `build_scheduler(..., start=False)` smoke test verifies the job lands with the right id + trigger and the closure is callable. `Phase0Worker._run_steps` patching switched from a direct class assignment (which leaked into the rest of the test session) to `monkeypatch.setattr(...)` with automatic teardown. `workspaces_dir` / `WORKSPACES_DIR` made an explicit Slice A setting (matches the name the base spec uses), with config tests; old `workspace_repo_root` references renamed everywhere. Project Conventions Reference updated to recommend `request.app.state.templates` instead of a module-local `Jinja2Templates` with hand-computed `parents[N]` directory math.
+
 - **rev3 (2026-05-19)** — Codex round 2 fixed: Phase 0 worker now wired into the existing APScheduler via a new Task 19 (registers an interval job + adds a `phase0_tick_seconds` setting); workspace-create enqueue called out as base-spec territory in the goal; Part 2 migration IDs (`0014`–`0017`) called out as placeholders with a discovery instruction at the top of Part 2; rubric-review GET handler dropped the broken `parents[3]` path math in favor of `request.app.state.templates`, with a new wire-up step that adds `app.state.templates` and `app.state.session_factory` to `create_app()`; POST handler dropped the unused `Form`/`RedirectResponse` imports and replaced the body-level meta-refresh with proper HX-Redirect (HTMX) / 303 (non-HTMX) handling (tests updated to `follow_redirects=False` + expect 303); file map no longer lists a non-existent `proposal_assist/db.py`; task range corrected from `9–26` to `9–21`; Part 1 milestone wording no longer claims "in production."
 
 ---
@@ -98,7 +100,7 @@ The client must be exited (`client.__exit__(None, None, None)`) after the test r
 
 - Auth dependency: `from call_monitor.auth.dependencies import get_current_user`
 - DB session dependency: `from call_monitor.db.session import get_db_dependency` — call as `Depends(get_db_dependency(app.state.session_factory))`, or store the session factory on `app.state` at startup and access it from a thin module-level helper.
-- Templates: `Jinja2Templates` is instantiated locally in `create_app()` (search `src/call_monitor/main.py` for the `templates = Jinja2Templates(...)` line). For new endpoints, the simplest pattern is to instantiate a module-local `Jinja2Templates(directory=TEMPLATES_DIR)` and pass `request` into `templates.TemplateResponse(request, ...)`. See `src/call_monitor/web/routes.py` or wherever the existing routes render HTML.
+- Templates: `Jinja2Templates` is instantiated locally inside `create_app()` (search `src/call_monitor/main.py` for the `templates = Jinja2Templates(...)` line). Tasks 17–18 (and any future endpoint) **stash it on `app.state.templates`** at startup and call `request.app.state.templates.TemplateResponse(request, ...)` from each handler. Do NOT spin up a second module-local `Jinja2Templates` with hand-computed `Path(__file__).parents[N]` directory math — both versions read the same on-disk directory, and a second instance is just one more thing to keep in sync.
 
 ### Session signer for cookie creation
 
@@ -2495,7 +2497,7 @@ def test_phase0_worker_transitions_to_done_on_success(
             client=Mock(model="claude-opus-4-7"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
         # Stub the long sub-steps so this test isolates the lifecycle wrapper.
         monkeypatch.setattr(worker, "_run_steps", lambda job: None)
@@ -2524,7 +2526,7 @@ def test_phase0_worker_increments_attempts_and_marks_failed_after_5(
             session=s, client=Mock(model="m"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
 
         def boom(_job):
@@ -2556,7 +2558,7 @@ def test_phase0_worker_requeues_on_transient_failure_below_attempt_cap(
             session=s, client=Mock(model="m"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
 
         def boom(_job):
@@ -2646,7 +2648,7 @@ class Phase0Worker:
     client: _AnthropicClientLike
     extractor_version: str
     rubric_extractor_version: str
-    workspace_repo_root: str
+    workspaces_dir: str
 
     def run_one(self) -> bool:
         """Claim one job, execute it, advance its status. Returns True if a
@@ -2790,7 +2792,7 @@ def test_phase0_steps_1_3_init_repo_and_snapshot(pg_session_factory, tmp_path):
             client=Mock(model="claude-opus-4-7"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
         job = s.scalar(
             select(WorkspaceSetupJob).where(
@@ -2844,7 +2846,7 @@ Inside `Phase0Worker`, add:
     )
 
     def _workspace_repo_dir(self, workspace_id) -> Path:
-        return Path(self.workspace_repo_root) / str(workspace_id) / "repo"
+        return Path(self.workspaces_dir) / str(workspace_id) / "repo"
 
     def _snapshot_and_init_repo(self, job: WorkspaceSetupJob) -> None:
         ws = self.session.get(Workspace, job.workspace_id)
@@ -2951,7 +2953,7 @@ def test_phase0_step_4_copies_section_extracts_into_workspace(
             session=s, client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
         job = s.scalar(
             select(WorkspaceSetupJob).where(
@@ -2995,7 +2997,7 @@ def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
             session=s, client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
         job = s.scalar(
             select(WorkspaceSetupJob).where(
@@ -3151,7 +3153,7 @@ def test_phase0_yields_to_waiting_for_rubric_review(
             session=s, client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
         worker.run_one()
         s.expire_all()
@@ -3776,7 +3778,12 @@ on a configurable cadence.
   `run_phase0_tick(session_factory, client_factory, settings)` driver
 - Test: `tests/proposal_assist/test_phase0_scheduler_tick.py`
 
-- [ ] **Step 1: Add the setting**
+- [ ] **Step 1: Add the settings**
+
+Two settings: the tick cadence and the workspaces directory. The directory
+name **`workspaces_dir` / `WORKSPACES_DIR`** matches the name the base spec
+uses (see [base spec line 370](../specs/2026-04-18-call-manager-proposal-assist-design.md#L370));
+keeping these aligned avoids a rename when base spec lands.
 
 In `Settings`:
 
@@ -3788,7 +3795,38 @@ In `Settings`:
                     "between workspace creation and rubric-review prompt; "
                     "raising it reduces idle DB churn when the queue is empty.",
     )
+    workspaces_dir: str = Field(
+        default="var/workspaces",
+        alias="WORKSPACES_DIR",
+        description="Filesystem root for per-workspace git repos. Each "
+                    "workspace gets var/workspaces/<uuid>/repo/. Must be "
+                    "writable, backed up, excluded from the docker image. "
+                    "Base spec [2026-04-18] owns this setting too; the alias "
+                    "matches so both sides see the same env var.",
+    )
 ```
+
+Add the corresponding test cases to `tests/proposal_assist/test_config.py`:
+
+```python
+def test_workspaces_dir_default(monkeypatch, _settings_env):
+    monkeypatch.delenv("WORKSPACES_DIR", raising=False)
+    assert Settings().workspaces_dir == "var/workspaces"
+
+
+def test_workspaces_dir_override(monkeypatch, _settings_env):
+    monkeypatch.setenv("WORKSPACES_DIR", "/srv/proposal-workspaces")
+    assert Settings().workspaces_dir == "/srv/proposal-workspaces"
+
+
+def test_phase0_tick_seconds_default(monkeypatch, _settings_env):
+    monkeypatch.delenv("PHASE0_TICK_SECONDS", raising=False)
+    assert Settings().phase0_tick_seconds == 30
+```
+
+If base spec has *already* added `workspaces_dir` to `Settings` by the time
+this task runs, drop the field addition (keep the test) and verify the
+existing definition uses the same default + alias.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -3809,7 +3847,11 @@ from tests.proposal_assist.conftest import (
 )
 
 
-def test_run_phase0_tick_drains_one_queued_job(pg_session_factory, tmp_path):
+def test_run_phase0_tick_drains_one_queued_job(
+    pg_session_factory, tmp_path, monkeypatch,
+):
+    from call_monitor.proposal_assist.phases.setup import Phase0Worker
+
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
@@ -3818,21 +3860,21 @@ def test_run_phase0_tick_drains_one_queued_job(pg_session_factory, tmp_path):
         s.commit()
 
     client = Mock(model="claude-opus-4-7")
-    # _run_steps stub keeps this test scoped to the driver wiring.
     captured: dict = {}
 
-    def fake_run_steps(worker, job):
+    def fake_run_steps(self, job):
         captured["worker_seen"] = True
 
-    from call_monitor.proposal_assist.phases.setup import Phase0Worker
-    Phase0Worker._run_steps = fake_run_steps  # type: ignore[method-assign]
+    # monkeypatch.setattr restores the original at test teardown, so the
+    # patched _run_steps does NOT leak into later tests in the same session.
+    monkeypatch.setattr(Phase0Worker, "_run_steps", fake_run_steps)
 
     run_phase0_tick(
         session_factory=pg_session_factory,
         client_factory=lambda: client,
         extractor_version="sections-v1",
         rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
+        workspaces_dir=str(tmp_path / "repos"),
     )
 
     with pg_session_factory() as s:
@@ -3852,7 +3894,7 @@ def test_run_phase0_tick_is_a_noop_when_queue_empty(pg_session_factory, tmp_path
         client_factory=lambda: Mock(model="m"),
         extractor_version="sections-v1",
         rubric_extractor_version="rubric-v1",
-        workspace_repo_root=str(tmp_path / "repos"),
+        workspaces_dir=str(tmp_path / "repos"),
     )
     # No assertion needed — absence of exception is the contract.
 ```
@@ -3873,7 +3915,7 @@ def run_phase0_tick(
     client_factory: Callable[[], _AnthropicClientLike],
     extractor_version: str,
     rubric_extractor_version: str,
-    workspace_repo_root: str,
+    workspaces_dir: str,
 ) -> None:
     """Scheduler-friendly tick: open one session, claim+drain at most one job.
 
@@ -3891,20 +3933,51 @@ def run_phase0_tick(
             client=client_factory(),
             extractor_version=extractor_version,
             rubric_extractor_version=rubric_extractor_version,
-            workspace_repo_root=workspace_repo_root,
+            workspaces_dir=workspaces_dir,
         )
         worker.run_one()
 ```
 
 - [ ] **Step 4: Register in `build_scheduler`**
 
-In `src/call_monitor/scheduler.py`, after the existing `sched.add_job(...)`
-calls for ingestion / ranking, add:
+In `src/call_monitor/scheduler.py`, inside the existing `build_scheduler`
+function, after the existing `sched.add_job(...)` calls for ingestion /
+ranking, add (note: the tick callable is a **closure** that captures
+`settings` and `session_factory` from the enclosing scope — APScheduler's
+`add_job` invokes the callable with no positional args by default):
 
 ```python
     # Phase 0 (proposal-assist) drain tick.
+    from call_monitor.proposal_assist.phases.setup import run_phase0_tick
+    from call_monitor.ranking.anthropic_client import AnthropicClient
+
+    def _phase0_tick() -> None:
+        """Closure: APScheduler calls this with no args. We capture the
+        settings + session factory from build_scheduler's scope, and lazily
+        construct an AnthropicClient per tick so a missing API key only
+        skips work (rather than crashing scheduler startup)."""
+        if not settings.anthropic_api_key:
+            _logger.info(
+                "phase0 tick skipped: ANTHROPIC_API_KEY not set"
+            )
+            return
+
+        def make_client():
+            return AnthropicClient(
+                api_key=settings.anthropic_api_key,
+                model=settings.proposal_assist_llm_model,
+            )
+
+        run_phase0_tick(
+            session_factory=session_factory,
+            client_factory=make_client,
+            extractor_version=settings.extractor_version,
+            rubric_extractor_version=settings.rubric_extractor_version,
+            workspaces_dir=settings.workspaces_dir,
+        )
+
     sched.add_job(
-        _phase0_tick_job,
+        _phase0_tick,
         trigger=IntervalTrigger(seconds=settings.phase0_tick_seconds),
         id="proposal_assist_phase0_tick",
         max_instances=1,        # single in-flight tick at a time
@@ -3912,57 +3985,73 @@ calls for ingestion / ranking, add:
     )
 ```
 
-And define `_phase0_tick_job` (at module scope, alongside the other job
-callables in this file):
+Use `_logger` (the module-level logger in `scheduler.py` is named with a
+leading underscore — verify with `grep -n "^_logger" src/call_monitor/scheduler.py`).
+
+If `build_scheduler` doesn't currently bind `settings` and `session_factory`
+as locals (some signatures pass individual fields like `ranking_tick_seconds`
+instead of the whole settings object), adapt the closure to capture whichever
+locals are actually available, OR add `settings` / `session_factory` as
+parameters to `build_scheduler`. Verify with `grep -n "def build_scheduler"
+src/call_monitor/scheduler.py` before writing.
+
+- [ ] **Step 5: Smoke test for the registration**
+
+Add to `tests/proposal_assist/test_phase0_scheduler_tick.py`:
 
 ```python
-def _phase0_tick_job(settings, session_factory) -> None:
-    """Closure wired up in build_scheduler. Lazy-import the worker to keep
-    scheduler module-load cheap and avoid importing the Anthropic SDK at
-    process start (mirrors the existing ranking-tick pattern)."""
-    from call_monitor.proposal_assist.phases.setup import run_phase0_tick
-    from call_monitor.ranking.anthropic_client import AnthropicClient
+def test_build_scheduler_registers_phase0_tick(monkeypatch, pg_url):
+    """The job lands in the scheduler with the right id + trigger, and
+    starting it does not crash. Catches signature drift in build_scheduler
+    (e.g. _phase0_tick_job receiving args it can't unpack)."""
+    from datetime import time as dtime
 
-    if not settings.anthropic_api_key:
-        # No key configured → Phase 0 cannot run. Log once per tick at INFO
-        # so the operator sees it but it doesn't spam at WARNING.
-        logger.info(
-            "phase0 tick skipped: ANTHROPIC_API_KEY not set"
+    from call_monitor.config import Settings
+    from call_monitor.db.session import make_engine, make_session_factory
+    from call_monitor.scheduler import build_scheduler
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    settings = Settings()
+
+    engine = make_engine(pg_url)
+    try:
+        session_factory = make_session_factory(engine)
+        # Match the project's existing build_scheduler signature — the
+        # snippet below is illustrative; adapt to the real arg names by
+        # reading scheduler.py before running.
+        sched = build_scheduler(
+            settings=settings,
+            session_factory=session_factory,
+            ranking_tick_seconds=60,
+            ingest_at=dtime(3, 0),
+            start=False,
         )
-        return
-
-    def make_client():
-        return AnthropicClient(
-            api_key=settings.anthropic_api_key,
-            model=settings.proposal_assist_llm_model,
-        )
-
-    run_phase0_tick(
-        session_factory=session_factory,
-        client_factory=make_client,
-        extractor_version=settings.extractor_version,
-        rubric_extractor_version=settings.rubric_extractor_version,
-        workspace_repo_root=settings.workspace_repo_root,  # NEW SETTING
-    )
+        try:
+            job = sched.get_job("proposal_assist_phase0_tick")
+            assert job is not None
+            # Trigger is an IntervalTrigger with the configured seconds.
+            assert job.trigger.interval.total_seconds() == settings.phase0_tick_seconds
+            # Invoke the closure once with the queue empty — must not raise,
+            # must not crash on signature mismatch.
+            job.func()
+        finally:
+            sched.shutdown(wait=False)
+    finally:
+        engine.dispose()
 ```
 
-The `WORKSPACE_REPO_ROOT` setting belongs to the base spec (it points at
-`var/workspaces/`). If base spec hasn't added it yet, add a `workspace_repo_root`
-field to `Settings` here with default `"var/workspaces"`.
-
-Pass `settings` + `session_factory` into the closure when calling
-`sched.add_job` — the existing scheduler functions already curry these in;
-mirror that pattern.
-
-- [ ] **Step 5: Run tests**
+- [ ] **Step 6: Run tests**
 
 ```bash
 uv run pytest tests/proposal_assist/test_phase0_scheduler_tick.py -v
 ```
 
-Expected: 2 tests pass.
+Expected: 3 tests pass (the two driver tests + the build_scheduler smoke test).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/call_monitor/config.py src/call_monitor/scheduler.py src/call_monitor/proposal_assist/phases/setup.py tests/proposal_assist/test_phase0_scheduler_tick.py
@@ -4056,7 +4145,7 @@ def test_phase0_happy_path_to_waiting_for_rubric_review(
             session=s, client=llm,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
-            workspace_repo_root=str(tmp_path / "repos"),
+            workspaces_dir=str(tmp_path / "repos"),
         )
         processed = worker.run_one()
         assert processed is True
