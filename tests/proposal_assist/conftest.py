@@ -1,5 +1,6 @@
 """Shared fixtures for proposal_assist tests. See plan's
 'Project Conventions Reference' section for context."""
+
 import pytest
 
 

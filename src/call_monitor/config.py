@@ -71,8 +71,8 @@ class Settings(BaseSettings):
         default="sections-v1",
         alias="EXTRACTOR_VERSION",
         description="Bump when the section extractor prompt or output schema changes; "
-                    "stored on call_section_extracts.extractor_version and used by Phase 0 "
-                    "to decide whether to re-extract.",
+        "stored on call_section_extracts.extractor_version and used by Phase 0 "
+        "to decide whether to re-extract.",
     )
     rubric_extractor_version: str = Field(
         default="rubric-v1",
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
         default="claude-opus-4-7",
         alias="PROPOSAL_ASSIST_LLM_MODEL",
         description="Anthropic model id used for proposal-assist extractors, "
-                    "score_against_rubric, fit-check, persona scoring, and consolidation.",
+        "score_against_rubric, fit-check, persona scoring, and consolidation.",
     )
     remote_rank_model: str = Field(
         default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL"
