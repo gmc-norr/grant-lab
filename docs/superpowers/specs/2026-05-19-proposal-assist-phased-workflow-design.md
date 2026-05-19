@@ -46,7 +46,7 @@ Phase 0 (Setup) ─► Spec ─► Plan ─► Draft ─► Review
 ```
 
 - **Phase 0** is a non-interactive background job that runs once per workspace. Snapshots, section extraction (if missing), rubric extraction (if missing), rubric user-review gate. User lands on Spec when done.
-- **Spec / Plan / Draft / Review** are interactive chat phases with: a pinned goal (rendered in UI), a pinned artifact (the file the agent edits), a phase-gated tool subset, and the workspace's rubric copy (`workspaces.rubric_criteria`) always in the system prompt.
+- **Spec / Plan / Draft** are interactive chat phases with: a pinned goal (rendered in UI), a pinned artifact (the file the agent edits), a phase-gated tool subset, and the workspace's rubric copy (`workspaces.rubric_criteria`) always in the system prompt. **Review** is non-chat (see bullet below).
 - **Forward gates are strict.** Approval is on the artifact (latest git sha recorded in `phase_approvals`). No skipping.
 - **Backward navigation is unilateral.** Any user with workspace write access can jump back; downstream phases become **stale** by timestamp comparison and the UI shows "re-approve to clear" badges.
 - **Review phase is non-chat** — a deterministic fan-out of ~6 Opus calls (1 fit-check + 4 persona scorings + 1 consolidation). Produces two artifacts: `fit-check.md` and `rubric-review.md`.
@@ -57,7 +57,7 @@ Phase 0 (Setup) ─► Spec ─► Plan ─► Draft ─► Review
 
 ## Data model
 
-Reuses base spec's `workspaces`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`, `workspace_viewers`, `workspace_events`. Phased workflow adds six things.
+Reuses base spec's `workspaces`, `chat_turns`, `turn_jobs`, `chat_summaries`, `artifact_versions`, `attachments`, `attachment_jobs`, `workspace_viewers`, `workspace_events`. Phased workflow adds seven things.
 
 ### 1. Columns added to `workspaces`
 
@@ -68,9 +68,15 @@ current_phase             text NOT NULL DEFAULT 'setup'
 call_body_snapshot        text NOT NULL DEFAULT ''
 profile_desc_snapshot     text NOT NULL DEFAULT ''
 snapshot_refreshed_at     timestamptz NOT NULL DEFAULT now()
-rubric_criteria           jsonb NOT NULL                 -- copy of call_rubrics.criteria
-                                                         --   at workspace creation; only
-                                                         --   workspaces.owner_id may edit
+rubric_criteria           jsonb NOT NULL DEFAULT '[]'    -- copy of call_rubrics.criteria;
+                                                         --   defaults to [] so workspace
+                                                         --   creation can complete before
+                                                         --   Phase 0 fills it. Consumers
+                                                         --   that find an empty array MUST
+                                                         --   treat the workspace as still
+                                                         --   in setup (Phase 0 hasn't
+                                                         --   completed) and not proceed
+                                                         --   to Spec. Owner-only edits.
 rubric_funder_notes       text NULL                      -- copy of call_rubrics.funder_notes
 rubric_updated_at         timestamptz NOT NULL DEFAULT now()
                                                          -- bumped on every owner edit;
@@ -158,9 +164,14 @@ call_rubrics
                            --          subcriteria?: list[{name, description}]}]
   funder_notes             text NULL              -- free-text
   extracted_at             timestamptz NOT NULL
+  extracted_by_model       text NOT NULL          -- e.g. 'claude-opus-4-7'
+  extractor_version        text NOT NULL          -- e.g. 'rubric-v1' or git sha;
+                                                   --   bumped when prompt changes
+  source_text_hash         text NOT NULL          -- sha256 of calls.full_text the
+                                                   --   rubric was extracted from
 ```
 
-Auto-extracted at ingestion. **Template only** — not the live source-of-truth for any workspace's evaluation. Each workspace gets its own editable copy (`workspaces.rubric_criteria`, `workspaces.rubric_funder_notes`) at creation. This row is read once per workspace (at Phase 0, to seed the workspace copy) and never again; editing this row affects future workspaces' starting point but never an existing workspace. No `user_reviewed_at` gate at the call level — review happens per-workspace in Phase 0 (see Phase 0 step 6).
+Auto-extracted at ingestion. **Template only** — not the live source-of-truth for any workspace's evaluation. Each workspace gets its own editable copy (`workspaces.rubric_criteria`, `workspaces.rubric_funder_notes`) at Phase 0. This row is read once per workspace (to seed the workspace copy) and never again; editing this row affects future workspaces' starting point but never an existing workspace. The template is re-extracted when either `source_text_hash` mismatches current `calls.full_text` (re-ingest) or `extractor_version` mismatches `Settings.RUBRIC_EXTRACTOR_VERSION` (extractor logic changed) — same staleness contract as `call_section_extracts`. No `user_reviewed_at` gate at the call level — review happens per-workspace in Phase 0 (see Phase 0 step 6).
 
 ### 6. `review_runs` — per-review-run cost ceiling tracking (Q9)
 
@@ -186,6 +197,15 @@ review_runs
   cache_read_input_tokens  integer NULL           -- sum across items
   estimated_dollars        numeric(6,3) NULL      -- sum across items
   INDEX (workspace_id, triggered_at DESC)
+  UNIQUE (workspace_id) WHERE status IN ('queued','running')
+                                          -- active-review lock: a workspace
+                                          --   can have at most one in-flight
+                                          --   Review at any moment. Prevents
+                                          --   double-click duplicate fan-outs
+                                          --   and a re-trigger while the
+                                          --   previous run is still resolving.
+                                          --   Terminal states (done, partial,
+                                          --   failed, cancelled) don't count.
 ```
 
 ### 7. `review_run_items` — per-LLM-call detail within a Review run (NEW 2026-05-19)
@@ -243,8 +263,8 @@ Each phase has: a pinned **goal** (rendered in UI), a pinned **artifact**, a pha
 2. Snapshot `calls.full_text` into `workspaces.call_body_snapshot`.
 3. Snapshot `profiles.description` into `workspaces.profile_desc_snapshot`.
 4. Ensure `call_section_extracts` template is fresh for this call (6 rows). Fresh = exists AND `source_text_hash` matches `sha256(calls.full_text)` AND `extractor_version` matches `Settings.EXTRACTOR_VERSION`. If any condition fails, run the extractor (one Opus call) against current `calls.full_text` and upsert the rows. Then copy all 6 sections' `extract_text` into `workspaces.section_extracts` (JSON object keyed by section name). The workspace's snapshot is what every later phase reads via `get_section_extract`.
-5. Ensure `call_rubrics` exists for this call (template). If missing, auto-extract via Opus and write the row.
-6. Copy `call_rubrics.criteria` and `call_rubrics.funder_notes` into `workspaces.rubric_criteria` and `workspaces.rubric_funder_notes`. Set `workspaces.rubric_updated_at = now()`. **Block** transition to Spec at `workspace_setup_jobs.status = 'waiting_for_rubric_review'` until the workspace **owner** opens the rubric-review screen, edits if needed, and clicks confirm. Every workspace gets its own review beat — no skip-if-call-already-reviewed shortcut, because each workspace's copy is independently editable. While the job is `waiting_for_rubric_review` it is **not** counted as `running` (the worker yielded) — this avoids holding a worker slot indefinitely on a human gate.
+5. Ensure `call_rubrics` template is fresh for this call. Fresh = exists AND `source_text_hash` matches `sha256(calls.full_text)` AND `extractor_version` matches `Settings.RUBRIC_EXTRACTOR_VERSION`. If any condition fails, run the rubric extractor (one Opus call) against current `calls.full_text` and upsert the row.
+6. Copy `call_rubrics.criteria` and `call_rubrics.funder_notes` into `workspaces.rubric_criteria` and `workspaces.rubric_funder_notes`. Set `workspaces.rubric_updated_at = now()`. Write a `workspace_events(kind='rubric_initialized', payload={'criteria': ..., 'funder_notes': ..., 'seeded_from_call_rubrics_extracted_at': ...})` row — this is the canonical starting state for the audit-replay path described in "Rubric editing". **Block** transition to Spec at `workspace_setup_jobs.status = 'waiting_for_rubric_review'` until the workspace **owner** opens the rubric-review screen, edits if needed (which writes a `rubric_edited` event on top of the `rubric_initialized` one), and clicks confirm. Every workspace gets its own review beat — no skip-if-call-already-reviewed shortcut, because each workspace's copy is independently editable. While the job is `waiting_for_rubric_review` it is **not** counted as `running` (the worker yielded) — this avoids holding a worker slot indefinitely on a human gate.
 7. Advance `current_phase: setup → spec`.
 
 **Failure handling**: retries on transient failures up to 5 attempts. Permanent failure surfaces with option to manually paste rubric.
@@ -307,7 +327,9 @@ Each phase has: a pinned **goal** (rendered in UI), a pinned **artifact**, a pha
 
 **Execution model** — a `review_runs` row drives the fan-out (not the interactive chat); each LLM call gets its own `review_run_items` row that records status/tokens/error/raw response:
 
-1. **Fit-check pass**. Deterministic Opus call. Input: `proposal.md` + `workspaces.rubric_criteria` (workspace copy). Output: per-criterion `{addressed: bool, evidence_quote: str, gap_description?: str}`. Writes `fit-check.md`. If any `addressed: false` → user prompted to either backward-nav to Draft or explicitly waive the gate. Waiver recorded in `workspace_events`.
+1. **Fit-check pass**. Deterministic Opus call (`review_run_items` row, `kind='fit_check'`). Input: `proposal.md` + `workspaces.rubric_criteria` (workspace copy). Output: per-criterion `{addressed: bool, evidence_quote: str, gap_description?: str}`. Writes `fit-check.md`. **If any `addressed: false`**: the persona items are NOT dispatched; the run terminates with `review_runs.status='failed'` and a `workspace_events(kind='fit_check_failed', payload={criteria_unaddressed: [...]})` is written. The committed `fit-check.md` is what the UI shows the user. The user then chooses one of two recovery paths, each of which is its own action and (if chosen) **triggers a fresh `review_runs` row**:
+   - **Backward-nav to Draft** → edit `proposal.md` → re-approve Draft → trigger a new Review (the existing review_run stays `failed` for audit; the new one starts from queued).
+   - **Explicit waiver** → click "Waive fit-check and proceed to persona scoring", which writes `workspace_events(kind='fit_check_waived', payload={waiving_user_id, criteria_unaddressed})` and immediately enqueues a new `review_runs` whose fit-check item is short-circuited to `status='skipped'` with `error_message='waived by user <id>'`. Personas + consolidation proceed as normal.
 2. **Four persona scorings** in parallel (asyncio gather, one `review_run_items` row per persona). Each is one Opus call. Each receives: `proposal.md` + `workspaces.rubric_criteria` + persona framing. Each outputs per-criterion `{rating: int_on_funder_scale, rationale: str, quoted_evidence: str}`, stored on the persona's item row (`raw_response_json`). Personas: Domain skeptic / Methodology critic / Translation-impact skeptic / Devil's advocate. They evaluate the same criteria; persona only changes emphasis and what they look critically at. A persona timeout or LLM error sets that item to `status='failed'` and does **not** abort the gather — the other personas continue.
 3. **Consolidation pass**. One Opus call (its own `review_run_items` row, `kind='consolidation'`). Inputs: the `raw_response_json` of every persona item where `status='done'` (at least 1 required; otherwise consolidation is `skipped` and the run is `failed`) + fit-check JSON. Output: `rubric-review.md` with per-criterion consolidated rating (median or worst-case, configurable), agreement/disagreement notes, "if these reviewers were funder reviewers, your score would likely be X." If any persona was failed, the rendered `rubric-review.md` includes a header note naming which reviewers were unavailable, and `review_runs.status` is set to `'partial'` (rather than `'done'`).
 
@@ -322,7 +344,7 @@ Each phase has: a pinned **goal** (rendered in UI), a pinned **artifact**, a pha
 - The clicked phase becomes the new `current_phase`; chat re-opens with that phase's pinned goal and gated tools.
 - Backward nav writes nothing in `phase_approvals` and on its own makes nothing stale.
 - **Phase status has two distinct out-of-sync states** (REVISED 2026-05-19 — Codex split). Both render as a badge on the phase, but they have different colors, labels, and recommended user actions:
-  - **`MODIFIED`** — the phase's artifact has been edited since its last approval, but the new edits haven't been approved yet. Computed: `phase_artifact_HEAD_sha != MAX(phase_approvals.approved_artifact_sha WHERE phase = X)` for any phase X with an approval. Recommended action: review the diff and click Approve to lock in. UI: amber badge "Modified — re-approve".
+  - **`MODIFIED`** — the phase's artifact files have been edited since its last approval, but the new edits haven't been approved yet. Computed **per-artifact-path** (not by comparing repo commit shas — `approved_artifact_sha` is a repo commit, and a Draft commit would otherwise spuriously flag Plan as modified): phase X is MODIFIED iff `git diff <approved_artifact_sha for X> HEAD -- <artifact_paths for X>` is non-empty. The phase → artifact mapping: Spec→[`proposal-spec.md`], Plan→[`proposal-plan.md`], Draft→[`proposal.md`], Review→[`fit-check.md`, `rubric-review.md`]. Recommended action: review the diff and click Approve to lock in. UI: amber badge "Modified — re-approve".
   - **`OUTDATED`** — the phase's last approval is older than something upstream (an earlier phase's re-approval, OR a rubric edit). Two sub-conditions:
     - **Upstream re-approval:** `MAX(approved_at WHERE phase = X) < MAX(approved_at WHERE phase = <any earlier phase>)`. Example: user re-approves Spec → Plan and Draft both go OUTDATED.
     - **Rubric edit:** `MAX(approved_at WHERE phase = X) < workspaces.rubric_updated_at`. The rubric is the central scoring yardstick; a rubric change invalidates the assumption under which the phase was previously approved.
@@ -335,7 +357,8 @@ Each phase has: a pinned **goal** (rendered in UI), a pinned **artifact**, a pha
 The workspace's rubric copy (`workspaces.rubric_criteria`, `workspaces.rubric_funder_notes`) is editable post-Phase-0 from a **workspace-settings form**. **Owner-only**: viewers see the rubric read-only; the edit affordance is hidden for non-owners and the API endpoint returns 403 if a non-owner attempts to PATCH.
 
 - **Form, not chat tool.** Criteria are structured JSON — a form UI is more natural than markdown editing. The agent has **no** `edit_rubric` tool, and no read tool either: the rubric is in the system prompt every turn (see "System prompt skeleton" in each phase), so an explicit read would be redundant.
-- **Edit semantics.** Each save writes the new criteria + funder_notes to `workspaces`, bumps `rubric_updated_at`, and writes a `workspace_events` row with `kind='rubric_edited'` and `payload={'old_criteria': ..., 'new_criteria': ..., 'old_funder_notes': ..., 'new_funder_notes': ..., 'edited_by_user_id': <owner_id>}`. The audit log is the reproducibility surface: given any past phase-approval timestamp, the rubric content in force at that time can be reconstructed by replaying `rubric_edited` events up to that timestamp against the current row.
+- **Edit semantics.** Each save writes the new criteria + funder_notes to `workspaces`, bumps `rubric_updated_at`, and writes a `workspace_events` row with `kind='rubric_edited'` and `payload={'old_criteria': ..., 'new_criteria': ..., 'old_funder_notes': ..., 'new_funder_notes': ..., 'edited_by_user_id': <owner_id>}`.
+- **Audit reconstruction (forward replay).** Phase 0 writes a `workspace_events(kind='rubric_initialized', payload={'criteria': ..., 'funder_notes': ..., 'seeded_from_call_rubrics_extracted_at': ...})` row as part of the rubric copy step — this is the canonical starting state. Reproducing the rubric in force at any past timestamp T: start from `rubric_initialized.payload`, then apply each `rubric_edited.payload.new_criteria` (and `new_funder_notes`) in event-timestamp order up to T. Forward replay is straightforward and doesn't require diffing the current row.
 - **Staleness.** Every rubric edit stales all downstream phase approvals via the timestamp rule above. The owner is shown a confirmation modal before save: *"This edit will mark Spec / Plan / Draft as needing re-approval. Continue?"*
 
 ---
@@ -366,7 +389,6 @@ All edits auto-commit to the workspace git repo (one commit per tool call); `art
 |---|---|
 | `get_call_body()` | Returns `workspaces.call_body_snapshot` (the snapshot, not live). |
 | `get_section_extract(section)` | Returns `workspaces.section_extracts[section]` — the workspace's own snapshot, frozen at Phase 0. One of `eligibility / scope / budget / expected_outcomes / restrictions / mandatory`. |
-| `get_rubric()` | Returns the full workspace rubric: `workspaces.rubric_criteria` + `workspaces.rubric_funder_notes`. Reads the workspace's own copy, not the call template. (Redundant with the system-prompt verbatim copy, but kept for cases where the agent wants to re-cite specific text without consuming context window.) |
 | `get_profile_description()` | Returns `workspaces.profile_desc_snapshot`. |
 | `list_preliminary_data()` | Returns filename + description for each user-uploaded attachment. Spec/Plan/Draft only. |
 | `read_preliminary_data(filename)` | Returns the extracted text (or describe-figure output) of the named attachment. Spec/Plan/Draft only. |
@@ -440,7 +462,7 @@ Mirrors the project's existing pattern (real Postgres via testcontainers, mocked
 **Phase state machine** (high-leverage, tested heavily):
 - Forward transition writes `phase_approvals`; `approved_artifact_sha` matches the repo HEAD commit (not a blob sha).
 - Backward nav does NOT write `phase_approvals`.
-- Phase status `MODIFIED`: edit Spec via `edit_spec` without approving → `phase_artifact_HEAD_sha != phase_approvals.approved_artifact_sha` → status surfaces MODIFIED only (not OUTDATED).
+- Phase status `MODIFIED`: edit `proposal-spec.md` via `edit_spec` without approving → `git diff approved_sha..HEAD -- proposal-spec.md` non-empty → Spec is MODIFIED. Plan and Draft (untouched paths) remain non-MODIFIED even though the repo HEAD advanced — verifying the per-artifact-path scope.
 - Phase status `OUTDATED` (upstream re-approval): after re-approving Spec, `MAX(approved_at WHERE phase='plan') < MAX(approved_at WHERE phase='spec')` → plan is OUTDATED.
 - Phase status `OUTDATED` (rubric edit): after `rubric_updated_at` is bumped, `MAX(approved_at WHERE phase='plan') < rubric_updated_at` → plan OUTDATED; same rule for Spec, Draft, Review.
 - Phase status `MODIFIED + OUTDATED`: edit Spec after a rubric edit → both badges fire; re-approval clears both.
@@ -450,7 +472,7 @@ Mirrors the project's existing pattern (real Postgres via testcontainers, mocked
 **Rubric editing**:
 - Owner PATCH succeeds, bumps `rubric_updated_at`, writes `workspace_events(kind='rubric_edited')` with old + new content in payload.
 - Non-owner (viewer) PATCH returns 403; no DB writes.
-- Audit reconstruction: replaying `rubric_edited` events up to a past timestamp reproduces the rubric content in force at that moment.
+- Audit reconstruction (forward replay): Phase 0 writes `rubric_initialized`; subsequent edits write `rubric_edited`; starting from `rubric_initialized.payload` and applying each `rubric_edited.payload.new_criteria` in event-timestamp order up to T yields the rubric state at T. Tested with: seed → edit A → edit B → reconstruct-at-time-of-A should equal post-A state, not the final state.
 - Rubric edit invalidates downstream approvals (see staleness tests).
 
 **Artifact / git layer**:
@@ -463,10 +485,13 @@ Mirrors the project's existing pattern (real Postgres via testcontainers, mocked
 - Template re-extraction on `source_text_hash` mismatch: after `calls.full_text` changes, next Phase 0 detects the mismatch, re-runs the extractor, upserts the template rows; pre-existing workspaces keep their snapshot.
 - Template re-extraction on `extractor_version` bump: bumping `Settings.EXTRACTOR_VERSION` triggers re-extraction on next Phase 0.
 - Workspace snapshot frozen: editing `calls.full_text` after workspace creation does **not** alter `workspaces.section_extracts`.
+- `call_rubrics` template re-extraction symmetric to extracts: `source_text_hash` mismatch (after `calls.full_text` change) or `extractor_version` bump triggers re-extraction on next Phase 0; existing workspaces keep their snapshot.
 - `call_rubrics` extraction tolerates malformed JSON; surfaces as "user must paste rubric" UI flag, not a crash.
 
 **Review fan-out**:
-- Fit-check before quality: any `addressed: false` → `review_runs.rubric_review_sha` stays NULL until user resolves or waives.
+- Fit-check failure terminates the run: any `addressed: false` → personas NOT dispatched, `review_runs.status='failed'`, `fit-check.md` committed, `workspace_events(kind='fit_check_failed')` written.
+- Waiver path: after a fit-check failure, clicking Waive writes `workspace_events(kind='fit_check_waived')` and enqueues a NEW `review_runs` whose fit-check item is `status='skipped'` with `error_message='waived by user <id>'`; personas + consolidation run; the previous failed run remains for audit.
+- Active-review lock: while a `review_runs` row is `queued` or `running`, a second triggering attempt is rejected (partial unique index conflict surfaces as a 409 in the UI). Concurrent double-click is the canonical test case.
 - Items table fully populated on happy path: 1 fit_check + 4 persona + 1 consolidation = 6 `review_run_items` rows, all `status='done'`, `review_runs.status='done'`.
 - Partial failure: stub one persona to fail. Surviving 3 personas + fit-check + consolidation finish; failed-persona item has `status='failed'` + non-null `error_message`; `review_runs.status='partial'`; `rubric-review.md` header notes the missing reviewer.
 - Total failure: stub all 4 personas to fail. Consolidation item is `status='skipped'`; `review_runs.status='failed'`; `rubric_review_sha` stays NULL.
