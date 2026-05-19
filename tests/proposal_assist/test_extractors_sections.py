@@ -62,6 +62,15 @@ def test_extract_sections_raises_on_non_str_value():
         extract_sections(call_text="dummy", client=client)
 
 
+def test_extract_sections_raises_on_bad_envelope_shape():
+    client = Mock()
+    client.chat.return_value = {}  # missing "choices"
+    client.model = "claude-opus-4-7"
+
+    with pytest.raises(ValueError, match="unexpected envelope shape"):
+        extract_sections(call_text="dummy", client=client)
+
+
 def test_extract_sections_passes_call_text_in_user_message():
     client = Mock()
     client.chat.return_value = _envelope(json.dumps({s: "" for s in SECTION_NAMES}))

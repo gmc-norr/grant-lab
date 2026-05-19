@@ -86,3 +86,12 @@ def test_extract_rubric_raises_on_missing_required_criterion_fields():
     client.model = "claude-opus-4-7"
     with pytest.raises(ValueError, match="missing required field"):
         extract_rubric(call_text="dummy", client=client)
+
+
+def test_extract_rubric_raises_on_bad_envelope_shape():
+    client = Mock()
+    client.chat.return_value = {}  # missing "choices"
+    client.model = "claude-opus-4-7"
+
+    with pytest.raises(ValueError, match="unexpected envelope shape"):
+        extract_rubric(call_text="dummy", client=client)
