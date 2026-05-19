@@ -33,12 +33,14 @@ def test_workspace_optional_call_and_profile(pg_session_factory):
         owner = make_user(s)
         call = make_call(s)
         s.commit()
-        s.add(Workspace(
-            title="Linked draft",
-            owner_id=owner.id,
-            call_id=call.id,
-            deadline=datetime(2026, 12, 1, tzinfo=UTC),
-        ))
+        s.add(
+            Workspace(
+                title="Linked draft",
+                owner_id=owner.id,
+                call_id=call.id,
+                deadline=datetime(2026, 12, 1, tzinfo=UTC),
+            )
+        )
         s.commit()
         ws = s.scalar(select(Workspace).where(Workspace.title == "Linked draft"))
         assert ws.call_id == call.id
