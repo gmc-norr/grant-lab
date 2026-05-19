@@ -667,3 +667,52 @@ class Attachment(Base):
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
+
+
+class AttachmentJob(Base):
+    __tablename__ = "attachment_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','completed','failed')",
+            name="ck_attachment_jobs_status",
+        ),
+        CheckConstraint(
+            "kind IN ('describe_figure')",
+            name="ck_attachment_jobs_kind",
+        ),
+        Index(
+            "ix_attachment_jobs_status_updated", "status", "updated_at",
+        ),
+        Index(
+            "uq_attachment_jobs_active",
+            "attachment_id", "kind",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attachment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("attachments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )

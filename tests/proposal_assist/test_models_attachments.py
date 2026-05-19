@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Attachment
+from call_monitor.db.models import Attachment, AttachmentJob  # merged
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -46,3 +46,92 @@ def test_attachment_kind_check(pg_session_factory):
         )
         with pytest.raises(IntegrityError):
             s.commit()
+
+
+def _add_attachment(s, ws_id, user_id, *, filename="fig.png"):
+    a = Attachment(
+        workspace_id=ws_id,
+        kind="figure",
+        filename=filename,
+        storage_path=f"figs/{filename}",
+        mime_type="image/png",
+        uploaded_by=user_id,
+    )
+    s.add(a)
+    s.flush()
+    return a
+
+
+def test_attachment_job_insert_queued(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        uploader = make_user(s, email="u@ki.se")
+        attachment = _add_attachment(s, ws.id, uploader.id)
+        s.add(
+            AttachmentJob(
+                workspace_id=ws.id,
+                attachment_id=attachment.id,
+                kind="describe_figure",
+                status="queued",
+            )
+        )
+        s.commit()
+        j = s.scalar(select(AttachmentJob).where(AttachmentJob.attachment_id == attachment.id))
+        assert j is not None
+        assert j.status == "queued"
+        assert j.attempts == 0
+
+
+def test_attachment_job_unique_active_per_attachment_kind(pg_session_factory):
+    """Partial UNIQUE on (attachment_id, kind) WHERE status IN
+    ('queued','running') prevents double-enqueueing the same describe job."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        uploader = make_user(s, email="u2@ki.se")
+        attachment = _add_attachment(s, ws.id, uploader.id)
+        s.add(
+            AttachmentJob(
+                workspace_id=ws.id,
+                attachment_id=attachment.id,
+                kind="describe_figure",
+                status="queued",
+            )
+        )
+        s.commit()
+        s.add(
+            AttachmentJob(
+                workspace_id=ws.id,
+                attachment_id=attachment.id,
+                kind="describe_figure",
+                status="running",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            s.commit()
+
+
+def test_attachment_job_completed_allows_re_enqueue(pg_session_factory):
+    """A previously-completed job doesn't block a new queued job for the
+    same (attachment_id, kind) — the partial index is bounded by status."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        uploader = make_user(s, email="u3@ki.se")
+        attachment = _add_attachment(s, ws.id, uploader.id)
+        s.add(
+            AttachmentJob(
+                workspace_id=ws.id,
+                attachment_id=attachment.id,
+                kind="describe_figure",
+                status="completed",
+            )
+        )
+        s.commit()
+        s.add(
+            AttachmentJob(
+                workspace_id=ws.id,
+                attachment_id=attachment.id,
+                kind="describe_figure",
+                status="queued",
+            )
+        )
+        s.commit()  # should not raise
