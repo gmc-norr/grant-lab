@@ -190,6 +190,14 @@ review_runs
   fit_check_sha            text NULL              -- written first; gates
                                                    --   the persona reviews
   rubric_review_sha        text NULL              -- written last
+  waived_from_review_run_id uuid NULL FK review_runs(id)
+                                                   -- set on a run that exists
+                                                   --   because the user waived
+                                                   --   the prior run's fit-check
+                                                   --   failure; lets consolidation
+                                                   --   trace back to the original
+                                                   --   fit-check JSON. NULL on
+                                                   --   non-waiver runs.
   input_tokens             integer NULL           -- sum across items (denorm
                                                    --   for cap checks and admin
                                                    --   spend view)
@@ -222,12 +230,24 @@ review_run_items
                              'persona_devils_advocate',
                              'consolidation'))
   status                   text CHECK (status IN
-                            ('queued','running','done','failed','skipped'))
+                            ('queued','running','done','failed','skipped',
+                             'cancelled'))
                                                           -- 'skipped' = upstream
                                                           --   dependency failed
                                                           --   (e.g. consolidation
                                                           --   when all 4 personas
-                                                          --   failed)
+                                                          --   failed) OR fit-check
+                                                          --   short-circuited by
+                                                          --   user waiver
+                                                          -- 'cancelled' = parent
+                                                          --   review_run was
+                                                          --   cancelled while this
+                                                          --   item was queued or
+                                                          --   running; mirrors the
+                                                          --   parent state so the
+                                                          --   audit row reflects
+                                                          --   the in-flight item
+                                                          --   actually stopped
   started_at, completed_at timestamptz NULL
   model                    text NULL                      -- e.g. 'claude-opus-4-7'
   input_tokens             integer NULL
@@ -329,13 +349,21 @@ Each phase has: a pinned **goal** (rendered in UI), a pinned **artifact**, a pha
 
 1. **Fit-check pass**. Deterministic Opus call (`review_run_items` row, `kind='fit_check'`). Input: `proposal.md` + `workspaces.rubric_criteria` (workspace copy). Output: per-criterion `{addressed: bool, evidence_quote: str, gap_description?: str}`. Writes `fit-check.md`. **If any `addressed: false`**: the persona items are NOT dispatched; the run terminates with `review_runs.status='failed'` and a `workspace_events(kind='fit_check_failed', payload={criteria_unaddressed: [...]})` is written. The committed `fit-check.md` is what the UI shows the user. The user then chooses one of two recovery paths, each of which is its own action and (if chosen) **triggers a fresh `review_runs` row**:
    - **Backward-nav to Draft** → edit `proposal.md` → re-approve Draft → trigger a new Review (the existing review_run stays `failed` for audit; the new one starts from queued).
-   - **Explicit waiver** → click "Waive fit-check and proceed to persona scoring", which writes `workspace_events(kind='fit_check_waived', payload={waiving_user_id, criteria_unaddressed})` and immediately enqueues a new `review_runs` whose fit-check item is short-circuited to `status='skipped'` with `error_message='waived by user <id>'`. Personas + consolidation proceed as normal.
+   - **Explicit waiver** → click "Waive fit-check and proceed to persona scoring", which writes `workspace_events(kind='fit_check_waived', payload={waiving_user_id, criteria_unaddressed})` and immediately enqueues a new `review_runs` with `waived_from_review_run_id` set to the failed run's id. The new run's fit-check item is short-circuited to `status='skipped'` with `error_message='waived by user <id>'`, and its `raw_response_json` is **copied verbatim from the prior failed run's fit-check item** (this preserves the input contract for consolidation: consolidation reads fit-check JSON the same way regardless of `done` vs `skipped`). Personas + consolidation proceed as normal. The previous failed run remains for audit.
 2. **Four persona scorings** in parallel (asyncio gather, one `review_run_items` row per persona). Each is one Opus call. Each receives: `proposal.md` + `workspaces.rubric_criteria` + persona framing. Each outputs per-criterion `{rating: int_on_funder_scale, rationale: str, quoted_evidence: str}`, stored on the persona's item row (`raw_response_json`). Personas: Domain skeptic / Methodology critic / Translation-impact skeptic / Devil's advocate. They evaluate the same criteria; persona only changes emphasis and what they look critically at. A persona timeout or LLM error sets that item to `status='failed'` and does **not** abort the gather — the other personas continue.
-3. **Consolidation pass**. One Opus call (its own `review_run_items` row, `kind='consolidation'`). Inputs: the `raw_response_json` of every persona item where `status='done'` (at least 1 required; otherwise consolidation is `skipped` and the run is `failed`) + fit-check JSON. Output: `rubric-review.md` with per-criterion consolidated rating (median or worst-case, configurable), agreement/disagreement notes, "if these reviewers were funder reviewers, your score would likely be X." If any persona was failed, the rendered `rubric-review.md` includes a header note naming which reviewers were unavailable, and `review_runs.status` is set to `'partial'` (rather than `'done'`).
+3. **Consolidation pass**. One Opus call (its own `review_run_items` row, `kind='consolidation'`). Inputs: the `raw_response_json` of every persona item where `status='done'` (at least 1 required; otherwise consolidation is `skipped` and the run is `failed`) + the fit-check item's `raw_response_json` (present whether `status='done'` on the happy path, OR `status='skipped'` on a waived run — the waiver path copies the prior run's fit-check JSON forward, so consolidation has the same input shape either way). Output: `rubric-review.md` with per-criterion consolidated rating (median or worst-case, configurable), agreement/disagreement notes, "if these reviewers were funder reviewers, your score would likely be X." If any persona was failed, the rendered `rubric-review.md` includes a header note naming which reviewers were unavailable, and `review_runs.status` is set to `'partial'` (rather than `'done'`).
 
 **Tools available**: read-only on everything; no editing. (Review is non-chat — there's no agent loop to drive a tool surface here.)
 
-**Approval**: user clicks "Approve Review" → `phase_approvals` row written. Workspace status can transition to `submitted` from the UI.
+**Approval preconditions**: "Approve Review" is allowed (button enabled in UI; API returns 400 if bypassed) only when ALL of:
+- there exists a `review_runs` row for this workspace with `draft_sha = <currently-approved Draft sha>`, AND
+- that row's `status IN ('done', 'partial')` (not `failed`, `cancelled`, `queued`, or `running`), AND
+- `rubric_review_sha IS NOT NULL` on that row, AND
+- the Review phase is not OUTDATED relative to upstream (Spec/Plan/Draft re-approvals or rubric edits since the run completed).
+
+Without these, a failed-fit-check run that committed only `fit-check.md` could otherwise be mistaken for an approvable review.
+
+**Approval**: user clicks "Approve Review" → `phase_approvals` row written with the repo HEAD commit sha (covering both `fit-check.md` and `rubric-review.md`). Workspace status can transition to `submitted` from the UI.
 
 ### Backward navigation behaviour
 
@@ -359,7 +387,7 @@ The workspace's rubric copy (`workspaces.rubric_criteria`, `workspaces.rubric_fu
 - **Form, not chat tool.** Criteria are structured JSON — a form UI is more natural than markdown editing. The agent has **no** `edit_rubric` tool, and no read tool either: the rubric is in the system prompt every turn (see "System prompt skeleton" in each phase), so an explicit read would be redundant.
 - **Edit semantics.** Each save writes the new criteria + funder_notes to `workspaces`, bumps `rubric_updated_at`, and writes a `workspace_events` row with `kind='rubric_edited'` and `payload={'old_criteria': ..., 'new_criteria': ..., 'old_funder_notes': ..., 'new_funder_notes': ..., 'edited_by_user_id': <owner_id>}`.
 - **Audit reconstruction (forward replay).** Phase 0 writes a `workspace_events(kind='rubric_initialized', payload={'criteria': ..., 'funder_notes': ..., 'seeded_from_call_rubrics_extracted_at': ...})` row as part of the rubric copy step — this is the canonical starting state. Reproducing the rubric in force at any past timestamp T: start from `rubric_initialized.payload`, then apply each `rubric_edited.payload.new_criteria` (and `new_funder_notes`) in event-timestamp order up to T. Forward replay is straightforward and doesn't require diffing the current row.
-- **Staleness.** Every rubric edit stales all downstream phase approvals via the timestamp rule above. The owner is shown a confirmation modal before save: *"This edit will mark Spec / Plan / Draft as needing re-approval. Continue?"*
+- **Staleness.** Every rubric edit stales all downstream phase approvals via the timestamp rule above (Spec, Plan, Draft, AND Review — the rubric is the central yardstick, so a Review approved against the old rubric is invalidated too). The owner is shown a confirmation modal before save whose text **dynamically names the phases that actually have approvals to invalidate**, e.g. *"This edit will mark Spec, Plan, Draft, and Review as needing re-approval. Continue?"* on a fully-approved workspace, or *"This edit will mark Spec and Plan as needing re-approval. Continue?"* if Draft and Review haven't been approved yet. Avoids over-warning ("Review needs re-approval" on a workspace that's never reached Review) and under-warning ("Spec/Plan/Draft" while Review is silently invalidated).
 
 ---
 
@@ -490,8 +518,10 @@ Mirrors the project's existing pattern (real Postgres via testcontainers, mocked
 
 **Review fan-out**:
 - Fit-check failure terminates the run: any `addressed: false` → personas NOT dispatched, `review_runs.status='failed'`, `fit-check.md` committed, `workspace_events(kind='fit_check_failed')` written.
-- Waiver path: after a fit-check failure, clicking Waive writes `workspace_events(kind='fit_check_waived')` and enqueues a NEW `review_runs` whose fit-check item is `status='skipped'` with `error_message='waived by user <id>'`; personas + consolidation run; the previous failed run remains for audit.
+- Waiver path: after a fit-check failure, clicking Waive writes `workspace_events(kind='fit_check_waived')` and enqueues a NEW `review_runs` with `waived_from_review_run_id` set to the failed run's id. The new run's fit-check item is `status='skipped'` AND its `raw_response_json` equals the prior failed run's fit-check `raw_response_json` (byte-identical). Personas + consolidation run successfully; consolidation reads the same fit-check JSON shape regardless of waiver. The previous failed run remains for audit.
 - Active-review lock: while a `review_runs` row is `queued` or `running`, a second triggering attempt is rejected (partial unique index conflict surfaces as a 409 in the UI). Concurrent double-click is the canonical test case.
+- Cancel mid-fan-out: cancelling a `running` review_run sets parent status='cancelled' and propagates to in-flight items (`status='cancelled'` for any item still `queued` or `running`); already-`done` items stay `done`.
+- Approve Review preconditions: (a) no `review_runs` for current draft_sha → 400; (b) latest run `status='failed'` → 400; (c) `rubric_review_sha IS NULL` → 400; (d) Review OUTDATED (rubric edited after run completed) → 400; (e) happy path with `status='done'` and rubric_review_sha set and not OUTDATED → 200 + phase_approvals row.
 - Items table fully populated on happy path: 1 fit_check + 4 persona + 1 consolidation = 6 `review_run_items` rows, all `status='done'`, `review_runs.status='done'`.
 - Partial failure: stub one persona to fail. Surviving 3 personas + fit-check + consolidation finish; failed-persona item has `status='failed'` + non-null `error_message`; `review_runs.status='partial'`; `rubric-review.md` header notes the missing reviewer.
 - Total failure: stub all 4 personas to fail. Consolidation item is `status='skipped'`; `review_runs.status='failed'`; `rubric_review_sha` stays NULL.
