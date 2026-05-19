@@ -293,5 +293,65 @@ def test_ensure_rubric_fresh_preserves_existing_on_extractor_failure(
                 client=failing_client,
                 extractor_version="rubric-v2",
             )
+        s.rollback()  # discard any unflushed changes from the failed call
+        s.expire_all()  # force the next read to hit Postgres, not the identity map
         # Row content unchanged.
         assert s.get(CallRubric, call.id).criteria == before_criteria
+
+
+def test_ensure_rubric_fresh_re_extracts_on_version_bump(pg_session_factory):
+    client = Mock()
+    client.chat.return_value = _rubric_envelope()
+    client.model = "claude-opus-4-7"
+
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_rubric_fresh(
+            session=s,
+            call=call,
+            client=client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+        assert client.chat.call_count == 1
+
+        ensure_rubric_fresh(
+            session=s,
+            call=call,
+            client=client,
+            extractor_version="rubric-v2",  # bumped
+        )
+        s.commit()
+        assert client.chat.call_count == 2
+        row = s.get(CallRubric, call.id)
+        assert row.extractor_version == "rubric-v2"
+
+
+def test_ensure_rubric_fresh_re_extracts_on_source_text_change(pg_session_factory):
+    client = Mock()
+    client.chat.return_value = _rubric_envelope()
+    client.model = "claude-opus-4-7"
+
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ensure_rubric_fresh(
+            session=s,
+            call=call,
+            client=client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+
+        call.full_text = (call.full_text or "") + " (RE-INGESTED)"
+        s.commit()
+
+        ensure_rubric_fresh(
+            session=s,
+            call=call,
+            client=client,
+            extractor_version="rubric-v1",
+        )
+        s.commit()
+        assert client.chat.call_count == 2
