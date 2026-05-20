@@ -48,6 +48,7 @@ def test_phase_approval_phase_check_constraint(pg_session_factory):
 
 def test_phase_approval_cascade_on_workspace_delete(pg_session_factory):
     from sqlalchemy import delete
+
     from call_monitor.db.models import Workspace
 
     with pg_session_factory() as s:

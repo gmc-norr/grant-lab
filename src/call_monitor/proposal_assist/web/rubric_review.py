@@ -96,7 +96,9 @@ def _parse_form_criteria(form: dict[str, str]) -> list[dict[str, Any]]:
             crit["weight"] = float(crit.get("weight", 0))
             crit["scale_max"] = int(crit.get("scale_max", 5))
         except (TypeError, ValueError) as e:
-            raise HTTPException(400, f"criterion {idx}: bad numeric value ({e})")
+            raise HTTPException(
+                400, f"criterion {idx}: bad numeric value ({e})"
+            ) from e
         for required in ("name", "description", "weight", "scale_max"):
             if required not in crit:
                 raise HTTPException(400, f"criterion {idx}: missing {required}")

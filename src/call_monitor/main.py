@@ -14,15 +14,15 @@ from call_monitor.config import Settings
 from call_monitor.db.session import make_engine, make_session_factory
 from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.logging import configure_logging
+from call_monitor.proposal_assist.web.rubric_review import (
+    router as rubric_review_router,
+)
 from call_monitor.web.filters import (
     criterion_label,
     display_date,
     display_dt,
     model_label,
     note_category_heading,
-)
-from call_monitor.proposal_assist.web.rubric_review import (
-    router as rubric_review_router,
 )
 from call_monitor.web.routes import admin, auth, calls, health, me, profiles
 
