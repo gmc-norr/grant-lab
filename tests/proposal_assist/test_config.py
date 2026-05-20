@@ -37,3 +37,13 @@ def test_phase0_scheduler_settings_override_via_env(monkeypatch, _settings_env):
     s = Settings()
     assert s.phase0_tick_seconds == 60
     assert s.workspaces_dir == "/data/workspaces"
+
+
+def test_workspace_idle_timeout_seconds_default(monkeypatch, _settings_env):
+    monkeypatch.delenv("WORKSPACE_IDLE_TIMEOUT_SECONDS", raising=False)
+    assert Settings().workspace_idle_timeout_seconds == 600
+
+
+def test_workspace_idle_timeout_seconds_override(monkeypatch, _settings_env):
+    monkeypatch.setenv("WORKSPACE_IDLE_TIMEOUT_SECONDS", "120")
+    assert Settings().workspace_idle_timeout_seconds == 120
