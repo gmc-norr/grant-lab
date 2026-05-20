@@ -14,6 +14,14 @@
   </hgroup>
 </header>
 
+{# B6: Start a workspace pre-filled with this call. profile_id is
+   omitted from the link when no ranking exists for any of the user's
+   profiles — the form still lets the user pick. #}
+<p>
+  <a href="/workspaces/new?call_id={{ call.id }}{% if best_profile_id %}&profile_id={{ best_profile_id }}{% endif %}"
+     class="button">Start drafting workspace</a>
+</p>
+
 {% if ranking %}
 <section aria-label="Ranking">
   <article style="display:flex;gap:1.2rem;align-items:center;">

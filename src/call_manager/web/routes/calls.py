@@ -207,6 +207,20 @@ def call_detail(
                         .scalars()
                         .all()
                     )
+        # B6: best-fit profile lookup — highest-scoring profile among those
+        # owned by the current user for this call. nulls_last() ensures a
+        # profile with NULL score never displaces one with a real score.
+        best_profile_id = session.scalar(
+            select(CallRanking.profile_id)
+            .join(Profile, Profile.id == CallRanking.profile_id)
+            .where(
+                CallRanking.call_id == call_id,
+                Profile.created_by == user.id,
+            )
+            .order_by(CallRanking.aggregate_score.desc().nulls_last())
+            .limit(1)
+        )
+
         # See note in calls_index: detach Call AND its joined `source` together.
         session.expunge_all()
 
@@ -228,6 +242,7 @@ def call_detail(
             "ranking": ranking,
             "criteria": criteria,
             "criterion_details": details,
+            "best_profile_id": best_profile_id,
             "user": user,
         },
     )
