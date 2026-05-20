@@ -725,6 +725,37 @@ def soft_delete(
     return RedirectResponse(url="/workspaces", status_code=303)
 
 
+@router.get("/{workspace_id}/export.md")
+def export_markdown(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Markdown-only export. Word/PDF would require pandoc; deferred."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    repo_dir = Path(request.app.state.settings.workspaces_dir) / str(ws.id) / "repo"
+    proposal = repo_dir / "proposal.md"
+    if not proposal.exists():
+        raise HTTPException(status_code=404, detail="no proposal.md yet")
+    # Sanitize the filename — workspace titles can contain anything,
+    # but we want a safe header value.
+    safe_title = (
+        "".join(c if c.isalnum() or c in "-_." else "_" for c in ws.title)[:80] or "proposal"
+    )
+    return Response(
+        proposal.read_text(),
+        media_type="text/markdown",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}.md"',
+        },
+    )
+
+
 @router.post("/{workspace_id}/turns/{turn_job_id}/cancel")
 def cancel_turn(
     workspace_id: uuid.UUID,
