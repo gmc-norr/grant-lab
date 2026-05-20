@@ -278,6 +278,15 @@ class Phase0Worker:
         )
 
     def _run_steps(self, job: WorkspaceSetupJob) -> None:
-        """Filled in by Tasks 14–16. Raises on transient/permanent failure;
-        mutates job.status to 'waiting_for_rubric_review' to yield."""
-        raise NotImplementedError("filled in by Tasks 14–16")
+        # Steps 1-3: git init + snapshot call body + snapshot profile
+        self._snapshot_and_init_repo(job)
+        # Step 4: ensure section_extracts template + copy to workspace
+        self._ensure_section_extracts_snapshot(job)
+        # Step 5: ensure rubric template + copy to workspace + write
+        # rubric_initialized audit event
+        self._ensure_rubric_snapshot(job)
+        # Step 6: yield to owner rubric review. The rubric-review endpoint
+        # (Task 18) advances the job to 'done' and the workspace to
+        # current_phase='spec' when the owner confirms.
+        job.status = "waiting_for_rubric_review"
+        # NOT setting completed_at — the job isn't terminal yet.

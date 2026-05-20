@@ -5,11 +5,11 @@ from unittest.mock import Mock
 from sqlalchemy import select
 
 from call_monitor.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
+from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
 from call_monitor.proposal_assist.phases.setup import (
     Phase0Worker,
     claim_next_setup_job,
 )
-from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
 from tests.proposal_assist.conftest import make_call, make_profile, make_workspace
 
 
@@ -287,3 +287,88 @@ def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
         assert len(events) == 1
         assert events[0].payload["criteria"][0]["name"] == "X"
         assert events[0].payload["funder_notes"] == "see FAQ"
+
+
+def test_phase0_yields_to_waiting_for_rubric_review(
+    pg_session_factory,
+    tmp_path,
+):
+    """End-to-end of the worker scaffold + steps 1-5: run_one() should
+    yield at waiting_for_rubric_review, not auto-promote to done. The
+    job stays in the queue until the owner confirms via the rubric
+    endpoint (Task 18)."""
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ws = make_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
+        s.commit()
+        ws_id = ws.id
+
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        # Two LLM calls expected: section extractor + rubric extractor.
+        client.chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    sec: f"x_{sec}"
+                                    for sec in (
+                                        "eligibility",
+                                        "scope",
+                                        "budget",
+                                        "expected_outcomes",
+                                        "restrictions",
+                                        "mandatory",
+                                    )
+                                }
+                            ),
+                        }
+                    }
+                ],
+                "model": "claude-opus-4-7",
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "criteria": [
+                                        {
+                                            "name": "C",
+                                            "description": "c",
+                                            "weight": 1.0,
+                                            "scale_max": 5,
+                                        }
+                                    ],
+                                    "funder_notes": "",
+                                }
+                            ),
+                        }
+                    }
+                ],
+                "model": "claude-opus-4-7",
+            },
+        ]
+
+        worker = Phase0Worker(
+            session=s,
+            client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+        worker.run_one()
+        s.expire_all()
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
+        ws_refetch = s.get(Workspace, ws_id)
+        assert job.status == "waiting_for_rubric_review"
+        assert job.completed_at is None
+        # Phase doesn't advance yet — that's Task 18's job.
+        assert ws_refetch.current_phase == "setup"
