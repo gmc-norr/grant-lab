@@ -69,15 +69,24 @@ B4 produces a fully-functional turn pipeline tested end-to-end against `FakeAgen
 ## Revision history
 
 - **rev1 (2026-05-20)** — initial plan.
+- **rev2 (2026-05-20, Codex round 1)** — seven findings, all addressed:
+  - **H1** Restructured Task 5: `controller.launch(workspace_id)` runs BEFORE the atomic claim, not after. Reason: the launch triggers B3's orphan sweep, which would otherwise mark our just-claimed `status='running'` row as `'failed'`. Also adds a regression test for the "stale running row + new queued row" path that previously blocked the claim via the unique partial index.
+  - **H2** Made compaction scope explicit: it's for the DB-stored transcript + future UI summaries, NOT for SDK session-context bounding. Native session-ID resume (from B3) lets the SDK rehydrate its own history; the SDK session grows unbounded with workspace age. The "reset SDK session on compaction" path (clear `last_sdk_session_id`, seed next launch with summary) is documented as a B5/B8 follow-up but explicitly out of B4 scope. Long-running workspaces will see unbounded SDK context cost — admin monitoring lands in B8.
+  - **H3** Fixed migration revision strings to match the project's two-digit convention (`"0029"` / `down_revision="0028"`, not the descriptive-name variant). Switched `sa.Text` / `sa.Integer` to call form (`sa.Text()`, `sa.Integer()`).
+  - **M1** Added `turn_jobs.submitted_by_user_id` (FK users, nullable). `submit_user_turn` takes a `submitted_by_user_id` kwarg and writes the `cloud_turn_sent` audit event AT SUBMIT TIME (before any SDK dispatch), so a crash between submit and finalize doesn't lose the audit trail. Finalize writes a separate `cloud_turn_completed` or `cloud_turn_failed` event with the telemetry. Compliance can answer "by whom" via `turn_jobs.submitted_by_user_id` or `workspace_events.actor_id`.
+  - **M2** Drain query uses Postgres `DISTINCT ON (workspace_id) ... ORDER BY workspace_id, queued_at, id` — single-row tie-breaker on `id` when multiple jobs share the min `queued_at`.
+  - **M3** Compaction's latest-summary picker now joins to the boundary `chat_turns` row and orders by `chat_turns.position DESC` — eliminates the `chat_summaries.created_at` tie issue (same pattern B3's resume serializer landed in Task 8 before being deleted).
+  - **L1** Task 2's settings smoke became a real pytest test with the `_settings_env` fixture; the inline shell `uv run python -c "..."` was misleading because `Settings()` fails without baseline env.
 
 ---
 
 ## Task 1: schema additions for B4
 
-Adds three columns to `workspaces`:
-- `last_sdk_session_id: text | null` — populated by the turn processor from `TurnDoneEvent.session_id`; consumed by the controller on next launch for native SDK resume.
-- `daily_token_cap_in_override: integer | null` — admin-set per-workspace override of the global input cap.
-- `daily_token_cap_out_override: integer | null` — same for output.
+Adds three columns to `workspaces` and one to `turn_jobs`:
+- `workspaces.last_sdk_session_id: text | null` — populated by the turn processor from `TurnDoneEvent.session_id`; consumed by the controller on next launch for native SDK resume.
+- `workspaces.daily_token_cap_in_override: integer | null` — admin-set per-workspace override of the global input cap.
+- `workspaces.daily_token_cap_out_override: integer | null` — same for output.
+- `turn_jobs.submitted_by_user_id: bigint | null` — FK users(id); compliance/audit who initiated the turn. Nullable so system-initiated turns (e.g., future auto-summarization) work without forging a user.
 
 **Files:**
 - Create: `alembic/versions/0029_workspace_b4_columns.py`
@@ -93,15 +102,20 @@ import uuid
 
 from sqlalchemy import inspect, select
 
-from call_monitor.db.models import Workspace
+from call_monitor.db.models import TurnJob, Workspace
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
-def test_workspace_has_last_sdk_session_id_column():
+def test_workspace_has_b4_columns():
     cols = {c.name for c in inspect(Workspace).columns}
     assert "last_sdk_session_id" in cols
     assert "daily_token_cap_in_override" in cols
     assert "daily_token_cap_out_override" in cols
+
+
+def test_turn_jobs_has_submitted_by_user_id_column():
+    cols = {c.name for c in inspect(TurnJob).columns}
+    assert "submitted_by_user_id" in cols
 
 
 def test_workspace_defaults_b4_columns_to_null(pg_session_factory):
@@ -143,10 +157,10 @@ Expected: AttributeError / column not in inspector results.
 `alembic/versions/0029_workspace_b4_columns.py`:
 
 ```python
-"""workspace B4 columns: last_sdk_session_id + daily cap overrides
+"""workspace B4 columns: last_sdk_session_id + daily cap overrides + submitter
 
-Revision ID: 0029_workspace_b4_columns
-Revises: 0028_chat_turns_position
+Revision ID: 0029
+Revises: 0028
 Create Date: 2026-05-20
 """
 from __future__ import annotations
@@ -155,8 +169,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0029_workspace_b4_columns"
-down_revision = "0028_chat_turns_position"
+revision = "0029"
+down_revision = "0028"
 branch_labels = None
 depends_on = None
 
@@ -164,25 +178,35 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "workspaces",
-        sa.Column("last_sdk_session_id", sa.Text, nullable=True),
+        sa.Column("last_sdk_session_id", sa.Text(), nullable=True),
     )
     op.add_column(
         "workspaces",
-        sa.Column("daily_token_cap_in_override", sa.Integer, nullable=True),
+        sa.Column("daily_token_cap_in_override", sa.Integer(), nullable=True),
     )
     op.add_column(
         "workspaces",
-        sa.Column("daily_token_cap_out_override", sa.Integer, nullable=True),
+        sa.Column("daily_token_cap_out_override", sa.Integer(), nullable=True),
+    )
+    op.add_column(
+        "turn_jobs",
+        sa.Column(
+            "submitted_by_user_id",
+            sa.BigInteger(),
+            sa.ForeignKey("users.id"),
+            nullable=True,
+        ),
     )
 
 
 def downgrade() -> None:
+    op.drop_column("turn_jobs", "submitted_by_user_id")
     op.drop_column("workspaces", "daily_token_cap_out_override")
     op.drop_column("workspaces", "daily_token_cap_in_override")
     op.drop_column("workspaces", "last_sdk_session_id")
 ```
 
-- [ ] **Step 4: Add the columns to the Workspace model**
+- [ ] **Step 4: Add the columns to the Workspace + TurnJob models**
 
 In `src/call_monitor/db/models.py`, add to `Workspace` (alongside the other nullable columns):
 
@@ -195,6 +219,16 @@ In `src/call_monitor/db/models.py`, add to `Workspace` (alongside the other null
     )
     daily_token_cap_out_override: Mapped[int | None] = mapped_column(
         Integer, nullable=True,
+    )
+```
+
+And to `TurnJob`:
+
+```python
+    submitted_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id"),
+        nullable=True,
     )
 ```
 
@@ -281,14 +315,32 @@ Place near `workspace_idle_sweep_seconds` (the closest related block):
     )
 ```
 
-- [ ] **Step 2: Smoke test + commit**
+- [ ] **Step 2: Smoke test the settings load**
+
+Add to `tests/proposal_assist/test_models_workspace_b4_columns.py` (it already uses `_settings_env`-style env, easier than a new file):
+
+```python
+def test_b4_settings_load_with_defaults(_settings_env):
+    """The six new B4 settings expose the documented defaults when no
+    override env vars are set."""
+    from call_monitor.config import Settings
+
+    s = Settings()
+    assert s.daily_token_cap_input == 500_000
+    assert s.daily_token_cap_output == 100_000
+    assert s.compaction_turn_threshold == 100
+    assert s.compaction_token_threshold == 200_000
+    assert s.compaction_tick_seconds == 300
+    assert s.turn_drain_tick_seconds == 5
+```
+
+Run it:
 
 ```bash
-uv run python -c "from call_monitor.config import Settings; s = Settings(); print(s.daily_token_cap_input, s.compaction_turn_threshold, s.turn_drain_tick_seconds)"
-# expect: 500000 100 5
-
-uv run ruff format src/call_monitor/config.py
-git add src/call_monitor/config.py
+uv run pytest tests/proposal_assist/test_models_workspace_b4_columns.py::test_b4_settings_load_with_defaults -v
+# expect 1 passing
+uv run ruff format src/call_monitor/config.py tests/proposal_assist/test_models_workspace_b4_columns.py
+git add src/call_monitor/config.py tests/proposal_assist/test_models_workspace_b4_columns.py
 git commit -m "feat(b4): cap + compaction + drain-cadence settings"
 ```
 
@@ -557,13 +609,14 @@ git commit -m "feat(b4): daily-token-cap enforcement helper + TokenCapExceeded"
 
 ---
 
-## Task 4: `submit_user_turn` — atomic insert
+## Task 4: `submit_user_turn` — atomic insert + audit-at-submit
 
 The entry point B6 will call from POST /workspaces/<id>/turns. Atomically inserts:
 1. One `chat_turns` row with `role='user'`, `content=<user message in SDK-native shape>`, no token counts (user-side tokens aren't billed by us).
-2. One `turn_jobs` row with `status='queued'`, `user_turn_id=<the chat_turn just written>`.
+2. One `turn_jobs` row with `status='queued'`, `user_turn_id=<the chat_turn just written>`, `submitted_by_user_id=<the user>`.
+3. One `workspace_events` row with `kind='cloud_turn_sent'`, `actor_id=<the user>`, `payload={"turn_job_id": ..., "phase": "queued"}` — written BEFORE dispatch so a crash between submit and finalize doesn't lose the audit trail. Finalize will write a second event (`cloud_turn_completed` or `cloud_turn_failed`) with the outcome telemetry.
 
-Pre-enqueue: calls `check_daily_token_cap`. If not allowed, raises `TokenCapExceeded` and rolls back (no rows written).
+Pre-enqueue: calls `check_daily_token_cap`. If not allowed, raises `TokenCapExceeded` and the caller is expected to rollback (the SQLAlchemy `flush()` we use will be rolled back as part of the caller's transaction).
 
 **Files:**
 - Create: `src/call_monitor/proposal_assist/turns/submit.py`
@@ -578,11 +631,12 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import ChatTurn, TurnJob
+from call_monitor.db.models import ChatTurn, TurnJob, WorkspaceEvent
 from call_monitor.proposal_assist.turns.caps import TokenCapExceeded
 from call_monitor.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import (
     make_chat_turn,
+    make_user,
     make_workspace,
 )
 
@@ -593,15 +647,17 @@ def test_submit_user_turn_writes_chat_turn_and_turn_job(
     from call_monitor.config import Settings
     settings = Settings()
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
         s.commit()
-        wsid = ws.id
+        uid, wsid = user.id, ws.id
 
     with pg_session_factory() as s:
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
             content={"type": "text", "text": "Hello agent."},
+            submitted_by_user_id=uid,
             settings=settings,
         )
         s.commit()
@@ -612,13 +668,25 @@ def test_submit_user_turn_writes_chat_turn_and_turn_job(
             select(ChatTurn).where(ChatTurn.workspace_id == wsid)
         ))
         job_row = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        events = list(s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "cloud_turn_sent",
+            )
+        ))
 
     assert len(turn_rows) == 1
     assert turn_rows[0].role == "user"
     assert turn_rows[0].content == {"type": "text", "text": "Hello agent."}
     assert job_row.status == "queued"
     assert job_row.user_turn_id == turn_rows[0].id
+    assert job_row.submitted_by_user_id == uid
     assert job_row.queued_at is not None
+    # Audit event written at submit-time so it survives a crash before finalize.
+    assert len(events) == 1
+    assert events[0].actor_id == uid
+    assert events[0].payload["turn_job_id"] == str(job_id)
+    assert events[0].payload["phase"] == "queued"
 
 
 def test_submit_user_turn_raises_when_input_cap_exceeded(
@@ -628,12 +696,13 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
     from call_monitor.config import Settings
     settings = Settings()
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
         make_chat_turn(s, ws, role="assistant",
                        content={"type": "text", "text": "x"},
                        tokens_in=200)
         s.commit()
-        wsid = ws.id
+        uid, wsid = user.id, ws.id
 
     with pg_session_factory() as s:
         with pytest.raises(TokenCapExceeded) as exc_info:
@@ -641,6 +710,7 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
                 session=s,
                 workspace_id=wsid,
                 content={"type": "text", "text": "hi"},
+                submitted_by_user_id=uid,
                 settings=settings,
             )
         s.rollback()
@@ -657,8 +727,50 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
         jobs = list(s.scalars(
             select(TurnJob).where(TurnJob.workspace_id == wsid)
         ))
+        events = list(s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "cloud_turn_sent",
+            )
+        ))
     assert user_rows == []
     assert jobs == []
+    assert events == []  # audit row also rolled back
+
+
+def test_submit_user_turn_accepts_null_submitter_for_system_initiated(
+    pg_session_factory, _settings_env,
+):
+    """System-initiated turns (future auto-summarization, recovery)
+    legitimately have no user actor — pass None."""
+    from call_monitor.config import Settings
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content={"type": "text", "text": "system message"},
+            submitted_by_user_id=None,
+            settings=settings,
+        )
+        s.commit()
+        job_id = job.id
+
+    with pg_session_factory() as s:
+        job_row = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        events = list(s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "cloud_turn_sent",
+            )
+        ))
+    assert job_row.submitted_by_user_id is None
+    assert events[0].actor_id is None
 ```
 
 - [ ] **Step 2: Implement**
@@ -669,12 +781,20 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
 """Atomically enqueue a user turn for an agent workspace.
 
 This is the entry point B6's POST /workspaces/<id>/turns will call. It
-writes one chat_turns row (role='user') and one turn_jobs row
-(status='queued') in the caller's session/transaction. Caller commits.
+writes one chat_turns row (role='user'), one turn_jobs row
+(status='queued', submitted_by_user_id=...), and one workspace_events
+audit row (kind='cloud_turn_sent', phase='queued') in the caller's
+session/transaction. Caller commits.
+
+The audit row is written BEFORE dispatch so a crash between submit and
+finalize doesn't lose the compliance trail. The processor writes a
+second event (cloud_turn_completed or cloud_turn_failed) with telemetry
+once the turn finishes.
 
 Cap enforcement: pre-write, calls check_daily_token_cap. If exceeded,
 raises TokenCapExceeded — caller (typically B6) catches this and
-returns 429 to the client. No rows are written when the cap is hit.
+returns 429 to the client. The session's flushed-but-uncommitted state
+is rolled back by the caller (or by the request-scope teardown).
 
 B8 will layer the user-facing "you hit the cap" surfacing on top of
 the TokenCapExceeded path.
@@ -688,7 +808,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from call_monitor.config import Settings
-from call_monitor.db.models import ChatTurn, TurnJob
+from call_monitor.db.models import ChatTurn, TurnJob, WorkspaceEvent
 from call_monitor.proposal_assist.turns.caps import (
     TokenCapExceeded,
     check_daily_token_cap,
@@ -700,10 +820,12 @@ def submit_user_turn(
     session: Session,
     workspace_id: uuid.UUID,
     content: dict[str, Any] | list[Any] | str,
+    submitted_by_user_id: int | None,
     settings: Settings,
 ) -> TurnJob:
-    """Insert chat_turns(role='user') + turn_jobs(status='queued')
-    atomically. Returns the TurnJob (not yet committed)."""
+    """Insert chat_turns(role='user') + turn_jobs(status='queued') +
+    workspace_events(cloud_turn_sent, phase='queued') atomically.
+    Returns the TurnJob (not yet committed)."""
     cap = check_daily_token_cap(session, workspace_id, settings=settings)
     if not cap.allowed:
         raise TokenCapExceeded(
@@ -726,10 +848,25 @@ def submit_user_turn(
     job = TurnJob(
         workspace_id=workspace_id,
         user_turn_id=user_turn.id,
+        submitted_by_user_id=submitted_by_user_id,
         status="queued",
         queued_at=datetime.now(UTC),
     )
     session.add(job)
+    session.flush()
+
+    # Audit-at-submit: survives a crash between submit and finalize.
+    # The processor writes a separate cloud_turn_{completed,failed}
+    # event with telemetry when the turn finishes.
+    session.add(WorkspaceEvent(
+        workspace_id=workspace_id,
+        kind="cloud_turn_sent",
+        actor_id=submitted_by_user_id,
+        payload={
+            "turn_job_id": str(job.id),
+            "phase": "queued",
+        },
+    ))
     session.flush()
     return job
 ```
@@ -748,17 +885,21 @@ git commit -m "feat(b4): submit_user_turn — atomic chat_turns + turn_jobs inse
 ## Task 5: turn processor
 
 The heart of B4. Given a `turn_jobs.id`, the processor:
-1. Claims it (`UPDATE turn_jobs SET status='running', started_at=now() WHERE id=? AND status='queued'`).
-2. Reads the linked user `chat_turns` content.
-3. Calls `await controller.send_turn(workspace_id, user_text)`.
-4. For each event yielded:
+
+1. **Launch first** (`await controller.launch(workspace_id)`). This is critical: B3's orphan sweep runs inside `launch()` on a fresh subprocess. If we claimed our row first, the sweep would mark it `status='failed', error='orphaned'` because it's in the `status='running'` set. Launching first guarantees: (a) any stale `running` rows from a prior crash are cleaned up before we try to claim (otherwise the unique partial index on `turn_jobs(workspace_id) WHERE status='running'` would block our UPDATE); (b) by the time we claim, our row is the only `running` one, so no sweep collision possible. If the controller's handle is cached (we're not the first turn this session), no sweep runs — also safe, because a cached handle proves no crash since last launch.
+2. Atomically claim (`UPDATE turn_jobs SET status='running', started_at=now() WHERE id=? AND status='queued'`). If the row is already in another state (raced, or pre-claimed), the UPDATE returns no rows and the processor is a no-op.
+3. Read the linked user `chat_turns` content.
+4. Call `await controller.send_turn(workspace_id, user_text)`.
+5. For each event yielded:
    - `AssistantTextEvent` → `chat_turns(role='assistant', content={"type":"text","text":...})`
    - `ToolUseEvent` → `chat_turns(role='assistant', content={"type":"tool_use", "id":..., "name":..., "input":...})`
    - `ToolResultEvent` → `chat_turns(role='tool', content={"type":"tool_result", "tool_use_id":..., "content":..., "is_error":...})`
-   - `TurnDoneEvent` → stamp tokens on the LAST assistant `chat_turns` row written this turn (if any); update `workspaces.last_sdk_session_id = event.session_id` (if set); update `turn_jobs.status='completed'`, `completed_at=now()`; write `workspace_events(kind='cloud_turn_sent', payload={...})`.
-5. Errors:
-   - `SDKTurnError` → `turn_jobs.status='failed'`, `error=str(exc)`, `completed_at=now()`. No further chat_turns. Still write `workspace_events(kind='cloud_turn_sent', payload={"failed": true, "error": ...})`.
+   - `TurnDoneEvent` → stamp tokens on the LAST assistant `chat_turns` row written this turn (if any); update `workspaces.last_sdk_session_id = event.session_id` (if set); update `turn_jobs.status='completed'`, `completed_at=now()`; write `workspace_events(kind='cloud_turn_completed', payload={tokens_in, tokens_out, model, turn_job_id})`.
+6. Errors:
+   - `SDKTurnError` → `turn_jobs.status='failed'`, `error=str(exc)`, `completed_at=now()`. Write `workspace_events(kind='cloud_turn_failed', payload={turn_job_id, error, tokens_in, tokens_out})`.
    - Any other exception → same as SDKTurnError but with `error='processor_failure: <type>: <msg>'`.
+
+Note: the SUBMIT-time `cloud_turn_sent` event (Task 4) is the loss-on-crash-safe audit. Task 5's `cloud_turn_completed` / `cloud_turn_failed` events are the outcome telemetry. Both share `payload.turn_job_id` for joining.
 
 **Files:**
 - Create: `src/call_monitor/proposal_assist/turns/processor.py`
@@ -792,6 +933,7 @@ from tests.proposal_assist.conftest import make_workspace
 
 def _build_controller_and_submit(pg_session_factory, _settings_env, events):
     from call_monitor.config import Settings
+    from tests.proposal_assist.conftest import make_user
     settings = Settings()
     adapter = FakeAgentAdapter()
     adapter.script_next_turn(events)
@@ -800,13 +942,16 @@ def _build_controller_and_submit(pg_session_factory, _settings_env, events):
         registry=registry, session_factory=pg_session_factory,
     )
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
         s.commit()
-        wsid = ws.id
+        uid, wsid = user.id, ws.id
     with pg_session_factory() as s:
         job = submit_user_turn(
             session=s, workspace_id=wsid,
-            content={"type": "text", "text": "Hi"}, settings=settings,
+            content={"type": "text", "text": "Hi"},
+            submitted_by_user_id=uid,
+            settings=settings,
         )
         s.commit()
         job_id = job.id
@@ -883,7 +1028,9 @@ async def test_process_turn_writes_tool_events(
 async def test_process_turn_handles_sdk_turn_error(
     pg_session_factory, _settings_env,
 ):
-    """SDKTurnError mid-stream marks the turn_job failed and stops further writes."""
+    """SDKTurnError mid-stream marks the turn_job failed and writes a
+    cloud_turn_failed event."""
+    from tests.proposal_assist.conftest import make_user
     adapter = FakeAgentAdapter()
 
     # Override send_turn to raise after one event.
@@ -902,13 +1049,16 @@ async def test_process_turn_handles_sdk_turn_error(
     from call_monitor.config import Settings
     settings = Settings()
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
         s.commit()
-        wsid = ws.id
+        uid, wsid = user.id, ws.id
     with pg_session_factory() as s:
         job = submit_user_turn(
             session=s, workspace_id=wsid,
-            content={"type": "text", "text": "hi"}, settings=settings,
+            content={"type": "text", "text": "hi"},
+            submitted_by_user_id=uid,
+            settings=settings,
         )
         s.commit()
         job_id = job.id
@@ -925,13 +1075,14 @@ async def test_process_turn_handles_sdk_turn_error(
 
     assert job.status == "failed"
     assert "529" in (job.error or "")
-    cloud_events = [e for e in events if e.kind == "cloud_turn_sent"]
-    assert len(cloud_events) == 1
-    assert cloud_events[0].payload.get("failed") is True
+    failed_events = [e for e in events if e.kind == "cloud_turn_failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0].payload["turn_job_id"] == str(job_id)
+    assert "529" in failed_events[0].payload["error"]
 
 
 @pytest.mark.asyncio
-async def test_process_turn_writes_cloud_turn_sent_event(
+async def test_process_turn_writes_cloud_turn_completed_event(
     pg_session_factory, _settings_env,
 ):
     wsid, job_id, controller, _ = _build_controller_and_submit(
@@ -950,7 +1101,7 @@ async def test_process_turn_writes_cloud_turn_sent_event(
         events = list(s.scalars(
             select(WorkspaceEvent).where(
                 WorkspaceEvent.workspace_id == wsid,
-                WorkspaceEvent.kind == "cloud_turn_sent",
+                WorkspaceEvent.kind == "cloud_turn_completed",
             )
         ))
     assert len(events) == 1
@@ -960,6 +1111,71 @@ async def test_process_turn_writes_cloud_turn_sent_event(
     assert payload["turn_job_id"] == str(job_id)
     # Content NOT in payload — spec says content lives only in chat_turns.
     assert "content" not in payload
+
+
+@pytest.mark.asyncio
+async def test_process_turn_survives_stale_running_row_from_prior_crash(
+    pg_session_factory, _settings_env,
+):
+    """Regression for H1: a stale `running` turn_jobs row (from a crashed
+    prior process) must NOT block the new claim. The launch-first ordering
+    + B3's orphan sweep cleans up the stale row before we try to claim,
+    so the unique partial index doesn't fire."""
+    from datetime import UTC, datetime
+    from tests.proposal_assist.conftest import make_user
+    from call_monitor.config import Settings
+
+    settings = Settings()
+    adapter = FakeAgentAdapter()
+    adapter.script_next_turn([
+        AssistantTextEvent(text="ok"),
+        TurnDoneEvent(tokens_in=1, tokens_out=1, model="fake", session_id="s1"),
+    ])
+    from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
+    from call_monitor.proposal_assist.drafting.controller import WorkspaceController
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory,
+    )
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        # Stale `running` row from a hypothetical crashed prior process.
+        s.add(TurnJob(
+            workspace_id=ws.id, status="running",
+            started_at=datetime.now(UTC),
+        ))
+        s.commit()
+        uid, wsid = user.id, ws.id
+
+    # Submit a NEW turn — this would IntegrityError on the unique partial
+    # index if the stale row hadn't been swept first.
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s, workspace_id=wsid,
+            content={"type": "text", "text": "hi"},
+            submitted_by_user_id=uid,
+            settings=settings,
+        )
+        s.commit()
+        new_job_id = job.id
+
+    # process_turn_once should: launch (sweep marks stale row failed),
+    # then claim new_job_id, then dispatch.
+    await process_turn_once(
+        session_factory=pg_session_factory, controller=controller, turn_job_id=new_job_id,
+    )
+
+    with pg_session_factory() as s:
+        all_jobs = list(s.scalars(
+            select(TurnJob).where(TurnJob.workspace_id == wsid).order_by(TurnJob.queued_at.nulls_first())
+        ))
+    statuses = sorted([j.status for j in all_jobs])
+    # One stale failed (from sweep), one completed (the new one).
+    assert statuses == ["completed", "failed"]
+    stale = next(j for j in all_jobs if j.status == "failed")
+    assert stale.error == "orphaned"
 
 
 @pytest.mark.asyncio
@@ -987,7 +1203,9 @@ async def test_process_turn_noop_if_already_running(
         session_factory=pg_session_factory, controller=controller, turn_job_id=job_id,
     )
 
-    # Status unchanged; no extra chat_turns written.
+    # Status unchanged; no extra chat_turns written beyond the user one.
+    # NB: the launch DOES still fire (idempotent), but no claim → no
+    # dispatch → no event writes.
     with pg_session_factory() as s:
         job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
         turns = list(s.scalars(
@@ -1057,7 +1275,33 @@ async def process_turn_once(
     turn_job_id: uuid.UUID,
 ) -> None:
     """Process one queued turn. No-op if the row is not in 'queued' state."""
-    # Atomic claim.
+    # First: peek at the workspace_id so we can launch the controller
+    # BEFORE claiming the row. The launch runs B3's orphan sweep on a
+    # fresh subprocess; if we claimed first, the sweep would mark our
+    # just-claimed row as orphaned. Launching first also clears any
+    # stale `running` row that would otherwise block our claim via the
+    # unique partial index on turn_jobs(workspace_id) WHERE status='running'.
+    with session_factory() as s:
+        peek = s.scalar(
+            select(TurnJob.workspace_id).where(TurnJob.id == turn_job_id)
+        )
+    if peek is None:
+        logger.info("turn_job %s does not exist; skipping", turn_job_id)
+        return
+    workspace_id_for_launch = peek
+
+    # Launch (or reuse cached) handle. Idempotent.
+    try:
+        await controller.launch(workspace_id_for_launch)
+    except Exception:
+        logger.exception(
+            "process_turn_once: controller.launch failed for workspace %s; "
+            "leaving turn_job %s in queued state for retry",
+            workspace_id_for_launch, turn_job_id,
+        )
+        return
+
+    # Atomic claim AFTER the sweep has run.
     with session_factory() as s:
         result = s.execute(
             update(TurnJob)
@@ -1221,13 +1465,12 @@ def _finalize_success(
                 ws.last_sdk_session_id = session_id
         s.add(WorkspaceEvent(
             workspace_id=workspace_id,
-            kind="cloud_turn_sent",
+            kind="cloud_turn_completed",
             payload={
                 "turn_job_id": str(turn_job_id),
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "model": model,
-                "failed": False,
             },
         ))
         s.commit()
@@ -1250,12 +1493,11 @@ def _finalize_failed(
             job.completed_at = datetime.now(UTC)
         s.add(WorkspaceEvent(
             workspace_id=workspace_id,
-            kind="cloud_turn_sent",
+            kind="cloud_turn_failed",
             payload={
                 "turn_job_id": str(turn_job_id),
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
-                "failed": True,
                 "error": error,
             },
         ))
@@ -1309,7 +1551,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import TurnJob
+from call_monitor.db.models import ChatTurn, TurnJob
 from call_monitor.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     TurnDoneEvent,
@@ -1319,7 +1561,7 @@ from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
 from call_monitor.proposal_assist.turns.drain import drain_turn_queue_tick
 from call_monitor.proposal_assist.turns.submit import submit_user_turn
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 @pytest.mark.asyncio
@@ -1348,12 +1590,17 @@ async def test_drain_tick_processes_one_queued_turn_per_workspace(
 
     job_ids = []
     with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        uid = user.id
         for _ in range(2):
-            ws = make_workspace(s)
+            ws = make_workspace(s, owner=user)
             s.commit()
             job = submit_user_turn(
                 session=s, workspace_id=ws.id,
-                content={"type": "text", "text": "hi"}, settings=settings,
+                content={"type": "text", "text": "hi"},
+                submitted_by_user_id=uid,
+                settings=settings,
             )
             s.commit()
             job_ids.append(job.id)
@@ -1383,6 +1630,60 @@ async def test_drain_tick_no_op_when_no_queued_turns(
         session_factory=pg_session_factory, controller=controller,
     )
     assert adapter.launches == []
+
+
+@pytest.mark.asyncio
+async def test_drain_tick_picks_exactly_one_when_queued_at_ties(
+    pg_session_factory, _settings_env,
+):
+    """Regression for M2: two queued jobs for the same workspace with
+    identical queued_at must produce exactly one dispatch per tick (the
+    DISTINCT ON + id tie-break guarantees this)."""
+    from datetime import UTC, datetime
+    from tests.proposal_assist.conftest import make_user
+    from call_monitor.config import Settings
+    settings = Settings()
+
+    adapter = FakeAgentAdapter()
+    adapter.script_next_turn([
+        AssistantTextEvent(text="ok"),
+        TurnDoneEvent(tokens_in=1, tokens_out=1, model="fake", session_id="s1"),
+    ])
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory,
+    )
+
+    same_ts = datetime.now(UTC)
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    with pg_session_factory() as s:
+        # Two user turns + two queued jobs sharing the exact same queued_at.
+        for _ in range(2):
+            t = ChatTurn(workspace_id=wsid, role="user",
+                         content={"type": "text", "text": "hi"})
+            s.add(t)
+            s.flush()
+            s.add(TurnJob(
+                workspace_id=wsid, user_turn_id=t.id,
+                submitted_by_user_id=uid,
+                status="queued", queued_at=same_ts,
+            ))
+        s.commit()
+
+    dispatched = await drain_turn_queue_tick(
+        session_factory=pg_session_factory, controller=controller,
+    )
+    assert dispatched == 1
+    # The other one stays queued for the next tick.
+    with pg_session_factory() as s:
+        statuses = sorted([r for r in s.scalars(
+            select(TurnJob.status).where(TurnJob.workspace_id == wsid)
+        )])
+    assert statuses == ["completed", "queued"]
 ```
 
 - [ ] **Step 2: Implement**
@@ -1421,30 +1722,18 @@ async def drain_turn_queue_tick(
     """Find workspaces with queued turn_jobs; pick the oldest queued
     job per workspace; dispatch process_turn_once for each. Returns the
     count of dispatched turns."""
-    # Step 1: find all (workspace_id, oldest_queued_id) pairs.
+    # Step 1: find one queued job per workspace, using PG DISTINCT ON
+    # so two rows sharing the same min(queued_at) deterministically
+    # break the tie on id. ORDER BY's leading columns must match the
+    # DISTINCT ON tuple.
     with session_factory() as s:
-        # One queued job per workspace — the oldest.
-        # SELECT DISTINCT ON requires PG-specific ordering; use a window/groupby
-        # approximation that works on standard SQLAlchemy.
-        from sqlalchemy import func
-        subq = (
-            select(
-                TurnJob.workspace_id,
-                func.min(TurnJob.queued_at).label("oldest"),
-            )
-            .where(TurnJob.status == "queued")
-            .group_by(TurnJob.workspace_id)
-            .subquery()
-        )
-        rows = list(s.execute(
+        stmt = (
             select(TurnJob.id, TurnJob.workspace_id)
-            .join(
-                subq,
-                (TurnJob.workspace_id == subq.c.workspace_id)
-                & (TurnJob.queued_at == subq.c.oldest),
-            )
             .where(TurnJob.status == "queued")
-        ).all())
+            .distinct(TurnJob.workspace_id)
+            .order_by(TurnJob.workspace_id, TurnJob.queued_at, TurnJob.id)
+        )
+        rows = list(s.execute(stmt).all())
 
     if not rows:
         return 0
@@ -1485,9 +1774,13 @@ git commit -m "feat(b4): drain tick — one queued turn per workspace per tick"
 
 ## Task 7: compaction summarizer + tick
 
+**Scope clarification (Codex H2):** B4 compaction is for the DB-stored transcript only — it generates a human-readable summary of un-summarized `chat_turns` for future UI display. It does **NOT** bound the SDK session's context. With native session-ID resume (B3), the SDK manages its own conversation history server-side. The local `chat_turns` and `chat_summaries` tables are independent of the SDK's view.
+
+**Implication:** long-running workspaces accumulate unbounded SDK context cost over time, even with compaction running. The "reset SDK session on compaction" path (clear `last_sdk_session_id`, then seed the next launch's first turn with the summary as initial context) is the eventual fix but requires a new `LaunchContext.initial_seed_message` field and processor-side logic — too much surface for B4. B8 will add cost monitoring + admin-driven session reset; until then, treat unbounded SDK growth as a known limit.
+
 When a workspace's un-summarized chat_turns count >= `COMPACTION_TURN_THRESHOLD` OR un-summarized input tokens >= `COMPACTION_TOKEN_THRESHOLD`, a compaction job:
 
-1. Loads the latest `chat_summaries` row (if any) to find the `summarized_through` boundary turn.
+1. Loads the latest `chat_summaries` row (if any) by joining to its boundary `chat_turns` and ordering by `chat_turns.position DESC` (NOT `chat_summaries.created_at` — same statement-time tie pitfall B3 fixed).
 2. Loads all chat_turns with `position > boundary.position` (ordered by position).
 3. Calls the summarizer model with a fixed prompt: "Summarize the following proposal-drafting conversation. Cover: user intent, agent's working approach, current state of the artifact, any pending decisions. Keep the summary under 2000 tokens."
 4. Writes a new `chat_summaries` row: `summary=<text>`, `summarized_through=<id of last turn included>`, `tokens=<approx output size>`, `model=<summarizer model>`.
@@ -1775,19 +2068,22 @@ Conversation:
 
 def _summarized_through_position(session: Session, workspace_id: uuid.UUID) -> int | None:
     """Return the `position` of the chat_turn the latest summary covers,
-    or None if there is no summary yet."""
-    latest = session.execute(
-        select(ChatSummary.summarized_through)
+    or None if there is no summary yet.
+
+    "Latest" is defined by joining to the boundary chat_turn and ordering
+    by chat_turns.position DESC — NOT chat_summaries.created_at. The
+    created_at column has the same statement-time tie problem that B3
+    fixed for chat_turns ordering: multiple summaries written in one tx
+    share an identical timestamp.
+    """
+    boundary_pos = session.execute(
+        select(ChatTurn.position)
+        .join(ChatSummary, ChatSummary.summarized_through == ChatTurn.id)
         .where(ChatSummary.workspace_id == workspace_id)
-        .order_by(ChatSummary.created_at.desc())
+        .order_by(ChatTurn.position.desc())
         .limit(1)
     ).scalar_one_or_none()
-    if latest is None:
-        return None
-    pos = session.scalar(
-        select(ChatTurn.position).where(ChatTurn.id == latest)
-    )
-    return int(pos) if pos is not None else None
+    return int(boundary_pos) if boundary_pos is not None else None
 
 
 def _un_summarized_stats(
@@ -2059,7 +2355,7 @@ from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
 from call_monitor.proposal_assist.turns.drain import drain_turn_queue_tick
 from call_monitor.proposal_assist.turns.submit import submit_user_turn
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 @pytest.mark.asyncio
@@ -2083,13 +2379,15 @@ async def test_full_turn_pipeline(pg_session_factory, _settings_env):
     )
 
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
         s.commit()
-        wsid = ws.id
+        uid, wsid = user.id, ws.id
     with pg_session_factory() as s:
         job = submit_user_turn(
             session=s, workspace_id=wsid,
             content={"type": "text", "text": "Get the spec."},
+            submitted_by_user_id=uid,
             settings=settings,
         )
         s.commit()
@@ -2106,18 +2404,28 @@ async def test_full_turn_pipeline(pg_session_factory, _settings_env):
         ))
         job_row = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
         ws_row = s.scalar(select(Workspace).where(Workspace.id == wsid))
-        cloud_events = list(s.scalars(
+        sent_events = list(s.scalars(
             select(WorkspaceEvent).where(
                 WorkspaceEvent.workspace_id == wsid,
                 WorkspaceEvent.kind == "cloud_turn_sent",
+            )
+        ))
+        completed_events = list(s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "cloud_turn_completed",
             )
         ))
 
     assert [t.role for t in turns] == ["user", "assistant", "assistant", "tool", "assistant"]
     assert job_row.status == "completed"
     assert ws_row.last_sdk_session_id == "sess-A"
-    assert len(cloud_events) == 1
-    assert cloud_events[0].payload["tokens_in"] == 100
+    # Audit-at-submit + outcome event = full trace.
+    assert len(sent_events) == 1
+    assert sent_events[0].actor_id == uid
+    assert sent_events[0].payload["phase"] == "queued"
+    assert len(completed_events) == 1
+    assert completed_events[0].payload["tokens_in"] == 100
 
     # Now submit a SECOND turn. Terminate first to force a fresh launch
     # (otherwise the cached subprocess is reused and resume_session_id
@@ -2132,6 +2440,7 @@ async def test_full_turn_pipeline(pg_session_factory, _settings_env):
         submit_user_turn(
             session=s, workspace_id=wsid,
             content={"type": "text", "text": "Another turn."},
+            submitted_by_user_id=uid,
             settings=settings,
         )
         s.commit()
@@ -2348,7 +2657,7 @@ Surface to the user:
 
 2. **One assistant chat_turn per StreamEvent.** This is a deliberate flattening — the SDK message shape (with multiple content blocks per message) is lost in chat_turns. Reasoning: we no longer need chat_turns to be SDK-replay-compatible (B3 native resume sidesteps this). One row per event is simpler for UI rendering (B6) and audit. If a future feature needs to reconstruct the SDK message boundaries, add an `sdk_message_id` column.
 
-3. **`cloud_turn_sent` payload contains telemetry, not content.** Per spec line 343. Content lives in `chat_turns`.
+3. **Audit events are split: submit-time + outcome.** `cloud_turn_sent` (kind) is written at submit time with `actor_id=submitter` and `payload.phase="queued"` — survives a crash between submit and finalize so compliance always has the trace. `cloud_turn_completed` / `cloud_turn_failed` are written by the processor at finalize with telemetry. All three share `payload.turn_job_id`. Per spec line 343, payloads carry telemetry, not content — content lives in `chat_turns`.
 
 4. **Compaction is best-effort.** A failed compaction logs and moves on; the chat_summaries row is just absent for one more tick. No retry queue. The next tick will try again. If compaction repeatedly fails for one workspace, admin will notice via log rate (no formal alerting yet — B8 territory).
 
