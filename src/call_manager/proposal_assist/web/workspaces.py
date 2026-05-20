@@ -22,7 +22,7 @@ import bleach
 import markdown
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
@@ -441,3 +441,39 @@ async def stream_turn(
         ),
         media_type="text/event-stream",
     )
+
+
+@router.post("/{workspace_id}/turns/{turn_job_id}/cancel")
+def cancel_turn(
+    workspace_id: uuid.UUID,
+    turn_job_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Mark queued turn_job as 'cancelled'. No-op if status != 'queued'.
+
+    Race-safe: the WHERE clause includes status='queued', so a concurrent
+    processor that has already moved it to 'running' wins; this handler
+    returns the noop message.
+    """
+    from datetime import UTC, datetime
+
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    result = session.execute(
+        update(TurnJob)
+        .where(
+            TurnJob.id == turn_job_id,
+            TurnJob.workspace_id == ws.id,
+            TurnJob.status == "queued",
+        )
+        .values(status="cancelled", completed_at=datetime.now(UTC))
+    )
+    session.commit()
+    if result.rowcount:
+        return HTMLResponse("<p>cancelled</p>")
+    return HTMLResponse("<p>too late — already started or finished</p>")
