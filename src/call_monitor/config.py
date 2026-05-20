@@ -5,18 +5,14 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: str = Field(alias="DATABASE_URL")
     session_secret: str = Field(alias="SESSION_SECRET", min_length=16)
     # NoDecode: pydantic-settings would otherwise try to JSON-decode the env
     # value for complex types. We want plain comma-separated strings, parsed
     # by the validator below.
-    allowed_email_domains: Annotated[list[str], NoDecode] = Field(
-        alias="ALLOWED_EMAIL_DOMAINS"
-    )
+    allowed_email_domains: Annotated[list[str], NoDecode] = Field(alias="ALLOWED_EMAIL_DOMAINS")
     initial_admin_emails: Annotated[list[str], NoDecode] = Field(
         default_factory=list, alias="INITIAL_ADMIN_EMAIL"
     )
@@ -28,12 +24,8 @@ class Settings(BaseSettings):
     # `proxy_set_header X-Forwarded-For`). When False, X-Forwarded-For
     # is ignored so an attacker can't spoof their rate-limit bucket.
     trusted_proxy: bool = Field(default=False, alias="TRUSTED_PROXY")
-    eu_portal_base_url: str = Field(
-        default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL"
-    )
-    vinnova_base_url: str = Field(
-        default="https://data.vinnova.se", alias="VINNOVA_BASE_URL"
-    )
+    eu_portal_base_url: str = Field(default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL")
+    vinnova_base_url: str = Field(default="https://data.vinnova.se", alias="VINNOVA_BASE_URL")
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
     ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
@@ -44,9 +36,7 @@ class Settings(BaseSettings):
     # below this (computed by the caller, not the gate) are zeroed out
     # before the LLM is invoked. Default 0.30 chosen from BGE-M3's typical
     # similarity distribution (see ranking-v2 spec).
-    embedding_pregate_threshold: float = Field(
-        default=0.30, alias="EMBEDDING_PREGATE_THRESHOLD"
-    )
+    embedding_pregate_threshold: float = Field(default=0.30, alias="EMBEDDING_PREGATE_THRESHOLD")
     # Two-band embedding gate (Codex #1):
     #   sim < EMBEDDING_HARD_FAIL_THRESHOLD  -> short-circuit FAIL, no LLM
     #   hard_fail <= sim < pregate_threshold -> UNKNOWN, LLM adjudicates
@@ -64,9 +54,7 @@ class Settings(BaseSettings):
     # rank_pair then routes every pair to the local client and the
     # threshold + model fields are ignored. The threshold defaults to
     # 0.50; tune up to skip more, down to send more pairs to Sonnet.
-    anthropic_api_key: str | None = Field(
-        default=None, alias="ANTHROPIC_API_KEY"
-    )
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     extractor_version: str = Field(
         default="sections-v1",
         alias="EXTRACTOR_VERSION",
@@ -85,12 +73,23 @@ class Settings(BaseSettings):
         description="Anthropic model id used for proposal-assist extractors, "
         "score_against_rubric, fit-check, persona scoring, and consolidation.",
     )
-    remote_rank_model: str = Field(
-        default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL"
+    phase0_tick_seconds: int = Field(
+        default=30,
+        alias="PHASE0_TICK_SECONDS",
+        description="How often the in-process Phase 0 worker drains "
+        "workspace_setup_jobs. Lowering this shortens the gap "
+        "between workspace creation and rubric-review prompt; "
+        "raising it reduces idle DB churn when the queue is empty.",
     )
-    remote_rank_cosine_threshold: float = Field(
-        default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD"
+    workspaces_dir: str = Field(
+        default="var/workspaces",
+        alias="WORKSPACES_DIR",
+        description="Filesystem root for per-workspace git repos. Each "
+        "workspace gets var/workspaces/<uuid>/repo/. Must be "
+        "writable, backed up, excluded from the docker image.",
     )
+    remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")
+    remote_rank_cosine_threshold: float = Field(default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD")
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
@@ -101,13 +100,9 @@ class Settings(BaseSettings):
     # signed session will outlast the cookie (or vice versa). 30 days is
     # the hospital-internal default; shorten via env for high-security
     # deployments.
-    session_max_age_seconds: int = Field(
-        default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS"
-    )
+    session_max_age_seconds: int = Field(default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS")
     digest_dry_run: bool = Field(default=False, alias="DIGEST_DRY_RUN")
-    admin_dashboard_url: str = Field(
-        default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL"
-    )
+    admin_dashboard_url: str = Field(default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL")
 
     @field_validator("admin_dashboard_url", mode="after")
     @classmethod

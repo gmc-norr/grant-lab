@@ -21,3 +21,19 @@ def test_proposal_assist_settings_override_via_env(monkeypatch, _settings_env):
     assert s.extractor_version == "sections-v2"
     assert s.rubric_extractor_version == "rubric-v2"
     assert s.proposal_assist_llm_model == "claude-sonnet-4-6"
+
+
+def test_phase0_scheduler_settings_have_defaults(monkeypatch, _settings_env):
+    monkeypatch.delenv("PHASE0_TICK_SECONDS", raising=False)
+    monkeypatch.delenv("WORKSPACES_DIR", raising=False)
+    s = Settings()
+    assert s.phase0_tick_seconds == 30
+    assert s.workspaces_dir == "var/workspaces"
+
+
+def test_phase0_scheduler_settings_override_via_env(monkeypatch, _settings_env):
+    monkeypatch.setenv("PHASE0_TICK_SECONDS", "60")
+    monkeypatch.setenv("WORKSPACES_DIR", "/data/workspaces")
+    s = Settings()
+    assert s.phase0_tick_seconds == 60
+    assert s.workspaces_dir == "/data/workspaces"

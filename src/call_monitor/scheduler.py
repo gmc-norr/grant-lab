@@ -19,6 +19,7 @@ from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.embeddings.refresh import refresh_missing_embeddings_tick
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
+from call_monitor.proposal_assist.phases.setup import run_phase0_tick
 from call_monitor.ranking.anthropic_client import AnthropicClient
 from call_monitor.ranking.ollama_client import OllamaClient
 from call_monitor.ranking.queue import reconcile_missing_rankings
@@ -117,9 +118,7 @@ def build_scheduler(
     # semantics inside rank_pair.
     anthropic_client: AnthropicClient | None = None
     if anthropic_api_key:
-        anthropic_client = AnthropicClient(
-            api_key=anthropic_api_key, model=remote_rank_model
-        )
+        anthropic_client = AnthropicClient(api_key=anthropic_api_key, model=remote_rank_model)
 
     def _rank_drain_job() -> None:
         drain_queue(
@@ -229,6 +228,7 @@ def build_scheduler(
     )
 
     if digest_email_client is not None and digest_settings is not None:
+
         def _digest_tick() -> None:
             now = _dt.now(UTC)
             _logger.info("digest.tick.start", extra={"event": "digest_tick_start"})
@@ -278,6 +278,7 @@ def build_scheduler(
         )
 
     if limiters:
+
         def _rate_limit_sweep(_ls=tuple(limiters)) -> None:
             # Each limiter's dict of per-key deques grows with unique
             # (email|ip) attempts. Sweep reclaims any key whose entire
@@ -298,8 +299,11 @@ def build_scheduler(
                 except Exception as e:  # noqa: BLE001
                     _logger.exception(
                         "rate_limit.sweep.failed",
-                        extra={"event": "rate_limit_sweep_failed",
-                               "limiter": lim.name, "error": str(e)},
+                        extra={
+                            "event": "rate_limit_sweep_failed",
+                            "limiter": lim.name,
+                            "error": str(e),
+                        },
                     )
 
         sched.add_job(
@@ -313,6 +317,38 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
         )
+
+    # Phase 0 (proposal-assist) drain tick.
+    def _phase0_tick() -> None:
+        """Closure: APScheduler calls this with no args. We capture the
+        settings + session_factory from build_scheduler's scope, and lazily
+        construct an AnthropicClient per tick so a missing API key only
+        skips work (rather than crashing scheduler startup)."""
+        if not settings.anthropic_api_key:
+            _logger.info("phase0 tick skipped: ANTHROPIC_API_KEY not set")
+            return
+
+        def make_client() -> AnthropicClient:
+            return AnthropicClient(
+                api_key=settings.anthropic_api_key,
+                model=settings.proposal_assist_llm_model,
+            )
+
+        run_phase0_tick(
+            session_factory=session_factory,
+            client_factory=make_client,
+            extractor_version=settings.extractor_version,
+            rubric_extractor_version=settings.rubric_extractor_version,
+            workspaces_dir=settings.workspaces_dir,
+        )
+
+    sched.add_job(
+        _phase0_tick,
+        trigger=IntervalTrigger(seconds=settings.phase0_tick_seconds),
+        id="proposal_assist_phase0_tick",
+        max_instances=1,
+        coalesce=True,
+    )
 
     if start:
         sched.start()

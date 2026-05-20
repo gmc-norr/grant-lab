@@ -290,3 +290,37 @@ class Phase0Worker:
         # current_phase='spec' when the owner confirms.
         job.status = "waiting_for_rubric_review"
         # NOT setting completed_at — the job isn't terminal yet.
+
+
+from collections.abc import Callable  # noqa: E402
+
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+
+
+def run_phase0_tick(
+    *,
+    session_factory: sessionmaker,
+    client_factory: Callable[[], _AnthropicClientLike],
+    extractor_version: str,
+    rubric_extractor_version: str,
+    workspaces_dir: str,
+) -> None:
+    """Scheduler-friendly tick: open one session, claim+drain at most one job.
+
+    A single-job-per-tick discipline keeps individual ticks short (so the
+    BackgroundScheduler worker pool doesn't pile up), gives Postgres' FOR
+    UPDATE SKIP LOCKED a clean release point, and bounds the cost of a
+    failed LLM call to one workspace per tick.
+
+    Multiple ticks per second are fine — claim_next_setup_job returns None
+    when the queue is empty and the function returns immediately.
+    """
+    with session_factory() as session:
+        worker = Phase0Worker(
+            session=session,
+            client=client_factory(),
+            extractor_version=extractor_version,
+            rubric_extractor_version=rubric_extractor_version,
+            workspaces_dir=workspaces_dir,
+        )
+        worker.run_one()
