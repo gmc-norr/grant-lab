@@ -825,3 +825,35 @@ class AttachmentJob(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class PhaseApproval(Base):
+    __tablename__ = "phase_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "phase IN ('spec','plan','draft','review')",
+            name="ck_phase_approvals_phase",
+        ),
+        Index(
+            "ix_phase_approvals_ws_phase_at",
+            "workspace_id", "phase",
+            text("approved_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    approving_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=False,
+    )
+    approved_artifact_sha: Mapped[str] = mapped_column(Text, nullable=False)
