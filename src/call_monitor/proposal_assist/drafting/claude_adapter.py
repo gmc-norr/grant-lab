@@ -119,18 +119,46 @@ class ClaudeAgentSDKAdapter:
         # NOTE: This is a "soft" replay — the model re-processes the history
         # rather than a true transcript injection. A native messages= seed
         # parameter would be preferable; track as a known limitation.
-        for msg in context.resume_messages:
-            role = msg.get("role", "")
-            if role != "user":
-                continue
-            content = msg.get("content", "")
-            text = content if isinstance(content, str) else _flatten_content(content)
-            if not text:
-                continue
-            await self._drain_turn(client, text)
+        #
+        # FIXME(B5): the replay loop below executes the SDK subprocess with
+        # permission_mode="bypassPermissions", so any tool calls the model decides
+        # to make during replay will run for real (file writes, bash, etc.). This
+        # is acceptable for B3 because no MCP tools are registered yet and the
+        # built-in tools are unlikely to fire on simple text replays — but once B5
+        # adds edit_proposal and friends, replay must be either (a) routed through
+        # a separate sandboxed client with allowed_tools=[], or (b) replaced by
+        # native session-ID resume via ClaudeAgentOptions(resume=session_id) once
+        # each workspace persists its SDK session UUID.
+        try:
+            for msg in context.resume_messages:
+                role = msg.get("role", "")
+                if role != "user":
+                    continue
+                content = msg.get("content", "")
+                text = content if isinstance(content, str) else _flatten_content(content)
+                if not text:
+                    continue
+                await self._drain_turn(client, text)
+        except Exception:
+            # Replay failed mid-way; tear down the half-connected client so the
+            # subprocess doesn't leak.
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.warning(
+                    "Failed to disconnect client after replay failure for workspace %s",
+                    workspace_id,
+                    exc_info=True,
+                )
+            raise
 
         return handle
 
+    # TODO(B4/B5): once each workspace persists its SDK session UUID
+    # (captured from ResultMessage.session_id during the first turn), drop
+    # _drain_turn replay entirely and pass session_id to
+    # ClaudeAgentOptions(resume=session_id) at connect() time — that's the
+    # SDK's native resume path. The current soft-replay is a stopgap.
     async def _drain_turn(self, client: ClaudeSDKClient, text: str) -> None:
         """Send a user message and drain all events (discard output)."""
         await client.query(text)
@@ -215,8 +243,8 @@ class ClaudeAgentSDKAdapter:
         try:
             await client.disconnect()
         except Exception:
-            logger.debug(
-                "Ignoring exception during SDK client disconnect for workspace %s",
+            logger.warning(
+                "SDK client disconnect failed for workspace %s; subprocess may have leaked",
                 handle.workspace_id,
                 exc_info=True,
             )
