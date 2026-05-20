@@ -79,6 +79,8 @@ async def lifespan(app: FastAPI):
     )
     app.state.workspace_controller = workspace_controller
 
+    import asyncio as _asyncio
+
     app.state.scheduler = build_scheduler(
         session_factory=app.state.session_factory,
         settings=settings,
@@ -97,6 +99,7 @@ async def lifespan(app: FastAPI):
         digest_settings=settings,
         limiters=[app.state.email_limiter, app.state.ip_limiter],
         workspace_controller=workspace_controller,
+        app_loop=_asyncio.get_running_loop(),
         start=True,
     )
     try:

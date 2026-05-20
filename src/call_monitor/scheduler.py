@@ -69,6 +69,7 @@ def build_scheduler(
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     limiters: list[SlidingWindowLimiter] | None = None,
     workspace_controller: WorkspaceController,
+    app_loop=None,  # asyncio.AbstractEventLoop | None
     start: bool = True,
 ) -> BackgroundScheduler:
     """Build (and optionally start) the daily ingestion scheduler.
@@ -355,16 +356,39 @@ def build_scheduler(
     # Drafting subprocess idle sweep.
     def _drafting_idle_sweep() -> None:
         """Closure: APScheduler calls this with no args. We capture the
-        workspace_controller from build_scheduler's scope.
+        workspace_controller and app_loop from build_scheduler's scope.
 
-        APScheduler runs jobs in a threadpool by default; the closure
-        creates a fresh event loop per invocation via asyncio.run(). If
-        the project later switches to an async APScheduler executor,
-        replace asyncio.run() with a direct `await`."""
+        APScheduler runs jobs in a threadpool by default. The registry's
+        asyncio.Lock (and any SDK client state) were created on the FastAPI
+        lifespan loop; using asyncio.run() here would create a NEW loop and
+        raise RuntimeError (Python 3.12 lazy-binds asyncio primitives to the
+        first loop they're awaited on).
+
+        When app_loop is provided (production), we dispatch the coroutine onto
+        the lifespan loop via run_coroutine_threadsafe and block until it
+        finishes, so APScheduler's max_instances=1 guard is effective.
+
+        When app_loop is None (scheduler-tick unit test), the registry was
+        freshly constructed in the test's own loop scope — asyncio.run() is
+        safe there and this branch is only exercised in tests."""
         import asyncio
 
+        if app_loop is None:
+            # Test/sync construction: fresh registry has no cross-loop concern.
+            try:
+                asyncio.run(workspace_controller._registry.sweep_idle())
+            except Exception:
+                _logger.exception("drafting.idle_sweep failed")
+            return
+
+        fut = asyncio.run_coroutine_threadsafe(
+            workspace_controller._registry.sweep_idle(),
+            app_loop,
+        )
         try:
-            asyncio.run(workspace_controller._registry.sweep_idle())
+            # Block until the sweep completes so APScheduler's max_instances=1
+            # prevents the next tick from overlapping with this one.
+            fut.result(timeout=300)
         except Exception:
             _logger.exception("drafting.idle_sweep failed")
 
