@@ -42,7 +42,7 @@ class FakeAgentAdapter:
             workspace_id=context.workspace_id,
             state={
                 "fake": True,
-                "resume_messages": context.resume_messages,
+                "resume_session_id": context.resume_session_id,
             },
         )
 

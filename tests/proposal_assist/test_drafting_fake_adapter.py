@@ -33,18 +33,15 @@ async def test_fake_adapter_records_launch_context():
     assert fake.launches[0].workspace_id == wsid
 
 
-async def test_fake_adapter_records_resume_messages_on_handle_state():
-    """The Claude adapter consumes resume_messages at launch; the Fake
-    stashes them on the handle so tests can assert what context was
+async def test_fake_adapter_records_resume_session_id_on_handle_state():
+    """The Claude adapter passes resume_session_id to ClaudeAgentOptions; the
+    Fake stashes it on the handle so tests can assert what context was
     passed through."""
     fake = FakeAgentAdapter()
     wsid = uuid.uuid4()
-    messages = [
-        {"role": "user", "content": {"type": "text", "text": "prior turn"}},
-    ]
-    ctx = LaunchContext(workspace_id=wsid, resume_messages=messages)
+    ctx = LaunchContext(workspace_id=wsid, resume_session_id="session-abc-123")
     handle = await fake.launch(ctx)
-    assert handle.state["resume_messages"] == messages
+    assert handle.state["resume_session_id"] == "session-abc-123"
 
 
 async def test_fake_adapter_scripts_turn_events():

@@ -31,13 +31,20 @@ class LaunchContext:
     """Everything an adapter needs at session-creation time.
 
     Built by WorkspaceController.launch(); passed verbatim to
-    DraftingAgent.launch(). Adapter implementations consume what they
-    need (Claude adapter feeds resume_messages into the SDK session;
-    Fake adapter records the whole context for assertions).
+    DraftingAgent.launch().
+
+    resume_session_id is the SDK session UUID returned by the previous
+    successful turn's ResultMessage. When set, the adapter passes it to
+    ClaudeAgentOptions(resume=...) so the SDK natively rehydrates prior
+    conversation history without us replaying turns. When None, the
+    subprocess starts fresh — the model has no memory of past turns.
+
+    B4 will: capture session_id from TurnDoneEvent, persist it per
+    workspace, and pass it back here on the next launch.
     """
 
     workspace_id: uuid.UUID
-    resume_messages: list[dict] = field(default_factory=list)
+    resume_session_id: str | None = None
 
 
 # Stream event variants. send_turn yields these in order during a turn.
@@ -73,12 +80,14 @@ class ToolResultEvent:
 
 @dataclass
 class TurnDoneEvent:
-    """Terminal event for a turn. Carries token + model telemetry so
-    chat_turns rows can be stamped."""
+    """Terminal event for a turn. Carries token + model telemetry +
+    SDK session id so chat_turns rows can be stamped and the workspace
+    can persist the session id for the next launch's native resume."""
 
     tokens_in: int | None
     tokens_out: int | None
     model: str | None
+    session_id: str | None = None
 
 
 StreamEvent = AssistantTextEvent | ToolUseEvent | ToolResultEvent | TurnDoneEvent
@@ -90,8 +99,8 @@ class DraftingAgent(Protocol):
 
     `launch` is awaited once per (workspace, idle-window). It does whatever
     initialization the adapter needs — for Claude this means connecting
-    the SDK client and seeding it with context.resume_messages; for Fake
-    it just records the call.
+    the SDK client (optionally resuming a prior session via
+    context.resume_session_id); for Fake it just records the call.
 
     `send_turn` is an async generator: caller iterates with `async for
     event in adapter.send_turn(handle, msg)`. The final event is always

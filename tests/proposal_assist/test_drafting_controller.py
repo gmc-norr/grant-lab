@@ -14,7 +14,7 @@ from call_monitor.proposal_assist.drafting.controller import (
 from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_monitor.proposal_assist.drafting.locking import acquire_workspace_lock
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
-from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+from tests.proposal_assist.conftest import make_workspace
 
 
 @pytest.mark.asyncio
@@ -63,33 +63,6 @@ async def test_controller_launch_runs_orphan_sweep(pg_session_factory):
         job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
         assert job.status == "failed"
         assert job.error == "orphaned"
-
-
-@pytest.mark.asyncio
-async def test_controller_launch_passes_resume_messages_to_adapter(
-    pg_session_factory,
-):
-    """The controller builds a LaunchContext with resume messages from
-    history and passes it to the adapter at launch time. For the fake
-    adapter, we verify they were recorded on the handle's state."""
-    adapter = FakeAgentAdapter()
-    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
-    controller = WorkspaceController(
-        registry=registry,
-        session_factory=pg_session_factory,
-    )
-    with pg_session_factory() as s:
-        ws = make_workspace(s)
-        make_chat_turn(s, ws, role="user", content={"type": "text", "text": "old turn"})
-        s.commit()
-        wsid = ws.id
-
-    handle = await controller.launch(wsid)
-
-    resume = handle.state.get("resume_messages")
-    assert resume is not None
-    assert len(resume) == 1
-    assert resume[0]["content"] == {"type": "text", "text": "old turn"}
 
 
 @pytest.mark.asyncio

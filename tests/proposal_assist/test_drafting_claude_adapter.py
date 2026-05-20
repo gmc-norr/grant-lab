@@ -23,9 +23,8 @@ from call_monitor.proposal_assist.drafting.contract import (
 
 
 def test_flatten_content_handles_single_dict():
-    """resume.py produces SDK-native shapes — a single text block is a
-    dict, not a list. _flatten_content must extract .text, not iterate
-    the dict's keys."""
+    """ToolResultBlock content may be a single text-block dict.
+    _flatten_content must extract .text, not iterate the dict's keys."""
     from call_monitor.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
@@ -54,8 +53,8 @@ def test_flatten_content_handles_string_passthrough():
 
 
 def test_flatten_content_returns_empty_for_non_text_block():
-    """Image / tool_use blocks can't be replayed as text — they're
-    dropped (returns empty string)."""
+    """Non-text ToolResultBlock content (image, tool_use) is dropped
+    (returns empty string)."""
     from call_monitor.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
@@ -114,6 +113,129 @@ async def test_send_turn_raises_on_sdk_error_result():
     with pytest.raises(SDKTurnError, match="529"):
         async for _ in adapter.send_turn(handle, "hi"):
             pass
+
+
+# ---------------------------------------------------------------------------
+# B3 — native session-ID resume scaffolding (no SDK calls)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_uses_resume_session_id_in_options(monkeypatch):
+    """When LaunchContext.resume_session_id is set, the adapter passes
+    it to ClaudeAgentOptions(resume=...) so the SDK natively resumes
+    the prior conversation. Verified by spying on options construction."""
+    import asyncio
+
+    from call_monitor.proposal_assist.drafting import claude_adapter as ca
+
+    captured: dict[str, object] = {}
+    real_options = ca.ClaudeAgentOptions
+
+    def spy_options(**kw):
+        captured.update(kw)
+        return real_options(**kw)
+
+    monkeypatch.setattr(ca, "ClaudeAgentOptions", spy_options)
+
+    class _StubClient:
+        def __init__(self, options):
+            self.options = options
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+    monkeypatch.setattr(ca, "ClaudeSDKClient", _StubClient)
+
+    adapter = ca.ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/x",
+    )
+    ctx = LaunchContext(
+        workspace_id=uuid.uuid4(),
+        resume_session_id="abc-123",
+    )
+    asyncio.run(adapter.launch(ctx))
+    assert captured.get("resume") == "abc-123"
+
+
+def test_launch_omits_resume_when_session_id_is_none(monkeypatch):
+    """No resume_session_id → no resume= in options (fresh session)."""
+    import asyncio
+
+    from call_monitor.proposal_assist.drafting import claude_adapter as ca
+
+    captured: dict[str, object] = {}
+    real_options = ca.ClaudeAgentOptions
+
+    def spy_options(**kw):
+        captured.update(kw)
+        return real_options(**kw)
+
+    monkeypatch.setattr(ca, "ClaudeAgentOptions", spy_options)
+
+    class _StubClient:
+        def __init__(self, options):
+            self.options = options
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+    monkeypatch.setattr(ca, "ClaudeSDKClient", _StubClient)
+
+    adapter = ca.ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/x",
+    )
+    ctx = LaunchContext(workspace_id=uuid.uuid4())
+    asyncio.run(adapter.launch(ctx))
+    assert "resume" not in captured
+
+
+@pytest.mark.asyncio
+async def test_send_turn_captures_session_id_on_turn_done():
+    """ResultMessage.uuid (SDK 0.2.82 attribute name) flows through to
+    TurnDoneEvent.session_id so B4 can persist it for native resume on
+    the next launch."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from claude_agent_sdk.types import ResultMessage
+
+    from call_monitor.proposal_assist.drafting.contract import AgentHandle
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/x",
+    )
+
+    fake_client = MagicMock()
+    fake_client.query = AsyncMock()
+
+    async def fake_receive():
+        rm = object.__new__(ResultMessage)
+        rm.is_error = False
+        rm.api_error_status = None
+        rm.errors = None
+        rm.model_usage = None
+        # SDK 0.2.82 uses `uuid`; the adapter probes both names.
+        rm.uuid = "session-abc-123"
+        yield rm
+
+    fake_client.receive_response = fake_receive
+
+    handle = AgentHandle(workspace_id=uuid.uuid4(), state={"client": fake_client})
+
+    events = []
+    async for ev in adapter.send_turn(handle, "hi"):
+        events.append(ev)
+
+    done = next(ev for ev in events if isinstance(ev, TurnDoneEvent))
+    assert done.session_id == "session-abc-123"
 
 
 # ---------------------------------------------------------------------------

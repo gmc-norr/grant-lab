@@ -14,14 +14,24 @@ Discovery (SDK 0.2.82):
   The client maintains a persistent subprocess + anyio task group between
   connect() and disconnect(); do NOT wrap each turn in `async with` — that
   re-handshakes the subprocess every turn.
-- Resume-seeding mechanism: ClaudeAgentOptions.resume accepts a session-ID
-  string (UUID), not raw message dicts. There is no messages= kwarg on
-  connect(). Seeding resume_messages is handled by replaying them as initial
-  query() calls before returning the handle (see _seed_resume below).
-  This means the resume is "soft" — the model sees the prior turns as new
-  user/assistant exchanges rather than as a true transcript replay. A future
-  SDK version that exposes a messages= seed parameter would be cleaner; track
-  as a known limitation.
+- Native resume: ClaudeAgentOptions(resume=<session_uuid_str>) tells the SDK
+  subprocess to natively rehydrate a prior conversation. No history replay
+  needed. The session UUID is obtained from ResultMessage.uuid (the attribute
+  is named `uuid`, not `session_id`, in SDK 0.2.82; captured defensively via
+  getattr with both names). B4 will persist this per workspace so subsequent
+  launches can supply it via LaunchContext.resume_session_id.
+
+Lifecycle per workspace:
+  - launch(context): construct + connect the SDK client. If
+    context.resume_session_id is set, pass it to ClaudeAgentOptions(resume=...)
+    so the SDK natively resumes the prior session. Otherwise the subprocess
+    starts fresh — the model has no memory of past turns.
+  - send_turn(handle, msg): calls client.query(msg) then iterates
+    client.receive_response() for streaming events. Captures session_id from
+    ResultMessage.uuid (SDK 0.2.82 naming) and emits it on TurnDoneEvent so
+    B4 can persist it.
+  - terminate(handle): calls client.disconnect() and discards the client
+    from state. Safe to call even if client was never connected.
 """
 
 from __future__ import annotations
@@ -66,17 +76,7 @@ class SDKTurnError(RuntimeError):
 class ClaudeAgentSDKAdapter:
     """Wraps claude-agent-sdk in a per-workspace persistent client.
 
-    Lifecycle per workspace:
-      - launch(context): construct + connect the SDK client, seeding it with
-        context.resume_messages by replaying them as initial queries before
-        returning the handle. The connected client is stored on
-        AgentHandle.state['client'].
-      - send_turn(handle, msg): calls client.query(msg) then iterates
-        client.receive_response() for streaming events. No async-with wrapper
-        — the client is already connected; re-wrapping would re-handshake the
-        subprocess on every turn.
-      - terminate(handle): calls client.disconnect() and discards the client
-        from state. Safe to call even if client was never connected.
+    See module docstring for the full lifecycle description.
     """
 
     def __init__(
@@ -93,9 +93,9 @@ class ClaudeAgentSDKAdapter:
     async def launch(self, context: LaunchContext) -> AgentHandle:
         """Connect the SDK client for this workspace.
 
-        Seeds resume_messages by replaying them as initial query/receive
-        pairs before returning the handle. This is a workaround for the SDK
-        not supporting a messages= seed parameter on connect().
+        If context.resume_session_id is set, asks the SDK to resume that
+        session natively (ClaudeAgentOptions(resume=...)). Otherwise the
+        subprocess starts fresh — the model has no memory of past turns.
 
         The repo_dir is passed as cwd so the Claude subprocess runs inside
         the workspace's git-backed repo directory. The directory is not
@@ -104,75 +104,22 @@ class ClaudeAgentSDKAdapter:
         workspace_id = context.workspace_id
         repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
 
-        options = ClaudeAgentOptions(
+        options_kwargs: dict[str, Any] = dict(
             cwd=str(repo_dir),
             model=self._model,
-            permission_mode=self._permission_mode,  # type: ignore[arg-type]
+            permission_mode=self._permission_mode,  # type: ignore[typeddict-item]
         )
+        if context.resume_session_id is not None:
+            options_kwargs["resume"] = context.resume_session_id
+        options = ClaudeAgentOptions(**options_kwargs)
+
         client = ClaudeSDKClient(options=options)
         await client.connect()
 
-        handle = AgentHandle(
+        return AgentHandle(
             workspace_id=workspace_id,
             state={"client": client},
         )
-
-        # Replay prior history before returning the handle so the first real
-        # user turn has context. resume_messages is a list of
-        # {"role": "user"|"assistant", "content": str|list} dicts produced by
-        # resume.py. We replay only user turns; assistant turns are implied by
-        # the model's responses during replay — sending them directly could
-        # confuse the subprocess. Drain each response to keep the subprocess
-        # in sync.
-        #
-        # NOTE: This is a "soft" replay — the model re-processes the history
-        # rather than a true transcript injection. A native messages= seed
-        # parameter would be preferable; track as a known limitation.
-        #
-        # FIXME(B5): the replay loop below executes the SDK subprocess with
-        # permission_mode="bypassPermissions", so any tool calls the model decides
-        # to make during replay will run for real (file writes, bash, etc.). This
-        # is acceptable for B3 because no MCP tools are registered yet and the
-        # built-in tools are unlikely to fire on simple text replays — but once B5
-        # adds edit_proposal and friends, replay must be either (a) routed through
-        # a separate sandboxed client with allowed_tools=[], or (b) replaced by
-        # native session-ID resume via ClaudeAgentOptions(resume=session_id) once
-        # each workspace persists its SDK session UUID.
-        try:
-            for msg in context.resume_messages:
-                role = msg.get("role", "")
-                if role != "user":
-                    continue
-                content = msg.get("content", "")
-                text = _flatten_content(content)
-                if not text:
-                    continue
-                await self._drain_turn(client, text)
-        except Exception:
-            # Replay failed mid-way; tear down the half-connected client so the
-            # subprocess doesn't leak.
-            try:
-                await client.disconnect()
-            except Exception:
-                logger.warning(
-                    "Failed to disconnect client after replay failure for workspace %s",
-                    workspace_id,
-                    exc_info=True,
-                )
-            raise
-
-        return handle
-
-    # TODO(B4/B5): once each workspace persists its SDK session UUID
-    # (captured from ResultMessage.session_id during the first turn), drop
-    # _drain_turn replay entirely and pass session_id to
-    # ClaudeAgentOptions(resume=session_id) at connect() time — that's the
-    # SDK's native resume path. The current soft-replay is a stopgap.
-    async def _drain_turn(self, client: ClaudeSDKClient, text: str) -> None:
-        """Send a user message and drain all events (discard output)."""
-        await client.query(text)
-        async for _ in client.receive_response():
-            pass
 
     async def send_turn(
         self,
@@ -235,17 +182,27 @@ class ClaudeAgentSDKAdapter:
                         f"SDK reported error for workspace {handle.workspace_id}: {detail}",
                         status=str(api_status) if api_status else None,
                     )
-                # Extract model-level usage from model_usage if present
-                mu: dict[str, Any] | None = message.model_usage
+
+                # Capture model telemetry and the SDK session_id so B4 can persist
+                # it on the workspace and pass it back via LaunchContext for the
+                # next launch's native resume.
+                # NOTE: in SDK 0.2.82 the attribute is named `uuid`, not `session_id`.
+                # We probe both so a future SDK rename is handled automatically.
+                mu: dict[str, Any] | None = getattr(message, "model_usage", None)
                 if mu is not None:
                     if tokens_in is None:
                         tokens_in = mu.get("input_tokens")
                     if tokens_out is None:
                         tokens_out = mu.get("output_tokens")
+                session_id: str | None = getattr(message, "session_id", None) or getattr(
+                    message, "uuid", None
+                )
+
                 yield TurnDoneEvent(
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     model=model,
+                    session_id=session_id,
                 )
                 return
 
@@ -255,6 +212,7 @@ class ClaudeAgentSDKAdapter:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             model=model,
+            session_id=None,
         )
 
     async def terminate(self, handle: AgentHandle) -> None:
@@ -278,18 +236,14 @@ class ClaudeAgentSDKAdapter:
 
 
 def _flatten_content(content: Any) -> str:
-    """Flatten resume serializer content or tool result content to a plain string.
+    """Flatten tool result content to a plain string for ToolResultEvent.
 
-    The chat_turns.content column stores SDK-native shapes. For a user
-    text turn that's typically a single {"type": "text", "text": "..."}
-    dict; for a turn with multiple blocks it's a list of such dicts.
-    Returns empty string for non-text blocks (image, tool_use) — those
-    can't be replayed as a query() text and are intentionally dropped.
+    ToolResultBlock.content may be str, list, or None. Returns empty string
+    for non-text blocks (image, tool_use) — those are intentionally dropped.
 
-    This function is also used for ToolResultBlock.content (which may be
-    str, list, or None), replacing the former _content_to_str helper.
-    Unification decision: both callers needed identical semantics after M1
-    — a single recursive function is cleaner than keeping two in sync.
+    Unification note: this function previously also served the soft-replay
+    path (dropped in B3). It now exists solely for ToolResultBlock.content
+    handling in send_turn().
     """
     if content is None:
         return ""

@@ -31,27 +31,25 @@ def test_agent_handle_state_defaults_to_empty_dict():
     assert h.state == {}
 
 
-def test_launch_context_carries_workspace_id_and_resume_messages():
+def test_launch_context_carries_workspace_id_and_resume_session_id():
     """LaunchContext is built by WorkspaceController.launch and passed
-    verbatim to DraftingAgent.launch. The Claude adapter feeds
-    resume_messages into the SDK at session start (so the SDK sees
-    prior conversation history before any new turn arrives)."""
+    verbatim to DraftingAgent.launch. When resume_session_id is set, the
+    Claude adapter passes it to ClaudeAgentOptions(resume=...) so the SDK
+    natively rehydrates the prior conversation — no replay needed."""
     wsid = uuid.uuid4()
-    messages = [
-        {"role": "user", "content": {"type": "text", "text": "old turn"}},
-    ]
-    ctx = LaunchContext(workspace_id=wsid, resume_messages=messages)
+    ctx = LaunchContext(workspace_id=wsid, resume_session_id="abc-123")
     assert ctx.workspace_id == wsid
-    assert ctx.resume_messages == messages
+    assert ctx.resume_session_id == "abc-123"
 
 
-def test_launch_context_default_resume_messages_is_empty_list():
-    """Fresh workspace (no chat history yet) — resume_messages defaults
-    to []. Adapter sees an empty list and skips replay."""
+def test_launch_context_default_resume_session_id_is_none():
+    """Fresh workspace (no prior session yet) — resume_session_id defaults
+    to None. The adapter starts a fresh subprocess with no conversation
+    history."""
     wsid = uuid.uuid4()
     ctx = LaunchContext(workspace_id=wsid)
     assert ctx.workspace_id == wsid
-    assert ctx.resume_messages == []
+    assert ctx.resume_session_id is None
 
 
 def test_stream_event_types_carry_expected_fields():
@@ -75,6 +73,10 @@ def test_stream_event_types_carry_expected_fields():
     assert d.tokens_in == 100
     assert d.tokens_out == 200
     assert d.model == "claude-opus-4-7"
+    assert d.session_id is None  # default
+
+    d2 = TurnDoneEvent(tokens_in=1, tokens_out=2, model="m", session_id="s-xyz")
+    assert d2.session_id == "s-xyz"
 
 
 def test_drafting_agent_protocol_methods_exist():

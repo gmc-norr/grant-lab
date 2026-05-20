@@ -2,7 +2,6 @@
 
   - acquire per-workspace advisory lock (held for the handle's lifetime)
   - sweep orphaned turn_jobs rows (inside the lock)
-  - build resume-from-history messages (inside the lock)
   - launch (or reuse) the subprocess via the registry
   - expose send_turn / terminate as a thin pass-through
 
@@ -30,9 +29,6 @@ from call_monitor.proposal_assist.drafting.orphan_sweep import (
     sweep_orphaned_turn_jobs,
 )
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
-from call_monitor.proposal_assist.drafting.resume import (
-    build_resume_messages,
-)
 
 
 class WorkspaceController:
@@ -60,9 +56,9 @@ class WorkspaceController:
            another process holds the lock).  The session is never
            committed — keeping the connection checked out is what
            maintains the Postgres session-level advisory lock.
-        2. Runs the orphan sweep + builds resume messages in a SHORT-
-           LIVED sibling session (committed and closed immediately)
-           while we hold the lock, so no other process can race us.
+        2. Runs the orphan sweep in a SHORT-LIVED sibling session
+           (committed and closed immediately) while we hold the lock,
+           so no other process can race us.
         3. Calls adapter.launch() to start the subprocess.
         4. Hands the lock-holding session to the registry via
            fulfill_pending_launch() — the registry keeps it open (and
@@ -89,13 +85,12 @@ class WorkspaceController:
 
         # We are the launcher. Track ownership of partially-acquired
         # resources so the outer except can clean up uniformly across
-        # every failure mode (factory raise, acquire raise, sweep/resume
-        # raise, adapter.launch raise, CancelledError between launch and
-        # fulfill, fulfill itself raising). The order on cleanup is
-        # terminate handle → release lock → close session, mirroring the
-        # registry's normal teardown. `handed_off` tracks whether
-        # ownership has transferred to the registry — once True, cleanup
-        # must NOT run (the registry now owns the resources).
+        # every failure mode (factory raise, acquire raise, sweep raise,
+        # adapter.launch raise, CancelledError between launch and fulfill,
+        # fulfill itself raising). The order on cleanup is terminate handle
+        # → release lock → close session, mirroring the registry's normal
+        # teardown. `handed_off` tracks whether ownership has transferred
+        # to the registry — once True, cleanup must NOT run.
         lock_session: Session | None = None
         lock_acquired = False
         handle: AgentHandle | None = None
@@ -107,18 +102,15 @@ class WorkspaceController:
                 raise LockNotAcquired(workspace_id)
             lock_acquired = True
 
-            # Run sweep + resume in a separate committed session so the
-            # orphan-sweep UPDATE is visible to other sessions, while
-            # lock_session stays open (uncommitted) to hold the advisory
-            # lock on its connection.
+            # Run sweep in a separate committed session so the orphan-sweep
+            # UPDATE is visible to other sessions, while lock_session stays
+            # open (uncommitted) to hold the advisory lock on its connection.
+            # B4 will also fetch the workspace's last_sdk_session_id here to
+            # populate LaunchContext.resume_session_id for native resume.
             with self._session_factory() as work_session:
                 sweep_orphaned_turn_jobs(work_session, workspace_id)
-                resume_messages = build_resume_messages(work_session, workspace_id)
                 work_session.commit()
-            context = LaunchContext(
-                workspace_id=workspace_id,
-                resume_messages=resume_messages,
-            )
+            context = LaunchContext(workspace_id=workspace_id)
             handle = await self._registry._adapter.launch(context)
             await self._registry.fulfill_pending_launch(
                 workspace_id,
