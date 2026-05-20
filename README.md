@@ -408,3 +408,35 @@ uv run pytest -q
 | **Test files** | **72** |
 | **Tests passing** | **468** |
 | **Commits on `master`** | **215** |
+
+## Renamed from `call-monitor` (B2 cutover)
+
+The project was renamed from `call-monitor` to `call-manager` in 2026-05.
+For production deployments crossing the rename boundary:
+
+1. Stop the running app process (so no sessions hold the old database open).
+2. Run the cutover script as a Postgres superuser:
+   ```bash
+   PGUSER=postgres PGHOST=... bash scripts/cutover_rename_database.sh
+   ```
+3. Update `DATABASE_URL` in the deployment's env to point at `call_manager`
+   (user, password, and database name all `call_manager`; the dev default
+   matches `.env.example`). **If your deployment was NOT using the dev-default
+   password**, rotate it now — the cutover script restores the dev default
+   (`'call_manager'`); change it via `psql -c "ALTER ROLE call_manager WITH
+   PASSWORD '...'"` before bringing the app up.
+4. Start the new app process with the updated env.
+5. (Optional cleanup) Prune the orphaned Docker volume from the old name:
+   ```bash
+   docker volume rm <stack-name>_call_monitor_pgdata
+   ```
+   The new `call_manager_pgdata` volume now holds the live data; the old
+   one is unused and consumes disk.
+
+The cutover script is idempotent: a second invocation after success is a no-op.
+
+**Side effect of the rename:** Task 2's commit also changed the session-cookie
+salt from `"call-monitor-session"` to `"call-manager-session"`, which invalidates
+existing session cookies. All active users will be forced to re-authenticate.
+For a pre-production deployment this is no concern; for a live deployment with
+active sessions, plan a brief downtime announcement.
