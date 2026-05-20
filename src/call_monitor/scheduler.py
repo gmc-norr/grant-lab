@@ -402,6 +402,69 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # B4: turn-drain tick. Uses the same app_loop dispatch pattern as
+    # drafting_idle_sweep so the registry's loop-bound state isn't
+    # corrupted by a worker-thread asyncio.run.
+    def _turn_drain_tick() -> None:
+        import asyncio
+
+        from call_monitor.proposal_assist.turns.drain import drain_turn_queue_tick
+
+        coro = drain_turn_queue_tick(
+            session_factory=session_factory,
+            controller=workspace_controller,
+        )
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("turn_drain tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            fut.result(timeout=300)
+        except Exception:
+            _logger.exception("turn_drain tick failed")
+
+    sched.add_job(
+        _turn_drain_tick,
+        trigger=IntervalTrigger(seconds=settings.turn_drain_tick_seconds),
+        id="turn_drain",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # B4: compaction tick. Synchronous (just DB + Anthropic HTTP call).
+    def _compaction_tick() -> None:
+        from call_monitor.proposal_assist.turns.compaction import run_compaction_tick
+
+        def make_summarizer_client() -> AnthropicClient:
+            return AnthropicClient(
+                api_key=settings.anthropic_api_key,
+                model=settings.proposal_assist_llm_model,
+            )
+
+        if not settings.anthropic_api_key:
+            _logger.info("compaction tick skipped: ANTHROPIC_API_KEY not set")
+            return
+
+        try:
+            run_compaction_tick(
+                session_factory=session_factory,
+                summarizer_client_factory=make_summarizer_client,
+                settings=settings,
+            )
+        except Exception:
+            _logger.exception("compaction tick failed")
+
+    sched.add_job(
+        _compaction_tick,
+        trigger=IntervalTrigger(seconds=settings.compaction_tick_seconds),
+        id="compaction_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+
     if start:
         sched.start()
     return sched
