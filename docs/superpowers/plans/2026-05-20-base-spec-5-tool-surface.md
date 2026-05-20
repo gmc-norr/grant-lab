@@ -78,6 +78,12 @@
   - **C1** Context tools must read workspace SNAPSHOTS, not live `calls`/`profiles` rows. Phased spec line 418: context tools return the snapshot taken at workspace creation. Models confirm: `Workspace.call_body_snapshot`, `Workspace.profile_desc_snapshot`, `Workspace.rubric_criteria`, `Workspace.rubric_funder_notes`, `Workspace.section_extracts` are populated by Phase 0. The live `Call` has `summary` + `full_text` (NOT `description`), and `Profile` is the org/group profile — neither is what the agent should see. Task 4 rewritten.
   - **C2** Git failure handling. `_write_and_commit` writes the file BEFORE the commit; if `git commit` fails, the working tree is dirty. Spec line 253: "If step 1 fails: no state change anywhere." Fix: capture original content, on commit failure restore it via direct write + `git reset --hard HEAD` (the project's policy normally flags `git reset --hard` but this is intra-tool rollback of the tool's own change, scoped to a single repo). Plus copy Phase 0's `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env-var pattern so production without global gitconfig still works.
   - **C3** Reconciliation timestamps. Spec line 258: backfill reads message AND timestamp from git log. Plan was using `created_at=now()` (server_default). Fix: capture `%ct` (committer Unix timestamp) in the `git log` format string, parse, and pass explicit `created_at=datetime.fromtimestamp(ts, tz=UTC)` on the backfilled `ArtifactVersion` row.
+- **rev3 (2026-05-20, Codex round 2)** — four more findings, all addressed:
+  - **B4** Registry tests probe the wrong MCP `Server` API. `Server.list_tools` is a decorator-registration method, not a callable that returns tools. The real handler lives in `instance.request_handlers[ListToolsRequest]`. _find_handler's `_tools` / `_tool_handlers` probing is also wrong — those attrs don't exist. Fix: bypass the MCP `Server` probe entirely; test `_collect_tools(ctx)` directly (it returns `list[SdkMcpTool]`, each with a `.name` attribute). For the envelope-shape test, call the SdkMcpTool's handler directly.
+  - **B5** Optional tool args are still REQUIRED in the generated JSON Schema. The SDK's dict-style schema converter (`__init__.py:408`) puts every key in `required`. So `triggering_turn_id` (Task 6) and `limit` were required despite being optional in the handler. Fix: every `@tool` now uses a full JSON Schema dict (with explicit `required` list naming only the truly mandatory keys), not the dict-of-types shorthand.
+  - **M4** Rollback in `_write_and_commit` used `git reset --hard HEAD`, which discards ALL uncommitted edits in the workspace repo — including unrelated tracked files an admin or future process might have left dirty. Fix: scope to proposal.md only via `git reset HEAD -- <file>` (unstages only that path, doesn't touch other files). The working tree is already restored by our explicit `path.write_text(original_content)`.
+  - **M5** `get_artifact_history` ran bare `git log` (whole-repo history), but it claims to return proposal.md history. In this phased repo, commits to `proposal-spec.md`, `proposal-plan.md`, review artifacts, and Phase 0's initial empty-files commit would leak into the returned list. Fix: scope every history-tool's git command to `-- proposal.md`.
+  - **Open Q** allowed_tools naming (`mcp__<server>__<tool>` vs bare `<tool>`): rev3 has Task 7 use the prefixed form AND include bare names as a belt-and-braces fallback. Added a Step-0 discovery in Task 7 telling the implementer to run a quick `uv run python` snippet that constructs `ClaudeAgentOptions` and confirms which form the SDK actually honors before committing.
 
 ---
 
@@ -479,6 +485,46 @@ async def test_write_and_commit_rolls_back_working_tree_on_commit_failure(
 
 
 @pytest.mark.asyncio
+async def test_write_and_commit_rollback_leaves_unrelated_dirty_files_alone(
+    pg_session_factory, _settings_env, tmp_path, monkeypatch,
+):
+    """Rev3 / Codex M4 regression: rollback must NOT touch unrelated
+    tracked files that happen to be dirty when our tool runs. Without
+    the scoped reset, `git reset --hard HEAD` would discard them."""
+    import subprocess as _sp
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
+
+    # Add an unrelated tracked file, commit it, then dirty it.
+    sidecar = ctx.repo_dir / "sidecar.txt"
+    sidecar.write_text("clean version")
+    _sp.run(["git", "add", "sidecar.txt"], cwd=ctx.repo_dir, check=True)
+    _sp.run(["git", "commit", "-q", "-m", "add sidecar"], cwd=ctx.repo_dir, check=True)
+    sidecar.write_text("DIRTY uncommitted edits an admin left")
+
+    # Force a commit failure (same pattern as the prior rollback test).
+    from call_monitor.proposal_assist.tools import proposal as _proposal_mod
+    real_run = _proposal_mod.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "commit":
+            raise _sp.CalledProcessError(
+                returncode=1, cmd=cmd, stderr=b"simulated commit failure",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(_proposal_mod.subprocess, "run", fake_run)
+
+    result = await edit_proposal_impl(
+        ctx,
+        edits=[{"old_string": "Initial.", "new_string": "Should not land."}],
+        triggering_turn_id=None,
+    )
+    assert result.get("error")
+    # Unrelated dirty file untouched.
+    assert sidecar.read_text() == "DIRTY uncommitted edits an admin left"
+
+
+@pytest.mark.asyncio
 async def test_edit_proposal_links_triggering_turn(
     pg_session_factory, _settings_env, tmp_path,
 ):
@@ -677,17 +723,19 @@ async def _write_and_commit(
         )
         sha = sha_proc.stdout.strip()
     except subprocess.CalledProcessError as e:
-        # ROLLBACK: restore working tree AND reset index. Spec mandates
-        # "no state change" on commit failure. `git reset --hard HEAD`
-        # is normally a destructive op the project flags, but here it
-        # only un-does this same function call's own write + add — it
-        # cannot lose prior committed work because nothing was committed.
+        # ROLLBACK (rev3): scoped to proposal.md only — never bulk-reset.
+        # 1. Restore the working-tree file from our captured original.
+        # 2. Unstage proposal.md from the index (in case `git add` ran).
+        # We do NOT use `git reset --hard HEAD` because it would wipe
+        # unrelated tracked-file edits a future process or admin might
+        # have left dirty. The scoped `git reset HEAD -- <file>` only
+        # unstages the named path; the working tree is already correct.
         if original_content is None:
             path.unlink(missing_ok=True)
         else:
             path.write_text(original_content)
         subprocess.run(
-            ["git", "reset", "--hard", "HEAD"],
+            ["git", "reset", "HEAD", "--", PROPOSAL_FILENAME],
             cwd=ctx.repo_dir, check=False, capture_output=True, env=env,
         )
         stderr = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
@@ -858,6 +906,30 @@ async def test_diff_artifact_rejects_invalid_sha(
     ctx = _build_ctx(repo_dir, pg_session_factory)
     result = await diff_artifact_impl(ctx, commit_a="bad", commit_b=shas[-1])
     assert result.get("error")
+
+
+@pytest.mark.asyncio
+async def test_get_artifact_history_skips_commits_to_other_files(
+    pg_session_factory, _settings_env, tmp_path,
+):
+    """Rev3 / Codex M5 regression: commits to phased artifacts other
+    than proposal.md (e.g., proposal-spec.md) MUST NOT appear in
+    proposal.md's history."""
+    repo_dir = tmp_path / "repo"
+    shas = _init_repo_with_history(repo_dir)
+    # Make a commit that touches ONLY a sibling phased artifact.
+    (repo_dir / "proposal-spec.md").write_text("# Spec\n")
+    subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "agent: edit spec"],
+        cwd=repo_dir, check=True,
+    )
+
+    ctx = _build_ctx(repo_dir, pg_session_factory)
+    result = await get_artifact_history_impl(ctx, limit=10)
+    returned_messages = [c["message"] for c in result["commits"]]
+    assert "agent: edit spec" not in returned_messages
+    assert "commit 2" in returned_messages  # the proposal.md commits remain
 ```
 
 - [ ] **Step 2: Implement**
@@ -884,12 +956,21 @@ PROPOSAL_FILENAME = "proposal.md"
 async def get_artifact_history_impl(
     ctx: ToolContext, *, limit: int = 20,
 ) -> dict[str, Any]:
-    """Recent commits on the current branch, newest-first, with sha,
-    message, and timestamp."""
+    """Recent commits that TOUCHED proposal.md, newest-first, with sha,
+    message, and timestamp.
+
+    Rev3 / Codex M5: scoped with `-- proposal.md` so commits to other
+    phased artifacts (proposal-spec.md, proposal-plan.md, review files,
+    Phase 0's initial-empty commit) don't leak into the returned list.
+    """
     limit = max(1, min(limit, 100))  # clamp
     try:
         proc = subprocess.run(
-            ["git", "log", f"-n{limit}", "--pretty=format:%H%x00%ct%x00%s"],
+            [
+                "git", "log", f"-n{limit}",
+                "--pretty=format:%H%x00%ct%x00%s",
+                "--", PROPOSAL_FILENAME,
+            ],
             cwd=ctx.repo_dir, check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
@@ -1411,112 +1492,95 @@ Now that all eight tool implementations exist, wire them into `build_proposal_as
 
 - [ ] **Step 1: Write failing test (add to test_tools_registry.py)**
 
+Rev3 NOTE: avoid probing the MCP `Server` object's internals — its API is decorator-based (`@server.list_tools()` registers in `request_handlers[ListToolsRequest]`, not a `_tools` dict). Test `_collect_tools(ctx)` directly: it returns `list[SdkMcpTool]`, each with `.name` + `.handler` attributes.
+
 ```python
 import asyncio
 
+import pytest
 
-def test_build_mcp_server_registers_all_eight_tools():
-    """All eight tools are registered with their expected names. The
-    server dict's 'instance' is the in-memory MCP server (from the
-    'mcp' package); query its list_tools() to introspect."""
+
+def _make_ctx():
     import uuid
     from pathlib import Path
-    from call_monitor.proposal_assist.tools.registry import (
-        ToolContext, build_proposal_assist_mcp_server,
-    )
-
-    ctx = ToolContext(
+    from call_monitor.proposal_assist.tools.registry import ToolContext
+    return ToolContext(
         workspace_id=uuid.uuid4(),
         repo_dir=Path("/tmp/x"),
         session_factory=None,  # type: ignore[arg-type]
         settings=None,  # type: ignore[arg-type]
     )
-    server = build_proposal_assist_mcp_server(ctx)
-    instance = server["instance"]
 
-    # The MCP server's list_tools is async; the exact handler-discovery
-    # API depends on the mcp package version. Common shapes:
-    #   tools = await instance.list_tools()
-    #   tools = list(instance._tools.values())
-    # Probe the running instance to learn the right shape; the assertion
-    # is on the SET of tool names regardless of where they live.
-    found_names = _extract_tool_names(instance)
-    assert found_names == {
+
+def test_collect_tools_returns_eight_named_tools():
+    """All eight tool names are present. Probes _collect_tools directly
+    instead of fighting the MCP Server's decorator-based API."""
+    from call_monitor.proposal_assist.tools.registry import _collect_tools
+
+    tools = _collect_tools(_make_ctx())
+    names = {t.name for t in tools}
+    assert names == {
         "read_proposal", "edit_proposal", "replace_proposal",
         "get_artifact_history", "read_artifact_at", "diff_artifact",
         "get_call_details", "get_profile",
     }
 
 
-def _extract_tool_names(mcp_instance) -> set[str]:
-    """Probe the MCP server's internal tool registry. Tries multiple
-    SDK shapes."""
-    # Try the public API first.
-    list_tools = getattr(mcp_instance, "list_tools", None)
-    if list_tools is not None:
-        try:
-            result = list_tools()
-            if asyncio.iscoroutine(result):
-                result = asyncio.get_event_loop().run_until_complete(result)
-            return {t.name for t in result}
-        except Exception:
-            pass
-    # Fall back to internal attributes (likely _tool_manager or _tools).
-    for attr in ("_tools", "_tool_handlers", "_tool_manager"):
-        val = getattr(mcp_instance, attr, None)
-        if val is None:
-            continue
-        if isinstance(val, dict):
-            return set(val.keys())
-        # _tool_manager may hold a registry; explore one level deeper.
-        for inner in ("_tools", "tools"):
-            inner_val = getattr(val, inner, None)
-            if isinstance(inner_val, dict):
-                return set(inner_val.keys())
-    raise RuntimeError(
-        "could not extract tool names from MCP server instance; "
-        "the mcp package's API has changed — probe `dir(instance)` "
-        "in a quick repl and adjust this helper."
-    )
+@pytest.mark.asyncio
+async def test_tool_handler_returns_mcp_envelope_shape():
+    """Smoke: a tool handler returns the MCP envelope shape, not the
+    plain dict the *_impl function produces. Use read_proposal against
+    a missing repo so the impl returns an error — we only care about
+    envelope shape, not content."""
+    from call_monitor.proposal_assist.tools.registry import _collect_tools
 
-
-def test_tool_handlers_return_mcp_envelope_shape():
-    """Smoke: a @tool handler returns the MCP envelope shape, not the
-    plain dict the *_impl function produces."""
-    import uuid
-    from pathlib import Path
-    from call_monitor.proposal_assist.tools.registry import (
-        ToolContext, build_proposal_assist_mcp_server,
-    )
-
-    # Use a missing repo_dir so read_proposal returns an error path —
-    # we just need to verify the envelope shape, not the content.
-    ctx = ToolContext(
-        workspace_id=uuid.uuid4(),
-        repo_dir=Path("/nonexistent"),
-        session_factory=None,  # type: ignore[arg-type]
-        settings=None,  # type: ignore[arg-type]
-    )
-    server = build_proposal_assist_mcp_server(ctx)
-    instance = server["instance"]
-    # Find read_proposal's handler and invoke directly.
-    handler = _find_handler(instance, "read_proposal")
-    result = asyncio.get_event_loop().run_until_complete(handler({}))
+    tools = _collect_tools(_make_ctx())
+    read = next(t for t in tools if t.name == "read_proposal")
+    result = await read.handler({})
     assert "content" in result
     assert isinstance(result["content"], list)
     assert result["content"][0]["type"] == "text"
     assert "is_error" in result
+    # The "missing file" path is an error.
+    assert result["is_error"] is True
 
 
-def _find_handler(mcp_instance, name: str):
-    """Locate a handler by tool name; mirrors _extract_tool_names probing."""
-    for attr in ("_tools", "_tool_handlers"):
-        val = getattr(mcp_instance, attr, None)
-        if isinstance(val, dict) and name in val:
-            entry = val[name]
-            # entry may be the handler directly, or an object wrapping it.
-            return getattr(entry, "handler", entry)
-    raise RuntimeError(f"could not locate handler for {name}")
+@pytest.mark.asyncio
+async def test_tool_handler_envelope_success_path():
+    """When the impl returns a plain success dict (no 'error' key), the
+    wrapper produces is_error=False and JSON-encodes the payload as
+    the text content."""
+    import json
+    import subprocess
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from call_monitor.proposal_assist.tools.registry import (
+        ToolContext, _collect_tools,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "a@b"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+        (repo / "proposal.md").write_text("hello world")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+        ctx = ToolContext(
+            workspace_id=uuid.uuid4(), repo_dir=repo,
+            session_factory=None, settings=None,  # type: ignore[arg-type]
+        )
+        tools = _collect_tools(ctx)
+        read = next(t for t in tools if t.name == "read_proposal")
+        result = await read.handler({})
+
+    assert result["is_error"] is False
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["content"] == "hello world"
 ```
 
 - [ ] **Step 2: Implement — update `_collect_tools`**
@@ -1545,7 +1609,15 @@ def _collect_tools(ctx: ToolContext) -> list:
         edit_proposal_impl, read_proposal_impl, replace_proposal_impl,
     )
 
-    @tool("read_proposal", "Return the current proposal.md content.", {})
+    # Rev3 NOTE: SDK converts dict-of-types into JSON Schema with ALL
+    # keys in `required`. To make args truly optional, pass full JSON
+    # Schema dicts with explicit `required` lists.
+
+    @tool(
+        "read_proposal",
+        "Return the current proposal.md content.",
+        {"type": "object", "properties": {}, "required": []},
+    )
     async def read_proposal(args):
         return _wrap(await read_proposal_impl(ctx))
 
@@ -1554,7 +1626,24 @@ def _collect_tools(ctx: ToolContext) -> list:
         "Apply a list of {old_string, new_string} surgical edits to "
         "proposal.md. All-or-nothing: if any anchor is missing or "
         "ambiguous, no edits are applied. Auto-commits on success.",
-        {"edits": list, "triggering_turn_id": str},
+        {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                        },
+                        "required": ["old_string", "new_string"],
+                    },
+                },
+                "triggering_turn_id": {"type": "string"},
+            },
+            "required": ["edits"],
+        },
     )
     async def edit_proposal(args):
         ttid = args.get("triggering_turn_id") or None
@@ -1569,7 +1658,14 @@ def _collect_tools(ctx: ToolContext) -> list:
         "replace_proposal",
         "Overwrite proposal.md with new content. For large structural "
         "rewrites. Auto-commits.",
-        {"content": str, "triggering_turn_id": str},
+        {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "triggering_turn_id": {"type": "string"},
+            },
+            "required": ["content"],
+        },
     )
     async def replace_proposal(args):
         ttid = args.get("triggering_turn_id") or None
@@ -1583,7 +1679,13 @@ def _collect_tools(ctx: ToolContext) -> list:
     @tool(
         "get_artifact_history",
         "Return up to `limit` recent commits on proposal.md, newest first.",
-        {"limit": int},
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": [],
+        },
     )
     async def get_artifact_history(args):
         return _wrap(await get_artifact_history_impl(
@@ -1593,7 +1695,11 @@ def _collect_tools(ctx: ToolContext) -> list:
     @tool(
         "read_artifact_at",
         "Return proposal.md content at a specific commit sha.",
-        {"commit_sha": str},
+        {
+            "type": "object",
+            "properties": {"commit_sha": {"type": "string"}},
+            "required": ["commit_sha"],
+        },
     )
     async def read_artifact_at(args):
         return _wrap(await read_artifact_at_impl(
@@ -1603,7 +1709,14 @@ def _collect_tools(ctx: ToolContext) -> list:
     @tool(
         "diff_artifact",
         "Unified diff of proposal.md between two commit shas.",
-        {"commit_a": str, "commit_b": str},
+        {
+            "type": "object",
+            "properties": {
+                "commit_a": {"type": "string"},
+                "commit_b": {"type": "string"},
+            },
+            "required": ["commit_a", "commit_b"],
+        },
     )
     async def diff_artifact(args):
         return _wrap(await diff_artifact_impl(
@@ -1615,7 +1728,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         "Return the snapshot of the linked call's body + metadata "
         "(captured at workspace creation, refreshed by Phase 0). "
         "Returns {linked: false} if no call linked.",
-        {},
+        {"type": "object", "properties": {}, "required": []},
     )
     async def get_call_details(args):
         return _wrap(await get_call_details_impl(ctx))
@@ -1625,7 +1738,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         "Return the snapshot of the linked profile description "
         "(captured at workspace creation). Returns {linked: false} "
         "if no profile linked.",
-        {},
+        {"type": "object", "properties": {}, "required": []},
     )
     async def get_profile(args):
         return _wrap(await get_profile_impl(ctx))
@@ -1636,8 +1749,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         get_call_details, get_profile,
     ]
 ```
-
-Note: `triggering_turn_id` is typed `str` (the SDK doesn't natively support `str | None` in the input schema); the handler treats empty-string / missing as None. Document in the tool description: "Pass empty string when there is no triggering turn (system-initiated edits)." Or use `int` for size, accepting that the agent always passes the turn id when present.
 
 **Implementer note:** The exact attribute name on `McpSdkServerConfig` (`.tools` vs `["tools"]`) depends on the SDK's internal representation — verify with a quick `dir(server)` after construction. The test in Step 1 probes both shapes; adapt the assertion if the SDK uses something else (e.g., `server.config["tools"]`).
 
@@ -1667,6 +1778,28 @@ The adapter NEEDS `session_factory` + `settings` inside `tools_factory` — but 
 - Modify: `src/call_monitor/proposal_assist/drafting/factory.py`
 - Modify: `src/call_monitor/proposal_assist/drafting/__init__.py` (re-export `ToolContext`)
 - Test: `tests/proposal_assist/test_tools_claude_adapter_wiring.py`
+
+- [ ] **Step 0: Discovery — confirm `allowed_tools` naming convention**
+
+Codex round 2 flagged an open question: the SDK might honor `mcp__<server>__<tool>` OR bare `<tool>` names in `allowed_tools`. Run a quick discovery to learn which:
+
+```bash
+uv run python -c "
+from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions
+@tool('probe', 'probe', {'type': 'object', 'properties': {}, 'required': []})
+async def probe(args): return {'content': [{'type':'text','text':'ok'}], 'is_error': False}
+srv = create_sdk_mcp_server(name='probe_srv', tools=[probe])
+# Inspect SDK docs/CLI to see which allowed_tools form is honored.
+# Try ClaudeAgentOptions with both forms and check what the SDK's stderr
+# logging says about tool registration / permission gating.
+print('server name:', srv.get('name'))
+print('tool name attr:', probe.name)
+"
+```
+
+If the SDK README / source confirms `mcp__<server>__<tool>` is the canonical form: use that.
+If it's bare names: use those.
+If unclear: use BOTH (the snippet below does this as belt-and-braces). Document the chosen form in the commit message.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1803,14 +1936,18 @@ if self._tools_factory is not None:
     # additionally auto-grants permission on those (no prompts).
     options_kwargs["tools"] = []
     options_kwargs["strict_mcp_config"] = True
+    # Belt-and-braces: include BOTH naming forms in allowed_tools
+    # because the SDK's accepted form is undocumented (see Step 0
+    # discovery). Listing both makes either form accept; replace with
+    # the single confirmed form after Step 0 verifies.
+    _tool_names = (
+        "read_proposal", "edit_proposal", "replace_proposal",
+        "get_artifact_history", "read_artifact_at", "diff_artifact",
+        "get_call_details", "get_profile",
+    )
     options_kwargs["allowed_tools"] = [
-        f"mcp__proposal_assist__{name}"
-        for name in (
-            "read_proposal", "edit_proposal", "replace_proposal",
-            "get_artifact_history", "read_artifact_at", "diff_artifact",
-            "get_call_details", "get_profile",
-        )
-    ]
+        f"mcp__proposal_assist__{name}" for name in _tool_names
+    ] + list(_tool_names)
 options = ClaudeAgentOptions(**options_kwargs)
 ```
 
