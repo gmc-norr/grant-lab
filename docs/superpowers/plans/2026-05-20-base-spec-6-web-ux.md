@@ -6,7 +6,7 @@
 
 **Architecture:** All routes live in `src/call_manager/proposal_assist/web/workspaces.py` (mounted at `/workspaces` — the existing `rubric_review.py` already uses this prefix; B6 extends it). Server-rendered Jinja2 templates with HTMX for partial swaps. SSE bridge polls `chat_turns` for new rows since the consumer connected (~200ms tick) and emits MCP-style events so the browser streams the agent's reply in real time. No SPA, no frontend build.
 
-**Tech Stack:** FastAPI, Jinja2, HTMX (including `hx-ext="sse"` for the stream), markdown rendering via the existing `markdown` package, SQLAlchemy 2.x. Reuses B4's `submit_user_turn`, B5's `read_proposal_impl` / `get_artifact_history_impl` / `read_artifact_at_impl` / `diff_artifact_impl`, and B3's `WorkspaceController`.
+**Tech Stack:** FastAPI, Jinja2 (existing `app.state.templates` instance, NOT a fresh one — keeps filters + base.html nav), HTMX 1.9 + the SSE extension (`htmx-sse.js`, vendored alongside `htmx.min.js`), markdown rendering via the `markdown` package wrapped in `bleach.clean(..., tags=ALLOWED_TAGS, strip=True)` to defang HTML, SQLAlchemy 2.x. Reuses B4's `submit_user_turn`, B5's `read_proposal_impl` / `get_artifact_history_impl` / `read_artifact_at_impl` / `diff_artifact_impl`, and B3's `WorkspaceController`.
 
 **Spec:** [docs/superpowers/specs/2026-04-18-call-manager-proposal-assist-design.md](../specs/2026-04-18-call-manager-proposal-assist-design.md), §Workspace UX (lines 288–320), §Compliance / disclosure (lines 322–352).
 
@@ -74,7 +74,9 @@ What IS in B6:
 - `src/call_manager/web/templates/proposal_assist/partials/artifact_pane.html` — markdown rendering + raw toggle + version selector + diff.
 - `src/call_manager/web/templates/proposal_assist/partials/cloud_banner.html` — persistent "data sent to Anthropic" banner above the composer.
 - `src/call_manager/web/templates/proposal_assist/partials/disclosure_modal.html` — first-time data disclosure modal.
-- Tests at `tests/proposal_assist/test_web_workspaces_list.py`, `test_web_workspaces_new.py`, `test_web_workspaces_main.py`, `test_web_workspaces_turns.py`, `test_web_workspaces_sse.py`, `test_web_workspaces_artifact.py`, `test_web_workspaces_settings.py`, `test_web_workspaces_viewers.py`, `test_web_workspaces_disclosure.py`, `test_web_workspaces_export.py`.
+- `src/call_manager/web/templates/proposal_assist/partials/history.html` — version-history list (rev2 / Codex M1).
+- `src/call_manager/web/static/htmx-sse.js` — vendored htmx 1.9 SSE extension (rev2 / Codex H1).
+- Tests at `tests/proposal_assist/test_web_workspaces_list.py`, `test_web_workspaces_new.py`, `test_web_workspaces_main.py`, `test_web_workspaces_turns.py`, `test_web_workspaces_sse.py`, `test_web_workspaces_artifact.py`, `test_web_workspaces_settings.py`, `test_web_workspaces_viewers.py`, `test_web_workspaces_disclosure.py`, `test_web_workspaces_export.py`, `test_web_workspaces_xss.py` (rev2: regression for markdown + chat-turn HTML sanitization).
 
 **Modified:**
 - `src/call_manager/main.py` — already mounts `rubric_review_router`; B6's router is in the same module so no extra include needed. (Actually B6 creates a NEW router file; verify the include is added.)
@@ -86,6 +88,12 @@ What IS in B6:
 ## Revision history
 
 - **rev1 (2026-05-20)** — initial plan.
+- **rev2 (2026-05-20, Codex round 1)** — five findings, all addressed:
+  - **H1** (SSE won't start in browser): `hx-swap="none"` on the composer form discarded the SSE-connector `<div>` returned by `POST /turns`, so HTMX never opened the stream. Also `base.html` only loaded `htmx.min.js` — no SSE extension. Fix: composer form now uses `hx-target="#chat-history" hx-swap="beforeend"`; `POST /turns` response returns BOTH the rendered user-turn partial AND the SSE connector div, both appended. `htmx-sse.js` (htmx 1.9 SSE extension) is vendored in Task 1 and added to `base.html`.
+  - **H2** (persistent XSS — markdown + f-string SSE): `markdown.markdown(raw) | safe` injects unsanitized HTML from `proposal.md`; the SSE helper f-strings chat_turn content + tool names without escaping. Both are agent-or-user controlled. Fix: add `bleach` dependency; sanitize markdown output via `bleach.clean(html, tags=ALLOWED_TAGS, strip=True)`. All template insertions of chat content rely on Jinja's auto-escape (no `| safe`). SSE helper uses `html.escape` on every interpolated string.
+  - **M1** (missing `history.html`): Task 9 referenced `proposal_assist/partials/history.html` but it was not in the file map. Fix: added to file map; Task 9 now creates it.
+  - **M2** (separate Jinja instance): plan instantiated its own `Jinja2Templates(...)`, bypassing `app.state.templates` which has registered filters (`display_dt`, `criterion_label`, …). Also `base.html` expects `user` not `current_user`. Fix: use `request.app.state.templates`; rename `current_user` → `user` in every context dict. Workspace pages now inherit the standard navigation + filter set.
+  - **M3** (best-profile prefill scope gap): plan scope promised "pre-fills the linked call and the profile that scored it highest for the current user" but Task 4 deliberately punted profile selection. Fix: Task 4 now queries `CallRanking` joined to `Profile` for the highest `aggregate_score` profile owned by the current user; passes `?profile_id=<best>` when found. Falls back to no prefill when no ranking exists.
 
 ---
 
@@ -99,7 +107,9 @@ The scaffolding everything else lives on. Sets up the `/workspaces` router (or e
 - Create: `src/call_manager/web/templates/proposal_assist/workspace_new.html`
 - Create: `src/call_manager/web/templates/proposal_assist/workspace_main.html`
 - Create: `src/call_manager/web/templates/proposal_assist/workspace_settings.html`
+- Create: `src/call_manager/web/static/htmx-sse.js` (vendored htmx 1.9 SSE extension)
 - Modify: `src/call_manager/main.py` — include the new router.
+- Modify: `src/call_manager/web/templates/base.html` — add `<script src="/static/htmx-sse.js"></script>` after the existing htmx.min.js include (rev2 / Codex H1).
 - Modify: `src/call_manager/proposal_assist/web/rubric_review.py` — delete the `GET /workspaces/{id}` placeholder.
 - Test: `tests/proposal_assist/test_web_workspaces_main.py` — placeholder route returns 200 + auth-protected smoke.
 
@@ -156,6 +166,12 @@ turn submission + SSE bridge, viewer mgmt, disclosure modal, export.
 
 All routes mount at /workspaces. Mirrors the proposal_assist router
 pattern from rubric_review.py (same _session_dep, same auth dep).
+
+Rev2 / Codex M2: uses `request.app.state.templates` (set up by
+main.py) — NOT a fresh Jinja2Templates instance. This is what keeps
+the navigation in base.html working (base.html expects `user` in the
+context, and main.py registers the `display_dt` / `criterion_label`
+/ ... filters on that single instance).
 """
 from __future__ import annotations
 
@@ -163,7 +179,6 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
@@ -171,8 +186,6 @@ from call_manager.db.models import Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
-
-templates = Jinja2Templates(directory="src/call_manager/web/templates")
 
 
 def _session_dep(request: Request):
@@ -226,13 +239,19 @@ def get_workspace_main(
     session: Session = Depends(_session_dep),
 ) -> HTMLResponse:
     """Two-pane main view. Subsequent tasks fill in chat history +
-    artifact pane; this stub just renders the shell."""
+    artifact pane; this stub just renders the shell.
+
+    Note: uses `request.app.state.templates` (the existing instance
+    with registered filters + base.html nav). Context key is `user`
+    (NOT `current_user`) to match base.html.
+    """
     ws = _require_owner_or_viewer(
         workspace_id=workspace_id, user=user, session=session,
     )
+    templates = request.app.state.templates
     return templates.TemplateResponse(
         request, "proposal_assist/workspace_main.html",
-        {"workspace": ws, "current_user": user},
+        {"workspace": ws, "user": user},
     )
 ```
 
@@ -275,6 +294,27 @@ from call_manager.proposal_assist.web.workspaces import (
 # ...
 app.include_router(workspaces_router)
 ```
+
+- [ ] **Step 6b: Vendor htmx-sse extension + load it in base.html** (rev2 / Codex H1)
+
+Download the htmx 1.9 SSE extension. The currently vendored htmx version is `1.9.12` (verified). The matching SSE extension is `htmx-extensions/sse/sse.js` from htmx 1.9 — pull the file matching that version.
+
+```bash
+# Quick option: download from a pinned CDN URL with sha verification.
+# Or: copy from your local node_modules / git clone of the htmx repo.
+# Verify the downloaded file's banner mentions htmx 1.9.x SSE extension.
+curl -fsSL https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js -o src/call_manager/web/static/htmx-sse.js
+head -1 src/call_manager/web/static/htmx-sse.js
+# expect: a function-style wrapper, mentioning sse
+```
+
+In `src/call_manager/web/templates/base.html`, after the existing `<script src="/static/htmx.min.js"></script>`, add:
+
+```html
+<script src="/static/htmx-sse.js"></script>
+```
+
+Without this, `hx-ext="sse"` is a no-op and `sse-connect` never opens the EventSource — the H1 finding.
 
 - [ ] **Step 7: Run + commit**
 
@@ -649,7 +689,7 @@ git commit -m "feat(b6): GET/POST /workspaces/new — create form"
 
 ## Task 4: "Start drafting workspace" button on /calls/{id}
 
-Add a button to `call_detail.html` that links to `/workspaces/new?call_id=<id>&profile_id=<best>`. "Best profile" = the one with the highest score for this user × this call (already computed by the ranking pipeline and stored).
+Add a button to `call_detail.html` that links to `/workspaces/new?call_id=<id>&profile_id=<best>`. "Best profile" = the highest-scoring profile OWNED BY the current user for this call. Use `CallRanking.aggregate_score` (joined to `Profile` filtered by `created_by == current_user.id`). If no ranking exists or the user has no profiles, fall back to just `?call_id=<id>` (the form lets the user pick).
 
 **Files:**
 - Modify: `src/call_manager/web/templates/call_detail.html`.
@@ -678,20 +718,82 @@ def test_call_detail_has_start_drafting_link(
     assert f'/workspaces/new?call_id={cid}'.encode() in response.content
 ```
 
-- [ ] **Step 2: Modify `call_detail.html`**
+- [ ] **Step 2: Add best-profile lookup to the /calls/{id} route**
 
-Find a sensible location (near the call's metadata block) and add:
+Locate the GET /calls/{id} handler in `src/call_manager/web/routes/calls.py`. Before rendering, add:
+
+```python
+from sqlalchemy import select
+from call_manager.db.models import CallRanking, Profile
+
+best_profile_id = session.scalar(
+    select(CallRanking.profile_id)
+    .join(Profile, Profile.id == CallRanking.profile_id)
+    .where(
+        CallRanking.call_id == call_id,
+        Profile.created_by == user.id,
+    )
+    .order_by(CallRanking.aggregate_score.desc().nulls_last())
+    .limit(1)
+)
+# Pass best_profile_id into the template context.
+```
+
+- [ ] **Step 3: Modify `call_detail.html`**
 
 ```html
 {# B6: Start a workspace pre-filled with this call. profile_id is
-   optional — the form lets the user pick if no best-fit can be inferred. #}
+   omitted from the link when no ranking exists for any of the user's
+   profiles — the form still lets the user pick. #}
 <p>
-  <a href="/workspaces/new?call_id={{ call.id }}"
+  <a href="/workspaces/new?call_id={{ call.id }}{% if best_profile_id %}&profile_id={{ best_profile_id }}{% endif %}"
      class="button">Start drafting workspace</a>
 </p>
 ```
 
-If you have a best-fit profile lookup available (e.g., highest-scoring profile for this user × call from the ranking pipeline), include `&profile_id=...` too. Otherwise leave it as just call_id; the user picks the profile in the form.
+- [ ] **Step 4: Add a regression test that profile_id IS in the link when a ranking exists**
+
+```python
+def test_call_detail_includes_best_profile_id_when_ranking_exists(
+    client_authed_user, pg_session_factory, current_user,
+):
+    from call_manager.db.models import Call, CallRanking, Profile, Source
+    with pg_session_factory() as s:
+        src = Source(slug="t", name="T", base_url="http://x")
+        s.add(src); s.flush()
+        call = Call(source_id=src.id, external_id="c1", title="A", url="http://x/c1")
+        s.add(call); s.flush()
+        prof = Profile(name="P", description="d", kind="group",
+                       created_by=current_user.id)
+        s.add(prof); s.flush()
+        s.add(CallRanking(
+            call_id=call.id, profile_id=prof.id,
+            aggregate_score=85, rationale="r", model="m", prompt_version="v",
+        ))
+        s.commit()
+        cid, pid = call.id, prof.id
+
+    response = client_authed_user.get(f"/calls/{cid}")
+    assert response.status_code == 200
+    assert f"/workspaces/new?call_id={cid}&profile_id={pid}".encode() in response.content
+
+
+def test_call_detail_falls_back_to_no_profile_id_when_no_ranking(
+    client_authed_user, pg_session_factory,
+):
+    from call_manager.db.models import Call, Source
+    with pg_session_factory() as s:
+        src = Source(slug="t", name="T", base_url="http://x")
+        s.add(src); s.flush()
+        call = Call(source_id=src.id, external_id="c1", title="A", url="http://x/c1")
+        s.add(call); s.commit()
+        cid = call.id
+
+    response = client_authed_user.get(f"/calls/{cid}")
+    assert response.status_code == 200
+    # No profile_id query string in the link (only call_id).
+    assert f"/workspaces/new?call_id={cid}\"".encode() in response.content
+```
 
 - [ ] **Step 3: Run + commit**
 
@@ -773,11 +875,33 @@ def test_main_view_renders_artifact_pane(
 Replace the stub:
 
 ```python
+import bleach
 import markdown
 from pathlib import Path
 
 from call_manager.db.models import ChatTurn
 from sqlalchemy import select
+
+
+# Rev2 / Codex H2: every HTML rendering of agent-controlled content
+# (proposal.md, chat_turns content) MUST go through this sanitizer.
+# markdown.markdown() emits raw HTML for any raw HTML in the input;
+# bleach.clean strips tags not in the allowlist.
+_ALLOWED_TAGS = [
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "p", "br", "hr",
+    "strong", "em", "code", "pre",
+    "ul", "ol", "li",
+    "blockquote", "a",
+    "table", "thead", "tbody", "tr", "th", "td",
+]
+_ALLOWED_ATTRS = {"a": ["href", "title"]}
+
+
+def _render_proposal_markdown(raw: str) -> str:
+    """Render proposal.md content to safe HTML."""
+    html = markdown.markdown(raw, extensions=["extra"])
+    return bleach.clean(html, tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS, strip=True)
 
 
 @router.get("/{workspace_id}", response_class=HTMLResponse)
@@ -800,16 +924,17 @@ def get_workspace_main(
     proposal_path = repo_dir / "proposal.md"
     if proposal_path.exists():
         raw = proposal_path.read_text()
-        rendered = markdown.markdown(raw)
+        rendered = _render_proposal_markdown(raw)
     else:
         raw, rendered = "", "<em>(no proposal.md yet)</em>"
 
     is_owner = ws.owner_id == user.id
+    templates = request.app.state.templates
     return templates.TemplateResponse(
         request, "proposal_assist/workspace_main.html",
         {
             "workspace": ws,
-            "current_user": user,
+            "user": user,            # base.html expects `user`, not `current_user`
             "is_owner": is_owner,
             "chat_turns": chat_turns,
             "artifact_rendered": rendered,
@@ -846,7 +971,9 @@ def get_workspace_main(
     {% if is_owner %}
     <form id="composer" method="post" action="/workspaces/{{ workspace.id }}/turns"
           hx-post="/workspaces/{{ workspace.id }}/turns"
-          hx-swap="none">
+          hx-target="#chat-history"
+          hx-swap="beforeend"
+          hx-on::after-request="this.reset()">
       <textarea name="content" rows="3" required></textarea>
       <button type="submit">Send</button>
     </form>
@@ -905,11 +1032,13 @@ def get_workspace_main(
 </p>
 ```
 
-- [ ] **Step 4: Add the `markdown` dependency**
+- [ ] **Step 4: Add the `markdown` + `bleach` dependencies**
 
 ```bash
-uv add markdown
+uv add markdown bleach
 ```
+
+(`bleach` is required to sanitize the markdown output per rev2 / Codex H2 — see `_render_proposal_markdown`.)
 
 - [ ] **Step 5: Run + commit**
 
@@ -1035,15 +1164,36 @@ def post_turn(
             f"Europe/Stockholm or ask an admin to raise the cap.</p>",
             status_code=429,
         )
-    # HTMX: return the turn_job_id so the front-end can open the SSE stream.
-    return HTMLResponse(
-        f"<div id='pending-turn' "
+
+    # Rev2 / Codex H1: form's hx-target/hx-swap is #chat-history /
+    # beforeend, so the response is appended to the chat. Send TWO pieces
+    # of HTML, both appended in one swap:
+    #   (1) The just-sent user turn, rendered as a chat row (so the
+    #       user sees their message immediately, before the agent's
+    #       reply arrives via SSE).
+    #   (2) The SSE-connector div, which opens EventSource to the
+    #       stream endpoint and self-removes when the stream emits the
+    #       'done' event.
+    # Note: chat content is HTML-escaped (html.escape) — never f-string'd
+    # raw into HTML (Codex H2).
+    import html as _html
+    safe_text = _html.escape(content)
+    user_turn_html = (
+        "<div class='chat-turn' data-role='user'>"
+        "<strong>user:</strong>"
+        f"<p>{safe_text}</p>"
+        "</div>"
+    )
+    sse_connector = (
+        f"<div id='sse-mount-{job.id}' "
         f"hx-ext='sse' "
         f"sse-connect='/workspaces/{workspace_id}/turns/{job.id}/stream' "
         f"sse-swap='message' "
+        f"sse-close='done' "
         f"hx-target='#chat-history' "
-        f"hx-swap='beforeend'>turn queued: {job.id}</div>"
+        f"hx-swap='beforeend'></div>"
     )
+    return HTMLResponse(user_turn_html + sse_connector)
 ```
 
 - [ ] **Step 3: Run + commit**
@@ -1185,19 +1335,29 @@ async def stream_turn(
 
 def _render_chat_turn_html(turn) -> str:
     """Render one chat_turns row to a small HTML snippet for SSE emission.
-    Matches the partials/chat_turn.html template's per-row markup."""
+    Matches the partials/chat_turn.html template's per-row markup.
+
+    Rev2 / Codex H2: every interpolated field is run through
+    `html.escape` first — chat content + tool names are agent-controlled
+    and could contain `<script>` otherwise.
+    """
+    import html as _html
     c = turn.content
+    safe_role = _html.escape(turn.role)
     if isinstance(c, dict) and c.get("type") == "text":
-        body = f"<p>{c.get('text', '')}</p>"
+        body = f"<p>{_html.escape(str(c.get('text', '')))}</p>"
     elif isinstance(c, dict) and c.get("type") == "tool_use":
-        body = f"<p><em>(tool call: {c.get('name', '?')})</em></p>"
+        body = f"<p><em>(tool call: {_html.escape(str(c.get('name', '?')))})</em></p>"
     elif isinstance(c, dict) and c.get("type") == "tool_result":
         err = " — error" if c.get("is_error") else ""
         body = f"<p><em>(tool result{err})</em></p>"
     else:
-        body = f"<pre>{c}</pre>"
+        body = f"<pre>{_html.escape(str(c))}</pre>"
+    snippet = (
+        f"<div class='chat-turn' data-role='{safe_role}'>"
+        f"<strong>{safe_role}:</strong>{body}</div>"
+    )
     # JSON-escape \n so it's valid in an SSE data: line.
-    snippet = f"<div class='chat-turn' data-role='{turn.role}'><strong>{turn.role}:</strong>{body}</div>"
     return snippet.replace("\n", "")
 ```
 
@@ -1282,9 +1442,10 @@ async def artifact_raw(workspace_id, request, user=Depends(get_current_user), se
 async def artifact_history(workspace_id, request, user=Depends(get_current_user), session=Depends(_session_dep)):
     ws = _require_owner_or_viewer(...)
     result = await get_artifact_history_impl(_make_tool_ctx(request, ws), limit=50)
+    templates = request.app.state.templates
     return templates.TemplateResponse(
         request, "proposal_assist/partials/history.html",
-        {"workspace": ws, "commits": result.get("commits", [])},
+        {"workspace": ws, "commits": result.get("commits", []), "user": user},
     )
 
 
@@ -1304,9 +1465,120 @@ async def artifact_diff(workspace_id, commit_a: str, commit_b: str, request, ...
     return Response(result["diff"], media_type="text/plain")
 ```
 
+Create the missing template (rev2 / Codex M1):
+
+`src/call_manager/web/templates/proposal_assist/partials/history.html`:
+
+```html
+{% extends "base.html" %}
+{% block title %}History — {{ workspace.title }}{% endblock %}
+{% block content %}
+<h1>Version history — {{ workspace.title }}</h1>
+<p><a href="/workspaces/{{ workspace.id }}">← Back to workspace</a></p>
+{% if commits %}
+<table>
+  <thead><tr><th>Date</th><th>SHA</th><th>Message</th><th>View</th></tr></thead>
+  <tbody>
+    {% for c in commits %}
+    <tr>
+      <td>{{ c.timestamp }}</td>
+      <td><code>{{ c.sha[:8] }}</code></td>
+      <td>{{ c.message }}</td>
+      <td><a href="/workspaces/{{ workspace.id }}/artifact/at/{{ c.sha }}">view</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No history yet.</p>
+{% endif %}
+{% endblock %}
+```
+
+(Chat content + commit messages render via Jinja default auto-escape — no `| safe`.)
+
 Tests cover happy paths + B5's sha-validation rejection (e.g., `--output=evil` returns 400).
 
 Run + commit.
+
+---
+
+## Task 9b: XSS regression tests (rev2 / Codex H2)
+
+Three regression tests prove the H2 sanitization guards work end-to-end:
+
+1. **`proposal.md` with `<script>`** — render the main view; assert the script tag is absent from the response body (bleach strips it).
+2. **chat_turn with `<img src=x onerror=alert(1)>`** — render the main view; assert the dangerous attributes are absent (Jinja auto-escape converts to `&lt;img …&gt;`).
+3. **SSE-emitted chat_turn with `<script>`** — directly call `_render_chat_turn_html` and assert the output contains `&lt;script&gt;` (escaped), NOT `<script>`.
+
+```python
+def test_proposal_md_with_script_tag_is_sanitized(
+    client_authed_owner, pg_session_factory, current_user, tmp_workspaces_dir,
+):
+    from pathlib import Path
+    import subprocess
+    from tests.proposal_assist.conftest import make_workspace
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+    repo_dir = Path(tmp_workspaces_dir) / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "a@b"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo_dir, check=True)
+    (repo_dir / "proposal.md").write_text(
+        "# Heading\n\n<script>alert('xss')</script>\n\nBody."
+    )
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo_dir, check=True)
+
+    response = client_authed_owner.get(f"/workspaces/{wsid}")
+    assert response.status_code == 200
+    assert b"<script>" not in response.content
+    assert b"alert" not in response.content  # bleach strips the tag entirely
+
+
+def test_chat_turn_content_with_html_is_escaped(
+    client_authed_owner, pg_session_factory, current_user,
+):
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        make_chat_turn(
+            s, ws, role="assistant",
+            content={"type": "text", "text": "<img src=x onerror=alert(1)>"},
+        )
+        s.commit()
+        wsid = ws.id
+    response = client_authed_owner.get(f"/workspaces/{wsid}")
+    assert response.status_code == 200
+    # Jinja auto-escape replaces < with &lt; — raw <img> tag must not appear.
+    assert b"<img" not in response.content
+    assert b"onerror" not in response.content
+    # Escaped form should be present (the user can read what was attempted).
+    assert b"&lt;img" in response.content
+
+
+def test_sse_helper_escapes_chat_content():
+    """Direct unit test on _render_chat_turn_html — Codex H2 regression."""
+    from call_manager.proposal_assist.web.workspaces import _render_chat_turn_html
+    from call_manager.db.models import ChatTurn
+    import uuid
+
+    turn = ChatTurn(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        role="assistant",
+        content={"type": "text", "text": "<script>alert('x')</script>"},
+        position=1,
+    )
+    snippet = _render_chat_turn_html(turn)
+    assert "<script>" not in snippet
+    assert "&lt;script&gt;" in snippet
+```
+
+These tests should be in `tests/proposal_assist/test_web_workspaces_xss.py`. Run + commit.
 
 ---
 
