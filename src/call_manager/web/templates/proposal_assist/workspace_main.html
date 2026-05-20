@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ workspace.title }}{% endblock %}
 {% block content %}
+{% if needs_disclosure %}
+  {% include "proposal_assist/partials/disclosure_modal.html" %}
+{% endif %}
 <h1>{{ workspace.title }}</h1>
 <p>
   <strong>Phase:</strong> {{ workspace.current_phase }}

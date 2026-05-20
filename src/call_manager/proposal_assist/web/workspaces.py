@@ -26,7 +26,14 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import ChatTurn, TurnJob, User, Workspace, WorkspaceViewer
+from call_manager.db.models import (
+    ChatTurn,
+    TurnJob,
+    User,
+    Workspace,
+    WorkspaceEvent,
+    WorkspaceViewer,
+)
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
@@ -330,6 +337,18 @@ def get_workspace_main(
         )
     )
 
+    # Per-user, per-workspace disclosure check.
+    prior_ack = session.scalar(
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.kind == "disclosure_acknowledged",
+            WorkspaceEvent.actor_id == user.id,
+        )
+        .limit(1)
+    )
+    needs_disclosure = prior_ack is None
+
     settings = request.app.state.settings
     repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
     proposal_path = repo_dir / "proposal.md"
@@ -351,8 +370,39 @@ def get_workspace_main(
             "chat_turns": chat_turns,
             "artifact_rendered": rendered,
             "artifact_raw": raw,
+            "needs_disclosure": needs_disclosure,
         },
     )
+
+
+@router.post("/{workspace_id}/disclosure")
+def post_disclosure(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Record that the current user has read + acknowledged the data
+    disclosure for this workspace. Owner OR viewer can call this
+    (each user has their own ack). Idempotent: multiple POSTs simply
+    write multiple audit rows."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    session.add(
+        WorkspaceEvent(
+            workspace_id=ws.id,
+            kind="disclosure_acknowledged",
+            actor_id=user.id,
+            payload={},
+        )
+    )
+    session.commit()
+    # Empty body — HTMX swaps the modal away via outerHTML on the
+    # modal div itself.
+    return HTMLResponse("")
 
 
 @router.post("/{workspace_id}/turns")
