@@ -1,6 +1,26 @@
 {% extends "base.html" %}
-{% block title %}New Workspace{% endblock %}
+{% block title %}New workspace{% endblock %}
 {% block content %}
-<h1>New Workspace</h1>
-<p>Workspace creation form coming in a later task.</p>
+<h1>New workspace</h1>
+<form method="post" action="/workspaces/new">
+  <p>
+    <label>Title (required): <input name="title" required></label>
+  </p>
+  <p>
+    <label>Linked call ID (optional):
+      <input name="call_id" type="number" value="{{ prefill_call_id or '' }}">
+    </label>
+  </p>
+  <p>
+    <label>Profile ID (optional):
+      <input name="profile_id" type="number" value="{{ prefill_profile_id or '' }}">
+    </label>
+  </p>
+  <p>
+    <label>Deadline (optional, YYYY-MM-DD):
+      <input name="deadline" type="date">
+    </label>
+  </p>
+  <button type="submit">Create</button>
+</form>
 {% endblock %}

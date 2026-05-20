@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
+from call_manager.workspaces import create_workspace as _create_workspace
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -81,6 +82,54 @@ def _require_owner_or_viewer(
             detail="you do not have access to this workspace",
         )
     return ws
+
+
+@router.get("/new", response_class=HTMLResponse)
+def get_new_workspace_form(
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    call_id: int | None = None,
+    profile_id: int | None = None,
+) -> HTMLResponse:
+    """New-workspace form. Optional ?call_id= and ?profile_id= pre-fill
+    the form fields (used by the /calls/{id} 'Start drafting' button)."""
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/workspace_new.html",
+        {"prefill_call_id": call_id, "prefill_profile_id": profile_id, "user": user},
+    )
+
+
+@router.post("/new")
+def post_new_workspace(
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    title: str = Form(...),
+    call_id: int | None = Form(None),
+    profile_id: int | None = Form(None),
+    deadline: str | None = Form(None),
+) -> RedirectResponse:
+    """Create + enqueue Phase 0 + redirect to the new workspace's main view."""
+    from datetime import datetime
+
+    parsed_deadline = None
+    if deadline:
+        parsed_deadline = datetime.fromisoformat(deadline)
+
+    ws = _create_workspace(
+        session=session,
+        owner_id=user.id,
+        title=title,
+        call_id=call_id,
+        profile_id=profile_id,
+    )
+    if parsed_deadline:
+        ws.deadline = parsed_deadline
+    session.commit()
+    return RedirectResponse(url=f"/workspaces/{ws.id}", status_code=303)
 
 
 @router.get("", response_class=HTMLResponse)
