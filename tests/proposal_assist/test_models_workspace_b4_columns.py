@@ -1,4 +1,3 @@
-
 from sqlalchemy import inspect, select
 
 from call_monitor.db.models import TurnJob, Workspace
@@ -41,3 +40,17 @@ def test_workspace_can_set_last_sdk_session_id(pg_session_factory):
     with pg_session_factory() as s:
         row = s.scalar(select(Workspace).where(Workspace.id == wsid))
         assert row.last_sdk_session_id == "abc-123"
+
+
+def test_b4_settings_load_with_defaults(_settings_env):
+    """The six new B4 settings expose the documented defaults when no
+    override env vars are set."""
+    from call_monitor.config import Settings
+
+    s = Settings()
+    assert s.daily_token_cap_input == 500_000
+    assert s.daily_token_cap_output == 100_000
+    assert s.compaction_turn_threshold == 100
+    assert s.compaction_token_threshold == 200_000
+    assert s.compaction_tick_seconds == 300
+    assert s.turn_drain_tick_seconds == 5

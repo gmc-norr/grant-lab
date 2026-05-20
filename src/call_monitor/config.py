@@ -118,6 +118,53 @@ class Settings(BaseSettings):
             "tighter teardown latency but more polling."
         ),
     )
+    daily_token_cap_input: int = Field(
+        default=500_000,
+        alias="DAILY_TOKEN_CAP_INPUT",
+        description=(
+            "Per-workspace default daily input-token cap (Europe/Stockholm "
+            "day). Overridable per-workspace via "
+            "workspaces.daily_token_cap_in_override. Enforced pre-enqueue "
+            "by submit_user_turn(); B8 will surface the UX."
+        ),
+    )
+    daily_token_cap_output: int = Field(
+        default=100_000,
+        alias="DAILY_TOKEN_CAP_OUTPUT",
+        description="Per-workspace default daily output-token cap.",
+    )
+    compaction_turn_threshold: int = Field(
+        default=100,
+        alias="COMPACTION_TURN_THRESHOLD",
+        description=(
+            "Number of un-summarized chat_turns since the latest "
+            "chat_summaries row that triggers compaction."
+        ),
+    )
+    compaction_token_threshold: int = Field(
+        default=200_000,
+        alias="COMPACTION_TOKEN_THRESHOLD",
+        description=(
+            "Sum of input-tokens across un-summarized chat_turns that "
+            "triggers compaction (whichever threshold trips first)."
+        ),
+    )
+    compaction_tick_seconds: int = Field(
+        default=300,
+        alias="COMPACTION_TICK_SECONDS",
+        description="How often the compaction tick scans for workspaces over threshold.",
+    )
+    turn_drain_tick_seconds: int = Field(
+        default=5,
+        alias="TURN_DRAIN_TICK_SECONDS",
+        description=(
+            "How often the turn-drain tick picks one queued turn per "
+            "workspace and dispatches it. Lower = snappier perceived "
+            "latency; higher = less polling overhead. B6's SSE bridge "
+            "may add its own zero-latency wakeup so this is a floor, "
+            "not the only mechanism."
+        ),
+    )
     remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")
     remote_rank_cosine_threshold: float = Field(default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD")
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
