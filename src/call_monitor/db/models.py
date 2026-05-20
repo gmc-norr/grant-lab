@@ -889,3 +889,111 @@ class WorkspaceSetupJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+
+
+class ReviewRun(Base):
+    __tablename__ = "review_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','done','failed','cancelled',"
+            "'partial')",
+            name="ck_review_runs_status",
+        ),
+        Index(
+            "ix_review_runs_ws_triggered",
+            "workspace_id",
+            text("triggered_at DESC"),
+        ),
+        Index(
+            "uq_review_runs_active",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued','running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    draft_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    fit_check_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rubric_review_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    waived_from_review_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("review_runs.id"),
+        nullable=True,
+    )
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    estimated_dollars: Mapped[float | None] = mapped_column(
+        Numeric(6, 3), nullable=True,
+    )
+
+
+class ReviewRunItem(Base):
+    __tablename__ = "review_run_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_run_id", "kind", name="uq_review_run_items_run_kind",
+        ),
+        CheckConstraint(
+            "kind IN ('fit_check',"
+            "'persona_domain_skeptic',"
+            "'persona_methodology_critic',"
+            "'persona_translation_skeptic',"
+            "'persona_devils_advocate',"
+            "'consolidation')",
+            name="ck_review_run_items_kind",
+        ),
+        CheckConstraint(
+            "status IN ('queued','running','done','failed','skipped',"
+            "'cancelled')",
+            name="ck_review_run_items_status",
+        ),
+        Index("ix_review_run_items_run", "review_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("review_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    estimated_dollars: Mapped[float | None] = mapped_column(
+        Numeric(6, 4), nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response_json: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True,
+    )
