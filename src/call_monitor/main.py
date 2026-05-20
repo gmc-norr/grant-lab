@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     # lifespan runs, so test-side `create_app()` calls that never enter
     # lifespan don't pay the import cost or trigger its side-effects.
     from call_monitor.admin_bootstrap import bootstrap_admins
+
     bootstrap_admins(
         app.state.session_factory,
         emails=app.state.settings.initial_admin_emails,
@@ -62,10 +63,21 @@ async def lifespan(app: FastAPI):
             app.state.digest_email_client = digest_email_client
         except EmailConfigError as e:
             import logging
+
             logging.getLogger(__name__).warning(
                 "digest.email_client_unavailable",
                 extra={"event": "digest_email_client_unavailable", "error": str(e)},
             )
+
+    from call_monitor.proposal_assist.drafting.factory import (
+        build_workspace_controller,
+    )
+
+    workspace_controller = build_workspace_controller(
+        settings=settings,
+        session_factory=app.state.session_factory,
+    )
+    app.state.workspace_controller = workspace_controller
 
     app.state.scheduler = build_scheduler(
         session_factory=app.state.session_factory,
@@ -84,6 +96,7 @@ async def lifespan(app: FastAPI):
         digest_email_client=digest_email_client,
         digest_settings=settings,
         limiters=[app.state.email_limiter, app.state.ip_limiter],
+        workspace_controller=workspace_controller,
         start=True,
     )
     try:
@@ -145,9 +158,7 @@ def create_app() -> FastAPI:
     # Sits below FastAPI's routing but above handlers — see auth/csrf.py
     # for the design rationale. Layers on top of the session cookie's
     # SameSite=lax (set in routes/auth.py).
-    app.add_middleware(
-        OriginCSRFMiddleware, expected_base_url=settings.app_base_url
-    )
+    app.add_middleware(OriginCSRFMiddleware, expected_base_url=settings.app_base_url)
 
     # Redirect unauthenticated HTML requests to /login instead of returning
     # the raw JSON 401 from get_current_user. The auth dependency raises
@@ -187,9 +198,7 @@ def create_app() -> FastAPI:
     app.state.email_limiter = SlidingWindowLimiter(
         max_requests=5, window_seconds=15 * 60, name="email"
     )
-    app.state.ip_limiter = SlidingWindowLimiter(
-        max_requests=30, window_seconds=15 * 60, name="ip"
-    )
+    app.state.ip_limiter = SlidingWindowLimiter(max_requests=30, window_seconds=15 * 60, name="ip")
     app.state.session_signer = SessionSigner(
         secret=settings.session_secret,
         max_age_seconds=settings.session_max_age_seconds,

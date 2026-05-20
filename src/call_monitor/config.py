@@ -104,6 +104,16 @@ class Settings(BaseSettings):
         description="How long (seconds) a drafting subprocess may sit idle "
         "before the sweep evicts it. Default 10 minutes; lower in tests.",
     )
+    workspace_idle_sweep_seconds: int = Field(
+        default=60,
+        alias="WORKSPACE_IDLE_SWEEP_SECONDS",
+        description=(
+            "Cadence at which the scheduler asks the subprocess "
+            "registry to sweep handles idle for "
+            "WORKSPACE_IDLE_TIMEOUT_SECONDS or longer. Faster sweep = "
+            "tighter teardown latency but more polling."
+        ),
+    )
     remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")
     remote_rank_cosine_threshold: float = Field(default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD")
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
