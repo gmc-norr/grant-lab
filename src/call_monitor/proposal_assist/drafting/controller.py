@@ -10,10 +10,11 @@ This is the only object the web layer (B6) needs to construct."""
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import AsyncIterator
 
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
@@ -67,10 +68,14 @@ class WorkspaceController:
            fulfill_pending_launch() — the registry keeps it open (and
            therefore the lock held) for the handle's lifetime.
 
-        Error handling: if any step raises, fail_pending_launch() is
-        called so that waiting coroutines receive the exception rather
-        than hanging forever.  lock_session is always released + closed
-        before the exception propagates.
+        Error handling: if any step raises (including CancelledError),
+        fail_pending_launch() is called so that waiting coroutines
+        receive the exception rather than hanging forever. All partially
+        acquired resources are cleaned up uniformly in the outer except:
+        handle is terminated (if launched), advisory lock is released
+        (if acquired), lock_session is closed (if opened). Cleanup uses
+        contextlib.suppress so a secondary failure doesn't mask the
+        original exception.
 
         Known limit: if fulfill_pending_launch itself raises (dict ops /
         future.set_result — neither should in practice), the handle
@@ -82,41 +87,60 @@ class WorkspaceController:
             # pending is a resolved or in-progress Future[AgentHandle].
             return await pending  # type: ignore[return-value]
 
-        # We are the launcher.
+        # We are the launcher. Track ownership of partially-acquired
+        # resources so the outer except can clean up uniformly across
+        # every failure mode (factory raise, acquire raise, sweep/resume
+        # raise, adapter.launch raise, CancelledError between launch and
+        # fulfill, fulfill itself raising). The order on cleanup is
+        # terminate handle → release lock → close session, mirroring the
+        # registry's normal teardown. `handed_off` tracks whether
+        # ownership has transferred to the registry — once True, cleanup
+        # must NOT run (the registry now owns the resources).
+        lock_session: Session | None = None
+        lock_acquired = False
+        handle: AgentHandle | None = None
+        handed_off = False
+
         try:
             lock_session = self._session_factory()
             if not acquire_workspace_lock(lock_session, workspace_id):
-                lock_session.close()
                 raise LockNotAcquired(workspace_id)
+            lock_acquired = True
 
-            try:
-                # Run sweep + resume in a separate committed session so the
-                # orphan-sweep UPDATE is visible to other sessions, while
-                # lock_session stays open (uncommitted) to hold the advisory
-                # lock on its connection.
-                with self._session_factory() as work_session:
-                    sweep_orphaned_turn_jobs(work_session, workspace_id)
-                    resume_messages = build_resume_messages(work_session, workspace_id)
-                    work_session.commit()
-                context = LaunchContext(
-                    workspace_id=workspace_id,
-                    resume_messages=resume_messages,
-                )
-                handle = await self._registry._adapter.launch(context)
-            except Exception:
-                release_workspace_lock(lock_session, workspace_id)
-                lock_session.close()
-                raise
+            # Run sweep + resume in a separate committed session so the
+            # orphan-sweep UPDATE is visible to other sessions, while
+            # lock_session stays open (uncommitted) to hold the advisory
+            # lock on its connection.
+            with self._session_factory() as work_session:
+                sweep_orphaned_turn_jobs(work_session, workspace_id)
+                resume_messages = build_resume_messages(work_session, workspace_id)
+                work_session.commit()
+            context = LaunchContext(
+                workspace_id=workspace_id,
+                resume_messages=resume_messages,
+            )
+            handle = await self._registry._adapter.launch(context)
+            await self._registry.fulfill_pending_launch(
+                workspace_id,
+                handle,
+                lock_session=lock_session,
+            )
+            handed_off = True
 
         except BaseException as e:
-            await self._registry.fail_pending_launch(workspace_id, e)
+            if not handed_off:
+                if handle is not None:
+                    with contextlib.suppress(Exception):
+                        await self._registry._adapter.terminate(handle)
+                if lock_acquired and lock_session is not None:
+                    with contextlib.suppress(Exception):
+                        release_workspace_lock(lock_session, workspace_id)
+                if lock_session is not None:
+                    with contextlib.suppress(Exception):
+                        lock_session.close()
+                await self._registry.fail_pending_launch(workspace_id, e)
             raise
 
-        await self._registry.fulfill_pending_launch(
-            workspace_id,
-            handle,
-            lock_session=lock_session,
-        )
         return handle
 
     async def send_turn(
