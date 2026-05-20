@@ -4,6 +4,10 @@ import pytest
 from sqlalchemy import select
 
 from call_monitor.db.models import TurnJob
+from call_monitor.proposal_assist.drafting.contract import (
+    AssistantTextEvent,
+    TurnDoneEvent,
+)
 from call_monitor.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
@@ -226,9 +230,9 @@ async def test_controller_sweep_idle_releases_advisory_lock(pg_session_factory):
     await controller.launch(wsid)
 
     # Give the touch timestamp a tiny gap so the entry is "stale".
-    import asyncio
+    import asyncio as _asyncio
 
-    await asyncio.sleep(0.01)
+    await _asyncio.sleep(0.01)
 
     swept = await registry.sweep_idle()
     assert swept == 1
@@ -241,3 +245,82 @@ async def test_controller_sweep_idle_releases_advisory_lock(pg_session_factory):
         )
 
         release_workspace_lock(s2, wsid)
+
+
+@pytest.mark.asyncio
+async def test_send_turn_increments_and_decrements_in_flight(pg_session_factory):
+    """in_flight is 1 while the generator is being iterated and 0 afterwards."""
+
+    class _ProbingAdapter(FakeAgentAdapter):
+        """Yields a probe event, then records in_flight, then yields TurnDone."""
+
+        async def send_turn(self, handle, user_message):
+            yield AssistantTextEvent(text="probing")
+
+    adapter = _ProbingAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    gen = controller.send_turn(wsid, "hi")
+    # Consume the first (and only) event — in_flight should be 1 at this point.
+    first = await gen.__anext__()
+    # Peek at in_flight while still inside the generator.
+    async with registry._lock:
+        entry = registry._entries.get(wsid)
+        in_flight_mid = entry.in_flight if entry is not None else -1
+
+    # Exhaust the generator so the finally block fires.
+    import contextlib
+
+    with contextlib.suppress(StopAsyncIteration):
+        await gen.__anext__()
+
+    async with registry._lock:
+        entry = registry._entries.get(wsid)
+        in_flight_after = entry.in_flight if entry is not None else -1
+
+    assert isinstance(first, AssistantTextEvent)
+    assert in_flight_mid == 1
+    assert in_flight_after == 0
+
+
+@pytest.mark.asyncio
+async def test_send_turn_decrements_in_flight_on_early_exit(pg_session_factory):
+    """If the consumer breaks out of the loop early (aclose), in_flight is
+    still decremented via the finally block."""
+    adapter = FakeAgentAdapter()
+    adapter.script_next_turn(
+        [
+            AssistantTextEvent(text="first"),
+            AssistantTextEvent(text="second"),
+            TurnDoneEvent(tokens_in=1, tokens_out=1, model="fake"),
+        ]
+    )
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    # Consume only the first event and then close the generator.
+    gen = controller.send_turn(wsid, "hi")
+    first = await gen.__anext__()
+    await gen.aclose()
+
+    async with registry._lock:
+        entry = registry._entries.get(wsid)
+        in_flight_after = entry.in_flight if entry is not None else -1
+
+    assert isinstance(first, AssistantTextEvent)
+    assert in_flight_after == 0

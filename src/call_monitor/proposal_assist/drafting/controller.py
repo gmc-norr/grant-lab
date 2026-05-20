@@ -97,12 +97,20 @@ class WorkspaceController:
         workspace_id: uuid.UUID,
         user_message: str,
     ) -> AsyncIterator[StreamEvent]:
-        """Send a turn and stream events. Touches the registry's idle
-        timer on completion so the handle doesn't get swept mid-flight."""
+        """Send a turn and stream events.
+
+        in_flight is incremented before iteration begins and decremented in a
+        finally block so that sweep_idle never terminates a handle mid-stream,
+        even if the turn takes longer than workspace_idle_timeout_seconds.
+        decrement_in_flight also bumps last_touched_monotonic, so a separate
+        touch() call is no longer needed."""
         handle = await self.launch(workspace_id)
-        async for event in self._registry.send_turn(handle, user_message):
-            yield event
-        await self._registry.touch(workspace_id)
+        await self._registry.increment_in_flight(workspace_id)
+        try:
+            async for event in self._registry.send_turn(handle, user_message):
+                yield event
+        finally:
+            await self._registry.decrement_in_flight(workspace_id)
 
     async def terminate(self, workspace_id: uuid.UUID) -> None:
         await self._registry.terminate(workspace_id)

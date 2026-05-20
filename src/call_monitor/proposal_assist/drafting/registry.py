@@ -29,6 +29,7 @@ class _Entry:
     handle: AgentHandle
     last_touched_monotonic: float
     lock_session: Session | None  # held for the handle's lifetime
+    in_flight: int = 0  # number of active send_turn iterations; never swept while > 0
 
 
 class SubprocessRegistry:
@@ -91,6 +92,24 @@ class SubprocessRegistry:
             if entry is not None:
                 entry.last_touched_monotonic = time.monotonic()
 
+    async def increment_in_flight(self, workspace_id: uuid.UUID) -> None:
+        """Signal that a send_turn iteration has started for this workspace.
+        Prevents sweep_idle from terminating an active handle."""
+        async with self._lock:
+            entry = self._entries.get(workspace_id)
+            if entry is not None:
+                entry.in_flight += 1
+                entry.last_touched_monotonic = time.monotonic()
+
+    async def decrement_in_flight(self, workspace_id: uuid.UUID) -> None:
+        """Signal that a send_turn iteration has finished (or been abandoned).
+        Also bumps last_touched_monotonic so the handle's idle clock resets."""
+        async with self._lock:
+            entry = self._entries.get(workspace_id)
+            if entry is not None:
+                entry.in_flight = max(0, entry.in_flight - 1)
+                entry.last_touched_monotonic = time.monotonic()
+
     async def terminate(self, workspace_id: uuid.UUID) -> None:
         """Explicitly tear down a workspace's handle. No-op if unknown."""
         async with self._lock:
@@ -116,7 +135,7 @@ class SubprocessRegistry:
             stale_ids = [
                 wsid
                 for wsid, entry in self._entries.items()
-                if entry.last_touched_monotonic <= cutoff
+                if entry.last_touched_monotonic <= cutoff and entry.in_flight == 0
             ]
             stale_entries = [(wsid, self._entries.pop(wsid)) for wsid in stale_ids]
 

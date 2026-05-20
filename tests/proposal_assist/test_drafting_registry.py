@@ -91,3 +91,43 @@ async def test_registry_terminate_unknown_workspace_is_noop():
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     await registry.terminate(uuid.uuid4())  # no raise
     assert adapter.terminations == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_idle_skips_handles_with_in_flight_turns():
+    """A handle with in_flight > 0 is never swept, even past the idle threshold."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
+    wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
+
+    await registry.get_or_launch(wsid, context=ctx)
+    await registry.increment_in_flight(wsid)
+
+    # Sleep past the idle threshold.
+    await asyncio.sleep(0.01)
+    swept = await registry.sweep_idle()
+
+    assert swept == 0
+    assert adapter.terminations == []
+
+
+@pytest.mark.asyncio
+async def test_decrement_in_flight_makes_handle_sweepable_again():
+    """After decrement_in_flight brings in_flight back to 0 and enough
+    idle time has passed, sweep_idle terminates the handle."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
+    wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
+
+    await registry.get_or_launch(wsid, context=ctx)
+    await registry.increment_in_flight(wsid)
+    await registry.decrement_in_flight(wsid)
+
+    # decrement_in_flight bumps last_touched_monotonic, so we sleep again.
+    await asyncio.sleep(0.01)
+    swept = await registry.sweep_idle()
+
+    assert swept == 1
+    assert len(adapter.terminations) == 1
