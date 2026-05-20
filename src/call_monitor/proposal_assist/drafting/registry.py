@@ -4,6 +4,7 @@ last_touched_at, lock_session). Drives idle-timeout teardown."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -20,12 +21,14 @@ from call_monitor.proposal_assist.drafting.contract import (
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class _Entry:
     handle: AgentHandle
     last_touched_monotonic: float
-    lock_session: "Session | None"  # held for the handle's lifetime
+    lock_session: Session | None  # held for the handle's lifetime
 
 
 class SubprocessRegistry:
@@ -62,7 +65,7 @@ class SubprocessRegistry:
         workspace_id: uuid.UUID,
         *,
         context: LaunchContext | None = None,
-        lock_session: "Session | None" = None,
+        lock_session: Session | None = None,
     ) -> AgentHandle:
         async with self._lock:
             existing = self._entries.get(workspace_id)
@@ -120,14 +123,20 @@ class SubprocessRegistry:
         # Terminate outside the lock — adapter.terminate may take a while
         # (subprocess teardown) and we don't want to block get_or_launch.
         for wsid, entry in stale_entries:
-            if entry.lock_session is not None:
-                from call_monitor.proposal_assist.drafting.locking import (
-                    release_workspace_lock,
-                )
+            try:
+                if entry.lock_session is not None:
+                    from call_monitor.proposal_assist.drafting.locking import (
+                        release_workspace_lock,
+                    )
 
-                release_workspace_lock(entry.lock_session, wsid)
-                entry.lock_session.close()
-            await self._adapter.terminate(entry.handle)
+                    release_workspace_lock(entry.lock_session, wsid)
+                    entry.lock_session.close()
+            except Exception:
+                logger.exception("sweep_idle: failed to release lock for workspace %s", wsid)
+            try:
+                await self._adapter.terminate(entry.handle)
+            except Exception:
+                logger.exception("sweep_idle: adapter.terminate raised for workspace %s", wsid)
         return len(stale_entries)
 
     async def send_turn(

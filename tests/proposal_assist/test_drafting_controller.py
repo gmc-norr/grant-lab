@@ -1,4 +1,3 @@
-import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -170,3 +169,75 @@ async def test_controller_send_turn_yields_events(pg_session_factory):
     assert len(events) == 2
     assert isinstance(events[0], AssistantTextEvent)
     assert isinstance(events[1], TurnDoneEvent)
+
+
+@pytest.mark.asyncio
+async def test_controller_launch_releases_lock_if_adapter_launch_raises(
+    pg_session_factory,
+):
+    """If adapter.launch raises after we acquired the advisory lock,
+    the controller must release the lock and close lock_session — no
+    leak."""
+    adapter = FakeAgentAdapter()
+
+    async def boom(context):
+        raise RuntimeError("adapter exploded")
+
+    adapter.launch = boom  # type: ignore[method-assign]
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    with pytest.raises(RuntimeError, match="adapter exploded"):
+        await controller.launch(wsid)
+
+    # Lock must be released — a fresh session can acquire it.
+    with pg_session_factory() as s2:
+        assert acquire_workspace_lock(s2, wsid) is True
+        # cleanup so we don't leak this test's lock
+        from call_monitor.proposal_assist.drafting.locking import (
+            release_workspace_lock,
+        )
+
+        release_workspace_lock(s2, wsid)
+
+
+@pytest.mark.asyncio
+async def test_controller_sweep_idle_releases_advisory_lock(pg_session_factory):
+    """sweep_idle must release the per-workspace advisory lock so
+    another process can take over after the idle timeout fires."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    await controller.launch(wsid)
+
+    # Give the touch timestamp a tiny gap so the entry is "stale".
+    import asyncio
+
+    await asyncio.sleep(0.01)
+
+    swept = await registry.sweep_idle()
+    assert swept == 1
+
+    # Lock must be released.
+    with pg_session_factory() as s2:
+        assert acquire_workspace_lock(s2, wsid) is True
+        from call_monitor.proposal_assist.drafting.locking import (
+            release_workspace_lock,
+        )
+
+        release_workspace_lock(s2, wsid)

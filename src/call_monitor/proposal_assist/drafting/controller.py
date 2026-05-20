@@ -77,20 +77,19 @@ class WorkspaceController:
                 sweep_orphaned_turn_jobs(work_session, workspace_id)
                 resume_messages = build_resume_messages(work_session, workspace_id)
                 work_session.commit()
+            context = LaunchContext(
+                workspace_id=workspace_id,
+                resume_messages=resume_messages,
+            )
+            handle = await self._registry.get_or_launch(
+                workspace_id,
+                context=context,
+                lock_session=lock_session,
+            )
         except Exception:
             release_workspace_lock(lock_session, workspace_id)
             lock_session.close()
             raise
-
-        context = LaunchContext(
-            workspace_id=workspace_id,
-            resume_messages=resume_messages,
-        )
-        handle = await self._registry.get_or_launch(
-            workspace_id,
-            context=context,
-            lock_session=lock_session,
-        )
         return handle
 
     async def send_turn(
