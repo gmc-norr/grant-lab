@@ -99,6 +99,15 @@ def check_daily_token_cap(
         else settings.daily_token_cap_output
     )
 
+    # Reject AT-OR-OVER the cap (`>=`, not `>`). The spec says "exceeding"
+    # the cap returns a chat error, but reading it strictly (`>`) would let
+    # a single response push us tens of thousands of tokens past the budget
+    # before the NEXT turn finally trips the check — the cap stops being
+    # protective. `>=` makes the cap a hard ceiling: once we hit it, no
+    # more turns can start (the in-flight one runs to completion, see
+    # plan self-review note 5). Override=0 leverages this as a workspace
+    # pause toggle: an admin setting daily_token_cap_in_override=0 blocks
+    # all new turns until they raise it again.
     reason: str | None = None
     if used_in >= cap_in:
         reason = "input_cap_exceeded"

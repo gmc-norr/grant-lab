@@ -15,12 +15,27 @@ The cached-handle path also satisfies H1: a cached handle proves no
 crash since launch, so no stale rows can exist.
 
 Responsibilities:
-  - Peek workspace_id (read-only).
-  - Launch (or reuse) the workspace's subprocess.
+  - Peek workspace_id + status (read-only). Return early if the row
+    isn't `queued` — avoids firing launch (whose orphan sweep would
+    clobber an already-running row).
+  - Launch (or reuse) the workspace's subprocess. If launch itself
+    raises (e.g., LockNotAcquired in a multi-instance future, or SDK
+    init failure), log and return — the row stays `queued` and the
+    next drain tick retries. NB this leaves the submit-time
+    `cloud_turn_sent` audit row without a matching outcome event;
+    persistent launch failure → N un-matched cloud_turn_sent rows for
+    one turn_job_id. B6/B8 may want to write `cloud_turn_failed`
+    after K retries — out of scope for B4.
   - Atomically claim the queued turn (queued → running).
-  - Read the user message from the linked chat_turns row.
+  - Read the user message from the linked chat_turns row. If the row
+    is missing (impossible under normal submit flow), mark failed via
+    _finalize_failed (which DOES write cloud_turn_failed).
   - Dispatch via WorkspaceController.send_turn (async generator).
-  - For each StreamEvent, write a chat_turns row.
+  - For each StreamEvent, write a chat_turns row. Each row commits
+    independently — a mid-stream crash leaves partial assistant/tool
+    rows in place; the orphan sweep marks the turn_job failed but
+    does NOT cascade-delete chat_turns. B6 UI will need to render
+    partial-then-failed transcripts coherently.
   - On TurnDoneEvent: stamp tokens on the latest assistant row,
     persist session_id on the workspace, mark turn_job completed,
     write the cloud_turn_completed audit event.

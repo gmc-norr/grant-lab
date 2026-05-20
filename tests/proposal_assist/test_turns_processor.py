@@ -1,4 +1,3 @@
-
 import pytest
 from sqlalchemy import select
 
@@ -335,3 +334,144 @@ async def test_process_turn_survives_stale_running_row_from_prior_crash(
     assert statuses == ["completed", "failed"]
     stale = next(j for j in all_jobs if j.status == "failed")
     assert stale.error == "orphaned"
+
+
+@pytest.mark.asyncio
+async def test_process_turn_leaves_row_queued_when_launch_raises(
+    pg_session_factory,
+    _settings_env,
+):
+    """If controller.launch() itself raises (broken adapter, missing key,
+    LockNotAcquired in a multi-instance future), the processor must
+    leave the row in `queued` state so the next drain tick retries.
+    No claim, no chat_turns assistant rows, no cloud_turn_failed
+    outcome event (the launch failure path is documented as audit-
+    trail-incomplete; B6/B8 may surface after K retries)."""
+    from call_monitor.config import Settings
+    from tests.proposal_assist.conftest import make_user
+
+    settings = Settings()
+    adapter = FakeAgentAdapter()
+
+    async def boom(context):
+        raise RuntimeError("adapter init failed")
+
+    adapter.launch = boom  # type: ignore[method-assign]
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content={"type": "text", "text": "hi"},
+            submitted_by_user_id=uid,
+            settings=settings,
+        )
+        s.commit()
+        job_id = job.id
+
+    # process_turn_once must NOT raise; it must log and return.
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        turns = list(s.scalars(select(ChatTurn).where(ChatTurn.workspace_id == wsid)))
+        outcome_events = list(
+            s.scalars(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == wsid,
+                    WorkspaceEvent.kind.in_(["cloud_turn_completed", "cloud_turn_failed"]),
+                )
+            )
+        )
+
+    # Row stays queued for retry.
+    assert job.status == "queued"
+    assert job.started_at is None
+    # Only the user turn from submit was written; no assistant rows.
+    assert [t.role for t in turns] == ["user"]
+    # No outcome event — documented limitation; the cloud_turn_sent from
+    # submit is the only audit row.
+    assert outcome_events == []
+
+
+@pytest.mark.asyncio
+async def test_process_turn_finalizes_failed_when_user_turn_row_missing(
+    pg_session_factory,
+    _settings_env,
+):
+    """If the linked chat_turns row was deleted between submit and
+    processing, the processor marks the job failed via _finalize_failed
+    (which writes cloud_turn_failed)."""
+    from call_monitor.config import Settings
+    from tests.proposal_assist.conftest import make_user
+
+    settings = Settings()
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content={"type": "text", "text": "hi"},
+            submitted_by_user_id=uid,
+            settings=settings,
+        )
+        s.commit()
+        job_id = job.id
+        user_turn_id = job.user_turn_id
+
+    # Simulate the user turn being deleted between submit and process.
+    with pg_session_factory() as s:
+        ut = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        # Also detach from turn_job so FK doesn't cascade-block delete.
+        j = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        j.user_turn_id = None
+        s.flush()
+        s.delete(ut)
+        s.commit()
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        failed_events = list(
+            s.scalars(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == wsid,
+                    WorkspaceEvent.kind == "cloud_turn_failed",
+                )
+            )
+        )
+
+    assert job.status == "failed"
+    assert "missing_user_turn_row" in (job.error or "")
+    assert len(failed_events) == 1
+    assert "missing_user_turn_row" in failed_events[0].payload["error"]

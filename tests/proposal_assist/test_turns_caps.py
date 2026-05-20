@@ -108,3 +108,50 @@ def test_token_cap_exceeded_carries_diagnostic_fields():
     )
     assert "200" in str(exc)
     assert exc.reason == "input_cap_exceeded"
+
+
+def test_check_daily_token_cap_rejects_at_exact_boundary(
+    pg_session_factory,
+    _settings_env,
+    monkeypatch,
+):
+    """Documents the `>=` rejection rule (cap is a hard ceiling, not 'one
+    more please' permissive). A workspace whose usage exactly equals the
+    cap is blocked — protects against a single in-flight turn pushing the
+    workspace tens of thousands of tokens past budget."""
+    monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
+    monkeypatch.setenv("DAILY_TOKEN_CAP_OUTPUT", "1000000")
+    from call_monitor.config import Settings
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        make_chat_turn(
+            s, ws, role="assistant", content={"type": "text", "text": "x"}, tokens_in=100
+        )
+        s.commit()
+        result = check_daily_token_cap(s, ws.id, settings=settings)
+    assert result.allowed is False
+    assert result.used_in == 100
+    assert result.cap_in == 100
+    assert result.reason == "input_cap_exceeded"
+
+
+def test_check_daily_token_cap_override_zero_pauses_workspace(
+    pg_session_factory,
+    _settings_env,
+):
+    """Override=0 is the documented admin "pause this workspace" hook:
+    any turn is blocked, even with zero accumulated usage."""
+    from call_monitor.config import Settings
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        ws.daily_token_cap_in_override = 0
+        s.commit()
+        result = check_daily_token_cap(s, ws.id, settings=settings)
+    assert result.allowed is False
+    assert result.cap_in == 0
+    assert result.used_in == 0
+    assert result.reason == "input_cap_exceeded"
