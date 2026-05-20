@@ -37,9 +37,13 @@ Lifecycle per workspace:
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import McpSdkServerConfig
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from claude_agent_sdk.types import (
@@ -79,10 +83,12 @@ class ClaudeAgentSDKAdapter:
         model: str,
         workspaces_dir: str,
         permission_mode: str = "bypassPermissions",
+        tools_factory: Callable[[Path, uuid.UUID], McpSdkServerConfig] | None = None,
     ) -> None:
         self._model = model
         self._workspaces_dir = Path(workspaces_dir)
         self._permission_mode = permission_mode  # type: ignore[assignment]
+        self._tools_factory = tools_factory
 
     async def launch(self, context: LaunchContext) -> AgentHandle:
         """Connect the SDK client for this workspace.
@@ -105,6 +111,29 @@ class ClaudeAgentSDKAdapter:
         )
         if context.resume_session_id is not None:
             options_kwargs["resume"] = context.resume_session_id
+        if self._tools_factory is not None:
+            mcp_server = self._tools_factory(repo_dir, workspace_id)
+            options_kwargs["mcp_servers"] = {"proposal_assist": mcp_server}
+            # CRITICAL security boundary (Codex B2): allowed_tools alone does NOT
+            # disable Claude Code's built-in toolbox. The disable is `tools=[]`
+            # PLUS `strict_mcp_config=True`. Together with mcp_servers, the agent
+            # sees ONLY our 8 MCP tools.
+            options_kwargs["tools"] = []
+            options_kwargs["strict_mcp_config"] = True
+            # Bare tool names per the SDK's docstring example
+            # (claude_agent_sdk/__init__.py:352 — "allowed_tools=['add','multiply']"
+            # paired with mcp_servers={'calc': calculator}). The SDK forwards the
+            # list verbatim to the CLI's --allowedTools flag.
+            options_kwargs["allowed_tools"] = [
+                "read_proposal",
+                "edit_proposal",
+                "replace_proposal",
+                "get_artifact_history",
+                "read_artifact_at",
+                "diff_artifact",
+                "get_call_details",
+                "get_profile",
+            ]
         options = ClaudeAgentOptions(**options_kwargs)
 
         client = ClaudeSDKClient(options=options)
