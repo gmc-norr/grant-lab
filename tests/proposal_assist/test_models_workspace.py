@@ -109,3 +109,32 @@ def test_workspace_updated_at_bumped_on_modification(pg_session_factory):
         s.commit()
         s.refresh(ws)
         assert ws.updated_at > original
+
+
+def test_workspace_phased_columns_have_safe_defaults(pg_session_factory):
+    """Phased-column defaults let a brand-new workspace land via B1's
+    create_workspace() without filling these out — Phase 0 populates
+    them later."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        s.refresh(ws)
+        assert ws.current_phase == "setup"
+        assert ws.call_body_snapshot == ""
+        assert ws.profile_desc_snapshot == ""
+        assert isinstance(ws.snapshot_refreshed_at, datetime)
+        assert ws.rubric_criteria == []
+        assert ws.rubric_funder_notes is None
+        assert isinstance(ws.rubric_updated_at, datetime)
+        assert ws.section_extracts == {}
+        assert ws.review_runs_per_day_override is None
+        assert ws.review_dollar_cap_override is None
+
+
+def test_workspace_current_phase_check_constraint(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws.current_phase = "not_a_phase"
+        with pytest.raises(IntegrityError):
+            s.commit()

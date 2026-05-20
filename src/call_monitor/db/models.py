@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -429,6 +430,10 @@ class Workspace(Base):
             "status IN ('drafting','submitted','awarded','rejected','abandoned')",
             name="ck_workspaces_status",
         ),
+        CheckConstraint(
+            "current_phase IN ('setup','spec','plan','draft','review')",
+            name="ck_workspaces_current_phase",
+        ),
         Index(
             "ix_workspaces_owner_status",
             "owner_id",
@@ -481,6 +486,34 @@ class Workspace(Base):
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    current_phase: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="setup",
+    )
+    call_body_snapshot: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="",
+    )
+    profile_desc_snapshot: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="",
+    )
+    snapshot_refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    rubric_criteria: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+    )
+    rubric_funder_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rubric_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    section_extracts: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+    )
+    review_runs_per_day_override: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+    )
+    review_dollar_cap_override: Mapped[float | None] = mapped_column(
+        Numeric(6, 3), nullable=True,
     )
 
 
