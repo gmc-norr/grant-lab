@@ -1,13 +1,14 @@
+import subprocess
 from unittest.mock import Mock
 
 from sqlalchemy import select
 
-from call_monitor.db.models import WorkspaceSetupJob
+from call_monitor.db.models import Workspace, WorkspaceSetupJob
 from call_monitor.proposal_assist.phases.setup import (
     Phase0Worker,
     claim_next_setup_job,
 )
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_call, make_profile, make_workspace
 
 
 def test_claim_next_returns_oldest_queued(pg_session_factory):
@@ -133,3 +134,45 @@ def test_phase0_worker_requeues_on_transient_failure_below_attempt_cap(
         assert job.attempts == 1
         assert job.started_at is None  # cleared so next claim works
         assert "transient" in (job.last_error or "")
+
+
+def test_phase0_steps_1_3_init_repo_and_snapshot(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        profile = make_profile(s)
+        s.commit()
+        ws = make_workspace(s, call_id=call.id, profile_id=profile.id)
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+
+        worker = Phase0Worker(
+            session=s,
+            client=Mock(model="claude-opus-4-7"),
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id))
+        worker._snapshot_and_init_repo(job)
+        s.commit()
+
+        # repo exists with three empty artifact files
+        repo_dir = tmp_path / "repos" / str(ws.id) / "repo"
+        assert (repo_dir / ".git").is_dir()
+        for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
+            assert (repo_dir / fname).is_file()
+            assert (repo_dir / fname).read_text() == ""
+
+        # one initial commit exists
+        out = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert int(out.stdout.strip()) == 1
+
+        # snapshots populated
+        ws_refetch = s.get(Workspace, ws.id)
+        assert (call.full_text or "") in ws_refetch.call_body_snapshot
+        assert ws_refetch.profile_desc_snapshot == profile.description

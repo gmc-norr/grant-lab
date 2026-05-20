@@ -15,14 +15,17 @@ so multiple worker instances (future) wouldn't pick the same row.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from call_monitor.db.models import WorkspaceSetupJob
+from call_monitor.db.models import Call, Profile, Workspace, WorkspaceSetupJob
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,67 @@ class Phase0Worker:
             pass
         self.session.commit()
         return True
+
+    _PHASE_ARTIFACT_FILES: tuple[str, ...] = (
+        "proposal-spec.md",
+        "proposal-plan.md",
+        "proposal.md",
+    )
+
+    def _workspace_repo_dir(self, workspace_id) -> Path:
+        return Path(self.workspaces_dir) / str(workspace_id) / "repo"
+
+    def _snapshot_and_init_repo(self, job: WorkspaceSetupJob) -> None:
+        ws = self.session.get(Workspace, job.workspace_id)
+        if ws is None:
+            raise RuntimeError(f"workspace {job.workspace_id} vanished")
+
+        # Step 1: init git repo with empty phase artifacts.
+        repo_dir = self._workspace_repo_dir(ws.id)
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        if not (repo_dir / ".git").is_dir():
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main"],
+                cwd=repo_dir,
+                check=True,
+            )
+            # Author identity for the initial commit — set via env so we
+            # don't depend on the running user's global gitconfig (CI / containers).
+            env = os.environ.copy()
+            env.setdefault("GIT_AUTHOR_NAME", "call-manager")
+            env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
+            env.setdefault("GIT_COMMITTER_NAME", "call-manager")
+            env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
+            for fname in self._PHASE_ARTIFACT_FILES:
+                (repo_dir / fname).write_text("")
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_dir,
+                check=True,
+                env=env,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "phase0: initialize empty artifacts"],
+                cwd=repo_dir,
+                check=True,
+                env=env,
+            )
+
+        # Step 2: snapshot call body.
+        if ws.call_id is None:
+            raise RuntimeError(f"workspace {ws.id} has no call_id — Phase 0 requires one")
+        call = self.session.get(Call, ws.call_id)
+        if call is None:
+            raise RuntimeError(f"call {ws.call_id} not found")
+        ws.call_body_snapshot = (call.summary or "") + "\n\n" + (call.full_text or "")
+
+        # Step 3: snapshot profile description (if profile linked).
+        if ws.profile_id is not None:
+            profile = self.session.get(Profile, ws.profile_id)
+            if profile is not None:
+                ws.profile_desc_snapshot = profile.description or ""
+
+        ws.snapshot_refreshed_at = datetime.now(UTC)
 
     def _run_steps(self, job: WorkspaceSetupJob) -> None:
         """Filled in by Tasks 14–16. Raises on transient/permanent failure;

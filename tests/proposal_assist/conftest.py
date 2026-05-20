@@ -62,6 +62,23 @@ def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
     return u
 
 
+def make_profile(session, *, name: str = "Test PI Profile") -> "Profile":  # noqa: F821
+    """Build a Profile owned by a fresh User. Real Profile requires
+    `kind: ProfileKind` and `created_by` FK — no `slug`."""
+    from call_monitor.db.models import Profile, ProfileKind
+
+    u = make_user(session, email=f"profile-owner-{name.lower().replace(' ', '-')}@ki.se")
+    p = Profile(
+        name=name,
+        kind=ProfileKind.GROUP,
+        description="AI-assisted diagnosis of cancer biopsies, histopathology.",
+        created_by=u.id,
+    )
+    session.add(p)
+    session.flush()
+    return p
+
+
 def make_workspace(
     session,
     *,
