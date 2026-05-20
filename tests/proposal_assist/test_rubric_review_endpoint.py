@@ -141,10 +141,15 @@ def test_rubric_review_post_writes_edited_event_and_advances_phase(
             },
             follow_redirects=False,
         )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/workspaces/{wsid}"
+
+        # Follow the redirect and assert the target renders.
+        target_resp = client.get(resp.headers["location"])
+        assert target_resp.status_code == 200
+        assert "Test workspace" in target_resp.text
     finally:
         client.__exit__(None, None, None)
-    assert resp.status_code == 303
-    assert resp.headers["location"] == f"/workspaces/{wsid}"
 
     with pg_session_factory() as s:
         ws = s.get(Workspace, wsid)
@@ -206,9 +211,14 @@ def test_rubric_review_post_confirm_without_edits_still_advances_phase(
             },
             follow_redirects=False,
         )
+        assert resp.status_code == 303  # phase advanced even without edits
+
+        # Follow the redirect and assert the target renders.
+        target_resp = client.get(resp.headers["location"])
+        assert target_resp.status_code == 200
+        assert "Test workspace" in target_resp.text
     finally:
         client.__exit__(None, None, None)
-    assert resp.status_code == 303  # phase advanced even without edits
 
     with pg_session_factory() as s:
         ws = s.get(Workspace, wsid)
@@ -257,6 +267,46 @@ def test_rubric_review_post_returns_403_for_non_owner(
             },
             follow_redirects=False,
         )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
+
+
+def test_workspace_placeholder_returns_200_for_owner(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    assert "Test workspace" in resp.text
+    assert "setup" in resp.text  # current_phase rendered
+
+
+def test_workspace_placeholder_returns_403_for_non_owner(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        _, wsid = _make_owner_and_workspace(s)
+        other = User(email="other-ws@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+
+    client = _authed_client(app, user_id=other_id)
+    try:
+        resp = client.get(f"/workspaces/{wsid}")
     finally:
         client.__exit__(None, None, None)
     assert resp.status_code == 403

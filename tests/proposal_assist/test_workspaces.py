@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Workspace, WorkspaceEvent
+from call_monitor.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_monitor.workspaces import create_workspace
 from tests.proposal_assist.conftest import make_call, make_user
 
@@ -49,33 +49,19 @@ def test_create_workspace_writes_created_audit_event(pg_session_factory):
         assert events[0].payload["title"] == "audit-test"
 
 
-def test_create_workspace_does_not_enqueue_phase0_setup_job(
-    pg_session_factory,
-):
-    """B1 deliberately leaves Phase 0 enqueueing to Slice A Part 2, which
-    owns the `workspace_setup_jobs` table. If a future revision adds the
-    enqueue here without also pulling in WorkspaceSetupJob, this regression
-    test will catch the resulting import/runtime error.
-
-    Note: this test only proves the absence of the enqueue at B1's
-    boundaries. It cannot import WorkspaceSetupJob (doesn't exist yet).
-    Slice A Part 2 should add the positive test that asserts the row IS
-    enqueued via its own helper / extended create_workspace.
-    """
+def test_create_workspace_enqueues_phase0_setup_job(pg_session_factory):
+    """Phase 0 (Slice A Part 2) drains workspace_setup_jobs. create_workspace
+    must enqueue a row so the next scheduler tick picks it up."""
     with pg_session_factory() as s:
         owner = make_user(s)
         s.commit()
         ws = create_workspace(session=s, owner_id=owner.id, title="x")
         s.commit()
 
-        # Only base-spec tables should have rows for this workspace:
-        # workspaces (1) + workspace_events (1, the 'created' row).
-        # If a future commit adds a WorkspaceSetupJob enqueue without
-        # also moving that table into B1, the import in create_workspace
-        # will fail at import time and this test will fail to collect.
-        events = s.scalars(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == ws.id)).all()
-        assert len(events) == 1
-        assert events[0].kind == "created"
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id))
+        assert job is not None
+        assert job.status == "queued"
+        assert job.attempts == 0
 
 
 def test_create_workspace_with_call_and_profile(pg_session_factory):
@@ -112,3 +98,4 @@ def test_create_workspace_raises_for_unknown_owner(pg_session_factory):
         s.rollback()
         assert s.scalar(select(WorkspaceEvent)) is None
         assert s.scalar(select(Workspace)) is None
+        assert s.scalar(select(WorkspaceSetupJob)) is None

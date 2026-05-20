@@ -96,9 +96,7 @@ def _parse_form_criteria(form: dict[str, str]) -> list[dict[str, Any]]:
             crit["weight"] = float(crit.get("weight", 0))
             crit["scale_max"] = int(crit.get("scale_max", 5))
         except (TypeError, ValueError) as e:
-            raise HTTPException(
-                400, f"criterion {idx}: bad numeric value ({e})"
-            ) from e
+            raise HTTPException(400, f"criterion {idx}: bad numeric value ({e})") from e
         for required in ("name", "description", "weight", "scale_max"):
             if required not in crit:
                 raise HTTPException(400, f"criterion {idx}: missing {required}")
@@ -186,4 +184,29 @@ async def post_rubric_review(
             "criteria": ws.rubric_criteria,
             "funder_notes": ws.rubric_funder_notes or "",
         },
+    )
+
+
+@router.get(
+    "/{workspace_id}",
+    response_class=HTMLResponse,
+)
+def get_workspace_placeholder(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Minimal placeholder for the workspace detail page. Slice B6 will
+    replace this with the real spec/plan/draft UI. For now: just enough
+    to land the rubric-review POST redirect target."""
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "proposal_assist/workspace_placeholder.html",
+        {"workspace": ws},
     )

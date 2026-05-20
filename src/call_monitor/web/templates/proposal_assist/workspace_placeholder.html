@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}{{ workspace.title }}{% endblock %}
+
+{% block content %}
+<h1>{{ workspace.title }}</h1>
+<p><strong>Current phase:</strong> {{ workspace.current_phase }}</p>
+<p>
+  This workspace's full UI ships with Slice B6
+  (Spec/Plan/Draft/Review pages). For now this page exists so the
+  rubric-review confirmation has somewhere to land.
+</p>
+{% endblock %}
