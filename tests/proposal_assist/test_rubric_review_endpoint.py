@@ -4,9 +4,10 @@ tests/test_web_admin_digest_panel.py."""
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import User, Workspace
+from call_monitor.db.models import User, Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_monitor.main import create_app
 
 
@@ -103,3 +104,159 @@ def test_rubric_review_get_returns_404_for_missing_workspace(
     finally:
         client.__exit__(None, None, None)
     assert resp.status_code == 404
+
+
+def test_rubric_review_post_writes_edited_event_and_advances_phase(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        ws.rubric_criteria = [
+            {"name": "Old", "description": "old", "weight": 1.0, "scale_max": 5},
+        ]
+        ws.rubric_funder_notes = ""
+        ws.current_phase = "setup"
+        s.add(
+            WorkspaceSetupJob(
+                workspace_id=wsid,
+                status="waiting_for_rubric_review",
+            )
+        )
+        s.commit()
+
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "New",
+                "criteria[0][description]": "new",
+                "criteria[0][weight]": "1.0",
+                "criteria[0][scale_max]": "5",
+                "funder_notes": "updated",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/workspaces/{wsid}"
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wsid)
+        assert ws.rubric_criteria[0]["name"] == "New"
+        assert ws.rubric_funder_notes == "updated"
+        assert ws.current_phase == "spec"
+        job = s.execute(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == wsid)
+        ).scalar_one()
+        assert job.status == "done"
+        assert job.completed_at is not None
+        edits = (
+            s.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == wsid,
+                    WorkspaceEvent.kind == "rubric_edited",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(edits) == 1
+        assert edits[0].payload["old_criteria"][0]["name"] == "Old"
+        assert edits[0].payload["new_criteria"][0]["name"] == "New"
+        assert edits[0].payload["edited_by_user_id"] == uid
+
+
+def test_rubric_review_post_confirm_without_edits_still_advances_phase(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        ws.rubric_criteria = [
+            {"name": "X", "description": "x", "weight": 1.0, "scale_max": 5},
+        ]
+        ws.current_phase = "setup"
+        s.add(
+            WorkspaceSetupJob(
+                workspace_id=wsid,
+                status="waiting_for_rubric_review",
+            )
+        )
+        s.commit()
+
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "X",
+                "criteria[0][description]": "x",
+                "criteria[0][weight]": "1.0",
+                "criteria[0][scale_max]": "5",
+                "funder_notes": "",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 303  # phase advanced even without edits
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wsid)
+        job = s.execute(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == wsid)
+        ).scalar_one()
+        assert ws.current_phase == "spec"
+        assert job.status == "done"
+        # No rubric_edited event because content didn't change.
+        edits = (
+            s.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == wsid,
+                    WorkspaceEvent.kind == "rubric_edited",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(edits) == 0
+
+
+def test_rubric_review_post_returns_403_for_non_owner(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        _, wsid = _make_owner_and_workspace(s, owner_email="owner@ki.se")
+        other = User(email="other@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+
+    client = _authed_client(app, user_id=other_id)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "X",
+                "criteria[0][description]": "x",
+                "criteria[0][weight]": "1.0",
+                "criteria[0][scale_max]": "5",
+                "funder_notes": "",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
