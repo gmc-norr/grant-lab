@@ -17,6 +17,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
@@ -80,6 +81,42 @@ def _require_owner_or_viewer(
             detail="you do not have access to this workspace",
         )
     return ws
+
+
+@router.get("", response_class=HTMLResponse)
+def list_workspaces(
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    status: str | None = None,
+) -> HTMLResponse:
+    """List workspaces visible to the user: owned OR viewer-of, not
+    soft-deleted. Optional ?status=drafting|submitted|... filter."""
+    viewer_ids = session.scalars(
+        select(WorkspaceViewer.workspace_id).where(
+            WorkspaceViewer.user_id == user.id,
+        )
+    ).all()
+    q = (
+        select(Workspace)
+        .where(
+            Workspace.soft_deleted_at.is_(None),
+            or_(
+                Workspace.owner_id == user.id,
+                Workspace.id.in_(viewer_ids),
+            ),
+        )
+        .order_by(Workspace.updated_at.desc())
+    )
+    if status:
+        q = q.where(Workspace.status == status)
+    workspaces = list(session.scalars(q))
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/workspaces_index.html",
+        {"workspaces": workspaces, "status_filter": status, "user": user},
+    )
 
 
 @router.get("/{workspace_id}", response_class=HTMLResponse)

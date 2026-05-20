@@ -2,5 +2,38 @@
 {% block title %}Workspaces{% endblock %}
 {% block content %}
 <h1>Workspaces</h1>
-<p>Workspace list coming in a later task.</p>
+<p>
+  <a href="/workspaces/new">+ New workspace</a> |
+  <a href="/workspaces">All</a>
+  | <a href="/workspaces?status=drafting">In progress</a>
+  | <a href="/workspaces?status=submitted">Submitted</a>
+  | <a href="/workspaces?status=awarded">Awarded</a>
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>Linked call</th>
+      <th>Status</th>
+      <th>Deadline</th>
+      <th>Last activity</th>
+      <th>Owner</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for ws in workspaces %}
+    <tr>
+      <td><a href="/workspaces/{{ ws.id }}">{{ ws.title }}</a></td>
+      <td>{{ ws.call_id or "—" }}</td>
+      <td>{{ ws.status }}</td>
+      <td>{{ ws.deadline.strftime("%Y-%m-%d") if ws.deadline else "—" }}</td>
+      <td>{{ ws.updated_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td>{{ ws.owner_id }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if not workspaces %}
+<p>No workspaces match.</p>
+{% endif %}
 {% endblock %}
