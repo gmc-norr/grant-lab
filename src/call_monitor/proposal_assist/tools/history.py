@@ -8,15 +8,42 @@ Rev3 / Codex M5: every git command is scoped to proposal.md only.
 Without the scope, commits to sibling phased artifacts
 (proposal-spec.md, proposal-plan.md, review files) leak into the
 returned proposal.md history.
+
+SECURITY (Codex round 3): every agent-supplied "sha" argument MUST be
+validated to match ^[0-9a-fA-F]{7,40}$ BEFORE being passed to git.
+Without the regex guard a value like `--output=proposal.md` would be
+parsed by git as an option (it's recognized before the `--` path
+separator), letting the model overwrite proposal.md via `git diff
+--output=...` and bypass edit_proposal/replace_proposal, the
+auto-commit, and the artifact_versions write. The regex blocks any
+input that could plausibly be a git option.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 from typing import Any
 
 from call_monitor.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_monitor.proposal_assist.tools.registry import ToolContext
+
+# Git allows shas as short as 4 chars (configurable via core.abbrev),
+# but our tools only produce 7+ (matches git's --abbrev-commit default).
+# The upper bound 40 is sha1 full length. sha256-mode repos use 64; if
+# this codebase ever migrates, extend.
+_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+def _validate_sha(sha: str, *, arg_name: str = "commit_sha") -> str | None:
+    """Return an error message if `sha` is unsafe to pass to git, else None.
+
+    Anything not matching the hex-sha pattern is rejected. This blocks
+    git-option injection (e.g. --output=...) — see the module docstring.
+    """
+    if not isinstance(sha, str) or not _SHA_PATTERN.match(sha):
+        return f"{arg_name} must be a hex commit sha (7-40 chars, 0-9a-f); got: {sha!r}"
+    return None
 
 
 async def get_artifact_history_impl(
@@ -64,6 +91,9 @@ async def read_artifact_at_impl(
     commit_sha: str,
 ) -> dict[str, Any]:
     """Return proposal.md content at a specific commit."""
+    err = _validate_sha(commit_sha)
+    if err:
+        return {"error": err}
     try:
         proc = subprocess.run(
             ["git", "show", f"{commit_sha}:{PROPOSAL_FILENAME}"],
@@ -84,6 +114,11 @@ async def diff_artifact_impl(
     commit_b: str,
 ) -> dict[str, Any]:
     """Unified diff between two commits on proposal.md."""
+    err = _validate_sha(commit_a, arg_name="commit_a") or _validate_sha(
+        commit_b, arg_name="commit_b"
+    )
+    if err:
+        return {"error": err}
     try:
         proc = subprocess.run(
             ["git", "diff", commit_a, commit_b, "--", PROPOSAL_FILENAME],

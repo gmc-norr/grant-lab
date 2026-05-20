@@ -157,3 +157,107 @@ async def test_get_artifact_history_skips_commits_to_other_files(
     returned_messages = [c["message"] for c in result["commits"]]
     assert "agent: edit spec" not in returned_messages
     assert "commit 2" in returned_messages  # the proposal.md commits remain
+
+
+@pytest.mark.asyncio
+async def test_diff_artifact_rejects_option_injection_via_output_flag(
+    pg_session_factory,
+    _settings_env,
+    tmp_path,
+):
+    """Codex security regression: a value like `--output=proposal.md`
+    must be rejected BEFORE reaching git. Without the sha-pattern guard
+    git would interpret it as the --output option and write the diff to
+    proposal.md, bypassing edit_proposal/replace_proposal entirely."""
+    repo_dir = tmp_path / "repo"
+    shas = _init_repo_with_history(repo_dir)
+    ctx = _build_ctx(repo_dir, pg_session_factory)
+
+    original_proposal = (repo_dir / "proposal.md").read_text()
+
+    result = await diff_artifact_impl(
+        ctx,
+        commit_a="--output=proposal.md",
+        commit_b=shas[-1],
+    )
+    assert result.get("error")
+    assert "hex commit sha" in result["error"]
+    # proposal.md must be untouched.
+    assert (repo_dir / "proposal.md").read_text() == original_proposal
+
+    # Also test commit_b position.
+    result = await diff_artifact_impl(
+        ctx,
+        commit_a=shas[0],
+        commit_b="--output=proposal.md",
+    )
+    assert result.get("error")
+    assert "hex commit sha" in result["error"]
+    assert (repo_dir / "proposal.md").read_text() == original_proposal
+
+
+@pytest.mark.asyncio
+async def test_read_artifact_at_rejects_option_injection(
+    pg_session_factory,
+    _settings_env,
+    tmp_path,
+):
+    """Same class of attack via git show — reject before invoking git."""
+    repo_dir = tmp_path / "repo"
+    _init_repo_with_history(repo_dir)
+    ctx = _build_ctx(repo_dir, pg_session_factory)
+
+    result = await read_artifact_at_impl(
+        ctx,
+        commit_sha="--output=evil.txt",
+    )
+    assert result.get("error")
+    assert "hex commit sha" in result["error"]
+    # No evil.txt written.
+    assert not (repo_dir / "evil.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_read_artifact_at_rejects_non_hex_input(
+    pg_session_factory,
+    _settings_env,
+    tmp_path,
+):
+    """Non-hex strings (random branch names, garbage) are rejected
+    by the regex even though they're not malicious — the API contract
+    is sha-only."""
+    repo_dir = tmp_path / "repo"
+    _init_repo_with_history(repo_dir)
+    ctx = _build_ctx(repo_dir, pg_session_factory)
+
+    for bad in ("HEAD", "main", "xyz123", "abc", "", "deadbeefXX"):
+        result = await read_artifact_at_impl(ctx, commit_sha=bad)
+        assert result.get("error"), f"{bad!r} should have been rejected"
+        assert "hex commit sha" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_diff_artifact_accepts_valid_shas(
+    pg_session_factory,
+    _settings_env,
+    tmp_path,
+):
+    """The validator must not regress valid-input acceptance: shas
+    from get_artifact_history are valid by construction."""
+    repo_dir = tmp_path / "repo"
+    shas = _init_repo_with_history(repo_dir)
+    ctx = _build_ctx(repo_dir, pg_session_factory)
+
+    # Full 40-char sha.
+    result = await diff_artifact_impl(ctx, commit_a=shas[0], commit_b=shas[-1])
+    assert "diff" in result
+    assert "error" not in result
+
+    # Abbreviated 7-char sha (git's default short form).
+    result = await diff_artifact_impl(
+        ctx,
+        commit_a=shas[0][:7],
+        commit_b=shas[-1][:7],
+    )
+    assert "diff" in result
+    assert "error" not in result
