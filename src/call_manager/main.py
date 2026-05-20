@@ -17,6 +17,9 @@ from call_manager.logging import configure_logging
 from call_manager.proposal_assist.web.rubric_review import (
     router as rubric_review_router,
 )
+from call_manager.proposal_assist.web.workspaces import (
+    router as workspaces_router,
+)
 from call_manager.web.filters import (
     criterion_label,
     display_date,
@@ -229,4 +232,5 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(profiles.router)
     app.include_router(rubric_review_router)
+    app.include_router(workspaces_router)
     return app

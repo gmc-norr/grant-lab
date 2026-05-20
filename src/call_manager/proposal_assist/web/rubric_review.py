@@ -187,26 +187,5 @@ async def post_rubric_review(
     )
 
 
-@router.get(
-    "/{workspace_id}",
-    response_class=HTMLResponse,
-)
-def get_workspace_placeholder(
-    workspace_id: uuid.UUID,
-    request: Request,
-    user=Depends(get_current_user),  # noqa: B008
-    session: Session = Depends(_session_dep),  # noqa: B008
-):
-    """Minimal placeholder for the workspace detail page. Slice B6 will
-    replace this with the real spec/plan/draft UI. For now: just enough
-    to land the rubric-review POST redirect target."""
-    ws = _require_owner(
-        workspace_id=workspace_id,
-        user=user,
-        session=session,
-    )
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "proposal_assist/workspace_placeholder.html",
-        {"workspace": ws},
-    )
+# NOTE: GET /workspaces/{id} now lives in proposal_assist/web/workspaces.py
+# (B6 replaced the placeholder with the real two-pane view).

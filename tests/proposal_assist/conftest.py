@@ -4,9 +4,12 @@
 from datetime import UTC, datetime
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.db.models import Call, Source
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Call, Source, User
+from call_manager.main import create_app
 
 
 @pytest.fixture
@@ -20,6 +23,63 @@ def _settings_env(monkeypatch, pg_url):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+
+
+# ---------------------------------------------------------------------------
+# Shared auth client fixtures — used by workspace router smoke tests (B6).
+# Pattern mirrors test_rubric_review_endpoint.py's _authed_client() helper
+# but exposed as pytest fixtures so tests don't need boilerplate.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _app(_settings_env):
+    """A create_app() instance for the current test (env already patched by
+    _settings_env). The lifespan is entered/exited by the TestClient context
+    managers below."""
+    return create_app()
+
+
+@pytest.fixture
+def current_user(_app, pg_session_factory):
+    """A User row inserted into the testcontainer DB. The app's session_factory
+    is replaced with the test one so get_current_user() resolves against the
+    same DB the test writes to."""
+    with pg_session_factory() as s:
+        u = User(email="owner-fixture@ki.se")
+        s.add(u)
+        s.commit()
+        uid = u.id
+    # Point the app's session_factory at the test DB (same engine).
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        return s.get(User, uid)
+
+
+@pytest.fixture
+def client_authed_owner(_app, current_user, pg_session_factory):
+    """TestClient with a valid session cookie for current_user (owner role)."""
+    _app.state.session_factory = pg_session_factory
+    client = TestClient(_app, raise_server_exceptions=True)
+    client.__enter__()
+    signer: SessionSigner = _app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=current_user.id))
+    yield client
+    client.__exit__(None, None, None)
+
+
+@pytest.fixture
+def client_unauth(_app, pg_session_factory):
+    """TestClient with no session (anonymous visitor)."""
+    _app.state.session_factory = pg_session_factory
+    client = TestClient(_app, raise_server_exceptions=False)
+    client.__enter__()
+    yield client
+    client.__exit__(None, None, None)
+
+
+# Alias: the plan uses both names interchangeably.
+client_authed_user = client_authed_owner
 
 
 def make_call(

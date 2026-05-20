@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ workspace.title }}{% endblock %}
+{% block content %}
+<h1>{{ workspace.title }}</h1>
+<p><strong>Current phase:</strong> {{ workspace.current_phase }}</p>
+<div id="workspace-main-panes">
+  <p>Chat + artifact panes coming in Task 5.</p>
+</div>
+{% endblock %}
