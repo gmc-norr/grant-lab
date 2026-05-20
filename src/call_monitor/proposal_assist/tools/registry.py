@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from claude_agent_sdk import create_sdk_mcp_server
+from claude_agent_sdk import create_sdk_mcp_server, tool
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpSdkServerConfig
@@ -73,7 +73,173 @@ def build_proposal_assist_mcp_server(ctx: ToolContext) -> McpSdkServerConfig:
     return create_sdk_mcp_server(name="proposal_assist", tools=tools)
 
 
+def _wrap(impl_result: dict[str, Any]) -> dict[str, Any]:
+    """Translate an *_impl plain-dict return into the MCP envelope."""
+    if "error" in impl_result:
+        return _mcp_error(impl_result["error"])
+    return _mcp_ok(impl_result)
+
+
 def _collect_tools(ctx: ToolContext) -> list:
-    """Gather every tool's @tool-decorated handler. Subsequent tasks
-    append to this list."""
-    return []
+    """Gather every tool's @tool-decorated handler.
+
+    Rev3 NOTE: SDK converts dict-of-types into JSON Schema with ALL
+    keys in `required`. To make args truly optional, every @tool below
+    uses a full JSON Schema dict with explicit `required` lists.
+    """
+    from call_monitor.proposal_assist.tools.context import (
+        get_call_details_impl,
+        get_profile_impl,
+    )
+    from call_monitor.proposal_assist.tools.history import (
+        diff_artifact_impl,
+        get_artifact_history_impl,
+        read_artifact_at_impl,
+    )
+    from call_monitor.proposal_assist.tools.proposal import (
+        edit_proposal_impl,
+        read_proposal_impl,
+        replace_proposal_impl,
+    )
+
+    @tool(
+        "read_proposal",
+        "Return the current proposal.md content.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def read_proposal(args):
+        return _wrap(await read_proposal_impl(ctx))
+
+    @tool(
+        "edit_proposal",
+        "Apply a list of {old_string, new_string} surgical edits to "
+        "proposal.md. All-or-nothing: if any anchor is missing or "
+        "ambiguous, no edits are applied. Auto-commits on success.",
+        {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                        },
+                        "required": ["old_string", "new_string"],
+                    },
+                },
+                "triggering_turn_id": {"type": "string"},
+            },
+            "required": ["edits"],
+        },
+    )
+    async def edit_proposal(args):
+        from uuid import UUID
+
+        ttid = args.get("triggering_turn_id") or None
+        return _wrap(
+            await edit_proposal_impl(
+                ctx,
+                edits=args["edits"],
+                triggering_turn_id=UUID(ttid) if ttid else None,
+            )
+        )
+
+    @tool(
+        "replace_proposal",
+        "Overwrite proposal.md with new content. For large structural rewrites. Auto-commits.",
+        {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "triggering_turn_id": {"type": "string"},
+            },
+            "required": ["content"],
+        },
+    )
+    async def replace_proposal(args):
+        from uuid import UUID
+
+        ttid = args.get("triggering_turn_id") or None
+        return _wrap(
+            await replace_proposal_impl(
+                ctx,
+                content=args["content"],
+                triggering_turn_id=UUID(ttid) if ttid else None,
+            )
+        )
+
+    @tool(
+        "get_artifact_history",
+        "Return up to `limit` recent commits on proposal.md, newest first.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": [],
+        },
+    )
+    async def get_artifact_history(args):
+        return _wrap(await get_artifact_history_impl(ctx, limit=int(args.get("limit", 20))))
+
+    @tool(
+        "read_artifact_at",
+        "Return proposal.md content at a specific commit sha.",
+        {
+            "type": "object",
+            "properties": {"commit_sha": {"type": "string"}},
+            "required": ["commit_sha"],
+        },
+    )
+    async def read_artifact_at(args):
+        return _wrap(await read_artifact_at_impl(ctx, commit_sha=args["commit_sha"]))
+
+    @tool(
+        "diff_artifact",
+        "Unified diff of proposal.md between two commit shas.",
+        {
+            "type": "object",
+            "properties": {
+                "commit_a": {"type": "string"},
+                "commit_b": {"type": "string"},
+            },
+            "required": ["commit_a", "commit_b"],
+        },
+    )
+    async def diff_artifact(args):
+        return _wrap(
+            await diff_artifact_impl(ctx, commit_a=args["commit_a"], commit_b=args["commit_b"])
+        )
+
+    @tool(
+        "get_call_details",
+        "Return the snapshot of the linked call's body + metadata "
+        "(captured at workspace creation, refreshed by Phase 0). "
+        "Returns {linked: false} if no call linked.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def get_call_details(args):
+        return _wrap(await get_call_details_impl(ctx))
+
+    @tool(
+        "get_profile",
+        "Return the snapshot of the linked profile description "
+        "(captured at workspace creation). Returns {linked: false} "
+        "if no profile linked.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def get_profile(args):
+        return _wrap(await get_profile_impl(ctx))
+
+    return [
+        read_proposal,
+        edit_proposal,
+        replace_proposal,
+        get_artifact_history,
+        read_artifact_at,
+        diff_artifact,
+        get_call_details,
+        get_profile,
+    ]
