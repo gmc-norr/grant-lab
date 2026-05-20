@@ -95,3 +95,17 @@ def test_workspace_viewer_cascade_on_workspace_delete(pg_session_factory):
             )
         )
         assert remaining is None
+
+
+def test_workspace_updated_at_bumped_on_modification(pg_session_factory):
+    """onupdate=func.now() on Workspace.updated_at means a column UPDATE
+    refreshes the timestamp. Matches the convention Profile/RankingJob
+    already use; future status-change logic relies on this."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        original = ws.updated_at
+        ws.title = "renamed"
+        s.commit()
+        s.refresh(ws)
+        assert ws.updated_at > original

@@ -135,3 +135,27 @@ def test_attachment_job_completed_allows_re_enqueue(pg_session_factory):
             )
         )
         s.commit()  # should not raise
+
+
+def test_attachment_job_updated_at_bumped_on_modification(pg_session_factory):
+    """onupdate=func.now() on AttachmentJob.updated_at keeps the
+    `ix_attachment_jobs_status_updated` index meaningful — without it, a
+    job worker would have to manually set updated_at on every status
+    transition, which is easy to forget and would mislead the index."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        uploader = make_user(s, email="updated-at@ki.se")
+        attachment = _add_attachment(s, ws.id, uploader.id)
+        job = AttachmentJob(
+            workspace_id=ws.id,
+            attachment_id=attachment.id,
+            kind="describe_figure",
+            status="queued",
+        )
+        s.add(job)
+        s.commit()
+        original = job.updated_at
+        job.status = "running"
+        s.commit()
+        s.refresh(job)
+        assert job.updated_at > original

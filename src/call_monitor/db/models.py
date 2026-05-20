@@ -476,6 +476,7 @@ class Workspace(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+        onupdate=func.now(),
     )
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -789,4 +790,5 @@ class AttachmentJob(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+        onupdate=func.now(),
     )
