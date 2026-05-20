@@ -60,6 +60,28 @@ def test_run_phase0_tick_is_a_noop_when_queue_empty(
     # No assertion needed — absence of exception is the contract.
 
 
+def test_run_phase0_tick_does_not_build_client_when_queue_empty(
+    pg_session_factory,
+    tmp_path,
+):
+    """Empty queue → client_factory MUST NOT be called. Saves the
+    cost of constructing the Anthropic SDK on every idle tick."""
+    factory_calls = {"n": 0}
+
+    def tracking_factory():
+        factory_calls["n"] += 1
+        return Mock(model="m")
+
+    run_phase0_tick(
+        session_factory=pg_session_factory,
+        client_factory=tracking_factory,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspaces_dir=str(tmp_path / "repos"),
+    )
+    assert factory_calls["n"] == 0
+
+
 def test_build_scheduler_registers_phase0_tick(monkeypatch, pg_url):
     """The job lands in the scheduler with the right id + trigger, and
     starting it does not crash. Catches signature drift in build_scheduler

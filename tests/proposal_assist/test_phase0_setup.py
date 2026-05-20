@@ -25,6 +25,7 @@ def test_claim_next_returns_oldest_queued(pg_session_factory):
         assert claimed.id == job.id
         assert claimed.status == "running"
         assert claimed.started_at is not None
+        assert claimed.queued_at is not None
 
 
 def test_claim_next_returns_none_when_nothing_queued(pg_session_factory):
@@ -372,3 +373,83 @@ def test_phase0_yields_to_waiting_for_rubric_review(
         assert job.completed_at is None
         # Phase doesn't advance yet — that's Task 18's job.
         assert ws_refetch.current_phase == "setup"
+
+
+def test_phase0_steps_1_3_recovers_from_aborted_git_init(
+    pg_session_factory,
+    tmp_path,
+):
+    """Simulate a prior attempt that did `git init` but crashed before
+    committing. Second attempt should detect the missing initial commit
+    and recreate the artifact files + commit."""
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ws = make_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+
+        # Manually `git init` the workspace repo dir but DON'T create
+        # files or commit — simulating a crash mid-init.
+        repo_dir = tmp_path / "repos" / str(ws_id) / "repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"],
+            cwd=repo_dir,
+            check=True,
+        )
+        assert (repo_dir / ".git").is_dir()
+        # No initial commit, no artifact files.
+        assert not (repo_dir / "proposal-spec.md").exists()
+
+        worker = Phase0Worker(
+            session=s,
+            client=Mock(model="claude-opus-4-7"),
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
+        worker._snapshot_and_init_repo(job)
+        s.commit()
+
+        # Recovery: artifact files + initial commit now exist.
+        for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
+            assert (repo_dir / fname).is_file()
+        out = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert int(out.stdout.strip()) == 1
+
+
+def test_claim_next_returns_oldest_by_queued_at(pg_session_factory):
+    """Claim order is FIFO on queued_at, not arbitrary by UUID."""
+    import time
+
+    from call_monitor.db.models import User
+
+    with pg_session_factory() as s:
+        owner_a = User(email="fifo-owner-a@ki.se")
+        owner_b = User(email="fifo-owner-b@ki.se")
+        s.add_all([owner_a, owner_b])
+        s.flush()
+        ws_a = make_workspace(s, owner=owner_a)
+        ws_b = make_workspace(s, owner=owner_b)
+        s.commit()
+        # Insert in B-then-A order so the UUID lexical order differs from
+        # the queued_at order.
+        s.add(WorkspaceSetupJob(workspace_id=ws_b.id, status="queued"))
+        s.commit()
+        time.sleep(0.01)  # ensure distinct now() values
+        s.add(WorkspaceSetupJob(workspace_id=ws_a.id, status="queued"))
+        s.commit()
+
+        # First claim should be ws_b (queued first).
+        claimed = claim_next_setup_job(session=s)
+        s.commit()
+        assert claimed is not None
+        assert claimed.workspace_id == ws_b.id

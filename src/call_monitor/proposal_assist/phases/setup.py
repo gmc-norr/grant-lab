@@ -8,7 +8,7 @@ Lifecycle:
             ├─ run_steps raises + attempts < 5      → queued, attempts++
             └─ run_steps raises + attempts == 5     → failed, completed_at
 
-Each tick claims one job (FIFO via id) under SELECT FOR UPDATE SKIP LOCKED
+Each tick claims one job (FIFO via queued_at) under SELECT FOR UPDATE SKIP LOCKED
 so multiple worker instances (future) wouldn't pick the same row.
 """
 
@@ -65,7 +65,7 @@ def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
     stmt = (
         select(WorkspaceSetupJob)
         .where(WorkspaceSetupJob.status == "queued")
-        .order_by(WorkspaceSetupJob.id)  # FIFO-ish; UUIDs sort lexically
+        .order_by(WorkspaceSetupJob.queued_at)  # FIFO
         .limit(1)
         .with_for_update(skip_locked=True)
     )
@@ -170,12 +170,30 @@ class Phase0Worker:
         # Step 1: init git repo with empty phase artifacts.
         repo_dir = self._workspace_repo_dir(ws.id)
         repo_dir.mkdir(parents=True, exist_ok=True)
+        # Init the git repo if it doesn't exist; safe to skip if it does.
         if not (repo_dir / ".git").is_dir():
             subprocess.run(
                 ["git", "init", "-q", "-b", "main"],
                 cwd=repo_dir,
                 check=True,
             )
+
+        # Recovery-safe: separately check whether the initial commit landed.
+        # A previous attempt might have completed `git init` but crashed
+        # before creating the artifact files or committing — in that case
+        # HEAD has no commits and we need to finish the job. `rev-list
+        # --count HEAD` exits non-zero on an unborn branch (no commits),
+        # which is what we treat as "needs initial commit".
+        commit_count_proc = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+        )
+        has_initial_commit = (
+            commit_count_proc.returncode == 0 and commit_count_proc.stdout.strip() not in ("", "0")
+        )
+        if not has_initial_commit:
             # Author identity for the initial commit — set via env so we
             # don't depend on the running user's global gitconfig (CI / containers).
             env = os.environ.copy()
@@ -183,6 +201,8 @@ class Phase0Worker:
             env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
             env.setdefault("GIT_COMMITTER_NAME", "call-manager")
             env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
+            # Idempotent: if a previous attempt wrote some files, write_text
+            # rewrites them to empty (matches the initial state contract).
             for fname in self._PHASE_ARTIFACT_FILES:
                 (repo_dir / fname).write_text("")
             subprocess.run(
@@ -303,15 +323,19 @@ def run_phase0_tick(
 ) -> None:
     """Scheduler-friendly tick: open one session, claim+drain at most one job.
 
-    A single-job-per-tick discipline keeps individual ticks short (so the
-    BackgroundScheduler worker pool doesn't pile up), gives Postgres' FOR
-    UPDATE SKIP LOCKED a clean release point, and bounds the cost of a
-    failed LLM call to one workspace per tick.
-
-    Multiple ticks per second are fine — claim_next_setup_job returns None
-    when the queue is empty and the function returns immediately.
+    Peeks the queue before constructing the LLM client — avoids paying the
+    client-construction cost on every empty tick. A short race window
+    between peek and claim is benign: worst case the client is built and
+    immediately unused.
     """
     with session_factory() as session:
+        # Cheap peek: any queued job at all?
+        has_work = session.scalar(
+            select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.status == "queued").limit(1)
+        )
+        if has_work is None:
+            return
+
         worker = Phase0Worker(
             session=session,
             client=client_factory(),

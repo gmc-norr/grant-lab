@@ -883,6 +883,11 @@ class WorkspaceSetupJob(Base):
         SmallInteger, nullable=False, server_default=text("0"),
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
