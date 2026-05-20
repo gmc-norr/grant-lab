@@ -83,7 +83,7 @@
   - **B5** Optional tool args are still REQUIRED in the generated JSON Schema. The SDK's dict-style schema converter (`__init__.py:408`) puts every key in `required`. So `triggering_turn_id` (Task 6) and `limit` were required despite being optional in the handler. Fix: every `@tool` now uses a full JSON Schema dict (with explicit `required` list naming only the truly mandatory keys), not the dict-of-types shorthand.
   - **M4** Rollback in `_write_and_commit` used `git reset --hard HEAD`, which discards ALL uncommitted edits in the workspace repo — including unrelated tracked files an admin or future process might have left dirty. Fix: scope to proposal.md only via `git reset HEAD -- <file>` (unstages only that path, doesn't touch other files). The working tree is already restored by our explicit `path.write_text(original_content)`.
   - **M5** `get_artifact_history` ran bare `git log` (whole-repo history), but it claims to return proposal.md history. In this phased repo, commits to `proposal-spec.md`, `proposal-plan.md`, review artifacts, and Phase 0's initial empty-files commit would leak into the returned list. Fix: scope every history-tool's git command to `-- proposal.md`.
-  - **Open Q** allowed_tools naming (`mcp__<server>__<tool>` vs bare `<tool>`): rev3 has Task 7 use the prefixed form AND include bare names as a belt-and-braces fallback. Added a Step-0 discovery in Task 7 telling the implementer to run a quick `uv run python` snippet that constructs `ClaudeAgentOptions` and confirms which form the SDK actually honors before committing.
+  - **Open Q** allowed_tools naming RESOLVED: use BARE tool names. Evidence is in the installed SDK source itself — `__init__.py:352` shows `allowed_tools=["add", "multiply"]` paired with `mcp_servers={"calc": calculator}` in a working example. The SDK passes the list verbatim to the CLI's `--allowedTools` flag (`_internal/transport/subprocess_cli.py:257`); whatever the CLI accepts is what the SDK exposes, and the SDK author's own example documents the form. Task 7 updated to use bare names only; the Step-0 discovery is retained as a verification belt for the implementer (a one-line `print` of what the SDK would send) but no longer a decision point.
 
 ---
 
@@ -1779,27 +1779,24 @@ The adapter NEEDS `session_factory` + `settings` inside `tools_factory` — but 
 - Modify: `src/call_monitor/proposal_assist/drafting/__init__.py` (re-export `ToolContext`)
 - Test: `tests/proposal_assist/test_tools_claude_adapter_wiring.py`
 
-- [ ] **Step 0: Discovery — confirm `allowed_tools` naming convention**
+- [ ] **Step 0: Verify `allowed_tools` naming (single-line check)**
 
-Codex round 2 flagged an open question: the SDK might honor `mcp__<server>__<tool>` OR bare `<tool>` names in `allowed_tools`. Run a quick discovery to learn which:
+The plan uses **bare** tool names in `allowed_tools` (matching the SDK's own docstring example at `claude_agent_sdk/__init__.py:352`, which pairs `mcp_servers={"calc": ...}` with `allowed_tools=["add", "multiply"]`). The SDK passes the list verbatim to the CLI's `--allowedTools` flag (`_internal/transport/subprocess_cli.py:257`). Confirm nothing's changed:
 
 ```bash
 uv run python -c "
 from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions
-@tool('probe', 'probe', {'type': 'object', 'properties': {}, 'required': []})
-async def probe(args): return {'content': [{'type':'text','text':'ok'}], 'is_error': False}
-srv = create_sdk_mcp_server(name='probe_srv', tools=[probe])
-# Inspect SDK docs/CLI to see which allowed_tools form is honored.
-# Try ClaudeAgentOptions with both forms and check what the SDK's stderr
-# logging says about tool registration / permission gating.
-print('server name:', srv.get('name'))
-print('tool name attr:', probe.name)
+@tool('probe', 'probe', {'type':'object','properties':{},'required':[]})
+async def probe(args): return {'content':[{'type':'text','text':'ok'}], 'is_error': False}
+opts = ClaudeAgentOptions(
+    mcp_servers={'probe_srv': create_sdk_mcp_server(name='probe_srv', tools=[probe])},
+    allowed_tools=['probe'],
+)
+print('allowed_tools:', opts.allowed_tools)
 "
 ```
 
-If the SDK README / source confirms `mcp__<server>__<tool>` is the canonical form: use that.
-If it's bare names: use those.
-If unclear: use BOTH (the snippet below does this as belt-and-braces). Document the chosen form in the commit message.
+If the printed list is `['probe']`, the bare-name form is what the CLI will receive. If the SDK has added namespacing logic since plan-writing, update Task 7's `allowed_tools` to match.
 
 - [ ] **Step 1: Write failing test**
 
@@ -1894,9 +1891,12 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
 
     allowed = captured.get("allowed_tools")
     assert allowed is not None
-    # MCP tool naming convention: mcp__<server>__<tool>.
-    assert any("read_proposal" in t for t in allowed)
-    assert any("edit_proposal" in t for t in allowed)
+    # Bare names per SDK docstring example (see Task 7 Step 0).
+    assert "read_proposal" in allowed
+    assert "edit_proposal" in allowed
+    # NO mcp__ prefix — confirm we're using the bare form, not the
+    # belt-and-braces both-forms rev3 originally proposed.
+    assert not any(t.startswith("mcp__") for t in allowed)
 ```
 
 - [ ] **Step 2: Modify `claude_adapter.py`**
@@ -1936,18 +1936,16 @@ if self._tools_factory is not None:
     # additionally auto-grants permission on those (no prompts).
     options_kwargs["tools"] = []
     options_kwargs["strict_mcp_config"] = True
-    # Belt-and-braces: include BOTH naming forms in allowed_tools
-    # because the SDK's accepted form is undocumented (see Step 0
-    # discovery). Listing both makes either form accept; replace with
-    # the single confirmed form after Step 0 verifies.
-    _tool_names = (
+    # Bare tool names per the SDK's docstring example
+    # (claude_agent_sdk/__init__.py:352 — "allowed_tools=['add','multiply']"
+    # paired with mcp_servers={'calc': calculator}). The SDK forwards the
+    # list verbatim to the CLI's --allowedTools flag; the bare form is
+    # what works in CLI v0.2.82.
+    options_kwargs["allowed_tools"] = [
         "read_proposal", "edit_proposal", "replace_proposal",
         "get_artifact_history", "read_artifact_at", "diff_artifact",
         "get_call_details", "get_profile",
-    )
-    options_kwargs["allowed_tools"] = [
-        f"mcp__proposal_assist__{name}" for name in _tool_names
-    ] + list(_tool_names)
+    ]
 options = ClaudeAgentOptions(**options_kwargs)
 ```
 
@@ -2269,7 +2267,7 @@ Expected: only `claude_adapter.py` and `tools/registry.py` import from `claude_a
 
 7. **`mcp__proposal_assist__<tool>` naming.** The SDK exposes MCP tools under the `mcp__<server>__<tool>` name format in `allowed_tools`. Verify with `dir(server)` if the SDK has changed.
 
-8. **`tools=[]` + `strict_mcp_config=True` are what actually block built-ins** (rev2 / Codex B2). `allowed_tools` alone only auto-grants permission on listed tools — it does NOT disable Claude Code's built-in Bash/Read/Edit/etc. Setting `tools=[]` empties the built-in list, `mcp_servers={"proposal_assist": ...}` adds our 8, `strict_mcp_config=True` forbids the SDK from accepting any other MCP server config, and `allowed_tools=[...]` auto-grants permission on our 8 (no prompts). Together these are the proper fix for B3's "soft-replay re-fires built-in tools" FIXME — once B5 lands, the agent has ONLY our 8 tools.
+8. **`tools=[]` + `strict_mcp_config=True` are what actually block built-ins** (rev2 / Codex B2). `allowed_tools` alone only auto-grants permission on listed tools — it does NOT disable Claude Code's built-in Bash/Read/Edit/etc. Setting `tools=[]` empties the built-in list (SDK source `types.py:1582-1591` confirms `[]` "Disable all built-in tools"), `mcp_servers={"proposal_assist": ...}` adds our 8 MCP tools, `strict_mcp_config=True` forbids the SDK from accepting any other MCP server config, and `allowed_tools=[...]` auto-grants permission (no prompts) using BARE tool names per the SDK's own docstring example (`__init__.py:352`). Together these are the proper fix for B3's "soft-replay re-fires built-in tools" FIXME — once B5 lands, the agent has ONLY our 8 tools.
 
 9. **No commit signing.** Spec doesn't require GPG-signed commits. The git config in tests uses simple email/name; production uses the workspace process's git config.
 
