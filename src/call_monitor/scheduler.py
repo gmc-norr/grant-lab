@@ -376,13 +376,13 @@ def build_scheduler(
         if app_loop is None:
             # Test/sync construction: fresh registry has no cross-loop concern.
             try:
-                asyncio.run(workspace_controller._registry.sweep_idle())
+                asyncio.run(workspace_controller.sweep_idle())
             except Exception:
                 _logger.exception("drafting.idle_sweep failed")
             return
 
         fut = asyncio.run_coroutine_threadsafe(
-            workspace_controller._registry.sweep_idle(),
+            workspace_controller.sweep_idle(),
             app_loop,
         )
         try:

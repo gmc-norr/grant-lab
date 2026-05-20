@@ -165,3 +165,11 @@ class WorkspaceController:
 
     async def terminate(self, workspace_id: uuid.UUID) -> None:
         await self._registry.terminate(workspace_id)
+
+    async def sweep_idle(self) -> int:
+        """Terminate any handle untouched for >= the registry's idle window.
+
+        Returns the number of handles swept. Intended for the scheduler
+        tick — exposed here so the scheduler closure doesn't have to reach
+        into _registry."""
+        return await self._registry.sweep_idle()

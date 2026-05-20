@@ -37,13 +37,13 @@ async def test_build_scheduler_registers_idle_sweep_tick(monkeypatch, pg_url):
 
         # Replace sweep_idle with a tracker that records calls.
         sweep_calls = {"n": 0}
-        original_sweep = controller._registry.sweep_idle
+        original_sweep = controller.sweep_idle
 
         async def tracking_sweep():
             sweep_calls["n"] += 1
             return await original_sweep()
 
-        controller._registry.sweep_idle = tracking_sweep
+        controller.sweep_idle = tracking_sweep  # type: ignore[method-assign]
 
         class _Alerter:
             def record_failure(self, source_slug, *, error=None):
