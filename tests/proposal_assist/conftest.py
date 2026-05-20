@@ -101,3 +101,51 @@ def make_workspace(
     session.add(ws)
     session.flush()
     return ws
+
+
+def make_chat_turn(
+    session,
+    workspace,
+    *,
+    role: str,
+    content: dict,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    model: str | None = None,
+):
+    from call_monitor.db.models import ChatTurn
+
+    turn = ChatTurn(
+        workspace_id=workspace.id,
+        role=role,
+        content=content,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        model=model,
+    )
+    session.add(turn)
+    session.flush()
+    return turn
+
+
+def make_chat_summary(
+    session,
+    workspace,
+    summarized_through,
+    *,
+    summary_text: str = "previous turns summarized here.",
+    tokens: int = 100,
+    model: str = "claude-haiku-4-5",
+):
+    from call_monitor.db.models import ChatSummary
+
+    cs = ChatSummary(
+        workspace_id=workspace.id,
+        summary=summary_text,
+        summarized_through=summarized_through.id,
+        tokens=tokens,
+        model=model,
+    )
+    session.add(cs)
+    session.flush()
+    return cs
