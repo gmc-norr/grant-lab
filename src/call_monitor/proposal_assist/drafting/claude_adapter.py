@@ -135,7 +135,7 @@ class ClaudeAgentSDKAdapter:
                 if role != "user":
                     continue
                 content = msg.get("content", "")
-                text = content if isinstance(content, str) else _flatten_content(content)
+                text = _flatten_content(content)
                 if not text:
                     continue
                 await self._drain_turn(client, text)
@@ -208,7 +208,7 @@ class ClaudeAgentSDKAdapter:
                         if isinstance(block, ToolResultBlock):
                             yield ToolResultEvent(
                                 tool_use_id=block.tool_use_id,
-                                content=_content_to_str(block.content),
+                                content=_flatten_content(block.content),
                                 is_error=bool(block.is_error),
                             )
 
@@ -255,32 +255,33 @@ class ClaudeAgentSDKAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _flatten_content(content: list[Any]) -> str:
-    """Flatten a list of content blocks to a plain string.
+def _flatten_content(content: Any) -> str:
+    """Flatten resume serializer content or tool result content to a plain string.
 
-    Handles the resume serializer format where content may be a list of
-    {"type": "text", "text": "..."} dicts.
+    The chat_turns.content column stores SDK-native shapes. For a user
+    text turn that's typically a single {"type": "text", "text": "..."}
+    dict; for a turn with multiple blocks it's a list of such dicts.
+    Returns empty string for non-text blocks (image, tool_use) — those
+    can't be replayed as a query() text and are intentionally dropped.
+
+    This function is also used for ToolResultBlock.content (which may be
+    str, list, or None), replacing the former _content_to_str helper.
+    Unification decision: both callers needed identical semantics after M1
+    — a single recursive function is cleaner than keeping two in sync.
     """
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-            else:
-                parts.append(str(block))
-        elif isinstance(block, str):
-            parts.append(block)
-        else:
-            parts.append(str(block))
-    return " ".join(parts)
-
-
-def _content_to_str(content: str | list[Any] | None) -> str:
-    """Convert tool result content to a plain string."""
     if content is None:
         return ""
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text", ""))
+        return ""  # non-text single block (image, tool_use, etc.) — dropped
     if isinstance(content, list):
-        return _flatten_content(content)
+        parts: list[str] = []
+        for block in content:
+            piece = _flatten_content(block)
+            if piece:
+                parts.append(piece)
+        return " ".join(parts)
     return str(content)
