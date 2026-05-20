@@ -13,6 +13,7 @@ context, and main.py registers the `display_dt` / `criterion_label`
 
 from __future__ import annotations
 
+import html as _html
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from sqlalchemy.orm import Session
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ChatTurn, Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
+from call_manager.proposal_assist.turns.caps import TokenCapExceeded
+from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.workspaces import create_workspace as _create_workspace
 
 # Rev2 / Codex H2: sanitize agent-controlled markdown before render.
@@ -268,3 +271,65 @@ def get_workspace_main(
             "artifact_raw": raw,
         },
     )
+
+
+@router.post("/{workspace_id}/turns")
+def post_turn(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    content: str = Form(...),
+) -> HTMLResponse:
+    """Enqueue a user turn and return TWO HTML fragments (H1):
+    1. The rendered user-turn row (immediate feedback in #chat-history).
+    2. An SSE-connector div that opens EventSource to the stream endpoint
+       and self-removes when the stream emits the 'done' event.
+
+    The composer form uses hx-target='#chat-history' hx-swap='beforeend',
+    so both fragments are appended to the chat div in one swap.
+
+    Returns 403 for non-owners (shared-read, single-write spec).
+    Returns 429 when the daily token cap is exceeded.
+    """
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    settings = request.app.state.settings
+    try:
+        job = submit_user_turn(
+            session=session,
+            workspace_id=ws.id,
+            content={"type": "text", "text": content},
+            submitted_by_user_id=user.id,
+            settings=settings,
+        )
+        session.commit()
+    except TokenCapExceeded as e:
+        session.rollback()
+        return HTMLResponse(
+            f"<p>Workspace daily token cap exceeded: {e.reason}. "
+            f"Used {e.used_in} input / {e.used_out} output today; "
+            f"cap is {e.cap_in} / {e.cap_out}. Try again after midnight "
+            f"Europe/Stockholm or ask an admin to raise the cap.</p>",
+            status_code=429,
+        )
+
+    # Rev2 / H2: every interpolated user value goes through html.escape —
+    # never f-string'd raw into the response body.
+    safe_text = _html.escape(content)
+    user_turn_html = (
+        f"<div class='chat-turn' data-role='user'><strong>user:</strong><p>{safe_text}</p></div>"
+    )
+    sse_connector = (
+        f"<div id='sse-mount-{job.id}' "
+        f"hx-ext='sse' "
+        f"sse-connect='/workspaces/{workspace_id}/turns/{job.id}/stream' "
+        f"sse-swap='message' "
+        f"sse-close='done' "
+        f"hx-target='#chat-history' "
+        f"hx-swap='beforeend'></div>"
+    )
+    return HTMLResponse(user_turn_html + sse_connector)
