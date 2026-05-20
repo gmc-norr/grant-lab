@@ -25,7 +25,20 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from call_monitor.db.models import Call, Profile, Workspace, WorkspaceSetupJob
+from call_monitor.db.models import (
+    Call,
+    CallRubric,
+    CallSectionExtract,
+    Profile,
+    Workspace,
+    WorkspaceEvent,
+    WorkspaceSetupJob,
+)
+from call_monitor.proposal_assist.extractors.refresh import (
+    ensure_rubric_fresh,
+    ensure_section_extracts_fresh,
+)
+from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +212,70 @@ class Phase0Worker:
                 ws.profile_desc_snapshot = profile.description or ""
 
         ws.snapshot_refreshed_at = datetime.now(UTC)
+
+    def _ensure_section_extracts_snapshot(self, job: WorkspaceSetupJob) -> None:
+        ws = self.session.get(Workspace, job.workspace_id)
+        if ws is None or ws.call_id is None:
+            raise RuntimeError("workspace or call missing for section extracts")
+        call = self.session.get(Call, ws.call_id)
+        if call is None:
+            raise RuntimeError(f"call {ws.call_id} not found")
+
+        ensure_section_extracts_fresh(
+            session=self.session,
+            call=call,
+            client=self.client,
+            extractor_version=self.extractor_version,
+        )
+        # Read back into a workspace-owned dict; the workspace snapshot is
+        # what every later phase reads via get_section_extract.
+        rows = (
+            self.session.query(CallSectionExtract)
+            .filter(CallSectionExtract.call_id == call.id)
+            .all()
+        )
+        snapshot = {r.section: r.extract_text for r in rows}
+        # Defensive: ensure all six keys present (extract_sections backfills,
+        # but if the template was seeded by a different path, fill any gaps).
+        for name in SECTION_NAMES:
+            snapshot.setdefault(name, "")
+        ws.section_extracts = snapshot
+
+    def _ensure_rubric_snapshot(self, job: WorkspaceSetupJob) -> None:
+        ws = self.session.get(Workspace, job.workspace_id)
+        if ws is None or ws.call_id is None:
+            raise RuntimeError("workspace or call missing for rubric")
+        call = self.session.get(Call, ws.call_id)
+        if call is None:
+            raise RuntimeError(f"call {ws.call_id} not found")
+
+        ensure_rubric_fresh(
+            session=self.session,
+            call=call,
+            client=self.client,
+            extractor_version=self.rubric_extractor_version,
+        )
+        template = self.session.get(CallRubric, call.id)
+        if template is None:
+            raise RuntimeError(f"rubric template for call {call.id} not found after fresh")
+
+        ws.rubric_criteria = template.criteria
+        ws.rubric_funder_notes = template.funder_notes
+        ws.rubric_updated_at = datetime.now(UTC)
+
+        # Audit: write the canonical starting state for forward-replay of
+        # rubric edits (per the phased spec's audit-reconstruction contract).
+        self.session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="rubric_initialized",
+                payload={
+                    "criteria": template.criteria,
+                    "funder_notes": template.funder_notes,
+                    "seeded_from_call_rubrics_extracted_at": (template.extracted_at.isoformat()),
+                },
+            )
+        )
 
     def _run_steps(self, job: WorkspaceSetupJob) -> None:
         """Filled in by Tasks 14–16. Raises on transient/permanent failure;

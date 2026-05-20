@@ -1,13 +1,15 @@
+import json
 import subprocess
 from unittest.mock import Mock
 
 from sqlalchemy import select
 
-from call_monitor.db.models import Workspace, WorkspaceSetupJob
+from call_monitor.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_monitor.proposal_assist.phases.setup import (
     Phase0Worker,
     claim_next_setup_job,
 )
+from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
 from tests.proposal_assist.conftest import make_call, make_profile, make_workspace
 
 
@@ -176,3 +178,112 @@ def test_phase0_steps_1_3_init_repo_and_snapshot(pg_session_factory, tmp_path):
         ws_refetch = s.get(Workspace, ws.id)
         assert (call.full_text or "") in ws_refetch.call_body_snapshot
         assert ws_refetch.profile_desc_snapshot == profile.description
+
+
+def test_phase0_step_4_copies_section_extracts_into_workspace(
+    pg_session_factory,
+    tmp_path,
+):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ws = make_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        client.chat.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "eligibility": "E",
+                                "scope": "S",
+                                "budget": "B",
+                                "expected_outcomes": "O",
+                                "restrictions": "R",
+                                "mandatory": "M",
+                            }
+                        ),
+                    }
+                }
+            ],
+            "model": "claude-opus-4-7",
+        }
+
+        worker = Phase0Worker(
+            session=s,
+            client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
+        worker._ensure_section_extracts_snapshot(job)
+        s.commit()
+        ws_refetch = s.get(Workspace, ws_id)
+        assert set(ws_refetch.section_extracts.keys()) == set(SECTION_NAMES)
+        assert ws_refetch.section_extracts["eligibility"] == "E"
+
+
+def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
+    pg_session_factory,
+    tmp_path,
+):
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ws = make_workspace(s, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        client.chat.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "criteria": [
+                                    {"name": "X", "description": "x", "weight": 1.0, "scale_max": 5}
+                                ],
+                                "funder_notes": "see FAQ",
+                            }
+                        ),
+                    }
+                }
+            ],
+            "model": "claude-opus-4-7",
+        }
+
+        worker = Phase0Worker(
+            session=s,
+            client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
+        worker._ensure_rubric_snapshot(job)
+        s.commit()
+        ws_refetch = s.get(Workspace, ws_id)
+        assert len(ws_refetch.rubric_criteria) == 1
+        assert ws_refetch.rubric_criteria[0]["name"] == "X"
+        assert ws_refetch.rubric_funder_notes == "see FAQ"
+
+        events = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "rubric_initialized",
+            )
+        ).all()
+        assert len(events) == 1
+        assert events[0].payload["criteria"][0]["name"] == "X"
+        assert events[0].payload["funder_notes"] == "see FAQ"
