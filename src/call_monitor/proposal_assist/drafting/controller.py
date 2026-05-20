@@ -13,8 +13,10 @@ import contextlib
 import uuid
 from collections.abc import AsyncIterator
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from call_monitor.db.models import Workspace
 from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
     LaunchContext,
@@ -109,8 +111,13 @@ class WorkspaceController:
             # populate LaunchContext.resume_session_id for native resume.
             with self._session_factory() as work_session:
                 sweep_orphaned_turn_jobs(work_session, workspace_id)
+                ws_row = work_session.scalar(select(Workspace).where(Workspace.id == workspace_id))
+                resume_session_id = ws_row.last_sdk_session_id if ws_row is not None else None
                 work_session.commit()
-            context = LaunchContext(workspace_id=workspace_id)
+            context = LaunchContext(
+                workspace_id=workspace_id,
+                resume_session_id=resume_session_id,
+            )
             handle = await self._registry._adapter.launch(context)
             await self._registry.fulfill_pending_launch(
                 workspace_id,
