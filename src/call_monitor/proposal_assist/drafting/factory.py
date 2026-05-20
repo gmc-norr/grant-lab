@@ -30,6 +30,7 @@ def build_workspace_controller(
     return WorkspaceController(
         registry=registry,
         session_factory=session_factory,
+        workspaces_dir=settings.workspaces_dir,
     )
 
 

@@ -10,8 +10,10 @@ This is the only object the web layer (B6) needs to construct."""
 from __future__ import annotations
 
 import contextlib
+import logging
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -31,6 +33,9 @@ from call_monitor.proposal_assist.drafting.orphan_sweep import (
     sweep_orphaned_turn_jobs,
 )
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
+from call_monitor.proposal_assist.reconcile import reconcile_workspace_git_drift
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceController:
@@ -39,9 +44,13 @@ class WorkspaceController:
         *,
         registry: SubprocessRegistry,
         session_factory: sessionmaker,
+        workspaces_dir: Path | str = "var/workspaces",
     ) -> None:
         self._registry = registry
         self._session_factory = session_factory
+        # Production callers pass settings.workspaces_dir explicitly;
+        # the default keeps existing tests that omit this parameter working.
+        self._workspaces_dir = Path(workspaces_dir)
 
     async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
         """Launch (or return cached) handle, coalescing concurrent callers.
@@ -114,6 +123,23 @@ class WorkspaceController:
                 ws_row = work_session.scalar(select(Workspace).where(Workspace.id == workspace_id))
                 resume_session_id = ws_row.last_sdk_session_id if ws_row is not None else None
                 work_session.commit()
+            # B5: backfill orphan git commits (artifact_versions rows missing
+            # for committed proposal.md changes). Idempotent. Failure logged
+            # but doesn't block launch — the subprocess can still run;
+            # reconciliation will retry on the next workspace open.
+            try:
+                repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
+                reconcile_workspace_git_drift(
+                    self._session_factory,
+                    workspace_id,
+                    repo_dir,
+                )
+            except Exception:
+                logger.exception(
+                    "controller.launch: reconciliation failed for %s; continuing",
+                    workspace_id,
+                )
+
             context = LaunchContext(
                 workspace_id=workspace_id,
                 resume_session_id=resume_session_id,

@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from call_monitor.db.models import ArtifactVersion, WorkspaceEvent
@@ -162,3 +163,38 @@ def test_reconcile_preserves_commit_timestamp(pg_session_factory, tmp_path):
         f"backfilled created_at {row.created_at} should match commit "
         f"timestamp {past}; delta {delta_seconds}s"
     )
+
+
+@pytest.mark.asyncio
+async def test_controller_launch_runs_reconciliation(pg_session_factory, tmp_path):
+    """controller.launch backfills orphan commits before the subprocess
+    is launched."""
+    from call_monitor.proposal_assist.drafting.controller import WorkspaceController
+    from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+    from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
+
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    workspaces_dir = tmp_path / "workspaces"
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+        workspaces_dir=workspaces_dir,
+    )
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    # Seed the workspace's repo with TWO commits but no artifact_versions rows.
+    repo_dir = workspaces_dir / str(wsid) / "repo"
+    shas = _init_repo_with_n_commits(repo_dir, 2)
+
+    await controller.launch(wsid)
+
+    with pg_session_factory() as s:
+        rows = list(s.scalars(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wsid)))
+    assert len(rows) == 2
+    assert {r.commit_sha for r in rows} == set(shas)
+    assert all(r.created_by == "reconciled" for r in rows)
