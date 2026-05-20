@@ -88,6 +88,22 @@ class Settings(BaseSettings):
         "workspace gets var/workspaces/<uuid>/repo/. Must be "
         "writable, backed up, excluded from the docker image.",
     )
+    drafting_adapter: str = Field(
+        default="claude",
+        alias="DRAFTING_ADAPTER",
+        description=(
+            "Which DraftingAgent implementation to wire up. "
+            "'claude' (default) → ClaudeAgentSDKAdapter; "
+            "'fake' → FakeAgentAdapter (for integration tests + local "
+            "demos without an API key)."
+        ),
+    )
+    workspace_idle_timeout_seconds: int = Field(
+        default=600,
+        alias="WORKSPACE_IDLE_TIMEOUT_SECONDS",
+        description="How long (seconds) a drafting subprocess may sit idle "
+        "before the sweep evicts it. Default 10 minutes; lower in tests.",
+    )
     remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")
     remote_rank_cosine_threshold: float = Field(default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD")
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
