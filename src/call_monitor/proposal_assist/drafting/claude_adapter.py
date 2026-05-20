@@ -54,6 +54,15 @@ from call_monitor.proposal_assist.drafting.contract import (
 logger = logging.getLogger(__name__)
 
 
+class SDKTurnError(RuntimeError):
+    """Raised when the SDK signals an error result (rate-limit, 5xx, etc.)
+    instead of completing the turn. Caller should mark the turn as failed."""
+
+    def __init__(self, message: str, *, status: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class ClaudeAgentSDKAdapter:
     """Wraps claude-agent-sdk in a per-workspace persistent client.
 
@@ -213,6 +222,19 @@ class ClaudeAgentSDKAdapter:
                             )
 
             elif isinstance(message, ResultMessage):
+                # Check for error states before treating as success.
+                # getattr() guards against future SDK field-name drift.
+                # ResultMessage fields (SDK 0.2.82): is_error: bool,
+                # api_error_status: int | None, errors: list[str] | None.
+                is_error = bool(getattr(message, "is_error", False))
+                api_status = getattr(message, "api_error_status", None)
+                err_list = getattr(message, "errors", None)
+                if is_error or api_status or err_list:
+                    detail = f"is_error={is_error} status={api_status!r} errors={err_list!r}"
+                    raise SDKTurnError(
+                        f"SDK reported error for workspace {handle.workspace_id}: {detail}",
+                        status=str(api_status) if api_status else None,
+                    )
                 # Extract model-level usage from model_usage if present
                 mu: dict[str, Any] | None = message.model_usage
                 if mu is not None:

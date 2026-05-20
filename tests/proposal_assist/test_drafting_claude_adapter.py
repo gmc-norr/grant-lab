@@ -65,6 +65,58 @@ def test_flatten_content_returns_empty_for_non_text_block():
 
 
 # ---------------------------------------------------------------------------
+# M2 — SDKTurnError on ResultMessage error result
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_turn_raises_on_sdk_error_result():
+    """A ResultMessage with is_error=True must raise SDKTurnError, not
+    pass through as a successful TurnDoneEvent. B4 catches this and
+    marks the turn failed."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from claude_agent_sdk.types import ResultMessage
+
+    from call_monitor.proposal_assist.drafting.claude_adapter import (
+        ClaudeAgentSDKAdapter,
+        SDKTurnError,
+    )
+    from call_monitor.proposal_assist.drafting.contract import AgentHandle
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/x",
+    )
+
+    # Build a fake client that yields a single ResultMessage with is_error=True.
+    fake_client = MagicMock()
+    fake_client.query = AsyncMock()
+
+    async def fake_receive():
+        # Construct a ResultMessage with is_error=True. The SDK's actual
+        # __init__ has many required fields — use object.__new__ to
+        # bypass __init__ and set only what we need.
+        rm = object.__new__(ResultMessage)
+        rm.is_error = True
+        rm.api_error_status = "529"
+        rm.errors = ["overloaded"]
+        rm.model_usage = None
+        yield rm
+
+    fake_client.receive_response = fake_receive
+
+    handle = AgentHandle(
+        workspace_id=uuid.uuid4(),
+        state={"client": fake_client},
+    )
+
+    with pytest.raises(SDKTurnError, match="529"):
+        async for _ in adapter.send_turn(handle, "hi"):
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Protocol conformance (no SDK calls)
 # ---------------------------------------------------------------------------
 
