@@ -13,6 +13,7 @@ context, and main.py registers the `display_dt` / `criterion_label`
 
 from __future__ import annotations
 
+import asyncio
 import html as _html
 import uuid
 from pathlib import Path
@@ -20,12 +21,12 @@ from pathlib import Path
 import bleach
 import markdown
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import ChatTurn, Workspace, WorkspaceViewer
+from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.turns.caps import TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import submit_user_turn
@@ -76,6 +77,80 @@ def _render_proposal_markdown(raw: str) -> str:
         attributes=_ALLOWED_ATTRS,
         strip=True,
     )
+
+
+def _render_chat_turn_html(turn: ChatTurn) -> str:
+    """Render one chat_turns row to a small HTML snippet for SSE emission.
+    Matches the partials/chat_turn.html template's per-row markup.
+
+    Rev2 / Codex H2: every interpolated field is run through
+    html.escape — chat content + tool names are agent-controlled and
+    could contain <script> otherwise. The XSS regression tests in
+    test_web_workspaces_sse.py assert this.
+    """
+    c = turn.content
+    safe_role = _html.escape(turn.role)
+    if isinstance(c, dict) and c.get("type") == "text":
+        body = f"<p>{_html.escape(str(c.get('text', '')))}</p>"
+    elif isinstance(c, dict) and c.get("type") == "tool_use":
+        body = f"<p><em>(tool call: {_html.escape(str(c.get('name', '?')))})</em></p>"
+    elif isinstance(c, dict) and c.get("type") == "tool_result":
+        err = " — error" if c.get("is_error") else ""
+        body = f"<p><em>(tool result{err})</em></p>"
+    else:
+        body = f"<pre>{_html.escape(str(c))}</pre>"
+    snippet = (
+        f"<div class='chat-turn' data-role='{safe_role}'><strong>{safe_role}:</strong>{body}</div>"
+    )
+    # Remove newlines so the value is valid in an SSE data: line.
+    return snippet.replace("\n", "")
+
+
+async def _stream_turn_generator(
+    *,
+    session_factory,
+    workspace_id: uuid.UUID,
+    turn_job_id: uuid.UUID,
+    poll_seconds: float = 0.2,
+):
+    """Async generator that yields SSE-formatted strings.
+
+    Extracted from the route handler so tests can drive it directly
+    (skipping the HTTP layer that's hard to interleave with background
+    writes in a single test).
+    """
+    # Seed last_seen_position at the user_turn's position (so we don't
+    # echo the user turn back — it was already shown by the POST handler).
+    with session_factory() as s:
+        job = s.get(TurnJob, turn_job_id)
+        if job is None or job.workspace_id != workspace_id:
+            yield "event: done\ndata: missing\n\n"
+            return
+        last_seen_position = (
+            s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
+        )
+
+    while True:
+        with session_factory() as s:
+            new_rows = list(
+                s.scalars(
+                    select(ChatTurn)
+                    .where(
+                        ChatTurn.workspace_id == workspace_id,
+                        ChatTurn.position > last_seen_position,
+                    )
+                    .order_by(ChatTurn.position)
+                )
+            )
+            for turn in new_rows:
+                rendered = _render_chat_turn_html(turn)
+                yield f"data: {rendered}\n\n"
+                last_seen_position = turn.position
+            tj = s.get(TurnJob, turn_job_id)
+            if tj.status in ("completed", "failed", "cancelled"):
+                yield f"event: done\ndata: {tj.status}\n\n"
+                return
+        await asyncio.sleep(poll_seconds)
 
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
@@ -333,3 +408,36 @@ def post_turn(
         f"hx-swap='beforeend'></div>"
     )
     return HTMLResponse(user_turn_html + sse_connector)
+
+
+@router.get("/{workspace_id}/turns/{turn_job_id}/stream")
+async def stream_turn(
+    workspace_id: uuid.UUID,
+    turn_job_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> StreamingResponse:
+    """SSE bridge: polls chat_turns for new rows written by the processor
+    and emits them as SSE events. Closes with 'event: done' when the
+    turn_job reaches a terminal state (completed/failed/cancelled).
+
+    Viewers may connect (read-only access is sufficient to watch the stream).
+    """
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    job = session.get(TurnJob, turn_job_id)
+    if job is None or job.workspace_id != ws.id:
+        raise HTTPException(status_code=404, detail="turn_job not found")
+
+    return StreamingResponse(
+        _stream_turn_generator(
+            session_factory=request.app.state.session_factory,
+            workspace_id=ws.id,
+            turn_job_id=turn_job_id,
+        ),
+        media_type="text/event-stream",
+    )
