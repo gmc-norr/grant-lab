@@ -26,7 +26,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceViewer
+from call_manager.db.models import ChatTurn, TurnJob, User, Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
@@ -562,11 +562,70 @@ def get_settings(
         user=user,
         session=session,
     )
+    viewers = list(
+        session.execute(
+            select(WorkspaceViewer, User)
+            .join(User, User.id == WorkspaceViewer.user_id)
+            .where(WorkspaceViewer.workspace_id == ws.id)
+        ).all()
+    )
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
         "proposal_assist/workspace_settings.html",
-        {"workspace": ws, "user": user},
+        {"workspace": ws, "user": user, "viewers": viewers},
+    )
+
+
+@router.post("/{workspace_id}/viewers")
+def add_viewer(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    email: str = Form(...),
+):
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    target = session.scalar(select(User).where(User.email == email))
+    if target is None:
+        raise HTTPException(status_code=400, detail=f"no user with email {email}")
+    existing = (
+        session.query(WorkspaceViewer).filter_by(workspace_id=ws.id, user_id=target.id).first()
+    )
+    if existing is None:
+        session.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
+        session.commit()
+    return RedirectResponse(
+        url=f"/workspaces/{ws.id}/settings",
+        status_code=303,
+    )
+
+
+@router.post("/{workspace_id}/viewers/{user_id}/remove")
+def remove_viewer(
+    workspace_id: uuid.UUID,
+    user_id: int,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    session.query(WorkspaceViewer).filter_by(
+        workspace_id=ws.id,
+        user_id=user_id,
+    ).delete()
+    session.commit()
+    return RedirectResponse(
+        url=f"/workspaces/{ws.id}/settings",
+        status_code=303,
     )
 
 

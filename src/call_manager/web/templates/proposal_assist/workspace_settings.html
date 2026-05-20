@@ -35,5 +35,28 @@
 </form>
 
 <h2 style="margin-top: 2em;">Viewers</h2>
-<p>Viewer management coming in Task 11.</p>
+{% if viewers %}
+<ul>
+  {% for viewer, user_row in viewers %}
+  <li>
+    {{ user_row.email }}
+    <form method="post" action="/workspaces/{{ workspace.id }}/viewers/{{ user_row.id }}/remove"
+          style="display: inline;">
+      <button type="submit" style="font-size: 0.85em;">Remove</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>No viewers yet.</p>
+{% endif %}
+
+<form method="post" action="/workspaces/{{ workspace.id }}/viewers">
+  <p>
+    <label>Add viewer by email:
+      <input name="email" type="email" required>
+    </label>
+    <button type="submit">Add</button>
+  </p>
+</form>
 {% endblock %}
