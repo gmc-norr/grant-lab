@@ -21,13 +21,20 @@ from pathlib import Path
 import bleach
 import markdown
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
+from call_manager.proposal_assist.tools.history import (
+    diff_artifact_impl,
+    get_artifact_history_impl,
+    read_artifact_at_impl,
+)
+from call_manager.proposal_assist.tools.proposal import read_proposal_impl
+from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.turns.caps import TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.workspaces import create_workspace as _create_workspace
@@ -441,6 +448,106 @@ async def stream_turn(
         ),
         media_type="text/event-stream",
     )
+
+
+def _make_tool_ctx(request: Request, ws: Workspace) -> ToolContext:
+    """Build a ToolContext bound to `ws` and this request's app state."""
+    settings = request.app.state.settings
+    return ToolContext(
+        workspace_id=ws.id,
+        repo_dir=Path(settings.workspaces_dir) / str(ws.id) / "repo",
+        session_factory=request.app.state.session_factory,
+        settings=settings,
+    )
+
+
+@router.get("/{workspace_id}/artifact/raw")
+async def artifact_raw(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Return the current proposal.md content as plain text."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    result = await read_proposal_impl(_make_tool_ctx(request, ws))
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return Response(result["content"], media_type="text/plain")
+
+
+@router.get("/{workspace_id}/artifact/history", response_class=HTMLResponse)
+async def artifact_history(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Render the commit history for proposal.md as an HTML partial."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    result = await get_artifact_history_impl(_make_tool_ctx(request, ws), limit=50)
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/history.html",
+        {"workspace": ws, "commits": result.get("commits", []), "user": user},
+    )
+
+
+@router.get("/{workspace_id}/artifact/at/{commit_sha}")
+async def artifact_at(
+    workspace_id: uuid.UUID,
+    commit_sha: str,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Return proposal.md content at a specific commit sha."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    result = await read_artifact_at_impl(
+        _make_tool_ctx(request, ws),
+        commit_sha=commit_sha,
+    )
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return Response(result["content"], media_type="text/plain")
+
+
+@router.get("/{workspace_id}/artifact/diff")
+async def artifact_diff(
+    workspace_id: uuid.UUID,
+    request: Request,
+    commit_a: str,
+    commit_b: str,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Return a unified diff of proposal.md between two commits."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    result = await diff_artifact_impl(
+        _make_tool_ctx(request, ws),
+        commit_a=commit_a,
+        commit_b=commit_b,
+    )
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return Response(result["diff"], media_type="text/plain")
 
 
 @router.post("/{workspace_id}/turns/{turn_job_id}/cancel")

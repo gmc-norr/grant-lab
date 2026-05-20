@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}History — {{ workspace.title }}{% endblock %}
+{% block content %}
+<h1>Version history — {{ workspace.title }}</h1>
+<p><a href="/workspaces/{{ workspace.id }}">← Back to workspace</a></p>
+{% if commits %}
+<table>
+  <thead><tr><th>Date</th><th>SHA</th><th>Message</th><th>View</th></tr></thead>
+  <tbody>
+    {% for c in commits %}
+    <tr>
+      <td>{{ c.timestamp }}</td>
+      <td><code>{{ c.sha[:8] }}</code></td>
+      <td>{{ c.message }}</td>
+      <td><a href="/workspaces/{{ workspace.id }}/artifact/at/{{ c.sha }}">view</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No history yet.</p>
+{% endif %}
+{% endblock %}
