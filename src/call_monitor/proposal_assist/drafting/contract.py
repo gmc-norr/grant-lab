@@ -93,6 +93,19 @@ class TurnDoneEvent:
 StreamEvent = AssistantTextEvent | ToolUseEvent | ToolResultEvent | TurnDoneEvent
 
 
+class SDKTurnError(RuntimeError):
+    """Raised by an adapter's send_turn when the backend signals an error
+    result (rate-limit, 5xx, etc.) instead of completing the turn. Caller
+    (B4's turn processor) catches this to mark the turn as failed without
+    tearing down the handle. Lives on the contract so callers can catch
+    it without importing claude_adapter (which would force eager SDK
+    import)."""
+
+    def __init__(self, message: str, *, status: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 @runtime_checkable
 class DraftingAgent(Protocol):
     """The adapter contract.

@@ -55,6 +55,7 @@ from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
     AssistantTextEvent,
     LaunchContext,
+    SDKTurnError,
     StreamEvent,
     ToolResultEvent,
     ToolUseEvent,
@@ -63,14 +64,7 @@ from call_monitor.proposal_assist.drafting.contract import (
 
 logger = logging.getLogger(__name__)
 
-
-class SDKTurnError(RuntimeError):
-    """Raised when the SDK signals an error result (rate-limit, 5xx, etc.)
-    instead of completing the turn. Caller should mark the turn as failed."""
-
-    def __init__(self, message: str, *, status: str | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+__all__ = ["ClaudeAgentSDKAdapter", "SDKTurnError"]
 
 
 class ClaudeAgentSDKAdapter:
