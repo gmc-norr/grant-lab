@@ -17,13 +17,14 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from call_monitor.db.models import (
     Call,
@@ -290,11 +291,6 @@ class Phase0Worker:
         # current_phase='spec' when the owner confirms.
         job.status = "waiting_for_rubric_review"
         # NOT setting completed_at — the job isn't terminal yet.
-
-
-from collections.abc import Callable  # noqa: E402
-
-from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 
 def run_phase0_tick(
