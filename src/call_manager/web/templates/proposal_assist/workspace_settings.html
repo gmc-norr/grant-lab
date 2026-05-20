@@ -1,6 +1,39 @@
 {% extends "base.html" %}
-{% block title %}Workspace Settings{% endblock %}
+{% block title %}Settings — {{ workspace.title }}{% endblock %}
 {% block content %}
-<h1>Workspace Settings</h1>
-<p>Settings panel coming in a later task.</p>
+<h1>Settings — {{ workspace.title }}</h1>
+<p><a href="/workspaces/{{ workspace.id }}">← Back to workspace</a></p>
+
+<form method="post" action="/workspaces/{{ workspace.id }}/settings">
+  <p>
+    <label>Title: <input name="title" value="{{ workspace.title }}" required></label>
+  </p>
+  <p>
+    <label>Status:
+      <select name="status">
+        <option value="drafting" {% if workspace.status == "drafting" %}selected{% endif %}>Drafting</option>
+        <option value="submitted" {% if workspace.status == "submitted" %}selected{% endif %}>Submitted</option>
+        <option value="awarded" {% if workspace.status == "awarded" %}selected{% endif %}>Awarded</option>
+        <option value="rejected" {% if workspace.status == "rejected" %}selected{% endif %}>Rejected</option>
+        <option value="abandoned" {% if workspace.status == "abandoned" %}selected{% endif %}>Abandoned</option>
+      </select>
+    </label>
+  </p>
+  <p>
+    <label>Deadline:
+      <input name="deadline" type="date"
+             value="{{ workspace.deadline.strftime('%Y-%m-%d') if workspace.deadline else '' }}">
+    </label>
+  </p>
+  <button type="submit">Save</button>
+</form>
+
+<h2 style="margin-top: 2em; color: #c00;">Danger zone</h2>
+<form method="post" action="/workspaces/{{ workspace.id }}/delete"
+      onsubmit="return confirm('Soft-delete this workspace? It will be hidden from the list but can be recovered by an admin.');">
+  <button type="submit" style="background: #c00; color: white;">Soft delete</button>
+</form>
+
+<h2 style="margin-top: 2em;">Viewers</h2>
+<p>Viewer management coming in Task 11.</p>
 {% endblock %}

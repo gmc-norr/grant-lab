@@ -550,6 +550,72 @@ async def artifact_diff(
     return Response(result["diff"], media_type="text/plain")
 
 
+@router.get("/{workspace_id}/settings", response_class=HTMLResponse)
+def get_settings(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/workspace_settings.html",
+        {"workspace": ws, "user": user},
+    )
+
+
+@router.post("/{workspace_id}/settings")
+def post_settings(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    title: str = Form(...),
+    status: str = Form(...),
+    deadline: str | None = Form(None),
+):
+    from datetime import datetime
+
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    ws.title = title
+    ws.status = status
+    if deadline:
+        ws.deadline = datetime.fromisoformat(deadline)
+    else:
+        ws.deadline = None
+    session.commit()
+    return RedirectResponse(url=f"/workspaces/{ws.id}", status_code=303)
+
+
+@router.post("/{workspace_id}/delete")
+def soft_delete(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    from datetime import UTC, datetime
+
+    ws = _require_owner(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    ws.soft_deleted_at = datetime.now(UTC)
+    session.commit()
+    return RedirectResponse(url="/workspaces", status_code=303)
+
+
 @router.post("/{workspace_id}/turns/{turn_job_id}/cancel")
 def cancel_turn(
     workspace_id: uuid.UUID,
