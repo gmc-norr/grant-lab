@@ -50,9 +50,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     digest_bounce_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
@@ -69,19 +67,13 @@ class MagicLinkToken(Base):
     __tablename__ = "magic_link_tokens"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    consumed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="magic_link_tokens")
 
@@ -96,9 +88,7 @@ class Source(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     slug: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
-    last_fetched_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -136,16 +126,15 @@ class Call(Base):
     budget_max: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
     programme: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    keywords: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, default=list
-    )
+    keywords: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     embedding: Mapped[list[float] | None] = mapped_column(
-        Vector(1024), nullable=True,
+        Vector(1024),
+        nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -211,7 +200,8 @@ class Profile(Base):
     # ISO 4217. NULL = unknown — v2's budget gate treats NULL as no penalty.
     budget_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(
-        Vector(1024), nullable=True,
+        Vector(1024),
+        nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -271,7 +261,8 @@ class CallRanking(Base):
     # ranking/prompt.py::_sanitize_applicant_notes for the shape contract.
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     applicant_notes: Mapped[list[dict] | None] = mapped_column(
-        JSONB, nullable=True,
+        JSONB,
+        nullable=True,
     )
 
 
@@ -289,9 +280,7 @@ class RankingJob(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    call_id: Mapped[int] = mapped_column(
-        ForeignKey("calls.id", ondelete="CASCADE"), nullable=False
-    )
+    call_id: Mapped[int] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
     profile_id: Mapped[int] = mapped_column(
         ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
     )
@@ -312,7 +301,9 @@ class RankingJob(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
         onupdate=func.now(),
     )
 
@@ -335,9 +326,7 @@ class DigestRun(Base):
     __tablename__ = "digest_runs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -488,32 +477,60 @@ class Workspace(Base):
         nullable=True,
     )
     current_phase: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="setup",
+        Text,
+        nullable=False,
+        server_default="setup",
     )
     call_body_snapshot: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="",
+        Text,
+        nullable=False,
+        server_default="",
     )
     profile_desc_snapshot: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="",
+        Text,
+        nullable=False,
+        server_default="",
     )
     snapshot_refreshed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     rubric_criteria: Mapped[list[dict]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
     )
     rubric_funder_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     rubric_updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     section_extracts: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb"),
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
     )
     review_runs_per_day_override: Mapped[int | None] = mapped_column(
-        Integer, nullable=True,
+        Integer,
+        nullable=True,
     )
     review_dollar_cap_override: Mapped[float | None] = mapped_column(
-        Numeric(6, 3), nullable=True,
+        Numeric(6, 3),
+        nullable=True,
+    )
+    last_sdk_session_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    daily_token_cap_in_override: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    daily_token_cap_out_override: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
 
 
@@ -657,6 +674,11 @@ class TurnJob(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+    )
+    submitted_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id"),
         nullable=True,
     )
 
@@ -842,13 +864,16 @@ class PhaseApproval(Base):
         ),
         Index(
             "ix_phase_approvals_ws_phase_at",
-            "workspace_id", "phase",
+            "workspace_id",
+            "phase",
             text("approved_at DESC"),
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -857,10 +882,14 @@ class PhaseApproval(Base):
     )
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     approved_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     approving_user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id"), nullable=False,
+        BigInteger,
+        ForeignKey("users.id"),
+        nullable=False,
     )
     approved_artifact_sha: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -870,14 +899,15 @@ class WorkspaceSetupJob(Base):
     __table_args__ = (
         UniqueConstraint("workspace_id", name="uq_workspace_setup_jobs_ws"),
         CheckConstraint(
-            "status IN ('queued','running','waiting_for_rubric_review',"
-            "'done','failed')",
+            "status IN ('queued','running','waiting_for_rubric_review','done','failed')",
             name="ck_workspace_setup_jobs_status",
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -886,7 +916,9 @@ class WorkspaceSetupJob(Base):
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
     attempts: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, server_default=text("0"),
+        SmallInteger,
+        nullable=False,
+        server_default=text("0"),
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(
@@ -895,10 +927,12 @@ class WorkspaceSetupJob(Base):
         server_default=func.now(),
     )
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 
@@ -906,8 +940,7 @@ class ReviewRun(Base):
     __tablename__ = "review_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued','running','done','failed','cancelled',"
-            "'partial')",
+            "status IN ('queued','running','done','failed','cancelled','partial')",
             name="ck_review_runs_status",
         ),
         Index(
@@ -924,7 +957,9 @@ class ReviewRun(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -933,10 +968,13 @@ class ReviewRun(Base):
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
     triggered_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     draft_sha: Mapped[str] = mapped_column(Text, nullable=False)
     fit_check_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -949,10 +987,12 @@ class ReviewRun(Base):
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cache_read_input_tokens: Mapped[int | None] = mapped_column(
-        Integer, nullable=True,
+        Integer,
+        nullable=True,
     )
     estimated_dollars: Mapped[float | None] = mapped_column(
-        Numeric(6, 3), nullable=True,
+        Numeric(6, 3),
+        nullable=True,
     )
 
 
@@ -960,7 +1000,9 @@ class ReviewRunItem(Base):
     __tablename__ = "review_run_items"
     __table_args__ = (
         UniqueConstraint(
-            "review_run_id", "kind", name="uq_review_run_items_run_kind",
+            "review_run_id",
+            "kind",
+            name="uq_review_run_items_run_kind",
         ),
         CheckConstraint(
             "kind IN ('fit_check',"
@@ -972,15 +1014,16 @@ class ReviewRunItem(Base):
             name="ck_review_run_items_kind",
         ),
         CheckConstraint(
-            "status IN ('queued','running','done','failed','skipped',"
-            "'cancelled')",
+            "status IN ('queued','running','done','failed','skipped','cancelled')",
             name="ck_review_run_items_status",
         ),
         Index("ix_review_run_items_run", "review_run_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     review_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -990,21 +1033,26 @@ class ReviewRunItem(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        DateTime(timezone=True),
+        nullable=True,
     )
     model: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cache_read_input_tokens: Mapped[int | None] = mapped_column(
-        Integer, nullable=True,
+        Integer,
+        nullable=True,
     )
     estimated_dollars: Mapped[float | None] = mapped_column(
-        Numeric(6, 4), nullable=True,
+        Numeric(6, 4),
+        nullable=True,
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_response_json: Mapped[dict | None] = mapped_column(
-        JSONB, nullable=True,
+        JSONB,
+        nullable=True,
     )
