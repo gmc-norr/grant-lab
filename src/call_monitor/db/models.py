@@ -857,3 +857,35 @@ class PhaseApproval(Base):
         BigInteger, ForeignKey("users.id"), nullable=False,
     )
     approved_artifact_sha: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class WorkspaceSetupJob(Base):
+    __tablename__ = "workspace_setup_jobs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="uq_workspace_setup_jobs_ws"),
+        CheckConstraint(
+            "status IN ('queued','running','waiting_for_rubric_review',"
+            "'done','failed')",
+            name="ck_workspace_setup_jobs_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0"),
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
