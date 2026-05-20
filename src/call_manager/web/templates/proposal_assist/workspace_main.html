@@ -2,8 +2,39 @@
 {% block title %}{{ workspace.title }}{% endblock %}
 {% block content %}
 <h1>{{ workspace.title }}</h1>
-<p><strong>Current phase:</strong> {{ workspace.current_phase }}</p>
-<div id="workspace-main-panes">
-  <p>Chat + artifact panes coming in Task 5.</p>
+<p>
+  <strong>Phase:</strong> {{ workspace.current_phase }}
+  | <a href="/workspaces/{{ workspace.id }}/settings">Settings</a>
+  | <a href="/workspaces">All workspaces</a>
+</p>
+
+<div style="display: flex; gap: 1em;">
+  {# LEFT: chat #}
+  <div style="flex: 1; min-width: 0;">
+    <h2>Chat</h2>
+    <div id="chat-history" style="max-height: 60vh; overflow-y: auto; border: 1px solid #ddd; padding: 0.5em;">
+      {% for turn in chat_turns %}
+        {% include "proposal_assist/partials/chat_turn.html" %}
+      {% endfor %}
+    </div>
+    {% include "proposal_assist/partials/cloud_banner.html" %}
+    {% if is_owner %}
+    <form id="composer" method="post" action="/workspaces/{{ workspace.id }}/turns"
+          hx-post="/workspaces/{{ workspace.id }}/turns"
+          hx-target="#chat-history"
+          hx-swap="beforeend"
+          hx-on::after-request="this.reset()">
+      <textarea name="content" rows="3" required></textarea>
+      <button type="submit">Send</button>
+    </form>
+    {% else %}
+    <p><em>(read-only — only the workspace owner can send turns)</em></p>
+    {% endif %}
+  </div>
+
+  {# RIGHT: artifact #}
+  <div style="flex: 1; min-width: 0;">
+    {% include "proposal_assist/partials/artifact_pane.html" %}
+  </div>
 </div>
 {% endblock %}

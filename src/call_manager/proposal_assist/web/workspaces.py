@@ -14,16 +14,66 @@ context, and main.py registers the `display_dt` / `criterion_label`
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
+import bleach
+import markdown
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Workspace, WorkspaceViewer
+from call_manager.db.models import ChatTurn, Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
 from call_manager.workspaces import create_workspace as _create_workspace
+
+# Rev2 / Codex H2: sanitize agent-controlled markdown before render.
+_ALLOWED_TAGS = [
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "br",
+    "hr",
+    "strong",
+    "em",
+    "code",
+    "pre",
+    "ul",
+    "ol",
+    "li",
+    "blockquote",
+    "a",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+]
+_ALLOWED_ATTRS = {"a": ["href", "title"]}
+
+
+def _render_proposal_markdown(raw: str) -> str:
+    """Render proposal.md content to safe HTML.
+
+    H2 fix: markdown.markdown() emits raw HTML for any raw HTML in the
+    input; bleach.clean strips tags not in the allowlist + dangerous
+    attributes. Output is then trusted to render via `| safe` in the
+    template.
+    """
+    html = markdown.markdown(raw, extensions=["extra"])
+    return bleach.clean(
+        html,
+        tags=_ALLOWED_TAGS,
+        attributes=_ALLOWED_ATTRS,
+        strip=True,
+    )
+
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -175,21 +225,46 @@ def get_workspace_main(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> HTMLResponse:
-    """Two-pane main view. Task 5 fills in chat history + artifact
-    pane; this stub renders the shell.
+    """Two-pane main view: chat history (left) + sanitized markdown artifact (right).
 
-    Uses `request.app.state.templates` (the existing instance with
-    registered filters + base.html nav). Context key is `user`
-    (NOT `current_user`) to match base.html.
+    Uses `request.app.state.templates` (the existing instance with registered
+    filters + base.html nav). Context key is `user` (NOT `current_user`) to
+    match base.html.  artifact_rendered is bleach-cleaned by
+    _render_proposal_markdown before it reaches the template (rev2 / H2).
     """
     ws = _require_owner_or_viewer(
         workspace_id=workspace_id,
         user=user,
         session=session,
     )
+    chat_turns = list(
+        session.scalars(
+            select(ChatTurn)
+            .where(ChatTurn.workspace_id == workspace_id)
+            .order_by(ChatTurn.position)
+        )
+    )
+
+    settings = request.app.state.settings
+    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
+    proposal_path = repo_dir / "proposal.md"
+    if proposal_path.exists():
+        raw = proposal_path.read_text()
+        rendered = _render_proposal_markdown(raw)
+    else:
+        raw, rendered = "", "<em>(no proposal.md yet)</em>"
+
+    is_owner = ws.owner_id == user.id
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
         "proposal_assist/workspace_main.html",
-        {"workspace": ws, "user": user},
+        {
+            "workspace": ws,
+            "user": user,
+            "is_owner": is_owner,
+            "chat_turns": chat_turns,
+            "artifact_rendered": rendered,
+            "artifact_raw": raw,
+        },
     )

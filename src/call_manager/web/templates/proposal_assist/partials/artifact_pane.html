@@ -1,0 +1,11 @@
+<h2>Proposal</h2>
+<p>
+  <a href="/workspaces/{{ workspace.id }}/artifact/raw">View raw</a>
+  | <a href="/workspaces/{{ workspace.id }}/artifact/history">History</a>
+  | <a href="/workspaces/{{ workspace.id }}/export.md">Export markdown</a>
+</p>
+{# artifact_rendered is already bleached in the route handler (rev2 / H2),
+   so the `| safe` here is trusted output, not raw markdown injection. #}
+<div id="artifact-rendered" style="border: 1px solid #ddd; padding: 0.5em; max-height: 70vh; overflow-y: auto;">
+  {{ artifact_rendered | safe }}
+</div>
