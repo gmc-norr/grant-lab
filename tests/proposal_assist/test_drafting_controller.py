@@ -292,6 +292,34 @@ async def test_send_turn_increments_and_decrements_in_flight(pg_session_factory)
 
 
 @pytest.mark.asyncio
+async def test_concurrent_launch_same_workspace_returns_same_handle(
+    pg_session_factory,
+):
+    """Two concurrent launch() calls for the same workspace return the
+    same handle. Without the pending-launch fix, the second would have
+    raised LockNotAcquired."""
+    import asyncio
+
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    h1, h2 = await asyncio.gather(
+        controller.launch(wsid),
+        controller.launch(wsid),
+    )
+    assert h1 is h2
+    assert len(adapter.launches) == 1
+
+
+@pytest.mark.asyncio
 async def test_send_turn_decrements_in_flight_on_early_exit(pg_session_factory):
     """If the consumer breaks out of the loop early (aclose), in_flight is
     still decremented via the finally block."""

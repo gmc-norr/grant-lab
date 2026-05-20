@@ -7,34 +7,87 @@ from call_monitor.proposal_assist.drafting.contract import AgentHandle, LaunchCo
 from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _install_handle(
+    registry: SubprocessRegistry,
+    workspace_id: uuid.UUID,
+) -> AgentHandle:
+    """Claim the launcher slot, have the fake adapter create a handle, and
+    fulfil the pending launch.  Returns the installed handle."""
+    am_launcher, _ = await registry.claim_launch_or_wait(workspace_id)
+    assert am_launcher, "expected to become the launcher"
+    ctx = LaunchContext(workspace_id=workspace_id)
+    handle = await registry._adapter.launch(ctx)
+    await registry.fulfill_pending_launch(workspace_id, handle, lock_session=None)
+    return handle
+
+
+# ---------------------------------------------------------------------------
+# claim_launch_or_wait / fulfill_pending_launch / fail_pending_launch
+# ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
-async def test_registry_get_or_launch_returns_new_handle():
+async def test_claim_launch_or_wait_first_caller_becomes_launcher():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
-
-    handle = await registry.get_or_launch(wsid, context=ctx)
-    assert isinstance(handle, AgentHandle)
-    assert handle.workspace_id == wsid
-    assert adapter.launches[0].workspace_id == wsid
+    am_launcher, pending = await registry.claim_launch_or_wait(wsid)
+    assert am_launcher is True
+    assert pending is None
 
 
 @pytest.mark.asyncio
-async def test_registry_returns_same_handle_on_second_call():
-    """Within the idle window, get_or_launch returns the existing handle
-    without relaunching."""
+async def test_claim_launch_or_wait_second_caller_gets_pending_future():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
+    am1, _ = await registry.claim_launch_or_wait(wsid)
+    am2, pending = await registry.claim_launch_or_wait(wsid)
+    assert am1 is True
+    assert am2 is False
+    assert pending is not None
+    assert not pending.done()
 
-    h1 = await registry.get_or_launch(wsid, context=ctx)
-    h2 = await registry.get_or_launch(wsid)
 
-    assert h1 is h2
-    assert len(adapter.launches) == 1  # only one launch
+@pytest.mark.asyncio
+async def test_fulfill_pending_launch_resolves_future_and_installs_entry():
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    wsid = uuid.uuid4()
+    am1, _ = await registry.claim_launch_or_wait(wsid)
+    am2, pending = await registry.claim_launch_or_wait(wsid)
+    handle = AgentHandle(workspace_id=wsid, state={})
+    await registry.fulfill_pending_launch(wsid, handle, lock_session=None)
+    assert pending.result() is handle
+    # Entry should now exist; a third caller gets a resolved future (cached).
+    am3, pending3 = await registry.claim_launch_or_wait(wsid)
+    assert am3 is False
+    assert pending3.result() is handle
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_launch_propagates_exception_to_waiters():
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    wsid = uuid.uuid4()
+    await registry.claim_launch_or_wait(wsid)
+    _, pending = await registry.claim_launch_or_wait(wsid)
+    await registry.fail_pending_launch(wsid, RuntimeError("boom"))
+    with pytest.raises(RuntimeError, match="boom"):
+        pending.result()
+    # Next caller can re-attempt as launcher (pending entry was cleared).
+    am, _ = await registry.claim_launch_or_wait(wsid)
+    assert am is True
+
+
+# ---------------------------------------------------------------------------
+# terminate / sweep_idle
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -42,15 +95,14 @@ async def test_registry_terminate_removes_handle():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
 
-    h = await registry.get_or_launch(wsid, context=ctx)
+    h = await _install_handle(registry, wsid)
     await registry.terminate(wsid)
 
     assert adapter.terminations == [h]
-    # Next get_or_launch creates a fresh handle.
-    ctx2 = LaunchContext(workspace_id=wsid)
-    h2 = await registry.get_or_launch(wsid, context=ctx2)
+    # After terminate, _install_handle should succeed as the launcher again
+    # (no cached entry, no pending launch).
+    h2 = await _install_handle(registry, wsid)
     assert h2 is not h
     assert len(adapter.launches) == 2
 
@@ -63,9 +115,8 @@ async def test_registry_sweep_idle_terminates_stale_handles():
     # idle_seconds=0 so any handle older than 'now' is stale.
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
 
-    await registry.get_or_launch(wsid, context=ctx)
+    await _install_handle(registry, wsid)
     # Yield to give the timestamp a tiny gap.
     await asyncio.sleep(0.01)
     swept = await registry.sweep_idle()
@@ -78,8 +129,7 @@ async def test_registry_sweep_idle_leaves_fresh_handles_alone():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
-    await registry.get_or_launch(wsid, context=ctx)
+    await _install_handle(registry, wsid)
     swept = await registry.sweep_idle()
     assert swept == 0
     assert adapter.terminations == []
@@ -115,9 +165,8 @@ async def test_registry_terminate_calls_adapter_before_releasing_lock():
 
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
 
-    handle = await registry.get_or_launch(wsid, context=ctx)
+    handle = await _install_handle(registry, wsid)
     # Inject a fake lock_session so we can observe close().
     registry._entries[wsid].lock_session = _FakeSession()  # type: ignore[assignment]
 
@@ -150,15 +199,19 @@ async def test_registry_terminate_calls_adapter_before_releasing_lock():
     assert closed == [True]
 
 
+# ---------------------------------------------------------------------------
+# in_flight accounting
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_sweep_idle_skips_handles_with_in_flight_turns():
     """A handle with in_flight > 0 is never swept, even past the idle threshold."""
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
 
-    await registry.get_or_launch(wsid, context=ctx)
+    await _install_handle(registry, wsid)
     await registry.increment_in_flight(wsid)
 
     # Sleep past the idle threshold.
@@ -176,9 +229,8 @@ async def test_decrement_in_flight_makes_handle_sweepable_again():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
     wsid = uuid.uuid4()
-    ctx = LaunchContext(workspace_id=wsid)
 
-    await registry.get_or_launch(wsid, context=ctx)
+    await _install_handle(registry, wsid)
     await registry.increment_in_flight(wsid)
     await registry.decrement_in_flight(wsid)
 
