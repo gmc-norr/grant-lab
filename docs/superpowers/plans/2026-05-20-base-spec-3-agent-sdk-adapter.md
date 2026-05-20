@@ -4,13 +4,19 @@
 
 **Goal:** Land the `DraftingAgent` adapter contract, the subprocess registry that hands out per-workspace handles with idle-timeout teardown, the per-workspace advisory lock, the orphan sweep that cleans up `turn_jobs.status='running'` rows from crashed prior processes, and the resume-from-history serializer that rebuilds an SDK-compatible message stream from `chat_summaries` + `chat_turns`. End state: given a workspace, calling `WorkspaceController.launch(workspace_id)` returns a working `AgentHandle` (real or fake, behind the same Protocol) and tears it down after `WORKSPACE_IDLE_TIMEOUT_SECONDS` of inactivity.
 
-**Architecture:** Two layers. Top layer (Tasks 3–8) is the `DraftingAgent` Protocol + `WorkspaceController` + registry/lock/sweep/resume helpers — entirely SDK-agnostic, exercised with a `FakeAgentAdapter` test double. Bottom layer (Task 9) is `ClaudeAgentSDKAdapter` — the only file in the codebase that imports `claude_agent_sdk`. An SDK upgrade only touches one file.
+**Architecture:** Two layers. Top layer (Tasks 4–9) is the `DraftingAgent` Protocol + `WorkspaceController` + registry/lock/sweep/resume helpers — entirely SDK-agnostic, exercised with a `FakeAgentAdapter` test double. Bottom layer (Task 10) is `ClaudeAgentSDKAdapter` — the only file in the codebase that imports `claude_agent_sdk`. An SDK upgrade only touches one file.
 
 **Tech Stack:** Python 3.12, `claude-agent-sdk` (new dep — version verified at Task 1), Postgres advisory locks via SQLAlchemy `func.pg_advisory_lock` / `pg_advisory_unlock`, `asyncio` for the subprocess-streaming layer, pytest + testcontainers.
 
 **Spec:** [docs/superpowers/specs/2026-04-18-call-manager-proposal-assist-design.md](../specs/2026-04-18-call-manager-proposal-assist-design.md), §Architecture (lines 42–85) + §Data model `chat_turns` / `chat_summaries` / `turn_jobs` design notes (lines 190–199).
 
 **Overview:** [docs/superpowers/plans/2026-05-19-base-spec-overview.md](2026-05-19-base-spec-overview.md), §B3.
+
+---
+
+## Revision history
+
+- **rev2 (2026-05-20)** — Codex round 1 fixed three structural issues. The advisory lock now lives on the registry entry's session (held for the handle's lifetime), not on the controller's launch-prelude session (released before launch). The Protocol's `launch()` accepts a `LaunchContext` so resume messages reach the SDK **before** the session is created. A new task (Task 3) adds `chat_turns.position bigint` populated via a global sequence — `created_at` ties when multiple turns commit in one transaction (the spec mandates user-turn + tool-result rows in one tx), so ordering by `created_at` is unsound. Plus: scheduler tick for the idle sweep is now in scope (new Task 12), the Claude adapter uses `connect()`/`disconnect()` (not `async with` per turn — that re-handshakes the SDK every turn, defeating the per-workspace subprocess model). Unused imports cleaned across snippets.
 
 ---
 
@@ -26,7 +32,7 @@
 
 B3 produces the *adapter and lifecycle plumbing* that B4/B5/B6 plug into. The end state is testable in isolation: a fake adapter satisfies the Protocol; the real adapter wraps the SDK; the controller wires them.
 
-**SDK-API caveat (Task 9 only):** The `claude-agent-sdk` API surface evolves frequently. Tasks 1–8 are written against a stable `DraftingAgent` Protocol the codebase owns; they do not depend on the SDK's exact shape. Task 9's discovery step requires the implementer to read the SDK README/quickstart and confirm `query()` / `Options` / streaming-message types before writing adapter code. If the SDK has changed materially since this plan was written, Task 9 is the only one that needs adjustment.
+**SDK-API caveat (Task 10 only):** The `claude-agent-sdk` API surface evolves frequently. Tasks 1–9 are written against a stable `DraftingAgent` Protocol the codebase owns; they do not depend on the SDK's exact shape. Task 10's discovery step requires the implementer to read the SDK README/quickstart and confirm `query()` / `Options` / streaming-message types before writing adapter code. If the SDK has changed materially since this plan was written, Task 10 is the only one that needs adjustment.
 
 ---
 
@@ -45,15 +51,17 @@ Specifically:
 ## File map
 
 **Created:**
+- `alembic/versions/0028_chat_turns_position.py` — add `position bigint` column + global sequence
 - `src/call_monitor/proposal_assist/drafting/__init__.py`
-- `src/call_monitor/proposal_assist/drafting/contract.py` — `AgentHandle` + `DraftingAgent` Protocol + stream event types
+- `src/call_monitor/proposal_assist/drafting/contract.py` — `AgentHandle` + `LaunchContext` + `DraftingAgent` Protocol + stream event types
 - `src/call_monitor/proposal_assist/drafting/fake_adapter.py` — `FakeAgentAdapter` test double
-- `src/call_monitor/proposal_assist/drafting/registry.py` — `SubprocessRegistry` (in-memory map + idle timer)
-- `src/call_monitor/proposal_assist/drafting/locking.py` — per-workspace `pg_advisory_lock` helpers
+- `src/call_monitor/proposal_assist/drafting/registry.py` — `SubprocessRegistry` (in-memory map + idle timer + lock-session ownership)
+- `src/call_monitor/proposal_assist/drafting/locking.py` — per-workspace `pg_advisory_lock` helpers + `workspace_lock_session` context manager
 - `src/call_monitor/proposal_assist/drafting/orphan_sweep.py` — one-shot SQL that transitions stale `running` `turn_jobs` to `failed`
-- `src/call_monitor/proposal_assist/drafting/resume.py` — builds SDK-compatible message list from history
+- `src/call_monitor/proposal_assist/drafting/resume.py` — builds SDK-compatible message list from history (ordered by `position`)
 - `src/call_monitor/proposal_assist/drafting/controller.py` — `WorkspaceController` composes registry + lock + sweep + resume
 - `src/call_monitor/proposal_assist/drafting/claude_adapter.py` — real `ClaudeAgentSDKAdapter` (the SDK-touching file)
+- `tests/proposal_assist/test_models_chat_turns.py` (extended with position tests)
 - `tests/proposal_assist/test_drafting_contract.py`
 - `tests/proposal_assist/test_drafting_fake_adapter.py`
 - `tests/proposal_assist/test_drafting_registry.py`
@@ -62,10 +70,14 @@ Specifically:
 - `tests/proposal_assist/test_drafting_resume.py`
 - `tests/proposal_assist/test_drafting_controller.py`
 - `tests/proposal_assist/test_drafting_claude_adapter.py` (skipped unless `ANTHROPIC_API_KEY` set in env)
+- `tests/proposal_assist/test_drafting_scheduler_tick.py`
 
 **Modified:**
 - `pyproject.toml` — add `claude-agent-sdk` dependency
-- `src/call_monitor/config.py` — add `workspace_idle_timeout_seconds` setting
+- `src/call_monitor/db/models.py` — add `ChatTurn.position` column
+- `src/call_monitor/config.py` — add `workspace_idle_timeout_seconds` + `workspace_idle_sweep_seconds` settings
+- `src/call_monitor/scheduler.py` — register idle-sweep scheduler tick
+- `src/call_monitor/main.py` — construct workspace controller + pass to scheduler
 - `tests/proposal_assist/conftest.py` — add `make_chat_turn` + `make_chat_summary` helpers
 
 ---
@@ -83,9 +95,9 @@ Specifically:
 ```python
 """Smoke test: claude-agent-sdk is installed and importable.
 
-This is the only test in B3 that touches the real SDK during Tasks 1-8.
+This is the only test in B3 that touches the real SDK during Tasks 1-9.
 If the SDK isn't pinned or moves to a different package name, this test
-fails fast (rather than at Task 9 when we'd otherwise discover it)."""
+fails fast (rather than at Task 10 when we'd otherwise discover it)."""
 
 
 def test_claude_agent_sdk_is_importable():
@@ -188,7 +200,156 @@ git commit -m "feat(b3): add WORKSPACE_IDLE_TIMEOUT_SECONDS setting"
 
 ---
 
-## Task 3: `AgentHandle` + `DraftingAgent` Protocol + stream-event types
+## Task 3: Add `chat_turns.position` column for monotonic per-workspace ordering
+
+`chat_turns.created_at` uses `server_default=func.now()`, which is statement-stable — multiple INSERTs in one transaction (the spec mandates user-turn + tool-result rows in one tx; see [base spec line 194](../specs/2026-04-18-call-manager-proposal-assist-design.md#L194)) all get the same `now()` value. Ordering by `created_at` produces ties; the UUID `id` is lexically arbitrary. Resume-from-history (Task 8) needs strict monotonic ordering or it can drop / reorder history rows.
+
+Fix: add a `position bigint NOT NULL` column populated by a global Postgres SEQUENCE. Strict monotonicity is guaranteed (sequence increments per row insert, never ties). ORDER BY position is the only sound ordering for chat history.
+
+**Files:**
+- Create: `alembic/versions/0028_chat_turns_position.py`
+- Modify: `src/call_monitor/db/models.py` (`ChatTurn`)
+- Test: extend `tests/proposal_assist/test_models_chat_turns.py`
+
+- [ ] **Step 1: Append failing test**
+
+Append to `tests/proposal_assist/test_models_chat_turns.py`:
+
+```python
+def test_chat_turn_position_is_monotonic_within_transaction(pg_session_factory):
+    """Multiple turns committed in one transaction get strictly
+    monotonic position values — no ties. This is the property
+    resume-from-history relies on for sound ordering."""
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        # Three turns in ONE transaction:
+        t1 = ChatTurn(workspace_id=ws.id, role="user",
+                      content={"type": "text", "text": "a"})
+        t2 = ChatTurn(workspace_id=ws.id, role="assistant",
+                      content={"type": "text", "text": "b"})
+        t3 = ChatTurn(workspace_id=ws.id, role="tool",
+                      content={"type": "text", "text": "c"})
+        s.add_all([t1, t2, t3])
+        s.commit()
+        s.refresh(t1)
+        s.refresh(t2)
+        s.refresh(t3)
+        # Strictly monotonic — no ties.
+        assert t1.position < t2.position < t3.position
+
+
+def test_chat_turn_position_is_global_not_per_workspace(pg_session_factory):
+    """The sequence is global; cross-workspace ordering is not
+    meaningful but per-workspace ordering is (which is all the
+    resume serializer needs)."""
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws_a = make_workspace(s, title="A")
+        ws_b = make_workspace(s, title="B")
+        t_a = ChatTurn(workspace_id=ws_a.id, role="user",
+                       content={"type": "text", "text": "a"})
+        t_b = ChatTurn(workspace_id=ws_b.id, role="user",
+                       content={"type": "text", "text": "b"})
+        s.add_all([t_a, t_b])
+        s.commit()
+        s.refresh(t_a)
+        s.refresh(t_b)
+        # Different positions (one is greater); we don't care which.
+        assert t_a.position != t_b.position
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+uv run pytest tests/proposal_assist/test_models_chat_turns.py::test_chat_turn_position_is_monotonic_within_transaction -v
+```
+
+Expected: `AttributeError: 'ChatTurn' object has no attribute 'position'`.
+
+- [ ] **Step 3: Write migration**
+
+`alembic/versions/0028_chat_turns_position.py`:
+
+```python
+"""chat_turns: add position column for monotonic ordering
+
+Revision ID: 0028
+Revises: 0027
+Create Date: 2026-05-20
+"""
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision = "0028"
+down_revision = "0027"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # Create a global sequence + add position column defaulted from it.
+    # Strict monotonicity within a workspace's history requires a
+    # row-insert-counter, and Postgres SEQUENCE is the simplest such
+    # counter that's tie-free even within a single INSERT statement.
+    op.execute("CREATE SEQUENCE chat_turns_position_seq")
+    op.add_column(
+        "chat_turns",
+        sa.Column(
+            "position", sa.BigInteger(),
+            nullable=False,
+            server_default=sa.text("nextval('chat_turns_position_seq')"),
+        ),
+    )
+    op.create_index(
+        "ix_chat_turns_ws_position",
+        "chat_turns",
+        ["workspace_id", "position"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_chat_turns_ws_position", table_name="chat_turns")
+    op.drop_column("chat_turns", "position")
+    op.execute("DROP SEQUENCE chat_turns_position_seq")
+```
+
+- [ ] **Step 4: Update model**
+
+In `src/call_monitor/db/models.py`, edit `ChatTurn`. Add to `__table_args__`:
+
+```python
+        Index("ix_chat_turns_ws_position", "workspace_id", "position"),
+```
+
+Add the column:
+
+```python
+    position: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('chat_turns_position_seq')"),
+    )
+```
+
+(Place it near the other auto-populated columns. `BigInteger`, `text` are already imported.)
+
+- [ ] **Step 5: Run + commit**
+
+```bash
+uv run pytest tests/proposal_assist/test_models_chat_turns.py -v
+uv run ruff format alembic/versions/0028_chat_turns_position.py tests/proposal_assist/test_models_chat_turns.py
+git add alembic/versions/0028_chat_turns_position.py src/call_monitor/db/models.py tests/proposal_assist/test_models_chat_turns.py
+git commit -m "feat(b3): chat_turns.position for monotonic per-workspace ordering"
+```
+
+---
+
+## Task 4: `AgentHandle` + `DraftingAgent` Protocol + stream-event types
 
 The contract every adapter implements. Defines the events that flow back from a turn so the web layer (B6) and turn-queue logic (B4) can consume them without knowing whether they came from the real SDK or a test fake.
 
@@ -208,6 +369,7 @@ from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
     AssistantTextEvent,
     DraftingAgent,
+    LaunchContext,
     StreamEvent,
     ToolResultEvent,
     ToolUseEvent,
@@ -253,8 +415,8 @@ def test_drafting_agent_protocol_methods_exist():
     that quacks like it should satisfy isinstance check (runtime_checkable)."""
 
     class _Dummy:
-        async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
-            return AgentHandle(workspace_id=workspace_id, state={})
+        async def launch(self, context: LaunchContext) -> AgentHandle:
+            return AgentHandle(workspace_id=context.workspace_id, state={})
 
         async def send_turn(
             self, handle: AgentHandle, user_message: str,
@@ -265,6 +427,15 @@ def test_drafting_agent_protocol_methods_exist():
             return None
 
     assert isinstance(_Dummy(), DraftingAgent)
+
+
+def test_launch_context_default_resume_messages_is_empty_list():
+    """Fresh workspace (no chat history yet) — resume_messages defaults
+    to []. Adapter sees an empty list and skips replay."""
+    wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
+    assert ctx.workspace_id == wsid
+    assert ctx.resume_messages == []
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -306,6 +477,19 @@ class AgentHandle:
     recorder, etc.) — controller code MUST NOT introspect it."""
     workspace_id: uuid.UUID
     state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LaunchContext:
+    """Everything an adapter needs at session-creation time.
+
+    Built by WorkspaceController.launch(); passed verbatim to
+    DraftingAgent.launch(). Adapter implementations consume what they
+    need (Claude adapter feeds resume_messages into the SDK session;
+    Fake adapter records the whole context for assertions).
+    """
+    workspace_id: uuid.UUID
+    resume_messages: list[dict] = field(default_factory=list)
 
 
 # Stream event variants. send_turn yields these in order during a turn.
@@ -365,7 +549,7 @@ class DraftingAgent(Protocol):
     `terminate` is idempotent: calling on an already-torn-down handle is
     a no-op (logs but doesn't raise)."""
 
-    async def launch(self, workspace_id: uuid.UUID) -> AgentHandle: ...
+    async def launch(self, context: LaunchContext) -> AgentHandle: ...
 
     async def send_turn(
         self, handle: AgentHandle, user_message: str,
@@ -385,7 +569,7 @@ git commit -m "feat(b3): DraftingAgent Protocol + AgentHandle + StreamEvent type
 
 ---
 
-## Task 4: `FakeAgentAdapter` test double
+## Task 5: `FakeAgentAdapter` test double
 
 The fake that every subsequent task in this plan tests against. It records `launch`/`send_turn`/`terminate` calls and lets tests script the stream events a turn produces. No subprocess, no SDK, no async I/O of any consequence.
 
@@ -406,6 +590,7 @@ from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
     AssistantTextEvent,
     DraftingAgent,
+    LaunchContext,
     TurnDoneEvent,
 )
 from call_monitor.proposal_assist.drafting.fake_adapter import (
@@ -428,10 +613,23 @@ async def test_fake_adapter_implements_protocol():
 async def test_fake_adapter_records_launch():
     fake = FakeAgentAdapter()
     wsid = uuid.uuid4()
-    handle = await fake.launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    handle = await fake.launch(ctx)
     assert isinstance(handle, AgentHandle)
     assert handle.workspace_id == wsid
-    assert fake.launches == [wsid]
+    assert fake.launches[0].workspace_id == wsid
+
+
+@pytest.mark.asyncio
+async def test_fake_adapter_records_resume_messages_on_handle_state():
+    """LaunchContext.resume_messages is recorded on handle.state so tests
+    can assert that the controller passed the right messages."""
+    fake = FakeAgentAdapter()
+    wsid = uuid.uuid4()
+    msgs = [{"role": "user", "content": {"type": "text", "text": "old"}}]
+    ctx = LaunchContext(workspace_id=wsid, resume_messages=msgs)
+    handle = await fake.launch(ctx)
+    assert handle.state["resume_messages"] == msgs
 
 
 @pytest.mark.asyncio
@@ -440,7 +638,8 @@ async def test_fake_adapter_scripts_turn_events():
     in order. Final event is always TurnDoneEvent."""
     fake = FakeAgentAdapter()
     wsid = uuid.uuid4()
-    handle = await fake.launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    handle = await fake.launch(ctx)
 
     fake.script_next_turn([
         AssistantTextEvent(text="Hello, world!"),
@@ -458,7 +657,8 @@ async def test_fake_adapter_scripts_turn_events():
 async def test_fake_adapter_records_turn_history():
     fake = FakeAgentAdapter()
     wsid = uuid.uuid4()
-    handle = await fake.launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    handle = await fake.launch(ctx)
     fake.script_next_turn([TurnDoneEvent(tokens_in=1, tokens_out=1, model="m")])
     fake.script_next_turn([TurnDoneEvent(tokens_in=2, tokens_out=2, model="m")])
 
@@ -472,7 +672,8 @@ async def test_fake_adapter_records_turn_history():
 async def test_fake_adapter_terminate_is_idempotent():
     fake = FakeAgentAdapter()
     wsid = uuid.uuid4()
-    handle = await fake.launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    handle = await fake.launch(ctx)
     await fake.terminate(handle)
     await fake.terminate(handle)  # second call doesn't raise
     assert fake.terminations == [handle, handle]
@@ -484,7 +685,8 @@ async def test_fake_adapter_send_turn_without_script_returns_terminal_only():
     the harness doesn't hang on `async for`."""
     fake = FakeAgentAdapter()
     wsid = uuid.uuid4()
-    handle = await fake.launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    handle = await fake.launch(ctx)
     events = await _collect(fake.send_turn(handle, "unscripted"))
     assert len(events) == 1
     assert isinstance(events[0], TurnDoneEvent)
@@ -507,12 +709,12 @@ Expected: `ModuleNotFoundError`.
 the stream of events each turn produces."""
 from __future__ import annotations
 
-import uuid
 from collections import deque
 from collections.abc import AsyncIterator
 
 from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
+    LaunchContext,
     StreamEvent,
     TurnDoneEvent,
 )
@@ -523,13 +725,13 @@ class FakeAgentAdapter:
     event streams via `script_next_turn(events)`.
 
     Inspection attributes for assertions:
-      - launches: list[uuid.UUID]
+      - launches: list[LaunchContext]
       - turns: list[tuple[AgentHandle, str]]
       - terminations: list[AgentHandle]
     """
 
     def __init__(self) -> None:
-        self.launches: list[uuid.UUID] = []
+        self.launches: list[LaunchContext] = []
         self.turns: list[tuple[AgentHandle, str]] = []
         self.terminations: list[AgentHandle] = []
         self._scripted: deque[list[StreamEvent]] = deque()
@@ -539,9 +741,12 @@ class FakeAgentAdapter:
         If you don't script, send_turn yields a single bare TurnDoneEvent."""
         self._scripted.append(events)
 
-    async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
-        self.launches.append(workspace_id)
-        return AgentHandle(workspace_id=workspace_id, state={"fake": True})
+    async def launch(self, context: LaunchContext) -> AgentHandle:
+        self.launches.append(context)
+        return AgentHandle(
+            workspace_id=context.workspace_id,
+            state={"fake": True, "resume_messages": context.resume_messages},
+        )
 
     async def send_turn(
         self, handle: AgentHandle, user_message: str,
@@ -575,11 +780,11 @@ git commit -m "feat(b3): FakeAgentAdapter test double"
 
 ---
 
-## Task 5: Per-workspace advisory lock helpers
+## Task 6: Per-workspace advisory lock helpers
 
 Postgres `pg_advisory_lock(bigint)` gives us session-scoped mutual exclusion. The spec ([line 195](docs/superpowers/specs/2026-04-18-call-manager-proposal-assist-design.md#L195)) mandates this for "one subprocess per workspace": each handle holds `pg_advisory_lock(hashtext('workspace:' || workspace_id::text))` while live; a racing handle blocks on it.
 
-We wrap this in small helpers so the lock-acquisition pattern is testable in isolation and reusable by both the registry (Task 6) and any future code that needs per-workspace exclusion.
+We wrap this in small helpers so the lock-acquisition pattern is testable in isolation and reusable by both the registry (Task 9) and any future code that needs per-workspace exclusion.
 
 **Files:**
 - Create: `src/call_monitor/proposal_assist/drafting/locking.py`
@@ -592,12 +797,14 @@ We wrap this in small helpers so the lock-acquisition pattern is testable in iso
 ```python
 import uuid
 
-from sqlalchemy import text
+import pytest
 
 from call_monitor.proposal_assist.drafting.locking import (
+    LockNotAcquired,
     acquire_workspace_lock,
     release_workspace_lock,
     workspace_lock_key,
+    workspace_lock_session,
 )
 
 
@@ -646,6 +853,48 @@ def test_different_workspaces_do_not_contend(pg_session_factory):
         assert acquire_workspace_lock(s2, wsid_b) is True
         assert release_workspace_lock(s1, wsid_a) is True
         assert release_workspace_lock(s2, wsid_b) is True
+
+
+def test_workspace_lock_session_acquires_and_releases_on_normal_exit(
+    pg_session_factory,
+):
+    """Context manager acquires the lock for the session lifetime and
+    releases it on clean exit."""
+    wsid = uuid.uuid4()
+    with workspace_lock_session(pg_session_factory, wsid) as s:
+        # While inside the context, a second session can't acquire.
+        with pg_session_factory() as s2:
+            assert acquire_workspace_lock(s2, wsid) is False
+    # After exit, the lock is released — a new session can acquire.
+    with pg_session_factory() as s3:
+        assert acquire_workspace_lock(s3, wsid) is True
+        release_workspace_lock(s3, wsid)
+
+
+def test_workspace_lock_session_releases_on_exception(pg_session_factory):
+    """Lock is released even when the body raises."""
+    wsid = uuid.uuid4()
+    with pytest.raises(ValueError):
+        with workspace_lock_session(pg_session_factory, wsid):
+            raise ValueError("simulated error")
+    # Lock freed — another session can acquire.
+    with pg_session_factory() as s:
+        assert acquire_workspace_lock(s, wsid) is True
+        release_workspace_lock(s, wsid)
+
+
+def test_workspace_lock_session_raises_lock_not_acquired_when_contended(
+    pg_session_factory,
+):
+    """If the lock is already held, LockNotAcquired is raised immediately."""
+    wsid = uuid.uuid4()
+    with pg_session_factory() as holder:
+        acquire_workspace_lock(holder, wsid)
+        with pytest.raises(LockNotAcquired) as exc_info:
+            with workspace_lock_session(pg_session_factory, wsid):
+                pass  # never reached
+        assert exc_info.value.workspace_id == wsid
+        release_workspace_lock(holder, wsid)
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -679,6 +928,8 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -727,6 +978,41 @@ def release_workspace_lock(session: Session, workspace_id: uuid.UUID) -> bool:
         {"k": key},
     ).scalar()
     return bool(result)
+
+
+class LockNotAcquired(RuntimeError):
+    def __init__(self, workspace_id: uuid.UUID) -> None:
+        super().__init__(
+            f"workspace {workspace_id} advisory lock held by another process"
+        )
+        self.workspace_id = workspace_id
+
+
+@contextmanager
+def workspace_lock_session(
+    session_factory, workspace_id: uuid.UUID,
+) -> Iterator[Session]:
+    """Open a session, acquire the workspace's advisory lock, yield the
+    session. On exit (normal or exceptional), release the lock and
+    close the session. Raises LockNotAcquired if the lock is held by
+    another process.
+
+    The session held by this context manager is what carries the lock —
+    Postgres advisory locks are session-scoped. The registry stashes
+    this session alongside the AgentHandle so the lock persists as
+    long as the subprocess does.
+    """
+    session = session_factory()
+    try:
+        if not acquire_workspace_lock(session, workspace_id):
+            session.close()
+            raise LockNotAcquired(workspace_id)
+        try:
+            yield session
+        finally:
+            release_workspace_lock(session, workspace_id)
+    finally:
+        session.close()
 ```
 
 - [ ] **Step 4: Run + commit**
@@ -740,7 +1026,7 @@ git commit -m "feat(b3): per-workspace advisory lock helpers"
 
 ---
 
-## Task 6: Orphan sweep — clean up `turn_jobs` rows from crashed prior processes
+## Task 7: Orphan sweep — clean up `turn_jobs` rows from crashed prior processes
 
 Spec mandate (lines 196–197): when a subprocess launches (or `/admin` runs "recover workspace"), a single SQL pass transitions any `running` `turn_jobs` for that workspace to `failed` with `error='orphaned'`. This cleans up after crashes and redeploys.
 
@@ -906,13 +1192,13 @@ git commit -m "feat(b3): orphan sweep for stale running turn_jobs"
 
 ---
 
-## Task 7: Resume-from-history serializer
+## Task 8: Resume-from-history serializer
 
 Spec mandate (line 197): "Subprocess resume = `latest chat_summaries row + all chat_turns after summarized_through`. This caps cold-start cost and context size at a known ceiling regardless of workspace age."
 
-This task implements the **serializer**: given a `workspace_id`, return a list of message dicts in the SDK's expected format (user/assistant/tool roles, content blocks). The Claude adapter (Task 9) passes the output to `claude_agent_sdk` at session start.
+This task implements the **serializer**: given a `workspace_id`, return a list of message dicts in the SDK's expected format (user/assistant/tool roles, content blocks). The Claude adapter (Task 10) receives the output via `LaunchContext.resume_messages` and passes it to `claude_agent_sdk` at session start.
 
-The serializer is pure Python — testable without spinning a subprocess. SDK-format details are encapsulated; if the SDK changes the message shape, only this file (and Task 9) need updating.
+The serializer is pure Python — testable without spinning a subprocess. SDK-format details are encapsulated; if the SDK changes the message shape, only this file (and Task 10) need updating.
 
 **Files:**
 - Modify: `tests/proposal_assist/conftest.py` (add `make_chat_turn` + `make_chat_summary` helpers)
@@ -1069,32 +1355,27 @@ def test_resume_uses_latest_summary_when_multiple_exist(pg_session_factory):
         assert "first summary" not in text
 
 
-def test_resume_skips_summary_boundary_correctly_under_id_ordering(
+def test_resume_skips_summary_boundary_correctly_under_position_ordering(
     pg_session_factory,
 ):
     """Boundary semantics: 'summarized_through' is INCLUSIVE — the turn
-    referenced is summarized, not retained. We rely on chat_turns.created_at
-    ordering; turns created after summarized_through's created_at survive."""
-    import time
-
+    referenced is summarized, not retained. We rely on chat_turns.position
+    ordering; turns with a higher position than summarized_through survive.
+    No time.sleep() needed — position is tie-free even within one tx."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        t_old = make_chat_turn(s, ws, role="user",
-                               content={"type": "text", "text": "old"})
-        s.commit()
-        time.sleep(0.01)  # ensure created_at is strictly later
+        make_chat_turn(s, ws, role="user",
+                       content={"type": "text", "text": "old"})
         t_boundary = make_chat_turn(s, ws, role="user",
                                     content={"type": "text", "text": "boundary"})
-        s.commit()
-        time.sleep(0.01)
-        t_new = make_chat_turn(s, ws, role="user",
-                               content={"type": "text", "text": "new"})
+        make_chat_turn(s, ws, role="user",
+                       content={"type": "text", "text": "new"})
         # Summary covers everything up through t_boundary.
         make_chat_summary(s, ws, t_boundary)
         s.commit()
 
         messages = build_resume_messages(s, ws.id)
-        # 1 summary + 1 surviving turn (t_new).
+        # 1 summary + 1 surviving turn.
         assert len(messages) == 2
         assert messages[1]["content"] == {"type": "text", "text": "new"}
 ```
@@ -1143,7 +1424,7 @@ def build_resume_messages(
     If there is a chat_summaries row, the most recent one is rendered as
     a synthetic prefix message and only turns AFTER its summarized_through
     boundary are appended. Otherwise, all chat_turns are returned in
-    created_at order.
+    position order.
 
     Returns [] for a workspace with no chat history at all.
     """
@@ -1156,19 +1437,19 @@ def build_resume_messages(
     )
 
     if summary is None:
-        # No summary — include every turn.
+        # No summary — include every turn in strict monotonic order.
         turns = session.scalars(
             select(ChatTurn)
             .where(ChatTurn.workspace_id == workspace_id)
-            .order_by(ChatTurn.created_at)
+            .order_by(ChatTurn.position)
         ).all()
         return [
             {"role": turn.role, "content": turn.content}
             for turn in turns
         ]
 
-    # Resolve the boundary turn's created_at; only turns strictly after
-    # it (created_at greater than the boundary) survive.
+    # Resolve the boundary turn's position; only turns with a strictly
+    # higher position survive (they were inserted after summarized_through).
     boundary = session.get(ChatTurn, summary.summarized_through)
     if boundary is None:
         # Shouldn't happen (FK ON DELETE CASCADE), but be defensive:
@@ -1176,16 +1457,16 @@ def build_resume_messages(
         survivors = session.scalars(
             select(ChatTurn)
             .where(ChatTurn.workspace_id == workspace_id)
-            .order_by(ChatTurn.created_at)
+            .order_by(ChatTurn.position)
         ).all()
     else:
         survivors = session.scalars(
             select(ChatTurn)
             .where(
                 ChatTurn.workspace_id == workspace_id,
-                ChatTurn.created_at > boundary.created_at,
+                ChatTurn.position > boundary.position,
             )
-            .order_by(ChatTurn.created_at)
+            .order_by(ChatTurn.position)
         ).all()
 
     # Synthesize the prefix message from the summary. Use a 'user' role
@@ -1222,7 +1503,7 @@ git commit -m "feat(b3): resume-from-history serializer (summary + un-summarized
 
 ---
 
-## Task 8: `SubprocessRegistry` + `WorkspaceController`
+## Task 9: `SubprocessRegistry` + `WorkspaceController`
 
 The composition layer. `SubprocessRegistry` keeps an in-memory `{workspace_id → AgentHandle}` map with last-touched timestamps for idle-timeout teardown. `WorkspaceController.launch(workspace_id)` acquires the advisory lock, runs the orphan sweep, builds resume messages, and asks the adapter to launch.
 
@@ -1234,7 +1515,7 @@ We test the controller end-to-end against `FakeAgentAdapter` — that exercises 
 - Test: `tests/proposal_assist/test_drafting_registry.py`
 - Test: `tests/proposal_assist/test_drafting_controller.py`
 
-### Subtask 8a: `SubprocessRegistry`
+### Subtask 9a: `SubprocessRegistry`
 
 - [ ] **Step 1: Write failing test**
 
@@ -1246,7 +1527,7 @@ import uuid
 
 import pytest
 
-from call_monitor.proposal_assist.drafting.contract import AgentHandle
+from call_monitor.proposal_assist.drafting.contract import AgentHandle, LaunchContext
 from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
 
@@ -1256,11 +1537,12 @@ async def test_registry_get_or_launch_returns_new_handle():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
 
-    handle = await registry.get_or_launch(wsid)
+    handle = await registry.get_or_launch(wsid, context=ctx)
     assert isinstance(handle, AgentHandle)
     assert handle.workspace_id == wsid
-    assert adapter.launches == [wsid]
+    assert adapter.launches[0].workspace_id == wsid
 
 
 @pytest.mark.asyncio
@@ -1270,8 +1552,9 @@ async def test_registry_returns_same_handle_on_second_call():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
 
-    h1 = await registry.get_or_launch(wsid)
+    h1 = await registry.get_or_launch(wsid, context=ctx)
     h2 = await registry.get_or_launch(wsid)
 
     assert h1 is h2
@@ -1283,13 +1566,15 @@ async def test_registry_terminate_removes_handle():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
 
-    h = await registry.get_or_launch(wsid)
+    h = await registry.get_or_launch(wsid, context=ctx)
     await registry.terminate(wsid)
 
     assert adapter.terminations == [h]
     # Next get_or_launch creates a fresh handle.
-    h2 = await registry.get_or_launch(wsid)
+    ctx2 = LaunchContext(workspace_id=wsid)
+    h2 = await registry.get_or_launch(wsid, context=ctx2)
     assert h2 is not h
     assert len(adapter.launches) == 2
 
@@ -1302,8 +1587,9 @@ async def test_registry_sweep_idle_terminates_stale_handles():
     # idle_seconds=0 so any handle older than 'now' is stale.
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
     wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
 
-    await registry.get_or_launch(wsid)
+    await registry.get_or_launch(wsid, context=ctx)
     # Yield to give the timestamp a tiny gap.
     await asyncio.sleep(0.01)
     swept = await registry.sweep_idle()
@@ -1316,7 +1602,8 @@ async def test_registry_sweep_idle_leaves_fresh_handles_alone():
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     wsid = uuid.uuid4()
-    await registry.get_or_launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    await registry.get_or_launch(wsid, context=ctx)
     swept = await registry.sweep_idle()
     assert swept == 0
     assert adapter.terminations == []
@@ -1344,24 +1631,30 @@ Expected: `ModuleNotFoundError`.
 
 ```python
 """In-memory subprocess registry. Maps workspace_id → (AgentHandle,
-last_touched_at). Drives idle-timeout teardown."""
+last_touched_at, lock_session). Drives idle-timeout teardown."""
 from __future__ import annotations
 
 import asyncio
 import time
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
     DraftingAgent,
+    LaunchContext,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 @dataclass
 class _Entry:
     handle: AgentHandle
     last_touched_monotonic: float
+    lock_session: "Session | None"  # held for the handle's lifetime
 
 
 class SubprocessRegistry:
@@ -1380,17 +1673,38 @@ class SubprocessRegistry:
         self._entries: dict[uuid.UUID, _Entry] = {}
         self._lock = asyncio.Lock()
 
-    async def get_or_launch(self, workspace_id: uuid.UUID) -> AgentHandle:
+    async def get_or_launch_if_exists(
+        self, workspace_id: uuid.UUID,
+    ) -> AgentHandle | None:
+        """Return the cached handle if one exists (and refresh its touch
+        timestamp); else None. Does NOT call adapter.launch."""
+        async with self._lock:
+            entry = self._entries.get(workspace_id)
+            if entry is None:
+                return None
+            entry.last_touched_monotonic = time.monotonic()
+            return entry.handle
+
+    async def get_or_launch(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        context: LaunchContext | None = None,
+        lock_session: "Session | None" = None,
+    ) -> AgentHandle:
         async with self._lock:
             existing = self._entries.get(workspace_id)
             if existing is not None:
                 existing.last_touched_monotonic = time.monotonic()
                 return existing.handle
 
-            handle = await self._adapter.launch(workspace_id)
+            if context is None:
+                context = LaunchContext(workspace_id=workspace_id)
+            handle = await self._adapter.launch(context)
             self._entries[workspace_id] = _Entry(
                 handle=handle,
                 last_touched_monotonic=time.monotonic(),
+                lock_session=lock_session,
             )
             return handle
 
@@ -1407,6 +1721,12 @@ class SubprocessRegistry:
         async with self._lock:
             entry = self._entries.pop(workspace_id, None)
         if entry is not None:
+            if entry.lock_session is not None:
+                from call_monitor.proposal_assist.drafting.locking import (
+                    release_workspace_lock,
+                )
+                release_workspace_lock(entry.lock_session, workspace_id)
+                entry.lock_session.close()
             await self._adapter.terminate(entry.handle)
 
     async def sweep_idle(self) -> int:
@@ -1422,13 +1742,42 @@ class SubprocessRegistry:
                 for wsid, entry in self._entries.items()
                 if entry.last_touched_monotonic <= cutoff
             ]
-            stale_entries = [self._entries.pop(wsid) for wsid in stale_ids]
+            stale_entries = [
+                (wsid, self._entries.pop(wsid)) for wsid in stale_ids
+            ]
 
         # Terminate outside the lock — adapter.terminate may take a while
         # (subprocess teardown) and we don't want to block get_or_launch.
-        for entry in stale_entries:
+        for wsid, entry in stale_entries:
+            if entry.lock_session is not None:
+                from call_monitor.proposal_assist.drafting.locking import (
+                    release_workspace_lock,
+                )
+                release_workspace_lock(entry.lock_session, wsid)
+                entry.lock_session.close()
             await self._adapter.terminate(entry.handle)
         return len(stale_entries)
+
+    async def send_turn(
+        self, handle: AgentHandle, user_message: str,
+    ) -> "AsyncIterator[StreamEvent]":
+        """Pass-through to the adapter's send_turn. The controller calls
+        touch() after the iterator is fully consumed."""
+        async for event in self._adapter.send_turn(handle, user_message):
+            yield event
+```
+
+Add the `StreamEvent` + `AsyncIterator` imports to registry.py's imports (in `TYPE_CHECKING` block to avoid circular issues, or directly since they're just types from contract.py):
+
+```python
+from collections.abc import AsyncIterator
+
+from call_monitor.proposal_assist.drafting.contract import (
+    AgentHandle,
+    DraftingAgent,
+    LaunchContext,
+    StreamEvent,
+)
 ```
 
 - [ ] **Step 4: Run registry tests**
@@ -1439,7 +1788,7 @@ uv run pytest tests/proposal_assist/test_drafting_registry.py -v
 
 Expected: 6 tests pass.
 
-### Subtask 8b: `WorkspaceController`
+### Subtask 9b: `WorkspaceController`
 
 - [ ] **Step 5: Write failing test**
 
@@ -1457,6 +1806,7 @@ from call_monitor.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
 from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from call_monitor.proposal_assist.drafting.locking import acquire_workspace_lock
 from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
 from tests.proposal_assist.conftest import make_chat_turn, make_workspace
 
@@ -1475,7 +1825,7 @@ async def test_controller_launch_returns_handle(pg_session_factory):
 
     handle = await controller.launch(wsid)
     assert handle.workspace_id == wsid
-    assert adapter.launches == [wsid]
+    assert adapter.launches[0].workspace_id == wsid
 
 
 @pytest.mark.asyncio
@@ -1509,10 +1859,9 @@ async def test_controller_launch_runs_orphan_sweep(pg_session_factory):
 async def test_controller_launch_passes_resume_messages_to_adapter(
     pg_session_factory,
 ):
-    """The controller computes resume messages from history and stuffs
-    them into AgentHandle.state['resume_messages']. The adapter is
-    responsible for actually replaying them at SDK startup; for the
-    fake adapter, we just verify they were attached."""
+    """The controller builds a LaunchContext with resume messages from
+    history and passes it to the adapter at launch time. For the fake
+    adapter, we verify they were recorded on the handle's state."""
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     controller = WorkspaceController(
@@ -1534,17 +1883,39 @@ async def test_controller_launch_passes_resume_messages_to_adapter(
 
 
 @pytest.mark.asyncio
-async def test_controller_launch_acquires_advisory_lock(pg_session_factory):
-    """A second launch of the same workspace, while the first handle is
-    still live, just returns the cached handle (no relaunch) — the
-    advisory-lock acquire on the first launch is the gate. The lock is
-    *held by the controller's launch-time session*, which is released
-    when the session exits the with-block."""
-    # This test asserts that launch() does NOT crash on lock contention;
-    # the cached-handle path means concurrent launches resolve to the
-    # same handle. (Lock contention as such is hard to provoke from a
-    # single test process; the locking module's own tests cover the
-    # two-session case.)
+async def test_controller_launch_holds_advisory_lock_for_handle_lifetime(
+    pg_session_factory,
+):
+    """The advisory lock is acquired at launch and held until terminate.
+    While a handle is live, a second session cannot acquire the lock.
+    After terminate, the lock is released."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory,
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    await controller.launch(wsid)
+
+    # Lock should be held — a second session cannot acquire it.
+    with pg_session_factory() as s2:
+        assert acquire_workspace_lock(s2, wsid) is False
+
+    # After terminate, the lock is released.
+    await controller.terminate(wsid)
+    with pg_session_factory() as s3:
+        assert acquire_workspace_lock(s3, wsid) is True
+
+
+@pytest.mark.asyncio
+async def test_controller_launch_returns_cached_handle_on_second_call(
+    pg_session_factory,
+):
+    """Second launch of a live workspace returns the cached handle."""
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
     controller = WorkspaceController(
@@ -1606,9 +1977,9 @@ Expected: `ModuleNotFoundError`.
 ```python
 """WorkspaceController composes the drafting machinery:
 
-  - acquire per-workspace advisory lock
-  - sweep orphaned turn_jobs rows
-  - build resume-from-history messages
+  - acquire per-workspace advisory lock (held for the handle's lifetime)
+  - sweep orphaned turn_jobs rows (inside the lock)
+  - build resume-from-history messages (inside the lock)
   - launch (or reuse) the subprocess via the registry
   - expose send_turn / terminate as a thin pass-through
 
@@ -1617,15 +1988,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from typing import Callable
 
 from sqlalchemy.orm import sessionmaker
 
 from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
+    LaunchContext,
     StreamEvent,
 )
 from call_monitor.proposal_assist.drafting.locking import (
+    LockNotAcquired,
     acquire_workspace_lock,
     release_workspace_lock,
 )
@@ -1649,39 +2021,42 @@ class WorkspaceController:
         self._session_factory = session_factory
 
     async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
-        """Launch (or return cached) handle. Each fresh launch sweeps
-        orphans and attaches resume messages."""
-        # If we already have a live handle, just hand it back — no need
-        # to re-sweep or rebuild resume.
+        """Launch (or return cached) handle. Each fresh launch:
+          1. Opens a lock-holding session (raises LockNotAcquired if
+             another process holds the lock).
+          2. Runs the orphan sweep + builds resume messages USING THAT
+             SAME SESSION (so they're inside the lock).
+          3. Builds a LaunchContext and asks the registry to launch.
+          4. Hands the lock-holding session to the registry — the
+             registry keeps it open for the handle's lifetime.
+        """
         cached = await self._registry.get_or_launch_if_exists(workspace_id)
         if cached is not None:
             return cached
 
-        # First launch in this idle window: do the full prelude.
-        with self._session_factory() as session:
-            acquired = acquire_workspace_lock(session, workspace_id)
-            if not acquired:
-                # Another instance / process holds the lock. The cached-
-                # handle path above is the in-process case; this branch
-                # is for multi-instance deployments (out of scope for v1
-                # per the spec). For now, raise — multi-instance setup
-                # is explicitly deferred per design line 79.
-                raise RuntimeError(
-                    f"workspace {workspace_id} advisory lock held by "
-                    "another process; multi-instance routing not implemented"
-                )
+        # workspace_lock_session opens a session + acquires the advisory
+        # lock; we keep it open for the handle's lifetime.
+        lock_session = self._session_factory()
+        if not acquire_workspace_lock(lock_session, workspace_id):
+            lock_session.close()
+            raise LockNotAcquired(workspace_id)
 
-            try:
-                sweep_orphaned_turn_jobs(session, workspace_id)
-                resume_messages = build_resume_messages(session, workspace_id)
-                session.commit()
-            except Exception:
-                release_workspace_lock(session, workspace_id)
-                raise
-            release_workspace_lock(session, workspace_id)
+        try:
+            sweep_orphaned_turn_jobs(lock_session, workspace_id)
+            resume_messages = build_resume_messages(lock_session, workspace_id)
+            lock_session.commit()
+        except Exception:
+            release_workspace_lock(lock_session, workspace_id)
+            lock_session.close()
+            raise
 
-        handle = await self._registry.get_or_launch(workspace_id)
-        handle.state["resume_messages"] = resume_messages
+        context = LaunchContext(
+            workspace_id=workspace_id,
+            resume_messages=resume_messages,
+        )
+        handle = await self._registry.get_or_launch(
+            workspace_id, context=context, lock_session=lock_session,
+        )
         return handle
 
     async def send_turn(
@@ -1698,33 +2073,6 @@ class WorkspaceController:
         await self._registry.terminate(workspace_id)
 ```
 
-The `SubprocessRegistry` needs two additional methods that this controller
-uses: `get_or_launch_if_exists` and `send_turn`. Update `registry.py`:
-
-```python
-    async def get_or_launch_if_exists(
-        self, workspace_id: uuid.UUID,
-    ) -> AgentHandle | None:
-        """Return the cached handle if one exists (and refresh its touch
-        timestamp); else None. Does NOT call adapter.launch."""
-        async with self._lock:
-            entry = self._entries.get(workspace_id)
-            if entry is None:
-                return None
-            entry.last_touched_monotonic = time.monotonic()
-            return entry.handle
-
-    async def send_turn(
-        self, handle: AgentHandle, user_message: str,
-    ) -> "AsyncIterator[StreamEvent]":
-        """Pass-through to the adapter's send_turn. The controller calls
-        touch() after the iterator is fully consumed."""
-        async for event in self._adapter.send_turn(handle, user_message):
-            yield event
-```
-
-Add the `StreamEvent` import to registry.py's imports.
-
 - [ ] **Step 8: Run + commit**
 
 ```bash
@@ -1736,7 +2084,7 @@ git commit -m "feat(b3): SubprocessRegistry + WorkspaceController"
 
 ---
 
-## Task 9: `ClaudeAgentSDKAdapter` — real SDK integration
+## Task 10: `ClaudeAgentSDKAdapter` — real SDK integration
 
 **This is the only task that imports `claude_agent_sdk`.** Treat it as a small discovery exercise first, then code.
 
@@ -1801,11 +2149,14 @@ async def test_claude_adapter_implements_protocol():
 async def test_claude_adapter_can_round_trip_a_simple_turn():
     """End-to-end: launch, send a one-line turn, receive at least one
     AssistantTextEvent and a TurnDoneEvent. Uses Haiku for speed/cost."""
+    from call_monitor.proposal_assist.drafting.contract import LaunchContext
+
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5", workspaces_dir="/tmp/test_workspaces",
     )
     wsid = uuid.uuid4()
-    handle = await adapter.launch(wsid)
+    ctx = LaunchContext(workspace_id=wsid)
+    handle = await adapter.launch(ctx)
     try:
         events = []
         async for event in adapter.send_turn(handle, "Say 'hello'."):
@@ -1831,13 +2182,18 @@ NOTE FOR THE IMPLEMENTER: the SDK API has evolved. The skeleton below
 matches the SDK shape as of plan-writing time (May 2026). Cross-check
 with `uv run python -c "import claude_agent_sdk; help(...)"` before
 trusting any specific call.
+
+Lifecycle: one connect() per workspace launch, one disconnect() at
+terminate. send_turn() calls client.query() + iterates
+client.receive_response() WITHOUT an `async with` block — re-entering
+`async with` per turn would re-handshake the subprocess, defeating the
+per-workspace persistent-subprocess model. If the SDK's API differs,
+document the deviation in the commit message and adapt accordingly.
 """
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 # The exact import set depends on the SDK version. Likely candidates:
 #   from claude_agent_sdk import query, ClaudeAgentOptions
@@ -1850,6 +2206,7 @@ import claude_agent_sdk
 from call_monitor.proposal_assist.drafting.contract import (
     AgentHandle,
     AssistantTextEvent,
+    LaunchContext,
     StreamEvent,
     ToolResultEvent,
     ToolUseEvent,
@@ -1858,15 +2215,19 @@ from call_monitor.proposal_assist.drafting.contract import (
 
 
 class ClaudeAgentSDKAdapter:
-    """Wraps claude-agent-sdk in a per-workspace subprocess.
+    """Wraps claude-agent-sdk in a per-workspace persistent client.
 
-    For each workspace:
-      - launch() opens a session against the SDK, seeded with resume
-        messages from AgentHandle.state['resume_messages'] (set by
-        WorkspaceController).
-      - send_turn() streams the SDK's response messages, translating
-        each to a StreamEvent the rest of the codebase understands.
-      - terminate() closes the session.
+    Lifecycle per workspace:
+      - launch(context): construct + connect the SDK client, seeding it
+        with context.resume_messages so prior history is replayed before
+        the first new turn. The connected client is stored on
+        AgentHandle.state['client'].
+      - send_turn(handle, msg): calls client.query(msg) then iterates
+        client.receive_response() for streaming events. No async-with
+        wrapper — the client is already connected; re-wrapping would
+        re-handshake the subprocess on every turn.
+      - terminate(handle): calls client.disconnect() and discards the
+        client from state.
     """
 
     def __init__(
@@ -1880,20 +2241,16 @@ class ClaudeAgentSDKAdapter:
         self._workspaces_dir = Path(workspaces_dir)
         self._max_tokens = max_tokens
 
-    async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
-        """Create an SDK session for this workspace. The session itself
-        is stored on AgentHandle.state so send_turn can talk to it.
+    async def launch(self, context: LaunchContext) -> AgentHandle:
+        """Connect the SDK client for this workspace, seeding resume_messages.
 
-        IMPLEMENTER: depending on the SDK shape, you might:
-          (a) Hold a long-lived ClaudeSDKClient and call .query() per turn
-          (b) Spawn a subprocess and pipe stdio
-          (c) Just configure ClaudeAgentOptions and create a fresh query()
-              call per send_turn (simplest; lose conversation continuity
-              unless you replay history each turn)
-
-        Option (a) matches the spec's 'one agent loop per session' model
-        best. The skeleton below assumes (a).
+        IMPLEMENTER: verify the exact options/connect signature in Step 1.
+        The SDK's connect() (or __aenter__) may accept a messages= kwarg
+        to seed the session's conversation history. Per the SDK docs
+        (https://platform.claude.com/docs/en/agent-sdk/python), the
+        messages parameter on connect() seeds the session.
         """
+        workspace_id = context.workspace_id
         repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
         # Options is the v0.0.x name; later versions may use ClaudeAgentOptions.
         options = claude_agent_sdk.ClaudeAgentOptions(
@@ -1901,62 +2258,63 @@ class ClaudeAgentSDKAdapter:
             model=self._model,
             max_turns=1,
         )
-        # Real client construction may differ; verify in Step 1.
+        # Real client construction + connection may differ; verify in Step 1.
+        # If the SDK uses __aenter__ instead of connect(), use:
+        #   client = await claude_agent_sdk.ClaudeSDKClient(options=options).__aenter__()
+        # If connect() accepts messages= to seed history:
+        #   await client.connect(messages=context.resume_messages)
         client = claude_agent_sdk.ClaudeSDKClient(options=options)
+        await client.connect(messages=context.resume_messages)
         return AgentHandle(
             workspace_id=workspace_id,
-            state={"client": client, "options": options},
+            state={"client": client},
         )
 
     async def send_turn(
         self, handle: AgentHandle, user_message: str,
     ) -> AsyncIterator[StreamEvent]:
+        """Stream events for one turn. The client is already connected
+        (from launch); do NOT wrap in `async with` — that re-connects."""
         client = handle.state["client"]
-        # The exact call pattern depends on the SDK. As a typical shape:
-        #   async with client:
-        #       await client.query(user_message)
-        #       async for message in client.receive_response():
-        #           yield translate(message)
         tokens_in = 0
         tokens_out = 0
         model = self._model
 
-        async with client:
-            await client.query(user_message)
-            async for message in client.receive_response():
-                # Translate SDK message types → our StreamEvent types.
-                # The exact attribute names depend on the SDK. Verify
-                # with the discovery output from Step 1.
-                if isinstance(message, claude_agent_sdk.AssistantMessage):
-                    for block in message.content:
-                        if hasattr(block, "text"):
-                            yield AssistantTextEvent(text=block.text)
-                        elif hasattr(block, "tool_use_id"):
-                            yield ToolUseEvent(
-                                tool_name=block.name,
-                                tool_use_id=block.id,
-                                input=block.input,
-                            )
-                elif isinstance(message, claude_agent_sdk.UserMessage):
-                    # Tool results come back as UserMessage(content=[ToolResultBlock])
-                    for block in message.content:
-                        if hasattr(block, "tool_use_id"):
-                            yield ToolResultEvent(
-                                tool_use_id=block.tool_use_id,
-                                content=str(block.content),
-                                is_error=bool(getattr(block, "is_error", False)),
-                            )
-                elif isinstance(message, claude_agent_sdk.ResultMessage):
-                    usage = getattr(message, "usage", None)
-                    if usage is not None:
-                        tokens_in = getattr(usage, "input_tokens", 0)
-                        tokens_out = getattr(usage, "output_tokens", 0)
-                    yield TurnDoneEvent(
-                        tokens_in=tokens_in,
-                        tokens_out=tokens_out,
-                        model=model,
-                    )
-                    return
+        await client.query(user_message)
+        async for message in client.receive_response():
+            # Translate SDK message types → our StreamEvent types.
+            # The exact attribute names depend on the SDK. Verify
+            # with the discovery output from Step 1.
+            if isinstance(message, claude_agent_sdk.AssistantMessage):
+                for block in message.content:
+                    if hasattr(block, "text"):
+                        yield AssistantTextEvent(text=block.text)
+                    elif hasattr(block, "tool_use_id"):
+                        yield ToolUseEvent(
+                            tool_name=block.name,
+                            tool_use_id=block.id,
+                            input=block.input,
+                        )
+            elif isinstance(message, claude_agent_sdk.UserMessage):
+                # Tool results come back as UserMessage(content=[ToolResultBlock])
+                for block in message.content:
+                    if hasattr(block, "tool_use_id"):
+                        yield ToolResultEvent(
+                            tool_use_id=block.tool_use_id,
+                            content=str(block.content),
+                            is_error=bool(getattr(block, "is_error", False)),
+                        )
+            elif isinstance(message, claude_agent_sdk.ResultMessage):
+                usage = getattr(message, "usage", None)
+                if usage is not None:
+                    tokens_in = getattr(usage, "input_tokens", 0)
+                    tokens_out = getattr(usage, "output_tokens", 0)
+                yield TurnDoneEvent(
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    model=model,
+                )
+                return
 
         # Defensive: if the SDK never yielded a ResultMessage, emit a
         # bare TurnDoneEvent so the consumer's loop exits cleanly.
@@ -1967,9 +2325,14 @@ class ClaudeAgentSDKAdapter:
         )
 
     async def terminate(self, handle: AgentHandle) -> None:
+        """Disconnect the SDK client. Use disconnect() not close() per
+        the SDK docs. If the SDK uses __aexit__ instead, adapt."""
         client = handle.state.pop("client", None)
-        if client is not None and hasattr(client, "close"):
-            await client.close()
+        if client is not None:
+            if hasattr(client, "disconnect"):
+                await client.disconnect()
+            elif hasattr(client, "__aexit__"):
+                await client.__aexit__(None, None, None)
 ```
 
 - [ ] **Step 4: Run smoke tests (only with API key)**
@@ -2004,7 +2367,7 @@ Discovery notes:
 
 ---
 
-## Task 10: DI factory + milestone
+## Task 11: DI factory + milestone
 
 A small factory function that returns a `WorkspaceController` wired up with the right adapter for the environment (Fake in tests; Claude in production). Plus the final milestone (full suite + lint + surface).
 
@@ -2019,7 +2382,6 @@ A small factory function that returns a `WorkspaceController` wired up with the 
 ```python
 import pytest
 
-from call_monitor.proposal_assist.drafting.contract import DraftingAgent
 from call_monitor.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
@@ -2170,7 +2532,183 @@ Surface to the user:
 
 > B3 complete. The drafting package gives the rest of the codebase a `WorkspaceController` with `launch` / `send_turn` / `terminate`. Real Claude SDK integration lives in one file (`claude_adapter.py`); tests use `FakeAgentAdapter`. Slice A / B / C / D / E and B4–B8 can now build on the contract without re-deriving the subprocess/lock/sweep/resume plumbing.
 >
-> **Not yet wired:** scheduler tick for periodic idle sweep, FastAPI startup hook that constructs the controller, SSE bridge for streaming events to the browser. Those land in B4 (turn queue) or B6 (web UX).
+> **Not yet wired (after Task 11):** FastAPI startup hook that constructs the controller, SSE bridge for streaming events to the browser. Those land in B4 (turn queue) or B6 (web UX). The scheduler idle-sweep tick lands in Task 12 below.
+
+---
+
+## Task 12: Register the idle-sweep scheduler tick
+
+`SubprocessRegistry.sweep_idle()` exists but nothing calls it. Without a tick, idle subprocesses live forever (or until process restart). Register it in `build_scheduler` alongside the existing Phase 0 drain tick.
+
+**Files:**
+- Modify: `src/call_monitor/scheduler.py`
+- Modify: `src/call_monitor/main.py` — pass the workspace controller into the scheduler builder
+- Modify: `src/call_monitor/config.py` — add `workspace_idle_sweep_seconds` setting (separate from idle timeout; this is the sweep cadence)
+- Test: `tests/proposal_assist/test_drafting_scheduler_tick.py`
+
+- [ ] **Step 1: Add the setting**
+
+In `Settings`:
+
+```python
+    workspace_idle_sweep_seconds: int = Field(
+        default=60,
+        alias="WORKSPACE_IDLE_SWEEP_SECONDS",
+        description=(
+            "Cadence at which the scheduler asks the subprocess "
+            "registry to sweep handles idle for "
+            "WORKSPACE_IDLE_TIMEOUT_SECONDS or longer. Faster sweep = "
+            "tighter teardown latency but more polling."
+        ),
+    )
+```
+
+- [ ] **Step 2: Write failing test**
+
+`tests/proposal_assist/test_drafting_scheduler_tick.py`:
+
+```python
+"""The scheduler-tick that drives SubprocessRegistry.sweep_idle.
+
+We don't actually run the scheduler — we verify that build_scheduler
+registers a job with the right id and trigger, and that invoking the
+job's closure calls registry.sweep_idle()."""
+import asyncio
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_build_scheduler_registers_idle_sweep_tick(monkeypatch, pg_url):
+    from call_monitor.config import Settings
+    from call_monitor.db.session import make_engine, make_session_factory
+    from call_monitor.embeddings.client import OllamaEmbedClient
+    from call_monitor.proposal_assist.drafting.factory import (
+        build_workspace_controller,
+    )
+    from call_monitor.scheduler import build_scheduler
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
+    settings = Settings()
+
+    engine = make_engine(settings.database_url)
+    try:
+        session_factory = make_session_factory(engine)
+        controller = build_workspace_controller(
+            settings=settings, session_factory=session_factory,
+        )
+        # Replace sweep_idle with a tracker.
+        sweep_calls = {"n": 0}
+        original_sweep = controller._registry.sweep_idle
+
+        async def tracking_sweep():
+            sweep_calls["n"] += 1
+            return await original_sweep()
+
+        controller._registry.sweep_idle = tracking_sweep
+
+        class _Alerter:
+            def __call__(self, *a, **kw): pass
+
+        embed_client = OllamaEmbedClient(
+            base_url="http://localhost", model="x",
+        )
+        sched = build_scheduler(
+            session_factory=session_factory,
+            settings=settings,
+            alerter=_Alerter(),
+            ollama_url="http://localhost",
+            gemma_model="gemma:test",
+            ranking_tick_seconds=60,
+            ranking_queue_batch=10,
+            embedding_pregate_threshold=0.3,
+            embed_client=embed_client,
+            workspace_controller=controller,
+            start=False,
+        )
+        try:
+            job = sched.get_job("drafting_idle_sweep")
+            assert job is not None
+            assert (
+                job.trigger.interval.total_seconds()
+                == settings.workspace_idle_sweep_seconds
+            )
+            # Invoke the closure once — should call sweep_idle().
+            # The closure is sync (APScheduler default); it schedules the
+            # async sweep on the running loop. For this test, we just
+            # invoke it and let asyncio.run handle it.
+            job.func()
+            # Give the event loop a moment if the closure schedules async.
+            await asyncio.sleep(0.05)
+            assert sweep_calls["n"] >= 1
+        finally:
+            sched.shutdown(wait=False)
+    finally:
+        engine.dispose()
+```
+
+- [ ] **Step 3: Implement in scheduler.py**
+
+Add `workspace_controller: WorkspaceController` to `build_scheduler`'s keyword-only params. Inside the function, after the Phase 0 tick registration:
+
+```python
+    # Drafting subprocess idle sweep.
+    def _drafting_idle_sweep() -> None:
+        """Closure: APScheduler calls this with no args. We capture the
+        workspace_controller from build_scheduler's scope."""
+        import asyncio
+
+        try:
+            asyncio.run(workspace_controller._registry.sweep_idle())
+        except Exception:
+            _logger.exception("drafting.idle_sweep failed")
+
+    sched.add_job(
+        _drafting_idle_sweep,
+        trigger=IntervalTrigger(
+            seconds=settings.workspace_idle_sweep_seconds,
+        ),
+        id="drafting_idle_sweep",
+        max_instances=1,
+        coalesce=True,
+    )
+```
+
+- [ ] **Step 4: Wire in main.py**
+
+In `src/call_monitor/main.py`, where `build_scheduler` is called inside `create_app()`, construct the workspace controller and pass it in:
+
+```python
+from call_monitor.proposal_assist.drafting.factory import (
+    build_workspace_controller,
+)
+
+# Inside create_app(), near the existing controller construction:
+workspace_controller = build_workspace_controller(
+    settings=settings, session_factory=session_factory,
+)
+app.state.workspace_controller = workspace_controller
+
+# When calling build_scheduler, add:
+sched = build_scheduler(
+    ...,  # existing args
+    workspace_controller=workspace_controller,
+    ...,
+)
+```
+
+- [ ] **Step 5: Run + commit**
+
+```bash
+uv run pytest tests/proposal_assist/test_drafting_scheduler_tick.py -v
+uv run ruff format src/call_monitor/scheduler.py src/call_monitor/main.py src/call_monitor/config.py tests/proposal_assist/test_drafting_scheduler_tick.py
+git add src/call_monitor/scheduler.py src/call_monitor/main.py src/call_monitor/config.py tests/proposal_assist/test_drafting_scheduler_tick.py
+git commit -m "feat(b3): register drafting idle-sweep scheduler tick"
+```
 
 ---
 
@@ -2178,11 +2716,11 @@ Surface to the user:
 
 1. **`pytest-asyncio` mode**: All tests use `async def` + `@pytest.mark.asyncio`. The project's `pyproject.toml` should already have `asyncio_mode = "auto"` (verify with `grep asyncio_mode pyproject.toml`). If auto-mode is enabled, the decorators are redundant but harmless; either form runs.
 
-2. **Advisory lock release on session error**: `locking.release_workspace_lock` is called in a `try/finally`-style pattern in `controller.py`. Postgres also auto-releases on disconnect, but explicit release is cleaner. If the controller's session raises before reaching the unlock call, the session's exit handler closes the connection and Postgres releases the lock at that point — no leak.
+2. **Advisory lock held for handle lifetime**: The lock-holding session is opened in `WorkspaceController.launch()` and passed to the registry entry. The registry's `terminate()` and `sweep_idle()` release the lock and close the session before calling adapter.terminate(). Postgres also auto-releases on disconnect, but explicit release is cleaner and prevents the lock from persisting after a crashed session.
 
-3. **Multi-instance routing**: Per the spec, multi-instance deployments are out of scope for v1. The controller's `acquire_workspace_lock` returning False raises a `RuntimeError` with an explicit "not implemented" message — this surfaces the limitation rather than hiding it. When the org goes multi-instance (the spec mentions `workspaces.served_by_instance` as the future fix), revisit this branch.
+3. **Multi-instance routing**: Per the spec, multi-instance deployments are out of scope for v1. The controller's `acquire_workspace_lock` returning False raises `LockNotAcquired` — this surfaces the limitation rather than hiding it. When the org goes multi-instance (the spec mentions `workspaces.served_by_instance` as the future fix), revisit this branch.
 
-4. **Resume-message format**: Task 7 produces a list of `{"role": ..., "content": ...}` dicts. The exact `content` shape (string vs list-of-blocks) depends on the SDK's `messages=` option format. Cross-reference with Task 9's discovery. If the SDK wants strings instead of dicts, `resume.py` needs a small flattening pass — track as a Task 9 follow-up.
+4. **Resume-message format**: Task 8 produces a list of `{"role": ..., "content": ...}` dicts. The exact `content` shape (string vs list-of-blocks) depends on the SDK's `messages=` option format. Cross-reference with Task 10's discovery. If the SDK wants strings instead of dicts, `resume.py` needs a small flattening pass — track as a Task 10 follow-up.
 
 5. **Tool registration deferred**: B3 produces the plumbing for `ToolUseEvent` / `ToolResultEvent` to flow through. B5 implements actual tool handlers (`edit_proposal`, etc.) and registers them with the Claude adapter at construction time. Until B5 lands, the Claude adapter's tool-routing path is exercised only by the smoke test (which doesn't trigger any tool calls).
 
@@ -2191,4 +2729,4 @@ Surface to the user:
    - Stash it on `app.state.workspace_controller`.
    - Add an SSE endpoint that wraps `controller.send_turn(...)`.
 
-7. **Scheduler idle-sweep**: B3 doesn't register the `SubprocessRegistry.sweep_idle` call as a scheduler tick. That's a follow-up (probably in B4 alongside the chat-machinery integration, or in B8 alongside other ops hygiene). For now, idle handles persist until process exit — acceptable for v1 since workspaces are torn down on app restart anyway.
+7. **Scheduler idle-sweep**: Task 12 registers the sweep tick. The `asyncio.run()` pattern in the APScheduler closure works because APScheduler runs jobs in a threadpool by default; the closure creates a fresh event loop per invocation. If the project later switches to an async APScheduler executor, replace `asyncio.run()` with a direct `await`.
