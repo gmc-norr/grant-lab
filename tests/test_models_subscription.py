@@ -2,11 +2,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Profile, Subscription, User
+from call_manager.db.models import Profile, Subscription, User
 
 
 def _user_and_profile(s, email="u@ki.se", profile_name="G"):
-    from call_monitor.db.models import ProfileKind
+    from call_manager.db.models import ProfileKind
+
     u = User(email=email)
     s.add(u)
     s.flush()

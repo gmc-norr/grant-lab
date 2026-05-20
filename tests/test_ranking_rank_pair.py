@@ -5,9 +5,9 @@ from functools import partial
 
 import httpx
 
-from call_monitor.ranking.ollama_client import OllamaClient
-from call_monitor.ranking.rank_pair import RankResult
-from call_monitor.ranking.rank_pair import rank_pair as _rank_pair
+from call_manager.ranking.ollama_client import OllamaClient
+from call_manager.ranking.rank_pair import RankResult
+from call_manager.ranking.rank_pair import rank_pair as _rank_pair
 
 _NOW = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
 # Mirrors Settings.embedding_pregate_threshold default. Most tests don't tune
@@ -22,6 +22,7 @@ class _Profile:
     description: str = ""
     structured: dict = None
     budget_currency: str | None = None
+
     @property
     def kind(self):
         return type("K", (), {"value": "group"})()
@@ -44,17 +45,22 @@ def _ollama_mock(*, content: dict, logprobs: list[dict] | None = None):
     """Build a fake Ollama returning the given content + logprobs."""
     body = {
         "model": "gemma4:e4b-it-q4_K_M",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": json.dumps(content)},
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": json.dumps(content)},
+            }
+        ],
     }
     if logprobs is not None:
         body["choices"][0]["logprobs"] = {"content": logprobs}
+
     def handler(request):
         return httpx.Response(200, json=body)
+
     return OllamaClient(
-        base_url="http://x", model="gemma4:e4b-it-q4_K_M",
+        base_url="http://x",
+        model="gemma4:e4b-it-q4_K_M",
         transport=httpx.MockTransport(handler),
     )
 
@@ -69,11 +75,15 @@ def test_rank_pair_clean_pass_with_logprobs():
             "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
         },
         logprobs=[
-            {"token": "4", "logprob": -0.05, "top_logprobs": [
-                {"token": "4", "logprob": -0.05},
-                {"token": "5", "logprob": -3.0},
-                {"token": "3", "logprob": -3.5},
-            ]},
+            {
+                "token": "4",
+                "logprob": -0.05,
+                "top_logprobs": [
+                    {"token": "4", "logprob": -0.05},
+                    {"token": "5", "logprob": -3.0},
+                    {"token": "3", "logprob": -3.5},
+                ],
+            },
         ],
     )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
@@ -89,12 +99,16 @@ def test_rank_pair_short_circuits_on_gate_fail():
     """Timeline gate fails (deadline tomorrow) — no LLM call."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     from datetime import timedelta
+
     call = _Call(deadline=_NOW + timedelta(days=1))
+
     # Build a client that asserts it's NEVER called.
     def handler(request):
         raise AssertionError("LLM should not be called when gate fails")
+
     client = OllamaClient(
-        base_url="http://x", model="gemma4:e4b-it-q4_K_M",
+        base_url="http://x",
+        model="gemma4:e4b-it-q4_K_M",
         transport=httpx.MockTransport(handler),
     )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
@@ -106,11 +120,13 @@ def test_rank_pair_short_circuits_on_gate_fail():
 def test_rank_pair_eligibility_fail_zeros_score():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
-    client = _ollama_mock(content={
-        "topic_fit": {"rating": 4, "rationale": "x"},
-        "eligibility": {"rating": "fail", "rationale": "company-only"},
-        "exclusions": {"rating": "pass", "rationale": "x"},
-    })
+    client = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "x"},
+            "eligibility": {"rating": "fail", "rationale": "company-only"},
+            "exclusions": {"rating": "pass", "rationale": "x"},
+        }
+    )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
     assert r.score == 0
     assert r.reason == "eligibility"
@@ -121,11 +137,15 @@ def _remote_mock(*, model: str = "claude-sonnet-4-6", content: dict | None = Non
     Used so router-routing tests don't depend on the real Anthropic SDK
     being installed or reachable (they assert routing behaviour only)."""
     from unittest.mock import MagicMock
-    payload = json.dumps(content or {
-        "topic_fit": {"rating": 5, "rationale": "ideal", "quoted_evidence": "match"},
-        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-    })
+
+    payload = json.dumps(
+        content
+        or {
+            "topic_fit": {"rating": 5, "rationale": "ideal", "quoted_evidence": "match"},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
     client = MagicMock()
     client.model = model
     client.chat.return_value = {
@@ -141,6 +161,7 @@ def _profile_with_vector(*, sim_with_call: float):
     embedding gate doesn't care about dimension, only matching across
     profile + call."""
     import math
+
     # Profile vector along x-axis, call vector at angle whose cos = target.
     theta = math.acos(max(min(sim_with_call, 1.0), -1.0))
     p_vec = [1.0, 0.0, 0.0, 0.0]
@@ -159,11 +180,13 @@ def test_rank_pair_routes_to_remote_when_cosine_above_threshold():
     the result's .model must report the remote model so the UI badge
     and audit trail attribute the score to the right backend."""
     profile, call = _profile_with_vector(sim_with_call=0.85)
-    local = _ollama_mock(content={  # would-fail asserts if called
-        "topic_fit": {"rating": 1, "rationale": "wrong client"},
-        "eligibility": {"rating": "fail", "rationale": "wrong client"},
-        "exclusions": {"rating": "fail", "rationale": "wrong client"},
-    })
+    local = _ollama_mock(
+        content={  # would-fail asserts if called
+            "topic_fit": {"rating": 1, "rationale": "wrong client"},
+            "eligibility": {"rating": "fail", "rationale": "wrong client"},
+            "exclusions": {"rating": "fail", "rationale": "wrong client"},
+        }
+    )
     local.chat = lambda *a, **kw: (_ for _ in ()).throw(
         AssertionError("local client must not be called when cosine ≥ threshold")
     )
@@ -171,8 +194,12 @@ def test_rank_pair_routes_to_remote_when_cosine_above_threshold():
     remote = _remote_mock()
 
     r = rank_pair(
-        client=local, profile=profile, call=call, now=_NOW,
-        remote_client=remote, remote_cosine_threshold=0.50,
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        remote_cosine_threshold=0.50,
     )
     assert remote.chat.call_count == 1
     assert r.model == "claude-sonnet-4-6"
@@ -183,15 +210,21 @@ def test_rank_pair_stays_local_when_cosine_below_threshold():
     """Pairs below the escalation cutoff use the local Gemma — saves
     the API call entirely."""
     profile, call = _profile_with_vector(sim_with_call=0.35)
-    local = _ollama_mock(content={
-        "topic_fit": {"rating": 3, "rationale": "ok"},
-        "eligibility": {"rating": "pass"},
-        "exclusions": {"rating": "pass"},
-    })
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 3, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
     remote = _remote_mock()
     r = rank_pair(
-        client=local, profile=profile, call=call, now=_NOW,
-        remote_client=remote, remote_cosine_threshold=0.50,
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        remote_cosine_threshold=0.50,
     )
     assert remote.chat.call_count == 0
     assert r.model.startswith("gemma4")
@@ -201,14 +234,20 @@ def test_rank_pair_stays_local_when_remote_disabled():
     """No remote_client (anthropic_api_key unset) ⇒ never escalate,
     even on a 0.9 cosine. This is the prod-safe default for dev/CI."""
     profile, call = _profile_with_vector(sim_with_call=0.90)
-    local = _ollama_mock(content={
-        "topic_fit": {"rating": 3, "rationale": "ok"},
-        "eligibility": {"rating": "pass"},
-        "exclusions": {"rating": "pass"},
-    })
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 3, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
     r = rank_pair(
-        client=local, profile=profile, call=call, now=_NOW,
-        remote_client=None, remote_cosine_threshold=0.50,
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        remote_cosine_threshold=0.50,
     )
     assert r.model.startswith("gemma4")
 
@@ -220,15 +259,21 @@ def test_rank_pair_stays_local_when_cosine_missing():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
     # Neither has a vector ⇒ cosine = None ⇒ embedding gate UNKNOWN
-    local = _ollama_mock(content={
-        "topic_fit": {"rating": 3, "rationale": "ok"},
-        "eligibility": {"rating": "pass"},
-        "exclusions": {"rating": "pass"},
-    })
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 3, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
     remote = _remote_mock()
     r = rank_pair(
-        client=local, profile=profile, call=call, now=_NOW,
-        remote_client=remote, remote_cosine_threshold=0.50,
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        remote_cosine_threshold=0.50,
     )
     assert remote.chat.call_count == 0
     assert r.embed_similarity is None
@@ -255,10 +300,14 @@ def test_rank_pair_must_include_bypasses_timeline_gate():
     """A call matching a must_include keyword still gets LLM-scored even when
     the timeline gate would have FAILed (deadline tomorrow)."""
     from datetime import timedelta
-    profile = _Profile(structured={
-        "areas": [], "hard_exclusions": [],
-        "must_include": ["pathology"],
-    })
+
+    profile = _Profile(
+        structured={
+            "areas": [],
+            "hard_exclusions": [],
+            "must_include": ["pathology"],
+        }
+    )
     call = _Call(
         title="Pathology funding announcement",
         summary="x",
@@ -271,10 +320,14 @@ def test_rank_pair_must_include_bypasses_timeline_gate():
             "exclusions": {"rating": "pass"},
         },
         logprobs=[
-            {"token": "4", "logprob": -0.1, "top_logprobs": [
-                {"token": "4", "logprob": -0.1},
-                {"token": "3", "logprob": -2.5},
-            ]},
+            {
+                "token": "4",
+                "logprob": -0.1,
+                "top_logprobs": [
+                    {"token": "4", "logprob": -0.1},
+                    {"token": "3", "logprob": -2.5},
+                ],
+            },
         ],
     )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
@@ -292,20 +345,27 @@ def test_rank_pair_must_include_match_requires_term_in_text():
     """Profile has must_include keywords but call text doesn't contain any —
     behaves like a normal pair (timeline FAIL → score=0)."""
     from datetime import timedelta
-    profile = _Profile(structured={
-        "areas": [], "hard_exclusions": [],
-        "must_include": ["pathology"],
-    })
+
+    profile = _Profile(
+        structured={
+            "areas": [],
+            "hard_exclusions": [],
+            "must_include": ["pathology"],
+        }
+    )
     call = _Call(
         title="Unrelated call about EVs",
         summary="vehicle electrification",
         deadline=_NOW + timedelta(days=1),  # timeline FAIL
     )
+
     # LLM should NOT be called.
     def boom(req):
         raise AssertionError("LLM should not be called")
+
     bad_client = OllamaClient(
-        base_url="http://x", model="m",
+        base_url="http://x",
+        model="m",
         transport=httpx.MockTransport(boom),
     )
     r = rank_pair(client=bad_client, profile=profile, call=call, now=_NOW)
@@ -318,6 +378,7 @@ def test_rank_pair_must_include_match_requires_term_in_text():
 # Plan D Task 5 — embedding pre-gate integration
 # ---------------------------------------------------------------------------
 
+
 def _happy_path_v2_client():
     """Clean LLM response with logprobs that yield expected ~4.0 → score 80."""
     return _ollama_mock(
@@ -327,11 +388,15 @@ def _happy_path_v2_client():
             "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
         },
         logprobs=[
-            {"token": "4", "logprob": -0.05, "top_logprobs": [
-                {"token": "4", "logprob": -0.05},
-                {"token": "5", "logprob": -3.0},
-                {"token": "3", "logprob": -3.5},
-            ]},
+            {
+                "token": "4",
+                "logprob": -0.05,
+                "top_logprobs": [
+                    {"token": "4", "logprob": -0.05},
+                    {"token": "5", "logprob": -3.0},
+                    {"token": "3", "logprob": -3.5},
+                ],
+            },
         ],
     )
 
@@ -340,6 +405,7 @@ def _make_profile(*, embedding, embedding_model, structured=None, description="d
     """Build a SimpleNamespace profile with all the attributes rank_pair +
     build_messages need."""
     from types import SimpleNamespace
+
     return SimpleNamespace(
         id=1,
         name="P",
@@ -352,10 +418,12 @@ def _make_profile(*, embedding, embedding_model, structured=None, description="d
     )
 
 
-def _make_call(*, embedding, embedding_model, title="T", summary="S", full_text="F",
-               deadline_days=30):
+def _make_call(
+    *, embedding, embedding_model, title="T", summary="S", full_text="F", deadline_days=30
+):
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
+
     return SimpleNamespace(
         id=1,
         title=title,
@@ -363,8 +431,11 @@ def _make_call(*, embedding, embedding_model, title="T", summary="S", full_text=
         full_text=full_text,
         programme=None,
         deadline=datetime.now(UTC) + timedelta(days=deadline_days),
-        budget_min=None, budget_max=None, currency=None,
-        structured={}, keywords=[],
+        budget_min=None,
+        budget_max=None,
+        currency=None,
+        structured={},
+        keywords=[],
         embedding=embedding,
         embedding_model=embedding_model,
     )
@@ -469,7 +540,7 @@ def test_rank_pair_returns_none_similarity_on_model_mismatch(caplog):
 
     client = _happy_path_v2_client()
 
-    with caplog.at_level(logging.WARNING, logger="call_monitor.ranking.rank_pair"):
+    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.rank_pair"):
         result = rank_pair(client=client, profile=profile, call=call, now=datetime.now(UTC))
 
     # LLM ran (gate was UNKNOWN, not FAIL)
@@ -542,7 +613,10 @@ def test_rank_pair_threshold_kwarg_actually_changes_the_gate_cutoff():
     # Note: bypass the partial-wrapped `rank_pair` — we want to set the
     # threshold explicitly, not inherit the test-default of 0.30.
     result = _rank_pair(
-        client=client, profile=profile, call=call, now=datetime.now(UTC),
+        client=client,
+        profile=profile,
+        call=call,
+        now=datetime.now(UTC),
         embedding_threshold=0.5,
     )
     assert result.score == 0
@@ -559,7 +633,7 @@ def test_call_matches_must_include_searches_full_text():
     missed by both the timeline-bypass logic and the digest bucket."""
     from types import SimpleNamespace
 
-    from call_monitor.ranking.rank_pair import _call_matches_must_include
+    from call_manager.ranking.rank_pair import _call_matches_must_include
 
     profile = SimpleNamespace(structured={"must_include": ["ferroptosis"]})
     call = SimpleNamespace(
@@ -581,6 +655,6 @@ def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("EMBEDDING_PREGATE_THRESHOLD", "0.42")
 
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     assert Settings().embedding_pregate_threshold == 0.42

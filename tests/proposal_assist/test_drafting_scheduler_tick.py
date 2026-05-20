@@ -13,12 +13,12 @@ import pytest
 async def test_build_scheduler_registers_idle_sweep_tick(monkeypatch, pg_url):
     from unittest.mock import MagicMock
 
-    from call_monitor.config import Settings
-    from call_monitor.db.session import make_engine, make_session_factory
-    from call_monitor.proposal_assist.drafting.factory import (
+    from call_manager.config import Settings
+    from call_manager.db.session import make_engine, make_session_factory
+    from call_manager.proposal_assist.drafting.factory import (
         build_workspace_controller,
     )
-    from call_monitor.scheduler import build_scheduler
+    from call_manager.scheduler import build_scheduler
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
@@ -99,12 +99,12 @@ async def test_idle_sweep_runs_on_app_loop_not_fresh_loop(monkeypatch, pg_url):
     (which acts as the simulated FastAPI lifespan loop)."""
     from unittest.mock import MagicMock
 
-    from call_monitor.config import Settings
-    from call_monitor.db.session import make_engine, make_session_factory
-    from call_monitor.proposal_assist.drafting.factory import (
+    from call_manager.config import Settings
+    from call_manager.db.session import make_engine, make_session_factory
+    from call_manager.proposal_assist.drafting.factory import (
         build_workspace_controller,
     )
-    from call_monitor.scheduler import build_scheduler
+    from call_manager.scheduler import build_scheduler
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")

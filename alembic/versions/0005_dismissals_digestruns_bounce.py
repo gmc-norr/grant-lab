@@ -29,11 +29,15 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("user_id", "call_id", name="pk_user_call_dismissals"),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], ondelete="CASCADE",
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
             name="fk_user_call_dismissals_user",
         ),
         sa.ForeignKeyConstraint(
-            ["call_id"], ["calls.id"], ondelete="CASCADE",
+            ["call_id"],
+            ["calls.id"],
+            ondelete="CASCADE",
             name="fk_user_call_dismissals_call",
         ),
     )
@@ -56,7 +60,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name="pk_digest_runs"),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], ondelete="CASCADE",
+            ["user_id"],
+            ["users.id"],
+            ondelete="CASCADE",
             name="fk_digest_runs_user",
         ),
     )

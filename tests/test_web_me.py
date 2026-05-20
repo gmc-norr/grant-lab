@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import User
+from call_manager.main import create_app
 
 
 def _logged_in_client(monkeypatch, pg_url, pg_session_factory, *, email="alice@ki.se"):
@@ -80,7 +80,8 @@ def test_static_htmx_is_served_locally(monkeypatch, pg_url):
     unpkg, this fails."""
     from fastapi.testclient import TestClient
 
-    from call_monitor.main import create_app
+    from call_manager.main import create_app
+
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
@@ -100,7 +101,7 @@ def test_me_post_returns_401_when_user_gone(monkeypatch, pg_url, pg_session_fact
     and the POST handler re-fetching by id, we must 401 — not 500 on
     `None.name = ...`.
     """
-    from call_monitor.auth import dependencies as deps
+    from call_manager.auth import dependencies as deps
 
     client, uid = _logged_in_client(monkeypatch, pg_url, pg_session_factory)
 

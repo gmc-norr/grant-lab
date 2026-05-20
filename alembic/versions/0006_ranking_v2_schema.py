@@ -37,9 +37,7 @@ def upgrade() -> None:
     op.alter_column("call_rankings", "score", new_column_name="aggregate_score")
 
     op.drop_constraint("pk_call_rankings", "call_rankings", type_="primary")
-    op.create_primary_key(
-        "pk_call_rankings", "call_rankings", ["call_id", "profile_id", "scheme"]
-    )
+    op.create_primary_key("pk_call_rankings", "call_rankings", ["call_id", "profile_id", "scheme"])
 
     op.drop_index("ix_call_rankings_profile_score", table_name="call_rankings")
     op.create_index(
@@ -96,15 +94,22 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.PrimaryKeyConstraint(
-            "call_id", "profile_id", "scheme", "criterion",
+            "call_id",
+            "profile_id",
+            "scheme",
+            "criterion",
             name="pk_call_ranking_criteria",
         ),
         sa.ForeignKeyConstraint(
-            ["call_id"], ["calls.id"], ondelete="CASCADE",
+            ["call_id"],
+            ["calls.id"],
+            ondelete="CASCADE",
             name="fk_call_ranking_criteria_call",
         ),
         sa.ForeignKeyConstraint(
-            ["profile_id"], ["profiles.id"], ondelete="CASCADE",
+            ["profile_id"],
+            ["profiles.id"],
+            ondelete="CASCADE",
             name="fk_call_ranking_criteria_profile",
         ),
     )
@@ -138,9 +143,7 @@ def downgrade() -> None:
     # the old index that references the old column name.
     op.drop_index("ix_call_rankings_profile_scheme_score", table_name="call_rankings")
     op.drop_constraint("pk_call_rankings", "call_rankings", type_="primary")
-    op.create_primary_key(
-        "pk_call_rankings", "call_rankings", ["call_id", "profile_id"]
-    )
+    op.create_primary_key("pk_call_rankings", "call_rankings", ["call_id", "profile_id"])
     op.alter_column("call_rankings", "aggregate_score", new_column_name="score")
     op.create_index(
         "ix_call_rankings_profile_score",

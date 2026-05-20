@@ -1,7 +1,7 @@
 import uuid
 from collections.abc import AsyncIterator
 
-from call_monitor.proposal_assist.drafting.contract import (
+from call_manager.proposal_assist.drafting.contract import (
     AgentHandle,
     AssistantTextEvent,
     DraftingAgent,

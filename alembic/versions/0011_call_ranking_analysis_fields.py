@@ -18,6 +18,7 @@ Schema deltas:
   ranking/prompt.py::_sanitize_applicant_notes; the column itself is
   permissive so legacy schemas don't reject a partial-write rollback.
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa

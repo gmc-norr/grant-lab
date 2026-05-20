@@ -4,11 +4,11 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.email import EmailSendFailed, InMemoryEmailSender
-from call_monitor.auth.rate_limit import SlidingWindowLimiter
-from call_monitor.auth.tokens import issue_token
-from call_monitor.db.models import User
-from call_monitor.main import create_app
+from call_manager.auth.email import EmailSendFailed, InMemoryEmailSender
+from call_manager.auth.rate_limit import SlidingWindowLimiter
+from call_manager.auth.tokens import issue_token
+from call_manager.db.models import User
+from call_manager.main import create_app
 
 
 def _mk_app(monkeypatch, pg_url):
@@ -111,9 +111,7 @@ def test_verify_rejects_replay(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 400
 
 
-def test_verify_survives_post_consumption_failure(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_verify_survives_post_consumption_failure(monkeypatch, pg_url, pg_session_factory):
     """If anything between consume_token() and the handler's commit fails,
     the token must still be marked consumed. Otherwise the handler leaks
     its "return 400" / "raise" paths into a single-use-violation.
@@ -121,8 +119,8 @@ def test_verify_survives_post_consumption_failure(
     We simulate this by monkey-patching User.last_login_at assignment to
     raise, which is the exact code path that could blow up post-consume.
     """
-    from call_monitor.auth.tokens import hash_token
-    from call_monitor.db.models import MagicLinkToken
+    from call_manager.auth.tokens import hash_token
+    from call_manager.db.models import MagicLinkToken
 
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
@@ -133,7 +131,7 @@ def test_verify_survives_post_consumption_failure(
         s.commit()
 
     # Force any attempt to set last_login_at to explode.
-    import call_monitor.web.routes.auth as auth_module
+    import call_manager.web.routes.auth as auth_module
 
     sentinel = RuntimeError("simulated failure post-consumption")
 
@@ -176,9 +174,7 @@ class _ExplodingSender:
         raise EmailSendFailed("simulated upstream outage")
 
 
-def test_login_swallows_email_send_failure(
-    monkeypatch, pg_url, pg_session_factory, caplog
-):
+def test_login_swallows_email_send_failure(monkeypatch, pg_url, pg_session_factory, caplog):
     """If the upstream email service fails, /login must still return the
     same 'check your email' page (no information leak via 500) and log
     the failure for operator visibility.
@@ -186,16 +182,14 @@ def test_login_swallows_email_send_failure(
     app, _ = _mk_app(monkeypatch, pg_url)
     app.state.email_sender = _ExplodingSender()
 
-    with caplog.at_level(
-        logging.WARNING, logger="call_monitor.web.routes.auth"
-    ), TestClient(app) as client:
+    with (
+        caplog.at_level(logging.WARNING, logger="call_manager.web.routes.auth"),
+        TestClient(app) as client,
+    ):
         r = client.post("/login", data={"email": "alice@ki.se"})
     assert r.status_code == 200
     assert "check your email" in r.text.lower()
-    assert any(
-        getattr(rec, "event", None) == "login_email_send_failed"
-        for rec in caplog.records
-    )
+    assert any(getattr(rec, "event", None) == "login_email_send_failed" for rec in caplog.records)
 
 
 def test_login_verify_is_rate_limited_by_ip(monkeypatch, pg_url, pg_session_factory):
@@ -223,13 +217,12 @@ def test_login_emits_structured_logs(
     monkeypatch, pg_url, pg_session_factory, caplog, expected_event
 ):
     app, _ = _mk_app(monkeypatch, pg_url)
-    with caplog.at_level(
-        logging.INFO, logger="call_monitor.web.routes.auth"
-    ), TestClient(app) as client:
+    with (
+        caplog.at_level(logging.INFO, logger="call_manager.web.routes.auth"),
+        TestClient(app) as client,
+    ):
         client.post("/login", data={"email": "alice@ki.se"})
-    assert any(
-        getattr(rec, "event", None) == expected_event for rec in caplog.records
-    )
+    assert any(getattr(rec, "event", None) == expected_event for rec in caplog.records)
 
 
 def test_trusted_proxy_reads_x_forwarded_for(monkeypatch, pg_url, pg_session_factory):
@@ -243,13 +236,9 @@ def test_trusted_proxy_reads_x_forwarded_for(monkeypatch, pg_url, pg_session_fac
 
     with TestClient(app) as client:
         # Client A: first request allowed, second blocked.
-        client.post(
-            "/login", data={"email": "a@ki.se"}, headers={"X-Forwarded-For": "1.1.1.1"}
-        )
+        client.post("/login", data={"email": "a@ki.se"}, headers={"X-Forwarded-For": "1.1.1.1"})
         # Client B (different XFF): must still be allowed.
-        client.post(
-            "/login", data={"email": "b@ki.se"}, headers={"X-Forwarded-For": "2.2.2.2"}
-        )
+        client.post("/login", data={"email": "b@ki.se"}, headers={"X-Forwarded-For": "2.2.2.2"})
 
     assert "1.1.1.1" in app.state.ip_limiter._events
     assert "2.2.2.2" in app.state.ip_limiter._events
@@ -281,9 +270,7 @@ def test_trusted_proxy_picks_rightmost_xff_to_resist_spoofing(
     assert "1.1.1.1" not in app.state.ip_limiter._events
 
 
-def test_untrusted_proxy_ignores_x_forwarded_for(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_untrusted_proxy_ignores_x_forwarded_for(monkeypatch, pg_url, pg_session_factory):
     """Default is untrusted: XFF must be ignored so a caller can't spoof
     their rate-limit bucket. Both requests key to the TestClient IP."""
     app, _ = _mk_app(monkeypatch, pg_url)

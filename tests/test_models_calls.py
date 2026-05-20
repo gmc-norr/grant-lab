@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Call, Source
+from call_manager.db.models import Call, Source
 
 
 def test_seeded_sources_present(pg_session_factory):
@@ -51,12 +51,19 @@ def test_call_unique_per_source_and_external_id(pg_session_factory):
 def test_calls_keywords_gin_index_supports_overlap(pg_session_factory):
     """Smoke: keyword filter via && (overlap) returns hits — proves GIN index is in place."""
     from sqlalchemy import text
+
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "eu_portal")).scalar_one()
-        s.add(Call(source_id=src.id, external_id="k1", url="u", title="t",
-                   keywords=["digital pathology", "federated learning"]))
-        s.add(Call(source_id=src.id, external_id="k2", url="u", title="t",
-                   keywords=["energy"]))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="k1",
+                url="u",
+                title="t",
+                keywords=["digital pathology", "federated learning"],
+            )
+        )
+        s.add(Call(source_id=src.id, external_id="k2", url="u", title="t", keywords=["energy"]))
         s.commit()
         rows = s.execute(
             text("SELECT external_id FROM calls WHERE keywords && :kw ORDER BY external_id"),

@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Subscription, User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Subscription, User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -41,9 +41,7 @@ def test_me_lists_active_profiles_as_checkboxes(
     assert 'name="subscribe_' in r.text
 
 
-def test_me_post_subscribe_creates_rows(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
+def test_me_post_subscribe_creates_rows(monkeypatch, pg_url, pg_session_factory, profile_factory):
     p1, _ = profile_factory(name="Group A")
     p2, _ = profile_factory(name="Group B")
     app = _setup(monkeypatch, pg_url)
@@ -66,9 +64,7 @@ def test_me_post_subscribe_creates_rows(
     assert subs[0].profile_id == p1
 
 
-def test_me_post_unsubscribe_removes_row(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
+def test_me_post_unsubscribe_removes_row(monkeypatch, pg_url, pg_session_factory, profile_factory):
     p1, _ = profile_factory(name="Group A")
     app = _setup(monkeypatch, pg_url)
     uid = _user(pg_session_factory)
@@ -116,7 +112,8 @@ def test_me_post_silently_drops_inactive_profile_subscribe(
     """Subscribing to an INACTIVE profile must be silently dropped."""
     p1, _ = profile_factory(name="Inactive")
     with pg_session_factory() as s:
-        from call_monitor.db.models import Profile
+        from call_manager.db.models import Profile
+
         s.get(Profile, p1).is_active = False
         s.commit()
     app = _setup(monkeypatch, pg_url)

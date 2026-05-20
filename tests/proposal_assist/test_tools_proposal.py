@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import ArtifactVersion
-from call_monitor.proposal_assist.tools.proposal import (
+from call_manager.db.models import ArtifactVersion
+from call_manager.proposal_assist.tools.proposal import (
     edit_proposal_impl,
     read_proposal_impl,
     replace_proposal_impl,
 )
-from call_monitor.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -28,7 +28,7 @@ def _init_repo(repo_dir: Path, initial_content: str = "# Proposal\n\nInitial.\n"
 
 def _build_ctx(pg_session_factory, tmp_path) -> tuple[ToolContext, uuid.UUID]:
     """Build a ToolContext backed by a real testcontainer DB + tmp repo."""
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -169,7 +169,7 @@ async def test_write_and_commit_rolls_back_working_tree_on_commit_failure(
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
     original = (ctx.repo_dir / "proposal.md").read_text()
 
-    from call_monitor.proposal_assist.tools import proposal as _proposal_mod
+    from call_manager.proposal_assist.tools import proposal as _proposal_mod
 
     real_run = _proposal_mod.subprocess.run
 
@@ -218,7 +218,7 @@ async def test_write_and_commit_rollback_leaves_unrelated_dirty_files_alone(
     _sp.run(["git", "commit", "-q", "-m", "add sidecar"], cwd=ctx.repo_dir, check=True)
     sidecar.write_text("DIRTY uncommitted edits an admin left")
 
-    from call_monitor.proposal_assist.tools import proposal as _proposal_mod
+    from call_manager.proposal_assist.tools import proposal as _proposal_mod
 
     real_run = _proposal_mod.subprocess.run
 
@@ -249,7 +249,7 @@ async def test_edit_proposal_links_triggering_turn(
     _settings_env,
     tmp_path,
 ):
-    from call_monitor.db.models import ChatTurn
+    from call_manager.db.models import ChatTurn
 
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
     with pg_session_factory() as s:

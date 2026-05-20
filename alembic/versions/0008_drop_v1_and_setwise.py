@@ -25,6 +25,7 @@ All constraint/index names checked against alembic/versions/0006_ranking_v2_sche
 The criterion table's PK column is `criterion` (not `name`), per the v2
 criterion-design spec.
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -54,9 +55,7 @@ def upgrade() -> None:
     op.drop_index("ix_call_rankings_profile_scheme_score", table_name="call_rankings")
     op.execute("DELETE FROM call_rankings WHERE scheme = 'v1'")
     op.drop_constraint("pk_call_rankings", "call_rankings", type_="primary")
-    op.create_primary_key(
-        "pk_call_rankings", "call_rankings", ["call_id", "profile_id"]
-    )
+    op.create_primary_key("pk_call_rankings", "call_rankings", ["call_id", "profile_id"])
     op.drop_column("call_rankings", "scheme")
     op.drop_column("call_rankings", "setwise_offset")
     op.create_index(
@@ -68,9 +67,7 @@ def upgrade() -> None:
 
     # -------- call_ranking_criteria --------
     op.execute("DELETE FROM call_ranking_criteria WHERE scheme = 'v1'")
-    op.drop_constraint(
-        "pk_call_ranking_criteria", "call_ranking_criteria", type_="primary"
-    )
+    op.drop_constraint("pk_call_ranking_criteria", "call_ranking_criteria", type_="primary")
     op.create_primary_key(
         "pk_call_ranking_criteria",
         "call_ranking_criteria",
@@ -111,9 +108,7 @@ def downgrade() -> None:
         ),
     )
     op.alter_column("call_ranking_criteria", "scheme", server_default=None)
-    op.drop_constraint(
-        "pk_call_ranking_criteria", "call_ranking_criteria", type_="primary"
-    )
+    op.drop_constraint("pk_call_ranking_criteria", "call_ranking_criteria", type_="primary")
     op.create_primary_key(
         "pk_call_ranking_criteria",
         "call_ranking_criteria",
@@ -143,9 +138,7 @@ def downgrade() -> None:
     )
     op.alter_column("call_rankings", "scheme", server_default=None)
     op.drop_constraint("pk_call_rankings", "call_rankings", type_="primary")
-    op.create_primary_key(
-        "pk_call_rankings", "call_rankings", ["call_id", "profile_id", "scheme"]
-    )
+    op.create_primary_key("pk_call_rankings", "call_rankings", ["call_id", "profile_id", "scheme"])
     op.create_index(
         "ix_call_rankings_profile_scheme_score",
         "call_rankings",

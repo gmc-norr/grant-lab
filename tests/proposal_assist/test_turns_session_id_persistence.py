@@ -1,8 +1,8 @@
 import pytest
 
-from call_monitor.proposal_assist.drafting.controller import WorkspaceController
-from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
+from call_manager.proposal_assist.drafting.controller import WorkspaceController
+from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
 from tests.proposal_assist.conftest import make_workspace
 
 

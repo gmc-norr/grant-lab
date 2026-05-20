@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from call_monitor.sources.eu_portal import EUPortalAdapter
-from call_monitor.sources.types import AdapterError
+from call_manager.sources.eu_portal import EUPortalAdapter
+from call_manager.sources.types import AdapterError
 
 _FAKE_OK_BODY = {
     "results": [
@@ -30,6 +30,7 @@ def _mock_transport(status: int = 200, body=None, raise_exc=None):
         if raise_exc is not None:
             raise raise_exc
         return httpx.Response(status, json=body if body is not None else _FAKE_OK_BODY)
+
     return httpx.MockTransport(handler)
 
 
@@ -39,8 +40,10 @@ def _mock_html_transport(status: int = 200, html: str = ""):
     Default returns a 404 so existing tests stay hermetic without caring
     about full_text. Pass html=... to assert extraction.
     """
+
     def handler(request):
         return httpx.Response(status, text=html)
+
     return httpx.MockTransport(handler)
 
 
@@ -112,9 +115,7 @@ def test_fetch_skips_records_with_unsafe_url_scheme():
 
 
 def test_http_error_raises_adapter_error():
-    adapter = EUPortalAdapter(
-        base_url="https://x", transport=_mock_transport(status=503)
-    )
+    adapter = EUPortalAdapter(base_url="https://x", transport=_mock_transport(status=503))
     with pytest.raises(AdapterError):
         list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
 

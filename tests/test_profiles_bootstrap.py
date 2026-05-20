@@ -2,10 +2,10 @@ import json
 
 import httpx
 
-from call_monitor.profiles.bootstrap import bootstrap_profile
-from call_monitor.profiles.pubmed import PubMedClient
-from call_monitor.profiles.seed import Member, SeedInput
-from call_monitor.ranking.ollama_client import OllamaClient
+from call_manager.profiles.bootstrap import bootstrap_profile
+from call_manager.profiles.pubmed import PubMedClient
+from call_manager.profiles.seed import Member, SeedInput
+from call_manager.ranking.ollama_client import OllamaClient
 
 _ESEARCH = {"esearchresult": {"count": "1", "idlist": ["111"]}}
 _ESUMMARY = {
@@ -19,14 +19,16 @@ _ESUMMARY = {
         },
     },
 }
-_DRAFT_JSON = json.dumps({
-    "description": "Research group on AI for digital pathology.",
-    "areas": ["digital pathology"],
-    "budget_min": 100000,
-    "budget_max": 5000000,
-    "must_include": ["pathology"],
-    "hard_exclusions": [],
-})
+_DRAFT_JSON = json.dumps(
+    {
+        "description": "Research group on AI for digital pathology.",
+        "areas": ["digital pathology"],
+        "budget_min": 100000,
+        "budget_max": 5000000,
+        "must_include": ["pathology"],
+        "hard_exclusions": [],
+    }
+)
 
 
 def _pubmed_mock():
@@ -37,6 +39,7 @@ def _pubmed_mock():
         if "esummary" in url:
             return httpx.Response(200, json=_ESUMMARY)
         raise AssertionError(f"unexpected: {url}")
+
     return httpx.MockTransport(handler)
 
 
@@ -45,8 +48,10 @@ def _ollama_mock(content: str = _DRAFT_JSON):
         "model": "gemma4:e4b-q8",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}],
     }
+
     def handler(request):
         return httpx.Response(200, json=body)
+
     return httpx.MockTransport(handler)
 
 

@@ -3,15 +3,15 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import (
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
     Source,
     User,
 )
-from call_monitor.main import create_app
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -42,37 +42,57 @@ def test_call_detail_renders_criterion_breakdown(
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id="DETAIL", url="https://x", title="DetailCall",
+            source_id=src.id,
+            external_id="DETAIL",
+            url="https://x",
+            title="DetailCall",
             published_at=datetime.now(UTC),
         )
         s.add(c)
         s.flush()
-        s.add(CallRanking(
-            call_id=c.id, profile_id=pid,
-            aggregate_score=82, aggregate_reason=None,
-            rationale="Topic 4/5 · Eligibility: pass · Exclusions: pass",
-            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
-        ))
-        s.add_all([
-            CallRankingCriterion(
-                call_id=c.id, profile_id=pid,
-                criterion="topic_fit", rating="4",
-                rationale="strong AI match", quoted_evidence="AI funding call",
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=pid,
+                aggregate_score=82,
+                aggregate_reason=None,
+                rationale="Topic 4/5 · Eligibility: pass · Exclusions: pass",
+                model="m",
+                prompt_version="v2.0",
                 ranked_at=datetime.now(UTC),
-            ),
-            CallRankingCriterion(
-                call_id=c.id, profile_id=pid,
-                criterion="eligibility", rating="pass",
-                rationale="open to research groups", quoted_evidence=None,
-                ranked_at=datetime.now(UTC),
-            ),
-            CallRankingCriterion(
-                call_id=c.id, profile_id=pid,
-                criterion="exclusions", rating="pass",
-                rationale="no exclusions hit", quoted_evidence=None,
-                ranked_at=datetime.now(UTC),
-            ),
-        ])
+            )
+        )
+        s.add_all(
+            [
+                CallRankingCriterion(
+                    call_id=c.id,
+                    profile_id=pid,
+                    criterion="topic_fit",
+                    rating="4",
+                    rationale="strong AI match",
+                    quoted_evidence="AI funding call",
+                    ranked_at=datetime.now(UTC),
+                ),
+                CallRankingCriterion(
+                    call_id=c.id,
+                    profile_id=pid,
+                    criterion="eligibility",
+                    rating="pass",
+                    rationale="open to research groups",
+                    quoted_evidence=None,
+                    ranked_at=datetime.now(UTC),
+                ),
+                CallRankingCriterion(
+                    call_id=c.id,
+                    profile_id=pid,
+                    criterion="exclusions",
+                    rating="pass",
+                    rationale="no exclusions hit",
+                    quoted_evidence=None,
+                    ranked_at=datetime.now(UTC),
+                ),
+            ]
+        )
         s.commit()
         cid = c.id
 
@@ -98,17 +118,26 @@ def test_call_detail_renders_embed_similarity_when_present(
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id="COSDETAIL", url="https://x/cosdetail",
-            title="CosineDetailCall", published_at=datetime.now(UTC),
+            source_id=src.id,
+            external_id="COSDETAIL",
+            url="https://x/cosdetail",
+            title="CosineDetailCall",
+            published_at=datetime.now(UTC),
         )
         s.add(c)
         s.flush()
-        s.add(CallRanking(
-            call_id=c.id, profile_id=pid,
-            aggregate_score=82, embed_similarity=0.55,
-            rationale="Topic 4/5 · Eligibility: pass · Exclusions: pass",
-            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
-        ))
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=pid,
+                aggregate_score=82,
+                embed_similarity=0.55,
+                rationale="Topic 4/5 · Eligibility: pass · Exclusions: pass",
+                model="m",
+                prompt_version="v2.0",
+                ranked_at=datetime.now(UTC),
+            )
+        )
         s.commit()
         cid = c.id
 
@@ -132,17 +161,25 @@ def test_call_detail_omits_cosine_line_when_embed_similarity_is_none(
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id="NOCOS", url="https://x/nocos",
-            title="NoCosineCall", published_at=datetime.now(UTC),
+            source_id=src.id,
+            external_id="NOCOS",
+            url="https://x/nocos",
+            title="NoCosineCall",
+            published_at=datetime.now(UTC),
         )
         s.add(c)
         s.flush()
-        s.add(CallRanking(
-            call_id=c.id, profile_id=pid,
-            aggregate_score=70,  # embed_similarity intentionally omitted
-            rationale="ranking without cosine",
-            model="m", prompt_version="v2.0", ranked_at=datetime.now(UTC),
-        ))
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=pid,
+                aggregate_score=70,  # embed_similarity intentionally omitted
+                rationale="ranking without cosine",
+                model="m",
+                prompt_version="v2.0",
+                ranked_at=datetime.now(UTC),
+            )
+        )
         s.commit()
         cid = c.id
 

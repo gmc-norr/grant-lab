@@ -23,6 +23,7 @@ What it produces (so you can verify in the UI):
   UNKNOWN and the LLM runs as the safe fallback, which is what you want
   for verifying the GUI surfaces results promptly.
 """
+
 from __future__ import annotations
 
 import os
@@ -35,8 +36,8 @@ from sqlalchemy import select
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_here, os.pardir, "src"))
 
-from call_monitor.config import Settings  # noqa: E402
-from call_monitor.db.models import (  # noqa: E402
+from call_manager.config import Settings  # noqa: E402
+from call_manager.db.models import (  # noqa: E402
     Call,
     Profile,
     ProfileKind,
@@ -44,8 +45,8 @@ from call_monitor.db.models import (  # noqa: E402
     Subscription,
     User,
 )
-from call_monitor.db.session import make_engine, make_session_factory  # noqa: E402
-from call_monitor.ranking.queue import enqueue_for_pair  # noqa: E402
+from call_manager.db.session import make_engine, make_session_factory  # noqa: E402
+from call_manager.ranking.queue import enqueue_for_pair  # noqa: E402
 
 _NOW = datetime.now(UTC)
 
@@ -101,7 +102,9 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=60),
         "published_at": _NOW - timedelta(days=3),
-        "budget_min": 1_000_000, "budget_max": 4_000_000, "currency": "SEK",
+        "budget_min": 1_000_000,
+        "budget_max": 4_000_000,
+        "currency": "SEK",
         "programme": "Vinnova — Tillämpad AI i vården",
         "keywords": ["AI", "pathology", "cancer", "digital"],
         "raw": {"trl_min": 3, "trl_max": 6},
@@ -127,7 +130,9 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=90),
         "published_at": _NOW - timedelta(days=7),
-        "budget_min": 2_000_000, "budget_max": 5_000_000, "currency": "SEK",
+        "budget_min": 2_000_000,
+        "budget_max": 5_000_000,
+        "currency": "SEK",
         "programme": "Horizon Europe — Health Cluster",
         "keywords": ["AI", "federated learning", "cancer", "imaging"],
         "raw": {"trl_min": 4, "trl_max": 7},
@@ -151,12 +156,13 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=45),
         "published_at": _NOW - timedelta(days=2),
-        "budget_min": 800_000, "budget_max": 3_000_000, "currency": "SEK",
+        "budget_min": 800_000,
+        "budget_max": 3_000_000,
+        "currency": "SEK",
         "programme": "Vinnova — Klinisk innovation",
         "keywords": ["AI", "pathology", "validation", "cancer"],
         "raw": {"trl_min": 5, "trl_max": 7},
     },
-
     # ----- must-include keyword bypass on a tight deadline -----
     {
         "source": "eu_portal",
@@ -176,12 +182,13 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=10),
         "published_at": _NOW - timedelta(days=1),
-        "budget_min": 200_000, "budget_max": 1_500_000, "currency": "SEK",
+        "budget_min": 200_000,
+        "budget_max": 1_500_000,
+        "currency": "SEK",
         "programme": "Horizon — Health Cluster rapid response",
         "keywords": ["pathology", "AI", "datasets"],
         "raw": {"trl_min": 2, "trl_max": 5},
     },
-
     # ----- timeline FAIL (no must_include match) -----
     {
         "source": "eu_portal",
@@ -195,12 +202,13 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=8),
         "published_at": _NOW - timedelta(days=2),
-        "budget_min": 1_000_000, "budget_max": 3_000_000, "currency": "EUR",
+        "budget_min": 1_000_000,
+        "budget_max": 3_000_000,
+        "currency": "EUR",
         "programme": "Horizon — Digital Cluster",
         "keywords": ["quantum", "sensing"],
         "raw": {"trl_min": 4, "trl_max": 6},
     },
-
     # ----- budget FAIL (way above profile cap) -----
     {
         "source": "vinnova",
@@ -213,12 +221,13 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=120),
         "published_at": _NOW - timedelta(days=5),
-        "budget_min": 100_000_000, "budget_max": 500_000_000, "currency": "SEK",
+        "budget_min": 100_000_000,
+        "budget_max": 500_000_000,
+        "currency": "SEK",
         "programme": "Vinnova — Strategisk infrastruktur",
         "keywords": ["AI", "infrastructure"],
         "raw": {"trl_min": 6, "trl_max": 9},
     },
-
     # ----- TRL FAIL (profile maxes at 7, call wants 8-9) -----
     {
         "source": "vinnova",
@@ -232,12 +241,13 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=70),
         "published_at": _NOW - timedelta(days=4),
-        "budget_min": 1_000_000, "budget_max": 5_000_000, "currency": "SEK",
+        "budget_min": 1_000_000,
+        "budget_max": 5_000_000,
+        "currency": "SEK",
         "programme": "Vinnova — Marknadsintroduktion",
         "keywords": ["AI", "diagnostics", "market"],
         "raw": {"trl_min": 8, "trl_max": 9},
     },
-
     # ----- topic-dissimilar (industrial materials, expect FAIL on embedding) -----
     {
         "source": "eu_portal",
@@ -250,7 +260,9 @@ _CALLS = [
         ),
         "deadline": _NOW + timedelta(days=80),
         "published_at": _NOW - timedelta(days=6),
-        "budget_min": 1_000_000, "budget_max": 4_000_000, "currency": "EUR",
+        "budget_min": 1_000_000,
+        "budget_max": 4_000_000,
+        "currency": "EUR",
         "programme": "Horizon — Industrial Cluster",
         "keywords": ["materials", "construction"],
         "raw": {"trl_min": 5, "trl_max": 7},
@@ -283,9 +295,7 @@ def main() -> int:
         print(f"owner: {owner.email} (id={owner_id})")
 
         profile = s.execute(
-            select(Profile).where(
-                Profile.name == _PROFILE["name"], Profile.is_active.is_(True)
-            )
+            select(Profile).where(Profile.name == _PROFILE["name"], Profile.is_active.is_(True))
         ).scalar_one_or_none()
         if profile is None:
             profile = Profile(
@@ -318,10 +328,7 @@ def main() -> int:
             print("subscription created (owner ↔ profile)")
 
         # Map source slug → id once.
-        source_ids = {
-            row.slug: row.id
-            for row in s.execute(select(Source)).scalars().all()
-        }
+        source_ids = {row.slug: row.id for row in s.execute(select(Source)).scalars().all()}
 
         for c in _CALLS:
             src_id = source_ids.get(c["source"])

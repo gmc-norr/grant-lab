@@ -13,9 +13,10 @@ Adds the vector extension and embedding storage:
 - partial NULL-only indexes for the daily backfill tick
 
 Per spec §4. No data backfill here — historical embeddings are populated
-by `python -m call_monitor.embeddings.cli backfill` (Task 9), which is
+by `python -m call_manager.embeddings.cli backfill` (Task 9), which is
 part of the deploy procedure between `alembic upgrade head` and app start.
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -45,11 +46,15 @@ def upgrade() -> None:
     # are heavily selective until backfill completes, then become very small
     # — partial index keeps them cheap.
     op.create_index(
-        "ix_calls_embedding_null", "calls", ["id"],
+        "ix_calls_embedding_null",
+        "calls",
+        ["id"],
         postgresql_where=sa.text("embedding IS NULL"),
     )
     op.create_index(
-        "ix_profiles_embedding_null", "profiles", ["id"],
+        "ix_profiles_embedding_null",
+        "profiles",
+        ["id"],
         postgresql_where=sa.text("embedding IS NULL"),
     )
 
@@ -57,11 +62,13 @@ def upgrade() -> None:
     # or both non-NULL (embedded with a known model). Prevents orphan vectors
     # whose model is unknown.
     op.create_check_constraint(
-        "ck_calls_embedding_model_paired", "calls",
+        "ck_calls_embedding_model_paired",
+        "calls",
         "(embedding IS NULL) = (embedding_model IS NULL)",
     )
     op.create_check_constraint(
-        "ck_profiles_embedding_model_paired", "profiles",
+        "ck_profiles_embedding_model_paired",
+        "profiles",
         "(embedding IS NULL) = (embedding_model IS NULL)",
     )
 

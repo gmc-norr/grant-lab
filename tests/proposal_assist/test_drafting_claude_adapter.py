@@ -7,10 +7,10 @@ import uuid
 
 import pytest
 
-from call_monitor.proposal_assist.drafting.claude_adapter import (
+from call_manager.proposal_assist.drafting.claude_adapter import (
     ClaudeAgentSDKAdapter,
 )
-from call_monitor.proposal_assist.drafting.contract import (
+from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     DraftingAgent,
     LaunchContext,
@@ -25,7 +25,7 @@ from call_monitor.proposal_assist.drafting.contract import (
 def test_flatten_content_handles_single_dict():
     """ToolResultBlock content may be a single text-block dict.
     _flatten_content must extract .text, not iterate the dict's keys."""
-    from call_monitor.proposal_assist.drafting.claude_adapter import (
+    from call_manager.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -33,7 +33,7 @@ def test_flatten_content_handles_single_dict():
 
 
 def test_flatten_content_handles_list_of_dicts():
-    from call_monitor.proposal_assist.drafting.claude_adapter import (
+    from call_manager.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -45,7 +45,7 @@ def test_flatten_content_handles_list_of_dicts():
 
 
 def test_flatten_content_handles_string_passthrough():
-    from call_monitor.proposal_assist.drafting.claude_adapter import (
+    from call_manager.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -55,7 +55,7 @@ def test_flatten_content_handles_string_passthrough():
 def test_flatten_content_returns_empty_for_non_text_block():
     """Non-text ToolResultBlock content (image, tool_use) is dropped
     (returns empty string)."""
-    from call_monitor.proposal_assist.drafting.claude_adapter import (
+    from call_manager.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -77,11 +77,11 @@ async def test_send_turn_raises_on_sdk_error_result():
 
     from claude_agent_sdk.types import ResultMessage
 
-    from call_monitor.proposal_assist.drafting.claude_adapter import (
+    from call_manager.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
         SDKTurnError,
     )
-    from call_monitor.proposal_assist.drafting.contract import AgentHandle
+    from call_manager.proposal_assist.drafting.contract import AgentHandle
 
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
@@ -126,7 +126,7 @@ def test_launch_uses_resume_session_id_in_options(monkeypatch):
     the prior conversation. Verified by spying on options construction."""
     import asyncio
 
-    from call_monitor.proposal_assist.drafting import claude_adapter as ca
+    from call_manager.proposal_assist.drafting import claude_adapter as ca
 
     captured: dict[str, object] = {}
     real_options = ca.ClaudeAgentOptions
@@ -165,7 +165,7 @@ def test_launch_omits_resume_when_session_id_is_none(monkeypatch):
     """No resume_session_id → no resume= in options (fresh session)."""
     import asyncio
 
-    from call_monitor.proposal_assist.drafting import claude_adapter as ca
+    from call_manager.proposal_assist.drafting import claude_adapter as ca
 
     captured: dict[str, object] = {}
     real_options = ca.ClaudeAgentOptions
@@ -206,7 +206,7 @@ async def test_send_turn_captures_session_id_on_turn_done():
 
     from claude_agent_sdk.types import ResultMessage
 
-    from call_monitor.proposal_assist.drafting.contract import AgentHandle
+    from call_manager.proposal_assist.drafting.contract import AgentHandle
 
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",

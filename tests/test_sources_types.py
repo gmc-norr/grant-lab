@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from call_monitor.sources.types import AdapterError, NormalizedCall, SourceAdapter
+from call_manager.sources.types import AdapterError, NormalizedCall, SourceAdapter
 
 
 def test_normalized_call_minimal_fields():
@@ -21,6 +21,7 @@ def test_adapter_error_is_exception():
 
 def test_protocol_check():
     """A class that implements .slug and .fetch_new_calls satisfies SourceAdapter."""
+
     class FakeAdapter:
         slug = "fake"
 

@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import (
+from call_manager.db.models import (
     Call,
     CallRanking,
     Profile,
@@ -65,8 +65,12 @@ def test_call_ranking_composite_pk(pg_session_factory):
         c = s.execute(select(Call).where(Call.external_id == "C-1")).scalar_one()
         s.add(
             CallRanking(
-                call_id=c.id, profile_id=p.id, aggregate_score=10,
-                rationale="", model="", prompt_version="v2.0",
+                call_id=c.id,
+                profile_id=p.id,
+                aggregate_score=10,
+                rationale="",
+                model="",
+                prompt_version="v2.0",
             )
         )
         s.commit()

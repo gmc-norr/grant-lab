@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import Call, Source
+from call_manager.db.models import Call, Source
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
     """Build a User row. Each call uses a unique email by default so multiple
     callers in the same test don't UNIQUE-collide. Callers that care about a
     specific email pass it explicitly."""
-    from call_monitor.db.models import User
+    from call_manager.db.models import User
 
     u = User(email=email)
     session.add(u)
@@ -65,7 +65,7 @@ def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
 def make_profile(session, *, name: str = "Test PI Profile") -> "Profile":  # noqa: F821
     """Build a Profile owned by a fresh User. Real Profile requires
     `kind: ProfileKind` and `created_by` FK — no `slug`."""
-    from call_monitor.db.models import Profile, ProfileKind
+    from call_manager.db.models import Profile, ProfileKind
 
     u = make_user(session, email=f"profile-owner-{name.lower().replace(' ', '-')}@ki.se")
     p = Profile(
@@ -88,7 +88,7 @@ def make_workspace(
     profile_id: int | None = None,
 ) -> "Workspace":  # noqa: F821
     """Build a Workspace row. If `owner` not provided, creates a fresh User."""
-    from call_monitor.db.models import Workspace
+    from call_manager.db.models import Workspace
 
     if owner is None:
         owner = make_user(session)
@@ -113,7 +113,7 @@ def make_chat_turn(
     tokens_out: int | None = None,
     model: str | None = None,
 ):
-    from call_monitor.db.models import ChatTurn
+    from call_manager.db.models import ChatTurn
 
     turn = ChatTurn(
         workspace_id=workspace.id,
@@ -137,7 +137,7 @@ def make_chat_summary(
     tokens: int = 100,
     model: str = "claude-haiku-4-5",
 ):
-    from call_monitor.db.models import ChatSummary
+    from call_manager.db.models import ChatSummary
 
     cs = ChatSummary(
         workspace_id=workspace.id,

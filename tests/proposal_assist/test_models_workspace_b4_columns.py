@@ -1,6 +1,6 @@
 from sqlalchemy import inspect, select
 
-from call_monitor.db.models import TurnJob, Workspace
+from call_manager.db.models import TurnJob, Workspace
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -45,7 +45,7 @@ def test_workspace_can_set_last_sdk_session_id(pg_session_factory):
 def test_b4_settings_load_with_defaults(_settings_env):
     """The six new B4 settings expose the documented defaults when no
     override env vars are set."""
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     s = Settings()
     assert s.daily_token_cap_input == 500_000

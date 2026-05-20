@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Call, Source, User, UserCallDismissal
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Call, Source, User, UserCallDismissal
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -33,7 +33,10 @@ def _seed_call(pg_session_factory, *, title="HideMe"):
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id=title, url="https://x", title=title,
+            source_id=src.id,
+            external_id=title,
+            url="https://x",
+            title=title,
             published_at=datetime.now(UTC),
         )
         s.add(c)
@@ -42,9 +45,7 @@ def _seed_call(pg_session_factory, *, title="HideMe"):
         return c.id
 
 
-def test_hide_post_creates_dismissal_and_redirects(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_hide_post_creates_dismissal_and_redirects(monkeypatch, pg_url, pg_session_factory):
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)
     client, uid = _logged_in(app, pg_session_factory)
@@ -70,11 +71,15 @@ def test_hide_is_idempotent(monkeypatch, pg_url, pg_session_factory):
         r2 = client.post(f"/calls/{cid}/hide", follow_redirects=False)
     assert r2.status_code == 303
     with pg_session_factory() as s:
-        rows = s.execute(
-            select(UserCallDismissal).where(
-                UserCallDismissal.user_id == uid, UserCallDismissal.call_id == cid
+        rows = (
+            s.execute(
+                select(UserCallDismissal).where(
+                    UserCallDismissal.user_id == uid, UserCallDismissal.call_id == cid
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1
 
 
@@ -94,9 +99,7 @@ def test_hide_requires_auth(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 401
 
 
-def test_dashboard_omits_dismissed_calls(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_dashboard_omits_dismissed_calls(monkeypatch, pg_url, pg_session_factory):
     _seed_call(pg_session_factory, title="VisibleCall")
     hidden = _seed_call(pg_session_factory, title="HiddenCall")
     app = _setup(monkeypatch, pg_url)

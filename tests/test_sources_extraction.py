@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 
-from call_monitor.sources.extraction import (
+from call_manager.sources.extraction import (
     fetch_html_main_content,
     fetch_pdf_text,
 )
@@ -30,13 +30,16 @@ _SAMPLE_HTML = """\
 def _html_transport(payload: str, *, status: int = 200) -> httpx.MockTransport:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(status, text=payload, headers={"content-type": "text/html"})
+
     return httpx.MockTransport(handler)
 
 
-def _pdf_transport(payload: bytes, *, status: int = 200,
-                   content_type: str = "application/pdf") -> httpx.MockTransport:
+def _pdf_transport(
+    payload: bytes, *, status: int = 200, content_type: str = "application/pdf"
+) -> httpx.MockTransport:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(status, content=payload, headers={"content-type": content_type})
+
     return httpx.MockTransport(handler)
 
 
@@ -113,24 +116,29 @@ def test_fetch_pdf_text_rejects_oversized_response():
 
 def test_fetch_html_main_content_logs_warning_on_failure(caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="call_monitor.sources.extraction"):
+
+    with caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"):
         fetch_html_main_content(
             "https://example.test/missing",
             transport=_html_transport("", status=500),
         )
-    assert any("html_failed" in (r.getMessage() or "") or "html_failed" in r.message
-               for r in caplog.records)
+    assert any(
+        "html_failed" in (r.getMessage() or "") or "html_failed" in r.message
+        for r in caplog.records
+    )
 
 
 def test_fetch_pdf_text_logs_warning_on_failure(caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="call_monitor.sources.extraction"):
+
+    with caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"):
         fetch_pdf_text(
             "https://example.test/missing.pdf",
             transport=_pdf_transport(b"", status=500),
         )
-    assert any("pdf_failed" in (r.getMessage() or "") or "pdf_failed" in r.message
-               for r in caplog.records)
+    assert any(
+        "pdf_failed" in (r.getMessage() or "") or "pdf_failed" in r.message for r in caplog.records
+    )
 
 
 def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
@@ -143,12 +151,14 @@ def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
 
     with (
         patch("trafilatura.extract", side_effect=RuntimeError("simulated parser error")),
-        caplog.at_level(logging.WARNING, logger="call_monitor.sources.extraction"),
+        caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"),
     ):
         text = fetch_html_main_content(
             "https://example.test/call",
             transport=_html_transport(_SAMPLE_HTML),
         )
     assert text is None
-    assert any("html_failed" in (r.getMessage() or "") or "html_failed" in r.message
-               for r in caplog.records)
+    assert any(
+        "html_failed" in (r.getMessage() or "") or "html_failed" in r.message
+        for r in caplog.records
+    )

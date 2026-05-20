@@ -17,17 +17,17 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import (
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import (
     CallRubric,
     CallSectionExtract,
     Workspace,
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
-from call_monitor.main import create_app
-from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
-from call_monitor.proposal_assist.phases.setup import Phase0Worker
+from call_manager.main import create_app
+from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.phases.setup import Phase0Worker
 from tests.proposal_assist.conftest import (
     make_call,
     make_profile,

@@ -1,11 +1,11 @@
-
-from call_monitor.ranking.aggregate import (
+from call_manager.ranking.aggregate import (
     LLMResult,
     aggregate,
 )
-from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+from call_manager.ranking.criteria import GateResult, Gates, GateStatus
 
 # --- aggregate function ---
+
 
 def _gates_pass():
     return Gates(
@@ -142,9 +142,10 @@ def test_aggregate_unknown_gates_do_not_short_circuit():
 
 # --- Embedding gate aggregation ---
 
+
 def test_aggregate_embedding_fail_short_circuits_to_zero():
-    from call_monitor.ranking.aggregate import LLMResult, aggregate
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.aggregate import LLMResult, aggregate
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
 
     gates = Gates(
         timeline=GateResult(GateStatus.PASS),
@@ -160,8 +161,8 @@ def test_aggregate_embedding_fail_short_circuits_to_zero():
 
 def test_aggregate_embedding_fail_bypassed_by_must_include():
     """Like timeline, must_include_override skips the embedding short-circuit."""
-    from call_monitor.ranking.aggregate import LLMResult, aggregate
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.aggregate import LLMResult, aggregate
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
 
     gates = Gates(
         timeline=GateResult(GateStatus.PASS),
@@ -178,8 +179,8 @@ def test_aggregate_embedding_fail_bypassed_by_must_include():
 
 def test_aggregate_embedding_unknown_does_not_short_circuit():
     """UNKNOWN means missing embedding — fall through to LLM as if no gate."""
-    from call_monitor.ranking.aggregate import LLMResult, aggregate
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.aggregate import LLMResult, aggregate
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
 
     gates = Gates(
         timeline=GateResult(GateStatus.PASS),

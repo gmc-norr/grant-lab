@@ -30,6 +30,7 @@ Closes two idempotency gaps surfaced in the post-Plan-F code review:
    false-negative dedupe and a second digest — no worse than today, and
    the app's Python-side week_start check catches it on top of this.
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa

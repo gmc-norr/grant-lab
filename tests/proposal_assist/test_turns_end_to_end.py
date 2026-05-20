@@ -4,18 +4,18 @@ all rows materialized. Then second turn proves resume_session_id flows."""
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
-from call_monitor.proposal_assist.drafting.contract import (
+from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
+from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     ToolResultEvent,
     ToolUseEvent,
     TurnDoneEvent,
 )
-from call_monitor.proposal_assist.drafting.controller import WorkspaceController
-from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
-from call_monitor.proposal_assist.turns.drain import drain_turn_queue_tick
-from call_monitor.proposal_assist.turns.submit import submit_user_turn
+from call_manager.proposal_assist.drafting.controller import WorkspaceController
+from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from call_manager.proposal_assist.turns.drain import drain_turn_queue_tick
+from call_manager.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -24,7 +24,7 @@ async def test_full_turn_pipeline(pg_session_factory, _settings_env):
     """Submit → drain → processor → expected state.
 
     Then submit a second turn and verify resume_session_id flows."""
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     adapter = FakeAgentAdapter()

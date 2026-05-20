@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Source, User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Source, User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):

@@ -4,14 +4,14 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Call, CallRanking, Profile, RankingJob, Source, User
-from call_monitor.main import create_app
-from call_monitor.profiles.seed import DraftProfile
-from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
-from call_monitor.ranking.prompt import Parsed
-from call_monitor.ranking.rank_pair import RankResult
-from call_monitor.ranking.worker import drain_queue as _drain_queue
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Call, CallRanking, Profile, RankingJob, Source, User
+from call_manager.main import create_app
+from call_manager.profiles.seed import DraftProfile
+from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+from call_manager.ranking.prompt import Parsed
+from call_manager.ranking.rank_pair import RankResult
+from call_manager.ranking.worker import drain_queue as _drain_queue
 
 # drain_queue now requires embedding_threshold (no module-level default).
 drain_queue = partial(_drain_queue, embedding_threshold=0.30)
@@ -20,12 +20,18 @@ drain_queue = partial(_drain_queue, embedding_threshold=0.30)
 def _stub_rank_pair_returning(score: int = 80):
     parsed = Parsed(
         topic_fit_rating=4,
-        topic_fit_rationale="e2e", topic_fit_quoted=None,
-        eligibility_rating="pass", eligibility_rationale="ok", eligibility_quoted=None,
-        exclusions_rating="pass", exclusions_rationale="ok", exclusions_quoted=None,
+        topic_fit_rationale="e2e",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
     )
     stub_result = RankResult(
-        score=score, reason=None,
+        score=score,
+        reason=None,
         gates=Gates(
             timeline=GateResult(GateStatus.PASS),
             budget=GateResult(GateStatus.PASS),
@@ -34,7 +40,9 @@ def _stub_rank_pair_returning(score: int = 80):
         ),
         parsed=parsed,
         must_include_override=False,
-        model="gemma4:e4b-q8", prompt_version="v2.0", raw_response={},
+        model="gemma4:e4b-q8",
+        prompt_version="v2.0",
+        raw_response={},
         embed_similarity=None,
     )
 
@@ -44,9 +52,7 @@ def _stub_rank_pair_returning(score: int = 80):
     return _stub
 
 
-def test_e2e_create_profile_then_rank_then_browse(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_session_factory):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
@@ -54,12 +60,18 @@ def test_e2e_create_profile_then_rank_then_browse(
 
     # Seed a Call (published recently) so backfill finds it
     from datetime import UTC, datetime
+
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add(Call(
-            source_id=src.id, external_id="E2E-1", url="https://x", title="E2E call",
-            published_at=datetime.now(UTC),
-        ))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="E2E-1",
+                url="https://x",
+                title="E2E call",
+                published_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     app = create_app()
@@ -90,7 +102,7 @@ def test_e2e_create_profile_then_rank_then_browse(
         publications_skipped=0,
     )
     with (
-        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
         client,
     ):
         r = client.post(
@@ -137,7 +149,8 @@ def test_e2e_create_profile_then_rank_then_browse(
         assert len(jobs) == 1
 
         # 4. Drain the queue with a stub rank_pair
-        from call_monitor.ranking import worker as worker_mod
+        from call_manager.ranking import worker as worker_mod
+
         monkeypatch.setattr(worker_mod, "rank_pair", _stub_rank_pair_returning(score=80))
         drain_queue(
             session_factory=pg_session_factory,
@@ -145,9 +158,11 @@ def test_e2e_create_profile_then_rank_then_browse(
             batch_size=10,
         )
         with pg_session_factory() as s:
-            rankings = s.execute(
-                select(CallRanking).where(CallRanking.profile_id == profile_id)
-            ).scalars().all()
+            rankings = (
+                s.execute(select(CallRanking).where(CallRanking.profile_id == profile_id))
+                .scalars()
+                .all()
+            )
         assert len(rankings) == 1
         assert rankings[0].aggregate_score == 80
 

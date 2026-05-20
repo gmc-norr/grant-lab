@@ -20,11 +20,12 @@ lag before the pre-gate is active again.
 Operators who can't wait for the nightly tick can run the backfill
 CLI for immediate refresh:
 
-    uv run python -m call_monitor.embeddings.cli backfill
+    uv run python -m call_manager.embeddings.cli backfill
 
 No-op column changes; this migration is pure DML. No downgrade path
 for the DML (the old vectors are derivable; nothing's lost).
 """
+
 from __future__ import annotations
 
 from alembic import op
@@ -42,9 +43,7 @@ def upgrade() -> None:
     # model would still satisfy the OR, but keeping the columns in lockstep
     # matches the force-mode semantics in refresh.py).
     op.execute(
-        "UPDATE profiles "
-        "SET embedding = NULL, embedding_model = NULL "
-        "WHERE embedding IS NOT NULL"
+        "UPDATE profiles SET embedding = NULL, embedding_model = NULL WHERE embedding IS NOT NULL"
     )
 
 

@@ -1,11 +1,11 @@
 import json
 
-from call_monitor.profiles.bootstrap_prompt import (
+from call_manager.profiles.bootstrap_prompt import (
     BOOTSTRAP_PROMPT_VERSION,
     build_bootstrap_messages,
     parse_bootstrap_response,
 )
-from call_monitor.profiles.seed import Publication
+from call_manager.profiles.seed import Publication
 
 _FAKE_PUBS = [
     Publication(pmid="1", title="AI for digital pathology", year=2024, authors=["Smith J"]),
@@ -33,16 +33,18 @@ def test_messages_include_publications_and_grants():
 
 
 def test_parse_happy_path():
-    content = json.dumps({
-        "description": "Research group on AI for digital pathology.",
-        "areas": ["digital pathology", "federated learning"],
-        "budget_min": 100000,
-        "budget_max": 5000000,
-        "trl_min": 4,
-        "trl_max": 8,
-        "must_include": ["pathology"],
-        "hard_exclusions": ["animal studies"],
-    })
+    content = json.dumps(
+        {
+            "description": "Research group on AI for digital pathology.",
+            "areas": ["digital pathology", "federated learning"],
+            "budget_min": 100000,
+            "budget_max": 5000000,
+            "trl_min": 4,
+            "trl_max": 8,
+            "must_include": ["pathology"],
+            "hard_exclusions": ["animal studies"],
+        }
+    )
     out = parse_bootstrap_response(content)
     assert out.description.startswith("Research group")
     assert out.structured["areas"] == ["digital pathology", "federated learning"]
@@ -63,6 +65,7 @@ def test_parse_missing_optional_fields_uses_defaults():
 def test_parse_invalid_json_raises():
     import pytest
 
-    from call_monitor.profiles.bootstrap_prompt import BootstrapParseError
+    from call_manager.profiles.bootstrap_prompt import BootstrapParseError
+
     with pytest.raises(BootstrapParseError):
         parse_bootstrap_response("not json")

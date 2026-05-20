@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import ArtifactVersion, WorkspaceEvent
-from call_monitor.proposal_assist.reconcile import reconcile_workspace_git_drift
+from call_manager.db.models import ArtifactVersion, WorkspaceEvent
+from call_manager.proposal_assist.reconcile import reconcile_workspace_git_drift
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -169,9 +169,9 @@ def test_reconcile_preserves_commit_timestamp(pg_session_factory, tmp_path):
 async def test_controller_launch_runs_reconciliation(pg_session_factory, tmp_path):
     """controller.launch backfills orphan commits before the subprocess
     is launched."""
-    from call_monitor.proposal_assist.drafting.controller import WorkspaceController
-    from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-    from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
+    from call_manager.proposal_assist.drafting.controller import WorkspaceController
+    from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+    from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)

@@ -4,7 +4,7 @@ import uuid
 
 def test_claude_adapter_constructor_accepts_tools_factory():
     """The adapter accepts a tools_factory; if None, it works as before."""
-    from call_monitor.proposal_assist.drafting.claude_adapter import (
+    from call_manager.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
 
@@ -22,8 +22,8 @@ def test_factory_wires_tools_into_adapter(monkeypatch, _settings_env):
     """build_workspace_controller passes a tools_factory closure to the
     claude adapter; the closure is what builds the per-workspace MCP
     server."""
-    from call_monitor.config import Settings
-    from call_monitor.proposal_assist.drafting.factory import (
+    from call_manager.config import Settings
+    from call_manager.proposal_assist.drafting.factory import (
         build_workspace_controller,
     )
 
@@ -43,8 +43,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     """When tools_factory is set, adapter.launch passes
     ClaudeAgentOptions(mcp_servers=..., tools=[], strict_mcp_config=True,
     allowed_tools=<bare names>)."""
-    from call_monitor.proposal_assist.drafting import claude_adapter as ca
-    from call_monitor.proposal_assist.drafting.contract import LaunchContext
+    from call_manager.proposal_assist.drafting import claude_adapter as ca
+    from call_manager.proposal_assist.drafting.contract import LaunchContext
 
     captured: dict = {}
     real_options = ca.ClaudeAgentOptions

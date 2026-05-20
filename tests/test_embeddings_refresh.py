@@ -5,20 +5,24 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import select
 
-from call_monitor.db.models import Call, Profile, ProfileKind, Source, User
-from call_monitor.embeddings.refresh import (
+from call_manager.db.models import Call, Profile, ProfileKind, Source, User
+from call_manager.embeddings.refresh import (
     refresh_call_embedding,
     refresh_missing_embeddings_tick,
     refresh_profile_embedding,
 )
-from call_monitor.ranking.ollama_client import LLMError
+from call_manager.ranking.ollama_client import LLMError
 
 
 def _seed_call(s, *, source_slug: str = "vinnova", title: str = "T") -> int:
     src = s.execute(select(Source).where(Source.slug == source_slug)).scalar_one()
     c = Call(
-        source_id=src.id, external_id=f"{title}-1", url="https://x",
-        title=title, summary="S", full_text="F",
+        source_id=src.id,
+        external_id=f"{title}-1",
+        url="https://x",
+        title=title,
+        summary="S",
+        full_text="F",
         published_at=datetime.now(UTC),
     )
     s.add(c)
@@ -31,7 +35,9 @@ def _seed_profile(s, *, name: str = "P") -> int:
     s.add(u)
     s.flush()
     p = Profile(
-        name=name, kind=ProfileKind.GROUP, description=f"{name} description",
+        name=name,
+        kind=ProfileKind.GROUP,
+        description=f"{name} description",
         structured={"areas": [], "hard_exclusions": []},
         created_by=u.id,
     )
@@ -70,19 +76,19 @@ def test_refresh_call_embedding_writes_vector_and_model(pg_session_factory):
 
 def test_refresh_call_embedding_returns_false_on_llm_error(pg_session_factory, caplog):
     import logging
+
     with pg_session_factory() as s:
         cid = _seed_call(s, title="C2")
         s.commit()
     client = _fake_client(raises=LLMError("ollama down"))
 
-    logger_name = "call_monitor.embeddings.refresh"
+    logger_name = "call_manager.embeddings.refresh"
     with pg_session_factory() as s, caplog.at_level(logging.WARNING, logger=logger_name):
         ok = refresh_call_embedding(s, client, cid)
         s.commit()
     assert ok is False
     assert any(
-        "embedding_compute_failed" in r.getMessage()
-        or "embedding_compute_failed" in r.message
+        "embedding_compute_failed" in r.getMessage() or "embedding_compute_failed" in r.message
         for r in caplog.records
     )
 
@@ -129,7 +135,9 @@ def test_refresh_missing_embeddings_tick_processes_only_nulls(pg_session_factory
         s.commit()
 
     summary = refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
     )
     assert summary["calls_embedded"] == 1
     assert summary["profiles_embedded"] == 1
@@ -153,7 +161,9 @@ def test_refresh_missing_embeddings_tick_continues_after_one_failure(pg_session_
     client.embed.side_effect = [LLMError("first one fails"), [0.5] * 1024]
 
     summary = refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
     )
     assert summary["calls_embedded"] == 1
     assert summary["calls_failed"] == 1
@@ -172,7 +182,9 @@ def test_refresh_missing_tick_re_embeds_rows_with_mismatched_model(pg_session_fa
 
     client = _fake_client(vec=[0.1] * 1024)
     summary = refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
     )
     # Both got re-embedded (the old-model one + the NULL one)
     assert summary["calls_embedded"] == 2
@@ -208,7 +220,9 @@ def test_refresh_missing_tick_noops_on_blank_desc_no_areas_profile(pg_session_fa
     # True (state kept consistent with blank input), but the important
     # invariant is that we never hit the remote embedder with empty text.
     refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
     )
 
 
@@ -228,7 +242,9 @@ def test_refresh_missing_tick_embeds_profile_with_only_areas(pg_session_factory)
     client.embed.return_value = [0.2] * 1024
 
     refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
     )
 
     # Verify the embed was actually called and the vector landed.
@@ -258,8 +274,10 @@ def test_refresh_missing_tick_force_true_re_embeds_already_embedded_rows(pg_sess
 
     client = _fake_client(vec=[0.1] * 1024)
     summary = refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client,
-        batch_size=200, force=True,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
+        force=True,
     )
     assert summary["calls_embedded"] == 1
     assert summary["profiles_embedded"] == 1
@@ -286,7 +304,9 @@ def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_sess
 
     client = _fake_client(vec=[0.1] * 1024)
     summary = refresh_missing_embeddings_tick(
-        session_factory=pg_session_factory, embed_client=client, batch_size=200,
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=200,
     )
     assert summary["calls_embedded"] == 0
     assert summary["profiles_embedded"] == 0

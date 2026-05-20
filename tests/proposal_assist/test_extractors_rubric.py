@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from call_monitor.proposal_assist.extractors.rubric import (
+from call_manager.proposal_assist.extractors.rubric import (
     extract_rubric,
 )
 

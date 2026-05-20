@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from call_monitor.auth.session_cookie import (
+from call_manager.auth.session_cookie import (
     InvalidSession,
     SessionSigner,
 )

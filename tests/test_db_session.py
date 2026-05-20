@@ -1,6 +1,6 @@
 from sqlalchemy import text
 
-from call_monitor.db.session import make_session_factory
+from call_manager.db.session import make_session_factory
 
 
 def test_engine_executes_select_one(db_engine):

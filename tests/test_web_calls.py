@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Call, Source, User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Call, Source, User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -33,20 +33,37 @@ def _seed_calls(pg_session_factory):
     with pg_session_factory() as s:
         eu = s.execute(select(Source).where(Source.slug == "eu_portal")).scalar_one()
         vn = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add_all([
-            # EU one: published April 1, deadline July 1 (latest deadline)
-            Call(source_id=eu.id, external_id="E-1", url="u1", title="EU one",
-                 published_at=datetime(2026, 4, 1, tzinfo=UTC),
-                 deadline=datetime(2026, 7, 1, tzinfo=UTC)),
-            # Vin one: published April 5 (newest), deadline May 15 (earliest)
-            Call(source_id=vn.id, external_id="V-1", url="u2", title="Vin one",
-                 published_at=datetime(2026, 4, 5, tzinfo=UTC),
-                 deadline=datetime(2026, 5, 15, tzinfo=UTC)),
-            # EU two: published March 1 (oldest), deadline June 10
-            Call(source_id=eu.id, external_id="E-2", url="u3", title="EU two",
-                 published_at=datetime(2026, 3, 1, tzinfo=UTC),
-                 deadline=datetime(2026, 6, 10, tzinfo=UTC)),
-        ])
+        s.add_all(
+            [
+                # EU one: published April 1, deadline July 1 (latest deadline)
+                Call(
+                    source_id=eu.id,
+                    external_id="E-1",
+                    url="u1",
+                    title="EU one",
+                    published_at=datetime(2026, 4, 1, tzinfo=UTC),
+                    deadline=datetime(2026, 7, 1, tzinfo=UTC),
+                ),
+                # Vin one: published April 5 (newest), deadline May 15 (earliest)
+                Call(
+                    source_id=vn.id,
+                    external_id="V-1",
+                    url="u2",
+                    title="Vin one",
+                    published_at=datetime(2026, 4, 5, tzinfo=UTC),
+                    deadline=datetime(2026, 5, 15, tzinfo=UTC),
+                ),
+                # EU two: published March 1 (oldest), deadline June 10
+                Call(
+                    source_id=eu.id,
+                    external_id="E-2",
+                    url="u3",
+                    title="EU two",
+                    published_at=datetime(2026, 3, 1, tzinfo=UTC),
+                    deadline=datetime(2026, 6, 10, tzinfo=UTC),
+                ),
+            ]
+        )
         s.commit()
 
 
@@ -105,9 +122,7 @@ def test_root_treats_empty_profile_as_unfiltered(monkeypatch, pg_url, pg_session
     assert r.status_code == 200
 
 
-def test_call_detail_treats_empty_profile_as_unfiltered(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_call_detail_treats_empty_profile_as_unfiltered(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     _seed_calls(pg_session_factory)
     client = _logged_in(app, pg_session_factory)

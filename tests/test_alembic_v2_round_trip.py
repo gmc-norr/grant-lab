@@ -8,6 +8,7 @@ Plan E (0008) drops v1 entirely. The round-trip test no longer asserts
     so any rows seeded at head (which become scheme='v2' rows after 0008's
     down restores the column with that server_default) are dropped at
     0006→0005 and the schema is left clean for re-upgrade."""
+
 import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, text
@@ -57,39 +58,41 @@ def _run_round_trip(engine, alembic_cfg):
 
         # Seed: one user, one profile, one call, one ranking — all using the
         # post-0008 schema (no scheme / setwise_offset / ranking_scheme).
-        conn.execute(text(
-            "INSERT INTO users (email, is_admin, created_at) "
-            "VALUES ('rt@ki.se', false, now())"
-        ))
-        uid = conn.execute(text(
-            "SELECT id FROM users WHERE email = 'rt@ki.se'"
-        )).scalar_one()
-        conn.execute(text(
-            "INSERT INTO profiles (name, kind, description, structured, "
-            "                       created_by, is_active, "
-            "                       created_at, updated_at) "
-            "VALUES ('RT', 'group', '', '{}'::jsonb, :uid, true, now(), now())"
-        ), {"uid": uid})
-        pid = conn.execute(text(
-            "SELECT id FROM profiles WHERE name = 'RT'"
-        )).scalar_one()
-        sid = conn.execute(text(
-            "SELECT id FROM sources WHERE slug = 'vinnova'"
-        )).scalar_one()
-        conn.execute(text(
-            "INSERT INTO calls (source_id, external_id, url, title, "
-            "                    keywords, raw, published_at, fetched_at) "
-            "VALUES (:sid, 'RT-1', 'https://x', 'RT', '{}', '{}'::jsonb, now(), now())"
-        ), {"sid": sid})
-        cid = conn.execute(text(
-            "SELECT id FROM calls WHERE external_id = 'RT-1'"
-        )).scalar_one()
-        conn.execute(text(
-            "INSERT INTO call_rankings (call_id, profile_id, "
-            "                            aggregate_score, rationale, "
-            "                            model, prompt_version, ranked_at) "
-            "VALUES (:cid, :pid, 22, 'v2', 'm', 'v2.0', now())"
-        ), {"cid": cid, "pid": pid})
+        conn.execute(
+            text(
+                "INSERT INTO users (email, is_admin, created_at) VALUES ('rt@ki.se', false, now())"
+            )
+        )
+        uid = conn.execute(text("SELECT id FROM users WHERE email = 'rt@ki.se'")).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO profiles (name, kind, description, structured, "
+                "                       created_by, is_active, "
+                "                       created_at, updated_at) "
+                "VALUES ('RT', 'group', '', '{}'::jsonb, :uid, true, now(), now())"
+            ),
+            {"uid": uid},
+        )
+        pid = conn.execute(text("SELECT id FROM profiles WHERE name = 'RT'")).scalar_one()
+        sid = conn.execute(text("SELECT id FROM sources WHERE slug = 'vinnova'")).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO calls (source_id, external_id, url, title, "
+                "                    keywords, raw, published_at, fetched_at) "
+                "VALUES (:sid, 'RT-1', 'https://x', 'RT', '{}', '{}'::jsonb, now(), now())"
+            ),
+            {"sid": sid},
+        )
+        cid = conn.execute(text("SELECT id FROM calls WHERE external_id = 'RT-1'")).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO call_rankings (call_id, profile_id, "
+                "                            aggregate_score, rationale, "
+                "                            model, prompt_version, ranked_at) "
+                "VALUES (:cid, :pid, 22, 'v2', 'm', 'v2.0', now())"
+            ),
+            {"cid": cid, "pid": pid},
+        )
 
     # Down to 0005 — exercises 0008→0007→0006→0005. After 0008's downgrade,
     # the seeded row gets scheme='v2' (server_default); 0006's downgrade then
@@ -102,10 +105,16 @@ def _run_round_trip(engine, alembic_cfg):
     # Re-upgrade to head. Schema must reach the post-0008 state cleanly.
     command.upgrade(alembic_cfg, "head")
     with engine.begin() as conn:
-        cols = conn.execute(text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'call_rankings'"
-        )).scalars().all()
+        cols = (
+            conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'call_rankings'"
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert "scheme" not in cols
     assert "setwise_offset" not in cols
 
@@ -127,10 +136,12 @@ def test_0007_adds_pgvector_columns_and_partial_indexes(migrated_engine):
 
     # Partial indexes: querying pg_indexes is the cleanest check.
     with migrated_engine.connect() as conn:
-        rows = conn.execute(text(
-            "SELECT indexname FROM pg_indexes "
-            "WHERE indexname IN ('ix_calls_embedding_null', 'ix_profiles_embedding_null')"
-        )).all()
+        rows = conn.execute(
+            text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE indexname IN ('ix_calls_embedding_null', 'ix_profiles_embedding_null')"
+            )
+        ).all()
     assert {r[0] for r in rows} == {
         "ix_calls_embedding_null",
         "ix_profiles_embedding_null",
@@ -142,9 +153,7 @@ def test_0007_extension_vector_installed(migrated_engine):
     from sqlalchemy import text
 
     with migrated_engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT extname FROM pg_extension WHERE extname='vector'")
-        ).all()
+        rows = conn.execute(text("SELECT extname FROM pg_extension WHERE extname='vector'")).all()
     assert len(rows) == 1
 
 
@@ -184,12 +193,15 @@ def test_0007_check_constraint_rejects_orphan_embedding(pg_session_factory):
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
 
-    from call_monitor.db.models import Call, Source
+    from call_manager.db.models import Call, Source
 
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id="ck-1", url="https://x", title="T",
+            source_id=src.id,
+            external_id="ck-1",
+            url="https://x",
+            title="T",
             published_at=datetime.now(UTC),
             embedding=[0.1] * 1024,
             embedding_model=None,  # orphan — should violate CHECK

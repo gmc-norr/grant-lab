@@ -1,24 +1,24 @@
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
-from call_monitor.proposal_assist.drafting.contract import (
+from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
+from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     SDKTurnError,
     ToolResultEvent,
     ToolUseEvent,
     TurnDoneEvent,
 )
-from call_monitor.proposal_assist.drafting.controller import WorkspaceController
-from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
-from call_monitor.proposal_assist.turns.processor import process_turn_once
-from call_monitor.proposal_assist.turns.submit import submit_user_turn
+from call_manager.proposal_assist.drafting.controller import WorkspaceController
+from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from call_manager.proposal_assist.turns.processor import process_turn_once
+from call_manager.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _build_controller_and_submit(pg_session_factory, _settings_env, events):
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     adapter = FakeAgentAdapter()
@@ -144,7 +144,7 @@ async def test_process_turn_handles_sdk_turn_error(
         session_factory=pg_session_factory,
     )
 
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -270,7 +270,7 @@ async def test_process_turn_survives_stale_running_row_from_prior_crash(
     so the unique partial index doesn't fire."""
     from datetime import UTC, datetime
 
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     adapter = FakeAgentAdapter()
@@ -347,7 +347,7 @@ async def test_process_turn_leaves_row_queued_when_launch_raises(
     No claim, no chat_turns assistant rows, no cloud_turn_failed
     outcome event (the launch failure path is documented as audit-
     trail-incomplete; B6/B8 may surface after K retries)."""
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
     from tests.proposal_assist.conftest import make_user
 
     settings = Settings()
@@ -416,7 +416,7 @@ async def test_process_turn_finalizes_failed_when_user_turn_row_missing(
     """If the linked chat_turns row was deleted between submit and
     processing, the processor marks the job failed via _finalize_failed
     (which writes cloud_turn_failed)."""
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
     from tests.proposal_assist.conftest import make_user
 
     settings = Settings()

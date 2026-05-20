@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Attachment, AttachmentJob  # merged
+from call_manager.db.models import Attachment, AttachmentJob  # merged
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

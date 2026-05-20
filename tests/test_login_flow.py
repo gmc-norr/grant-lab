@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.email import InMemoryEmailSender
-from call_monitor.auth.rate_limit import SlidingWindowLimiter
-from call_monitor.main import create_app
+from call_manager.auth.email import InMemoryEmailSender
+from call_manager.auth.rate_limit import SlidingWindowLimiter
+from call_manager.main import create_app
 
 
 def test_full_login_flow(monkeypatch, pg_url, pg_session_factory):
@@ -25,7 +25,7 @@ def test_full_login_flow(monkeypatch, pg_url, pg_session_factory):
         body = sender.sent[0].text_body
         link = [line for line in body.splitlines() if "login/verify" in line][0].strip()
         # Strip host so TestClient can use it
-        path = link[link.index("/login/verify"):]
+        path = link[link.index("/login/verify") :]
 
         # 2. Click link → redirected, cookie set
         r = client.get(path, follow_redirects=False)

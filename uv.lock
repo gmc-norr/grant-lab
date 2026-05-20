@@ -97,7 +97,7 @@ wheels = [
 ]
 
 [[package]]
-name = "call-monitor"
+name = "call-manager"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

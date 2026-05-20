@@ -6,9 +6,9 @@ import uuid
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import User, Workspace, WorkspaceEvent, WorkspaceSetupJob
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import User, Workspace, WorkspaceEvent, WorkspaceSetupJob
+from call_manager.main import create_app
 
 
 def _build_app(monkeypatch, pg_url):

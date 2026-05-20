@@ -3,11 +3,11 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import select
 
-from call_monitor.auth.email import InMemoryEmailSender
-from call_monitor.db.models import Call, Source
-from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
-from call_monitor.ingestion.orchestrator import run_ingestion
-from call_monitor.sources.types import AdapterError, NormalizedCall
+from call_manager.auth.email import InMemoryEmailSender
+from call_manager.db.models import Call, Source
+from call_manager.ingestion.alerts import ConsecutiveFailureTracker
+from call_manager.ingestion.orchestrator import run_ingestion
+from call_manager.sources.types import AdapterError, NormalizedCall
 
 
 def _embed_client():
@@ -44,10 +44,12 @@ def _alerter(sender):
 
 def test_successful_run_persists_and_advances_timestamp(pg_session_factory):
     sender = InMemoryEmailSender()
-    adapter = _StaticAdapter([
-        NormalizedCall(external_id="V-1", url="u1", title="One"),
-        NormalizedCall(external_id="V-2", url="u2", title="Two"),
-    ])
+    adapter = _StaticAdapter(
+        [
+            NormalizedCall(external_id="V-1", url="u1", title="One"),
+            NormalizedCall(external_id="V-2", url="u2", title="Two"),
+        ]
+    )
 
     result = run_ingestion(
         session_factory=pg_session_factory,
@@ -70,17 +72,23 @@ def test_second_run_updates_existing_and_inserts_new(pg_session_factory):
     sender = InMemoryEmailSender()
     a1 = _StaticAdapter([NormalizedCall(external_id="V-1", url="u", title="OLD")])
     run_ingestion(
-        session_factory=pg_session_factory, adapter=a1,
-        alerter=_alerter(sender), embed_client=_embed_client(),
+        session_factory=pg_session_factory,
+        adapter=a1,
+        alerter=_alerter(sender),
+        embed_client=_embed_client(),
     )
 
-    a2 = _StaticAdapter([
-        NormalizedCall(external_id="V-1", url="u", title="NEW"),
-        NormalizedCall(external_id="V-2", url="u", title="Brand new"),
-    ])
+    a2 = _StaticAdapter(
+        [
+            NormalizedCall(external_id="V-1", url="u", title="NEW"),
+            NormalizedCall(external_id="V-2", url="u", title="Brand new"),
+        ]
+    )
     result = run_ingestion(
-        session_factory=pg_session_factory, adapter=a2,
-        alerter=_alerter(sender), embed_client=_embed_client(),
+        session_factory=pg_session_factory,
+        adapter=a2,
+        alerter=_alerter(sender),
+        embed_client=_embed_client(),
     )
     assert result.inserted == 1
     assert result.updated == 1
@@ -97,8 +105,10 @@ def test_failure_rolls_back_and_does_not_advance_timestamp(pg_session_factory):
         ).scalar_one()
 
     result = run_ingestion(
-        session_factory=pg_session_factory, adapter=adapter,
-        alerter=_alerter(sender), embed_client=_embed_client(),
+        session_factory=pg_session_factory,
+        adapter=adapter,
+        alerter=_alerter(sender),
+        embed_client=_embed_client(),
     )
     assert result.error is not None
     assert "network blip" in result.error
@@ -122,8 +132,10 @@ def test_three_consecutive_failures_alert_admin(pg_session_factory):
     adapter = _FailingAdapter()
     for _ in range(3):
         run_ingestion(
-            session_factory=pg_session_factory, adapter=adapter,
-            alerter=alerter, embed_client=_embed_client(),
+            session_factory=pg_session_factory,
+            adapter=adapter,
+            alerter=alerter,
+            embed_client=_embed_client(),
         )
     assert len(sender.sent) == 1
     assert "vinnova" in sender.sent[0].subject
@@ -147,9 +159,7 @@ def test_unknown_source_slug_raises(pg_session_factory):
         )
 
 
-def test_orchestrator_enqueues_one_job_per_active_profile(
-    pg_session_factory, profile_factory
-):
+def test_orchestrator_enqueues_one_job_per_active_profile(pg_session_factory, profile_factory):
     """The orchestrator enqueues a ranking job for every active profile per
     touched call."""
     from datetime import UTC, datetime
@@ -157,7 +167,7 @@ def test_orchestrator_enqueues_one_job_per_active_profile(
 
     from sqlalchemy import select
 
-    from call_monitor.db.models import RankingJob
+    from call_manager.db.models import RankingJob
 
     pid_a, _ = profile_factory(name="P-A")
     pid_b, _ = profile_factory(name="P-B")

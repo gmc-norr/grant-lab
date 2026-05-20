@@ -1,8 +1,8 @@
-# call-monitor
+# call-manager
 
 Internal hospital tool that aggregates funding calls (grants, EU calls, etc.) from multiple sources, ranks them with an LLM against organization- and group-level profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest.
 
-See [docs/superpowers/specs/2026-04-14-call-monitor-design.md](docs/superpowers/specs/2026-04-14-call-monitor-design.md) for the v1 design.
+See [docs/superpowers/specs/2026-04-14-call-manager-design.md](docs/superpowers/specs/2026-04-14-call-manager-design.md) for the v1 design.
 
 ## Conventions
 

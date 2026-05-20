@@ -3,17 +3,17 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import TurnJob
-from call_monitor.proposal_assist.drafting.contract import (
+from call_manager.db.models import TurnJob
+from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     TurnDoneEvent,
 )
-from call_monitor.proposal_assist.drafting.controller import (
+from call_manager.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
-from call_monitor.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_monitor.proposal_assist.drafting.locking import acquire_workspace_lock
-from call_monitor.proposal_assist.drafting.registry import SubprocessRegistry
+from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from call_manager.proposal_assist.drafting.locking import acquire_workspace_lock
+from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -120,7 +120,7 @@ async def test_controller_launch_returns_cached_handle_on_second_call(
 async def test_controller_send_turn_yields_events(pg_session_factory):
     """Controller.send_turn iterates the adapter's stream and touches
     the registry's idle timer along the way."""
-    from call_monitor.proposal_assist.drafting.contract import (
+    from call_manager.proposal_assist.drafting.contract import (
         AssistantTextEvent,
         TurnDoneEvent,
     )
@@ -178,7 +178,7 @@ async def test_controller_launch_releases_lock_if_adapter_launch_raises(
     with pg_session_factory() as s2:
         assert acquire_workspace_lock(s2, wsid) is True
         # cleanup so we don't leak this test's lock
-        from call_monitor.proposal_assist.drafting.locking import (
+        from call_manager.proposal_assist.drafting.locking import (
             release_workspace_lock,
         )
 
@@ -194,7 +194,7 @@ async def test_controller_launch_closes_session_if_acquire_raises(
     stale pooled connection), the opened lock_session must still be closed
     so the connection doesn't leak. Without the cleanup, the connection
     would sit checked-out until GC."""
-    from call_monitor.proposal_assist.drafting import controller as ctrl_mod
+    from call_manager.proposal_assist.drafting import controller as ctrl_mod
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
@@ -267,7 +267,7 @@ async def test_controller_launch_cleans_up_handle_if_fulfill_path_cancelled(
     # Lock was released — fresh session can re-acquire.
     with pg_session_factory() as s2:
         assert acquire_workspace_lock(s2, wsid) is True
-        from call_monitor.proposal_assist.drafting.locking import (
+        from call_manager.proposal_assist.drafting.locking import (
             release_workspace_lock,
         )
 
@@ -302,7 +302,7 @@ async def test_controller_sweep_idle_releases_advisory_lock(pg_session_factory):
     # Lock must be released.
     with pg_session_factory() as s2:
         assert acquire_workspace_lock(s2, wsid) is True
-        from call_monitor.proposal_assist.drafting.locking import (
+        from call_manager.proposal_assist.drafting.locking import (
             release_workspace_lock,
         )
 

@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Call, RankingJob, Source, User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Call, RankingJob, Source, User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -34,7 +34,8 @@ def test_admin_shows_queue_counts(monkeypatch, pg_url, pg_session_factory, profi
         c = Call(source_id=src.id, external_id="X", url="https://x", title="T")
         s.add(c)
         s.flush()
-        from call_monitor.db.models import RankingJobStatus
+        from call_manager.db.models import RankingJobStatus
+
         s.add(RankingJob(call_id=c.id, profile_id=profile_id, status=RankingJobStatus.PENDING))
         s.commit()
 
@@ -56,13 +57,19 @@ def test_admin_rerank_enqueues_jobs_for_recent_calls(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     from datetime import UTC, datetime, timedelta
+
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add(Call(
-            source_id=src.id, external_id="R", url="https://x/r", title="T",
-            published_at=datetime.now(UTC) - timedelta(days=10),
-        ))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="R",
+                url="https://x/r",
+                title="T",
+                published_at=datetime.now(UTC) - timedelta(days=10),
+            )
+        )
         s.commit()
 
     app = _setup(monkeypatch, pg_url)

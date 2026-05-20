@@ -1,13 +1,11 @@
 import logging
 
-from call_monitor.admin_bootstrap import bootstrap_admins
-from call_monitor.db.models import User
+from call_manager.admin_bootstrap import bootstrap_admins
+from call_manager.db.models import User
 
 
 def test_creates_users_with_admin_flag(pg_session_factory):
-    bootstrap_admins(
-        pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"]
-    )
+    bootstrap_admins(pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"])
     with pg_session_factory() as s:
         u = s.query(User).filter_by(email="root@ki.se").one()
     assert u.is_admin is True
@@ -17,21 +15,15 @@ def test_promotes_existing_user(pg_session_factory):
     with pg_session_factory() as s:
         s.add(User(email="alice@ki.se", is_admin=False))
         s.commit()
-    bootstrap_admins(
-        pg_session_factory, emails=["alice@ki.se"], allowed_domains=["ki.se"]
-    )
+    bootstrap_admins(pg_session_factory, emails=["alice@ki.se"], allowed_domains=["ki.se"])
     with pg_session_factory() as s:
         u = s.query(User).filter_by(email="alice@ki.se").one()
     assert u.is_admin is True
 
 
 def test_is_idempotent(pg_session_factory):
-    bootstrap_admins(
-        pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"]
-    )
-    bootstrap_admins(
-        pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"]
-    )
+    bootstrap_admins(pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"])
+    bootstrap_admins(pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"])
     with pg_session_factory() as s:
         assert s.query(User).filter_by(email="root@ki.se").count() == 1
 
@@ -46,7 +38,7 @@ def test_skips_email_outside_allowlist(pg_session_factory, caplog):
     """A typo or stale INITIAL_ADMIN_EMAIL pointing to a domain the app
     doesn't trust must not create an admin account. Silent creation is the
     exact failure mode the domain allowlist is there to prevent."""
-    with caplog.at_level(logging.WARNING, logger="call_monitor.admin_bootstrap"):
+    with caplog.at_level(logging.WARNING, logger="call_manager.admin_bootstrap"):
         bootstrap_admins(
             pg_session_factory,
             emails=["intruder@example.com"],
@@ -63,7 +55,7 @@ def test_skips_email_outside_allowlist(pg_session_factory, caplog):
 def test_skips_malformed_email(pg_session_factory, caplog):
     """An INITIAL_ADMIN_EMAIL without an @ must not persist a broken
     users row that no one can log in to."""
-    with caplog.at_level(logging.WARNING, logger="call_monitor.admin_bootstrap"):
+    with caplog.at_level(logging.WARNING, logger="call_manager.admin_bootstrap"):
         bootstrap_admins(
             pg_session_factory,
             emails=["not-an-email"],

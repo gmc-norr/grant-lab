@@ -1,8 +1,9 @@
 """Tests for create_app() email-sender startup selection logic."""
+
 import pytest
 
-from call_monitor.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
-from call_monitor.main import create_app
+from call_manager.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
+from call_manager.main import create_app
 
 
 def _set_min_env(monkeypatch, database_url):

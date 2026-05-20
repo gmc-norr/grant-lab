@@ -1,8 +1,9 @@
 """Origin/Referer CSRF middleware — layered on top of SameSite=Lax."""
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.csrf import OriginCSRFMiddleware
+from call_manager.auth.csrf import OriginCSRFMiddleware
 
 
 def _mk_app(base_url: str = "http://testserver") -> FastAPI:

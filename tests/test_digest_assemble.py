@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import (
+from call_manager.db.models import (
     Call,
     CallRanking,
     DigestRun,
@@ -14,7 +14,7 @@ from call_monitor.db.models import (
     User,
     UserCallDismissal,
 )
-from call_monitor.digest.assemble import assemble_for_user
+from call_manager.digest.assemble import assemble_for_user
 
 
 @pytest.fixture()
@@ -27,11 +27,19 @@ def _seed_user_with_profile(s, *, email="u@ki.se", profile_name="P", must_includ
     s.add(u)
     s.flush()
     p = Profile(
-        name=profile_name, kind=ProfileKind.GROUP, description="", structured={
-            "areas": [], "budget_min": None, "budget_max": None,
-            "trl_min": None, "trl_max": None,
-            "must_include": must_include or [], "hard_exclusions": [],
-        }, created_by=u.id,
+        name=profile_name,
+        kind=ProfileKind.GROUP,
+        description="",
+        structured={
+            "areas": [],
+            "budget_min": None,
+            "budget_max": None,
+            "trl_min": None,
+            "trl_max": None,
+            "must_include": must_include or [],
+            "hard_exclusions": [],
+        },
+        created_by=u.id,
     )
     s.add(p)
     s.flush()
@@ -40,22 +48,44 @@ def _seed_user_with_profile(s, *, email="u@ki.se", profile_name="P", must_includ
     return u.id, p.id
 
 
-def _seed_call(s, *, title, score=None, profile_id=None, summary=None,
-               keywords=None, deadline=None, published_at=None, full_text=None):
+def _seed_call(
+    s,
+    *,
+    title,
+    score=None,
+    profile_id=None,
+    summary=None,
+    keywords=None,
+    deadline=None,
+    published_at=None,
+    full_text=None,
+):
     src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
     c = Call(
-        source_id=src.id, external_id=title, url=f"https://x/{title}",
-        title=title, summary=summary, full_text=full_text, keywords=keywords or [],
-        deadline=deadline, published_at=published_at or datetime.now(UTC),
+        source_id=src.id,
+        external_id=title,
+        url=f"https://x/{title}",
+        title=title,
+        summary=summary,
+        full_text=full_text,
+        keywords=keywords or [],
+        deadline=deadline,
+        published_at=published_at or datetime.now(UTC),
     )
     s.add(c)
     s.flush()
     if score is not None and profile_id is not None:
-        s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, aggregate_score=score,
-            rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
-            ranked_at=datetime.now(UTC),
-        ))
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=profile_id,
+                aggregate_score=score,
+                rationale="r",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+                ranked_at=datetime.now(UTC),
+            )
+        )
         s.flush()
     return c.id
 
@@ -83,9 +113,7 @@ def test_assemble_returns_none_when_buckets_empty(pg_session_factory, now):
     assert payload is None
 
 
-def test_assemble_top_bucket_takes_top_5_above_threshold(
-    pg_session_factory, now
-):
+def test_assemble_top_bucket_takes_top_5_above_threshold(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
         for i in range(7):
@@ -107,7 +135,10 @@ def test_assemble_must_include_overrides_score(pg_session_factory, now):
         uid, pid = _seed_user_with_profile(s, must_include=["pathology"])
         # call with low score but matching must-include
         _seed_call(
-            s, title="Pathology AI breakthrough", score=20, profile_id=pid,
+            s,
+            title="Pathology AI breakthrough",
+            score=20,
+            profile_id=pid,
         )
         s.commit()
     with pg_session_factory() as s:
@@ -165,9 +196,12 @@ def test_assemble_must_include_matches_keywords(pg_session_factory, now):
         uid, pid = _seed_user_with_profile(s, must_include=["genomics"])
         # title and summary have no match — only the keywords array does
         _seed_call(
-            s, title="Funding announcement", summary="Generic blurb.",
+            s,
+            title="Funding announcement",
+            summary="Generic blurb.",
             keywords=["genomics", "biobank"],
-            score=20, profile_id=pid,
+            score=20,
+            profile_id=pid,
         )
         s.commit()
     with pg_session_factory() as s:
@@ -177,9 +211,7 @@ def test_assemble_must_include_matches_keywords(pg_session_factory, now):
     assert len(must) == 1
 
 
-def test_assemble_dedup_must_include_beats_top_in_other_profile(
-    pg_session_factory, now
-):
+def test_assemble_dedup_must_include_beats_top_in_other_profile(pg_session_factory, now):
     """Pin the bucket-priority decision: when the same call is must_include
     in P1 (low score) and top in P2 (high score), it goes to P1's must-include
     section. This is by design — must-include is the user's hard filter and
@@ -190,32 +222,56 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(
         s.add(u)
         s.flush()
         p_must = Profile(
-            name="MustProfile", kind=ProfileKind.GROUP, description="", structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": ["pathology"], "hard_exclusions": [],
-            }, created_by=u.id,
+            name="MustProfile",
+            kind=ProfileKind.GROUP,
+            description="",
+            structured={
+                "areas": [],
+                "budget_min": None,
+                "budget_max": None,
+                "trl_min": None,
+                "trl_max": None,
+                "must_include": ["pathology"],
+                "hard_exclusions": [],
+            },
+            created_by=u.id,
         )
         p_top = Profile(
-            name="TopProfile", kind=ProfileKind.GROUP, description="", structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": [], "hard_exclusions": [],
-            }, created_by=u.id,
+            name="TopProfile",
+            kind=ProfileKind.GROUP,
+            description="",
+            structured={
+                "areas": [],
+                "budget_min": None,
+                "budget_max": None,
+                "trl_min": None,
+                "trl_max": None,
+                "must_include": [],
+                "hard_exclusions": [],
+            },
+            created_by=u.id,
         )
         s.add_all([p_must, p_top])
         s.flush()
-        s.add_all([
-            Subscription(user_id=u.id, profile_id=p_must.id, digest_enabled=True),
-            Subscription(user_id=u.id, profile_id=p_top.id, digest_enabled=True),
-        ])
+        s.add_all(
+            [
+                Subscription(user_id=u.id, profile_id=p_must.id, digest_enabled=True),
+                Subscription(user_id=u.id, profile_id=p_top.id, digest_enabled=True),
+            ]
+        )
         cid = _seed_call(s, title="Pathology breakthrough", score=85, profile_id=p_top.id)
         # Also a low-score ranking against p_must so the call appears in both candidate sets
-        s.add(CallRanking(
-            call_id=cid, profile_id=p_must.id, aggregate_score=20,
-            rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
-            ranked_at=datetime.now(UTC),
-        ))
+        s.add(
+            CallRanking(
+                call_id=cid,
+                profile_id=p_must.id,
+                aggregate_score=20,
+                rationale="r",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+                ranked_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=u.id, now=now)
@@ -237,7 +293,9 @@ def test_assemble_handles_profile_missing_must_include_key(pg_session_factory, n
         s.add(u)
         s.flush()
         p = Profile(
-            name="Legacy", kind=ProfileKind.GROUP, description="",
+            name="Legacy",
+            kind=ProfileKind.GROUP,
+            description="",
             structured={},  # no must_include key
             created_by=u.id,
         )
@@ -320,11 +378,17 @@ def test_assemble_excludes_past_deadline(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
         _seed_call(
-            s, title="Future", score=80, profile_id=pid,
+            s,
+            title="Future",
+            score=80,
+            profile_id=pid,
             deadline=now + timedelta(days=10),
         )
         _seed_call(
-            s, title="Past", score=80, profile_id=pid,
+            s,
+            title="Past",
+            score=80,
+            profile_id=pid,
             deadline=now - timedelta(days=1),
         )
         _seed_call(s, title="NoDeadline", score=80, profile_id=pid, deadline=None)
@@ -337,9 +401,7 @@ def test_assemble_excludes_past_deadline(pg_session_factory, now):
     assert "Past" not in titles
 
 
-def test_assemble_dedup_across_profiles_keeps_highest_score(
-    pg_session_factory, now
-):
+def test_assemble_dedup_across_profiles_keeps_highest_score(pg_session_factory, now):
     """Same call ranked against two profiles. Lands once, in the higher
     section. The other profile's section gets an `also_in_profiles` note."""
     with pg_session_factory() as s:
@@ -347,32 +409,56 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(
         s.add(u)
         s.flush()
         p_low = Profile(
-            name="LowProfile", kind=ProfileKind.GROUP, description="", structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": [], "hard_exclusions": [],
-            }, created_by=u.id,
+            name="LowProfile",
+            kind=ProfileKind.GROUP,
+            description="",
+            structured={
+                "areas": [],
+                "budget_min": None,
+                "budget_max": None,
+                "trl_min": None,
+                "trl_max": None,
+                "must_include": [],
+                "hard_exclusions": [],
+            },
+            created_by=u.id,
         )
         p_high = Profile(
-            name="HighProfile", kind=ProfileKind.GROUP, description="", structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": [], "hard_exclusions": [],
-            }, created_by=u.id,
+            name="HighProfile",
+            kind=ProfileKind.GROUP,
+            description="",
+            structured={
+                "areas": [],
+                "budget_min": None,
+                "budget_max": None,
+                "trl_min": None,
+                "trl_max": None,
+                "must_include": [],
+                "hard_exclusions": [],
+            },
+            created_by=u.id,
         )
         s.add_all([p_low, p_high])
         s.flush()
-        s.add_all([
-            Subscription(user_id=u.id, profile_id=p_low.id, digest_enabled=True),
-            Subscription(user_id=u.id, profile_id=p_high.id, digest_enabled=True),
-        ])
+        s.add_all(
+            [
+                Subscription(user_id=u.id, profile_id=p_low.id, digest_enabled=True),
+                Subscription(user_id=u.id, profile_id=p_high.id, digest_enabled=True),
+            ]
+        )
         s.flush()
         cid = _seed_call(s, title="Shared", score=70, profile_id=p_low.id)
-        s.add(CallRanking(
-            call_id=cid, profile_id=p_high.id, aggregate_score=85,
-            rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
-            ranked_at=datetime.now(UTC),
-        ))
+        s.add(
+            CallRanking(
+                call_id=cid,
+                profile_id=p_high.id,
+                aggregate_score=85,
+                rationale="r",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+                ranked_at=datetime.now(UTC),
+            )
+        )
         s.commit()
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=u.id, now=now)
@@ -398,9 +484,7 @@ def test_assemble_skips_inactive_profile(pg_session_factory, now):
     assert payload is None
 
 
-def test_assemble_must_include_whitespace_term_does_not_match_all(
-    pg_session_factory, now
-):
+def test_assemble_must_include_whitespace_term_does_not_match_all(pg_session_factory, now):
     """A whitespace-only must_include term must not ilike-match every call."""
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s, must_include=["   "])
@@ -417,10 +501,16 @@ def test_assemble_must_include_escapes_like_wildcards(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s, must_include=["100%"])
         _seed_call(
-            s, title="Funding with 100% match rate", score=20, profile_id=pid,
+            s,
+            title="Funding with 100% match rate",
+            score=20,
+            profile_id=pid,
         )
         _seed_call(
-            s, title="Unrelated call", score=20, profile_id=pid,
+            s,
+            title="Unrelated call",
+            score=20,
+            profile_id=pid,
         )
         s.commit()
     with pg_session_factory() as s:
@@ -441,5 +531,3 @@ def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=uid, now=now)
     assert payload is None
-
-

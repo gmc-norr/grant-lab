@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from call_monitor.ranking.prompt import (
+from call_manager.ranking.prompt import (
     PROMPT_VERSION,
     Parsed,
     ParseError,
@@ -17,25 +17,33 @@ def test_prompt_version_bumped_to_v3():
 
 
 def test_build_messages_includes_profile_and_call_blocks():
-    profile = type("P", (), {
-        "name": "Pathology",
-        "kind": type("K", (), {"value": "group"})(),
-        "description": "Digital pathology AI",
-        "structured": {
-            "areas": ["digital pathology", "AI"],
-            "hard_exclusions": ["animal studies"],
+    profile = type(
+        "P",
+        (),
+        {
+            "name": "Pathology",
+            "kind": type("K", (), {"value": "group"})(),
+            "description": "Digital pathology AI",
+            "structured": {
+                "areas": ["digital pathology", "AI"],
+                "hard_exclusions": ["animal studies"],
+            },
         },
-    })()
-    call = type("C", (), {
-        "title": "AI for medical imaging",
-        "summary": "Open call for AI-driven medical imaging research.",
-        "programme": "Vinnova",
-        "deadline": None,
-        "budget_min": None,
-        "budget_max": None,
-        "currency": None,
-        "raw": {},
-    })()
+    )()
+    call = type(
+        "C",
+        (),
+        {
+            "title": "AI for medical imaging",
+            "summary": "Open call for AI-driven medical imaging research.",
+            "programme": "Vinnova",
+            "deadline": None,
+            "budget_min": None,
+            "budget_max": None,
+            "currency": None,
+            "raw": {},
+        },
+    )()
     msgs = build_messages(profile=profile, call=call)
     assert len(msgs) == 2
     assert msgs[0]["role"] == "system"
@@ -56,7 +64,8 @@ def test_build_messages_concatenates_summary_and_full_text():
     from types import SimpleNamespace
 
     profile = SimpleNamespace(
-        name="Cancer Research", description="cancer biomarkers",
+        name="Cancer Research",
+        description="cancer biomarkers",
         kind=SimpleNamespace(value="group"),
         structured={"areas": [], "hard_exclusions": []},
     )
@@ -65,7 +74,10 @@ def test_build_messages_concatenates_summary_and_full_text():
         summary="Brief abstract.",
         full_text="Substantive body paragraph 1.\n\nSubstantive body paragraph 2.",
         deadline=datetime.now(UTC) + timedelta(days=30),
-        budget_min=None, budget_max=None, currency=None, programme=None,
+        budget_min=None,
+        budget_max=None,
+        currency=None,
+        programme=None,
     )
     messages = build_messages(profile=profile, call=call)
     user_text = messages[1]["content"]
@@ -81,13 +93,20 @@ def test_build_messages_uses_summary_only_when_full_text_is_none():
     from types import SimpleNamespace
 
     profile = SimpleNamespace(
-        name="P", description="d", kind=SimpleNamespace(value="group"),
+        name="P",
+        description="d",
+        kind=SimpleNamespace(value="group"),
         structured={"areas": [], "hard_exclusions": []},
     )
     call = SimpleNamespace(
-        title="t", summary="only summary here", full_text=None,
+        title="t",
+        summary="only summary here",
+        full_text=None,
         deadline=datetime.now(UTC) + timedelta(days=30),
-        budget_min=None, budget_max=None, currency=None, programme=None,
+        budget_min=None,
+        budget_max=None,
+        currency=None,
+        programme=None,
     )
     messages = build_messages(profile=profile, call=call)
     assert "only summary here" in messages[1]["content"]
@@ -99,13 +118,20 @@ def test_build_messages_uses_full_text_only_when_summary_is_none():
     from types import SimpleNamespace
 
     profile = SimpleNamespace(
-        name="P", description="d", kind=SimpleNamespace(value="group"),
+        name="P",
+        description="d",
+        kind=SimpleNamespace(value="group"),
         structured={"areas": [], "hard_exclusions": []},
     )
     call = SimpleNamespace(
-        title="t", summary=None, full_text="only the body",
+        title="t",
+        summary=None,
+        full_text="only the body",
         deadline=datetime.now(UTC) + timedelta(days=30),
-        budget_min=None, budget_max=None, currency=None, programme=None,
+        budget_min=None,
+        budget_max=None,
+        currency=None,
+        programme=None,
     )
     messages = build_messages(profile=profile, call=call)
     assert "only the body" in messages[1]["content"]
@@ -121,19 +147,26 @@ def test_build_messages_truncates_at_call_text_limit():
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
-    from call_monitor.ranking.prompt import CALL_TEXT_LIMIT
+    from call_manager.ranking.prompt import CALL_TEXT_LIMIT
 
     assert CALL_TEXT_LIMIT == 16000
 
     profile = SimpleNamespace(
-        name="P", description="d", kind=SimpleNamespace(value="group"),
+        name="P",
+        description="d",
+        kind=SimpleNamespace(value="group"),
         structured={"areas": [], "hard_exclusions": []},
     )
     huge_full_text = "x" * 30_000
     call = SimpleNamespace(
-        title="t", summary=None, full_text=huge_full_text,
+        title="t",
+        summary=None,
+        full_text=huge_full_text,
         deadline=datetime.now(UTC) + timedelta(days=30),
-        budget_min=None, budget_max=None, currency=None, programme=None,
+        budget_min=None,
+        budget_max=None,
+        currency=None,
+        programme=None,
     )
     messages = build_messages(profile=profile, call=call)
     user_text = messages[1]["content"]
@@ -150,18 +183,25 @@ def test_build_messages_truncates_combined_summary_plus_full_text():
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
-    from call_monitor.ranking.prompt import CALL_TEXT_LIMIT
+    from call_manager.ranking.prompt import CALL_TEXT_LIMIT
 
     profile = SimpleNamespace(
-        name="P", description="d", kind=SimpleNamespace(value="group"),
+        name="P",
+        description="d",
+        kind=SimpleNamespace(value="group"),
         structured={"areas": [], "hard_exclusions": []},
     )
     summary = "Short abstract."
     huge_full_text = "x" * 30_000
     call = SimpleNamespace(
-        title="t", summary=summary, full_text=huge_full_text,
+        title="t",
+        summary=summary,
+        full_text=huge_full_text,
         deadline=datetime.now(UTC) + timedelta(days=30),
-        budget_min=None, budget_max=None, currency=None, programme=None,
+        budget_min=None,
+        budget_max=None,
+        currency=None,
+        programme=None,
     )
     messages = build_messages(profile=profile, call=call)
     user_text = messages[1]["content"]
@@ -175,11 +215,13 @@ def test_build_messages_truncates_combined_summary_plus_full_text():
 
 
 def test_parse_clean_response():
-    content = json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "AI for medical"},
-        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "AI for medical"},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
     out = parse_response(content)
     assert isinstance(out, Parsed)
     assert out.topic_fit_rating == 4
@@ -198,8 +240,11 @@ def test_build_messages_includes_analysis_block_when_enabled():
         name = "Test"
         description = "x"
         structured = {"areas": ["a"], "hard_exclusions": []}
+
         @property
-        def kind(self): return type("K", (), {"value": "group"})()
+        def kind(self):
+            return type("K", (), {"value": "group"})()
+
     @dataclass
     class _C:
         title = "T"
@@ -212,9 +257,7 @@ def test_build_messages_includes_analysis_block_when_enabled():
         programme = None
 
     sys_no_analysis = build_messages(profile=_P(), call=_C())[0]["content"]
-    sys_with_analysis = build_messages(
-        profile=_P(), call=_C(), enable_analysis=True
-    )[0]["content"]
+    sys_with_analysis = build_messages(profile=_P(), call=_C(), enable_analysis=True)[0]["content"]
     assert "summary" not in sys_no_analysis.lower() or "summary:" not in sys_no_analysis
     assert "applicant_notes" not in sys_no_analysis
     assert "applicant_notes" in sys_with_analysis
@@ -229,37 +272,37 @@ def test_parse_response_extracts_summary_and_applicant_notes_when_present():
     Sonnet returns a `summary` string + an `applicant_notes` list of
     {category, text} objects alongside the rating fields. The parser
     surfaces them on the Parsed dataclass."""
-    content = json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "x"},
-        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "summary": "Horizon call for federated AI; budget 2-5 MSEK; deadline ~90 days.",
-        "applicant_notes": [
-            {"category": "deadline", "text": "Hard cap, no extensions."},
-            {"category": "eligibility", "text": "Open to consortia with ≥3 EU states."},
-            {"category": "budget", "text": "20% mandatory co-funding from clinical partners."},
-        ],
-    })
-    out = parse_response(content)
-    assert out.summary == (
-        "Horizon call for federated AI; budget 2-5 MSEK; deadline ~90 days."
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "x"},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "summary": "Horizon call for federated AI; budget 2-5 MSEK; deadline ~90 days.",
+            "applicant_notes": [
+                {"category": "deadline", "text": "Hard cap, no extensions."},
+                {"category": "eligibility", "text": "Open to consortia with ≥3 EU states."},
+                {"category": "budget", "text": "20% mandatory co-funding from clinical partners."},
+            ],
+        }
     )
+    out = parse_response(content)
+    assert out.summary == ("Horizon call for federated AI; budget 2-5 MSEK; deadline ~90 days.")
     assert out.applicant_notes is not None
     assert len(out.applicant_notes) == 3
-    assert out.applicant_notes[0] == {
-        "category": "deadline", "text": "Hard cap, no extensions."
-    }
+    assert out.applicant_notes[0] == {"category": "deadline", "text": "Hard cap, no extensions."}
 
 
 def test_parse_response_tolerates_missing_analysis_fields():
     """Gemma path: the existing prompt doesn't ask for summary or
     applicant_notes. Their absence must not raise — fields default to
     None so the column stays NULL and the UI skips the analysis block."""
-    content = json.dumps({
-        "topic_fit": {"rating": 3, "rationale": "ok", "quoted_evidence": None},
-        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 3, "rationale": "ok", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
     out = parse_response(content)
     assert out.summary is None
     assert out.applicant_notes is None
@@ -269,12 +312,14 @@ def test_parse_response_silently_drops_malformed_applicant_notes():
     """A wrong shape (list of strings, list of objects missing fields,
     or not-a-list) must NOT crash the worker — the rating fields are
     still valid and worth persisting. Drop the analysis instead."""
-    content = json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
-        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "applicant_notes": ["string instead of dict", "another bad entry"],
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "applicant_notes": ["string instead of dict", "another bad entry"],
+        }
+    )
     out = parse_response(content)
     assert out.applicant_notes is None  # malformed → dropped
 
@@ -283,18 +328,20 @@ def test_parse_response_drops_unknown_categories_keeps_valid_ones():
     """Sonnet sometimes invents categories beyond the documented set.
     Don't reject the whole list — keep the good entries and drop the
     bad. This is a UX call: better to surface 2 useful notes than zero."""
-    content = json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
-        "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-        "applicant_notes": [
-            {"category": "deadline", "text": "Tight 30-day window."},
-            {"category": "vibes", "text": "Seems friendly."},   # bogus category
-            {"category": "budget", "text": "Co-funding required."},
-            {"category": "deadline"},                            # missing text
-            {"text": "Missing category."},                        # missing category
-        ],
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "applicant_notes": [
+                {"category": "deadline", "text": "Tight 30-day window."},
+                {"category": "vibes", "text": "Seems friendly."},  # bogus category
+                {"category": "budget", "text": "Co-funding required."},
+                {"category": "deadline"},  # missing text
+                {"text": "Missing category."},  # missing category
+            ],
+        }
+    )
     out = parse_response(content)
     assert out.applicant_notes is not None
     assert len(out.applicant_notes) == 2
@@ -313,21 +360,25 @@ def test_parse_missing_topic_fit_raises():
 
 
 def test_parse_invalid_topic_rating_raises():
-    content = json.dumps({
-        "topic_fit": {"rating": 9, "rationale": "x"},
-        "eligibility": {"rating": "pass"},
-        "exclusions": {"rating": "pass"},
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 9, "rationale": "x"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
     with pytest.raises(ParseError, match="topic_fit.rating"):
         parse_response(content)
 
 
 def test_parse_invalid_eligibility_rating_raises():
-    content = json.dumps({
-        "topic_fit": {"rating": 3},
-        "eligibility": {"rating": "maybe"},
-        "exclusions": {"rating": "pass"},
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 3},
+            "eligibility": {"rating": "maybe"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
     with pytest.raises(ParseError, match="eligibility"):
         parse_response(content)
 
@@ -335,11 +386,13 @@ def test_parse_invalid_eligibility_rating_raises():
 def test_parse_rejects_non_string_quoted_evidence():
     """Codex N3: quoted_evidence must be string or null; a list (or other
     non-string non-null type) must raise ParseError."""
-    content = json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": ["a list"]},
-        "eligibility": {"rating": "pass"},
-        "exclusions": {"rating": "pass"},
-    })
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": ["a list"]},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
     with pytest.raises(ParseError, match="quoted_evidence"):
         parse_response(content)
 
@@ -348,11 +401,13 @@ def _verification_payload(topic_quote: str) -> str:
     """Helper: build a minimal valid LLM JSON response with the given
     topic_fit quote and null quotes elsewhere — keeps the verification
     tests focused on the only field they exercise."""
-    return json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": topic_quote},
-        "eligibility": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
-    })
+    return json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "x", "quoted_evidence": topic_quote},
+            "eligibility": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "x", "quoted_evidence": None},
+        }
+    )
 
 
 def test_parse_response_verification_returns_verbatim_quote_when_in_haystack():

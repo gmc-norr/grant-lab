@@ -4,12 +4,12 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import CallRubric, CallSectionExtract
-from call_monitor.proposal_assist.extractors.refresh import (
+from call_manager.db.models import CallRubric, CallSectionExtract
+from call_manager.proposal_assist.extractors.refresh import (
     ensure_rubric_fresh,
     ensure_section_extracts_fresh,
 )
-from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from tests.proposal_assist.conftest import make_call
 
 

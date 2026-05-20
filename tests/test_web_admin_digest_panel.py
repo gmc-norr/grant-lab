@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import DigestRun, User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import DigestRun, User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -52,6 +52,7 @@ def test_admin_panel_shows_zero_when_no_runs(monkeypatch, pg_url, pg_session_fac
 
 def test_admin_panel_shows_recent_run_summary(monkeypatch, pg_url, pg_session_factory):
     from sqlalchemy import select
+
     app = _setup(monkeypatch, pg_url)
     # Bootstrap must run first; spin up a temporary client to trigger lifespan,
     # then add the DigestRun before making the actual assertion request.
@@ -85,8 +86,6 @@ def test_admin_panel_shows_disabled_user_count(monkeypatch, pg_url, pg_session_f
         r = client.get("/admin")
     finally:
         client.__exit__(None, None, None)
-    m = re.search(
-        r"Disabled users[^<]*</dt>\s*<dd>\s*(\d+)\s*</dd>", r.text
-    )
+    m = re.search(r"Disabled users[^<]*</dt>\s*<dd>\s*(\d+)\s*</dd>", r.text)
     assert m is not None, "Disabled-users row not found"
     assert int(m.group(1)) == 1

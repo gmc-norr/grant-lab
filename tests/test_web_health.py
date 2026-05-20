@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from call_monitor.db.session import make_engine
-from call_monitor.main import create_app
+from call_manager.db.session import make_engine
+from call_manager.main import create_app
 
 
 def _set_min_env(monkeypatch, database_url):

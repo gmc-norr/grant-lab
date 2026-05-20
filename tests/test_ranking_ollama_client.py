@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from call_monitor.ranking.ollama_client import LLMError, OllamaClient
+from call_manager.ranking.ollama_client import LLMError, OllamaClient
 
 _FAKE_RESPONSE = {
     "id": "chatcmpl-test",
@@ -27,6 +27,7 @@ def _mock(status: int = 200, body=None, raise_exc=None):
         if raise_exc is not None:
             raise raise_exc
         return httpx.Response(status, json=body if body is not None else _FAKE_RESPONSE)
+
     return httpx.MockTransport(handler)
 
 

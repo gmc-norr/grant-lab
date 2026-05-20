@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from call_monitor.profiles.pubmed import PubMedClient, PubMedError
-from call_monitor.profiles.seed import Member
+from call_manager.profiles.pubmed import PubMedClient, PubMedError
+from call_manager.profiles.seed import Member
 
 # Representative esearch response: returns 2 PMIDs
 _FAKE_ESEARCH = {
@@ -55,14 +55,14 @@ def _mock(responses):
 
 
 def test_fetch_publications_by_orcid():
-    transport, calls = _mock([
-        ("esearch.fcgi", _FAKE_ESEARCH),
-        ("esummary.fcgi", _FAKE_ESUMMARY),
-    ])
-    client = PubMedClient(transport=transport, sleep_between_members=0)
-    pubs = client.fetch_publications(
-        [Member(orcid="0000-0001-2345-6789")]
+    transport, calls = _mock(
+        [
+            ("esearch.fcgi", _FAKE_ESEARCH),
+            ("esummary.fcgi", _FAKE_ESUMMARY),
+        ]
     )
+    client = PubMedClient(transport=transport, sleep_between_members=0)
+    pubs = client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
     assert len(pubs) == 2
     assert pubs[0].pmid == "12345678"
     assert pubs[0].title.startswith("AI for digital pathology")
@@ -72,14 +72,14 @@ def test_fetch_publications_by_orcid():
 
 
 def test_fetch_publications_by_name_affiliation_fallback():
-    transport, calls = _mock([
-        ("esearch.fcgi", _FAKE_ESEARCH),
-        ("esummary.fcgi", _FAKE_ESUMMARY),
-    ])
-    client = PubMedClient(transport=transport, sleep_between_members=0)
-    pubs = client.fetch_publications(
-        [Member(name="Smith J", affiliation="Karolinska Institutet")]
+    transport, calls = _mock(
+        [
+            ("esearch.fcgi", _FAKE_ESEARCH),
+            ("esummary.fcgi", _FAKE_ESUMMARY),
+        ]
     )
+    client = PubMedClient(transport=transport, sleep_between_members=0)
+    pubs = client.fetch_publications([Member(name="Smith J", affiliation="Karolinska Institutet")])
     assert len(pubs) == 2
     # Search URL must use the [au] and [ad] fields
     assert "[au]" in calls[0].lower() or "%5bau%5d" in calls[0].lower()
@@ -88,11 +88,13 @@ def test_fetch_publications_by_name_affiliation_fallback():
 
 def test_empty_result_for_one_member_does_not_fail_others():
     empty = {"esearchresult": {"count": "0", "idlist": []}}
-    transport, _ = _mock([
-        ("esearch.fcgi", _FAKE_ESEARCH),  # first member → hits
-        ("esearch.fcgi", empty),           # second member → empty
-        ("esummary.fcgi", _FAKE_ESUMMARY),
-    ])
+    transport, _ = _mock(
+        [
+            ("esearch.fcgi", _FAKE_ESEARCH),  # first member → hits
+            ("esearch.fcgi", empty),  # second member → empty
+            ("esummary.fcgi", _FAKE_ESUMMARY),
+        ]
+    )
     # This mock ordering is approximate; real implementation just needs
     # to handle the 0-idlist case gracefully.
     client = PubMedClient(transport=transport, sleep_between_members=0)
@@ -110,9 +112,8 @@ def test_empty_result_for_one_member_does_not_fail_others():
 def test_http_error_raises_pubmed_error():
     def handler(request):
         return httpx.Response(503)
-    client = PubMedClient(
-        transport=httpx.MockTransport(handler), sleep_between_members=0
-    )
+
+    client = PubMedClient(transport=httpx.MockTransport(handler), sleep_between_members=0)
     with pytest.raises(PubMedError):
         client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
 

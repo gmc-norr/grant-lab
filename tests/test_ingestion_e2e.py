@@ -3,13 +3,13 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.email import InMemoryEmailSender
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import User
-from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
-from call_monitor.ingestion.orchestrator import run_ingestion
-from call_monitor.main import create_app
-from call_monitor.sources.types import NormalizedCall
+from call_manager.auth.email import InMemoryEmailSender
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import User
+from call_manager.ingestion.alerts import ConsecutiveFailureTracker
+from call_manager.ingestion.orchestrator import run_ingestion
+from call_manager.main import create_app
+from call_manager.sources.types import NormalizedCall
 
 
 class _FakeAdapter:
@@ -44,8 +44,10 @@ def test_end_to_end_ingest_and_browse(monkeypatch, pg_url, pg_session_factory):
     embed_client.model = "bge-m3"
     embed_client.embed.return_value = [0.1] * 1024
     result = run_ingestion(
-        session_factory=pg_session_factory, adapter=_FakeAdapter(),
-        alerter=alerter, embed_client=embed_client,
+        session_factory=pg_session_factory,
+        adapter=_FakeAdapter(),
+        alerter=alerter,
+        embed_client=embed_client,
     )
     assert result.error is None
     assert result.inserted == 2

@@ -1,36 +1,58 @@
 from datetime import UTC, datetime, timedelta
 
-from call_monitor.digest.assemble import (
+from call_manager.digest.assemble import (
     DigestCallEntry,
     DigestPayload,
     DigestProfileSection,
 )
-from call_monitor.digest.render import build_subject, render_html, render_text
+from call_manager.digest.render import build_subject, render_html, render_text
 
 
 def _payload():
     now = datetime(2026, 4, 17, tzinfo=UTC)
     must = DigestCallEntry(
-        call_id=1, title="Pathology AI", summary="great",
-        deadline=now + timedelta(days=14), score=None, rationale=None,
-        url="http://app/calls/1", bucket="must_include", also_in_profiles=[],
+        call_id=1,
+        title="Pathology AI",
+        summary="great",
+        deadline=now + timedelta(days=14),
+        score=None,
+        rationale=None,
+        url="http://app/calls/1",
+        bucket="must_include",
+        also_in_profiles=[],
     )
     top = DigestCallEntry(
-        call_id=2, title="Funding Vinnova", summary="apply",
-        deadline=now + timedelta(days=30), score=82, rationale="strong fit",
-        url="http://app/calls/2", bucket="top",
+        call_id=2,
+        title="Funding Vinnova",
+        summary="apply",
+        deadline=now + timedelta(days=30),
+        score=82,
+        rationale="strong fit",
+        url="http://app/calls/2",
+        bucket="top",
         also_in_profiles=["Other Group"],
     )
     border = DigestCallEntry(
-        call_id=3, title="Borderline call", summary="maybe",
-        deadline=None, score=52, rationale="weak fit",
-        url="http://app/calls/3", bucket="borderline", also_in_profiles=[],
+        call_id=3,
+        title="Borderline call",
+        summary="maybe",
+        deadline=None,
+        score=52,
+        rationale="weak fit",
+        url="http://app/calls/3",
+        bucket="borderline",
+        also_in_profiles=[],
     )
     section = DigestProfileSection(
-        profile_id=1, profile_name="Group A", entries=[must, top, border],
+        profile_id=1,
+        profile_name="Group A",
+        entries=[must, top, border],
     )
     return DigestPayload(
-        user_id=42, user_email="u@ki.se", sections=[section], total_calls=3,
+        user_id=42,
+        user_email="u@ki.se",
+        sections=[section],
+        total_calls=3,
     )
 
 
@@ -69,13 +91,22 @@ def test_html_renders_deadline_in_stockholm_timezone():
     # 23:30 UTC on Apr 30 = 01:30 Stockholm on May 1 (CEST, +2)
     late_deadline_utc = datetime(2026, 4, 30, 23, 30, tzinfo=UTC)
     entry = DigestCallEntry(
-        call_id=1, title="Late Deadline", summary=None,
-        deadline=late_deadline_utc, score=80, rationale=None,
-        url="http://app/calls/1", bucket="top", also_in_profiles=[],
+        call_id=1,
+        title="Late Deadline",
+        summary=None,
+        deadline=late_deadline_utc,
+        score=80,
+        rationale=None,
+        url="http://app/calls/1",
+        bucket="top",
+        also_in_profiles=[],
     )
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
-        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+        user_id=1,
+        user_email="u@ki.se",
+        sections=[section],
+        total_calls=1,
     )
     html = render_html(payload, dashboard_url="http://app/")
     # Must render Stockholm date (May 1), not UTC date (April 30)
@@ -88,14 +119,22 @@ def test_html_link_goes_to_in_app_not_external_source():
     entry must land the user on /calls/<id> (where the Hide button lives),
     not the external source URL."""
     entry = DigestCallEntry(
-        call_id=42, title="Source URL is external",
-        summary=None, deadline=None, score=80, rationale=None,
+        call_id=42,
+        title="Source URL is external",
+        summary=None,
+        deadline=None,
+        score=80,
+        rationale=None,
         url="https://vinnova.se/external-call-page",  # the source URL
-        bucket="top", also_in_profiles=[],
+        bucket="top",
+        also_in_profiles=[],
     )
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
-        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+        user_id=1,
+        user_email="u@ki.se",
+        sections=[section],
+        total_calls=1,
     )
     html = render_html(payload, dashboard_url="http://app.example.com/")
     # In-app link must be present
@@ -110,13 +149,22 @@ def test_html_link_goes_to_in_app_not_external_source():
 def test_text_link_goes_to_in_app():
     """Plain-text digest must also link to in-app detail, not external source."""
     entry = DigestCallEntry(
-        call_id=42, title="T", summary=None, deadline=None,
-        score=80, rationale=None, url="https://vinnova.se/x",
-        bucket="top", also_in_profiles=[],
+        call_id=42,
+        title="T",
+        summary=None,
+        deadline=None,
+        score=80,
+        rationale=None,
+        url="https://vinnova.se/x",
+        bucket="top",
+        also_in_profiles=[],
     )
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
-        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+        user_id=1,
+        user_email="u@ki.se",
+        sections=[section],
+        total_calls=1,
     )
     text = render_text(payload, dashboard_url="http://app.example.com/")
     assert "http://app.example.com/calls/42" in text
@@ -125,15 +173,26 @@ def test_text_link_goes_to_in_app():
 def test_html_escapes_xss_in_title():
     """Autoescape must be active for HTML template — user-supplied content is not raw."""
     xss_entry = DigestCallEntry(
-        call_id=99, title="<script>alert('xss')</script>", summary="bad",
-        deadline=None, score=80, rationale=None,
-        url="http://app/calls/99", bucket="top", also_in_profiles=[],
+        call_id=99,
+        title="<script>alert('xss')</script>",
+        summary="bad",
+        deadline=None,
+        score=80,
+        rationale=None,
+        url="http://app/calls/99",
+        bucket="top",
+        also_in_profiles=[],
     )
     section = DigestProfileSection(
-        profile_id=1, profile_name="Group A", entries=[xss_entry],
+        profile_id=1,
+        profile_name="Group A",
+        entries=[xss_entry],
     )
     payload = DigestPayload(
-        user_id=1, user_email="u@ki.se", sections=[section], total_calls=1,
+        user_id=1,
+        user_email="u@ki.se",
+        sections=[section],
+        total_calls=1,
     )
     html = render_html(payload, dashboard_url="http://app/")
     assert "<script>" not in html

@@ -3,8 +3,8 @@ from unittest.mock import MagicMock
 import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from call_monitor.config import Settings
-from call_monitor.scheduler import build_scheduler
+from call_manager.config import Settings
+from call_manager.scheduler import build_scheduler
 
 
 class _NullAlerter:
@@ -33,7 +33,7 @@ def _settings_env(monkeypatch):
 def test_build_scheduler_returns_one_job_per_active_adapter(_settings_env):
     """Smoke: the scheduler is constructed with a job per source. We don't
     actually start it — that would fire HTTP requests."""
-    from call_monitor.proposal_assist.drafting.factory import build_workspace_controller
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -77,8 +77,8 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
     turnover in failed-login attempts will leak memory indefinitely. The
     scheduler wires up a sweep job when callers hand it the limiters to
     sweep."""
-    from call_monitor.auth.rate_limit import SlidingWindowLimiter
-    from call_monitor.proposal_assist.drafting.factory import build_workspace_controller
+    from call_manager.auth.rate_limit import SlidingWindowLimiter
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
 
     email = SlidingWindowLimiter(max_requests=5, window_seconds=60, name="email")
     ip = SlidingWindowLimiter(max_requests=30, window_seconds=60, name="ip")
@@ -114,7 +114,7 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
 def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_env):
     """No limiters ⇒ no sweep job. Mirrors digest's opt-in pattern so
     unit tests that don't need the sweep don't accumulate it."""
-    from call_monitor.proposal_assist.drafting.factory import build_workspace_controller
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -144,7 +144,7 @@ def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_en
 
 
 def test_build_scheduler_includes_rank_drain_job(_settings_env):
-    from call_monitor.proposal_assist.drafting.factory import build_workspace_controller
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 

@@ -4,9 +4,9 @@ from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
 from alembic import command
-from call_monitor.config import Settings
-from call_monitor.db.base import Base
-from call_monitor.db.session import make_engine, make_session_factory
+from call_manager.config import Settings
+from call_manager.db.base import Base
+from call_manager.db.session import make_engine, make_session_factory
 
 
 @pytest.fixture(autouse=True)
@@ -77,9 +77,7 @@ def pg_session_factory(migrated_engine):
     table_names = ", ".join(t.name for t in Base.metadata.sorted_tables)
     if table_names:
         with migrated_engine.begin() as conn:
-            conn.execute(
-                text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE")
-            )
+            conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
             # Re-seed sources so model/orchestrator tests find them after teardown.
             conn.execute(
                 text(
@@ -95,7 +93,7 @@ def profile_factory(pg_session_factory):
     """Yield a factory that creates a Profile owned by a fresh User.
     Returns the (profile_id, user_id) tuple so tests can use the IDs
     after the session closes."""
-    from call_monitor.db.models import Profile, ProfileKind, User
+    from call_manager.db.models import Profile, ProfileKind, User
 
     created: list[int] = []
 

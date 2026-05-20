@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import Call, CallRanking, Source, User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import Call, CallRanking, Source, User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -33,23 +33,48 @@ def _seed(pg_session_factory, profile_id):
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c1 = Call(
-            source_id=src.id, external_id="A", url="https://x/a", title="High score",
+            source_id=src.id,
+            external_id="A",
+            url="https://x/a",
+            title="High score",
             published_at=datetime(2026, 4, 1, tzinfo=UTC),
         )
         c2 = Call(
-            source_id=src.id, external_id="B", url="https://x/b", title="Low score",
+            source_id=src.id,
+            external_id="B",
+            url="https://x/b",
+            title="Low score",
             published_at=datetime(2026, 4, 2, tzinfo=UTC),
         )
         c3 = Call(
-            source_id=src.id, external_id="C", url="https://x/c", title="Unranked",
+            source_id=src.id,
+            external_id="C",
+            url="https://x/c",
+            title="Unranked",
             published_at=datetime(2026, 4, 3, tzinfo=UTC),
         )
         s.add_all([c1, c2, c3])
         s.flush()
-        s.add(CallRanking(call_id=c1.id, profile_id=profile_id, aggregate_score=85,
-                          rationale="Great", model="gemma4:e4b-q8", prompt_version="v2.0"))
-        s.add(CallRanking(call_id=c2.id, profile_id=profile_id, aggregate_score=15,
-                          rationale="Poor", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.add(
+            CallRanking(
+                call_id=c1.id,
+                profile_id=profile_id,
+                aggregate_score=85,
+                rationale="Great",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
+        s.add(
+            CallRanking(
+                call_id=c2.id,
+                profile_id=profile_id,
+                aggregate_score=15,
+                rationale="Poor",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
         s.commit()
 
 
@@ -115,21 +140,30 @@ def test_root_inactive_profile_degrades_to_unranked(
     """Spec: inactive profiles are removed from feeds. ?profile=<inactive>
     MUST NOT show the stored ranking scores for that profile — otherwise
     a soft-delete wouldn't actually remove audit data from the UI."""
-    from call_monitor.db.models import CallRanking, Profile
+    from call_manager.db.models import CallRanking, Profile
+
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id="I-1", url="https://x/i",
+            source_id=src.id,
+            external_id="I-1",
+            url="https://x/i",
             title="Should be hidden",
             published_at=datetime(2026, 4, 1, tzinfo=UTC),
         )
         s.add(c)
         s.flush()
-        s.add(CallRanking(
-            call_id=c.id, profile_id=profile_id, aggregate_score=99,
-            rationale="hidden", model="gemma4:e4b-q8", prompt_version="v2.0",
-        ))
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=profile_id,
+                aggregate_score=99,
+                rationale="hidden",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
         # Now soft-delete the profile
         s.get(Profile, profile_id).is_active = False
         s.commit()
@@ -145,4 +179,3 @@ def test_root_inactive_profile_degrades_to_unranked(
     assert "99" not in r.text
     # The call itself still renders (it exists regardless of profile state)
     assert "Should be hidden" in r.text
-

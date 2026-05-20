@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import (
+from call_manager.db.models import (
     Call,
     CallRanking,
     DigestRun,
@@ -15,8 +15,8 @@ from call_monitor.db.models import (
     User,
     UserCallDismissal,
 )
-from call_monitor.digest.send import run_digest
-from call_monitor.email.client import SendResult
+from call_manager.digest.send import run_digest
+from call_manager.email.client import SendResult
 
 
 class _RecordingEmail:
@@ -54,42 +54,73 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
         s.add_all([ua, ub])
         s.flush()
         p1 = Profile(
-            name="P1", kind=ProfileKind.GROUP, description="", structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": ["pathology"], "hard_exclusions": [],
-            }, created_by=ua.id,
+            name="P1",
+            kind=ProfileKind.GROUP,
+            description="",
+            structured={
+                "areas": [],
+                "budget_min": None,
+                "budget_max": None,
+                "trl_min": None,
+                "trl_max": None,
+                "must_include": ["pathology"],
+                "hard_exclusions": [],
+            },
+            created_by=ua.id,
         )
         p2 = Profile(
-            name="P2", kind=ProfileKind.GROUP, description="", structured={
-                "areas": [], "budget_min": None, "budget_max": None,
-                "trl_min": None, "trl_max": None,
-                "must_include": [], "hard_exclusions": [],
-            }, created_by=ub.id,
+            name="P2",
+            kind=ProfileKind.GROUP,
+            description="",
+            structured={
+                "areas": [],
+                "budget_min": None,
+                "budget_max": None,
+                "trl_min": None,
+                "trl_max": None,
+                "must_include": [],
+                "hard_exclusions": [],
+            },
+            created_by=ub.id,
         )
         s.add_all([p1, p2])
         s.flush()
-        s.add_all([
-            Subscription(user_id=ua.id, profile_id=p1.id, digest_enabled=True),
-            Subscription(user_id=ub.id, profile_id=p2.id, digest_enabled=True),
-        ])
+        s.add_all(
+            [
+                Subscription(user_id=ua.id, profile_id=p1.id, digest_enabled=True),
+                Subscription(user_id=ub.id, profile_id=p2.id, digest_enabled=True),
+            ]
+        )
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c1 = Call(
-            source_id=src.id, external_id="c1", url="https://x/1",
-            title="Pathology AI breakthrough", summary="big news",
+            source_id=src.id,
+            external_id="c1",
+            url="https://x/1",
+            title="Pathology AI breakthrough",
+            summary="big news",
             published_at=now,
         )
         c2 = Call(
-            source_id=src.id, external_id="c2", url="https://x/2",
-            title="High-score for P2", published_at=now,
+            source_id=src.id,
+            external_id="c2",
+            url="https://x/2",
+            title="High-score for P2",
+            published_at=now,
         )
         s.add_all([c1, c2])
         s.flush()
         # Score c2 high for P2; c1 low for both
-        s.add(CallRanking(
-            call_id=c2.id, profile_id=p2.id, aggregate_score=85, rationale="r",
-            model="gemma4:e4b-q8", prompt_version="v2.0", ranked_at=now,
-        ))
+        s.add(
+            CallRanking(
+                call_id=c2.id,
+                profile_id=p2.id,
+                aggregate_score=85,
+                rationale="r",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+                ranked_at=now,
+            )
+        )
         # Bob dismisses c2
         s.add(UserCallDismissal(user_id=ub.id, call_id=c2.id))
         s.commit()
@@ -99,8 +130,10 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
 
     email = _RecordingEmail()
     summary = run_digest(
-        session_factory=pg_session_factory, email_client=email,
-        settings=_FakeSettings(), now=now,
+        session_factory=pg_session_factory,
+        email_client=email,
+        settings=_FakeSettings(),
+        now=now,
     )
 
     # Alice gets her must-include call; Bob's only candidate is dismissed.

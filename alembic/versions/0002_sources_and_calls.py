@@ -74,9 +74,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["source_id"], ["sources.id"], ondelete="RESTRICT", name="fk_calls_source_id"
         ),
-        sa.UniqueConstraint(
-            "source_id", "external_id", name="uq_calls_source_external"
-        ),
+        sa.UniqueConstraint("source_id", "external_id", name="uq_calls_source_external"),
     )
 
     # GIN supports the array overlap operator (&&) used by the keyword filter.

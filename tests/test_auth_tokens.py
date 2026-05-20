@@ -2,13 +2,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from call_monitor.auth.tokens import (
+from call_manager.auth.tokens import (
     InvalidToken,
     consume_token,
     hash_token,
     issue_token,
 )
-from call_monitor.db.models import MagicLinkToken, User
+from call_manager.db.models import MagicLinkToken, User
 
 
 def test_hash_token_is_sha256_hex(tmp_path):

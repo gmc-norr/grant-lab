@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+
+# Bump only when the prompt structure changes in a way that warrants
+# re-ranking. Stored on every CallRanking row so historical scores stay
+# attributable to the regime that produced them.
+PROMPT_VERSION = "v3.0"
+CALL_TEXT_LIMIT = 16000
+
+
+class ParseError(Exception):
+    """The LLM response didn't match the criterion schema."""
+
+
+_ANALYSIS_CATEGORIES = frozenset(
+    {
+        "deadline",
+        "eligibility",
+        "budget",
+        "team",
+        "ip",
+        "data",
+        "evaluation",
+        "process",
+        "other",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Parsed:
+    topic_fit_rating: int
+    topic_fit_rationale: str
+    topic_fit_quoted: str | None
+    eligibility_rating: str  # 'pass' | 'fail' | 'unclear'
+    eligibility_rationale: str
+    eligibility_quoted: str | None
+    exclusions_rating: str  # 'pass' | 'fail'
+    exclusions_rationale: str
+    exclusions_quoted: str | None
+    # Optional applicant-facing analysis. Populated only when the model
+    # was prompted with enable_analysis=True (currently the Sonnet path).
+    # `summary`: 2-3 sentence plain-language overview of the call.
+    # `applicant_notes`: list of {category, text} objects flagging
+    # specific things the applicant should know — odd requirements,
+    # tight deadlines, mandatory co-funding, IP/data clauses, etc.
+    # Categories outside `_ANALYSIS_CATEGORIES` are dropped at parse time.
+    summary: str | None = None
+    applicant_notes: list[dict] | None = None
+
+
+_SYSTEM_TEMPLATE = """\
+You are a research-funding analyst for an academic hospital.
+Evaluate a funding call against this profile on three criteria.
+
+PROFILE:
+  Name: {name}
+  Kind: {kind}
+  Description: {description}
+  Research areas: {areas}
+  Hard exclusions: {hard_exclusions}
+
+CRITERIA:
+  1. topic_fit (integer 0-5): how well the call's scope aligns with
+     the profile's research areas. 5 = direct match on a named area;
+     3 = adjacent/applicable; 1 = tangential; 0 = unrelated.
+  2. eligibility (pass | fail | unclear): whether a profile of this
+     kind would be eligible to apply. fail = clearly ineligible based
+     on a stated requirement. unclear = cannot determine from the text.
+  3. exclusions (pass | fail): whether the call violates any of the
+     profile's hard exclusions.
+
+For topic_fit and for "fail" judgments on eligibility/exclusions,
+quote the single sentence from the CALL that most supports your
+judgment (verbatim, max 200 chars). If no such sentence exists for
+eligibility or exclusions, set quoted_evidence to null.
+
+Output JSON exactly matching this schema:
+{{
+  "topic_fit":   {{"rating": int, "rationale": str, "quoted_evidence": str}},
+  "eligibility": {{"rating": "pass" | "fail" | "unclear",
+                   "rationale": str, "quoted_evidence": str | null}},
+  "exclusions":  {{"rating": "pass" | "fail",
+                   "rationale": str, "quoted_evidence": str | null}}{analysis_schema}
+}}{analysis_instructions}
+"""
+
+# Appended to _SYSTEM_TEMPLATE when enable_analysis=True (Sonnet path).
+# Kept out of the Gemma prompt because:
+#  (a) free-form prose is what Sonnet is meaningfully better at, and
+#  (b) Gemma's lower-quality summaries would just clutter the UI.
+# Categories are constrained — see _ANALYSIS_CATEGORIES — so the UI can
+# group / colour notes consistently and downstream filters work.
+_ANALYSIS_SCHEMA_FRAGMENT = """,
+  "summary":         "a 2-3 sentence plain-language overview of the call",
+  "applicant_notes": [
+    {{"category": "deadline" | "eligibility" | "budget" | "team" | "ip"
+                  | "data" | "evaluation" | "process" | "other",
+      "text": "one sentence on something the applicant should know"}}
+  ]"""
+
+_ANALYSIS_INSTRUCTIONS_FRAGMENT = """
+
+In addition to the rating fields, populate `summary` and `applicant_notes`:
+  - `summary`: a neutral 2-3 sentence overview of what the call funds,
+    who it targets, and the headline budget + timing. Do not editorialize
+    on fit — the rating fields cover that.
+  - `applicant_notes`: 3-7 entries flagging things a prospective applicant
+    should know that aren't already obvious from the title and budget:
+    odd eligibility constraints, tight deadlines, mandatory co-funding,
+    consortium / team-composition requirements, IP or open-data clauses,
+    pre-registration steps, two-stage submission processes, evaluation
+    criteria weightings. Skip categories with nothing notable; do not
+    pad. Each `text` should be one concise sentence."""
+
+_USER_TEMPLATE = """\
+CALL:
+  Title:     {title}
+  Programme: {programme}
+  Deadline:  {deadline}
+  Budget:    {budget_min}-{budget_max} {currency}
+  Body:      {text}
+"""
+
+
+def build_messages(*, profile, call, enable_analysis: bool = False) -> list[dict]:
+    """Build the criterion-rubric prompt. Profile block first so the
+    Ollama prefix cache is reused across calls scored against the same
+    profile.
+
+    Plan F: summary AND full_text are concatenated (when both present)
+    so the LLM sees both signals, then truncated to ``CALL_TEXT_LIMIT``
+    as a whole. The OR-pick fallback predates Plan F, when full_text was
+    rarely populated; with full-text ingestion live, OR-picking would
+    silently drop full_text whenever summary is non-empty.
+
+    When `enable_analysis=True`, the system prompt also asks the model
+    for a `summary` string and a list of `applicant_notes` flagging
+    deadlines, eligibility quirks, co-funding rules, etc. We currently
+    set this only when the Sonnet path runs (high-cosine pairs) — Gemma
+    is too small to produce prose worth showing.
+    """
+    structured = profile.structured or {}
+    sys = _SYSTEM_TEMPLATE.format(
+        name=profile.name,
+        kind=profile.kind.value if hasattr(profile.kind, "value") else str(profile.kind),
+        description=profile.description or "",
+        areas=", ".join(structured.get("areas") or []) or "(none)",
+        hard_exclusions=", ".join(structured.get("hard_exclusions") or []) or "(none)",
+        analysis_schema=_ANALYSIS_SCHEMA_FRAGMENT if enable_analysis else "",
+        analysis_instructions=_ANALYSIS_INSTRUCTIONS_FRAGMENT if enable_analysis else "",
+    )
+    parts: list[str] = []
+    if call.summary:
+        parts.append(call.summary)
+    full_text = getattr(call, "full_text", None)
+    if full_text:
+        parts.append(full_text)
+    text_source = "\n\n".join(parts) if parts else ""
+    if len(text_source) > CALL_TEXT_LIMIT:
+        text_source = text_source[:CALL_TEXT_LIMIT]
+    user = _USER_TEMPLATE.format(
+        title=call.title or "",
+        programme=call.programme or "",
+        deadline=call.deadline.isoformat() if call.deadline else "(none)",
+        budget_min=call.budget_min if call.budget_min is not None else "?",
+        budget_max=call.budget_max if call.budget_max is not None else "?",
+        currency=call.currency or "",
+        text=text_source or "(no text)",
+    )
+    return [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": user},
+    ]
+
+
+_QUOTED_EVIDENCE_MAX = 200
+
+
+def _validated_quote(block: dict, criterion: str) -> str | None:
+    """Extract quoted_evidence with type validation."""
+    if "quoted_evidence" not in block:
+        return None
+    q = block["quoted_evidence"]
+    if q is None:
+        return None
+    if not isinstance(q, str):
+        raise ParseError(
+            f"{criterion}.quoted_evidence must be string or null; got {type(q).__name__}"
+        )
+    return q if q else None  # empty string treated as null
+
+
+def parse_response(content: str, *, verification_text: str | None = None) -> Parsed:
+    """Parse the LLM's JSON criterion output. Raises ParseError on shape
+    violations.
+
+    When ``verification_text`` is supplied, each quoted_evidence field is
+    truncated to 200 chars and case-insensitive substring-checked against
+    that text. Misses are nulled silently — the LLM's rating still stands;
+    only the displayed quote is sanitized. The caller is responsible for
+    passing the FULL call body (title + summary + full untruncated full_text);
+    don't reuse the embedding helper here, which truncates full_text and
+    would falsely null quotes from past the truncation point.
+    """
+    try:
+        data = json.loads(content)
+    except ValueError as e:
+        raise ParseError(f"invalid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ParseError("response is not a JSON object")
+
+    tf = data.get("topic_fit")
+    if not isinstance(tf, dict):
+        raise ParseError("topic_fit missing or not an object")
+    rating = tf.get("rating")
+    if isinstance(rating, bool) or not isinstance(rating, int) or not 0 <= rating <= 5:
+        raise ParseError(f"topic_fit.rating must be int 0-5; got {rating!r}")
+
+    el = data.get("eligibility")
+    if not isinstance(el, dict):
+        raise ParseError("eligibility missing or not an object")
+    el_rating = el.get("rating")
+    if el_rating not in {"pass", "fail", "unclear"}:
+        raise ParseError(f"eligibility.rating must be 'pass'|'fail'|'unclear'; got {el_rating!r}")
+
+    ex = data.get("exclusions")
+    if not isinstance(ex, dict):
+        raise ParseError("exclusions missing or not an object")
+    ex_rating = ex.get("rating")
+    if ex_rating not in {"pass", "fail"}:
+        raise ParseError(f"exclusions.rating must be 'pass'|'fail'; got {ex_rating!r}")
+
+    # Pre-normalize the haystack once. PDF-derived full_text has hard line
+    # breaks, double newlines, and non-breaking spaces; LLMs typically quote
+    # in normalized form, so collapse all whitespace runs to a single space
+    # for comparison only. The display value returned to the caller is the
+    # LLM's original (un-normalized) quote.
+    normalized_haystack = (
+        re.sub(r"\s+", " ", verification_text).lower() if verification_text is not None else None
+    )
+
+    def _verified_quote(quote: str | None) -> str | None:
+        if quote is None:
+            return None
+        truncated = quote[:_QUOTED_EVIDENCE_MAX]
+        if normalized_haystack is None:
+            # No verification requested — keep the (truncated) quote as-is.
+            return truncated if truncated else None
+        # Whitespace-only quotes match almost any haystack but are useless.
+        if not truncated.strip():
+            return None
+        normalized_quote = re.sub(r"\s+", " ", truncated).strip().lower()
+        if normalized_quote in normalized_haystack:
+            return truncated
+        return None  # bogus quote — discarded silently
+
+    # Optional analysis fields (Sonnet path only).
+    summary = data.get("summary")
+    if summary is not None and not isinstance(summary, str):
+        summary = None
+    if isinstance(summary, str) and not summary.strip():
+        summary = None
+
+    applicant_notes = _sanitize_applicant_notes(data.get("applicant_notes"))
+
+    return Parsed(
+        topic_fit_rating=rating,
+        topic_fit_rationale=str(tf.get("rationale") or ""),
+        topic_fit_quoted=_verified_quote(_validated_quote(tf, "topic_fit")),
+        eligibility_rating=el_rating,
+        eligibility_rationale=str(el.get("rationale") or ""),
+        eligibility_quoted=_verified_quote(_validated_quote(el, "eligibility")),
+        exclusions_rating=ex_rating,
+        exclusions_rationale=str(ex.get("rationale") or ""),
+        exclusions_quoted=_verified_quote(_validated_quote(ex, "exclusions")),
+        summary=summary,
+        applicant_notes=applicant_notes,
+    )
+
+
+def _sanitize_applicant_notes(raw) -> list[dict] | None:
+    """Filter `applicant_notes` to well-formed entries with known categories.
+
+    A note is kept iff it is a dict carrying a `category` in our documented
+    set AND a non-empty `text`. Everything else is silently dropped — we
+    surface fewer notes rather than make the worker dead-letter a job over
+    a small schema deviation from the model. Returns None when the whole
+    list is missing or yields zero valid entries (NULL in DB → UI hides
+    the analysis section)."""
+    if not isinstance(raw, list):
+        return None
+    cleaned: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        category = entry.get("category")
+        text = entry.get("text")
+        if (
+            not isinstance(category, str)
+            or category not in _ANALYSIS_CATEGORIES
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            continue
+        cleaned.append({"category": category, "text": text.strip()})
+    return cleaned if cleaned else None

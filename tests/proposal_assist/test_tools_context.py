@@ -2,16 +2,16 @@ from pathlib import Path
 
 import pytest
 
-from call_monitor.proposal_assist.tools.context import (
+from call_manager.proposal_assist.tools.context import (
     get_call_details_impl,
     get_profile_impl,
 )
-from call_monitor.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
 
 
 def _build_ctx(pg_session_factory, wsid):
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     return ToolContext(
         workspace_id=wsid,

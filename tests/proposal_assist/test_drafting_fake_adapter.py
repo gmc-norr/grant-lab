@@ -1,13 +1,13 @@
 import uuid
 
-from call_monitor.proposal_assist.drafting.contract import (
+from call_manager.proposal_assist.drafting.contract import (
     AgentHandle,
     AssistantTextEvent,
     DraftingAgent,
     LaunchContext,
     TurnDoneEvent,
 )
-from call_monitor.proposal_assist.drafting.fake_adapter import (
+from call_manager.proposal_assist.drafting.fake_adapter import (
     FakeAgentAdapter,
 )
 

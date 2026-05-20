@@ -1,4 +1,4 @@
-# call-monitor
+# call-manager
 
 Internal hospital tool that aggregates funding calls (grants, EU calls, Vinnova programmes, etc.) from multiple sources, ranks them with a local LLM against organization- and group-level research profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest.
 
@@ -97,12 +97,12 @@ The system is designed so that **every failure mode is "LLM runs as fallback"** 
 
 | Step | File |
 |---|---|
-| 1 (embedding) | [`src/call_monitor/embeddings/refresh.py`](src/call_monitor/embeddings/refresh.py) + [`embeddings/similarity.py`](src/call_monitor/embeddings/similarity.py) |
-| 2 (gates) | [`src/call_monitor/ranking/criteria.py`](src/call_monitor/ranking/criteria.py) |
-| 3 (LLM rubric) | [`src/call_monitor/ranking/prompt.py`](src/call_monitor/ranking/prompt.py) (prompt + parser) + [`ranking/rank_pair.py`](src/call_monitor/ranking/rank_pair.py) (orchestration) |
-| 4 (quote verify) | [`src/call_monitor/ranking/prompt.py`](src/call_monitor/ranking/prompt.py) — `_verified_quote` inline in the parser |
-| 5 (aggregate) | [`src/call_monitor/ranking/aggregate.py`](src/call_monitor/ranking/aggregate.py) |
-| 6 (write + display) | [`src/call_monitor/ranking/worker.py`](src/call_monitor/ranking/worker.py) writes the row; [`web/routes/calls.py`](src/call_monitor/web/routes/calls.py), [`web/templates/call_detail.html`](src/call_monitor/web/templates/call_detail.html), and [`digest/assemble.py`](src/call_monitor/digest/assemble.py) read it |
+| 1 (embedding) | [`src/call_manager/embeddings/refresh.py`](src/call_manager/embeddings/refresh.py) + [`embeddings/similarity.py`](src/call_manager/embeddings/similarity.py) |
+| 2 (gates) | [`src/call_manager/ranking/criteria.py`](src/call_manager/ranking/criteria.py) |
+| 3 (LLM rubric) | [`src/call_manager/ranking/prompt.py`](src/call_manager/ranking/prompt.py) (prompt + parser) + [`ranking/rank_pair.py`](src/call_manager/ranking/rank_pair.py) (orchestration) |
+| 4 (quote verify) | [`src/call_manager/ranking/prompt.py`](src/call_manager/ranking/prompt.py) — `_verified_quote` inline in the parser |
+| 5 (aggregate) | [`src/call_manager/ranking/aggregate.py`](src/call_manager/ranking/aggregate.py) |
+| 6 (write + display) | [`src/call_manager/ranking/worker.py`](src/call_manager/ranking/worker.py) writes the row; [`web/routes/calls.py`](src/call_manager/web/routes/calls.py), [`web/templates/call_detail.html`](src/call_manager/web/templates/call_detail.html), and [`digest/assemble.py`](src/call_manager/digest/assemble.py) read it |
 
 ## What's a "rubric"?
 
@@ -119,7 +119,7 @@ It's the same idea a teacher uses to grade an essay: rather than just slapping "
 
 Then a fixed formula turns those into the final letter grade. The benefit: when a student asks "why a B+?", the teacher can point at "thesis was strong but evidence was thin" — not just "vibes."
 
-The call-monitor rubric works the same way. Instead of asking the LLM *"score this call 0–100"*, it asks for three separate judgments, each with its own scale and its own justification.
+The call-manager rubric works the same way. Instead of asking the LLM *"score this call 0–100"*, it asks for three separate judgments, each with its own scale and its own justification.
 
 ### Why a rubric instead of one big number
 
@@ -181,8 +181,8 @@ Two files:
 
 | What | Where |
 |---|---|
-| **The rubric prompt** (the questions, the scales, the JSON shape the LLM must return) | [`src/call_monitor/ranking/prompt.py`](src/call_monitor/ranking/prompt.py) — the `_SYSTEM_TEMPLATE` and `_USER_TEMPLATE` strings |
-| **The combining formula** (how the rubric becomes a 0–100 score) | [`src/call_monitor/ranking/aggregate.py`](src/call_monitor/ranking/aggregate.py) — the `aggregate()` function with its short-circuit chain |
+| **The rubric prompt** (the questions, the scales, the JSON shape the LLM must return) | [`src/call_manager/ranking/prompt.py`](src/call_manager/ranking/prompt.py) — the `_SYSTEM_TEMPLATE` and `_USER_TEMPLATE` strings |
+| **The combining formula** (how the rubric becomes a 0–100 score) | [`src/call_manager/ranking/aggregate.py`](src/call_manager/ranking/aggregate.py) — the `aggregate()` function with its short-circuit chain |
 
 Tuning the system is split between the two:
 
@@ -233,9 +233,9 @@ A **profile** describes either a research **organization** (e.g. the hospital) o
 
 ### Ranking pipeline — one path, four gates + an LLM rubric
 
-`rank_pair` ([src/call_monitor/ranking/rank_pair.py](src/call_monitor/ranking/rank_pair.py)) decomposes the relevance question into **deterministic gates** + a **structured LLM rubric** + a **deterministic aggregation**:
+`rank_pair` ([src/call_manager/ranking/rank_pair.py](src/call_manager/ranking/rank_pair.py)) decomposes the relevance question into **deterministic gates** + a **structured LLM rubric** + a **deterministic aggregation**:
 
-**1. Rule-based gates** ([src/call_monitor/ranking/criteria.py](src/call_monitor/ranking/criteria.py)) — evaluated in pure Python before the LLM is touched:
+**1. Rule-based gates** ([src/call_manager/ranking/criteria.py](src/call_manager/ranking/criteria.py)) — evaluated in pure Python before the LLM is touched:
 
 | Gate | PASS condition | UNKNOWN condition | FAIL condition |
 |---|---|---|---|
@@ -248,7 +248,7 @@ A FAIL on any gate **short-circuits the LLM call** — the result is `aggregate_
 
 The **`must_include` profile keyword override** is a partial escape hatch: if the call's title / summary / keywords match a must-include term, both the timeline and embedding FAILs are bypassed (those are topic gates and must-include is the user's "I want to see this regardless" signal). Budget and TRL FAILs still hard-zero the score even with override.
 
-**2. LLM rubric call** ([src/call_monitor/ranking/prompt.py](src/call_monitor/ranking/prompt.py)) — only fires if all gates pass (or were UNKNOWN, or were bypassed by must-include). The system prompt asks the model to act as a research-funding analyst evaluating a call for the given profile. It returns a JSON object with three sub-rubrics:
+**2. LLM rubric call** ([src/call_manager/ranking/prompt.py](src/call_manager/ranking/prompt.py)) — only fires if all gates pass (or were UNKNOWN, or were bypassed by must-include). The system prompt asks the model to act as a research-funding analyst evaluating a call for the given profile. It returns a JSON object with three sub-rubrics:
 
 ```json
 {
@@ -262,7 +262,7 @@ The user-prompt template carries `title`, `programme`, `deadline`, and `budget` 
 
 **3. Quoted-evidence verification** — for each non-null `quoted_evidence`, the parser checks it appears as a (whitespace-tolerant) case-insensitive substring of `title + summary + full_text` (FULL full-text — no truncation, so quotes from past the 16 KB prompt cap still verify). Verification failures null out the field; they never demote the score.
 
-**4. Score aggregation** ([src/call_monitor/ranking/aggregate.py](src/call_monitor/ranking/aggregate.py)) — combines gates + LLM into a final 0–100 score:
+**4. Score aggregation** ([src/call_manager/ranking/aggregate.py](src/call_manager/ranking/aggregate.py)) — combines gates + LLM into a final 0–100 score:
 
 | Condition | Score |
 |---|---|
@@ -285,8 +285,8 @@ The score is written to `call_rankings.aggregate_score` along with: rationale (a
 - **`/admin`** shows source health (per-source last-fetched + call count), ranking-queue depth by status, **embedding coverage** (calls and profiles embedded vs stale, against the currently-configured embedding model — blank-description profiles are excluded since they can't be embedded by design), digest panel (last sent, runs this week, disabled users from bounce-handling), and the most recent golden-set Kendall's τ.
 - **`/admin/rerank`** enqueues jobs for every active profile × every Call from the last 90 days. Idempotent (partial unique index dedups in-flight jobs).
 - **Weekly golden-set evaluator** at Mon 06:00: reads `tests/fixtures/golden_set.json` (curated `(call_id, profile_id, expected_score)` triples), queries `call_rankings`, computes Kendall's τ-b inline (pure stdlib, ties-aware), persists the result to `data/golden_set_last.json` for `/admin` to read.
-- **Embeddings backfill CLI** ([src/call_monitor/embeddings/cli.py](src/call_monitor/embeddings/cli.py)) — `python -m call_monitor.embeddings.cli backfill` walks every call + profile with NULL or model-mismatched embedding, calls Ollama in batches, exits 0 on full success / 1 if any row failed. Pass `--force` to re-embed every row regardless (used in content-rollout deploys; see "Deploy procedure" below). Pagination via id-cursor in force mode so a transient batch of failed rows doesn't stop the run. **In `--force` mode, an Ollama failure on a row clears both `embedding` and `embedding_model` to NULL** — the daily refresh tick will then re-select the row via its `IS NULL` filter and retry. Trade-off: that row degrades to LLM-only ranking until the next successful embed, which is safer than ranking against a known-stale vector.
-- **Forced-ingest CLI** ([src/call_monitor/ingestion/cli.py](src/call_monitor/ingestion/cli.py)) — `python -m call_monitor.ingestion.cli run --source <slug>` triggers a single ingest tick from the command line (without waiting for the 03:00 / 03:15 cron). `… list-sources` prints registered slugs from `sources/registry.SOURCES`. Exit 1 on adapter or DB failure so deploy scripts can chain on `&&`.
+- **Embeddings backfill CLI** ([src/call_manager/embeddings/cli.py](src/call_manager/embeddings/cli.py)) — `python -m call_manager.embeddings.cli backfill` walks every call + profile with NULL or model-mismatched embedding, calls Ollama in batches, exits 0 on full success / 1 if any row failed. Pass `--force` to re-embed every row regardless (used in content-rollout deploys; see "Deploy procedure" below). Pagination via id-cursor in force mode so a transient batch of failed rows doesn't stop the run. **In `--force` mode, an Ollama failure on a row clears both `embedding` and `embedding_model` to NULL** — the daily refresh tick will then re-select the row via its `IS NULL` filter and retry. Trade-off: that row degrades to LLM-only ranking until the next successful embed, which is safer than ranking against a known-stale vector.
+- **Forced-ingest CLI** ([src/call_manager/ingestion/cli.py](src/call_manager/ingestion/cli.py)) — `python -m call_manager.ingestion.cli run --source <slug>` triggers a single ingest tick from the command line (without waiting for the 03:00 / 03:15 cron). `… list-sources` prints registered slugs from `sources/registry.SOURCES`. Exit 1 on adapter or DB failure so deploy scripts can chain on `&&`.
 
 ## Stack
 
@@ -302,7 +302,7 @@ The score is written to `call_rankings.aggregate_score` along with: rationale (a
 ## Layout
 
 ```
-src/call_monitor/
+src/call_manager/
 ├── auth/             # session cookie + login
 ├── config.py         # settings & env wiring
 ├── db/               # SQLAlchemy models + session factory
@@ -327,8 +327,8 @@ docs/superpowers/
 ```bash
 uv sync
 uv run alembic upgrade head
-uv run python -m call_monitor.embeddings.cli backfill   # see Deploy procedure
-uv run uvicorn call_monitor.main:create_app --factory --reload
+uv run python -m call_manager.embeddings.cli backfill   # see Deploy procedure
+uv run uvicorn call_manager.main:create_app --factory --reload
 ```
 
 Required env: `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAINS`, `INITIAL_ADMIN_EMAIL`, `OLLAMA_URL`, `GEMMA_MODEL` (default `gemma4:e4b-it-q4_K_M`), `EMBEDDING_MODEL` (default `bge-m3`).
@@ -341,8 +341,8 @@ The supported deploy sequence depends on what the new code touches:
 
 ```bash
 alembic upgrade head
-python -m call_monitor.embeddings.cli backfill
-systemctl restart call-monitor    # only after the CLI exits 0
+python -m call_manager.embeddings.cli backfill
+systemctl restart call-manager    # only after the CLI exits 0
 ```
 
 ### Content-rollout deploy (changes to ingestion content, prompt, or embedding model)
@@ -361,13 +361,13 @@ psql -c "UPDATE sources SET last_fetched_at = NULL WHERE slug IN ('vinnova', 'eu
 
 # 3. Force-ingest both sources to repopulate Call rows under the new adapter logic.
 #    Both CLIs exit 1 on adapter or DB failure, so chaining with && is safe.
-python -m call_monitor.ingestion.cli run --source vinnova && \
-python -m call_monitor.ingestion.cli run --source eu_portal
+python -m call_manager.ingestion.cli run --source vinnova && \
+python -m call_manager.ingestion.cli run --source eu_portal
 
 # 4. Re-embed every call + profile under the now-richer text or new model.
 #    --force drops the NULL/mismatched filter so already-embedded rows are
 #    re-embedded too. Exits 0 on full success / 1 if any row failed.
-python -m call_monitor.embeddings.cli backfill --force
+python -m call_manager.embeddings.cli backfill --force
 
 # 5. Re-rank existing CallRanking rows under the new prompt. Hit /admin/rerank
 #    from the admin UI after step 4 completes; it enqueues every (active
@@ -375,7 +375,7 @@ python -m call_monitor.embeddings.cli backfill --force
 #    over the next ~hour at typical scale.
 
 # 6. Restart the app.
-systemctl restart call-monitor
+systemctl restart call-manager
 ```
 
 **Why this order:**
@@ -401,7 +401,7 @@ uv run pytest -q
 
 | Area | LOC |
 |---|---|
-| Production Python (`src/call_monitor`) | 6,594 |
+| Production Python (`src/call_manager`) | 6,594 |
 | Tests | 10,904 |
 | Templates (Jinja2 / HTML) | 460 |
 | Alembic migrations (8 revisions) | 959 |

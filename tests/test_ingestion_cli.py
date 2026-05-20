@@ -1,16 +1,17 @@
-"""Tests for the ingestion CLI: `python -m call_monitor.ingestion.cli run --source <slug>`.
+"""Tests for the ingestion CLI: `python -m call_manager.ingestion.cli run --source <slug>`.
 
 The CLI is a deploy-script entry point (per spec 2026-04-19 §9). Its exit
 code is load-bearing — deploy chains on `&&`, so any silent zero on a real
 failure would proceed past a broken ingest.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from call_monitor.ingestion.cli import ingest_main
+from call_manager.ingestion.cli import ingest_main
 
 
 @pytest.fixture
@@ -28,11 +29,12 @@ def _settings_env(monkeypatch, pg_url):
 
 
 def test_cli_invokes_orchestrator_for_named_source(
-    pg_session_factory, _settings_env,
+    pg_session_factory,
+    _settings_env,
 ):
     """`run --source vinnova` calls the orchestrator with the Vinnova adapter."""
     fake_run = MagicMock(return_value=None)
-    with patch("call_monitor.ingestion.cli._run_for_source", fake_run):
+    with patch("call_manager.ingestion.cli._run_for_source", fake_run):
         exit_code = ingest_main(
             argv=["run", "--source", "vinnova"],
             session_factory=pg_session_factory,
@@ -66,7 +68,9 @@ def test_cli_no_source_lists_available_sources(pg_session_factory, capsys):
 
 
 def test_cli_returns_nonzero_when_orchestrator_reports_error(
-    pg_session_factory, capsys, _settings_env,
+    pg_session_factory,
+    capsys,
+    _settings_env,
 ):
     """Codex H2 regression: when run_ingestion returns an IngestionResult
     with .error set (adapter HTTP failure, DB error during enqueue, etc.),
@@ -74,7 +78,7 @@ def test_cli_returns_nonzero_when_orchestrator_reports_error(
     proceed past a real failure."""
     fake_failed_result = MagicMock(error="adapter timed out", inserted=0, updated=0)
     with patch(
-        "call_monitor.ingestion.cli._run_for_source",
+        "call_manager.ingestion.cli._run_for_source",
         return_value=fake_failed_result,
     ):
         exit_code = ingest_main(

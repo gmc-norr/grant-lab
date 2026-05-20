@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import CallRubric, CallSectionExtract
+from call_manager.db.models import CallRubric, CallSectionExtract
 from tests.proposal_assist.conftest import make_call
 
 

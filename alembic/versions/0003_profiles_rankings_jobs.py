@@ -17,9 +17,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    profile_kind = postgresql.ENUM(
-        "org", "group", "user", name="profile_kind", create_type=False
-    )
+    profile_kind = postgresql.ENUM("org", "group", "user", name="profile_kind", create_type=False)
     profile_kind.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
@@ -105,8 +103,12 @@ def upgrade() -> None:
     )
 
     job_status = postgresql.ENUM(
-        "pending", "running", "failed", "done",
-        name="ranking_job_status", create_type=False,
+        "pending",
+        "running",
+        "failed",
+        "done",
+        name="ranking_job_status",
+        create_type=False,
     )
     job_status.create(op.get_bind(), checkfirst=True)
 

@@ -3,15 +3,17 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from call_monitor.embeddings.client import OllamaEmbedClient
-from call_monitor.ranking.ollama_client import LLMError
+from call_manager.embeddings.client import OllamaEmbedClient
+from call_manager.ranking.ollama_client import LLMError
 
 
 def _client_returning(payload: dict, *, status: int = 200) -> OllamaEmbedClient:
     def handler(_req):
         return httpx.Response(status, json=payload)
+
     return OllamaEmbedClient(
-        base_url="http://x", model="bge-m3",
+        base_url="http://x",
+        model="bge-m3",
         transport=httpx.MockTransport(handler),
     )
 
@@ -93,10 +95,13 @@ def test_embed_accepts_custom_expected_dim():
     when an operator wires the client to a model with a non-1024 native
     dim (e.g. bge-base at 768) without having to monkeypatch."""
     vec = [0.1] * 768
+
     def handler(_req):
         return httpx.Response(200, json={"embeddings": [vec]})
+
     client = OllamaEmbedClient(
-        base_url="http://x", model="bge-base",
+        base_url="http://x",
+        model="bge-base",
         transport=httpx.MockTransport(handler),
         expected_dim=768,
     )

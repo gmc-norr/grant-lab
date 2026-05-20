@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from call_monitor.sources.types import AdapterError
-from call_monitor.sources.vinnova import VinnovaAdapter
+from call_manager.sources.types import AdapterError
+from call_manager.sources.vinnova import VinnovaAdapter
 
 _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 
@@ -21,42 +21,52 @@ _PROGRAMMES = [
     }
 ]
 
-_ROUND_OPEN = [{
-    "Diarienummer": "ROUND-OPEN",
-    "DiarienummerUtlysning": "2009-02335",
-    "Titel": "Open round",
-    "Beskrivning": "Lots of detail.",
-    "TitelEngelska": "Open round (en)",
-    "BeskrivningEngelska": "Lots of detail (en).",
-    "Oppningsdatum": "2026-04-01T00:00:00",
-    "Stangningsdatum": "2099-12-31T14:00:00",
-    "LankLista": [
-        {"Beskrivning": "ansök här:", "URL": "https://www.vinnova.se/e/round-open"},
-    ],
-    "Publik": 1, "Webbsida": 1, "Extern": 1,
-}]
+_ROUND_OPEN = [
+    {
+        "Diarienummer": "ROUND-OPEN",
+        "DiarienummerUtlysning": "2009-02335",
+        "Titel": "Open round",
+        "Beskrivning": "Lots of detail.",
+        "TitelEngelska": "Open round (en)",
+        "BeskrivningEngelska": "Lots of detail (en).",
+        "Oppningsdatum": "2026-04-01T00:00:00",
+        "Stangningsdatum": "2099-12-31T14:00:00",
+        "LankLista": [
+            {"Beskrivning": "ansök här:", "URL": "https://www.vinnova.se/e/round-open"},
+        ],
+        "Publik": 1,
+        "Webbsida": 1,
+        "Extern": 1,
+    }
+]
 
-_ROUND_CLOSED = [{
-    "Diarienummer": "ROUND-CLOSED",
-    "DiarienummerUtlysning": "2009-02335",
-    "Titel": "Closed round",
-    "Beskrivning": "...",
-    "Oppningsdatum": "2020-01-01T00:00:00",
-    "Stangningsdatum": "2020-06-30T23:59:00",
-    "LankLista": [{"Beskrivning": "x", "URL": "https://www.vinnova.se/e/closed"}],
-    "Publik": 1, "Webbsida": 1,
-}]
+_ROUND_CLOSED = [
+    {
+        "Diarienummer": "ROUND-CLOSED",
+        "DiarienummerUtlysning": "2009-02335",
+        "Titel": "Closed round",
+        "Beskrivning": "...",
+        "Oppningsdatum": "2020-01-01T00:00:00",
+        "Stangningsdatum": "2020-06-30T23:59:00",
+        "LankLista": [{"Beskrivning": "x", "URL": "https://www.vinnova.se/e/closed"}],
+        "Publik": 1,
+        "Webbsida": 1,
+    }
+]
 
-_ROUND_NONPUBLIC = [{
-    "Diarienummer": "ROUND-NONPUBLIC",
-    "DiarienummerUtlysning": "2009-02335",
-    "Titel": "Non-public round",
-    "Beskrivning": "...",
-    "Oppningsdatum": "2026-04-01T00:00:00",
-    "Stangningsdatum": "2099-12-31T14:00:00",
-    "LankLista": [{"Beskrivning": "x", "URL": "https://www.vinnova.se/e/nonpub"}],
-    "Publik": 0, "Webbsida": 1,
-}]
+_ROUND_NONPUBLIC = [
+    {
+        "Diarienummer": "ROUND-NONPUBLIC",
+        "DiarienummerUtlysning": "2009-02335",
+        "Titel": "Non-public round",
+        "Beskrivning": "...",
+        "Oppningsdatum": "2026-04-01T00:00:00",
+        "Stangningsdatum": "2099-12-31T14:00:00",
+        "LankLista": [{"Beskrivning": "x", "URL": "https://www.vinnova.se/e/nonpub"}],
+        "Publik": 0,
+        "Webbsida": 1,
+    }
+]
 
 
 def _mock_transport(routes: dict[str, list | dict] | None = None):
@@ -119,40 +129,60 @@ def test_open_round_is_normalized_correctly():
 def test_fetch_skips_round_with_no_safe_url():
     routes = {
         "/api/utlysningar/2026-01-01": [
-            {"Diarienummer": "P", "Titel": "T",
-             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "BAD-URL"}]},
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "BAD-URL"}],
+            },
         ],
-        "/api/ansokningsomgangar/BAD-URL": [{
-            "Diarienummer": "BAD-URL", "Titel": "x", "Beskrivning": "x",
-            "Oppningsdatum": "2026-04-01T00:00:00",
-            "Stangningsdatum": "2099-12-31T14:00:00",
-            "LankLista": [{"URL": "javascript:alert(1)"}],
-            "Publik": 1, "Webbsida": 1,
-        }],
+        "/api/ansokningsomgangar/BAD-URL": [
+            {
+                "Diarienummer": "BAD-URL",
+                "Titel": "x",
+                "Beskrivning": "x",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "LankLista": [{"URL": "javascript:alert(1)"}],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
     }
-    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC)
-    ))
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
     assert out == []
 
 
 def test_fetch_skips_round_with_no_links():
     routes = {
         "/api/utlysningar/2026-01-01": [
-            {"Diarienummer": "P", "Titel": "T",
-             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "NOLINKS"}]},
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "NOLINKS"}],
+            },
         ],
-        "/api/ansokningsomgangar/NOLINKS": [{
-            "Diarienummer": "NOLINKS", "Titel": "x", "Beskrivning": "x",
-            "Oppningsdatum": "2026-04-01T00:00:00",
-            "Stangningsdatum": "2099-12-31T14:00:00",
-            "LankLista": [],
-            "Publik": 1, "Webbsida": 1,
-        }],
+        "/api/ansokningsomgangar/NOLINKS": [
+            {
+                "Diarienummer": "NOLINKS",
+                "Titel": "x",
+                "Beskrivning": "x",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "LankLista": [],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
     }
-    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC)
-    ))
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
     assert out == []
 
 
@@ -191,21 +221,30 @@ def test_summary_falls_back_to_just_beskrivning_when_no_webtext():
     """Round with only the short Beskrivning should still produce a summary."""
     routes = {
         "/api/utlysningar/2026-01-01": [
-            {"Diarienummer": "P", "Titel": "T",
-             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "PLAIN"}]},
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "PLAIN"}],
+            },
         ],
-        "/api/ansokningsomgangar/PLAIN": [{
-            "Diarienummer": "PLAIN", "Titel": "Title",
-            "Beskrivning": "Just a tagline.",
-            "Oppningsdatum": "2026-04-01T00:00:00",
-            "Stangningsdatum": "2099-12-31T14:00:00",
-            "LankLista": [{"URL": "https://www.vinnova.se/e/plain"}],
-            "Publik": 1, "Webbsida": 1,
-        }],
+        "/api/ansokningsomgangar/PLAIN": [
+            {
+                "Diarienummer": "PLAIN",
+                "Titel": "Title",
+                "Beskrivning": "Just a tagline.",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "LankLista": [{"URL": "https://www.vinnova.se/e/plain"}],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
     }
-    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC)
-    ))
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
     assert out[0].summary == "Just a tagline."
 
 
@@ -213,27 +252,35 @@ def test_vinnova_adapter_splits_summary_and_full_text():
     """After Plan F: Beskrivning -> summary; WebTextLista[*].TextSv -> full_text."""
     routes = {
         "/api/utlysningar/2026-01-01": [
-            {"Diarienummer": "P", "Titel": "T",
-             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "TEST-123"}]},
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "TEST-123"}],
+            },
         ],
-        "/api/ansokningsomgangar/TEST-123": [{
-            "Diarienummer": "TEST-123",
-            "Titel": "Test programme",
-            "Beskrivning": "A brief description.",
-            "BeskrivningEngelska": "A brief description in English.",
-            "WebTextLista": [
-                {"TextSv": "First substantive paragraph about the call."},
-                {"TextSv": "Second paragraph with more detail and eligibility."},
-            ],
-            "Stangningsdatum": "2099-12-31T14:00:00",
-            "Oppningsdatum": "2026-04-01T00:00:00",
-            "Publik": 1, "Webbsida": 1,
-            "LankLista": [{"URL": "https://vinnova.se/test"}],
-        }],
+        "/api/ansokningsomgangar/TEST-123": [
+            {
+                "Diarienummer": "TEST-123",
+                "Titel": "Test programme",
+                "Beskrivning": "A brief description.",
+                "BeskrivningEngelska": "A brief description in English.",
+                "WebTextLista": [
+                    {"TextSv": "First substantive paragraph about the call."},
+                    {"TextSv": "Second paragraph with more detail and eligibility."},
+                ],
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Publik": 1,
+                "Webbsida": 1,
+                "LankLista": [{"URL": "https://vinnova.se/test"}],
+            }
+        ],
     }
-    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC)
-    ))
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
     assert len(out) == 1
     nc = out[0]
 
@@ -253,23 +300,31 @@ def test_vinnova_adapter_full_text_none_when_no_webtextlista():
     """If the source provides no WebTextLista, full_text is None."""
     routes = {
         "/api/utlysningar/2026-01-01": [
-            {"Diarienummer": "P", "Titel": "T",
-             "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "TEST-456"}]},
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "TEST-456"}],
+            },
         ],
-        "/api/ansokningsomgangar/TEST-456": [{
-            "Diarienummer": "TEST-456",
-            "Titel": "Test programme",
-            "Beskrivning": "Just a description.",
-            "WebTextLista": [],
-            "Stangningsdatum": "2099-12-31T14:00:00",
-            "Oppningsdatum": "2026-04-01T00:00:00",
-            "Publik": 1, "Webbsida": 1,
-            "LankLista": [{"URL": "https://vinnova.se/test"}],
-        }],
+        "/api/ansokningsomgangar/TEST-456": [
+            {
+                "Diarienummer": "TEST-456",
+                "Titel": "Test programme",
+                "Beskrivning": "Just a description.",
+                "WebTextLista": [],
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Publik": 1,
+                "Webbsida": 1,
+                "LankLista": [{"URL": "https://vinnova.se/test"}],
+            }
+        ],
     }
-    out = list(_make(transport=_mock_transport(routes)).fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC)
-    ))
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
     assert len(out) == 1
     nc = out[0]
     assert nc.summary == "Just a description."

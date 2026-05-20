@@ -4,9 +4,9 @@ from unittest.mock import Mock
 
 from sqlalchemy import select
 
-from call_monitor.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
-from call_monitor.proposal_assist.extractors.sections import SECTION_NAMES
-from call_monitor.proposal_assist.phases.setup import (
+from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
+from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.phases.setup import (
     Phase0Worker,
     claim_next_setup_job,
 )
@@ -430,7 +430,7 @@ def test_claim_next_returns_oldest_by_queued_at(pg_session_factory):
     """Claim order is FIFO on queued_at, not arbitrary by UUID."""
     import time
 
-    from call_monitor.db.models import User
+    from call_manager.db.models import User
 
     with pg_session_factory() as s:
         owner_a = User(email="fifo-owner-a@ki.se")

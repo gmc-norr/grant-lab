@@ -1,6 +1,6 @@
 import pytest
 
-from call_monitor.proposal_assist.hashing import source_text_hash
+from call_manager.proposal_assist.hashing import source_text_hash
 
 
 def test_source_text_hash_is_64_lowercase_hex():

@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import User
-from call_monitor.main import create_app
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import User
+from call_manager.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -38,12 +38,11 @@ def test_profiles_list_requires_auth(monkeypatch, pg_url):
     assert r.status_code == 401
 
 
-def test_profiles_list_shows_active_only(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
+def test_profiles_list_shows_active_only(monkeypatch, pg_url, pg_session_factory, profile_factory):
     p_active, _ = profile_factory(name="Active group")
     p_inactive, _ = profile_factory(name="Inactive group")
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
+
     with pg_session_factory() as s:
         s.get(Profile, p_inactive).is_active = False
         s.commit()
@@ -67,15 +66,13 @@ def test_profile_new_form_renders(monkeypatch, pg_url, pg_session_factory):
     assert "orcid" in r.text.lower()
 
 
-def test_profile_new_post_creates_profile_and_redirects(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_session_factory):
     """POST creates a Profile synchronously (bootstrap is mocked via
     app.state override) and redirects to /profiles/<id>/edit."""
     from unittest.mock import patch
 
-    from call_monitor.db.models import Profile
-    from call_monitor.profiles.seed import DraftProfile
+    from call_manager.db.models import Profile
+    from call_manager.profiles.seed import DraftProfile
 
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
@@ -95,7 +92,7 @@ def test_profile_new_post_creates_profile_and_redirects(
         publications_skipped=0,
     )
     with (
-        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
         client,
     ):
         r = client.post(
@@ -144,15 +141,20 @@ def test_profile_edit_post_saves_and_triggers_backfill(
     for (call, profile) after the save."""
     from datetime import UTC, datetime
 
-    from call_monitor.db.models import Call, RankingJob, Source
+    from call_manager.db.models import Call, RankingJob, Source
 
     pid, _ = profile_factory(name="Backfill target")
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add(Call(
-            source_id=src.id, external_id="E-1", url="https://x", title="T",
-            published_at=datetime.now(UTC),
-        ))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="E-1",
+                url="https://x",
+                title="T",
+                published_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     app = _setup(monkeypatch, pg_url)
@@ -174,7 +176,8 @@ def test_profile_edit_post_saves_and_triggers_backfill(
         )
     assert r.status_code == 303
 
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
+
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
         assert p.description == "updated description"
@@ -275,9 +278,7 @@ def test_profile_edit_preserves_zero_budget_min(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """Regression: stored budget_min=0 must round-trip through the edit form."""
-    pid, _ = profile_factory(
-        name="zero budget", structured={"budget_min": 0, "budget_max": 100}
-    )
+    pid, _ = profile_factory(name="zero budget", structured={"budget_min": 0, "budget_max": 100})
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
     with client:
@@ -307,13 +308,11 @@ def test_profile_new_rejects_duplicate_active_name(
     assert r.status_code == 409
 
 
-def test_profile_new_coerces_invalid_kind_to_group(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_profile_new_coerces_invalid_kind_to_group(monkeypatch, pg_url, pg_session_factory):
     """Unknown kind value silently coerces to 'group'."""
     from unittest.mock import patch
 
-    from call_monitor.profiles.seed import DraftProfile
+    from call_manager.profiles.seed import DraftProfile
 
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
@@ -332,7 +331,7 @@ def test_profile_new_coerces_invalid_kind_to_group(
         publications_skipped=0,
     )
     with (
-        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
         client,
     ):
         r = client.post(
@@ -347,7 +346,8 @@ def test_profile_new_coerces_invalid_kind_to_group(
             follow_redirects=False,
         )
     assert r.status_code == 303
-    from call_monitor.db.models import Profile, ProfileKind
+    from call_manager.db.models import Profile, ProfileKind
+
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Coerced kind")).scalar_one()
     assert p.kind == ProfileKind.GROUP
@@ -356,7 +356,7 @@ def test_profile_new_coerces_invalid_kind_to_group(
 def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
     from unittest.mock import patch
 
-    from call_monitor.profiles.seed import DraftProfile
+    from call_manager.profiles.seed import DraftProfile
 
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
@@ -375,7 +375,7 @@ def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
         publications_skipped=0,
     )
     with (
-        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
         client,
     ):
         r = client.post(
@@ -390,7 +390,8 @@ def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
             follow_redirects=False,
         )
     assert r.status_code == 303
-    from call_monitor.db.models import Profile, ProfileKind
+    from call_manager.db.models import Profile, ProfileKind
+
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Org profile")).scalar_one()
     assert p.kind == ProfileKind.ORG
@@ -451,7 +452,8 @@ def test_profile_edit_round_trips_budget_currency(
             follow_redirects=False,
         )
     assert r.status_code == 303
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
+
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
     assert p.budget_currency == "SEK"
@@ -471,27 +473,31 @@ def test_profile_edit_rejects_non_owner_non_admin(
         r = client.post(
             f"/profiles/{pid}/edit",
             data={
-                "description": "hostile edit", "areas": "",
-                "budget_min": "", "budget_max": "", "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "description": "hostile edit",
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
     assert r.status_code == 403
 
     # And the description must not have been written.
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
+
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
     assert p.description != "hostile edit"
 
 
-def test_profile_edit_allows_owner(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_profile_edit_allows_owner(monkeypatch, pg_url, pg_session_factory):
     """The creator can edit even as a non-admin (policy: owner-or-admin)."""
-    from call_monitor.db.models import Profile, ProfileKind, User
+    from call_manager.db.models import Profile, ProfileKind, User
 
     app = _setup(monkeypatch, pg_url)
     # Register u@ki.se as a non-admin, then make them the creator of the
@@ -502,8 +508,11 @@ def test_profile_edit_allows_owner(
         s.add(u)
         s.flush()
         p = Profile(
-            name="My profile", kind=ProfileKind.GROUP,
-            description="mine", structured={}, created_by=u.id,
+            name="My profile",
+            kind=ProfileKind.GROUP,
+            description="mine",
+            structured={},
+            created_by=u.id,
         )
         s.add(p)
         s.commit()
@@ -516,10 +525,15 @@ def test_profile_edit_allows_owner(
         r = client.post(
             f"/profiles/{pid}/edit",
             data={
-                "description": "owner-updated", "areas": "",
-                "budget_min": "", "budget_max": "", "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "description": "owner-updated",
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -542,10 +556,15 @@ def test_profile_edit_rejects_unknown_currency(
         r = client.post(
             f"/profiles/{pid}/edit",
             data={
-                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "description": "x",
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
                 "budget_currency": "XYZ",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -564,10 +583,15 @@ def test_profile_edit_rejects_out_of_range_trl(
         r = client.post(
             f"/profiles/{pid}/edit",
             data={
-                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "description": "x",
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
                 "budget_currency": "",
-                "trl_min": "1", "trl_max": "999",
-                "must_include": "", "hard_exclusions": "",
+                "trl_min": "1",
+                "trl_max": "999",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -586,11 +610,15 @@ def test_profile_edit_rejects_obscenely_large_budget(
         r = client.post(
             f"/profiles/{pid}/edit",
             data={
-                "description": "x", "areas": "",
-                "budget_min": "0", "budget_max": "1000000000000000",
+                "description": "x",
+                "areas": "",
+                "budget_min": "0",
+                "budget_max": "1000000000000000",
                 "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -607,14 +635,20 @@ def test_profile_edit_accepts_empty_currency_as_null(
         client.post(
             f"/profiles/{pid}/edit",
             data={
-                "description": "x", "areas": "", "budget_min": "", "budget_max": "",
+                "description": "x",
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
                 "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
+
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
     assert p.budget_currency is None
@@ -623,7 +657,8 @@ def test_profile_edit_accepts_empty_currency_as_null(
 def test_profile_detail_renders_currency_when_set(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
+
     pid, _ = profile_factory(
         name="Display currency",
         structured={"budget_min": 100000, "budget_max": 500000},
@@ -649,6 +684,7 @@ def test_profile_detail_renders_currency_when_set(
 
 def _stub_embed_client(*, vec=None, raises=None):
     from unittest.mock import MagicMock
+
     c = MagicMock()
     c.model = "bge-m3"
     if raises is not None:
@@ -659,14 +695,16 @@ def _stub_embed_client(*, vec=None, raises=None):
 
 
 def test_profile_create_triggers_embedding_refresh(
-    monkeypatch, pg_url, pg_session_factory,
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
 ):
     """Creating a new profile triggers a sync embedding compute. After the
     POST, profile.embedding is the vector returned by the stub client."""
     from unittest.mock import patch
 
-    from call_monitor.db.models import Profile
-    from call_monitor.profiles.seed import DraftProfile
+    from call_manager.db.models import Profile
+    from call_manager.profiles.seed import DraftProfile
 
     app = _setup(monkeypatch, pg_url)
     app.state.embed_client = _stub_embed_client(vec=[0.5] * 1024)
@@ -675,14 +713,19 @@ def test_profile_create_triggers_embedding_refresh(
     fake_draft = DraftProfile(
         description="cancer immunotherapy + digital pathology",
         structured={
-            "areas": ["digital pathology"], "budget_min": None, "budget_max": None,
-            "trl_min": None, "trl_max": None,
-            "must_include": [], "hard_exclusions": [],
+            "areas": ["digital pathology"],
+            "budget_min": None,
+            "budget_max": None,
+            "trl_min": None,
+            "trl_max": None,
+            "must_include": [],
+            "hard_exclusions": [],
         },
-        publications_fetched=0, publications_skipped=0,
+        publications_fetched=0,
+        publications_skipped=0,
     )
     with (
-        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
         client,
     ):
         r = client.post(
@@ -707,14 +750,18 @@ def test_profile_create_triggers_embedding_refresh(
 
 
 def test_profile_edit_changing_description_triggers_embedding_refresh(
-    monkeypatch, pg_url, pg_session_factory, profile_factory,
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+    profile_factory,
 ):
     """Editing the description triggers re-embed: the new vector is written
     over any prior value."""
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
 
     pid, _ = profile_factory(
-        name="Edit re-embed", description="old description text",
+        name="Edit re-embed",
+        description="old description text",
     )
     # Pre-seed an old embedding so we can prove it gets overwritten.
     with pg_session_factory() as s:
@@ -734,9 +781,13 @@ def test_profile_edit_changing_description_triggers_embedding_refresh(
             data={
                 "description": "brand new description text",
                 "areas": "",
-                "budget_min": "", "budget_max": "", "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -749,14 +800,18 @@ def test_profile_edit_changing_description_triggers_embedding_refresh(
 
 
 def test_profile_edit_not_changing_description_skips_embedding_refresh(
-    monkeypatch, pg_url, pg_session_factory, profile_factory,
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+    profile_factory,
 ):
     """Editing rubric only (areas/must_include) does NOT re-embed —
     only description goes into the embedding."""
-    from call_monitor.db.models import Profile
+    from call_manager.db.models import Profile
 
     pid, _ = profile_factory(
-        name="Edit rubric only", description="stable description",
+        name="Edit rubric only",
+        description="stable description",
     )
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
@@ -774,9 +829,13 @@ def test_profile_edit_not_changing_description_skips_embedding_refresh(
             data={
                 "description": "stable description",  # SAME as before
                 "areas": "digital pathology\nfederated learning",  # rubric changed
-                "budget_min": "", "budget_max": "", "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "pathology", "hard_exclusions": "",
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "pathology",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -791,7 +850,10 @@ def test_profile_edit_not_changing_description_skips_embedding_refresh(
 
 
 def test_profile_edit_embed_failure_does_not_block_backfill(
-    monkeypatch, pg_url, pg_session_factory, profile_factory,
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+    profile_factory,
 ):
     """Codex H1 robustness: if the embed step raises, the handler logs and
     proceeds to backfill_profile. The redirect still lands; backfill jobs
@@ -799,16 +861,21 @@ def test_profile_edit_embed_failure_does_not_block_backfill(
     runs as the safe fallback.)"""
     from datetime import UTC, datetime
 
-    from call_monitor.db.models import Call, Profile, RankingJob, Source
-    from call_monitor.ranking.ollama_client import LLMError
+    from call_manager.db.models import Call, Profile, RankingJob, Source
+    from call_manager.ranking.ollama_client import LLMError
 
     pid, _ = profile_factory(name="Embed-fails-but-backfill-works")
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add(Call(
-            source_id=src.id, external_id="BF-1", url="https://x", title="T",
-            published_at=datetime.now(UTC),
-        ))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="BF-1",
+                url="https://x",
+                title="T",
+                published_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     app = _setup(monkeypatch, pg_url)
@@ -821,9 +888,13 @@ def test_profile_edit_embed_failure_does_not_block_backfill(
             data={
                 "description": "freshly changed description",  # triggers embed
                 "areas": "",
-                "budget_min": "", "budget_max": "", "budget_currency": "",
-                "trl_min": "", "trl_max": "",
-                "must_include": "", "hard_exclusions": "",
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
             },
             follow_redirects=False,
         )
@@ -841,15 +912,17 @@ def test_profile_edit_embed_failure_does_not_block_backfill(
 
 
 def test_profile_create_embed_failure_does_not_500(
-    monkeypatch, pg_url, pg_session_factory,
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
 ):
     """Same robustness contract on the create path: an embed failure on a
     brand-new profile must not block the redirect."""
     from unittest.mock import patch
 
-    from call_monitor.db.models import Profile
-    from call_monitor.profiles.seed import DraftProfile
-    from call_monitor.ranking.ollama_client import LLMError
+    from call_manager.db.models import Profile
+    from call_manager.profiles.seed import DraftProfile
+    from call_manager.ranking.ollama_client import LLMError
 
     app = _setup(monkeypatch, pg_url)
     app.state.embed_client = _stub_embed_client(raises=LLMError("ollama down"))
@@ -858,14 +931,19 @@ def test_profile_create_embed_failure_does_not_500(
     fake_draft = DraftProfile(
         description="new description",
         structured={
-            "areas": [], "budget_min": None, "budget_max": None,
-            "trl_min": None, "trl_max": None,
-            "must_include": [], "hard_exclusions": [],
+            "areas": [],
+            "budget_min": None,
+            "budget_max": None,
+            "trl_min": None,
+            "trl_max": None,
+            "must_include": [],
+            "hard_exclusions": [],
         },
-        publications_fetched=0, publications_skipped=0,
+        publications_fetched=0,
+        publications_skipped=0,
     )
     with (
-        patch("call_monitor.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
+        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
         client,
     ):
         r = client.post(
@@ -873,7 +951,9 @@ def test_profile_create_embed_failure_does_not_500(
             data={
                 "name": "Create-embed-fails",
                 "kind": "group",
-                "orcids": "", "names_affiliations": "", "pasted_grants": "",
+                "orcids": "",
+                "names_affiliations": "",
+                "pasted_grants": "",
             },
             follow_redirects=False,
         )

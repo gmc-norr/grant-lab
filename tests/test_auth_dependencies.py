@@ -3,10 +3,10 @@ from contextlib import contextmanager
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from call_monitor.auth.dependencies import get_current_user, require_admin
-from call_monitor.auth.session_cookie import SessionSigner
-from call_monitor.db.models import User
-from call_monitor.db.session import make_engine, make_session_factory
+from call_manager.auth.dependencies import get_current_user, require_admin
+from call_manager.auth.session_cookie import SessionSigner
+from call_manager.db.models import User
+from call_manager.db.session import make_engine, make_session_factory
 
 
 @contextmanager

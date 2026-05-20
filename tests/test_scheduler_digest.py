@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from call_monitor.config import Settings
-from call_monitor.scheduler import build_scheduler
+from call_manager.config import Settings
+from call_manager.scheduler import build_scheduler
 
 
 class _NullEmail:
@@ -23,7 +23,7 @@ def _settings_env(monkeypatch, pg_url):
 
 
 def _build(session_factory, *, with_digest):
-    from call_monitor.proposal_assist.drafting.factory import build_workspace_controller
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
     workspace_controller = build_workspace_controller(

@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import (
+from call_manager.db.models import (
     Call,
     DigestRun,
     Source,
@@ -19,7 +19,10 @@ def _user_and_call(s, email="u@ki.se"):
     s.flush()
     src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
     c = Call(
-        source_id=src.id, external_id=f"E-{email}", url="https://x", title="T",
+        source_id=src.id,
+        external_id=f"E-{email}",
+        url="https://x",
+        title="T",
         published_at=datetime.now(UTC),
     )
     s.add(c)

@@ -1,9 +1,9 @@
 import pytest
 from sqlalchemy import select
 
-from call_monitor.db.models import ChatTurn, TurnJob, WorkspaceEvent
-from call_monitor.proposal_assist.turns.caps import TokenCapExceeded
-from call_monitor.proposal_assist.turns.submit import submit_user_turn
+from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from call_manager.proposal_assist.turns.caps import TokenCapExceeded
+from call_manager.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import (
     make_chat_turn,
     make_user,
@@ -15,7 +15,7 @@ def test_submit_user_turn_writes_chat_turn_and_turn_job(
     pg_session_factory,
     _settings_env,
 ):
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -67,7 +67,7 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
     monkeypatch,
 ):
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -122,7 +122,7 @@ def test_submit_user_turn_accepts_null_submitter_for_system_initiated(
 ):
     """System-initiated turns (future auto-summarization, recovery)
     legitimately have no user actor — pass None."""
-    from call_monitor.config import Settings
+    from call_manager.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:

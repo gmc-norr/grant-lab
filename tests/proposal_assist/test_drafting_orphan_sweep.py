@@ -2,8 +2,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_monitor.db.models import TurnJob
-from call_monitor.proposal_assist.drafting.orphan_sweep import (
+from call_manager.db.models import TurnJob
+from call_manager.proposal_assist.drafting.orphan_sweep import (
     sweep_orphaned_turn_jobs,
 )
 from tests.proposal_assist.conftest import make_workspace
@@ -62,7 +62,7 @@ def test_sweep_leaves_other_statuses_alone(pg_session_factory):
 def test_sweep_is_workspace_scoped(pg_session_factory):
     """A 'running' row on workspace_A doesn't affect a sweep on
     workspace_B."""
-    from call_monitor.db.models import User
+    from call_manager.db.models import User
 
     with pg_session_factory() as s:
         # Two workspaces — each with their own owner to avoid UNIQUE

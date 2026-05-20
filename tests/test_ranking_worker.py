@@ -5,7 +5,7 @@ from functools import partial
 import httpx
 from sqlalchemy import select
 
-from call_monitor.db.models import (
+from call_manager.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
@@ -16,8 +16,8 @@ from call_monitor.db.models import (
     Source,
     User,
 )
-from call_monitor.ranking.ollama_client import OllamaClient
-from call_monitor.ranking.worker import drain_queue as _drain_queue
+from call_manager.ranking.ollama_client import OllamaClient
+from call_manager.ranking.worker import drain_queue as _drain_queue
 
 # Mirrors Settings.embedding_pregate_threshold default. drain_queue now requires
 # the threshold (no module-level constant); tests get the same default via
@@ -30,7 +30,9 @@ def _seed(s):
     s.add(u)
     s.flush()
     p = Profile(
-        name="P", kind=ProfileKind.GROUP, description="",
+        name="P",
+        kind=ProfileKind.GROUP,
+        description="",
         structured={"areas": ["AI"], "hard_exclusions": []},
         created_by=u.id,
     )
@@ -38,16 +40,23 @@ def _seed(s):
     s.flush()
     src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
     c = Call(
-        source_id=src.id, external_id="E", url="https://x", title="AI call",
-        summary="Open AI funding call.", deadline=datetime(2099, 12, 31, tzinfo=UTC),
+        source_id=src.id,
+        external_id="E",
+        url="https://x",
+        title="AI call",
+        summary="Open AI funding call.",
+        deadline=datetime(2099, 12, 31, tzinfo=UTC),
         published_at=datetime.now(UTC),
     )
     s.add(c)
     s.flush()
-    s.add(RankingJob(
-        call_id=c.id, profile_id=p.id,
-        status=RankingJobStatus.PENDING,
-    ))
+    s.add(
+        RankingJob(
+            call_id=c.id,
+            profile_id=p.id,
+            status=RankingJobStatus.PENDING,
+        )
+    )
     s.flush()
     return c.id, p.id
 
@@ -55,25 +64,53 @@ def _seed(s):
 def _ollama_clean():
     body = {
         "model": "gemma4:e4b-it-q4_K_M",
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": json.dumps({
-                "topic_fit": {"rating": 4, "rationale": "AI match", "quoted_evidence": "AI"},
-                "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-                "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-            })},
-            "logprobs": {"content": [
-                {"token": "4", "logprob": -0.1, "top_logprobs": [
-                    {"token": "4", "logprob": -0.1},
-                    {"token": "3", "logprob": -2.0},
-                ]},
-            ]},
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {
+                            "topic_fit": {
+                                "rating": 4,
+                                "rationale": "AI match",
+                                "quoted_evidence": "AI",
+                            },
+                            "eligibility": {
+                                "rating": "pass",
+                                "rationale": "ok",
+                                "quoted_evidence": None,
+                            },
+                            "exclusions": {
+                                "rating": "pass",
+                                "rationale": "ok",
+                                "quoted_evidence": None,
+                            },
+                        }
+                    ),
+                },
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "4",
+                            "logprob": -0.1,
+                            "top_logprobs": [
+                                {"token": "4", "logprob": -0.1},
+                                {"token": "3", "logprob": -2.0},
+                            ],
+                        },
+                    ]
+                },
+            }
+        ],
     }
+
     def handler(request):
         return httpx.Response(200, json=body)
+
     return OllamaClient(
-        base_url="http://x", model="gemma4:e4b-it-q4_K_M",
+        base_url="http://x",
+        model="gemma4:e4b-it-q4_K_M",
         transport=httpx.MockTransport(handler),
     )
 
@@ -124,7 +161,9 @@ def test_worker_short_circuit_writes_only_failing_gate_row(pg_session_factory):
         s.add(u)
         s.flush()
         p = Profile(
-            name="SC", kind=ProfileKind.GROUP, description="",
+            name="SC",
+            kind=ProfileKind.GROUP,
+            description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,
         )
@@ -133,24 +172,33 @@ def test_worker_short_circuit_writes_only_failing_gate_row(pg_session_factory):
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         # Deadline tomorrow → timeline FAIL.
         from datetime import timedelta
+
         c = Call(
-            source_id=src.id, external_id="SC", url="https://x", title="T",
+            source_id=src.id,
+            external_id="SC",
+            url="https://x",
+            title="T",
             deadline=datetime.now(UTC) + timedelta(days=1),
             published_at=datetime.now(UTC),
         )
         s.add(c)
         s.flush()
-        s.add(RankingJob(
-            call_id=c.id, profile_id=p.id,
-            status=RankingJobStatus.PENDING,
-        ))
+        s.add(
+            RankingJob(
+                call_id=c.id,
+                profile_id=p.id,
+                status=RankingJobStatus.PENDING,
+            )
+        )
         s.commit()
 
     # Client that would fail if called.
     def boom(request):
         raise AssertionError("LLM called for gate-failed pair")
+
     client = OllamaClient(
-        base_url="http://x", model="m",
+        base_url="http://x",
+        model="m",
         transport=httpx.MockTransport(boom),
     )
     drain_queue(session_factory=pg_session_factory, client=client, batch_size=10)
@@ -181,7 +229,9 @@ def test_worker_must_include_with_failing_timeline_persists_llm_score(
         s.flush()
         # Profile has must_include=["pathology"].
         p = Profile(
-            name="MI", kind=ProfileKind.GROUP, description="",
+            name="MI",
+            kind=ProfileKind.GROUP,
+            description="",
             structured={
                 "areas": ["pathology"],
                 "hard_exclusions": [],
@@ -195,7 +245,9 @@ def test_worker_must_include_with_failing_timeline_persists_llm_score(
         # Title contains "pathology" → must_include match.
         # Deadline tomorrow → timeline gate FAILs.
         c = Call(
-            source_id=src.id, external_id="MI", url="https://x",
+            source_id=src.id,
+            external_id="MI",
+            url="https://x",
             title="Pathology funding announcement",
             summary="Open call.",
             deadline=datetime.now(UTC) + timedelta(days=1),
@@ -203,10 +255,13 @@ def test_worker_must_include_with_failing_timeline_persists_llm_score(
         )
         s.add(c)
         s.flush()
-        s.add(RankingJob(
-            call_id=c.id, profile_id=p.id,
-            status=RankingJobStatus.PENDING,
-        ))
+        s.add(
+            RankingJob(
+                call_id=c.id,
+                profile_id=p.id,
+                status=RankingJobStatus.PENDING,
+            )
+        )
         s.commit()
 
     drain_queue(session_factory=pg_session_factory, client=_ollama_clean(), batch_size=10)
@@ -247,23 +302,29 @@ def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
 
     # Mutate the call so the timeline gate will FAIL on the next run.
     from datetime import timedelta
+
     with pg_session_factory() as s:
         call = s.get(Call, cid)
         # Make timeline FAIL — deadline in the past.
         call.deadline = datetime.now(UTC) - timedelta(days=1)
         s.commit()
         # Re-enqueue.
-        s.add(RankingJob(
-            call_id=cid, profile_id=pid,
-            status=RankingJobStatus.PENDING,
-        ))
+        s.add(
+            RankingJob(
+                call_id=cid,
+                profile_id=pid,
+                status=RankingJobStatus.PENDING,
+            )
+        )
         s.commit()
 
     # Second run: timeline FAILs early; LLM must NOT be called.
     def boom(request):
         raise AssertionError("LLM should not be called for gate-failed pair")
+
     bad_client = OllamaClient(
-        base_url="http://x", model="m",
+        base_url="http://x",
+        model="m",
         transport=httpx.MockTransport(boom),
     )
     drain_queue(session_factory=pg_session_factory, client=bad_client, batch_size=10)
@@ -279,10 +340,10 @@ def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
 def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkeypatch):
     """When rank_pair returns a clean result with embed_similarity=0.45,
     the worker persists that value to call_rankings.embed_similarity."""
-    from call_monitor.ranking import worker as worker_mod
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
-    from call_monitor.ranking.prompt import Parsed
-    from call_monitor.ranking.rank_pair import RankResult
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -290,12 +351,18 @@ def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkey
 
     parsed = Parsed(
         topic_fit_rating=4,
-        topic_fit_rationale="ok", topic_fit_quoted=None,
-        eligibility_rating="pass", eligibility_rationale="ok", eligibility_quoted=None,
-        exclusions_rating="pass", exclusions_rationale="ok", exclusions_quoted=None,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
     )
     stub_result = RankResult(
-        score=80, reason=None,
+        score=80,
+        reason=None,
         gates=Gates(
             timeline=GateResult(GateStatus.PASS),
             budget=GateResult(GateStatus.PASS),
@@ -304,7 +371,9 @@ def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkey
         ),
         parsed=parsed,
         must_include_override=False,
-        model="m", prompt_version="v3.0", raw_response={},
+        model="m",
+        prompt_version="v3.0",
+        raw_response={},
         embed_similarity=0.45,
     )
 
@@ -324,16 +393,17 @@ def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkey
 def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, monkeypatch):
     """Even on gate-FAIL short-circuits (e.g. embedding gate FAILed), the
     cosine should still be persisted — useful for tuning the threshold later."""
-    from call_monitor.ranking import worker as worker_mod
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
-    from call_monitor.ranking.rank_pair import RankResult
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
         s.commit()
 
     stub_result = RankResult(
-        score=0, reason="embedding",
+        score=0,
+        reason="embedding",
         gates=Gates(
             timeline=GateResult(GateStatus.PASS),
             budget=GateResult(GateStatus.PASS),
@@ -342,7 +412,9 @@ def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, mo
         ),
         parsed=None,
         must_include_override=False,
-        model="", prompt_version="v3.0", raw_response={},
+        model="",
+        prompt_version="v3.0",
+        raw_response={},
         embed_similarity=0.18,
     )
 
@@ -363,12 +435,13 @@ def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, mo
 def test_worker_summary_renders_embedding_fail_reason():
     """When aggregate_reason == 'embedding', the one-line summary mentions
     'topic_dissimilar' and the cosine value to 3 decimals."""
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
-    from call_monitor.ranking.rank_pair import RankResult
-    from call_monitor.ranking.worker import _rank_summary
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.rank_pair import RankResult
+    from call_manager.ranking.worker import _rank_summary
 
     r = RankResult(
-        score=0, reason="embedding",
+        score=0,
+        reason="embedding",
         gates=Gates(
             timeline=GateResult(GateStatus.PASS),
             budget=GateResult(GateStatus.PASS),
@@ -377,7 +450,9 @@ def test_worker_summary_renders_embedding_fail_reason():
         ),
         parsed=None,
         must_include_override=False,
-        model="m", prompt_version="v3.0", raw_response={},
+        model="m",
+        prompt_version="v3.0",
+        raw_response={},
         embed_similarity=0.18,
     )
     summary = _rank_summary(r)
@@ -396,9 +471,12 @@ def test_worker_must_include_override_appears_in_summary(pg_session_factory):
         s.add(u)
         s.flush()
         p = Profile(
-            name="OVR", kind=ProfileKind.GROUP, description="",
+            name="OVR",
+            kind=ProfileKind.GROUP,
+            description="",
             structured={
-                "areas": ["pathology"], "hard_exclusions": [],
+                "areas": ["pathology"],
+                "hard_exclusions": [],
                 "must_include": ["pathology"],
             },
             created_by=u.id,
@@ -407,7 +485,9 @@ def test_worker_must_include_override_appears_in_summary(pg_session_factory):
         s.flush()
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
-            source_id=src.id, external_id="OVR", url="https://x",
+            source_id=src.id,
+            external_id="OVR",
+            url="https://x",
             title="Pathology funding",
             summary="Open call.",
             deadline=datetime.now(UTC) + timedelta(days=1),
@@ -415,10 +495,13 @@ def test_worker_must_include_override_appears_in_summary(pg_session_factory):
         )
         s.add(c)
         s.flush()
-        s.add(RankingJob(
-            call_id=c.id, profile_id=p.id,
-            status=RankingJobStatus.PENDING,
-        ))
+        s.add(
+            RankingJob(
+                call_id=c.id,
+                profile_id=p.id,
+                status=RankingJobStatus.PENDING,
+            )
+        )
         s.commit()
 
     drain_queue(session_factory=pg_session_factory, client=_ollama_clean(), batch_size=10)
@@ -430,7 +513,8 @@ def test_worker_must_include_override_appears_in_summary(pg_session_factory):
 
 
 def test_worker_writes_embedding_criterion_row_on_gate_fail(
-    pg_session_factory, monkeypatch,
+    pg_session_factory,
+    monkeypatch,
 ):
     """When the embedding gate FAILs (cosine below threshold, no must_include
     override), the CallRankingCriterion table must include a row for
@@ -438,16 +522,17 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
     would render three "pass" rows for timeline/budget/trl and leave the
     operator wondering why the headline score is 0 — Codex finding from
     Plan D bug review."""
-    from call_monitor.ranking import worker as worker_mod
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
-    from call_monitor.ranking.rank_pair import RankResult
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
         s.commit()
 
     stub_result = RankResult(
-        score=0, reason="embedding",
+        score=0,
+        reason="embedding",
         gates=Gates(
             timeline=GateResult(GateStatus.PASS),
             budget=GateResult(GateStatus.PASS),
@@ -456,7 +541,9 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
         ),
         parsed=None,
         must_include_override=False,
-        model="", prompt_version="v3.0", raw_response={},
+        model="",
+        prompt_version="v3.0",
+        raw_response={},
         embed_similarity=0.18,
     )
 
@@ -481,7 +568,8 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
 
 
 def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
-    pg_session_factory, monkeypatch,
+    pg_session_factory,
+    monkeypatch,
 ):
     """Codex regression: a degraded re-rank (e.g., embedding model swap →
     profile/call vectors disagree → _safe_cosine returns None → UNKNOWN gate
@@ -490,35 +578,48 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
     The worker must NOT clobber the previously-recorded value with NULL —
     operators tuning the cosine pre-gate threshold rely on the historical
     diagnostic signal."""
-    from call_monitor.ranking import worker as worker_mod
-    from call_monitor.ranking.criteria import GateResult, Gates, GateStatus
-    from call_monitor.ranking.prompt import Parsed
-    from call_monitor.ranking.rank_pair import RankResult
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
         # Pre-seed a CallRanking row with embed_similarity=0.83 — the value
         # we want to verify is preserved across the degraded re-rank.
-        s.add(CallRanking(
-            call_id=cid, profile_id=pid,
-            aggregate_score=72, aggregate_reason=None,
-            rationale="prior run", model="m", prompt_version="v2.0",
-            raw_response={}, embed_similarity=0.83,
-            ranked_at=datetime.now(UTC),
-        ))
+        s.add(
+            CallRanking(
+                call_id=cid,
+                profile_id=pid,
+                aggregate_score=72,
+                aggregate_reason=None,
+                rationale="prior run",
+                model="m",
+                prompt_version="v2.0",
+                raw_response={},
+                embed_similarity=0.83,
+                ranked_at=datetime.now(UTC),
+            )
+        )
         s.commit()
 
     parsed = Parsed(
         topic_fit_rating=4,
-        topic_fit_rationale="ok", topic_fit_quoted=None,
-        eligibility_rating="pass", eligibility_rationale="ok", eligibility_quoted=None,
-        exclusions_rating="pass", exclusions_rationale="ok", exclusions_quoted=None,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
     )
     # Simulate degraded re-rank: embedding gate UNKNOWN (cosine returned
     # None due to model mismatch), LLM ran, non-zero score, but
     # embed_similarity=None on the new result.
     stub_result = RankResult(
-        score=80, reason=None,
+        score=80,
+        reason=None,
         gates=Gates(
             timeline=GateResult(GateStatus.PASS),
             budget=GateResult(GateStatus.PASS),
@@ -527,7 +628,9 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
         ),
         parsed=parsed,
         must_include_override=False,
-        model="m", prompt_version="v3.0", raw_response={},
+        model="m",
+        prompt_version="v3.0",
+        raw_response={},
         embed_similarity=None,
     )
 

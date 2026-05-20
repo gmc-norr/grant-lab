@@ -4,18 +4,19 @@ Verifies the single source of truth for which funding sources exist —
 adding a new adapter requires only an entry in `SOURCES` (plus the adapter
 file), and the scheduler + ingestion CLI both pick it up automatically.
 """
+
 from __future__ import annotations
 
 import pytest
 
-from call_monitor.config import Settings
-from call_monitor.sources.eu_portal import EUPortalAdapter
-from call_monitor.sources.registry import (
+from call_manager.config import Settings
+from call_manager.sources.eu_portal import EUPortalAdapter
+from call_manager.sources.registry import (
     SOURCES,
     build_adapter,
     known_slugs,
 )
-from call_monitor.sources.vinnova import VinnovaAdapter
+from call_manager.sources.vinnova import VinnovaAdapter
 
 
 @pytest.fixture
@@ -57,6 +58,5 @@ def test_build_adapter_returns_correct_adapter_class_for_each_known_slug(
         adapter = build_adapter(slug, settings)
         assert adapter is not None, f"registry missing slug {slug!r}"
         assert isinstance(adapter, cls), (
-            f"build_adapter({slug!r}) returned {type(adapter).__name__}, "
-            f"expected {cls.__name__}"
+            f"build_adapter({slug!r}) returned {type(adapter).__name__}, expected {cls.__name__}"
         )

@@ -3,6 +3,7 @@
 These tests drive the SDK with a stubbed messages.create so we exercise
 the envelope construction without burning real tokens.
 """
+
 from __future__ import annotations
 
 import json
@@ -10,12 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from call_monitor.ranking.anthropic_client import (
+from call_manager.ranking.anthropic_client import (
     AnthropicClient,
     _split_system,
     _strip_markdown_fence,
 )
-from call_monitor.ranking.ollama_client import LLMError
+from call_manager.ranking.ollama_client import LLMError
 
 
 def _fake_response(text: str, *, stop_reason: str = "end_turn", model: str = "claude-sonnet-4-6"):
@@ -28,18 +29,26 @@ def _fake_response(text: str, *, stop_reason: str = "end_turn", model: str = "cl
     resp.model = model
     resp.stop_reason = stop_reason
     resp.usage = MagicMock(
-        input_tokens=120, output_tokens=80,
-        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        input_tokens=120,
+        output_tokens=80,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
     )
     return resp
 
 
 def _call_chat(client: AnthropicClient, **kw):
     """Helper to invoke .chat with a default message list."""
-    return client.chat(messages=kw.pop("messages", [
-        {"role": "system", "content": "You are a ranker."},
-        {"role": "user", "content": "Score this call."},
-    ]), **kw)
+    return client.chat(
+        messages=kw.pop(
+            "messages",
+            [
+                {"role": "system", "content": "You are a ranker."},
+                {"role": "user", "content": "Score this call."},
+            ],
+        ),
+        **kw,
+    )
 
 
 def test_chat_returns_openai_shaped_envelope():
@@ -47,13 +56,14 @@ def test_chat_returns_openai_shaped_envelope():
     ['message']['content']` — Anthropic and Ollama paths must agree on
     that shape exactly."""
     client = AnthropicClient(api_key="sk-test", model="claude-sonnet-4-6")
-    payload = json.dumps({
-        "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "x"},
-        "eligibility": {"rating": "pass", "rationale": "fits", "quoted_evidence": None},
-        "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
-    })
-    with patch.object(client._client.messages, "create",
-                      return_value=_fake_response(payload)):
+    payload = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": "x"},
+            "eligibility": {"rating": "pass", "rationale": "fits", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
+    with patch.object(client._client.messages, "create", return_value=_fake_response(payload)):
         env = _call_chat(client)
     assert env["choices"][0]["message"]["content"] == payload
     assert env["choices"][0]["message"]["role"] == "assistant"
@@ -65,12 +75,13 @@ def test_chat_splits_system_into_anthropic_top_level_param():
     client lifts the system message into the top-level `system` arg
     and forwards only user/assistant turns in messages."""
     client = AnthropicClient(api_key="sk-test")
-    with patch.object(client._client.messages, "create",
-                      return_value=_fake_response("{}")) as mock:
-        client.chat(messages=[
-            {"role": "system", "content": "Be helpful."},
-            {"role": "user", "content": "Hi."},
-        ])
+    with patch.object(client._client.messages, "create", return_value=_fake_response("{}")) as mock:
+        client.chat(
+            messages=[
+                {"role": "system", "content": "Be helpful."},
+                {"role": "user", "content": "Hi."},
+            ]
+        )
     kwargs = mock.call_args.kwargs
     # system reaches Anthropic as a list with cache_control on the last block
     assert isinstance(kwargs["system"], list)
@@ -85,12 +96,13 @@ def test_chat_applies_prompt_caching_to_system_block():
     every call scored against that profile within the 5-min cache window.
     Without cache_control we'd re-pay full input cost on every pair."""
     client = AnthropicClient(api_key="sk-test")
-    with patch.object(client._client.messages, "create",
-                      return_value=_fake_response("{}")) as mock:
-        client.chat(messages=[
-            {"role": "system", "content": "criteria + rubric here"},
-            {"role": "user", "content": "score this"},
-        ])
+    with patch.object(client._client.messages, "create", return_value=_fake_response("{}")) as mock:
+        client.chat(
+            messages=[
+                {"role": "system", "content": "criteria + rubric here"},
+                {"role": "user", "content": "score this"},
+            ]
+        )
     system = mock.call_args.kwargs["system"]
     assert system[0]["cache_control"]["type"] == "ephemeral"
 
@@ -99,8 +111,7 @@ def test_chat_handles_empty_system():
     """Some callers may build a single-user-turn message list. We must
     not break by passing an empty system list to Anthropic."""
     client = AnthropicClient(api_key="sk-test")
-    with patch.object(client._client.messages, "create",
-                      return_value=_fake_response("ok")) as mock:
+    with patch.object(client._client.messages, "create", return_value=_fake_response("ok")) as mock:
         client.chat(messages=[{"role": "user", "content": "Hi."}])
     # system param either omitted or an empty list — both acceptable
     system = mock.call_args.kwargs.get("system")
@@ -116,9 +127,7 @@ def test_chat_wraps_api_status_error_in_llm_error():
     fake_resp = MagicMock()
     fake_resp.headers = {"request-id": "req_abc123"}
     fake_resp.status_code = 429
-    err = anthropic.APIStatusError(
-        message="rate limited", response=fake_resp, body={}
-    )
+    err = anthropic.APIStatusError(message="rate limited", response=fake_resp, body={})
     with (
         patch.object(client._client.messages, "create", side_effect=err),
         pytest.raises(LLMError) as exc_info,
@@ -133,8 +142,11 @@ def test_chat_wraps_connection_error_in_llm_error():
 
     client = AnthropicClient(api_key="sk-test")
     with (
-        patch.object(client._client.messages, "create",
-                     side_effect=anthropic.APIConnectionError(request=MagicMock())),
+        patch.object(
+            client._client.messages,
+            "create",
+            side_effect=anthropic.APIConnectionError(request=MagicMock()),
+        ),
         pytest.raises(LLMError),
     ):
         _call_chat(client)
@@ -150,8 +162,10 @@ def test_chat_raises_llm_error_on_no_text_blocks():
     empty_resp.model = "claude-sonnet-4-6"
     empty_resp.stop_reason = "end_turn"
     empty_resp.usage = MagicMock(
-        input_tokens=10, output_tokens=0,
-        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        input_tokens=10,
+        output_tokens=0,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
     )
     with (
         patch.object(client._client.messages, "create", return_value=empty_resp),
@@ -163,11 +177,13 @@ def test_chat_raises_llm_error_on_no_text_blocks():
 def test_split_system_concatenates_multiple_system_messages():
     """Defensive: if a caller ever ships two system messages we want
     them joined, not silently dropped."""
-    system, rest = _split_system([
-        {"role": "system", "content": "rule one"},
-        {"role": "system", "content": "rule two"},
-        {"role": "user", "content": "go"},
-    ])
+    system, rest = _split_system(
+        [
+            {"role": "system", "content": "rule one"},
+            {"role": "system", "content": "rule two"},
+            {"role": "user", "content": "go"},
+        ]
+    )
     assert "rule one" in system
     assert "rule two" in system
     assert rest == [{"role": "user", "content": "go"}]
@@ -189,13 +205,13 @@ def test_strip_markdown_fence_handles_json_block():
     """Anthropic models often wrap structured output in ```json ... ```
     fences. The downstream parser uses json.loads() directly, so we
     strip a single outer fence before returning the envelope."""
-    text = "```json\n{\"a\": 1}\n```"
+    text = '```json\n{"a": 1}\n```'
     assert _strip_markdown_fence(text) == '{"a": 1}'
 
 
 def test_strip_markdown_fence_handles_bare_fence():
     """Sometimes the fence has no language tag."""
-    text = "```\n{\"a\": 1}\n```"
+    text = '```\n{"a": 1}\n```'
     assert _strip_markdown_fence(text) == '{"a": 1}'
 
 
@@ -210,7 +226,7 @@ def test_strip_markdown_fence_no_partial_strip():
     """If the response has prose before/after the fence (e.g.
     'Here's the analysis: ```json...```'), don't strip — that's a
     different failure mode the prompt should fix, not silent recovery."""
-    text = "Here's the answer: ```json\n{\"a\": 1}\n```"
+    text = 'Here\'s the answer: ```json\n{"a": 1}\n```'
     # The fence isn't at the start, so leave the whole string alone
     assert _strip_markdown_fence(text) == text
 
@@ -219,9 +235,8 @@ def test_chat_strips_markdown_fence_from_response():
     """End-to-end: Sonnet returns ```json{...}``` → envelope content
     is the parseable raw JSON, not the fenced version."""
     client = AnthropicClient(api_key="sk-test")
-    fenced = "```json\n{\"topic_fit\": {\"rating\": 4}}\n```"
-    with patch.object(client._client.messages, "create",
-                      return_value=_fake_response(fenced)):
+    fenced = '```json\n{"topic_fit": {"rating": 4}}\n```'
+    with patch.object(client._client.messages, "create", return_value=_fake_response(fenced)):
         env = _call_chat(client)
     content = env["choices"][0]["message"]["content"]
     # Must be loadable as a dict — no fence chars left
@@ -233,7 +248,10 @@ def test_finish_reason_maps_anthropic_stop_to_openai_vocab():
     length/content_filter. Map so anything inspecting finish_reason
     on the envelope sees the OpenAI vocabulary."""
     client = AnthropicClient(api_key="sk-test")
-    with patch.object(client._client.messages, "create",
-                      return_value=_fake_response("{}", stop_reason="max_tokens")):
+    with patch.object(
+        client._client.messages,
+        "create",
+        return_value=_fake_response("{}", stop_reason="max_tokens"),
+    ):
         env = _call_chat(client)
     assert env["choices"][0]["finish_reason"] == "length"

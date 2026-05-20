@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from call_monitor.email.client import ResendClient, SMTPClient
-from call_monitor.email.factory import EmailConfigError, build_email_client
+from call_manager.email.client import ResendClient, SMTPClient
+from call_manager.email.factory import EmailConfigError, build_email_client
 
 
 @dataclass
@@ -12,6 +12,7 @@ class _FakeSettings:
 
     The real Settings class can't be constructed with kwargs (uses Field(alias)
     + reads env vars), so tests pass a duck-typed stand-in."""
+
     email_transport: str = "resend"
     resend_api_key: str | None = None
     smtp_host: str | None = None

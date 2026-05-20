@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_monitor.db.models import Workspace, WorkspaceViewer
+from call_manager.db.models import Workspace, WorkspaceViewer
 from tests.proposal_assist.conftest import make_call, make_user, make_workspace
 
 

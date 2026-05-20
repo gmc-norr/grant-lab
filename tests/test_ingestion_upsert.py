@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_monitor.db.models import Call, Source
-from call_monitor.ingestion.upsert import upsert_call
-from call_monitor.sources.types import NormalizedCall
+from call_manager.db.models import Call, Source
+from call_manager.ingestion.upsert import upsert_call
+from call_manager.sources.types import NormalizedCall
 
 
 def _vinnova_id(s):
@@ -64,6 +64,7 @@ def test_upsert_refreshes_fetched_at_on_re_encounter(pg_session_factory):
         first = s.execute(select(Call.fetched_at).where(Call.external_id == "V-1")).scalar_one()
     # Second pass at least 1ms later
     import time
+
     time.sleep(0.01)
     with pg_session_factory() as s:
         sid = _vinnova_id(s)
@@ -98,9 +99,7 @@ def test_upsert_preserves_full_text_when_new_payload_is_none(pg_session_factory)
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(
-                external_id="V-1", url="u", title="T", full_text="rich body"
-            ),
+            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text="rich body"),
         )
         s.commit()
         upsert_call(
@@ -125,17 +124,13 @@ def test_upsert_overwrites_full_text_when_new_payload_is_non_none(pg_session_fac
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(
-                external_id="V-1", url="u", title="T", full_text="OLD body"
-            ),
+            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text="OLD body"),
         )
         s.commit()
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(
-                external_id="V-1", url="u", title="T", full_text="NEW body"
-            ),
+            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text="NEW body"),
         )
         s.commit()
         row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()

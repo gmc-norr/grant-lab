@@ -1,4 +1,4 @@
-from call_monitor.auth.rate_limit import SlidingWindowLimiter
+from call_manager.auth.rate_limit import SlidingWindowLimiter
 
 
 def test_allows_under_limit():

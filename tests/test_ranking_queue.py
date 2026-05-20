@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 
-from call_monitor.db.models import (
+from call_manager.db.models import (
     Call,
     CallRanking,
     Profile,
@@ -10,7 +10,7 @@ from call_monitor.db.models import (
     RankingJobStatus,
     Source,
 )
-from call_monitor.ranking.queue import (
+from call_manager.ranking.queue import (
     claim_pending_jobs,
     enqueue_for_pair,
     mark_done,
@@ -157,8 +157,11 @@ def test_requeue_stuck_running_recovers_crashed_workers(pg_session_factory, prof
 def _seed_call_with(s, *, external_id: str, published: datetime | None) -> int:
     src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
     c = Call(
-        source_id=src.id, external_id=external_id, url=f"https://x/{external_id}",
-        title=f"T-{external_id}", published_at=published,
+        source_id=src.id,
+        external_id=external_id,
+        url=f"https://x/{external_id}",
+        title=f"T-{external_id}",
+        published_at=published,
     )
     s.add(c)
     s.flush()
@@ -181,10 +184,15 @@ def test_reconcile_enqueues_missing_pair(pg_session_factory, profile_factory):
 
     assert n == 1
     with pg_session_factory() as s:
-        jobs = s.execute(
-            select(RankingJob).where(RankingJob.call_id == call_id,
-                                     RankingJob.profile_id == profile_id)
-        ).scalars().all()
+        jobs = (
+            s.execute(
+                select(RankingJob).where(
+                    RankingJob.call_id == call_id, RankingJob.profile_id == profile_id
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert len(jobs) == 1
     assert jobs[0].status == RankingJobStatus.PENDING
 
@@ -196,10 +204,17 @@ def test_reconcile_skips_already_ranked_pair(pg_session_factory, profile_factory
         call_id = _seed_call_with(
             s, external_id="RC-2", published=datetime.now(UTC) - timedelta(days=2)
         )
-        s.add(CallRanking(
-            call_id=call_id, profile_id=profile_id, aggregate_score=50,
-            rationale="", model="m", prompt_version="v3.0", raw_response={},
-        ))
+        s.add(
+            CallRanking(
+                call_id=call_id,
+                profile_id=profile_id,
+                aggregate_score=50,
+                rationale="",
+                model="m",
+                prompt_version="v3.0",
+                raw_response={},
+            )
+        )
         s.commit()
 
     with pg_session_factory() as s:
@@ -240,9 +255,7 @@ def test_reconcile_ignores_inactive_profile(pg_session_factory, profile_factory)
         s.get(Profile, profile_id).is_active = False
         s.commit()
     with pg_session_factory() as s:
-        _seed_call_with(
-            s, external_id="RC-4", published=datetime.now(UTC) - timedelta(days=1)
-        )
+        _seed_call_with(s, external_id="RC-4", published=datetime.now(UTC) - timedelta(days=1))
         s.commit()
 
     with pg_session_factory() as s:
@@ -258,7 +271,8 @@ def test_reconcile_ignores_old_calls(pg_session_factory, profile_factory):
     profile_factory()
     with pg_session_factory() as s:
         _seed_call_with(
-            s, external_id="RC-5",
+            s,
+            external_id="RC-5",
             published=datetime.now(UTC) - timedelta(days=365),
         )
         s.commit()
@@ -270,9 +284,7 @@ def test_reconcile_ignores_old_calls(pg_session_factory, profile_factory):
     assert n == 0
 
 
-def test_reconcile_ignores_calls_with_null_published_at(
-    pg_session_factory, profile_factory
-):
+def test_reconcile_ignores_calls_with_null_published_at(pg_session_factory, profile_factory):
     """We key the cutoff off published_at; a NULL means we can't bound
     its age, so we leave it to the normal backfill-on-demand path (same
     behavior as backfill_profile)."""

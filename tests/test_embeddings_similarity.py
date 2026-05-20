@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
-from call_monitor.embeddings.similarity import (
+from call_manager.embeddings.similarity import (
     build_call_text,
     build_profile_text,
     cosine,
@@ -75,8 +75,10 @@ def test_build_profile_text_includes_description_and_areas():
             "areas": ["digital pathology", "federated learning"],
             "must_include": ["xyz"],
             "hard_exclusions": ["animal studies"],
-            "budget_min": 100, "budget_max": 500,
-            "trl_min": 3, "trl_max": 7,
+            "budget_min": 100,
+            "budget_max": 500,
+            "trl_min": 3,
+            "trl_max": 7,
         },
     )
     text = build_profile_text(profile)

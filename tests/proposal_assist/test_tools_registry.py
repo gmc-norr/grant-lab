@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from call_monitor.proposal_assist.tools.registry import (
+from call_manager.proposal_assist.tools.registry import (
     ToolContext,
     build_proposal_assist_mcp_server,
 )
@@ -41,7 +41,7 @@ def _make_ctx():
     import uuid
     from pathlib import Path
 
-    from call_monitor.proposal_assist.tools.registry import ToolContext
+    from call_manager.proposal_assist.tools.registry import ToolContext
 
     return ToolContext(
         workspace_id=uuid.uuid4(),
@@ -54,7 +54,7 @@ def _make_ctx():
 def test_collect_tools_returns_eight_named_tools():
     """All eight tool names are present. Probes _collect_tools directly
     instead of fighting the MCP Server's decorator-based API."""
-    from call_monitor.proposal_assist.tools.registry import _collect_tools
+    from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     names = {t.name for t in tools}
@@ -76,7 +76,7 @@ async def test_tool_handler_returns_mcp_envelope_shape():
     plain dict the *_impl function produces. Use read_proposal against
     a missing repo so the impl returns an error — we only care about
     envelope shape, not content."""
-    from call_monitor.proposal_assist.tools.registry import _collect_tools
+    from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     read = next(t for t in tools if t.name == "read_proposal")
@@ -100,7 +100,7 @@ async def test_tool_handler_envelope_success_path():
     import uuid
     from pathlib import Path
 
-    from call_monitor.proposal_assist.tools.registry import (
+    from call_manager.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
     )
