@@ -111,10 +111,20 @@ class SubprocessRegistry:
                 entry.last_touched_monotonic = time.monotonic()
 
     async def terminate(self, workspace_id: uuid.UUID) -> None:
-        """Explicitly tear down a workspace's handle. No-op if unknown."""
+        """Explicitly tear down a workspace's handle. No-op if unknown.
+
+        Order: terminate the adapter subprocess FIRST, then release the
+        advisory lock.  This prevents another caller from acquiring the lock
+        and launching a fresh subprocess while the old one is still
+        disconnecting.  The trade-off: if adapter.terminate hangs, the lock is
+        pinned until the hang clears — that's preferable to the lock leaking."""
         async with self._lock:
             entry = self._entries.pop(workspace_id, None)
-        if entry is not None:
+        if entry is None:
+            return
+        try:
+            await self._adapter.terminate(entry.handle)
+        finally:
             if entry.lock_session is not None:
                 from call_monitor.proposal_assist.drafting.locking import (
                     release_workspace_lock,
@@ -122,7 +132,6 @@ class SubprocessRegistry:
 
                 release_workspace_lock(entry.lock_session, workspace_id)
                 entry.lock_session.close()
-            await self._adapter.terminate(entry.handle)
 
     async def sweep_idle(self) -> int:
         """Terminate any handle untouched for >= idle_seconds. Returns
@@ -141,21 +150,27 @@ class SubprocessRegistry:
 
         # Terminate outside the lock — adapter.terminate may take a while
         # (subprocess teardown) and we don't want to block get_or_launch.
+        # Order: terminate the adapter FIRST, then release the advisory lock.
+        # This prevents another caller from acquiring the lock while the old
+        # subprocess is still disconnecting (the same ordering as terminate()).
         for wsid, entry in stale_entries:
-            try:
-                if entry.lock_session is not None:
-                    from call_monitor.proposal_assist.drafting.locking import (
-                        release_workspace_lock,
-                    )
-
-                    release_workspace_lock(entry.lock_session, wsid)
-                    entry.lock_session.close()
-            except Exception:
-                logger.exception("sweep_idle: failed to release lock for workspace %s", wsid)
             try:
                 await self._adapter.terminate(entry.handle)
             except Exception:
                 logger.exception("sweep_idle: adapter.terminate raised for workspace %s", wsid)
+            finally:
+                if entry.lock_session is not None:
+                    try:
+                        from call_monitor.proposal_assist.drafting.locking import (
+                            release_workspace_lock,
+                        )
+
+                        release_workspace_lock(entry.lock_session, wsid)
+                        entry.lock_session.close()
+                    except Exception:
+                        logger.exception(
+                            "sweep_idle: failed to release lock for workspace %s", wsid
+                        )
         return len(stale_entries)
 
     async def send_turn(

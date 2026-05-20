@@ -94,6 +94,63 @@ async def test_registry_terminate_unknown_workspace_is_noop():
 
 
 @pytest.mark.asyncio
+async def test_registry_terminate_calls_adapter_before_releasing_lock():
+    """adapter.terminate must be called, and the lock_session must be closed
+    even when adapter.terminate raises — verifying terminate-before-release
+    ordering via a raising FakeAgentAdapter."""
+
+    class _RaisingAdapter(FakeAgentAdapter):
+        async def terminate(self, handle):
+            self.terminations.append(handle)
+            raise RuntimeError("adapter exploded during terminate")
+
+    adapter = _RaisingAdapter()
+    closed: list[bool] = []
+
+    class _FakeSession:
+        """Minimal stand-in for a SQLAlchemy Session."""
+
+        def close(self):
+            closed.append(True)
+
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    wsid = uuid.uuid4()
+    ctx = LaunchContext(workspace_id=wsid)
+
+    handle = await registry.get_or_launch(wsid, context=ctx)
+    # Inject a fake lock_session so we can observe close().
+    registry._entries[wsid].lock_session = _FakeSession()  # type: ignore[assignment]
+
+    # Patch release_workspace_lock to avoid importing real locking machinery.
+    released: list[uuid.UUID] = []
+
+    async def _do_terminate():
+        import call_monitor.proposal_assist.drafting.locking as _lock_mod
+
+        orig = _lock_mod.release_workspace_lock
+
+        def _fake_release(session, wsid_arg):
+            released.append(wsid_arg)
+
+        _lock_mod.release_workspace_lock = _fake_release
+        try:
+            await registry.terminate(wsid)
+        except Exception:
+            pass  # the RuntimeError is expected; we only check side-effects
+        finally:
+            _lock_mod.release_workspace_lock = orig
+
+    await _do_terminate()
+
+    # adapter.terminate was called despite raising.
+    assert len(adapter.terminations) == 1
+    assert adapter.terminations[0] is handle
+    # Lock was released and session was closed despite the exception.
+    assert released == [wsid]
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
 async def test_sweep_idle_skips_handles_with_in_flight_turns():
     """A handle with in_flight > 0 is never swept, even past the idle threshold."""
     adapter = FakeAgentAdapter()
