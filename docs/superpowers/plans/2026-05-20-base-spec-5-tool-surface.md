@@ -71,6 +71,13 @@
 ## Revision history
 
 - **rev1 (2026-05-20)** — initial plan.
+- **rev2 (2026-05-20, Codex round 1)** — six findings, all blockers or correctness issues; addressed all:
+  - **B1** MCP return shape. `@tool` handlers must return `{"content": [{"type": "text", "text": ...}], "is_error": False}` — the SDK rejects plain dicts. Pattern revised: `*_impl` functions keep their plain-dict return for unit-testability; the `@tool` closures wrap via `_mcp_ok(data) / _mcp_error(message)` helpers in registry.py.
+  - **B2** Security boundary. `allowed_tools` only auto-grants permission; it does NOT disable Claude Code's built-in toolbox (Bash/Read/Edit/etc.). The right disable is `ClaudeAgentOptions(tools=[], ...)` PLUS `mcp_servers=...` plus `strict_mcp_config=True`. Task 7 updated to set all three.
+  - **B3** Registry tests use wrong types. `McpSdkServerConfig` is a `TypedDict`, and the server returned by `create_sdk_mcp_server` is a dict with `{type, name, instance}` keys. Tests revised to check `server["name"] == "proposal_assist"` and probe `server["instance"]` for tool introspection.
+  - **C1** Context tools must read workspace SNAPSHOTS, not live `calls`/`profiles` rows. Phased spec line 418: context tools return the snapshot taken at workspace creation. Models confirm: `Workspace.call_body_snapshot`, `Workspace.profile_desc_snapshot`, `Workspace.rubric_criteria`, `Workspace.rubric_funder_notes`, `Workspace.section_extracts` are populated by Phase 0. The live `Call` has `summary` + `full_text` (NOT `description`), and `Profile` is the org/group profile — neither is what the agent should see. Task 4 rewritten.
+  - **C2** Git failure handling. `_write_and_commit` writes the file BEFORE the commit; if `git commit` fails, the working tree is dirty. Spec line 253: "If step 1 fails: no state change anywhere." Fix: capture original content, on commit failure restore it via direct write + `git reset --hard HEAD` (the project's policy normally flags `git reset --hard` but this is intra-tool rollback of the tool's own change, scoped to a single repo). Plus copy Phase 0's `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env-var pattern so production without global gitconfig still works.
+  - **C3** Reconciliation timestamps. Spec line 258: backfill reads message AND timestamp from git log. Plan was using `created_at=now()` (server_default). Fix: capture `%ct` (committer Unix timestamp) in the `git log` format string, parse, and pass explicit `created_at=datetime.fromtimestamp(ts, tz=UTC)` on the backfilled `ArtifactVersion` row.
 
 ---
 
@@ -91,8 +98,6 @@ The contract. `ToolContext` carries everything a tool handler needs (workspace_i
 import uuid
 from pathlib import Path
 
-from claude_agent_sdk.types import McpSdkServerConfig
-
 from call_monitor.proposal_assist.tools.registry import (
     ToolContext,
     build_proposal_assist_mcp_server,
@@ -111,8 +116,9 @@ def test_tool_context_is_a_dataclass():
     assert isinstance(ctx.repo_dir, Path)
 
 
-def test_build_mcp_server_returns_mcp_sdk_server_config():
-    """The factory returns a config the SDK can consume."""
+def test_build_mcp_server_returns_dict_with_expected_keys():
+    """create_sdk_mcp_server returns a dict with {type, name, instance};
+    McpSdkServerConfig is a TypedDict so isinstance() does not work."""
     ctx = ToolContext(
         workspace_id=uuid.uuid4(),
         repo_dir=Path("/tmp/x"),
@@ -120,24 +126,12 @@ def test_build_mcp_server_returns_mcp_sdk_server_config():
         settings=None,  # type: ignore[arg-type]
     )
     server = build_proposal_assist_mcp_server(ctx)
-    assert isinstance(server, McpSdkServerConfig)
-
-
-def test_build_mcp_server_has_expected_name():
-    """Server name is stable so allowed_tools entries can reference it."""
-    ctx = ToolContext(
-        workspace_id=uuid.uuid4(),
-        repo_dir=Path("/tmp/x"),
-        session_factory=None,  # type: ignore[arg-type]
-        settings=None,  # type: ignore[arg-type]
-    )
-    server = build_proposal_assist_mcp_server(ctx)
-    # McpSdkServerConfig's exact attribute name depends on the SDK; the
-    # important invariant is that the server registers as "proposal_assist".
-    # If the SDK stores the name under a different attribute, adjust this
-    # assertion (likely server.name or server["name"]).
-    name = getattr(server, "name", None) or server.get("name") if isinstance(server, dict) else getattr(server, "name", None)
-    assert name == "proposal_assist"
+    assert isinstance(server, dict)
+    assert server["type"] == "sdk"
+    assert server["name"] == "proposal_assist"
+    # The actual MCP server instance is under "instance" — used by the
+    # SDK adapter when handing options to ClaudeAgentOptions.
+    assert "instance" in server
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -184,13 +178,20 @@ during a turn.
 Each WorkspaceController.launch builds a fresh ToolContext and a fresh
 MCP server bound to that workspace's repo_dir + session_factory. The
 handlers are closures over ctx — they don't read from globals.
+
+MCP return contract: tool handlers must return
+    {"content": [{"type": "text", "text": "..."}], "is_error": False}
+The SDK rejects plain dicts. _mcp_ok / _mcp_error wrap our plain-dict
+*_impl returns into this envelope so the impl functions stay
+unit-test-friendly.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import create_sdk_mcp_server
 
@@ -209,6 +210,29 @@ class ToolContext:
     repo_dir: Path
     session_factory: "sessionmaker"
     settings: "Settings"
+
+
+def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a plain-dict tool result in the MCP content-block envelope.
+
+    The SDK requires {"content": [{"type": "text", "text": "..."}],
+    "is_error": False}. We JSON-encode the impl's dict so the model
+    sees structured data; if the impl returned a single 'content' or
+    'diff' string we still serialize the whole envelope as JSON for
+    consistency — the model handles JSON fine.
+    """
+    return {
+        "content": [{"type": "text", "text": json.dumps(data)}],
+        "is_error": False,
+    }
+
+
+def _mcp_error(message: str) -> dict[str, Any]:
+    """Wrap an error message in the MCP envelope with is_error=True."""
+    return {
+        "content": [{"type": "text", "text": message}],
+        "is_error": True,
+    }
 
 
 def build_proposal_assist_mcp_server(ctx: ToolContext) -> "McpSdkServerConfig":
@@ -411,6 +435,50 @@ async def test_edit_proposal_no_op_when_edits_empty(
 
 
 @pytest.mark.asyncio
+async def test_write_and_commit_rolls_back_working_tree_on_commit_failure(
+    pg_session_factory, _settings_env, tmp_path, monkeypatch,
+):
+    """Codex C2 regression: if git commit fails (we simulate by making
+    the second subprocess.run call fail), the working-tree file is
+    restored to its original content and no artifact_versions row
+    lands. Spec line 253 mandates this."""
+    import subprocess as _sp
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
+    original = (ctx.repo_dir / "proposal.md").read_text()
+
+    # Patch subprocess.run inside the proposal module to fail on `git commit`.
+    from call_monitor.proposal_assist.tools import proposal as _proposal_mod
+    real_run = _proposal_mod.subprocess.run
+    call_count = {"n": 0}
+
+    def fake_run(cmd, *args, **kwargs):
+        call_count["n"] += 1
+        if len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "commit":
+            raise _sp.CalledProcessError(
+                returncode=1, cmd=cmd, stderr=b"simulated commit failure",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(_proposal_mod.subprocess, "run", fake_run)
+
+    result = await edit_proposal_impl(
+        ctx,
+        edits=[{"old_string": "Initial.", "new_string": "Should not land."}],
+        triggering_turn_id=None,
+    )
+    assert result.get("error")
+    assert "commit failed" in result["error"]
+    # Working tree restored.
+    assert (ctx.repo_dir / "proposal.md").read_text() == original
+    # No artifact_versions row landed.
+    with pg_session_factory() as s:
+        rows = list(s.scalars(
+            select(ArtifactVersion).where(ArtifactVersion.workspace_id == wsid)
+        ))
+    assert rows == []
+
+
+@pytest.mark.asyncio
 async def test_edit_proposal_links_triggering_turn(
     pg_session_factory, _settings_env, tmp_path,
 ):
@@ -570,36 +638,60 @@ async def _write_and_commit(
     triggering_turn_id: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Write file → git commit → artifact_versions insert. Returns sha
-    on success."""
-    path = ctx.repo_dir / PROPOSAL_FILENAME
-    path.write_text(content)
+    on success.
 
+    Spec line 253: "If step 1 fails: no state change anywhere." We
+    therefore capture the original working-tree contents BEFORE writing
+    and restore them on commit failure. We also reset the index in case
+    `git add` succeeded but `git commit` did not.
+
+    GIT_AUTHOR_* / GIT_COMMITTER_* env vars match Phase 0's pattern
+    (src/call_monitor/proposal_assist/phases/setup.py:200) so production
+    without a global gitconfig still works.
+    """
+    import os
+
+    path = ctx.repo_dir / PROPOSAL_FILENAME
+    original_existed = path.exists()
+    original_content = path.read_text() if original_existed else None
+
+    env = os.environ.copy()
+    env.setdefault("GIT_AUTHOR_NAME", "call-manager")
+    env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
+    env.setdefault("GIT_COMMITTER_NAME", "call-manager")
+    env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
+
+    path.write_text(content)
     try:
         subprocess.run(
             ["git", "add", PROPOSAL_FILENAME],
-            cwd=ctx.repo_dir,
-            check=True,
-            capture_output=True,
+            cwd=ctx.repo_dir, check=True, capture_output=True, env=env,
         )
         subprocess.run(
             ["git", "commit", "-q", "-m", commit_message],
-            cwd=ctx.repo_dir,
-            check=True,
-            capture_output=True,
+            cwd=ctx.repo_dir, check=True, capture_output=True, env=env,
         )
         sha_proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=ctx.repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
+            cwd=ctx.repo_dir, check=True, capture_output=True, text=True, env=env,
         )
         sha = sha_proc.stdout.strip()
     except subprocess.CalledProcessError as e:
-        # Git committed nothing (e.g., "nothing to commit" when content
-        # is identical). Surface as error; the model can retry with a
-        # real diff.
-        return {"error": f"git commit failed: {e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else e.stderr}"}
+        # ROLLBACK: restore working tree AND reset index. Spec mandates
+        # "no state change" on commit failure. `git reset --hard HEAD`
+        # is normally a destructive op the project flags, but here it
+        # only un-does this same function call's own write + add — it
+        # cannot lose prior committed work because nothing was committed.
+        if original_content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(original_content)
+        subprocess.run(
+            ["git", "reset", "--hard", "HEAD"],
+            cwd=ctx.repo_dir, check=False, capture_output=True, env=env,
+        )
+        stderr = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        return {"error": f"git commit failed: {stderr.strip()}"}
 
     # DB write: artifact_versions row.
     try:
@@ -854,7 +946,10 @@ git commit -m "feat(b5): history tools — get_artifact_history, read_artifact_a
 
 ## Task 4: context tools (get_call_details, get_profile)
 
-Two read-only context lookups. `get_call_details` returns the linked call's full body + metadata; empty if `workspaces.call_id` is null. `get_profile` returns the linked profile's description + structured fields; empty if `workspaces.profile_id` is null.
+Two read-only context lookups. **Both read the workspace's SNAPSHOT fields, not live `calls` / `profiles` rows** (rev2 / Codex C1). The phased spec says the agent should see what was captured at workspace creation (refreshed by Phase 0), so its view is stable for the duration of the drafting work — even if the live row changes later.
+
+- `get_call_details` reads `Workspace.call_body_snapshot` + `Workspace.rubric_funder_notes` + `Workspace.rubric_criteria`. Returns `{linked: false}` if `call_body_snapshot` is empty (no call linked at workspace creation).
+- `get_profile` reads `Workspace.profile_desc_snapshot`. Returns `{linked: false}` if it's empty.
 
 **Files:**
 - Create: `src/call_monitor/proposal_assist/tools/context.py`
@@ -888,11 +983,12 @@ def _build_ctx(pg_session_factory, wsid):
 
 
 @pytest.mark.asyncio
-async def test_get_call_details_returns_empty_when_no_linked_call(
+async def test_get_call_details_returns_empty_when_snapshot_empty(
     pg_session_factory, _settings_env,
 ):
+    """A fresh workspace with no Phase 0 snapshot returns {linked: false}."""
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        ws = make_workspace(s)  # call_body_snapshot defaults to "" (server_default)
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
@@ -901,45 +997,32 @@ async def test_get_call_details_returns_empty_when_no_linked_call(
 
 
 @pytest.mark.asyncio
-async def test_get_call_details_returns_call_body_when_linked(
+async def test_get_call_details_returns_snapshot_when_populated(
     pg_session_factory, _settings_env,
 ):
-    """Workspace linked to a call returns title, body, programme,
-    deadline, link."""
-    from call_monitor.db.models import Call, Source
+    """When Phase 0 has populated the workspace snapshot, the tool
+    returns it (NOT the live calls row — by design)."""
     with pg_session_factory() as s:
-        src = Source(slug="test-src", name="Test Source", base_url="http://x")
-        s.add(src)
-        s.flush()
-        call = Call(
-            source_id=src.id,
-            external_id="call-1",
-            title="Test Call",
-            description="Full call description here.",
-            url="https://example.com/call-1",
-            programme="HORIZON",
-            fetched_at=None,
-        )
-        s.add(call)
-        s.flush()
         ws = make_workspace(s)
-        ws.call_id = call.id
+        ws.call_body_snapshot = "Full call body captured at workspace creation."
+        ws.rubric_criteria = [{"name": "Excellence", "weight": 0.5}]
+        ws.rubric_funder_notes = "Late submissions rejected."
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
     result = await get_call_details_impl(ctx)
     assert result["linked"] is True
-    assert result["title"] == "Test Call"
-    assert "Full call description" in result["description"]
-    assert result["url"] == "https://example.com/call-1"
+    assert "Full call body" in result["call_body"]
+    assert result["rubric_funder_notes"] == "Late submissions rejected."
+    assert result["rubric_criteria"][0]["name"] == "Excellence"
 
 
 @pytest.mark.asyncio
-async def test_get_profile_returns_empty_when_no_linked_profile(
+async def test_get_profile_returns_empty_when_snapshot_empty(
     pg_session_factory, _settings_env,
 ):
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        ws = make_workspace(s)  # profile_desc_snapshot defaults to ""
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
@@ -948,31 +1031,18 @@ async def test_get_profile_returns_empty_when_no_linked_profile(
 
 
 @pytest.mark.asyncio
-async def test_get_profile_returns_profile_when_linked(
+async def test_get_profile_returns_snapshot_when_populated(
     pg_session_factory, _settings_env,
 ):
-    from call_monitor.db.models import Profile
-    from tests.proposal_assist.conftest import make_user
     with pg_session_factory() as s:
-        user = make_user(s)
-        s.flush()
-        prof = Profile(
-            name="Test Profile",
-            description="Research on X",
-            kind="group",
-            created_by=user.id,
-        )
-        s.add(prof)
-        s.flush()
-        ws = make_workspace(s, owner=user)
-        ws.profile_id = prof.id
+        ws = make_workspace(s)
+        ws.profile_desc_snapshot = "Group X researches Y disease using Z methods."
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
     result = await get_profile_impl(ctx)
     assert result["linked"] is True
-    assert result["name"] == "Test Profile"
-    assert "Research on X" in result["description"]
+    assert "Group X" in result["description"]
 ```
 
 - [ ] **Step 2: Implement**
@@ -982,9 +1052,18 @@ async def test_get_profile_returns_profile_when_linked(
 ```python
 """Context-retrieval tools: get_call_details, get_profile.
 
-Both are read-only DB lookups against the existing calls / profiles
-tables. Returns `{"linked": False}` when the workspace has no linked
-call / profile (the workspace's call_id / profile_id is NULL).
+Both read the workspace's SNAPSHOT fields (call_body_snapshot,
+profile_desc_snapshot, rubric_criteria, rubric_funder_notes) — NOT the
+live calls / profiles rows. The snapshot is captured at workspace
+creation and refreshed by Phase 0; the agent's view is stable for the
+drafting work's lifetime, immune to later edits of the source rows.
+
+Per phased spec line 418: read-only context tools return workspace
+snapshots, not live rows. See Workspace model fields at
+src/call_monitor/db/models.py:484+.
+
+Returns {"linked": False} when the snapshot is empty (no call/profile
+was linked at workspace creation).
 """
 from __future__ import annotations
 
@@ -992,44 +1071,35 @@ from typing import Any
 
 from sqlalchemy import select
 
-from call_monitor.db.models import Call, Profile, Workspace
+from call_monitor.db.models import Workspace
 from call_monitor.proposal_assist.tools.registry import ToolContext
 
 
 async def get_call_details_impl(ctx: ToolContext) -> dict[str, Any]:
-    """Return the full call body + metadata for the workspace's linked
-    call. Returns {"linked": False} when no call is linked."""
+    """Return the workspace's snapshot of the linked call body + rubric
+    metadata. Returns {"linked": False} when call_body_snapshot is empty."""
     with ctx.session_factory() as s:
         ws = s.scalar(select(Workspace).where(Workspace.id == ctx.workspace_id))
-        if ws is None or ws.call_id is None:
-            return {"linked": False}
-        call = s.scalar(select(Call).where(Call.id == ws.call_id))
-        if call is None:
+        if ws is None or not ws.call_body_snapshot:
             return {"linked": False}
         return {
             "linked": True,
-            "title": call.title,
-            "description": call.description,
-            "url": call.url,
-            "programme": call.programme,
+            "call_body": ws.call_body_snapshot,
+            "rubric_criteria": ws.rubric_criteria or [],
+            "rubric_funder_notes": ws.rubric_funder_notes or "",
         }
 
 
 async def get_profile_impl(ctx: ToolContext) -> dict[str, Any]:
-    """Return the linked profile's description + structured fields.
-    Returns {"linked": False} when no profile is linked."""
+    """Return the workspace's snapshot of the linked profile description.
+    Returns {"linked": False} when profile_desc_snapshot is empty."""
     with ctx.session_factory() as s:
         ws = s.scalar(select(Workspace).where(Workspace.id == ctx.workspace_id))
-        if ws is None or ws.profile_id is None:
-            return {"linked": False}
-        prof = s.scalar(select(Profile).where(Profile.id == ws.profile_id))
-        if prof is None:
+        if ws is None or not ws.profile_desc_snapshot:
             return {"linked": False}
         return {
             "linked": True,
-            "name": prof.name,
-            "description": prof.description,
-            "kind": prof.kind,
+            "description": ws.profile_desc_snapshot,
         }
 ```
 
@@ -1165,6 +1235,56 @@ def test_reconcile_handles_empty_repo(pg_session_factory, tmp_path):
         wsid = ws.id
     backfilled = reconcile_workspace_git_drift(pg_session_factory, wsid, repo_dir)
     assert backfilled == 0
+
+
+def test_reconcile_preserves_commit_timestamp(pg_session_factory, tmp_path):
+    """Codex C3 regression: backfilled artifact_versions.created_at must
+    equal the git commit's committer-timestamp, not reconciliation time.
+
+    We forge a commit with GIT_COMMITTER_DATE set to a known past time,
+    then verify the backfilled row's created_at matches (to the second).
+    """
+    import os
+    from datetime import UTC, datetime, timedelta
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "a@b"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo_dir, check=True)
+
+    # Backdate the commit by 2 days.
+    past = datetime.now(UTC) - timedelta(days=2)
+    iso = past.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    env = os.environ.copy()
+    env["GIT_AUTHOR_DATE"] = iso
+    env["GIT_COMMITTER_DATE"] = iso
+
+    (repo_dir / "proposal.md").write_text("v0")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "agent: backdated"],
+        cwd=repo_dir, check=True, env=env,
+    )
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+
+    backfilled = reconcile_workspace_git_drift(pg_session_factory, wsid, repo_dir)
+    assert backfilled == 1
+
+    with pg_session_factory() as s:
+        row = s.scalar(
+            select(ArtifactVersion).where(ArtifactVersion.workspace_id == wsid)
+        )
+    # Within 2 seconds — git stores at second resolution.
+    delta_seconds = abs((row.created_at - past).total_seconds())
+    assert delta_seconds < 2, (
+        f"backfilled created_at {row.created_at} should match commit "
+        f"timestamp {past}; delta {delta_seconds}s"
+    )
 ```
 
 - [ ] **Step 2: Implement**
@@ -1209,13 +1329,19 @@ def reconcile_workspace_git_drift(
     repo_dir: Path,
 ) -> int:
     """Backfill artifact_versions rows for git commits that don't have
-    one. Returns the count of rows inserted."""
+    one. Returns the count of rows inserted.
+
+    Codex C3: preserves commit timestamps (%ct = committer Unix time)
+    so backfilled rows' created_at matches when the commit actually
+    landed — not when reconciliation ran. Spec line 258 mandates this.
+    """
+    from datetime import UTC, datetime
+
     if not (repo_dir / ".git").is_dir():
-        # No git repo yet — nothing to reconcile.
         return 0
     try:
         proc = subprocess.run(
-            ["git", "log", "--pretty=format:%H%x00%s"],
+            ["git", "log", "--pretty=format:%H%x00%ct%x00%s"],
             cwd=repo_dir, check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
@@ -1225,12 +1351,14 @@ def reconcile_workspace_git_drift(
         )
         return 0
 
-    git_lines = [
-        line for line in proc.stdout.strip().split("\n") if line
-    ]
+    git_lines = [line for line in proc.stdout.strip().split("\n") if line]
     if not git_lines:
         return 0
-    git_commits = [line.split("\x00", 1) for line in git_lines]
+    # Each line: <sha>\x00<committer_unix_ts>\x00<subject>
+    git_commits: list[tuple[str, int, str]] = []
+    for line in git_lines:
+        sha, ts_str, message = line.split("\x00", 2)
+        git_commits.append((sha, int(ts_str), message))
 
     with session_factory() as s:
         existing_shas = set(s.scalars(
@@ -1238,7 +1366,7 @@ def reconcile_workspace_git_drift(
             .where(ArtifactVersion.workspace_id == workspace_id)
         ).all())
         backfilled = 0
-        for sha, message in git_commits:
+        for sha, ts, message in git_commits:
             if sha in existing_shas:
                 continue
             s.add(ArtifactVersion(
@@ -1247,6 +1375,7 @@ def reconcile_workspace_git_drift(
                 triggering_turn_id=None,
                 created_by="reconciled",
                 message=message,
+                created_at=datetime.fromtimestamp(ts, tz=UTC),
             ))
             backfilled += 1
         if backfilled > 0:
@@ -1283,8 +1412,13 @@ Now that all eight tool implementations exist, wire them into `build_proposal_as
 - [ ] **Step 1: Write failing test (add to test_tools_registry.py)**
 
 ```python
+import asyncio
+
+
 def test_build_mcp_server_registers_all_eight_tools():
-    """All eight tools are registered with their expected names."""
+    """All eight tools are registered with their expected names. The
+    server dict's 'instance' is the in-memory MCP server (from the
+    'mcp' package); query its list_tools() to introspect."""
     import uuid
     from pathlib import Path
     from call_monitor.proposal_assist.tools.registry import (
@@ -1298,26 +1432,106 @@ def test_build_mcp_server_registers_all_eight_tools():
         settings=None,  # type: ignore[arg-type]
     )
     server = build_proposal_assist_mcp_server(ctx)
-    # SDK exposes the tools list via .tools attribute on McpSdkServerConfig.
-    # If the attribute name differs, adjust — but the count should be 8.
-    tools = getattr(server, "tools", None)
-    if tools is None and isinstance(server, dict):
-        tools = server.get("tools", [])
-    assert tools is not None
-    names = {getattr(t, "name", None) or t.get("name") if isinstance(t, dict) else getattr(t, "name", None) for t in tools}
-    assert names == {
+    instance = server["instance"]
+
+    # The MCP server's list_tools is async; the exact handler-discovery
+    # API depends on the mcp package version. Common shapes:
+    #   tools = await instance.list_tools()
+    #   tools = list(instance._tools.values())
+    # Probe the running instance to learn the right shape; the assertion
+    # is on the SET of tool names regardless of where they live.
+    found_names = _extract_tool_names(instance)
+    assert found_names == {
         "read_proposal", "edit_proposal", "replace_proposal",
         "get_artifact_history", "read_artifact_at", "diff_artifact",
         "get_call_details", "get_profile",
     }
+
+
+def _extract_tool_names(mcp_instance) -> set[str]:
+    """Probe the MCP server's internal tool registry. Tries multiple
+    SDK shapes."""
+    # Try the public API first.
+    list_tools = getattr(mcp_instance, "list_tools", None)
+    if list_tools is not None:
+        try:
+            result = list_tools()
+            if asyncio.iscoroutine(result):
+                result = asyncio.get_event_loop().run_until_complete(result)
+            return {t.name for t in result}
+        except Exception:
+            pass
+    # Fall back to internal attributes (likely _tool_manager or _tools).
+    for attr in ("_tools", "_tool_handlers", "_tool_manager"):
+        val = getattr(mcp_instance, attr, None)
+        if val is None:
+            continue
+        if isinstance(val, dict):
+            return set(val.keys())
+        # _tool_manager may hold a registry; explore one level deeper.
+        for inner in ("_tools", "tools"):
+            inner_val = getattr(val, inner, None)
+            if isinstance(inner_val, dict):
+                return set(inner_val.keys())
+    raise RuntimeError(
+        "could not extract tool names from MCP server instance; "
+        "the mcp package's API has changed — probe `dir(instance)` "
+        "in a quick repl and adjust this helper."
+    )
+
+
+def test_tool_handlers_return_mcp_envelope_shape():
+    """Smoke: a @tool handler returns the MCP envelope shape, not the
+    plain dict the *_impl function produces."""
+    import uuid
+    from pathlib import Path
+    from call_monitor.proposal_assist.tools.registry import (
+        ToolContext, build_proposal_assist_mcp_server,
+    )
+
+    # Use a missing repo_dir so read_proposal returns an error path —
+    # we just need to verify the envelope shape, not the content.
+    ctx = ToolContext(
+        workspace_id=uuid.uuid4(),
+        repo_dir=Path("/nonexistent"),
+        session_factory=None,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+    )
+    server = build_proposal_assist_mcp_server(ctx)
+    instance = server["instance"]
+    # Find read_proposal's handler and invoke directly.
+    handler = _find_handler(instance, "read_proposal")
+    result = asyncio.get_event_loop().run_until_complete(handler({}))
+    assert "content" in result
+    assert isinstance(result["content"], list)
+    assert result["content"][0]["type"] == "text"
+    assert "is_error" in result
+
+
+def _find_handler(mcp_instance, name: str):
+    """Locate a handler by tool name; mirrors _extract_tool_names probing."""
+    for attr in ("_tools", "_tool_handlers"):
+        val = getattr(mcp_instance, attr, None)
+        if isinstance(val, dict) and name in val:
+            entry = val[name]
+            # entry may be the handler directly, or an object wrapping it.
+            return getattr(entry, "handler", entry)
+    raise RuntimeError(f"could not locate handler for {name}")
 ```
 
 - [ ] **Step 2: Implement — update `_collect_tools`**
 
-Replace the empty `_collect_tools(ctx)` body. Each handler is a `@tool`-decorated async closure over `ctx` that calls the existing `_impl` function.
+Replace the empty `_collect_tools(ctx)` body. Each handler is a `@tool`-decorated async closure over `ctx` that calls the corresponding `*_impl` function AND wraps the plain-dict return in the MCP envelope (`_mcp_ok` / `_mcp_error`).
 
 ```python
 from claude_agent_sdk import tool
+
+
+def _wrap(impl_result: dict[str, Any]) -> dict[str, Any]:
+    """Translate an *_impl plain-dict return into the MCP envelope."""
+    if "error" in impl_result:
+        return _mcp_error(impl_result["error"])
+    return _mcp_ok(impl_result)
 
 
 def _collect_tools(ctx: ToolContext) -> list:
@@ -1333,38 +1547,38 @@ def _collect_tools(ctx: ToolContext) -> list:
 
     @tool("read_proposal", "Return the current proposal.md content.", {})
     async def read_proposal(args):
-        return await read_proposal_impl(ctx)
+        return _wrap(await read_proposal_impl(ctx))
 
     @tool(
         "edit_proposal",
         "Apply a list of {old_string, new_string} surgical edits to "
         "proposal.md. All-or-nothing: if any anchor is missing or "
         "ambiguous, no edits are applied. Auto-commits on success.",
-        {"edits": list, "triggering_turn_id": str | None},
+        {"edits": list, "triggering_turn_id": str},
     )
     async def edit_proposal(args):
-        ttid = args.get("triggering_turn_id")
+        ttid = args.get("triggering_turn_id") or None
         from uuid import UUID
-        return await edit_proposal_impl(
+        return _wrap(await edit_proposal_impl(
             ctx,
             edits=args["edits"],
             triggering_turn_id=UUID(ttid) if ttid else None,
-        )
+        ))
 
     @tool(
         "replace_proposal",
         "Overwrite proposal.md with new content. For large structural "
         "rewrites. Auto-commits.",
-        {"content": str, "triggering_turn_id": str | None},
+        {"content": str, "triggering_turn_id": str},
     )
     async def replace_proposal(args):
-        ttid = args.get("triggering_turn_id")
+        ttid = args.get("triggering_turn_id") or None
         from uuid import UUID
-        return await replace_proposal_impl(
+        return _wrap(await replace_proposal_impl(
             ctx,
             content=args["content"],
             triggering_turn_id=UUID(ttid) if ttid else None,
-        )
+        ))
 
     @tool(
         "get_artifact_history",
@@ -1372,7 +1586,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"limit": int},
     )
     async def get_artifact_history(args):
-        return await get_artifact_history_impl(ctx, limit=int(args.get("limit", 20)))
+        return _wrap(await get_artifact_history_impl(
+            ctx, limit=int(args.get("limit", 20)),
+        ))
 
     @tool(
         "read_artifact_at",
@@ -1380,7 +1596,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"commit_sha": str},
     )
     async def read_artifact_at(args):
-        return await read_artifact_at_impl(ctx, commit_sha=args["commit_sha"])
+        return _wrap(await read_artifact_at_impl(
+            ctx, commit_sha=args["commit_sha"],
+        ))
 
     @tool(
         "diff_artifact",
@@ -1388,27 +1606,29 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"commit_a": str, "commit_b": str},
     )
     async def diff_artifact(args):
-        return await diff_artifact_impl(
+        return _wrap(await diff_artifact_impl(
             ctx, commit_a=args["commit_a"], commit_b=args["commit_b"],
-        )
+        ))
 
     @tool(
         "get_call_details",
-        "Return the linked call's full body + metadata, or "
-        "{linked: false} if the workspace has no linked call.",
+        "Return the snapshot of the linked call's body + metadata "
+        "(captured at workspace creation, refreshed by Phase 0). "
+        "Returns {linked: false} if no call linked.",
         {},
     )
     async def get_call_details(args):
-        return await get_call_details_impl(ctx)
+        return _wrap(await get_call_details_impl(ctx))
 
     @tool(
         "get_profile",
-        "Return the linked profile's description + structured fields, "
-        "or {linked: false} if the workspace has no linked profile.",
+        "Return the snapshot of the linked profile description "
+        "(captured at workspace creation). Returns {linked: false} "
+        "if no profile linked.",
         {},
     )
     async def get_profile(args):
-        return await get_profile_impl(ctx)
+        return _wrap(await get_profile_impl(ctx))
 
     return [
         read_proposal, edit_proposal, replace_proposal,
@@ -1416,6 +1636,8 @@ def _collect_tools(ctx: ToolContext) -> list:
         get_call_details, get_profile,
     ]
 ```
+
+Note: `triggering_turn_id` is typed `str` (the SDK doesn't natively support `str | None` in the input schema); the handler treats empty-string / missing as None. Document in the tool description: "Pass empty string when there is no triggering turn (system-initiated edits)." Or use `int` for size, accepting that the agent always passes the turn id when present.
 
 **Implementer note:** The exact attribute name on `McpSdkServerConfig` (`.tools` vs `["tools"]`) depends on the SDK's internal representation — verify with a quick `dir(server)` after construction. The test in Step 1 probes both shapes; adapt the assertion if the SDK uses something else (e.g., `server.config["tools"]`).
 
@@ -1533,6 +1755,10 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     assert "proposal_assist" in mcp
     assert mcp["proposal_assist"] is sentinel_server
 
+    # Built-in toolbox disabled (Codex B2): tools=[] + strict_mcp_config=True.
+    assert captured.get("tools") == []
+    assert captured.get("strict_mcp_config") is True
+
     allowed = captured.get("allowed_tools")
     assert allowed is not None
     # MCP tool naming convention: mcp__<server>__<tool>.
@@ -1570,7 +1796,13 @@ if context.resume_session_id is not None:
 if self._tools_factory is not None:
     mcp_server = self._tools_factory(repo_dir, workspace_id)
     options_kwargs["mcp_servers"] = {"proposal_assist": mcp_server}
-    # MCP tools are referenced as mcp__<server>__<tool>.
+    # CRITICAL security boundary (Codex B2): allowed_tools alone does NOT
+    # disable Claude Code's built-in toolbox (Bash/Read/Edit/etc.). The
+    # disable is `tools=[]` PLUS `strict_mcp_config=True`. Together with
+    # `mcp_servers=...`, the agent sees ONLY our 8 MCP tools. allowed_tools
+    # additionally auto-grants permission on those (no prompts).
+    options_kwargs["tools"] = []
+    options_kwargs["strict_mcp_config"] = True
     options_kwargs["allowed_tools"] = [
         f"mcp__proposal_assist__{name}"
         for name in (
@@ -1900,7 +2132,7 @@ Expected: only `claude_adapter.py` and `tools/registry.py` import from `claude_a
 
 7. **`mcp__proposal_assist__<tool>` naming.** The SDK exposes MCP tools under the `mcp__<server>__<tool>` name format in `allowed_tools`. Verify with `dir(server)` if the SDK has changed.
 
-8. **`allowed_tools` blocks built-ins.** By passing `allowed_tools` explicitly, we forbid the SDK's built-in Bash/Read/Edit tools at the same time. This is the proper fix for B3's "soft-replay re-fires built-in tools" FIXME — once tools are wired, the agent only has our 8 + (anything the SDK considers always-available).
+8. **`tools=[]` + `strict_mcp_config=True` are what actually block built-ins** (rev2 / Codex B2). `allowed_tools` alone only auto-grants permission on listed tools — it does NOT disable Claude Code's built-in Bash/Read/Edit/etc. Setting `tools=[]` empties the built-in list, `mcp_servers={"proposal_assist": ...}` adds our 8, `strict_mcp_config=True` forbids the SDK from accepting any other MCP server config, and `allowed_tools=[...]` auto-grants permission on our 8 (no prompts). Together these are the proper fix for B3's "soft-replay re-fires built-in tools" FIXME — once B5 lands, the agent has ONLY our 8 tools.
 
 9. **No commit signing.** Spec doesn't require GPG-signed commits. The git config in tests uses simple email/name; production uses the workspace process's git config.
 
