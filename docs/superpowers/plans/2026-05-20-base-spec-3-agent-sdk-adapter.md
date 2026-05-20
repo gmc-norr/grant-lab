@@ -17,6 +17,7 @@
 ## Revision history
 
 - **rev2 (2026-05-20)** — Codex round 1 fixed three structural issues. The advisory lock now lives on the registry entry's session (held for the handle's lifetime), not on the controller's launch-prelude session (released before launch). The Protocol's `launch()` accepts a `LaunchContext` so resume messages reach the SDK **before** the session is created. A new task (Task 3) adds `chat_turns.position bigint` populated via a global sequence — `created_at` ties when multiple turns commit in one transaction (the spec mandates user-turn + tool-result rows in one tx), so ordering by `created_at` is unsound. Plus: scheduler tick for the idle sweep is now in scope (new Task 12), the Claude adapter uses `connect()`/`disconnect()` (not `async with` per turn — that re-handshakes the SDK every turn, defeating the per-workspace subprocess model). Unused imports cleaned across snippets.
+- **rev3 (2026-05-20, during Task 9 execution)** — Empirically discovered: calling `lock_session.commit()` after acquiring the advisory lock returns the SQLAlchemy connection to the pool. The lock IS still held by the underlying Postgres backend, but `pg_try_advisory_lock` is reentrant per backend, so a subsequent session checking out the same physical connection from the pool will acquire the lock again — exclusivity broken. Fix: `lock_session` must stay **uncommitted** for the handle's lifetime (the open transaction pins the connection); the orphan sweep + resume-message build run in a **separate short-lived sibling session** that commits and closes inside the launch prelude. Task 9 code snippet updated accordingly.
 
 ---
 
@@ -2023,28 +2024,34 @@ class WorkspaceController:
     async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
         """Launch (or return cached) handle. Each fresh launch:
           1. Opens a lock-holding session (raises LockNotAcquired if
-             another process holds the lock).
-          2. Runs the orphan sweep + builds resume messages USING THAT
-             SAME SESSION (so they're inside the lock).
+             another process holds the lock). The session is NEVER
+             committed — keeping its connection checked out of the pool
+             with an open transaction is what maintains exclusivity
+             (see rev3 note in the revision history).
+          2. Runs the orphan sweep + builds resume messages in a SHORT-
+             LIVED sibling session that commits + closes immediately.
+             Sweep/resume happen while we hold the advisory lock, so
+             no other process can race us.
           3. Builds a LaunchContext and asks the registry to launch.
           4. Hands the lock-holding session to the registry — the
-             registry keeps it open for the handle's lifetime.
+             registry keeps it open (uncommitted) for the handle's
+             lifetime, releasing the lock + closing the session on
+             terminate / sweep_idle.
         """
         cached = await self._registry.get_or_launch_if_exists(workspace_id)
         if cached is not None:
             return cached
 
-        # workspace_lock_session opens a session + acquires the advisory
-        # lock; we keep it open for the handle's lifetime.
         lock_session = self._session_factory()
         if not acquire_workspace_lock(lock_session, workspace_id):
             lock_session.close()
             raise LockNotAcquired(workspace_id)
 
         try:
-            sweep_orphaned_turn_jobs(lock_session, workspace_id)
-            resume_messages = build_resume_messages(lock_session, workspace_id)
-            lock_session.commit()
+            with self._session_factory() as work_session:
+                sweep_orphaned_turn_jobs(work_session, workspace_id)
+                resume_messages = build_resume_messages(work_session, workspace_id)
+                work_session.commit()
         except Exception:
             release_workspace_lock(lock_session, workspace_id)
             lock_session.close()

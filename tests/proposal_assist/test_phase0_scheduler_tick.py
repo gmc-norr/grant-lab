@@ -96,11 +96,21 @@ def test_build_scheduler_registers_phase0_tick(monkeypatch, pg_url):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
     settings = Settings()
 
     engine = make_engine(settings.database_url)
     try:
         session_factory = make_session_factory(engine)
+
+        from call_monitor.proposal_assist.drafting.factory import (
+            build_workspace_controller,
+        )
+
+        workspace_controller = build_workspace_controller(
+            settings=settings,
+            session_factory=session_factory,
+        )
 
         class _Alerter:
             def record_failure(self, source_slug, *, error=None):
@@ -121,6 +131,7 @@ def test_build_scheduler_registers_phase0_tick(monkeypatch, pg_url):
             ranking_queue_batch=10,
             embedding_pregate_threshold=0.3,
             embed_client=embed_client,
+            workspace_controller=workspace_controller,
             start=False,
         )
         try:

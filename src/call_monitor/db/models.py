@@ -583,6 +583,7 @@ class ChatTurn(Base):
             name="ck_chat_turns_role",
         ),
         Index("ix_chat_turns_ws_created", "workspace_id", "created_at"),
+        Index("ix_chat_turns_ws_position", "workspace_id", "position"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -604,6 +605,11 @@ class ChatTurn(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+    position: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('chat_turns_position_seq')"),
     )
 
 

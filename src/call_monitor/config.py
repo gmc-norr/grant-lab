@@ -88,6 +88,16 @@ class Settings(BaseSettings):
         "workspace gets var/workspaces/<uuid>/repo/. Must be "
         "writable, backed up, excluded from the docker image.",
     )
+    drafting_adapter: str = Field(
+        default="claude",
+        alias="DRAFTING_ADAPTER",
+        description=(
+            "Which DraftingAgent implementation to wire up. "
+            "'claude' (default) → ClaudeAgentSDKAdapter; "
+            "'fake' → FakeAgentAdapter (for integration tests + local "
+            "demos without an API key)."
+        ),
+    )
     workspace_idle_timeout_seconds: int = Field(
         default=600,
         alias="WORKSPACE_IDLE_TIMEOUT_SECONDS",
@@ -96,6 +106,16 @@ class Settings(BaseSettings):
             "torn down. The next user turn relaunches it (with resume-"
             "from-history). Lower = less idle memory; higher = fewer "
             "cold starts on bursty usage."
+        ),
+    )
+    workspace_idle_sweep_seconds: int = Field(
+        default=60,
+        alias="WORKSPACE_IDLE_SWEEP_SECONDS",
+        description=(
+            "Cadence at which the scheduler asks the subprocess "
+            "registry to sweep handles idle for "
+            "WORKSPACE_IDLE_TIMEOUT_SECONDS or longer. Faster sweep = "
+            "tighter teardown latency but more polling."
         ),
     )
     remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")

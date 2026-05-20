@@ -19,6 +19,7 @@ from call_monitor.embeddings.client import OllamaEmbedClient
 from call_monitor.embeddings.refresh import refresh_missing_embeddings_tick
 from call_monitor.ingestion.alerts import ConsecutiveFailureTracker
 from call_monitor.ingestion.orchestrator import run_ingestion
+from call_monitor.proposal_assist.drafting.controller import WorkspaceController
 from call_monitor.proposal_assist.phases.setup import run_phase0_tick
 from call_monitor.ranking.anthropic_client import AnthropicClient
 from call_monitor.ranking.ollama_client import OllamaClient
@@ -67,6 +68,7 @@ def build_scheduler(
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     limiters: list[SlidingWindowLimiter] | None = None,
+    workspace_controller: WorkspaceController,
     start: bool = True,
 ) -> BackgroundScheduler:
     """Build (and optionally start) the daily ingestion scheduler.
@@ -346,6 +348,32 @@ def build_scheduler(
         _phase0_tick,
         trigger=IntervalTrigger(seconds=settings.phase0_tick_seconds),
         id="proposal_assist_phase0_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Drafting subprocess idle sweep.
+    def _drafting_idle_sweep() -> None:
+        """Closure: APScheduler calls this with no args. We capture the
+        workspace_controller from build_scheduler's scope.
+
+        APScheduler runs jobs in a threadpool by default; the closure
+        creates a fresh event loop per invocation via asyncio.run(). If
+        the project later switches to an async APScheduler executor,
+        replace asyncio.run() with a direct `await`."""
+        import asyncio
+
+        try:
+            asyncio.run(workspace_controller._registry.sweep_idle())
+        except Exception:
+            _logger.exception("drafting.idle_sweep failed")
+
+    sched.add_job(
+        _drafting_idle_sweep,
+        trigger=IntervalTrigger(
+            seconds=settings.workspace_idle_sweep_seconds,
+        ),
+        id="drafting_idle_sweep",
         max_instances=1,
         coalesce=True,
     )
