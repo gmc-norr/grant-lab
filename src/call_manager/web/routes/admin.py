@@ -5,16 +5,20 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import require_admin
 from call_manager.db.models import (
     Call,
+    ChatTurn,
     DigestRun,
     Profile,
     RankingJob,
     RankingJobStatus,
     Source,
     User,
+    Workspace,
+    WorkspaceEvent,
 )
 from call_manager.digest.send import week_start as _week_start
 from call_manager.ranking.backfill import backfill_profile
@@ -82,6 +86,83 @@ def _embedding_coverage_context(session, *, current_model: str) -> dict:
             "current_model": current_model,
         }
     }
+
+
+def _drafting_panel_context(session: Session, settings) -> dict:
+    """Aggregate everything the /admin/drafting page renders:
+    - kill switch state (read from settings)
+    - global cap usage today (input + output sums + caps)
+    - per-workspace usage today (id, title, owner_email, used_in, used_out)
+    - last 50 failed/cancelled cloud_turn events across workspaces
+    """
+    from call_manager.proposal_assist.turns.caps import (
+        _stockholm_day_start_utc,
+        check_global_daily_token_cap,
+    )
+
+    global_cap = check_global_daily_token_cap(session, settings=settings)
+
+    day_start_utc = _stockholm_day_start_utc()
+    per_workspace_rows = list(
+        session.execute(
+            select(
+                Workspace.id,
+                Workspace.title,
+                User.email.label("owner_email"),
+                func.coalesce(func.sum(ChatTurn.tokens_in), 0).label("used_in"),
+                func.coalesce(func.sum(ChatTurn.tokens_out), 0).label("used_out"),
+            )
+            .join(User, User.id == Workspace.owner_id)
+            .outerjoin(
+                ChatTurn,
+                (ChatTurn.workspace_id == Workspace.id) & (ChatTurn.created_at >= day_start_utc),
+            )
+            .where(Workspace.soft_deleted_at.is_(None))
+            .group_by(Workspace.id, Workspace.title, User.email)
+            .order_by(func.coalesce(func.sum(ChatTurn.tokens_in), 0).desc())
+        ).all()
+    )
+
+    recent_events = list(
+        session.scalars(
+            select(WorkspaceEvent)
+            .where(WorkspaceEvent.kind.in_(["cloud_turn_failed", "cloud_turn_cancelled"]))
+            .order_by(WorkspaceEvent.created_at.desc())
+            .limit(50)
+        ).all()
+    )
+
+    return {
+        "drafting_enabled": settings.drafting_enabled,
+        "global_cap": global_cap,
+        "per_workspace": per_workspace_rows,
+        "recent_events": recent_events,
+    }
+
+
+@router.get("/admin/drafting", response_class=HTMLResponse)
+def admin_drafting_panel(
+    request: Request,
+    user: User = Depends(require_admin),  # noqa: B008
+) -> HTMLResponse:
+    """Read-only admin panel for the proposal-assist drafting subsystem.
+
+    Toggling the kill switch / overriding the global cap from this UI
+    is intentionally NOT implemented in v1 (requires app restart). The
+    panel surfaces state so an operator can decide whether to restart
+    with a new env.
+    """
+    session_factory = request.app.state.session_factory
+    settings = request.app.state.settings
+    with session_factory() as session:
+        context = _drafting_panel_context(session, settings)
+    context["request"] = request
+    context["user"] = user
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="admin_drafting.html",
+        context=context,
+    )
 
 
 @router.get("/admin", response_class=HTMLResponse)
