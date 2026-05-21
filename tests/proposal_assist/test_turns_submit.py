@@ -158,9 +158,7 @@ def test_submit_user_turn_accepts_null_submitter_for_system_initiated(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_submits_cannot_overshoot_cap(
-    monkeypatch, pg_url, pg_session_factory
-):
+async def test_concurrent_submits_cannot_overshoot_cap(monkeypatch, pg_url, pg_session_factory):
     """Two concurrent submits, each individually fine, must not both
     succeed if together they'd exceed the daily cap. The cap check +
     insert must serialize via row-level lock on workspaces.
@@ -245,6 +243,4 @@ async def test_concurrent_submits_cannot_overshoot_cap(
             loop.run_in_executor(ex, attempt),
         )
 
-    assert sorted(results) == ["capped", "ok"], (
-        f"expected one ok and one capped, got {results}"
-    )
+    assert sorted(results) == ["capped", "ok"], f"expected one ok and one capped, got {results}"

@@ -82,9 +82,7 @@ def submit_user_turn(
     # will have already 404'd before reaching this code, so a missing
     # row here means a programmer error.
     locked = session.execute(
-        select(Workspace.id)
-        .where(Workspace.id == workspace_id)
-        .with_for_update()
+        select(Workspace.id).where(Workspace.id == workspace_id).with_for_update()
     ).scalar_one_or_none()
     if locked is None:
         raise ValueError(f"workspace {workspace_id} does not exist")
