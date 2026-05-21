@@ -173,7 +173,13 @@ async def test_concurrent_submits_cannot_overshoot_cap(
 
     `tokens_in=50` is passed explicitly to simulate a caller (e.g. B7
     attachment turns) that pre-counts message tokens at submit time so the
-    cap sum is immediately accurate after commit."""
+    cap sum is immediately accurate after commit.
+
+    Note: today's web caller does NOT pass `tokens_in`, so this test
+    exercises the B7-shape caller. For text-only B6 traffic the lock is
+    defense-in-depth — both submits still pass because user-turn
+    `tokens_in` is NULL until the processor fills it in from the LLM
+    response."""
     from concurrent.futures import ThreadPoolExecutor
     from datetime import UTC, datetime, timedelta
 

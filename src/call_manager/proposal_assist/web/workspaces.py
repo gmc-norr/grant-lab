@@ -448,6 +448,10 @@ def post_turn(
     )
     settings = request.app.state.settings
     try:
+        # TODO(B7): pass tokens_in once attachment-token counting lands.
+        # Without it, the per-workspace cap is reactive (counts billed
+        # assistant tokens only), so the row lock in submit_user_turn is
+        # currently defense-in-depth for text-only B6 traffic.
         job = submit_user_turn(
             session=session,
             workspace_id=ws.id,

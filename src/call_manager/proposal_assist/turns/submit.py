@@ -61,13 +61,21 @@ def submit_user_turn(
     the real value from the LLM response later.
 
     Concurrency: takes a `SELECT ... FOR UPDATE` row lock on the
-    workspaces row before reading today's token sums. Without this,
-    two concurrent submits could each read sums BELOW the cap, both
-    pass the gate, and together exceed the cap by one turn's worth
-    of tokens (TOCTOU). The row lock serializes per-workspace submits;
-    it's transaction-scoped (released on commit/rollback) and therefore
-    orthogonal to the session-scoped advisory lock that the drafting
-    subprocess holds.
+    workspaces row before reading today's token sums. The lock
+    serializes per-workspace submits and is transaction-scoped
+    (released on commit/rollback) — orthogonal to the session-scoped
+    advisory lock that the drafting subprocess holds.
+
+    The lock only changes observable cap behavior when the cap-query
+    input changes between commits. Today the cap query sums
+    ChatTurn.tokens_in, which the processor fills in for assistant
+    turns AFTER the LLM responds — so two concurrent text-only
+    submits both see the same pre-turn sum and the lock is
+    defense-in-depth (the cap gate is reactive, not predictive).
+    B7 will pre-count attachment tokens at submit time (via the
+    `tokens_in` parameter above), and at that point the lock
+    genuinely prevents two submits from both passing a cap they
+    should not both pass.
     """
     # Lock the workspace row for the duration of this transaction.
     # If the workspace doesn't exist, raise — the caller (web layer)
