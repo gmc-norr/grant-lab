@@ -567,9 +567,7 @@ def test_chat_history_view_renders_image_thumbnail(
     assert "chat-image" in body
 
 
-def test_post_turn_error_html_is_escaped(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_post_turn_error_html_is_escaped(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Reflected XSS regression: a malicious Content-Type or upload
     failure detail must NOT land as live HTML in the swap target."""
     import io

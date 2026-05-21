@@ -329,9 +329,7 @@ def test_submit_without_attachments_keeps_dict_content_shape(
     assert turn.content == {"type": "text", "text": "plain"}
 
 
-def test_submit_empty_text_with_no_attachments_raises(
-    pg_session_factory, _settings_env
-):
+def test_submit_empty_text_with_no_attachments_raises(pg_session_factory, _settings_env):
     """Empty submit (no text, no attachments) is rejected at submit
     entry with a clear ValueError — not a confusing downstream
     'attachment_resolution_failed: text block missing text'."""
@@ -343,8 +341,9 @@ def test_submit_empty_text_with_no_attachments_raises(
         s.commit()
         wsid, owner_id = ws.id, owner.id
 
-    with pg_session_factory() as s, pytest.raises(
-        ValueError, match="turn must have text or attachments"
+    with (
+        pg_session_factory() as s,
+        pytest.raises(ValueError, match="turn must have text or attachments"),
     ):
         submit_user_turn(
             session=s,
@@ -356,9 +355,7 @@ def test_submit_empty_text_with_no_attachments_raises(
         )
 
 
-def test_submit_empty_text_with_attachments_raises(
-    pg_session_factory, _settings_env, tmp_path
-):
+def test_submit_empty_text_with_attachments_raises(pg_session_factory, _settings_env, tmp_path):
     """Empty text + at least one attachment: rejected at submit entry
     with a clearer message than the resolver's downstream 'missing
     text' error. The attachment_ids form field could be set by a
@@ -397,8 +394,9 @@ def test_submit_empty_text_with_attachments_raises(
         )
         s.commit()
 
-    with pg_session_factory() as s, pytest.raises(
-        ValueError, match="content_text required when attachments"
+    with (
+        pg_session_factory() as s,
+        pytest.raises(ValueError, match="content_text required when attachments"),
     ):
         submit_user_turn(
             session=s,
@@ -463,9 +461,7 @@ def test_submit_mixed_valid_and_cross_workspace_ids_raises(
     # Submit on ws_a with two valid IDs plus one cross-workspace ID.
     # MUST raise — and MUST NOT silently insert a turn with only the
     # valid two while dropping the cross-workspace one.
-    with pg_session_factory() as s, pytest.raises(
-        ValueError, match="does not belong to workspace"
-    ):
+    with pg_session_factory() as s, pytest.raises(ValueError, match="does not belong to workspace"):
         submit_user_turn(
             session=s,
             workspace_id=wsid_a,
@@ -478,7 +474,5 @@ def test_submit_mixed_valid_and_cross_workspace_ids_raises(
 
     # Confirm no partial-success turn was inserted.
     with pg_session_factory() as s:
-        turns = list(
-            s.scalars(select(ChatTurn).where(ChatTurn.workspace_id == wsid_a))
-        )
+        turns = list(s.scalars(select(ChatTurn).where(ChatTurn.workspace_id == wsid_a)))
     assert turns == []

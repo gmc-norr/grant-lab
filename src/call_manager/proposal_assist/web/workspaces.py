@@ -572,9 +572,7 @@ async def post_turn(
         except HTTPException as e:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(
-                f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code
-            )
+            return HTMLResponse(f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code)
         if not data:
             session.rollback()
             _rollback_created_uploads()
@@ -584,9 +582,7 @@ async def post_turn(
         except HTTPException as e:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(
-                f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code
-            )
+            return HTMLResponse(f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code)
         detected_mime = _PIL_FORMAT_TO_MIME[fmt]
         if detected_mime != content_type:
             session.rollback()
@@ -643,7 +639,8 @@ async def post_turn(
         session.rollback()
         _rollback_created_uploads()
         return HTMLResponse(
-            f"<p>Too many attachments: {len(all_ids)} > {MAX_ATTACHMENTS_PER_TURN} max per turn.</p>",
+            f"<p>Too many attachments: {len(all_ids)} > "
+            f"{MAX_ATTACHMENTS_PER_TURN} max per turn.</p>",
             status_code=400,
         )
 

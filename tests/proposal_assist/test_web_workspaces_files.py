@@ -686,9 +686,7 @@ def test_upload_same_image_twice_creates_two_rows(
     assert resp2.status_code == 200, resp2.text
 
     with pg_session_factory() as s:
-        rows = list(
-            s.scalars(select(Attachment).where(Attachment.workspace_id == wsid))
-        )
+        rows = list(s.scalars(select(Attachment).where(Attachment.workspace_id == wsid)))
     assert len(rows) == 2
     assert rows[0].id != rows[1].id
     # Two distinct files on disk.
