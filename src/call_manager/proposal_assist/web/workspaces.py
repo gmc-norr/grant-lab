@@ -23,6 +23,7 @@ import bleach
 import markdown
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
@@ -106,31 +107,54 @@ def _render_proposal_markdown(raw: str) -> str:
     )
 
 
-def _render_chat_turn_html(turn: ChatTurn) -> str:
-    """Render one chat_turns row to a small HTML snippet for SSE emission.
-    Matches the partials/chat_turn.html template's per-row markup.
+_CHAT_TURN_PARTIAL = "proposal_assist/partials/chat_turn.html"
 
-    Rev2 / Codex H2: every interpolated field is run through
-    html.escape — chat content + tool names are agent-controlled and
-    could contain <script> otherwise. The XSS regression tests in
-    test_web_workspaces_sse.py assert this.
+
+def _default_templates() -> Jinja2Templates:
+    """Construct a Jinja2Templates rooted at the same TEMPLATES_DIR
+    used by main.py. Cached after first call so tests that exercise
+    _render_chat_turn_html without an app context don't pay the cost
+    twice.
     """
-    c = turn.content
-    safe_role = _html.escape(turn.role)
-    if isinstance(c, dict) and c.get("type") == "text":
-        body = f"<p>{_html.escape(str(c.get('text', '')))}</p>"
-    elif isinstance(c, dict) and c.get("type") == "tool_use":
-        body = f"<p><em>(tool call: {_html.escape(str(c.get('name', '?')))})</em></p>"
-    elif isinstance(c, dict) and c.get("type") == "tool_result":
-        err = " — error" if c.get("is_error") else ""
-        body = f"<p><em>(tool result{err})</em></p>"
-    else:
-        body = f"<pre>{_html.escape(str(c))}</pre>"
-    snippet = (
-        f"<div class='chat-turn' data-role='{safe_role}'><strong>{safe_role}:</strong>{body}</div>"
-    )
-    # Remove newlines so the value is valid in an SSE data: line.
-    return snippet.replace("\n", "")
+    global _DEFAULT_TEMPLATES
+    if _DEFAULT_TEMPLATES is None:
+        # Import here (not at module top) to avoid a hard dependency on
+        # the main module's import order; main.py itself imports this
+        # module.
+        from call_manager.main import TEMPLATES_DIR
+
+        _DEFAULT_TEMPLATES = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    return _DEFAULT_TEMPLATES
+
+
+_DEFAULT_TEMPLATES: Jinja2Templates | None = None
+
+
+def _render_chat_turn_html(
+    turn: ChatTurn,
+    *,
+    templates: Jinja2Templates | None = None,
+) -> str:
+    """Render one chat_turns row to a small HTML snippet for SSE emission.
+
+    Delegates to ``partials/chat_turn.html`` — the single source of truth
+    for chat-turn HTML (also used by workspace_main.html's history loop
+    and post_turn's immediate echo).
+
+    Rev2 / Codex H2: Jinja's default auto-escape escapes text content +
+    tool names + image attachment ids, so chat content cannot inject
+    HTML. The XSS regression tests in test_web_workspaces_sse.py assert
+    this remains true.
+
+    B7 / T4: image blocks in list-of-blocks content render as <img>
+    thumbnails. Per-block dispatch lives in the partial.
+    """
+    engine = templates if templates is not None else _default_templates()
+    rendered = engine.env.get_template(_CHAT_TURN_PARTIAL).render(turn=turn)
+    # SSE `data:` lines cannot contain raw newlines (the protocol
+    # uses LF as a record separator). Collapse them — the partial uses
+    # ``{%- ... -%}`` to keep this no-op for normal content.
+    return rendered.replace("\n", "")
 
 
 # Status values that terminate the SSE stream. Shared so a future
@@ -146,6 +170,7 @@ async def _stream_turn_generator(
     turn_job_id: uuid.UUID,
     poll_seconds: float = 0.2,
     request: Request | None = None,
+    templates: Jinja2Templates | None = None,
 ):
     """Async generator that yields SSE-formatted strings.
 
@@ -160,6 +185,11 @@ async def _stream_turn_generator(
     the turn_job reaches a terminal status — accumulating dead loops
     indefinitely under viewer fan-out. Tests pass `request=None` to
     keep the unit test deterministic.
+
+    B7 / T4: ``templates`` is forwarded to _render_chat_turn_html so
+    the SSE renderer uses the same partial as the chat-history loop.
+    When omitted, _render_chat_turn_html falls back to a default
+    Jinja2Templates instance rooted at the project's TEMPLATES_DIR.
     """
     # Seed last_seen_position at the user_turn's position (so we don't
     # echo the user turn back — it was already shown by the POST handler).
@@ -187,7 +217,7 @@ async def _stream_turn_generator(
                 )
             )
             for turn in new_rows:
-                rendered = _render_chat_turn_html(turn)
+                rendered = _render_chat_turn_html(turn, templates=templates)
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
             tj = s.get(TurnJob, turn_job_id)
@@ -642,23 +672,27 @@ async def post_turn(
             status_code=400,
         )
 
-    # Rev2 / H2: every interpolated user value goes through html.escape —
-    # never f-string'd raw into the response body.
-    safe_text = _html.escape(content)
-    image_html = ""
-    for aid in all_ids:
-        # Inline thumbnail per attachment; the file serve route enforces
-        # owner/viewer access on its own so a viewer reading the chat
-        # stream sees the same image the owner just sent.
-        image_html += (
-            f"<img src='/workspaces/{ws.id}/files/{aid}' "
-            f"alt='attachment' style='max-width: 200px; max-height: 200px;'>"
-        )
-    user_turn_html = (
-        f"<div class='chat-turn' data-role='user'>"
-        f"<strong>user:</strong><p>{safe_text}</p>{image_html}"
-        f"</div>"
+    # B7 / T4: render the just-posted user turn through the chat_turn
+    # partial — the single source of truth for chat-turn HTML — so the
+    # immediate echo, the SSE renderer, and the history loop all agree.
+    # We build a content shape that matches what submit_user_turn just
+    # persisted: list of {text} + {image} blocks when attachments are
+    # present, single text dict otherwise. Jinja's auto-escape inside
+    # the partial handles HTML in `content`.
+    if all_ids:
+        echo_content: object = [{"type": "text", "text": content}] + [
+            {"type": "image", "attachment_id": str(aid)} for aid in all_ids
+        ]
+    else:
+        echo_content = {"type": "text", "text": content}
+    echo_turn = ChatTurn(
+        workspace_id=ws.id,
+        role="user",
+        content=echo_content,  # type: ignore[arg-type]
     )
+    user_turn_html = request.app.state.templates.env.get_template(
+        _CHAT_TURN_PARTIAL,
+    ).render(turn=echo_turn)
     sse_connector = (
         f"<div id='sse-mount-{job.id}' "
         f"hx-ext='sse' "
@@ -700,6 +734,7 @@ async def stream_turn(
             workspace_id=ws.id,
             turn_job_id=turn_job_id,
             request=request,  # B6-residuals: enables client-disconnect detection
+            templates=request.app.state.templates,
         ),
         media_type="text/event-stream",
     )

@@ -419,3 +419,149 @@ def test_post_turn_owner_only_viewer_403(
         data={"content": "viewers can't write"},
     )
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# B7 Task 4: chat history partial renders text + image blocks uniformly.
+#
+# These tests pin the partial directly (rendering through Jinja) so the
+# three places that emit chat-turn HTML — the history loop, the SSE
+# renderer, and the post_turn echo — share one well-tested implementation.
+# ---------------------------------------------------------------------------
+
+
+def _render_partial(turn) -> str:
+    """Render partials/chat_turn.html for ``turn`` and return the HTML."""
+    from call_manager.proposal_assist.web.workspaces import (
+        _CHAT_TURN_PARTIAL,
+        _default_templates,
+    )
+
+    return _default_templates().env.get_template(_CHAT_TURN_PARTIAL).render(turn=turn)
+
+
+def test_chat_turn_partial_renders_plain_string_content():
+    """Legacy/pre-B7: ChatTurn.content == str (single-string body)."""
+    from call_manager.db.models import ChatTurn
+
+    turn = ChatTurn(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        role="user",
+        content="plain text",  # type: ignore[arg-type]
+        position=1,
+    )
+    html = _render_partial(turn)
+    assert "<p>plain text</p>" in html
+    assert 'data-role="user"' in html
+
+
+def test_chat_turn_partial_renders_single_text_dict_content():
+    """Pre-B7: ChatTurn.content == {"type":"text","text":"..."}."""
+    from call_manager.db.models import ChatTurn
+
+    turn = ChatTurn(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        role="assistant",
+        content={"type": "text", "text": "single dict"},
+        position=1,
+    )
+    html = _render_partial(turn)
+    assert "<p>single dict</p>" in html
+
+
+def test_chat_turn_partial_renders_list_of_text_and_image_blocks():
+    """B7: list content of text + image blocks renders <p> + <img>."""
+    from call_manager.db.models import ChatTurn
+
+    wsid = uuid.uuid4()
+    aid = uuid.uuid4()
+    turn = ChatTurn(
+        id=uuid.uuid4(),
+        workspace_id=wsid,
+        role="user",
+        content=[  # type: ignore[arg-type]
+            {"type": "text", "text": "hello"},
+            {"type": "image", "attachment_id": str(aid)},
+        ],
+        position=1,
+    )
+    html = _render_partial(turn)
+    assert "<p>hello</p>" in html
+    expected_src = f"/workspaces/{wsid}/files/{aid}"
+    assert expected_src in html
+    assert "<img" in html
+    assert 'class="chat-image"' in html
+
+
+def test_chat_turn_partial_renders_image_only_list_block():
+    """B7: list content with a single image block (no text) still renders
+    the <img> thumbnail."""
+    from call_manager.db.models import ChatTurn
+
+    wsid = uuid.uuid4()
+    aid = uuid.uuid4()
+    turn = ChatTurn(
+        id=uuid.uuid4(),
+        workspace_id=wsid,
+        role="user",
+        content=[{"type": "image", "attachment_id": str(aid)}],  # type: ignore[arg-type]
+        position=1,
+    )
+    html = _render_partial(turn)
+    assert f"/workspaces/{wsid}/files/{aid}" in html
+    assert "<img" in html
+    # No stray <p> when text is absent.
+    assert "<p>" not in html
+
+
+def test_chat_turn_partial_escapes_text_in_list_blocks():
+    """B7 XSS regression: HTML in a list-of-blocks text block is escaped
+    (defense in depth — the partial's auto-escape must apply to nested
+    block content, not just the top-level dict shape)."""
+    from call_manager.db.models import ChatTurn
+
+    turn = ChatTurn(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        role="user",
+        content=[{"type": "text", "text": "<script>alert(1)</script>"}],  # type: ignore[arg-type]
+        position=1,
+    )
+    html = _render_partial(turn)
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_chat_history_view_renders_image_thumbnail(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """Full-page render: a stored ChatTurn whose content is a list with
+    an image block surfaces an <img src="/workspaces/<wsid>/files/<aid>">
+    in the main view's chat history."""
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    aid = uuid.uuid4()
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        make_chat_turn(
+            s,
+            ws,
+            role="user",
+            content=[
+                {"type": "text", "text": "look at this fig"},
+                {"type": "image", "attachment_id": str(aid)},
+            ],  # type: ignore[arg-type]
+        )
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.get(f"/workspaces/{wsid}")
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert "<p>look at this fig</p>" in body
+    assert f"/workspaces/{wsid}/files/{aid}" in body
+    assert "chat-image" in body
