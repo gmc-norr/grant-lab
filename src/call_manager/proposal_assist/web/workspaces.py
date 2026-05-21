@@ -953,6 +953,18 @@ def soft_delete(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ):
+    """Soft-delete a workspace and scrub attachment bytes from disk.
+
+    Order (Codex-finding fix): DB commit FIRST (so the user-visible
+    "deleted" state is durable), THEN best-effort FS cleanup. If the
+    FS cleanup fails, the workspace is still soft-deleted; the orphan
+    files are harmless (no app code reads them, and the row-source-of-
+    truth lookup gates serving on a live DB row) and a re-invocation
+    of this handler OR a future sweep job will collect them.
+
+    Attachment DB rows are intentionally preserved for the audit
+    trail; only the bytes on disk are removed.
+    """
     from datetime import UTC, datetime
 
     ws = _require_owner(
@@ -962,6 +974,20 @@ def soft_delete(
     )
     ws.soft_deleted_at = datetime.now(UTC)
     session.commit()
+    # B7: scrub attachment bytes from disk. DB rows remain (compliance —
+    # audit trail preserved); only the bytes are removed. Errors here
+    # are non-fatal: the workspace is already soft-deleted at the DB
+    # level, which is the durable user-visible state.
+    storage = AttachmentStorage(root=Path(request.app.state.settings.workspaces_dir))
+    try:
+        storage.delete_workspace(workspace_id=workspace_id)
+    except OSError:
+        logger.warning(
+            "soft_delete: attachment cleanup failed for workspace %s; "
+            "files will be collected by future sweep",
+            workspace_id,
+            exc_info=True,
+        )
     return RedirectResponse(url="/workspaces", status_code=303)
 
 
