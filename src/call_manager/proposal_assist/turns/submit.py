@@ -27,10 +27,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
-from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.turns.caps import (
     TokenCapExceeded,
     check_daily_token_cap,
@@ -44,10 +45,42 @@ def submit_user_turn(
     content: dict[str, Any] | list[Any] | str,
     submitted_by_user_id: int | None,
     settings: Settings,
+    tokens_in: int | None = None,
 ) -> TurnJob:
     """Insert chat_turns(role='user') + turn_jobs(status='queued') +
     workspace_events(cloud_turn_sent, phase='queued') atomically.
-    Returns the TurnJob (not yet committed)."""
+    Returns the TurnJob (not yet committed).
+
+    `tokens_in`: pre-counted input tokens for this user message (e.g.
+    from attachment byte-size estimation in B7). When provided, the value
+    is stored on the chat_turns row immediately so the cap query sees it
+    as soon as this transaction commits — meaning a concurrent second
+    submit that acquires the workspace row lock after this one commits
+    will read the updated sum and be gated correctly. Without tokens_in,
+    user-turn rows start with tokens_in=NULL and the processor fills in
+    the real value from the LLM response later.
+
+    Concurrency: takes a `SELECT ... FOR UPDATE` row lock on the
+    workspaces row before reading today's token sums. Without this,
+    two concurrent submits could each read sums BELOW the cap, both
+    pass the gate, and together exceed the cap by one turn's worth
+    of tokens (TOCTOU). The row lock serializes per-workspace submits;
+    it's transaction-scoped (released on commit/rollback) and therefore
+    orthogonal to the session-scoped advisory lock that the drafting
+    subprocess holds.
+    """
+    # Lock the workspace row for the duration of this transaction.
+    # If the workspace doesn't exist, raise — the caller (web layer)
+    # will have already 404'd before reaching this code, so a missing
+    # row here means a programmer error.
+    locked = session.execute(
+        select(Workspace.id)
+        .where(Workspace.id == workspace_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if locked is None:
+        raise ValueError(f"workspace {workspace_id} does not exist")
+
     cap = check_daily_token_cap(session, workspace_id, settings=settings)
     if not cap.allowed:
         raise TokenCapExceeded(
@@ -63,6 +96,7 @@ def submit_user_turn(
         workspace_id=workspace_id,
         role="user",
         content=content,
+        tokens_in=tokens_in,
     )
     session.add(user_turn)
     session.flush()  # so user_turn.id is populated for FK below

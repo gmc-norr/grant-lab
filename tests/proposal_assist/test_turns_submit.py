@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from sqlalchemy import select
 
@@ -153,3 +155,90 @@ def test_submit_user_turn_accepts_null_submitter_for_system_initiated(
         )
     assert job_row.submitted_by_user_id is None
     assert events[0].actor_id is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submits_cannot_overshoot_cap(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Two concurrent submits, each individually fine, must not both
+    succeed if together they'd exceed the daily cap. The cap check +
+    insert must serialize via row-level lock on workspaces.
+
+    Scenario: seed=60 tokens, cap=100, each new turn contributes tokens_in=50.
+    Thread 1 reads sum=60 (below cap), inserts its turn, commits → sum=110.
+    Thread 2 (with FOR UPDATE) reads sum=110 after thread 1 commits → capped.
+    Thread 2 (without FOR UPDATE) would read sum=60, also succeed — TOCTOU:
+    both turn_jobs queued, 60+50+50=160 tokens billed, cap overshot by 60.
+
+    `tokens_in=50` is passed explicitly to simulate a caller (e.g. B7
+    attachment turns) that pre-counts message tokens at submit time so the
+    cap sum is immediately accurate after commit."""
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import UTC, datetime, timedelta
+
+    from call_manager.config import Settings
+    from call_manager.db.models import ChatTurn
+    from call_manager.proposal_assist.turns.caps import TokenCapExceeded
+    from call_manager.proposal_assist.turns.submit import submit_user_turn
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
+    monkeypatch.setenv("DAILY_TOKEN_CAP_OUTPUT", "1000000")
+    settings = Settings()
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="concurrent-test-owner@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        # Seed: 60 input tokens used today (from a completed assistant turn).
+        # Cap is 100. A single new turn with tokens_in=50 would read 60,
+        # pass (60 < 100), insert, commit → sum becomes 110.
+        # A second concurrent turn that reads BEFORE the first commits
+        # also reads 60, also passes — TOCTOU. With FOR UPDATE, the second
+        # waits for the first to commit, then reads 110 and is capped.
+        s.add(
+            ChatTurn(
+                workspace_id=ws.id,
+                role="assistant",
+                content={"type": "text", "text": "x"},
+                tokens_in=60,
+                created_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+        )
+        s.commit()
+        wsid = ws.id
+        owner_id = owner.id
+
+    def attempt():
+        with pg_session_factory() as session:
+            try:
+                submit_user_turn(
+                    session=session,
+                    workspace_id=wsid,
+                    content={"type": "text", "text": "hi"},
+                    submitted_by_user_id=owner_id,
+                    settings=settings,
+                    tokens_in=50,
+                )
+                session.commit()
+                return "ok"
+            except TokenCapExceeded:
+                session.rollback()
+                return "capped"
+
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        results = await asyncio.gather(
+            loop.run_in_executor(ex, attempt),
+            loop.run_in_executor(ex, attempt),
+        )
+
+    assert sorted(results) == ["capped", "ok"], (
+        f"expected one ok and one capped, got {results}"
+    )
