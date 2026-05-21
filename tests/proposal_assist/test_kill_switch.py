@@ -1,8 +1,6 @@
 """DRAFTING_ENABLED=false: POST /turns refuses with 503; drain
 tick logs + no-ops so queued turns wait for re-enable."""
 
-import io
-
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -29,9 +27,7 @@ def _authed_client(app, *, user_id: int) -> TestClient:
     return client
 
 
-def test_post_turn_returns_503_when_kill_switch_off(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_turn_returns_503_when_kill_switch_off(monkeypatch, pg_url, pg_session_factory):
     app = _build_app_kill(monkeypatch, pg_url, drafting_enabled=False)
     with pg_session_factory() as s:
         owner = User(email="owner@ki.se")
@@ -58,9 +54,7 @@ def test_post_turn_returns_503_when_kill_switch_off(
     assert jobs == []
 
 
-def test_post_turn_works_when_kill_switch_on(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_turn_works_when_kill_switch_on(monkeypatch, pg_url, pg_session_factory):
     """Sanity: defaulted/explicitly-True kill switch lets submits through."""
     app = _build_app_kill(monkeypatch, pg_url, drafting_enabled=True)
     with pg_session_factory() as s:

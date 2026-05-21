@@ -7,7 +7,6 @@ Mirrors the test pattern from test_web_admin_digest_panel.py:
 - assert page renders with expected fragments
 """
 
-
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
