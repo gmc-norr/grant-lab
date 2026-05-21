@@ -9,7 +9,8 @@ session/transaction. Caller commits.
 The audit row is written BEFORE dispatch so a crash between submit and
 finalize doesn't lose the compliance trail. The processor writes a
 second event (cloud_turn_completed or cloud_turn_failed) with telemetry
-once the turn finishes.
+once the turn finishes; the cancel route writes cloud_turn_cancelled
+if the user aborts a still-queued turn.
 
 Cap enforcement: pre-write, calls check_daily_token_cap. If exceeded,
 raises TokenCapExceeded — caller (typically B6) catches this and

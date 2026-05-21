@@ -787,6 +787,11 @@ def cancel_turn(
     Race-safe: the WHERE clause includes status='queued', so a concurrent
     processor that has already moved it to 'running' wins; this handler
     returns the noop message.
+
+    Audit: on successful cancel, writes a `cloud_turn_cancelled`
+    WorkspaceEvent in the same transaction. Without this, the
+    submit-time `cloud_turn_sent` row has no matching outcome event
+    and the compliance chain breaks (see B6-residuals review).
     """
     from datetime import UTC, datetime
 
@@ -804,6 +809,19 @@ def cancel_turn(
         )
         .values(status="cancelled", completed_at=datetime.now(UTC))
     )
+    if result.rowcount:
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="cloud_turn_cancelled",
+                actor_id=user.id,
+                payload={
+                    "turn_job_id": str(turn_job_id),
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                },
+            )
+        )
     session.commit()
     if result.rowcount:
         return HTMLResponse("<p>cancelled</p>")
