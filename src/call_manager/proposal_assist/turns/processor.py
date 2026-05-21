@@ -51,12 +51,17 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
 
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
+from call_manager.proposal_assist.attachments.resolver import (
+    AttachmentResolutionError,
+    resolve_user_content,
+)
 from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     SDKTurnError,
@@ -74,8 +79,15 @@ async def process_turn_once(
     session_factory: sessionmaker,
     controller: WorkspaceController,
     turn_job_id: uuid.UUID,
+    workspaces_dir: Path | None = None,
 ) -> None:
-    """Process one queued turn. No-op if the row is not in 'queued' state."""
+    """Process one queued turn. No-op if the row is not in 'queued' state.
+
+    workspaces_dir must be supplied when any turn may contain image content
+    blocks (attachment_id references). If None, attachment resolution falls
+    back to the text-only path for plain str content; image blocks will
+    raise AttachmentResolutionError and finalize the turn as failed.
+    """
     # Peek to learn the workspace_id and current status without claiming yet.
     with session_factory() as s:
         row = s.execute(
@@ -143,7 +155,29 @@ async def process_turn_once(
                 tokens_out=0,
             )
             return
-        user_text = _content_to_text(user_turn.content)
+        try:
+            user_message = resolve_user_content(
+                session=s,
+                workspaces_dir=workspaces_dir or Path("var/workspaces"),
+                workspace_id=workspace_id,
+                content=user_turn.content,
+            )
+        except AttachmentResolutionError as e:
+            logger.warning(
+                "process_turn_once: attachment resolution failed for turn_job %s: %s",
+                turn_job_id,
+                e,
+            )
+            _finalize_failed(
+                session_factory,
+                turn_job_id=turn_job_id,
+                workspace_id=workspace_id,
+                submitted_by_user_id=submitted_by_user_id,
+                error=f"attachment_resolution_failed: {e}",
+                tokens_in=0,
+                tokens_out=0,
+            )
+            return
 
     last_assistant_id: uuid.UUID | None = None
     tokens_in = 0
@@ -154,7 +188,7 @@ async def process_turn_once(
     other_error: BaseException | None = None
 
     try:
-        async for event in controller.send_turn(workspace_id, user_text):
+        async for event in controller.send_turn(workspace_id, user_message):
             if isinstance(event, AssistantTextEvent):
                 last_assistant_id = _write_chat_turn(
                     session_factory,
@@ -232,20 +266,6 @@ async def process_turn_once(
         )
         if not isinstance(other_error, Exception):
             raise other_error
-
-
-def _content_to_text(content: Any) -> str:
-    """Extract a string for the SDK. Handles plain string, single dict,
-    or list-of-dicts (mirrors claude_adapter._flatten_content)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        if content.get("type") == "text":
-            return str(content.get("text", ""))
-        return ""
-    if isinstance(content, list):
-        return " ".join(_content_to_text(b) for b in content if _content_to_text(b))
-    return ""
 
 
 def _write_chat_turn(

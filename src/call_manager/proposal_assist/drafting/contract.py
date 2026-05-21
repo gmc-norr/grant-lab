@@ -119,6 +119,12 @@ class DraftingAgent(Protocol):
     event in adapter.send_turn(handle, msg)`. The final event is always
     TurnDoneEvent.
 
+    `user_message` is either a plain string (cheap text-only path) or a
+    list of Anthropic content-block dicts (text and/or image with a
+    base64 source). The dicts are ALREADY in Anthropic API shape —
+    adapters MUST NOT do attachment-id resolution. That lives in the
+    attachments/resolver module called by the processor.
+
     `terminate` is idempotent: calling on an already-torn-down handle is
     a no-op (logs but doesn't raise)."""
 
@@ -127,7 +133,7 @@ class DraftingAgent(Protocol):
     async def send_turn(
         self,
         handle: AgentHandle,
-        user_message: str,
+        user_message: str | list[dict[str, Any]],
     ) -> AsyncIterator[StreamEvent]: ...
 
     async def terminate(self, handle: AgentHandle) -> None: ...

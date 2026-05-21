@@ -407,12 +407,14 @@ def build_scheduler(
     # corrupted by a worker-thread asyncio.run.
     def _turn_drain_tick() -> None:
         import asyncio
+        from pathlib import Path
 
         from call_manager.proposal_assist.turns.drain import drain_turn_queue_tick
 
         coro = drain_turn_queue_tick(
             session_factory=session_factory,
             controller=workspace_controller,
+            workspaces_dir=Path(settings.workspaces_dir),
         )
         if app_loop is None:
             try:

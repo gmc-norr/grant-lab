@@ -147,9 +147,17 @@ class ClaudeAgentSDKAdapter:
     async def send_turn(
         self,
         handle: AgentHandle,
-        user_message: str,
+        user_message: str | list[dict[str, Any]],
     ) -> AsyncIterator[StreamEvent]:
         """Stream events for one turn.
+
+        user_message is either:
+        - str: plain text — passed directly to SDK's cheap str path.
+        - list[dict]: already-API-shape content blocks (text and/or
+          image-with-base64-source). Forwarded via the SDK's
+          AsyncIterable[dict] query path. Attachment-id resolution is
+          the processor's job (attachments/resolver.py); adapter does
+          not touch the DB or filesystem.
 
         The client is already connected (from launch); do NOT wrap in
         `async with` — that re-connects and spawns a new subprocess.
@@ -159,7 +167,19 @@ class ClaudeAgentSDKAdapter:
         tokens_out: int | None = None
         model: str | None = self._model
 
-        await client.query(user_message)
+        if isinstance(user_message, list):
+            content_blocks = user_message
+
+            async def _gen():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": content_blocks},
+                    "parent_tool_use_id": None,
+                }
+
+            await client.query(_gen())
+        else:
+            await client.query(user_message)
         async for message in client.receive_response():
             if isinstance(message, AssistantMessage):
                 # Extract model name from the first AssistantMessage
