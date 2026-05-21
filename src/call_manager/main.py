@@ -14,6 +14,9 @@ from call_manager.config import Settings
 from call_manager.db.session import make_engine, make_session_factory
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
+from call_manager.proposal_assist.web.files import (
+    router as files_router,
+)
 from call_manager.proposal_assist.web.rubric_review import (
     router as rubric_review_router,
 )
@@ -253,4 +256,5 @@ def create_app() -> FastAPI:
     app.include_router(profiles.router)
     app.include_router(rubric_review_router)
     app.include_router(workspaces_router)
+    app.include_router(files_router)
     return app

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Files — {{ workspace.title }}{% endblock %}
+{% block content %}
+<h1>Files — {{ workspace.title }}</h1>
+<p>
+  <a href="/workspaces/{{ workspace.id }}">← Back to workspace</a>
+  | <a href="/workspaces">All workspaces</a>
+</p>
+
+{% if is_owner %}
+<h2>Upload</h2>
+<form method="post" enctype="multipart/form-data"
+      action="/workspaces/{{ workspace.id }}/files"
+      hx-post="/workspaces/{{ workspace.id }}/files"
+      hx-encoding="multipart/form-data"
+      hx-target="#file-list"
+      hx-swap="afterbegin"
+      hx-on::after-request="this.reset()">
+  <p>
+    <label>
+      Image (PNG / JPEG / WebP / GIF, up to 5 MB):
+      <input type="file" name="file"
+             accept="image/png,image/jpeg,image/webp,image/gif" required>
+    </label>
+  </p>
+  <button type="submit">Upload</button>
+</form>
+{% else %}
+<p><em>(read-only — only the workspace owner can upload or delete files)</em></p>
+{% endif %}
+
+<h2>Files in this workspace</h2>
+<div id="file-list">
+  {% for att in attachments %}
+    {% include "proposal_assist/partials/file_row.html" %}
+  {% else %}
+    <p><em>No files uploaded yet.</em></p>
+  {% endfor %}
+</div>
+{% endblock %}

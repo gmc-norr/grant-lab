@@ -1,0 +1,23 @@
+{# Single attachment row — used by the panel list AND as the HTMX swap-in
+   response from POST /workspaces/<id>/files. The context provides `att`
+   (Attachment), `workspace` (Workspace), and `is_owner` (bool). #}
+<div class="file-row" data-attachment-id="{{ att.id }}"
+     style="display: flex; gap: 1em; align-items: center; padding: 0.4em 0; border-bottom: 1px solid #eee;">
+  <img src="/workspaces/{{ att.workspace_id }}/files/{{ att.id }}"
+       alt="{{ att.filename }}"
+       style="max-width: 120px; max-height: 120px; object-fit: contain;">
+  <span class="filename" style="flex: 1;">{{ att.filename }}</span>
+  <span class="uploaded" style="color: #666; font-size: 0.9em;">
+    {{ att.uploaded_at | display_dt }}
+  </span>
+  {% if is_owner %}
+  <form method="post"
+        action="/workspaces/{{ att.workspace_id }}/files/{{ att.id }}/delete"
+        hx-post="/workspaces/{{ att.workspace_id }}/files/{{ att.id }}/delete"
+        hx-target="closest .file-row"
+        hx-swap="outerHTML"
+        hx-confirm="Delete this file? This cannot be undone.">
+    <button type="submit">Delete</button>
+  </form>
+  {% endif %}
+</div>
