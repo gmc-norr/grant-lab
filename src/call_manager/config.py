@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     # threshold + model fields are ignored. The threshold defaults to
     # 0.50; tune up to skip more, down to send more pairs to Sonnet.
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    drafting_enabled: bool = Field(
+        default=True,
+        alias="DRAFTING_ENABLED",
+        description=(
+            "Kill switch for the proposal-assist drafting subsystem. "
+            "When False, POST /workspaces/<id>/turns returns 503 and "
+            "the drain tick is a no-op (queued turns wait for re-enable). "
+            "Toggle requires app restart; UI-driven toggling is deferred."
+        ),
+    )
     extractor_version: str = Field(
         default="sections-v1",
         alias="EXTRACTOR_VERSION",

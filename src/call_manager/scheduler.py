@@ -415,6 +415,7 @@ def build_scheduler(
             session_factory=session_factory,
             controller=workspace_controller,
             workspaces_dir=Path(settings.workspaces_dir),
+            drafting_enabled=settings.drafting_enabled,
         )
         if app_loop is None:
             try:

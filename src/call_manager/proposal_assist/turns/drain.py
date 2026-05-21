@@ -31,6 +31,7 @@ async def drain_turn_queue_tick(
     session_factory: sessionmaker,
     controller: WorkspaceController,
     workspaces_dir: Path | None = None,
+    drafting_enabled: bool = True,
 ) -> int:
     """Find workspaces with queued turn_jobs; pick the oldest queued
     job per workspace; dispatch process_turn_once for each. Returns the
@@ -39,7 +40,16 @@ async def drain_turn_queue_tick(
     workspaces_dir is forwarded to process_turn_once for attachment
     resolution. Passing None uses the default 'var/workspaces' path,
     which is safe for pure-text turns but will raise for image blocks.
+
+    drafting_enabled: when False, the tick is a no-op — queued turns
+    wait for re-enable rather than being marked failed. The scheduler
+    passes settings.drafting_enabled so an operator can flip the kill
+    switch and restart without losing the queue.
     """
+    if not drafting_enabled:
+        logger.info("drain_turn_queue_tick: skipped (drafting_enabled=False)")
+        return 0
+
     with session_factory() as s:
         # Exclude workspaces that already have a running turn — otherwise
         # the atomic claim in process_turn_once would trip the partial

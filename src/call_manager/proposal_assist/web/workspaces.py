@@ -520,6 +520,13 @@ async def post_turn(
     The combined attachment count is capped at 5; overshooting returns
     400 with all just-uploaded files cleaned up.
     """
+    if not request.app.state.settings.drafting_enabled:
+        return HTMLResponse(
+            "<p>Drafting is currently disabled by an administrator. "
+            "Please try again later.</p>",
+            status_code=503,
+        )
+
     ws = _require_owner(
         workspace_id=workspace_id,
         user=user,
