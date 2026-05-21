@@ -68,9 +68,6 @@ async def test_e2e_upload_submit_drain_adapter_sees_resolved_image(
     Step 6: assert adapter.last_user_message is the resolved API shape.
     Step 7: assert cloud_turn_completed WorkspaceEvent landed.
     """
-    from call_manager.config import Settings
-
-    settings = Settings()
     # Mirror tmp_path into the in-process settings so the drain path
     # (which calls resolve_user_content) reads from the same directory
     # the upload handler wrote to.
@@ -135,12 +132,9 @@ async def test_e2e_upload_submit_drain_adapter_sees_resolved_image(
         )
     assert sent_event is not None, "cloud_turn_sent WorkspaceEvent must exist"
     assert sent_event.actor_id == owner_id, (
-        f"cloud_turn_sent.actor_id must equal owner.id ({owner_id}); "
-        f"got {sent_event.actor_id}"
+        f"cloud_turn_sent.actor_id must equal owner.id ({owner_id}); got {sent_event.actor_id}"
     )
-    assert "turn_job_id" in sent_event.payload, (
-        "cloud_turn_sent payload must contain turn_job_id"
-    )
+    assert "turn_job_id" in sent_event.payload, "cloud_turn_sent payload must contain turn_job_id"
     assert sent_event.payload["turn_job_id"] == str(job_id)
 
     # ------------------------------------------------------------------ #
