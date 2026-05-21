@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from call_manager.proposal_assist.drafting.contract import (
     AgentHandle,
@@ -237,7 +237,7 @@ class SubprocessRegistry:
     async def send_turn(
         self,
         handle: AgentHandle,
-        user_message: str,
+        user_message: str | list[dict[str, Any]],
     ) -> AsyncIterator[StreamEvent]:
         """Pass-through to the adapter's send_turn. The controller calls
         touch() after the iterator is fully consumed."""

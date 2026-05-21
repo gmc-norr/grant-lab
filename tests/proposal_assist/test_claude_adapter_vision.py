@@ -71,9 +71,7 @@ def handle_with_fake_client(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_adapter_forwards_already_resolved_image_blocks(
-    adapter, handle_with_fake_client
-):
+async def test_adapter_forwards_already_resolved_image_blocks(adapter, handle_with_fake_client):
     """When send_turn receives a list[dict] of already-API-shape blocks
     (with base64 sources), it forwards them verbatim via the SDK's
     iterable path — no resolution, no DB lookup, no disk read."""
@@ -106,9 +104,7 @@ async def test_adapter_forwards_already_resolved_image_blocks(
 
 
 @pytest.mark.asyncio
-async def test_adapter_text_only_keeps_string_path(
-    adapter, handle_with_fake_client
-):
+async def test_adapter_text_only_keeps_string_path(adapter, handle_with_fake_client):
     """A plain str user_message uses the cheap SDK string path —
     no JSON-iterable construction."""
     handle, transport = handle_with_fake_client

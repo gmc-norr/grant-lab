@@ -14,6 +14,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -171,7 +172,7 @@ class WorkspaceController:
     async def send_turn(
         self,
         workspace_id: uuid.UUID,
-        user_message: str,
+        user_message: str | list[dict[str, Any]],
     ) -> AsyncIterator[StreamEvent]:
         """Send a turn and stream events.
 

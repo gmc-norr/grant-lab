@@ -155,8 +155,9 @@ def test_resolve_list_collapses_single_text_to_str(pg_session_factory, tmp_path)
 def test_resolve_missing_attachment_raises(pg_session_factory, tmp_path):
     """An attachment_id that has no DB row raises AttachmentResolutionError."""
     missing_aid = uuid.uuid4()
-    with pg_session_factory() as s, pytest.raises(
-        AttachmentResolutionError, match=str(missing_aid)
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match=str(missing_aid)),
     ):
         resolve_user_content(
             session=s,
@@ -175,8 +176,9 @@ def test_resolve_wrong_workspace_raises(pg_session_factory, tmp_path):
         s.commit()
 
     other_ws_id = uuid.uuid4()
-    with pg_session_factory() as s, pytest.raises(
-        AttachmentResolutionError, match="belongs to workspace"
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="belongs to workspace"),
     ):
         resolve_user_content(
             session=s,
@@ -196,8 +198,9 @@ def test_resolve_missing_file_on_disk_raises(pg_session_factory, tmp_path):
         ws_id = ws.id
 
     # Deliberately do NOT write the file to disk.
-    with pg_session_factory() as s, pytest.raises(
-        AttachmentResolutionError, match="missing on disk"
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="missing on disk"),
     ):
         resolve_user_content(
             session=s,
@@ -209,12 +212,95 @@ def test_resolve_missing_file_on_disk_raises(pg_session_factory, tmp_path):
 
 def test_resolve_unknown_block_type_raises(pg_session_factory, tmp_path):
     """A content block with an unrecognized type raises AttachmentResolutionError."""
-    with pg_session_factory() as s, pytest.raises(
-        AttachmentResolutionError, match="unknown content-block type"
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="unknown content-block type"),
     ):
         resolve_user_content(
             session=s,
             workspaces_dir=tmp_path,
             workspace_id=uuid.uuid4(),
             content=[{"type": "video", "url": "http://example.com/video.mp4"}],
+        )
+
+
+def test_resolve_malformed_block_no_type_raises(pg_session_factory, tmp_path):
+    """A block dict missing the `type` key raises."""
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="malformed content block"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=uuid.uuid4(),
+            content=[{"foo": "bar"}],
+        )
+
+
+def test_resolve_text_block_empty_text_raises(pg_session_factory, tmp_path):
+    """A text block with empty `text` raises rather than silently emitting an empty block."""
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="text block missing text"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=uuid.uuid4(),
+            content=[{"type": "text", "text": ""}],
+        )
+
+
+def test_resolve_image_block_missing_attachment_id_raises(pg_session_factory, tmp_path):
+    """An image block without `attachment_id` raises."""
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="image block missing attachment_id"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=uuid.uuid4(),
+            content=[{"type": "image"}],
+        )
+
+
+def test_resolve_image_block_invalid_uuid_raises(pg_session_factory, tmp_path):
+    """An image block whose attachment_id is not a valid UUID raises."""
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="not a valid uuid"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=uuid.uuid4(),
+            content=[{"type": "image", "attachment_id": "not-a-uuid"}],
+        )
+
+
+def test_resolve_unsupported_suffix_raises(pg_session_factory, tmp_path):
+    """An attachment whose on-disk file has an unsupported extension raises."""
+    aid = uuid.uuid4()
+    with pg_session_factory() as s:
+        u, ws = _seed_user_and_workspace(s)
+        _seed_attachment(s, ws, u, aid, storage_path=f"{aid}.bmp")
+        s.commit()
+        ws_id = ws.id
+
+    # Write a .bmp file (which the resolver's _MIME_BY_SUFFIX rejects).
+    att_dir = tmp_path / str(ws_id) / "attachments"
+    att_dir.mkdir(parents=True, exist_ok=True)
+    (att_dir / f"{aid}.bmp").write_bytes(b"BM_fake_bmp_content")
+
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="unsupported suffix"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=ws_id,
+            content=[{"type": "image", "attachment_id": str(aid)}],
         )

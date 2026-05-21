@@ -63,9 +63,7 @@ def resolve_user_content(
             f"unexpected single-block content type: {content.get('type')!r}"
         )
     if not isinstance(content, list):
-        raise AttachmentResolutionError(
-            f"unexpected content type: {type(content).__name__}"
-        )
+        raise AttachmentResolutionError(f"unexpected content type: {type(content).__name__}")
 
     out: list[dict[str, Any]] = []
     for block in content:
@@ -92,14 +90,10 @@ def resolve_user_content(
                 raise AttachmentResolutionError(f"attachment {aid} not found")
             if att.workspace_id != workspace_id:
                 raise AttachmentResolutionError(
-                    f"attachment {aid} belongs to workspace {att.workspace_id}, "
-                    f"not {workspace_id}"
+                    f"attachment {aid} belongs to workspace {att.workspace_id}, not {workspace_id}"
                 )
             file_path = (
-                workspaces_dir
-                / str(workspace_id)
-                / "attachments"
-                / Path(att.storage_path).name
+                workspaces_dir / str(workspace_id) / "attachments" / Path(att.storage_path).name
             )
             if not file_path.exists():
                 raise AttachmentResolutionError(

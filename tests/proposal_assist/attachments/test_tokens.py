@@ -3,6 +3,7 @@ tokens = (width * height) / 750, with the longest side capped at 1568 px
 (images are downscaled before the count). Source:
 https://docs.anthropic.com/en/docs/build-with-claude/vision#calculate-image-costs
 """
+
 import io
 
 import pytest
