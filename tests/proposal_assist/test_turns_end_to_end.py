@@ -52,7 +52,7 @@ async def test_full_turn_pipeline(pg_session_factory, _settings_env):
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "Get the spec."},
+            content_text="Get the spec.",
             submitted_by_user_id=uid,
             settings=settings,
         )
@@ -114,7 +114,7 @@ async def test_full_turn_pipeline(pg_session_factory, _settings_env):
         submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "Another turn."},
+            content_text="Another turn.",
             submitted_by_user_id=uid,
             settings=settings,
         )

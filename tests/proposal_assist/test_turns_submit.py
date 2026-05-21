@@ -30,7 +30,7 @@ def test_submit_user_turn_writes_chat_turn_and_turn_job(
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "Hello agent."},
+            content_text="Hello agent.",
             submitted_by_user_id=uid,
             settings=settings,
         )
@@ -86,7 +86,7 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
             submit_user_turn(
                 session=s,
                 workspace_id=wsid,
-                content={"type": "text", "text": "hi"},
+                content_text="hi",
                 submitted_by_user_id=uid,
                 settings=settings,
             )
@@ -136,7 +136,7 @@ def test_submit_user_turn_accepts_null_submitter_for_system_initiated(
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "system message"},
+            content_text="system message",
             submitted_by_user_id=None,
             settings=settings,
         )
@@ -225,7 +225,7 @@ async def test_concurrent_submits_cannot_overshoot_cap(monkeypatch, pg_url, pg_s
                 submit_user_turn(
                     session=session,
                     workspace_id=wsid,
-                    content={"type": "text", "text": "hi"},
+                    content_text="hi",
                     submitted_by_user_id=owner_id,
                     settings=settings,
                     tokens_in=50,

@@ -49,6 +49,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Attachment, Workspace, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
+from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -223,21 +224,26 @@ async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
     return bytes(buf)
 
 
-def _probe_image_format(data: bytes) -> str:
-    """Open the bytes with Pillow and return its detected format string.
+def _probe_image_format(data: bytes) -> tuple[str, int, int]:
+    """Open the bytes with Pillow and return ``(format, width, height)``.
 
     Raises ``HTTPException(400)`` if the bytes are not a recognized image
     OR if the detected format is not in our allowlist. This is defense
     layer 2 against a client lying about ``content_type``.
+
+    B7: the size is needed at upload time to pre-populate the
+    ``Attachment.tokens_estimate`` column so submit-time cap accounting
+    doesn't need to re-read bytes for every queued turn.
     """
     try:
         with Image.open(io.BytesIO(data)) as img:
             fmt = img.format
+            width, height = img.size
     except (UnidentifiedImageError, OSError) as e:
         raise HTTPException(status_code=400, detail=f"unrecognised image data: {e}") from e
     if fmt not in _PIL_FORMAT_TO_MIME:
         raise HTTPException(status_code=400, detail=f"unsupported image format: {fmt!r}")
-    return fmt
+    return fmt, width, height
 
 
 @router.post("/{workspace_id}/files", response_class=HTMLResponse)
@@ -265,7 +271,8 @@ async def upload_file(
 
     # 3. Pillow probe (defense layer 2 — bytes must actually be an image,
     #    and the detected format must match the claimed content_type).
-    fmt = _probe_image_format(data)
+    #    Also extracts dims for the B7 token-estimate backfill below.
+    fmt, width_px, height_px = _probe_image_format(data)
     detected_mime = _PIL_FORMAT_TO_MIME[fmt]
     if detected_mime != content_type:
         raise HTTPException(
@@ -306,6 +313,9 @@ async def upload_file(
 
     # 7. Insert row + commit. If commit fails, clean up the orphan file
     #    via storage.delete_one — the DB has no row pointing at it.
+    #    Token estimate is pre-computed here so submit-time cap accounting
+    #    is one cheap sum() instead of a per-turn re-read of bytes.
+    tokens_estimate = estimate_image_tokens(width_px, height_px)
     att = Attachment(
         id=aid,
         workspace_id=ws.id,
@@ -314,6 +324,9 @@ async def upload_file(
         storage_path=relative_storage_path,
         mime_type=content_type,
         uploaded_by=user.id,
+        width_px=width_px,
+        height_px=height_px,
+        tokens_estimate=tokens_estimate,
     )
     session.add(att)
     try:

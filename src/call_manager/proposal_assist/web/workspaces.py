@@ -15,18 +15,20 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
+import logging
 import uuid
 from pathlib import Path
 
 import bleach
 import markdown
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
+    Attachment,
     ChatTurn,
     TurnJob,
     User,
@@ -35,6 +37,8 @@ from call_manager.db.models import (
     WorkspaceViewer,
 )
 from call_manager.db.session import get_db_dependency
+from call_manager.proposal_assist.attachments.storage import AttachmentStorage
+from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
     get_artifact_history_impl,
@@ -44,6 +48,15 @@ from call_manager.proposal_assist.tools.proposal import read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.turns.caps import TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import submit_user_turn
+from call_manager.proposal_assist.web.files import (
+    _ALLOWED_MIMES,
+    _MAX_BYTES,
+    _PIL_FORMAT_TO_MIME,
+    _SUFFIX_BY_MIME,
+    _probe_image_format,
+    _read_capped,
+    _sanitize_filename,
+)
 from call_manager.workspaces import create_workspace as _create_workspace
 
 # Rev2 / Codex H2: sanitize agent-controlled markdown before render.
@@ -183,6 +196,8 @@ async def _stream_turn_generator(
                 return
         await asyncio.sleep(poll_seconds)
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -354,6 +369,19 @@ def get_workspace_main(
         )
     )
 
+    # B7: list of workspace-scoped attachments for the composer picker.
+    # Ordered newest-first so the most-recently uploaded image surfaces
+    # next to the file input. Viewers also see this list (read-only) so
+    # the chat-image rendering Task 4 will produce can resolve the
+    # ``<img src=>`` references without a separate API round-trip.
+    workspace_attachments = list(
+        session.scalars(
+            select(Attachment)
+            .where(Attachment.workspace_id == workspace_id)
+            .order_by(Attachment.uploaded_at.desc())
+        )
+    )
+
     # Per-user, per-workspace disclosure check.
     prior_ack = session.scalar(
         select(WorkspaceEvent.id)
@@ -388,6 +416,7 @@ def get_workspace_main(
             "artifact_rendered": rendered,
             "artifact_raw": raw,
             "needs_disclosure": needs_disclosure,
+            "workspace_attachments": workspace_attachments,
         },
     )
 
@@ -422,13 +451,18 @@ def post_disclosure(
     return HTMLResponse("")
 
 
+_MAX_TURN_ATTACHMENTS = 5
+
+
 @router.post("/{workspace_id}/turns")
-def post_turn(
+async def post_turn(
     workspace_id: uuid.UUID,
     request: Request,
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
     content: str = Form(...),
+    attachment_ids: list[uuid.UUID] = Form(default_factory=list),  # noqa: B008
+    files: list[UploadFile] = File(default_factory=list),  # noqa: B008
 ) -> HTMLResponse:
     """Enqueue a user turn and return TWO HTML fragments (H1):
     1. The rendered user-turn row (immediate feedback in #chat-history).
@@ -440,6 +474,21 @@ def post_turn(
 
     Returns 403 for non-owners (shared-read, single-write spec).
     Returns 429 when the daily token cap is exceeded.
+
+    B7: accepts multipart with two optional fields layered on top of the
+    legacy ``content`` text:
+
+      * ``files`` — fresh uploads, each one validated + persisted via
+        the same atomic ordering as ``POST /files``. Any per-upload
+        failure (oversize, bad MIME, etc.) ROLLS BACK every prior
+        upload from this same request (DB row + on-disk file) before
+        returning 400 — no half-committed state.
+      * ``attachment_ids`` — references to pre-existing rows from this
+        workspace's files panel. Cross-workspace IDs raise 400 via
+        :func:`submit_user_turn`.
+
+    The combined attachment count is capped at 5; overshooting returns
+    400 with all just-uploaded files cleaned up.
     """
     ws = _require_owner(
         workspace_id=workspace_id,
@@ -447,21 +496,137 @@ def post_turn(
         session=session,
     )
     settings = request.app.state.settings
+    storage = AttachmentStorage(root=Path(settings.workspaces_dir))
+
+    # Track (workspace_id, attachment_id, suffix) for any files we
+    # persisted during THIS request so we can roll them back atomically
+    # if a later step (another upload, the submit call) fails. Plan-
+    # critical: if any new-file upload fails we MUST delete every
+    # already-written prior upload, not leave half a turn's worth on
+    # disk.
+    created_uploads: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+
+    def _rollback_created_uploads() -> None:
+        # Best-effort cleanup; the surrounding session.rollback drops the
+        # rows, so a failed unlink only leaves an orphan file (no broken
+        # DB pointer). Log and continue — never let a cleanup error mask
+        # the original failure.
+        for ws_id, aid, suf in created_uploads:
+            try:
+                storage.delete_one(
+                    workspace_id=ws_id,
+                    attachment_id=aid,
+                    suffix=suf,
+                )
+            except OSError:
+                logger.warning(
+                    "post_turn: orphan cleanup failed for attachment %s",
+                    aid,
+                    exc_info=True,
+                )
+
+    # --- Inline upload branch (same ordering as files.py:upload_file) ---
+    real_files = [f for f in files if f and f.filename]
+    new_upload_ids: list[uuid.UUID] = []
+    for upload in real_files:
+        content_type = (upload.content_type or "").lower()
+        if content_type not in _ALLOWED_MIMES:
+            session.rollback()
+            _rollback_created_uploads()
+            return HTMLResponse(
+                f"<p>Unsupported content_type: {content_type!r}</p>",
+                status_code=400,
+            )
+        try:
+            data = await _read_capped(upload, _MAX_BYTES)
+        except HTTPException as e:
+            session.rollback()
+            _rollback_created_uploads()
+            return HTMLResponse(f"<p>{e.detail}</p>", status_code=e.status_code)
+        if not data:
+            session.rollback()
+            _rollback_created_uploads()
+            return HTMLResponse("<p>empty upload</p>", status_code=400)
+        try:
+            fmt, width_px, height_px = _probe_image_format(data)
+        except HTTPException as e:
+            session.rollback()
+            _rollback_created_uploads()
+            return HTMLResponse(f"<p>{e.detail}</p>", status_code=e.status_code)
+        detected_mime = _PIL_FORMAT_TO_MIME[fmt]
+        if detected_mime != content_type:
+            session.rollback()
+            _rollback_created_uploads()
+            return HTMLResponse(
+                f"<p>content_type {content_type!r} does not match the actual "
+                f"image format {detected_mime!r}</p>",
+                status_code=400,
+            )
+        suffix = _SUFFIX_BY_MIME[content_type]
+        aid = uuid.uuid4()
+        safe_filename = _sanitize_filename(upload.filename or f"attachment{suffix}")
+        relative_storage_path = f"{aid}{suffix}"
+        try:
+            storage.write_atomic(
+                workspace_id=ws.id,
+                attachment_id=aid,
+                suffix=suffix,
+                data=data,
+            )
+        except OSError as e:
+            logger.warning(
+                "post_turn: storage.write_atomic failed for workspace=%s: %s",
+                ws.id,
+                e,
+            )
+            session.rollback()
+            _rollback_created_uploads()
+            return HTMLResponse("<p>storage write failed</p>", status_code=500)
+        # Record now so a downstream failure rolls back even files we
+        # haven't yet inserted a row for (the row insert below could
+        # still raise).
+        created_uploads.append((ws.id, aid, suffix))
+        tokens_estimate = estimate_image_tokens(width_px, height_px)
+        att = Attachment(
+            id=aid,
+            workspace_id=ws.id,
+            kind="figure",
+            filename=safe_filename,
+            storage_path=relative_storage_path,
+            mime_type=content_type,
+            uploaded_by=user.id,
+            width_px=width_px,
+            height_px=height_px,
+            tokens_estimate=tokens_estimate,
+        )
+        session.add(att)
+        new_upload_ids.append(aid)
+
+    # Combine: new uploads + explicit references. Order preserved so the
+    # composer's display order matches what we render in the chat row.
+    all_ids: list[uuid.UUID] = new_upload_ids + list(attachment_ids)
+    if len(all_ids) > _MAX_TURN_ATTACHMENTS:
+        session.rollback()
+        _rollback_created_uploads()
+        return HTMLResponse(
+            f"<p>Too many attachments: {len(all_ids)} > {_MAX_TURN_ATTACHMENTS} max per turn.</p>",
+            status_code=400,
+        )
+
     try:
-        # TODO(B7): pass tokens_in once attachment-token counting lands.
-        # Without it, the per-workspace cap is reactive (counts billed
-        # assistant tokens only), so the row lock in submit_user_turn is
-        # currently defense-in-depth for text-only B6 traffic.
         job = submit_user_turn(
             session=session,
             workspace_id=ws.id,
-            content={"type": "text", "text": content},
+            content_text=content,
+            attachment_ids=all_ids or None,
             submitted_by_user_id=user.id,
             settings=settings,
+            workspaces_dir=Path(settings.workspaces_dir),
         )
         session.commit()
     except TokenCapExceeded as e:
         session.rollback()
+        _rollback_created_uploads()
         return HTMLResponse(
             f"<p>Workspace daily token cap exceeded: {e.reason}. "
             f"Used {e.used_in} input / {e.used_out} output today; "
@@ -469,12 +634,30 @@ def post_turn(
             f"Europe/Stockholm or ask an admin to raise the cap.</p>",
             status_code=429,
         )
+    except ValueError as e:
+        session.rollback()
+        _rollback_created_uploads()
+        return HTMLResponse(
+            f"<p>{_html.escape(str(e))}</p>",
+            status_code=400,
+        )
 
     # Rev2 / H2: every interpolated user value goes through html.escape —
     # never f-string'd raw into the response body.
     safe_text = _html.escape(content)
+    image_html = ""
+    for aid in all_ids:
+        # Inline thumbnail per attachment; the file serve route enforces
+        # owner/viewer access on its own so a viewer reading the chat
+        # stream sees the same image the owner just sent.
+        image_html += (
+            f"<img src='/workspaces/{ws.id}/files/{aid}' "
+            f"alt='attachment' style='max-width: 200px; max-height: 200px;'>"
+        )
     user_turn_html = (
-        f"<div class='chat-turn' data-role='user'><strong>user:</strong><p>{safe_text}</p></div>"
+        f"<div class='chat-turn' data-role='user'>"
+        f"<strong>user:</strong><p>{safe_text}</p>{image_html}"
+        f"</div>"
     )
     sse_connector = (
         f"<div id='sse-mount-{job.id}' "

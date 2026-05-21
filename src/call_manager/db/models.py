@@ -792,6 +792,18 @@ class Attachment(Base):
         nullable=False,
         server_default=func.now(),
     )
+    # B7: image dimensions + pre-computed vision token estimate.
+    # Populated at upload time from a Pillow probe (see web/files.py).
+    # NULLable for two narrow reasons:
+    # 1. T2 panel inserts rows before T3 backfills the upload handler;
+    #    rows from that window have NULL dims until re-probed on submit.
+    # 2. Pre-B7 rows from any prior B5 demo data.
+    # NULL is NOT treated as zero in the cap sum — submit_user_turn
+    # re-probes from disk and persists the values before counting
+    # (see proposal_assist/turns/submit.py).
+    width_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class AttachmentJob(Base):

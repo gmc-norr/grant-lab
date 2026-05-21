@@ -178,6 +178,36 @@ def test_upload_png_owner_persists_row_and_file(
     assert str(att.id).encode() in resp.content
 
 
+def test_upload_writes_dimensions(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """B7 Task 3: the upload handler probes Pillow for ``img.size`` and
+    persists ``width_px``, ``height_px``, ``tokens_estimate`` on the row
+    so submit-time cap accounting is a cheap sum instead of a per-turn
+    re-read of bytes."""
+    from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    # 16x32 PNG → estimate_image_tokens(16, 32) = ceil(512/750) = 1.
+    data = _make_png_bytes(width=16, height=32)
+    resp = client_authed_owner.post(
+        f"/workspaces/{wsid}/files",
+        files={"file": ("fig.png", data, "image/png")},
+    )
+    assert resp.status_code == 200, resp.text
+    with pg_session_factory() as s:
+        att = s.scalar(select(Attachment).where(Attachment.workspace_id == wsid))
+    assert att.width_px == 16
+    assert att.height_px == 32
+    assert att.tokens_estimate == estimate_image_tokens(16, 32)
+
+
 def test_upload_jpeg_uses_jpg_suffix(
     client_authed_owner,
     pg_session_factory,

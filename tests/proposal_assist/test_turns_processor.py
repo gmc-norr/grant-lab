@@ -37,7 +37,7 @@ def _build_controller_and_submit(pg_session_factory, _settings_env, events):
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "Hi"},
+            content_text="Hi",
             submitted_by_user_id=uid,
             settings=settings,
         )
@@ -156,7 +156,7 @@ async def test_process_turn_handles_sdk_turn_error(
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "hi"},
+            content_text="hi",
             submitted_by_user_id=uid,
             settings=settings,
         )
@@ -314,7 +314,7 @@ async def test_process_turn_survives_stale_running_row_from_prior_crash(
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "hi"},
+            content_text="hi",
             submitted_by_user_id=uid,
             settings=settings,
         )
@@ -380,7 +380,7 @@ async def test_process_turn_leaves_row_queued_when_launch_raises(
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "hi"},
+            content_text="hi",
             submitted_by_user_id=uid,
             settings=settings,
         )
@@ -444,7 +444,7 @@ async def test_process_turn_finalizes_failed_when_user_turn_row_missing(
         job = submit_user_turn(
             session=s,
             workspace_id=wsid,
-            content={"type": "text", "text": "hi"},
+            content_text="hi",
             submitted_by_user_id=uid,
             settings=settings,
         )

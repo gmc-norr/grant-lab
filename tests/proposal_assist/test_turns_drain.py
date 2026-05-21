@@ -55,7 +55,7 @@ async def test_drain_tick_processes_one_queued_turn_per_workspace(
             job = submit_user_turn(
                 session=s,
                 workspace_id=ws.id,
-                content={"type": "text", "text": "hi"},
+                content_text="hi",
                 submitted_by_user_id=uid,
                 settings=settings,
             )

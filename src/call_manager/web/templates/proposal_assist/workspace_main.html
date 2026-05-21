@@ -23,12 +23,40 @@
     </div>
     {% include "proposal_assist/partials/cloud_banner.html" %}
     {% if is_owner %}
-    <form id="composer" method="post" action="/workspaces/{{ workspace.id }}/turns"
+    <form id="composer" method="post" enctype="multipart/form-data"
+          action="/workspaces/{{ workspace.id }}/turns"
           hx-post="/workspaces/{{ workspace.id }}/turns"
           hx-target="#chat-history"
           hx-swap="beforeend"
+          hx-encoding="multipart/form-data"
           hx-on::after-request="this.reset()">
       <textarea name="content" rows="3" required></textarea>
+
+      <details>
+        <summary>Attach images ({{ workspace_attachments|length }} in workspace)</summary>
+
+        <label>
+          Upload new (max 5 MB each, 5 total per turn):
+          <input type="file" name="files" multiple
+                 accept="image/png,image/jpeg,image/webp,image/gif">
+        </label>
+
+        {% if workspace_attachments %}
+        <fieldset>
+          <legend>Or pick from this workspace:</legend>
+          {% for att in workspace_attachments %}
+          <label class="att-pick" style="display: inline-block; margin: 0.25em;">
+            <input type="checkbox" name="attachment_ids" value="{{ att.id }}">
+            <img src="/workspaces/{{ att.workspace_id }}/files/{{ att.id }}"
+                 alt="{{ att.filename|e }}"
+                 style="max-width: 80px; max-height: 80px; vertical-align: middle;">
+            <span>{{ att.filename|e }}</span>
+          </label>
+          {% endfor %}
+        </fieldset>
+        {% endif %}
+      </details>
+
       <button type="submit">Send</button>
     </form>
     {% else %}
