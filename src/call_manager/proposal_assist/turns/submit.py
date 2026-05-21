@@ -68,7 +68,11 @@ from call_manager.proposal_assist.turns.caps import (
     check_daily_token_cap,
 )
 
-_MAX_ATTACHMENTS_PER_TURN = 5
+MAX_ATTACHMENTS_PER_TURN = 5
+"""Public per-turn attachment cap. Imported by web/workspaces.py so the
+web-layer pre-check and the submit-layer authoritative check use one
+constant — drift in either direction would cause a UX/contract mismatch.
+"""
 
 
 def _build_user_content(
@@ -214,12 +218,21 @@ def submit_user_turn(
     if locked is None:
         raise ValueError(f"workspace {workspace_id} does not exist")
 
+    # Early input validation: empty submits would otherwise reach the
+    # resolver and surface as the confusing
+    # "attachment_resolution_failed: text block missing text" error.
+    # Reject at the entry boundary with a clearer message.
+    if not content_text and not attachment_ids:
+        raise ValueError("turn must have text or attachments")
+    if not content_text and attachment_ids:
+        raise ValueError("content_text required when attachments are present")
+
     # ---- B7 attachment resolution + token pre-count -----------------
     attachments: list[Attachment] = []
     if attachment_ids:
-        if len(attachment_ids) > _MAX_ATTACHMENTS_PER_TURN:
+        if len(attachment_ids) > MAX_ATTACHMENTS_PER_TURN:
             raise ValueError(
-                f"too many attachments: {len(attachment_ids)} > {_MAX_ATTACHMENTS_PER_TURN}"
+                f"too many attachments: {len(attachment_ids)} > {MAX_ATTACHMENTS_PER_TURN}"
             )
 
         # Resolve all rows in one query, then re-order by request order

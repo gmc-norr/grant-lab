@@ -48,7 +48,10 @@ from call_manager.proposal_assist.tools.history import (
 from call_manager.proposal_assist.tools.proposal import read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.turns.caps import TokenCapExceeded
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from call_manager.proposal_assist.turns.submit import (
+    MAX_ATTACHMENTS_PER_TURN,
+    submit_user_turn,
+)
 from call_manager.proposal_assist.web.files import (
     _ALLOWED_MIMES,
     _MAX_BYTES,
@@ -481,9 +484,6 @@ def post_disclosure(
     return HTMLResponse("")
 
 
-_MAX_TURN_ATTACHMENTS = 5
-
-
 @router.post("/{workspace_id}/turns")
 async def post_turn(
     workspace_id: uuid.UUID,
@@ -639,11 +639,11 @@ async def post_turn(
     # Combine: new uploads + explicit references. Order preserved so the
     # composer's display order matches what we render in the chat row.
     all_ids: list[uuid.UUID] = new_upload_ids + list(attachment_ids)
-    if len(all_ids) > _MAX_TURN_ATTACHMENTS:
+    if len(all_ids) > MAX_ATTACHMENTS_PER_TURN:
         session.rollback()
         _rollback_created_uploads()
         return HTMLResponse(
-            f"<p>Too many attachments: {len(all_ids)} > {_MAX_TURN_ATTACHMENTS} max per turn.</p>",
+            f"<p>Too many attachments: {len(all_ids)} > {MAX_ATTACHMENTS_PER_TURN} max per turn.</p>",
             status_code=400,
         )
 

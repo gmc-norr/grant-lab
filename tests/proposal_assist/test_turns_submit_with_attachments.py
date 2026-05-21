@@ -327,3 +327,85 @@ def test_submit_without_attachments_keeps_dict_content_shape(
             )
         )
     assert turn.content == {"type": "text", "text": "plain"}
+
+
+def test_submit_empty_text_with_no_attachments_raises(
+    pg_session_factory, _settings_env
+):
+    """Empty submit (no text, no attachments) is rejected at submit
+    entry with a clear ValueError — not a confusing downstream
+    'attachment_resolution_failed: text block missing text'."""
+    settings = Settings()
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        wsid, owner_id = ws.id, owner.id
+
+    with pg_session_factory() as s, pytest.raises(
+        ValueError, match="turn must have text or attachments"
+    ):
+        submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content_text="",
+            attachment_ids=None,
+            submitted_by_user_id=owner_id,
+            settings=settings,
+        )
+
+
+def test_submit_empty_text_with_attachments_raises(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Empty text + at least one attachment: rejected at submit entry
+    with a clearer message than the resolver's downstream 'missing
+    text' error. The attachment_ids form field could be set by a
+    composer bug or a misuse; surface the error at the boundary."""
+    settings = Settings()
+    aid = uuid.uuid4()
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        wsid, owner_id = ws.id, owner.id
+
+        # Seed an attachment with a real on-disk file so the resolver
+        # would otherwise be able to load it — we want to prove that
+        # we fail BEFORE reaching the resolver.
+        att_dir = tmp_path / str(wsid) / "attachments"
+        att_dir.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (4, 4), color=(0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        (att_dir / f"{aid}.png").write_bytes(buf.getvalue())
+        s.add(
+            Attachment(
+                id=aid,
+                workspace_id=wsid,
+                kind="figure",
+                filename="x.png",
+                storage_path=f"{aid}.png",
+                mime_type="image/png",
+                uploaded_by=owner_id,
+                width_px=4,
+                height_px=4,
+                tokens_estimate=1,
+            )
+        )
+        s.commit()
+
+    with pg_session_factory() as s, pytest.raises(
+        ValueError, match="content_text required when attachments"
+    ):
+        submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content_text="",
+            attachment_ids=[aid],
+            submitted_by_user_id=owner_id,
+            settings=settings,
+            workspaces_dir=tmp_path,
+        )
