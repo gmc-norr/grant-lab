@@ -23,6 +23,7 @@ dependencies = [
     "claude-agent-sdk",
     "markdown>=3.10.2",
     "bleach>=6.3.0",
+    "pillow>=12.2.0",
 ]
 
 [dependency-groups]
