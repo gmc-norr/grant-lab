@@ -107,19 +107,27 @@ async def process_turn_once(
         )
         return
 
-    # Atomic claim AFTER the sweep has run.
+    # Atomic claim AFTER the sweep has run. RETURNING also brings back
+    # submitted_by_user_id so the outcome events (cloud_turn_completed /
+    # cloud_turn_failed) carry actor_id — matches the submit-time
+    # cloud_turn_sent event and gives compliance a single-row "who"
+    # answer without a turn_jobs join.
     with session_factory() as s:
         result = s.execute(
             update(TurnJob)
             .where(TurnJob.id == turn_job_id, TurnJob.status == "queued")
             .values(status="running", started_at=datetime.now(UTC))
-            .returning(TurnJob.workspace_id, TurnJob.user_turn_id)
+            .returning(
+                TurnJob.workspace_id,
+                TurnJob.user_turn_id,
+                TurnJob.submitted_by_user_id,
+            )
         ).first()
         s.commit()
         if result is None:
             logger.info("turn_job %s already claimed or completed; skipping", turn_job_id)
             return
-        workspace_id, user_turn_id = result
+        workspace_id, user_turn_id, submitted_by_user_id = result
 
     with session_factory() as s:
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
@@ -129,6 +137,7 @@ async def process_turn_once(
                 session_factory,
                 turn_job_id=turn_job_id,
                 workspace_id=workspace_id,
+                submitted_by_user_id=submitted_by_user_id,
                 error="missing_user_turn_row",
                 tokens_in=0,
                 tokens_out=0,
@@ -192,6 +201,7 @@ async def process_turn_once(
             session_factory,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
+            submitted_by_user_id=submitted_by_user_id,
             last_assistant_id=last_assistant_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
@@ -204,6 +214,7 @@ async def process_turn_once(
             session_factory,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
+            submitted_by_user_id=submitted_by_user_id,
             error=f"sdk_turn_error: {sdk_error}{status_suffix}",
             tokens_in=tokens_in,
             tokens_out=tokens_out,
@@ -214,6 +225,7 @@ async def process_turn_once(
             session_factory,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
+            submitted_by_user_id=submitted_by_user_id,
             error=f"processor_failure: {type(other_error).__name__}: {other_error}",
             tokens_in=tokens_in,
             tokens_out=tokens_out,
@@ -255,6 +267,7 @@ def _finalize_success(
     *,
     turn_job_id: uuid.UUID,
     workspace_id: uuid.UUID,
+    submitted_by_user_id: int | None,
     last_assistant_id: uuid.UUID | None,
     tokens_in: int,
     tokens_out: int,
@@ -280,6 +293,7 @@ def _finalize_success(
             WorkspaceEvent(
                 workspace_id=workspace_id,
                 kind="cloud_turn_completed",
+                actor_id=submitted_by_user_id,
                 payload={
                     "turn_job_id": str(turn_job_id),
                     "tokens_in": tokens_in,
@@ -296,6 +310,7 @@ def _finalize_failed(
     *,
     turn_job_id: uuid.UUID,
     workspace_id: uuid.UUID,
+    submitted_by_user_id: int | None,
     error: str,
     tokens_in: int,
     tokens_out: int,
@@ -310,6 +325,7 @@ def _finalize_failed(
             WorkspaceEvent(
                 workspace_id=workspace_id,
                 kind="cloud_turn_failed",
+                actor_id=submitted_by_user_id,
                 payload={
                     "turn_job_id": str(turn_job_id),
                     "tokens_in": tokens_in,

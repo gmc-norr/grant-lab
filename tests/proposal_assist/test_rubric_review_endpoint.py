@@ -272,7 +272,7 @@ def test_rubric_review_post_returns_403_for_non_owner(
     assert resp.status_code == 403
 
 
-def test_workspace_placeholder_returns_200_for_owner(
+def test_workspace_main_view_returns_200_for_owner(
     monkeypatch,
     pg_url,
     pg_session_factory,
@@ -291,7 +291,7 @@ def test_workspace_placeholder_returns_200_for_owner(
     assert "setup" in resp.text  # current_phase rendered
 
 
-def test_workspace_placeholder_returns_403_for_non_owner(
+def test_workspace_main_view_returns_403_for_non_viewer(
     monkeypatch,
     pg_url,
     pg_session_factory,

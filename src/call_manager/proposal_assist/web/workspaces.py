@@ -120,18 +120,33 @@ def _render_chat_turn_html(turn: ChatTurn) -> str:
     return snippet.replace("\n", "")
 
 
+# Status values that terminate the SSE stream. Shared so a future
+# schema addition (e.g. `'orphaned'`) gets surfaced as a hang risk
+# at this single point rather than silently breaking the stream.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 async def _stream_turn_generator(
     *,
     session_factory,
     workspace_id: uuid.UUID,
     turn_job_id: uuid.UUID,
     poll_seconds: float = 0.2,
+    request: Request | None = None,
 ):
     """Async generator that yields SSE-formatted strings.
 
     Extracted from the route handler so tests can drive it directly
     (skipping the HTTP layer that's hard to interleave with background
     writes in a single test).
+
+    B6-residuals: when `request` is provided, the generator checks
+    `request.is_disconnected()` each poll and exits cleanly if the
+    consumer's TCP connection went away. Without this, a closed browser
+    tab leaves the loop polling the DB at `poll_seconds` cadence until
+    the turn_job reaches a terminal status — accumulating dead loops
+    indefinitely under viewer fan-out. Tests pass `request=None` to
+    keep the unit test deterministic.
     """
     # Seed last_seen_position at the user_turn's position (so we don't
     # echo the user turn back — it was already shown by the POST handler).
@@ -145,6 +160,8 @@ async def _stream_turn_generator(
         )
 
     while True:
+        if request is not None and await request.is_disconnected():
+            return
         with session_factory() as s:
             new_rows = list(
                 s.scalars(
@@ -161,7 +178,7 @@ async def _stream_turn_generator(
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
             tj = s.get(TurnJob, turn_job_id)
-            if tj.status in ("completed", "failed", "cancelled"):
+            if tj.status in TERMINAL_STATUSES:
                 yield f"event: done\ndata: {tj.status}\n\n"
                 return
         await asyncio.sleep(poll_seconds)
@@ -495,6 +512,7 @@ async def stream_turn(
             session_factory=request.app.state.session_factory,
             workspace_id=ws.id,
             turn_job_id=turn_job_id,
+            request=request,  # B6-residuals: enables client-disconnect detection
         ),
         media_type="text/event-stream",
     )
