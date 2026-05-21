@@ -565,3 +565,50 @@ def test_chat_history_view_renders_image_thumbnail(
     assert "<p>look at this fig</p>" in body
     assert f"/workspaces/{wsid}/files/{aid}" in body
     assert "chat-image" in body
+
+
+def test_post_turn_error_html_is_escaped(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Reflected XSS regression: a malicious Content-Type or upload
+    failure detail must NOT land as live HTML in the swap target."""
+    import io
+
+    from fastapi.testclient import TestClient
+
+    from call_manager.auth.session_cookie import SessionSigner
+    from call_manager.db.models import User, Workspace
+    from call_manager.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
+    app = create_app()
+
+    with pg_session_factory() as s:
+        owner = User(email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="Test ws")
+        s.add(ws)
+        s.commit()
+        uid, wsid = owner.id, ws.id
+
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    try:
+        signer: SessionSigner = app.state.session_signer
+        client.cookies.set("session", signer.make(user_id=uid))
+        attack = "image/png<script>alert(1)</script>"
+        resp = client.post(
+            f"/workspaces/{wsid}/turns",
+            data={"content": "hi"},
+            files={"files": ("x.png", io.BytesIO(b"x"), attack)},
+        )
+        assert resp.status_code == 400
+        assert "<script>" not in resp.text
+        assert "&lt;script&gt;" in resp.text or "&#x3c;script&#x3e;" in resp.text
+    finally:
+        client.__exit__(None, None, None)

@@ -564,7 +564,7 @@ async def post_turn(
             session.rollback()
             _rollback_created_uploads()
             return HTMLResponse(
-                f"<p>Unsupported content_type: {content_type!r}</p>",
+                f"<p>Unsupported content_type: {_html.escape(repr(content_type))}</p>",
                 status_code=400,
             )
         try:
@@ -572,7 +572,9 @@ async def post_turn(
         except HTTPException as e:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(f"<p>{e.detail}</p>", status_code=e.status_code)
+            return HTMLResponse(
+                f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code
+            )
         if not data:
             session.rollback()
             _rollback_created_uploads()
@@ -582,14 +584,16 @@ async def post_turn(
         except HTTPException as e:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(f"<p>{e.detail}</p>", status_code=e.status_code)
+            return HTMLResponse(
+                f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code
+            )
         detected_mime = _PIL_FORMAT_TO_MIME[fmt]
         if detected_mime != content_type:
             session.rollback()
             _rollback_created_uploads()
             return HTMLResponse(
-                f"<p>content_type {content_type!r} does not match the actual "
-                f"image format {detected_mime!r}</p>",
+                f"<p>content_type {_html.escape(repr(content_type))} does not "
+                f"match the actual image format {_html.escape(repr(detected_mime))}</p>",
                 status_code=400,
             )
         suffix = _SUFFIX_BY_MIME[content_type]
