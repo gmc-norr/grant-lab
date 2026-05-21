@@ -34,9 +34,18 @@ async def drain_turn_queue_tick(
     job per workspace; dispatch process_turn_once for each. Returns the
     count of dispatched turns."""
     with session_factory() as s:
+        # Exclude workspaces that already have a running turn — otherwise
+        # the atomic claim in process_turn_once would trip the partial
+        # unique index on turn_jobs(workspace_id) WHERE status='running',
+        # raising IntegrityError once per drain tick under any moderately
+        # busy workspace.
+        running_subq = (
+            select(TurnJob.workspace_id).where(TurnJob.status == "running")
+        ).scalar_subquery()
         stmt = (
             select(TurnJob.id, TurnJob.workspace_id)
             .where(TurnJob.status == "queued")
+            .where(TurnJob.workspace_id.notin_(running_subq))
             .distinct(TurnJob.workspace_id)
             .order_by(TurnJob.workspace_id, TurnJob.queued_at, TurnJob.id)
         )
