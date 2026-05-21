@@ -409,3 +409,76 @@ def test_submit_empty_text_with_attachments_raises(
             settings=settings,
             workspaces_dir=tmp_path,
         )
+
+
+def test_submit_mixed_valid_and_cross_workspace_ids_raises(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Mixing valid attachment_ids from THIS workspace with one that
+    belongs to ANOTHER workspace must raise — not silently drop the
+    cross-workspace one and proceed with the valid ones. Defense against
+    partial-success via crafted form payloads."""
+    settings = Settings()
+    valid_a1 = uuid.uuid4()
+    valid_a2 = uuid.uuid4()
+    cross_b = uuid.uuid4()
+
+    def _write_png_to(ws_id, aid):
+        att_dir = tmp_path / str(ws_id) / "attachments"
+        att_dir.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (4, 4), color=(0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        (att_dir / f"{aid}.png").write_bytes(buf.getvalue())
+
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        s.commit()
+        ws_a = make_workspace(s, owner=owner, title="A")
+        ws_b = make_workspace(s, owner=owner, title="B")
+        s.commit()
+        wsid_a, wsid_b, owner_id = ws_a.id, ws_b.id, owner.id
+
+        _write_png_to(wsid_a, valid_a1)
+        _write_png_to(wsid_a, valid_a2)
+        _write_png_to(wsid_b, cross_b)
+
+        for ws_id, aid in [(wsid_a, valid_a1), (wsid_a, valid_a2), (wsid_b, cross_b)]:
+            s.add(
+                Attachment(
+                    id=aid,
+                    workspace_id=ws_id,
+                    kind="figure",
+                    filename="x.png",
+                    storage_path=f"{aid}.png",
+                    mime_type="image/png",
+                    uploaded_by=owner_id,
+                    width_px=4,
+                    height_px=4,
+                    tokens_estimate=1,
+                )
+            )
+        s.commit()
+
+    # Submit on ws_a with two valid IDs plus one cross-workspace ID.
+    # MUST raise — and MUST NOT silently insert a turn with only the
+    # valid two while dropping the cross-workspace one.
+    with pg_session_factory() as s, pytest.raises(
+        ValueError, match="does not belong to workspace"
+    ):
+        submit_user_turn(
+            session=s,
+            workspace_id=wsid_a,
+            content_text="hello",
+            attachment_ids=[valid_a1, cross_b, valid_a2],
+            submitted_by_user_id=owner_id,
+            settings=settings,
+            workspaces_dir=tmp_path,
+        )
+
+    # Confirm no partial-success turn was inserted.
+    with pg_session_factory() as s:
+        turns = list(
+            s.scalars(select(ChatTurn).where(ChatTurn.workspace_id == wsid_a))
+        )
+    assert turns == []

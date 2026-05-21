@@ -658,3 +658,42 @@ def test_delete_cross_workspace_returns_404(
     with pg_session_factory() as s:
         survivor = s.get(Attachment, aid)
     assert survivor is not None
+
+
+def test_upload_same_image_twice_creates_two_rows(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """Uploading the same bytes twice creates two distinct Attachment
+    rows AND two distinct files on disk — no implicit dedup. Each row
+    has its own UUID and the composer can reference both in one turn."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    data = _make_png_bytes(width=8, height=8)
+    resp1 = client_authed_owner.post(
+        f"/workspaces/{wsid}/files",
+        files={"file": ("fig.png", data, "image/png")},
+    )
+    assert resp1.status_code == 200, resp1.text
+    resp2 = client_authed_owner.post(
+        f"/workspaces/{wsid}/files",
+        files={"file": ("fig.png", data, "image/png")},
+    )
+    assert resp2.status_code == 200, resp2.text
+
+    with pg_session_factory() as s:
+        rows = list(
+            s.scalars(select(Attachment).where(Attachment.workspace_id == wsid))
+        )
+    assert len(rows) == 2
+    assert rows[0].id != rows[1].id
+    # Two distinct files on disk.
+    root = _settings_root(client_authed_owner)
+    att_dir = root / str(wsid) / "attachments"
+    files = sorted(p.name for p in att_dir.iterdir())
+    assert len(files) == 2
+    assert files[0] != files[1]

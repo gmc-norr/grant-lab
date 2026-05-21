@@ -30,6 +30,16 @@ Atomicity ordering (load-bearing — see plan's "Plan-Critical Constraints"):
 Cross-workspace IDOR: serve/delete look up the row by id, then return 404
 (not 403) when ``att.workspace_id != path workspace_id`` — we do not leak
 the existence of attachments the caller can't see.
+
+XSS surface note (B7 residuals review): ``HTTPException.detail`` from
+the validators in this module — e.g. ``"unrecognised image data: <pillow
+error>"``, ``"unsupported image format: 'XYZ'"`` — contains
+attacker-influenced data (the Pillow exception message can include bytes
+from arbitrary uploads). Today these responses are JSON-only (FastAPI's
+default), so the reflected-HTML vector does not apply here. If a future
+change makes any of these paths return ``HTMLResponse``, the ``detail``
+MUST be ``html.escape()``-ed before interpolation. See ``post_turn``'s
+error paths in ``web/workspaces.py`` for the established pattern.
 """
 
 from __future__ import annotations
