@@ -64,8 +64,10 @@ from call_manager.proposal_assist.attachments.tokens import (
     estimate_image_tokens_from_bytes,
 )
 from call_manager.proposal_assist.turns.caps import (
+    GlobalTokenCapExceeded,
     TokenCapExceeded,
     check_daily_token_cap,
+    check_global_daily_token_cap,
 )
 
 MAX_ATTACHMENTS_PER_TURN = 5
@@ -271,6 +273,18 @@ def submit_user_turn(
             tokens_in = sum(att.tokens_estimate or 0 for att in attachments) + (
                 len(content_text) // 4
             )
+
+    # Global cap check (org-wide guardrail). Read-only — no global
+    # advisory lock. See check_global_daily_token_cap docstring.
+    global_cap = check_global_daily_token_cap(session, settings=settings)
+    if not global_cap.allowed:
+        raise GlobalTokenCapExceeded(
+            used_in=global_cap.used_in,
+            used_out=global_cap.used_out,
+            cap_in=global_cap.cap_in,
+            cap_out=global_cap.cap_out,
+            reason=global_cap.reason or "cap_exceeded",
+        )
 
     cap = check_daily_token_cap(session, workspace_id, settings=settings)
     if not cap.allowed:

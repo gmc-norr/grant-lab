@@ -143,6 +143,27 @@ class Settings(BaseSettings):
         alias="DAILY_TOKEN_CAP_OUTPUT",
         description="Per-workspace default daily output-token cap.",
     )
+    global_daily_token_cap_input: int = Field(
+        default=5_000_000,
+        alias="GLOBAL_DAILY_TOKEN_CAP_INPUT",
+        description=(
+            "Org-wide ceiling on total input tokens (sum across all "
+            "workspaces) per Europe/Stockholm day. Defaults to 10x the "
+            "per-workspace cap so a single runaway workspace can't bill "
+            "the whole budget. Enforced before per-workspace cap; a small "
+            "overshoot from concurrent submits is acceptable (guardrail, "
+            "not exact ledger)."
+        ),
+    )
+    global_daily_token_cap_output: int = Field(
+        default=1_000_000,
+        alias="GLOBAL_DAILY_TOKEN_CAP_OUTPUT",
+        description=(
+            "Org-wide ceiling on total output tokens (sum across all "
+            "workspaces) per Europe/Stockholm day. Defaults to 10x the "
+            "per-workspace cap."
+        ),
+    )
     compaction_turn_threshold: int = Field(
         default=100,
         alias="COMPACTION_TURN_THRESHOLD",

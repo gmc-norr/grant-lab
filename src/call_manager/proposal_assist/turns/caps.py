@@ -59,6 +59,32 @@ class TokenCapExceeded(RuntimeError):
         self.reason = reason
 
 
+class GlobalTokenCapExceeded(RuntimeError):
+    """Raised when the org-wide daily-token ceiling is reached.
+
+    Distinct from TokenCapExceeded so the web layer can differentiate
+    'your workspace ran out' vs 'the whole org ran out'."""
+
+    def __init__(
+        self,
+        *,
+        used_in: int,
+        used_out: int,
+        cap_in: int,
+        cap_out: int,
+        reason: str,
+    ) -> None:
+        super().__init__(
+            f"global {reason}: used_in={used_in} used_out={used_out} "
+            f"cap_in={cap_in} cap_out={cap_out}"
+        )
+        self.used_in = used_in
+        self.used_out = used_out
+        self.cap_in = cap_in
+        self.cap_out = cap_out
+        self.reason = reason
+
+
 def _stockholm_day_start_utc() -> datetime:
     """Return UTC datetime corresponding to today's 00:00 in Europe/Stockholm."""
     now_se = datetime.now(_STOCKHOLM)
@@ -114,6 +140,47 @@ def check_daily_token_cap(
     elif used_out >= cap_out:
         reason = "output_cap_exceeded"
 
+    return CapCheckResult(
+        allowed=reason is None,
+        used_in=used_in,
+        used_out=used_out,
+        cap_in=cap_in,
+        cap_out=cap_out,
+        reason=reason,
+    )
+
+
+def check_global_daily_token_cap(
+    session: Session,
+    *,
+    settings: Settings,
+) -> CapCheckResult:
+    """Sum today's input/output tokens across ALL workspaces against the
+    global ceiling. Read-only; caller (submit_user_turn) raises.
+
+    Concurrency: NO global advisory lock. The cap is a guardrail
+    against runaway org-wide spend, not an exact ledger. Two concurrent
+    submits in different workspaces can both pass a near-cap global
+    check and queue, overshooting by one turn each. Acceptable because
+    a global lock would bottleneck all submits org-wide. If precise
+    enforcement becomes a requirement, add `pg_try_advisory_xact_lock`
+    on a stable per-day key (e.g. hashtext('global-cap:' || YYYYMMDD)).
+    """
+    day_start_utc = _stockholm_day_start_utc()
+    sums = session.execute(
+        select(
+            func.coalesce(func.sum(ChatTurn.tokens_in), 0),
+            func.coalesce(func.sum(ChatTurn.tokens_out), 0),
+        ).where(ChatTurn.created_at >= day_start_utc)
+    ).one()
+    used_in, used_out = int(sums[0]), int(sums[1])
+    cap_in = settings.global_daily_token_cap_input
+    cap_out = settings.global_daily_token_cap_output
+    reason: str | None = None
+    if used_in >= cap_in:
+        reason = "input_cap_exceeded"
+    elif used_out >= cap_out:
+        reason = "output_cap_exceeded"
     return CapCheckResult(
         allowed=reason is None,
         used_in=used_in,

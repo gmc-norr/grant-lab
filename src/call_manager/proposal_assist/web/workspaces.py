@@ -47,7 +47,7 @@ from call_manager.proposal_assist.tools.history import (
 )
 from call_manager.proposal_assist.tools.proposal import read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
-from call_manager.proposal_assist.turns.caps import TokenCapExceeded
+from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import (
     MAX_ATTACHMENTS_PER_TURN,
     submit_user_turn,
@@ -522,8 +522,7 @@ async def post_turn(
     """
     if not request.app.state.settings.drafting_enabled:
         return HTMLResponse(
-            "<p>Drafting is currently disabled by an administrator. "
-            "Please try again later.</p>",
+            "<p>Drafting is currently disabled by an administrator. Please try again later.</p>",
             status_code=503,
         )
 
@@ -662,6 +661,17 @@ async def post_turn(
             workspaces_dir=Path(settings.workspaces_dir),
         )
         session.commit()
+    except GlobalTokenCapExceeded as e:
+        session.rollback()
+        _rollback_created_uploads()
+        return HTMLResponse(
+            f"<p>Global org-wide daily token cap exceeded: {_html.escape(e.reason)}. "
+            f"Used {e.used_in} input / {e.used_out} output today; "
+            f"cap is {e.cap_in} / {e.cap_out}. Try again after midnight "
+            f"Europe/Stockholm or ask an admin to raise the cap.</p>",
+            status_code=429,
+            headers={"X-Token-Cap": "global"},
+        )
     except TokenCapExceeded as e:
         session.rollback()
         _rollback_created_uploads()
