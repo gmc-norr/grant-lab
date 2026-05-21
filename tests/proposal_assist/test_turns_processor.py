@@ -179,6 +179,9 @@ async def test_process_turn_handles_sdk_turn_error(
     assert len(failed_events) == 1
     assert failed_events[0].payload["turn_job_id"] == str(job_id)
     assert "529" in failed_events[0].payload["error"]
+    # B6-residuals: outcome events carry actor_id of the submitter so
+    # compliance can read who-submitted-what off a single row.
+    assert failed_events[0].actor_id == uid
 
 
 @pytest.mark.asyncio
@@ -210,12 +213,17 @@ async def test_process_turn_writes_cloud_turn_completed_event(
                 )
             )
         )
+        # Read the submitter back from the job row to assert the
+        # outcome event carries the same actor_id (B6-residuals).
+        job_row = s.get(TurnJob, job_id)
+        submitter_id = job_row.submitted_by_user_id
     assert len(events) == 1
     payload = events[0].payload
     assert payload["tokens_in"] == 10
     assert payload["tokens_out"] == 5
     assert payload["turn_job_id"] == str(job_id)
     assert "content" not in payload
+    assert events[0].actor_id == submitter_id
 
 
 @pytest.mark.asyncio
