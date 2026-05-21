@@ -483,3 +483,61 @@ async def test_process_turn_finalizes_failed_when_user_turn_row_missing(
     assert "missing_user_turn_row" in (job.error or "")
     assert len(failed_events) == 1
     assert "missing_user_turn_row" in failed_events[0].payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_success_clears_user_turn_pre_count(
+    pg_session_factory,
+    _settings_env,
+):
+    """B7 submit pre-counts vision tokens on the USER chat_turns row.
+    The processor writes the SDK's TRUE token count (which already
+    includes input tokens) on the ASSISTANT chat_turns row. Without
+    clearing the user-turn pre-count, the daily-cap query double-counts
+    the user's input tokens.
+
+    After _finalize_success runs, the user-turn row must have
+    tokens_in = NULL so the cap sum reflects only the SDK-reported
+    truth on the assistant row."""
+    wsid, job_id, controller, _ = _build_controller_and_submit(
+        pg_session_factory,
+        _settings_env,
+        [
+            AssistantTextEvent(text="ok"),
+            TurnDoneEvent(tokens_in=137, tokens_out=42, model="fake", session_id="sX"),
+        ],
+    )
+
+    # Simulate B7's submit-time pre-count by writing a non-NULL
+    # tokens_in on the user-turn row BEFORE the drain.
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == job.user_turn_id))
+        user_turn.tokens_in = 99
+        s.commit()
+        user_turn_id = user_turn.id
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        # User-turn's pre-count must be cleared.
+        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        assert user_turn.tokens_in is None, (
+            "user-turn pre-count must be NULL after finalize; "
+            "otherwise the cap query double-counts input tokens"
+        )
+        # Assistant row carries the SDK truth.
+        assistant_turns = list(
+            s.scalars(
+                select(ChatTurn)
+                .where(ChatTurn.workspace_id == wsid)
+                .where(ChatTurn.role == "assistant")
+            )
+        )
+        assert len(assistant_turns) == 1
+        assert assistant_turns[0].tokens_in == 137
+        assert assistant_turns[0].tokens_out == 42

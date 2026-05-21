@@ -236,6 +236,7 @@ async def process_turn_once(
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
             submitted_by_user_id=submitted_by_user_id,
+            user_turn_id=user_turn_id,
             last_assistant_id=last_assistant_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
@@ -288,6 +289,7 @@ def _finalize_success(
     turn_job_id: uuid.UUID,
     workspace_id: uuid.UUID,
     submitted_by_user_id: int | None,
+    user_turn_id: uuid.UUID,
     last_assistant_id: uuid.UUID | None,
     tokens_in: int,
     tokens_out: int,
@@ -301,6 +303,16 @@ def _finalize_success(
                 turn.tokens_in = tokens_in or None
                 turn.tokens_out = tokens_out or None
                 turn.model = model
+        # B7 cap-accounting fix: submit_user_turn pre-stamps the USER
+        # chat_turns row with an estimate (sum of attachment vision
+        # tokens + len(text)//4). The SDK's TurnDoneEvent.tokens_in
+        # already includes those user-input tokens. Leaving the
+        # pre-count in place would double-count input on the next
+        # daily-cap query. Clear it so the cap sum reflects only
+        # the SDK-reported truth on the assistant row.
+        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        if user_turn is not None:
+            user_turn.tokens_in = None
         job = s.scalar(select(TurnJob).where(TurnJob.id == turn_job_id))
         if job is not None:
             job.status = "completed"
