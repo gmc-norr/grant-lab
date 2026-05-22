@@ -676,7 +676,7 @@ async def post_turn(
         session.rollback()
         _rollback_created_uploads()
         return HTMLResponse(
-            f"<p>Workspace daily token cap exceeded: {e.reason}. "
+            f"<p>Workspace daily token cap exceeded: {_html.escape(e.reason)}. "
             f"Used {e.used_in} input / {e.used_out} output today; "
             f"cap is {e.cap_in} / {e.cap_out}. Try again after midnight "
             f"Europe/Stockholm or ask an admin to raise the cap.</p>",
