@@ -327,6 +327,9 @@ def build_scheduler(
         settings + session_factory from build_scheduler's scope, and lazily
         construct an AnthropicClient per tick so a missing API key only
         skips work (rather than crashing scheduler startup)."""
+        if not settings.drafting_enabled:
+            _logger.info("phase0 tick skipped: DRAFTING_ENABLED=false")
+            return
         if not settings.anthropic_api_key:
             _logger.info("phase0 tick skipped: ANTHROPIC_API_KEY not set")
             return
@@ -439,6 +442,10 @@ def build_scheduler(
 
     # B4: compaction tick. Synchronous (just DB + Anthropic HTTP call).
     def _compaction_tick() -> None:
+        if not settings.drafting_enabled:
+            _logger.info("compaction tick skipped: DRAFTING_ENABLED=false")
+            return
+
         from call_manager.proposal_assist.turns.compaction import run_compaction_tick
 
         def make_summarizer_client() -> AnthropicClient:
