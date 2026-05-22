@@ -33,7 +33,7 @@
       <tr>
         <td>Input tokens</td>
         <td>{{ global_cap.used_in }} / {{ global_cap.cap_in }}</td>
-        <td>{% if global_cap.allowed or global_cap.reason != "input_cap_exceeded" %}OK{% else %}<strong>EXCEEDED</strong>{% endif %}</td>
+        <td>{% if global_cap.reason == "input_cap_exceeded" %}<strong>EXCEEDED</strong>{% else %}OK{% endif %}</td>
       </tr>
       <tr>
         <td>Output tokens</td>
