@@ -160,3 +160,72 @@ def test_drafting_panel_shows_recent_failed_events(monkeypatch, pg_url, pg_sessi
     # Distinctive error strings should surface in the recent-failures section.
     assert "distinctive_test_error_0" in resp.text
     assert "distinctive_test_error_2" in resp.text
+
+
+def test_panel_shows_exceeded_state_when_over_cap(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Seed ChatTurn.tokens_in above the global cap; the panel must
+    show 'EXCEEDED' (not 'OK') for the input-row status. Locks in
+    the b8-residuals readability rewrite of the input-row Jinja."""
+    app = _build_app(monkeypatch, pg_url, drafting_enabled=True)
+    with pg_session_factory() as s:
+        owner = User(email="o@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="OverCapWs")
+        s.add(ws)
+        s.flush()
+        # _build_app sets GLOBAL_DAILY_TOKEN_CAP_INPUT=1000; seed 1500.
+        s.add(
+            ChatTurn(
+                workspace_id=ws.id,
+                role="assistant",
+                content={"type": "text", "text": "x"},
+                tokens_in=1500,
+            )
+        )
+        s.commit()
+    client = _admin_client(app)
+    try:
+        resp = client.get("/admin/drafting")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    assert "EXCEEDED" in resp.text
+
+
+def test_payload_with_html_chars_is_safely_rendered(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Locks in the Jinja `tojson` autoescape contract for the
+    recent-events table. A cloud_turn_failed event whose payload
+    contains a <script> substring (e.g., an SDK exception message
+    that quoted user input) MUST NOT render as live HTML."""
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        owner = User(email="o@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="W")
+        s.add(ws)
+        s.flush()
+        s.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="cloud_turn_failed",
+                actor_id=owner.id,
+                payload={"error": "<script>alert(1)</script>"},
+            )
+        )
+        s.commit()
+    client = _admin_client(app)
+    try:
+        resp = client.get("/admin/drafting")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    assert "<script>alert(1)</script>" not in resp.text
+    # tojson encodes < as <, and Jinja's HTML autoescape would
+    # render either form safely. Accept either.
+    assert "\\u003cscript" in resp.text or "&lt;script" in resp.text
