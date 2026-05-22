@@ -162,9 +162,7 @@ def test_drafting_panel_shows_recent_failed_events(monkeypatch, pg_url, pg_sessi
     assert "distinctive_test_error_2" in resp.text
 
 
-def test_panel_shows_exceeded_state_when_over_cap(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_panel_shows_exceeded_state_when_over_cap(monkeypatch, pg_url, pg_session_factory):
     """Seed ChatTurn.tokens_in above the global cap; the panel must
     show 'EXCEEDED' (not 'OK') for the input-row status. Locks in
     the b8-residuals readability rewrite of the input-row Jinja."""
@@ -195,9 +193,7 @@ def test_panel_shows_exceeded_state_when_over_cap(
     assert "EXCEEDED" in resp.text
 
 
-def test_payload_with_html_chars_is_safely_rendered(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_payload_with_html_chars_is_safely_rendered(monkeypatch, pg_url, pg_session_factory):
     """Locks in the Jinja `tojson` autoescape contract for the
     recent-events table. A cloud_turn_failed event whose payload
     contains a <script> substring (e.g., an SDK exception message

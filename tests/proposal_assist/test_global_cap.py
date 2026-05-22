@@ -144,9 +144,7 @@ def test_post_turn_returns_429_with_global_header(monkeypatch, pg_url, pg_sessio
     assert "global" in resp.text.lower()
 
 
-def test_global_cap_wins_when_per_workspace_also_exceeded(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_global_cap_wins_when_per_workspace_also_exceeded(monkeypatch, pg_url, pg_session_factory):
     """When BOTH global and per-workspace caps are exceeded, the
     global check runs first and raises GlobalTokenCapExceeded. The
     web layer surfaces the X-Token-Cap: global header so the UI can

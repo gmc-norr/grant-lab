@@ -196,9 +196,7 @@ def test_phase0_and_compaction_skip_when_disabled(monkeypatch):
     compaction_job.func()
 
     assert phase0_calls == [], "_phase0_tick must skip when drafting_enabled=False"
-    assert compaction_calls == [], (
-        "_compaction_tick must skip when drafting_enabled=False"
-    )
+    assert compaction_calls == [], "_compaction_tick must skip when drafting_enabled=False"
     sched.shutdown(wait=False)
 
 
@@ -227,9 +225,7 @@ async def test_re_enable_drains_queued_backlog(pg_session_factory, _settings_env
         ]
     )
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
-    controller = WorkspaceController(
-        registry=registry, session_factory=pg_session_factory
-    )
+    controller = WorkspaceController(registry=registry, session_factory=pg_session_factory)
 
     with pg_session_factory() as s:
         user = make_user(s)
