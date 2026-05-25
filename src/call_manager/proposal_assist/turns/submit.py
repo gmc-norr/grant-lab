@@ -70,10 +70,11 @@ from call_manager.proposal_assist.turns.caps import (
     check_global_daily_token_cap,
 )
 
-MAX_ATTACHMENTS_PER_TURN = 5
-"""Public per-turn attachment cap. Imported by web/workspaces.py so the
-web-layer pre-check and the submit-layer authoritative check use one
-constant — drift in either direction would cause a UX/contract mismatch.
+MAX_TURN_INCLUSIONS = 5
+"""Combined per-turn ceiling on attachments + references. Imported by
+web/workspaces.py so the web-layer pre-check and the submit-layer
+authoritative check use one constant — drift in either direction would
+cause a UX/contract mismatch.
 """
 
 
@@ -160,6 +161,7 @@ def submit_user_turn(
     workspace_id: uuid.UUID,
     content_text: str,
     attachment_ids: list[uuid.UUID] | None = None,
+    reference_ids: list[uuid.UUID] | None = None,
     submitted_by_user_id: int | None,
     settings: Settings,
     tokens_in: int | None = None,
@@ -178,8 +180,9 @@ def submit_user_turn(
     ``attachment_ids``: optional list of pre-existing
     :class:`~call_manager.db.models.Attachment` row ids to attach to
     this turn (B7). Each id is validated to belong to ``workspace_id``;
-    cross-workspace references raise ``ValueError``. Total
-    attachments are capped at 5 per turn; over-cap raises ``ValueError``.
+    cross-workspace references raise ``ValueError``. Combined inclusions
+    (``attachment_ids`` + ``reference_ids``) are capped at
+    ``MAX_TURN_INCLUSIONS`` per turn; over-cap raises ``ValueError``.
     Rows with NULL ``tokens_estimate`` trigger a disk re-probe via
     ``workspaces_dir`` — missing file ⇒ ``ValueError``.
 
@@ -229,14 +232,14 @@ def submit_user_turn(
     if not content_text and attachment_ids:
         raise ValueError("content_text required when attachments are present")
 
+    # ---- Combined inclusions cap (attachments + references) ----------
+    n_inclusions = len(attachment_ids or []) + len(reference_ids or [])
+    if n_inclusions > MAX_TURN_INCLUSIONS:
+        raise ValueError(f"too many inclusions: {n_inclusions} > {MAX_TURN_INCLUSIONS}")
+
     # ---- B7 attachment resolution + token pre-count -----------------
     attachments: list[Attachment] = []
     if attachment_ids:
-        if len(attachment_ids) > MAX_ATTACHMENTS_PER_TURN:
-            raise ValueError(
-                f"too many attachments: {len(attachment_ids)} > {MAX_ATTACHMENTS_PER_TURN}"
-            )
-
         # Resolve all rows in one query, then re-order by request order
         # so the rendered chat turn shows the user's chosen sequence.
         requested = list(attachment_ids)
