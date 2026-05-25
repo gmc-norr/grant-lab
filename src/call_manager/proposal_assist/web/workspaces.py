@@ -804,13 +804,21 @@ async def post_turn(
     # partial — the single source of truth for chat-turn HTML — so the
     # immediate echo, the SSE renderer, and the history loop all agree.
     # We build a content shape that matches what submit_user_turn just
-    # persisted: list of {text} + {image} blocks when attachments are
-    # present, single text dict otherwise. Jinja's auto-escape inside
-    # the partial handles HTML in `content`.
-    if all_ids:
-        echo_content: object = [{"type": "text", "text": content}] + [
-            {"type": "image", "attachment_id": str(aid)} for aid in all_ids
-        ]
+    # persisted: list of {text} + {image} + {reference} blocks when any
+    # inclusions are present, single text dict otherwise. Jinja's auto-
+    # escape inside the partial handles HTML in `content`.
+    #
+    # Slice 4 residuals fix: the prior condition (`if all_ids`) treated
+    # a refs-only turn as text-only, so the user got no visible chip
+    # in the echo until the SSE re-render landed. Including
+    # `reference_ids` in the trigger condition + emitting reference
+    # blocks in the echo restores immediate feedback.
+    if all_ids or reference_ids:
+        echo_content: object = (
+            [{"type": "text", "text": content}]
+            + [{"type": "image", "attachment_id": str(aid)} for aid in all_ids]
+            + [{"type": "reference", "reference_id": str(rid)} for rid in reference_ids]
+        )
     else:
         echo_content = {"type": "text", "text": content}
     echo_turn = ChatTurn(
@@ -818,9 +826,17 @@ async def post_turn(
         role="user",
         content=echo_content,  # type: ignore[arg-type]
     )
+    # Load the just-attached references for the echo partial so the
+    # chip shows a title/filename (not the "(unknown)" fallback). Scoped
+    # to this workspace — same query the history-loop path uses.
+    echo_ref_map = _load_reference_map(
+        session,
+        ws.id,
+        {str(rid) for rid in reference_ids},
+    )
     user_turn_html = request.app.state.templates.env.get_template(
         _CHAT_TURN_PARTIAL,
-    ).render(turn=echo_turn)
+    ).render(turn=echo_turn, chat_reference_map=echo_ref_map)
     sse_connector = (
         f"<div id='sse-mount-{job.id}' "
         f"hx-ext='sse' "
