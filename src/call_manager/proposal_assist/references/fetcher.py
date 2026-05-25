@@ -25,8 +25,10 @@ Per spec rev4 Codex High #2.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import socket
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
 import httpx
@@ -192,3 +194,131 @@ def fetch_bytes(
         return body
 
     raise FetchError(f"too many redirects (>{_MAX_REDIRECTS}) starting from {url!r}")
+
+
+_FILENAME_TO_MIME = {
+    ".pdf": "application/pdf",
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".rtf": "application/rtf",
+    ".csv": "text/csv",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ipynb": "application/x-ipynb+json",
+}
+
+
+def _infer_mime_from_filename(filename: str) -> str:
+    for suffix, mime in _FILENAME_TO_MIME.items():
+        if filename.lower().endswith(suffix):
+            return mime
+    return "application/pdf"  # most common fallback for academic content
+
+
+def fetch_crossref_doi(doi: str) -> tuple[bytes, str, str, dict]:
+    """Resolve a DOI via Crossref API, find the publisher PDF link,
+    fetch it via fetch_bytes."""
+    api_url = f"https://api.crossref.org/works/{doi}"
+    meta_bytes = fetch_bytes(api_url, max_bytes=1 * 1024 * 1024)  # 1 MB cap on metadata
+    try:
+        api_data = json.loads(meta_bytes)
+    except json.JSONDecodeError as e:
+        raise FetchError(f"Crossref returned non-JSON for DOI {doi!r}: {e}") from e
+
+    message = api_data.get("message", {})
+    links = message.get("link", []) or []
+    pdf_links = [
+        link.get("URL") for link in links if "pdf" in (link.get("content-type") or "").lower()
+    ]
+    if not pdf_links:
+        raise FetchError(
+            f"Crossref returned no PDF link for DOI {doi!r} — "
+            f"paper may be paywalled. Upload the PDF manually."
+        )
+    pdf_url = pdf_links[0]
+    pdf_bytes = fetch_bytes(pdf_url)
+
+    title = " ".join(message.get("title", []))[:200] or doi
+    filename = f"doi-{doi.replace('/', '_')}.pdf"
+    return (
+        pdf_bytes,
+        filename,
+        "application/pdf",
+        {
+            "doi": doi,
+            "title": title,
+            "source": "crossref",
+        },
+    )
+
+
+def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
+    """Convert PMID → PMC ID via elink; fetch PMC full-text XML via
+    efetch. Raises FetchError if the article isn't in PMC (not open-
+    access)."""
+    elink_url = (
+        f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pmc&id={pmid}"
+    )
+    elink_bytes = fetch_bytes(elink_url, max_bytes=512 * 1024)
+
+    try:
+        root = ET.fromstring(elink_bytes)
+    except ET.ParseError as e:
+        raise FetchError(f"elink returned non-XML for PMID {pmid!r}: {e}") from e
+    pmc_ids = [el.text for el in root.iter("Id") if el.text]
+    if not pmc_ids:
+        raise FetchError(
+            f"PMID {pmid!r} has no PMC mapping (likely closed-access). Upload the PDF manually."
+        )
+    pmc_id = pmc_ids[0]
+
+    efetch_url = (
+        f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmc_id}&rettype=xml"
+    )
+    xml_bytes = fetch_bytes(efetch_url)
+
+    return (
+        xml_bytes,
+        f"pmid-{pmid}-{pmc_id}.xml",
+        "application/xml",
+        {
+            "pmid": pmid,
+            "pmc_id": pmc_id,
+            "source": "pubmed",
+        },
+    )
+
+
+def fetch_arxiv(arxiv_id: str) -> tuple[bytes, str, str, dict]:
+    """arXiv ID → arxiv.org/pdf/<id>.pdf (open access by default)."""
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    pdf_bytes = fetch_bytes(pdf_url)
+    return (
+        pdf_bytes,
+        f"arxiv-{arxiv_id}.pdf",
+        "application/pdf",
+        {
+            "arxiv_id": arxiv_id,
+            "source": "arxiv",
+        },
+    )
+
+
+def fetch_generic_url(url: str) -> tuple[bytes, str, str, dict]:
+    """Generic URL fetch via SSRF-safe fetch_bytes. The MIME is inferred
+    from the URL path's filename suffix (fetch_bytes doesn't surface
+    response headers); filename from the URL path."""
+    body = fetch_bytes(url)
+    parsed = urlparse(url)
+    filename = parsed.path.split("/")[-1] or "fetched-reference"
+    mime = _infer_mime_from_filename(filename)
+    return (
+        body,
+        filename,
+        mime,
+        {
+            "url": url,
+            "source": "generic",
+        },
+    )
