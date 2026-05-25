@@ -89,7 +89,25 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     allowed = captured.get("allowed_tools")
     assert allowed is not None
     # Bare names per SDK docstring example (see Task 7 Step 0).
-    assert "read_proposal" in allowed
-    assert "edit_proposal" in allowed
     # NO mcp__ prefix — confirm we're using the bare form.
     assert not any(t.startswith("mcp__") for t in allowed)
+    # Full allowlist coverage: 8 existing (B5) + 6 new (Slice 2 — references).
+    expected_tools = {
+        # existing eight from B5
+        "read_proposal",
+        "edit_proposal",
+        "replace_proposal",
+        "get_artifact_history",
+        "read_artifact_at",
+        "diff_artifact",
+        "get_call_details",
+        "get_profile",
+        # six new reference tools (Slice 2)
+        "list_references",
+        "search_references",
+        "navigate_reference",
+        "read_reference",
+        "read_reference_section",
+        "summarize_data",
+    }
+    assert set(allowed) == expected_tools

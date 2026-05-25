@@ -51,14 +51,16 @@ def _make_ctx():
     )
 
 
-def test_collect_tools_returns_eight_named_tools():
-    """All eight tool names are present. Probes _collect_tools directly
-    instead of fighting the MCP Server's decorator-based API."""
+def test_collect_tools_returns_fourteen_named_tools():
+    """All fourteen tool names are present (8 from B5 + 6 from Slice 2).
+    Probes _collect_tools directly instead of fighting the MCP Server's
+    decorator-based API."""
     from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     names = {t.name for t in tools}
     assert names == {
+        # existing eight from B5
         "read_proposal",
         "edit_proposal",
         "replace_proposal",
@@ -67,6 +69,13 @@ def test_collect_tools_returns_eight_named_tools():
         "diff_artifact",
         "get_call_details",
         "get_profile",
+        # six new reference tools (Slice 2)
+        "list_references",
+        "search_references",
+        "navigate_reference",
+        "read_reference",
+        "read_reference_section",
+        "summarize_data",
     }
 
 

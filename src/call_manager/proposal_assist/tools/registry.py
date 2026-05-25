@@ -233,7 +233,148 @@ def _collect_tools(ctx: ToolContext) -> list:
     async def get_profile(args):
         return _wrap(await get_profile_impl(ctx))
 
+    from call_manager.proposal_assist.tools.references import (
+        list_references_impl,
+        navigate_reference_impl,
+        read_reference_impl,
+        read_reference_section_impl,
+        search_references_impl,
+        summarize_data_impl,
+    )
+
+    @tool(
+        "list_references",
+        "List references in this workspace. Filter by kind "
+        "(paper/prior_proposal/analysis/data) or substring match on title. "
+        "Returns up to `limit` rows with metadata (id, kind, title, status). "
+        "Token-cheap — use at the start of a turn to orient.",
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "q": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": [],
+        },
+    )
+    async def list_references(args):
+        return _wrap(
+            await list_references_impl(
+                ctx,
+                kind=args.get("kind"),
+                q=args.get("q"),
+                limit=int(args.get("limit", 50)),
+            )
+        )
+
+    @tool(
+        "search_references",
+        "Semantic search over reference chunks. Embeds the query and "
+        "returns the top-k most relevant chunks, each tagged with the "
+        "source reference and section_path. Use when you don't know "
+        "which reference contains the relevant material.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer", "default": 8},
+                "kind": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    )
+    async def search_references(args):
+        return _wrap(
+            await search_references_impl(
+                ctx,
+                query=args["query"],
+                top_k=int(args.get("top_k", 8)),
+                kind=args.get("kind"),
+            )
+        )
+
+    @tool(
+        "navigate_reference",
+        "Return the chunk-derived outline of a reference (the hierarchy "
+        "of section_path values). Use to discover what sections a "
+        "reference has before reading any of them.",
+        {
+            "type": "object",
+            "properties": {"reference_id": {"type": "string"}},
+            "required": ["reference_id"],
+        },
+    )
+    async def navigate_reference(args):
+        return _wrap(
+            await navigate_reference_impl(ctx, reference_id=args["reference_id"])
+        )
+
+    @tool(
+        "read_reference",
+        "Return the full extracted text of a reference, truncated at "
+        "`max_chars` chars. Use when you want the whole content of a "
+        "short reference; use read_reference_section for targeted reads "
+        "of long references.",
+        {
+            "type": "object",
+            "properties": {
+                "reference_id": {"type": "string"},
+                "max_chars": {"type": "integer", "default": 20000},
+            },
+            "required": ["reference_id"],
+        },
+    )
+    async def read_reference(args):
+        return _wrap(
+            await read_reference_impl(
+                ctx,
+                reference_id=args["reference_id"],
+                max_chars=int(args.get("max_chars", 20000)),
+            )
+        )
+
+    @tool(
+        "read_reference_section",
+        "Return concatenated text of all chunks under a given "
+        "section_path of a reference. The path is the breadcrumb "
+        "navigate_reference returned (e.g. 'Methods > Statistical analysis').",
+        {
+            "type": "object",
+            "properties": {
+                "reference_id": {"type": "string"},
+                "section_path": {"type": "string"},
+            },
+            "required": ["reference_id", "section_path"],
+        },
+    )
+    async def read_reference_section(args):
+        return _wrap(
+            await read_reference_section_impl(
+                ctx,
+                reference_id=args["reference_id"],
+                section_path=args["section_path"],
+            )
+        )
+
+    @tool(
+        "summarize_data",
+        "Return schema + sample (first 5 rows) for a kind='data' "
+        "reference (CSV/XLSX/ipynb). Use this instead of read_reference "
+        "for data files — the model never needs the raw rows.",
+        {
+            "type": "object",
+            "properties": {"reference_id": {"type": "string"}},
+            "required": ["reference_id"],
+        },
+    )
+    async def summarize_data(args):
+        return _wrap(
+            await summarize_data_impl(ctx, reference_id=args["reference_id"])
+        )
+
     return [
+        # existing eight
         read_proposal,
         edit_proposal,
         replace_proposal,
@@ -242,4 +383,11 @@ def _collect_tools(ctx: ToolContext) -> list:
         diff_artifact,
         get_call_details,
         get_profile,
+        # six new (Slice 2)
+        list_references,
+        search_references,
+        navigate_reference,
+        read_reference,
+        read_reference_section,
+        summarize_data,
     ]

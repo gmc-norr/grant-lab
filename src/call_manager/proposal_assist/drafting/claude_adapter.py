@@ -133,6 +133,13 @@ class ClaudeAgentSDKAdapter:
                 "diff_artifact",
                 "get_call_details",
                 "get_profile",
+                # Slice 2 — references
+                "list_references",
+                "search_references",
+                "navigate_reference",
+                "read_reference",
+                "read_reference_section",
+                "summarize_data",
             ]
         options = ClaudeAgentOptions(**options_kwargs)
 
