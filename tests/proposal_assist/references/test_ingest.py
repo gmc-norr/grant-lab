@@ -4,6 +4,7 @@ Phase 2 — sync Stage 1 (extract + chunk + embed) in a separate tx.
           On failure, text_status='failed', row + bytes retained.
 """
 
+import pytest
 from sqlalchemy import select
 
 from call_manager.db.models import Reference, ReferenceChunk
@@ -157,3 +158,59 @@ def test_ingest_data_csv_uses_skipped_status(pg_session_factory, tmp_path):
     # outline stays skipped (was already skipped at insert; v1.1 may change).
     assert ref.text_status == "done"
     assert ref.outline_status == "skipped"
+
+
+def test_phase1_commit_failure_cleans_bytes(pg_session_factory, tmp_path, monkeypatch):
+    """Blocker regression (post-Slice-2 review): if Phase 1 commit raises
+    after storage.write_atomic, the bytes must be unlinked. Otherwise we
+    leave orphan files on disk with no DB row pointing at them."""
+    from sqlalchemy.orm import Session
+
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    md = b"# Title\n\nbody."
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    # Patch Session.commit to raise on its FIRST call within ingest_bytes
+    # (the Phase 1 commit). Subsequent commits (Phase 2 internal) use
+    # fresh sessions and aren't patched.
+    original_commit = Session.commit
+    calls = {"count": 0}
+
+    def boom_then_real(self):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("simulated Phase 1 commit failure")
+        return original_commit(self)
+
+    monkeypatch.setattr(Session, "commit", boom_then_real)
+
+    with pg_session_factory() as s:
+        with pytest.raises(RuntimeError, match="simulated Phase 1 commit failure"):
+            ingest_bytes(
+                session_factory=pg_session_factory,
+                session=s,
+                storage=storage,
+                embedder=embedder,
+                workspace_id=wsid,
+                kind="paper",
+                source_type="uploaded",
+                source_uri=None,
+                filename="t.md",
+                mime_type="text/markdown",
+                data=md,
+                uploaded_by=uid,
+            )
+
+    # The bytes that were briefly on disk must be cleaned up.
+    workspace_refs_dir = tmp_path / str(wsid) / "references"
+    leftover = list(workspace_refs_dir.iterdir()) if workspace_refs_dir.exists() else []
+    assert leftover == [], (
+        f"Phase 1 commit-failure must unlink bytes; found leftover: {leftover}"
+    )

@@ -14,6 +14,7 @@ several seconds and we don't want to hold a tx open for that long.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,6 +29,8 @@ from call_manager.proposal_assist.references.extract import (
     extract_text,
 )
 from call_manager.proposal_assist.references.storage import ReferenceStorage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,31 +82,51 @@ def ingest_bytes(
     reference_id = uuid.uuid4()
 
     # Phase 1: write bytes, then insert row in the caller's tx.
+    # On any post-write failure (INSERT, commit, etc.), unlink the bytes
+    # to avoid orphan files (B7 attachments pattern; code-review residuals fix).
     storage.write_atomic(
         workspace_id=workspace_id,
         reference_id=reference_id,
         suffix=suffix,
         data=data,
     )
-    relative_path = f"{workspace_id}/references/{reference_id}/original{suffix}"
-    ref = Reference(
-        id=reference_id,
-        workspace_id=workspace_id,
-        kind=kind,
-        source_type=source_type,
-        source_uri=source_uri,
-        title=None,  # Slice 2 will derive from metadata; v1 leaves NULL
-        filename=filename,
-        storage_path=relative_path,
-        mime_type=mime_type,
-        bytes_total=len(data),
-        text_status="pending",
-        outline_status="skipped",  # v1; v1.1 changes to 'pending'
-        uploaded_by=uploaded_by,
-    )
-    session.add(ref)
-    session.commit()
-    # Caller may call s.commit() again; it is a harmless no-op.
+    try:
+        relative_path = f"{workspace_id}/references/{reference_id}/original{suffix}"
+        ref = Reference(
+            id=reference_id,
+            workspace_id=workspace_id,
+            kind=kind,
+            source_type=source_type,
+            source_uri=source_uri,
+            title=None,  # Slice 2 will derive from metadata; v1 leaves NULL
+            filename=filename,
+            storage_path=relative_path,
+            mime_type=mime_type,
+            bytes_total=len(data),
+            text_status="pending",
+            outline_status="skipped",  # v1; v1.1 changes to 'pending'
+            uploaded_by=uploaded_by,
+        )
+        session.add(ref)
+        session.commit()
+        # Caller may call s.commit() again; it is a harmless no-op.
+    except Exception:
+        # Clean up the bytes we just wrote. The row either was never
+        # inserted (pre-commit) or the commit failed (no row visible).
+        # Either way the file is now an orphan; remove it.
+        try:
+            storage.delete_one(
+                workspace_id=workspace_id, reference_id=reference_id
+            )
+        except Exception:
+            # Don't mask the original failure if cleanup also fails.
+            logger.exception(
+                "ingest Phase 1 rollback: storage.delete_one failed "
+                "for workspace=%s reference=%s",
+                workspace_id,
+                reference_id,
+            )
+        raise
 
     # Phase 2: run Stage 1 in a fresh session (row is now visible).
     with session_factory() as s2:
@@ -155,6 +178,11 @@ def ingest_bytes(
         return IngestResult(reference_id=reference_id, text_status="done", text_error=None)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
+        logger.exception(
+            "ingest Phase 2 failed for workspace=%s reference=%s",
+            workspace_id,
+            reference_id,
+        )
         with session_factory() as s2:
             ref2 = s2.get(Reference, reference_id)
             if ref2 is not None:
