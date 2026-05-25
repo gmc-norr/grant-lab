@@ -12,7 +12,6 @@ from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Call, Source, User
 from call_manager.main import create_app
 
-
 # Hostnames that reference-fetch tests mock via pytest-httpx. The SSRF
 # resolver in fetcher.py validates via socket.getaddrinfo BEFORE httpx
 # opens a connection, so we have to fake getaddrinfo too — pytest-httpx
