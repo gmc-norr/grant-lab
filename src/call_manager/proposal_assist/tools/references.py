@@ -383,6 +383,7 @@ async def fetch_reference_impl(
     *,
     input: str,  # noqa: A002
     kind: str = "paper",
+    embedder: Embedder | None = None,
 ) -> dict[str, Any]:
     """Agent-side mid-turn fetch. Atomic per-turn cap enforced BEFORE
     the fetch: UPDATE turn_jobs SET fetch_count = fetch_count + 1
@@ -393,6 +394,11 @@ async def fetch_reference_impl(
     If a bad input would have wasted a cap slot, the user gets
     nothing while the budget shrinks — bad UX. Detect-then-decrement
     isn't atomic but the test confirms invalid input doesn't increment.
+
+    The `embedder` kwarg matches the search_references_impl test-
+    injection seam: production code leaves it None and we construct
+    OllamaEmbedClient + OllamaEmbedderAdapter; tests pass a FakeEmbedder
+    to avoid needing a running Ollama.
     """
     from sqlalchemy import update as _sql_update
 
@@ -401,7 +407,6 @@ async def fetch_reference_impl(
         detect_source_type,
         dispatch_fetch,
     )
-    from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
     from call_manager.proposal_assist.references.fetcher import FetchError, SSRFError
     from call_manager.proposal_assist.references.ingest import ingest_bytes
     from call_manager.proposal_assist.references.storage import ReferenceStorage
@@ -453,13 +458,15 @@ async def fetch_reference_impl(
         return {"error": f"fetch failed: {e}", "fetch_count": new_count}
 
     storage = ReferenceStorage(root=Path(ctx.settings.workspaces_dir))
-    from call_manager.embeddings.client import OllamaEmbedClient
+    if embedder is None:
+        from call_manager.embeddings.client import OllamaEmbedClient
+        from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 
-    embed_client = OllamaEmbedClient(
-        base_url=ctx.settings.ollama_url,
-        model=ctx.settings.embedding_model,
-    )
-    embedder = OllamaEmbedderAdapter(embed_client)
+        embed_client = OllamaEmbedClient(
+            base_url=ctx.settings.ollama_url,
+            model=ctx.settings.embedding_model,
+        )
+        embedder = OllamaEmbedderAdapter(embed_client)
 
     with ctx.session_factory() as s:
         try:

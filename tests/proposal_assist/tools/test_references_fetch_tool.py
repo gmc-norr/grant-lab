@@ -17,6 +17,7 @@ from call_manager.db.models import (
     User,
     Workspace,
 )
+from call_manager.proposal_assist.references.embed import FakeEmbedder
 from call_manager.proposal_assist.tools.references import fetch_reference_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 
@@ -81,10 +82,10 @@ async def test_fetch_reference_no_running_turn_returns_error(pg_session_factory,
 
 
 @pytest.mark.asyncio
-@pytest.mark.httpx_mock(should_mock=lambda req: req.url.host != "localhost")
 async def test_fetch_reference_increments_fetch_count(pg_session_factory, tmp_path, httpx_mock):
     """Successful fetch increments turn_jobs.fetch_count and inserts
-    a Reference row."""
+    a Reference row. Injects FakeEmbedder so ingest doesn't try to hit
+    Ollama."""
     from io import BytesIO
 
     from reportlab.pdfgen.canvas import Canvas
@@ -102,7 +103,7 @@ async def test_fetch_reference_increments_fetch_count(pg_session_factory, tmp_pa
 
     wsid, jobid = _seed_running_turn(pg_session_factory)
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
-    out = await fetch_reference_impl(ctx, input="2401.12345")
+    out = await fetch_reference_impl(ctx, input="2401.12345", embedder=FakeEmbedder())
     assert "error" not in out, out
     assert "reference_id" in out
 
@@ -115,12 +116,12 @@ async def test_fetch_reference_increments_fetch_count(pg_session_factory, tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.httpx_mock(should_mock=lambda req: req.url.host != "localhost")
 async def test_fetch_reference_4th_attempt_returns_cap_error(
     pg_session_factory, tmp_path, httpx_mock
 ):
     """3 successful fetches → 4th attempt returns cap error WITHOUT
-    incrementing further (atomic WHERE fetch_count < 3)."""
+    incrementing further (atomic WHERE fetch_count < 3). FakeEmbedder
+    keeps ingest off the Ollama dependency."""
     from io import BytesIO
 
     from reportlab.pdfgen.canvas import Canvas
@@ -133,18 +134,19 @@ async def test_fetch_reference_4th_attempt_returns_cap_error(
 
     wsid, jobid = _seed_running_turn(pg_session_factory)
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    embedder = FakeEmbedder()
 
     for i, ax_id in enumerate(["2401.00001", "2401.00002", "2401.00003"]):
         httpx_mock.add_response(
             url=f"https://arxiv.org/pdf/{ax_id}.pdf",
             content=pdf_bytes,
         )
-        out = await fetch_reference_impl(ctx, input=ax_id)
+        out = await fetch_reference_impl(ctx, input=ax_id, embedder=embedder)
         assert "error" not in out, (i, out)
 
     # 4th attempt: cap hit BEFORE any HTTP — no mock registered because
     # the atomic UPDATE returns 0 rows and we short-circuit.
-    out = await fetch_reference_impl(ctx, input="2401.00004")
+    out = await fetch_reference_impl(ctx, input="2401.00004", embedder=embedder)
     assert "error" in out
     assert "cap" in out["error"].lower() or "3" in out["error"]
 
