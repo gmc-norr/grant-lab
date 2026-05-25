@@ -163,6 +163,12 @@ class ClaudeAgentSDKAdapter:
         `async with` — that re-connects and spawns a new subprocess.
         """
         client: ClaudeSDKClient = handle.state["client"]
+        # Defensive AssistantMessage capture: holds a running tally so we
+        # have *some* count if the ResultMessage never arrives (network
+        # drop, early disconnect). The authoritative final tally comes
+        # from ResultMessage and overwrites these unconditionally.
+        am_tokens_in: int | None = None
+        am_tokens_out: int | None = None
         tokens_in: int | None = None
         tokens_out: int | None = None
         model: str | None = self._model
@@ -185,10 +191,18 @@ class ClaudeAgentSDKAdapter:
                 # Extract model name from the first AssistantMessage
                 if message.model:
                     model = message.model
-                # Extract token counts from usage dict
-                if message.usage and tokens_in is None:
-                    tokens_in = message.usage.get("input_tokens")
-                    tokens_out = message.usage.get("output_tokens")
+                # AssistantMessage.usage holds a running tally (often
+                # partial — first streamed delta lands BEFORE any text
+                # is generated, so output_tokens is frequently 0; and
+                # input_tokens reflects only the un-cached portion, not
+                # cache_creation_input_tokens which dominates for Claude
+                # Code system prompts ~3787 tokens / "say hi" probe).
+                # Keep updating until ResultMessage arrives with the
+                # authoritative final tally.
+                if message.usage:
+                    am_tokens_in = _sum_input_tokens(message.usage)
+                    if message.usage.get("output_tokens") is not None:
+                        am_tokens_out = message.usage.get("output_tokens")
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         yield AssistantTextEvent(text=block.text)
@@ -231,12 +245,38 @@ class ClaudeAgentSDKAdapter:
                 # next launch's native resume.
                 # NOTE: in SDK 0.2.82 the attribute is named `uuid`, not `session_id`.
                 # We probe both so a future SDK rename is handled automatically.
-                mu: dict[str, Any] | None = getattr(message, "model_usage", None)
-                if mu is not None:
-                    if tokens_in is None:
-                        tokens_in = mu.get("input_tokens")
-                    if tokens_out is None:
-                        tokens_out = mu.get("output_tokens")
+                #
+                # B8-residuals-2: prefer ResultMessage.usage (the
+                # authoritative final tally) over the AssistantMessage
+                # running counts. ResultMessage.usage shape (probed
+                # against SDK 0.2.82 live):
+                #     {"input_tokens": N,
+                #      "cache_creation_input_tokens": K,  # ← can dominate
+                #      "cache_read_input_tokens": M,
+                #      "output_tokens": O,
+                #      ...}
+                # Cap-relevant input = sum of all input components the
+                # model actually processed (base + cache_creation + cache_read).
+                # Fall back to model_usage (camelCase, keyed by model) if
+                # the flat .usage isn't present in a future SDK build.
+                ru: dict[str, Any] | None = getattr(message, "usage", None)
+                if ru is not None:
+                    tokens_in = _sum_input_tokens(ru)
+                    if ru.get("output_tokens") is not None:
+                        tokens_out = ru.get("output_tokens")
+                else:
+                    mu: dict[str, Any] | None = getattr(message, "model_usage", None)
+                    if mu is not None:
+                        tokens_in = _sum_model_usage_input(mu)
+                        tokens_out = _sum_model_usage_output(mu)
+                # Last-resort fallback: if ResultMessage carried no
+                # usage at all, use the running AssistantMessage tally
+                # so we record *something* against the cap.
+                if tokens_in is None:
+                    tokens_in = am_tokens_in
+                if tokens_out is None:
+                    tokens_out = am_tokens_out
+
                 session_id: str | None = getattr(message, "session_id", None) or getattr(
                     message, "uuid", None
                 )
@@ -250,10 +290,11 @@ class ClaudeAgentSDKAdapter:
                 return
 
         # Defensive: if the SDK never yielded a ResultMessage, emit a bare
-        # TurnDoneEvent so the consumer's loop exits cleanly.
+        # TurnDoneEvent so the consumer's loop exits cleanly. Use the
+        # AssistantMessage running tally as the best we have.
         yield TurnDoneEvent(
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
+            tokens_in=am_tokens_in,
+            tokens_out=am_tokens_out,
             model=model,
             session_id=None,
         )
@@ -304,3 +345,72 @@ def _flatten_content(content: Any) -> str:
                 parts.append(piece)
         return " ".join(parts)
     return str(content)
+
+
+# Input-token component keys we sum into the cap-relevant `tokens_in`.
+# ResultMessage.usage uses snake_case; model_usage uses camelCase
+# (probed against SDK 0.2.82 live). Both forms covered so a future
+# SDK rename of either path is handled defensively.
+_INPUT_TOKEN_KEYS_SNAKE: tuple[str, ...] = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+_INPUT_TOKEN_KEYS_CAMEL: tuple[str, ...] = (
+    "inputTokens",
+    "cacheCreationInputTokens",
+    "cacheReadInputTokens",
+)
+
+
+def _sum_input_tokens(usage: dict[str, Any]) -> int | None:
+    """Sum the cap-relevant input-token components from a flat usage dict.
+
+    ResultMessage.usage and AssistantMessage.usage both use snake_case
+    field names (per SDK 0.2.82 probe). cache_creation_input_tokens
+    routinely dominates for Claude Code prompts (~3787 / "say hi"),
+    so we must include it — otherwise the daily cap silently
+    undercounts by orders of magnitude.
+
+    Returns None if no recognized input-token key is present (caller
+    falls back to AssistantMessage running tally or leaves NULL).
+    """
+    total = 0
+    found = False
+    for key in _INPUT_TOKEN_KEYS_SNAKE:
+        val = usage.get(key)
+        if val is not None:
+            total += int(val)
+            found = True
+    return total if found else None
+
+
+def _sum_model_usage_input(model_usage: dict[str, Any]) -> int | None:
+    """ResultMessage.model_usage is keyed by model name, with camelCase
+    per-model usage dicts. Sum across models (defensive — a turn could
+    span models if compaction or fallbacks ever route through here)."""
+    total = 0
+    found = False
+    for per_model in model_usage.values():
+        if not isinstance(per_model, dict):
+            continue
+        for key in _INPUT_TOKEN_KEYS_CAMEL:
+            val = per_model.get(key)
+            if val is not None:
+                total += int(val)
+                found = True
+    return total if found else None
+
+
+def _sum_model_usage_output(model_usage: dict[str, Any]) -> int | None:
+    """Sum outputTokens across all per-model entries in model_usage."""
+    total = 0
+    found = False
+    for per_model in model_usage.values():
+        if not isinstance(per_model, dict):
+            continue
+        val = per_model.get("outputTokens")
+        if val is not None:
+            total += int(val)
+            found = True
+    return total if found else None

@@ -14,6 +14,7 @@ from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     DraftingAgent,
     LaunchContext,
+    StreamEvent,
     TurnDoneEvent,
 )
 
@@ -276,3 +277,144 @@ async def test_claude_adapter_can_round_trip_a_simple_turn():
         assert isinstance(events[-1], TurnDoneEvent)
     finally:
         await adapter.terminate(handle)
+
+
+# ---------------------------------------------------------------------------
+# B8 residuals 2 — vision-token undercount fix
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_turn_uses_result_message_authoritative_usage():
+    """ResultMessage.usage is the SDK's final tally and MUST win over the
+    running counts captured from AssistantMessage. Per a real round-trip
+    probe (SDK 0.2.82), AssistantMessage.usage often has partial output
+    (e.g. output_tokens=0 on the first streamed chunk), and the
+    input_tokens field is just the un-cached portion — the bulk of
+    Claude Code's input cost is in cache_creation_input_tokens
+    (~3787 tokens for a 'say hi' prompt).
+
+    Cap-relevant input = input_tokens + cache_creation_input_tokens +
+                         cache_read_input_tokens
+    (all components the model actually processed for input)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
+    from call_manager.proposal_assist.drafting.claude_adapter import (
+        ClaudeAgentSDKAdapter,
+    )
+    from call_manager.proposal_assist.drafting.contract import AgentHandle
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-opus-4-7",
+        workspaces_dir="/tmp/x",
+    )
+    fake_client = MagicMock()
+    fake_client.query = AsyncMock()
+
+    async def fake_receive():
+        # First AssistantMessage: a STUB with output_tokens=0 (matches the
+        # real-SDK streaming behavior where the first delta lands before
+        # any text has been generated).
+        am_stub = AssistantMessage(
+            content=[],
+            model="claude-opus-4-7",
+            usage={"input_tokens": 6, "output_tokens": 0},
+        )
+        yield am_stub
+        # Second AssistantMessage: the real text block. Even here, usage
+        # reflects a running tally — input_tokens is still the un-cached
+        # portion, and cache_creation_input_tokens (the bulk) is NOT in
+        # AssistantMessage.usage at all in some SDK builds.
+        am_real = AssistantMessage(
+            content=[TextBlock(text="hi")],
+            model="claude-opus-4-7",
+            usage={"input_tokens": 6, "output_tokens": 7},
+        )
+        yield am_real
+        # ResultMessage with the AUTHORITATIVE tally — including the
+        # 3787 cache_creation_input_tokens that the AssistantMessage
+        # path didn't surface.
+        rm = object.__new__(ResultMessage)
+        rm.is_error = False
+        rm.api_error_status = None
+        rm.errors = None
+        rm.usage = {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 3787,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 7,
+        }
+        rm.model_usage = {
+            "claude-opus-4-7": {
+                "inputTokens": 6,
+                "outputTokens": 7,
+                "cacheCreationInputTokens": 3787,
+                "cacheReadInputTokens": 0,
+            }
+        }
+        rm.session_id = "sess-abc"
+        rm.uuid = "sess-abc"
+        yield rm
+
+    fake_client.receive_response = fake_receive
+    handle = AgentHandle(workspace_id=uuid.uuid4(), state={"client": fake_client})
+
+    events: list[StreamEvent] = []
+    async for ev in adapter.send_turn(handle, "hi"):
+        events.append(ev)
+
+    done = [e for e in events if isinstance(e, TurnDoneEvent)][-1]
+    # Cap-relevant input tokens = sum of all input components the model
+    # actually processed for input: base + cache_creation + cache_read.
+    # 6 + 3787 + 0 = 3793.
+    assert done.tokens_in == 3793, (
+        f"expected 3793 (sum of input + cache_creation + cache_read), got {done.tokens_in}"
+    )
+    assert done.tokens_out == 7
+    assert done.model == "claude-opus-4-7"
+    assert done.session_id == "sess-abc"
+
+
+@pytest.mark.asyncio
+async def test_send_turn_falls_back_to_assistant_usage_if_result_missing():
+    """Defensive: if the SDK never yields a ResultMessage (network drop,
+    early disconnect), we fall back to the AssistantMessage usage so
+    the cap still gets *some* count rather than NULL."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+    from call_manager.proposal_assist.drafting.claude_adapter import (
+        ClaudeAgentSDKAdapter,
+    )
+    from call_manager.proposal_assist.drafting.contract import AgentHandle
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/x",
+    )
+    fake_client = MagicMock()
+    fake_client.query = AsyncMock()
+
+    async def fake_receive():
+        # Only an AssistantMessage; no ResultMessage at all.
+        yield AssistantMessage(
+            content=[TextBlock(text="bye")],
+            model="claude-haiku-4-5",
+            usage={"input_tokens": 100, "output_tokens": 50},
+        )
+
+    fake_client.receive_response = fake_receive
+    handle = AgentHandle(workspace_id=uuid.uuid4(), state={"client": fake_client})
+
+    events: list[StreamEvent] = []
+    async for ev in adapter.send_turn(handle, "hi"):
+        events.append(ev)
+
+    done = [e for e in events if isinstance(e, TurnDoneEvent)][-1]
+    # Without ResultMessage, the best we have is AssistantMessage.usage.
+    # input_tokens=100, no cache_* fields → tokens_in=100.
+    assert done.tokens_in == 100
+    assert done.tokens_out == 50
