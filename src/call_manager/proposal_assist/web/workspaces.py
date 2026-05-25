@@ -668,6 +668,18 @@ async def post_turn(
 
     # --- Inline upload branch (same ordering as files.py:upload_file) ---
     real_files = [f for f in files if f and f.filename]
+    # Slice 4 residuals: early cap-check BEFORE the upload loop. The
+    # post-upload check below still runs (defense-in-depth + correct
+    # behavior if a file silently drops), but this short-circuit avoids
+    # decoding + writing N files to disk when the request was clearly
+    # over the cap from the start. No rollback needed — nothing has
+    # been written yet.
+    early_inclusions = len(real_files) + len(attachment_ids) + len(reference_ids)
+    if early_inclusions > MAX_TURN_INCLUSIONS:
+        return HTMLResponse(
+            f"<p>Too many inclusions: {early_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
+            status_code=400,
+        )
     new_upload_ids: list[uuid.UUID] = []
     for upload in real_files:
         content_type = (upload.content_type or "").lower()
