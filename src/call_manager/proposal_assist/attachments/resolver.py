@@ -20,7 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import Attachment
+from call_manager.db.models import Attachment, Reference
 
 _MIME_BY_SUFFIX = {
     ".png": "image/png",
@@ -29,6 +29,14 @@ _MIME_BY_SUFFIX = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+
+REFERENCE_TEXT_BUDGET_CHARS = 50_000
+"""Per-reference truncation budget for content injection. Must match
+``call_manager.proposal_assist.turns.submit.REFERENCE_TEXT_BUDGET_CHARS``
+— the submit pre-count uses this value to estimate tokens. Keep in
+sync; the constants are duplicated rather than imported to avoid a
+cyclic module dep (submit imports resolver context indirectly via
+processor)."""
 
 
 class AttachmentResolutionError(RuntimeError):
@@ -115,6 +123,44 @@ def resolve_user_content(
                     },
                 }
             )
+        elif kind == "reference":
+            rid_str = block.get("reference_id")
+            if not isinstance(rid_str, str):
+                raise AttachmentResolutionError("reference block missing reference_id")
+            try:
+                rid = uuid.UUID(rid_str)
+            except ValueError as e:
+                raise AttachmentResolutionError(
+                    f"reference block reference_id not a valid uuid: {rid_str!r}"
+                ) from e
+            ref = session.scalar(select(Reference).where(Reference.id == rid))
+            # IDOR: collapse "not found" + "wrong workspace" into the same
+            # error message so callers can't probe ref ids across tenants.
+            # Mirrors the pattern in
+            # ``call_manager.proposal_assist.turns.submit``.
+            if ref is None or ref.workspace_id != workspace_id:
+                raise AttachmentResolutionError(
+                    f"reference {rid} does not belong to workspace {workspace_id}"
+                )
+            if ref.text_status != "done":
+                raise AttachmentResolutionError(
+                    f"reference {rid} text not ready (text_status={ref.text_status!r})"
+                )
+            text_path = workspaces_dir / str(workspace_id) / "references" / str(rid) / "text.txt"
+            if not text_path.exists():
+                raise AttachmentResolutionError(f"reference {rid} text file missing at {text_path}")
+            full_text = text_path.read_text(errors="replace")
+            display_label = ref.title or ref.filename
+            if len(full_text) > REFERENCE_TEXT_BUDGET_CHARS:
+                body = (
+                    full_text[:REFERENCE_TEXT_BUDGET_CHARS]
+                    + "\n\n[truncated — full text via search_references / "
+                    "read_reference_section MCP tools]"
+                )
+            else:
+                body = full_text
+            wrapped = f"<system>Reference: {display_label}\n\n{body}\n</system>"
+            out.append({"type": "text", "text": wrapped})
         else:
             raise AttachmentResolutionError(f"unknown content-block type: {kind!r}")
 
