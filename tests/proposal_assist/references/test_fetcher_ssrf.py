@@ -78,11 +78,17 @@ def test_rejects_ipv6_loopback_and_link_local():
         fetch_bytes("http://[fe80::1]/")
 
 
-def test_rejects_dns_rebinding_via_resolver_returning_private_ip(monkeypatch):
-    """If DNS resolution returns a private IP for a public-looking
-    hostname, reject. The fetcher resolves once and validates before
-    connecting — defends against an attacker controlling DNS for a
-    domain that resolves to a private IP."""
+def test_validator_rejects_resolver_returning_private_ip(monkeypatch):
+    """Tests the validation step: if DNS resolution returns a private
+    IP for a public-looking hostname, _resolve_and_validate rejects
+    before httpx ever opens a socket.
+
+    This test does NOT prove rebinding immunity at the httpx layer.
+    The connect-time race remains a documented v1 limitation per the
+    spec — httpx re-resolves at connect time, so an attacker who can
+    flip DNS responses between the validation lookup and the connect
+    lookup can still slip a private IP past this defense. True pinning
+    is a v1.1 follow-up (custom httpx.HTTPTransport)."""
     import socket
 
     real_getaddrinfo = socket.getaddrinfo
