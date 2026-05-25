@@ -31,6 +31,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     Attachment,
     ChatTurn,
+    Reference,
     TurnJob,
     User,
     Workspace,
@@ -415,6 +416,23 @@ def get_workspace_main(
         )
     )
 
+    # Slice 4: list of done-references for the composer picker. Filtered
+    # server-side to ``text_status='done'`` because submit_user_turn
+    # rejects anything else — keeping the template dumb means the picker
+    # never shows a checkbox that would fail validation. Pending / failed
+    # refs still appear on the /references panel (where the user manages
+    # them); only the composer picker hides them.
+    workspace_references = list(
+        session.scalars(
+            select(Reference)
+            .where(
+                Reference.workspace_id == workspace_id,
+                Reference.text_status == "done",
+            )
+            .order_by(Reference.created_at.desc())
+        )
+    )
+
     # Per-user, per-workspace disclosure check.
     prior_ack = session.scalar(
         select(WorkspaceEvent.id)
@@ -450,6 +468,7 @@ def get_workspace_main(
             "artifact_raw": raw,
             "needs_disclosure": needs_disclosure,
             "workspace_attachments": workspace_attachments,
+            "workspace_references": workspace_references,
         },
     )
 
@@ -492,6 +511,7 @@ async def post_turn(
     session: Session = Depends(_session_dep),  # noqa: B008
     content: str = Form(...),
     attachment_ids: list[uuid.UUID] = Form(default_factory=list),  # noqa: B008
+    reference_ids: list[uuid.UUID] = Form(default_factory=list),  # noqa: B008
     files: list[UploadFile] = File(default_factory=list),  # noqa: B008
 ) -> HTMLResponse:
     """Enqueue a user turn and return TWO HTML fragments (H1):
@@ -642,14 +662,19 @@ async def post_turn(
         session.add(att)
         new_upload_ids.append(aid)
 
-    # Combine: new uploads + explicit references. Order preserved so the
-    # composer's display order matches what we render in the chat row.
+    # Combine: new uploads + explicit attachment refs. Order preserved
+    # so the composer's display order matches what we render in the
+    # chat row.
     all_ids: list[uuid.UUID] = new_upload_ids + list(attachment_ids)
-    if len(all_ids) > MAX_TURN_INCLUSIONS:
+    # Slice 4: combined inclusion cap covers attachments + references.
+    # Pre-check here saves a wasted submit_user_turn DB round-trip and
+    # gives a single error format for both kinds.
+    all_inclusions = len(all_ids) + len(reference_ids)
+    if all_inclusions > MAX_TURN_INCLUSIONS:
         session.rollback()
         _rollback_created_uploads()
         return HTMLResponse(
-            f"<p>Too many attachments: {len(all_ids)} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
+            f"<p>Too many inclusions: {all_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
             status_code=400,
         )
 
@@ -659,6 +684,7 @@ async def post_turn(
             workspace_id=ws.id,
             content_text=content,
             attachment_ids=all_ids or None,
+            reference_ids=list(reference_ids) or None,
             submitted_by_user_id=user.id,
             settings=settings,
             workspaces_dir=Path(settings.workspaces_dir),

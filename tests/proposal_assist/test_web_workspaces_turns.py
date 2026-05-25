@@ -610,3 +610,203 @@ def test_post_turn_error_html_is_escaped(monkeypatch, pg_url, pg_session_factory
         assert "&lt;script&gt;" in resp.text or "&#x3c;script&#x3e;" in resp.text
     finally:
         client.__exit__(None, None, None)
+
+
+def test_post_turn_with_reference_ids_form_field(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """End-to-end: POST a turn with reference_ids; the ChatTurn row's
+    content includes a reference block; tokens_in pre-count includes
+    the reference chars."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from call_manager.auth.session_cookie import SessionSigner
+    from call_manager.db.models import ChatTurn, Reference, User, Workspace
+    from call_manager.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
+
+    app = create_app()
+    with pg_session_factory() as s:
+        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="T")
+        s.add(ws)
+        s.flush()
+        ref = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="My Paper",
+            filename="my.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=80,
+        )
+        s.add(ref)
+        s.commit()
+        uid, wsid, refid = owner.id, ws.id, ref.id
+
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    signer: SessionSigner = app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=uid))
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/turns",
+            data={
+                "content": "talk about this",
+                "reference_ids": str(refid),
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+
+    with pg_session_factory() as s:
+        ct = s.scalar(
+            select(ChatTurn).where(ChatTurn.workspace_id == wsid, ChatTurn.role == "user")
+        )
+    assert isinstance(ct.content, list)
+    assert any(
+        b.get("type") == "reference" and b.get("reference_id") == str(refid) for b in ct.content
+    )
+    # Pre-count: 80 // 4 + len("talk about this") // 4 = 20 + 3 = 23
+    assert ct.tokens_in == 20 + (len("talk about this") // 4)
+
+
+def test_post_turn_with_reference_ids_returns_400_for_pending_reference(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """text_status='pending' → submit raises ValueError → route returns 400."""
+    from fastapi.testclient import TestClient
+
+    from call_manager.auth.session_cookie import SessionSigner
+    from call_manager.db.models import Reference, User, Workspace
+    from call_manager.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
+
+    app = create_app()
+    with pg_session_factory() as s:
+        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="T")
+        s.add(ws)
+        s.flush()
+        ref = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="X",
+            filename="x.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="pending",
+            text_chars_total=None,
+        )
+        s.add(ref)
+        s.commit()
+        uid, wsid, refid = owner.id, ws.id, ref.id
+
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    signer: SessionSigner = app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=uid))
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/turns",
+            data={"content": "x", "reference_ids": str(refid)},
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 400
+    assert b"not ready" in resp.content
+
+
+def test_workspace_main_context_includes_workspace_references(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The composer picker needs the list of done-references in the
+    template context. Only text_status='done' refs appear (pending /
+    failed are filtered out)."""
+    from fastapi.testclient import TestClient
+
+    from call_manager.auth.session_cookie import SessionSigner
+    from call_manager.db.models import Reference, User, Workspace
+    from call_manager.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
+
+    app = create_app()
+    with pg_session_factory() as s:
+        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="T")
+        s.add(ws)
+        s.flush()
+        # Two refs: one done (should appear in picker), one pending (filtered out)
+        ref_done = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="Done",
+            filename="d.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=10,
+        )
+        ref_pending = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="Pending",
+            filename="p.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="pending",
+            text_chars_total=None,
+        )
+        s.add_all([ref_done, ref_pending])
+        s.commit()
+        uid, wsid = owner.id, ws.id
+        done_id = ref_done.id
+        pending_id = ref_pending.id
+
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    signer: SessionSigner = app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=uid))
+    try:
+        resp = client.get(f"/workspaces/{wsid}")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    # Composer picker should list the done ref but not the pending one
+    assert "Done" in body
+    assert 'name="reference_ids"' in body
+    # The done ref's checkbox value should be present.
+    assert f'value="{done_id}"' in body
+    # The pending ref's id should NOT appear as a picker value (filtered server-side).
+    assert f'value="{pending_id}"' not in body
