@@ -450,6 +450,116 @@ Both read-only — no remediation UI in v1.
 
 ---
 
+## Section 5 — Slice plan
+
+The subsystem ships in 5 slices, each independently mergeable to master with the established pattern (plan → subagent-driven execution → 2-stage review → smoke → merge → Codex review pass → residuals). Total scope is ~2-3 weeks if all slices are pursued sequentially.
+
+### Slice 1 — Foundation: model + storage + sync ingest + manual upload
+
+**Goal:** users can upload a reference file via the web UI; bytes land on disk, text is extracted, chunks are embedded, the row is searchable. No agent integration yet.
+
+**Files (new):**
+- `alembic/versions/0031_references.py` — migration for `references`, `reference_chunks`, `ALTER turn_jobs ADD fetch_count`.
+- `src/call_manager/db/models.py` — `Reference`, `ReferenceChunk` ORM models.
+- `src/call_manager/proposal_assist/references/__init__.py`
+- `src/call_manager/proposal_assist/references/storage.py` — filesystem layout helpers (mirrors `attachments/storage.py`).
+- `src/call_manager/proposal_assist/references/extract.py` — text extractors per MIME (pdftotext via pdfminer/poppler subprocess, python-docx, striprtf, openpyxl, ipynb parsing).
+- `src/call_manager/proposal_assist/references/chunker.py` — section-aware chunker.
+- `src/call_manager/proposal_assist/references/ingest.py` — two-phase ingest entry point (atomic write+row then sync Stage 1).
+- `src/call_manager/proposal_assist/web/references.py` — new router with `GET /workspaces/<id>/references` (panel, owner+viewer), `POST /workspaces/<id>/references` (multipart upload, owner-only), `GET /workspaces/<id>/references/<id>/raw` (serve bytes with `Content-Disposition: attachment` + `nosniff`).
+- `src/call_manager/web/templates/proposal_assist/workspace_references.html` — list+upload panel.
+- `src/call_manager/web/templates/proposal_assist/partials/reference_row.html` — per-row partial (HTMX swap target).
+- `tests/proposal_assist/references/test_storage.py`
+- `tests/proposal_assist/references/test_extract.py`
+- `tests/proposal_assist/references/test_chunker.py`
+- `tests/proposal_assist/references/test_ingest.py`
+- `tests/proposal_assist/test_web_workspaces_references.py`
+
+**Files (modified):**
+- `src/call_manager/main.py` — register new router.
+- `src/call_manager/web/templates/proposal_assist/workspace_main.html` — add "References" link to side nav.
+- `pyproject.toml` — add `python-docx`, `striprtf`, `openpyxl`, optionally `pdfminer.six`.
+
+**Smoke test:** upload a small PDF via the panel; verify row + bytes + chunks land; download via `/raw` returns the original bytes with `attachment` disposition.
+
+### Slice 2 — Read-only MCP tools (browse + search + navigate)
+
+**Goal:** agent can `list_references`, `search_references`, `navigate_reference`, `read_reference`, `read_reference_section`, `summarize_data`. Read-only — no mutation, no fetch.
+
+**Files (new):**
+- `src/call_manager/proposal_assist/references/mcp_tools.py` — 6 MCP tool handlers.
+- `tests/proposal_assist/references/test_mcp_tools.py` — each tool tested with seeded chunks.
+
+**Files (modified):**
+- `src/call_manager/proposal_assist/tools/registry.py` — register the 6 new tools in the existing MCP registry.
+- `src/call_manager/proposal_assist/drafting/claude_adapter.py` — add the 6 new tool names to the `allowed_tools` allowlist (the security boundary established in B5).
+
+**Smoke test:** ask the agent in a workspace with 3+ uploaded papers "search for the methods section about X" — verify it picks the right tool, returns relevant snippets with section_path tagged.
+
+### Slice 3 — Auto-fetch dispatcher + SSRF-safe httpx + `fetch_reference` MCP tool
+
+**Goal:** agent can `fetch_reference("10.1056/NEJMms…")`, `fetch_reference("https://arxiv.org/abs/…")`, etc. Same dispatcher backs a `POST /references/fetch` UI button.
+
+**Files (new):**
+- `src/call_manager/proposal_assist/references/fetcher.py` — SSRF-safe httpx Transport with IP pinning + the 4 source-specific backends (Crossref, PubMed, arXiv, generic).
+- `tests/proposal_assist/references/test_fetcher_ssrf.py` — explicit tests for each SSRF defense (private IP rejection, DNS rebinding sim, scheme allowlist, redirect validation, size cap).
+- `tests/proposal_assist/references/test_fetcher_backends.py` — mock each source's API surface.
+
+**Files (modified):**
+- `src/call_manager/proposal_assist/web/references.py` — add `POST /references/fetch` form route.
+- `src/call_manager/proposal_assist/references/mcp_tools.py` — add `fetch_reference` tool with the atomic `UPDATE turn_jobs SET fetch_count = fetch_count + 1 WHERE workspace_id = ? AND status = 'running' AND fetch_count < 3 RETURNING fetch_count` pattern.
+- `src/call_manager/proposal_assist/drafting/claude_adapter.py` — add `fetch_reference` to `allowed_tools`.
+- `pyproject.toml` — add `httpx` if not already direct dep (transitive via Claude SDK; promote to direct).
+
+**Smoke test:** agent fetches a real arXiv paper mid-turn, then immediately `search_references` finds a chunk from it.
+
+### Slice 4 — Chat composer integration + cap pre-counting
+
+**Goal:** user can attach references to a turn via the composer; B8 cap reflects the real input cost.
+
+**Files (modified):**
+- `src/call_manager/proposal_assist/turns/submit.py` — extend `submit_user_turn` signature with `reference_ids: list[uuid.UUID] = []`. Pre-count via `text_chars_total // 4` (rejects if any included ref's `text_status != 'done'`). Rename `MAX_ATTACHMENTS_PER_TURN` → `MAX_TURN_INCLUSIONS = 5`; check becomes `len(attachment_ids) + len(reference_ids) > 5`.
+- `src/call_manager/proposal_assist/attachments/resolver.py` — sibling resolver function `resolve_references()` that injects `<system>Reference: <title>\n\n<truncated text>...</system>` blocks into the user message at processor turn-time.
+- `src/call_manager/proposal_assist/turns/processor.py` — call the new resolver alongside attachments resolver.
+- `src/call_manager/web/templates/proposal_assist/workspace_main.html` — composer `<details>` gains reference checkbox picker (similar to image picker).
+- `tests/proposal_assist/test_turns_submit.py` — add tests for `reference_ids` + pre-count + over-cap-combined rejection.
+- `tests/proposal_assist/test_web_workspaces_turns.py` — add e2e test for posting a turn with references.
+
+**Smoke test:** user submits a turn with 2 attached references; agent's response demonstrates it saw the reference content; verify cap counter on the row reflects the pre-count.
+
+### Slice 5 — Operational polish: delete + copy + reembed CLI + admin panel
+
+**Goal:** lifecycle complete — delete, copy across workspaces, re-embed after model change, admin visibility of failures.
+
+**Files (modified/new):**
+- `src/call_manager/proposal_assist/web/references.py` — add `POST /references/<id>/delete` (owner-only, row-first then file unlink, B7 pattern) and `POST /references/<id>/copy_to` (resolve source, copy bytes + INSERT new row + duplicate chunks).
+- `src/call_manager/proposal_assist/references/cli.py` — new `python -m call_manager.proposal_assist.references.cli reembed --model <new>` command that re-extracts + re-chunks + re-embeds all `text_status='done'` references with `embedding_model != <new>`. Atomic per-reference (delete old chunks + insert new in one tx).
+- `src/call_manager/web/routes/admin.py` — extend `_drafting_panel_context` to include reference-failure counts; render in the existing `admin_drafting.html` template (new section at the bottom).
+- `tests/proposal_assist/references/test_delete_copy.py`
+- `tests/proposal_assist/references/test_reembed_cli.py`
+- `tests/test_web_admin_drafting_panel.py` — add test for the new section.
+
+**Smoke test:** copy a reference from workspace A to B (verify independent row + file); change `EMBEDDING_MODEL` env, run reembed CLI, verify chunks updated; admin panel shows the failure count if any `text_status='failed'` rows exist.
+
+### Slice dependency graph
+
+```
+1 (Foundation) ──┬─→ 2 (read-only MCP tools)
+                 ├─→ 4 (composer integration)
+                 └─→ 5 (operational polish)
+3 (auto-fetch + fetch_reference tool) ─── depends on 1 + 2
+```
+
+Slice 2 and Slice 3 can land in either order after Slice 1 (3 can be sketched against the UI route alone; the MCP version benefits from 2's tool-registry plumbing being live but doesn't strictly require it). Recommended order is **1 → 2 → 3 → 4 → 5** because each slice's smoke test is more interesting when the prior agent-interaction surface is live.
+
+### What's NOT in v1 (deferred to v1.1)
+
+- PageIndex outline generation + the async indexing tick + the `llm_usage` ledger table + the `caps.py` cap-query UNION change. All land as one slice (call it `v1.1`) when better outlines for weak-structure PDFs become a real pain point.
+- Inline-preview routes for PDFs/images (with bleach sanitization). v1 only has the `attachment`-disposition raw download.
+- Promotion of references to a cross-workspace shared library. v1 is copy-on-add only.
+
+---
+
 ## Open questions / pending review
 
 1. **Section 5 — slice plan** is not yet drafted. The build order is provisionally 4–5 slices: (1) `Reference` model + manual upload + storage, (2) ingestion pipeline (text extraction + chunk/embed + pgvector reuse), (3) PageIndex async indexing, (4) auto-fetch sources (Crossref + PubMed + arXiv + Web), (5) agent MCP tools + web UI + chat composer integration. Final ordering depends on dependency analysis during plan writing.
