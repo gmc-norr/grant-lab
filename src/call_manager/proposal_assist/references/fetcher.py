@@ -6,20 +6,25 @@ resolution, PubMed XML, arXiv PDF, generic URLs) go through this
 module, which:
 
 1. Rejects non-http(s) schemes (no file://, gopher://, data:, etc.).
-2. Resolves DNS once, validates every returned IP against the private/
-   internal range deny-list. Rejects if any address is private.
-3. PINS the httpx connection to the validated IP, then sends the
-   original hostname for TLS SNI + cert validation. Defends against
-   DNS rebinding (validation resolves to public IP; fetch resolves
-   to private IP).
-4. Re-validates every redirect target (and re-pins) up to a configurable
-   max-redirect count.
+   Both http and https are allowed unconditionally; the private-IP
+   block below is the actual SSRF defense.
+2. Resolves DNS for validation, checks every returned IP against the
+   private/internal range deny-list. Rejects if any address is private.
+3. VALIDATES the resolved IP against the deny-list, but does NOT pin
+   the connection. httpx re-resolves the hostname at connect time, so
+   a determined attacker rebinding DNS between validation and fetch
+   can still hit a private IP. True pinning (a custom httpx.HTTPTransport
+   that overrides connect_socket) is a v1.1 follow-up. The validate-once
+   pattern closes the common-case rebinding window but is not a hard
+   guarantee.
+4. Re-validates every redirect target up to a configurable max-redirect
+   count.
 5. Caps response size at max_bytes; reads in chunks.
 
 Source-specific backends (Crossref / PubMed / arXiv / generic) wrap
 fetch_bytes and add their own URL-shaping + response parsing.
 
-Per spec rev4 Codex High #2.
+Per spec rev4 Codex High #2 (with rev5 honesty pass on pinning).
 """
 
 from __future__ import annotations
@@ -104,15 +109,14 @@ def _resolve_and_validate(host: str, port: int) -> str:
     return addrs[0]
 
 
-def _validate_url(url: str, *, allow_http: bool = False) -> tuple[str, str, int, str]:
+def _validate_url(url: str) -> tuple[str, str, int, str]:
     """Returns (scheme, host, port, path-and-query). Raises SSRFError
     on any safety violation.
 
-    Note: the http-vs-https check runs AFTER hostname parsing but the
-    private-IP check happens later in _resolve_and_validate. We do NOT
-    gate http:// here — the security-critical check is the private-IP
-    block, and refusing http:// for private IPs would produce a less
-    actionable error message ("scheme" vs "private")."""
+    Both http and https are accepted — the private-IP check in
+    _resolve_and_validate is the security-critical defense. Gating
+    http:// here would produce less actionable errors ("scheme" vs
+    "private") for the common private-IP-over-http case."""
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
@@ -131,7 +135,6 @@ def fetch_bytes(
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
-    allow_http: bool = False,
     user_agent: str = "call-manager-references/1.0",
 ) -> bytes:
     """Fetch the bytes at `url`, following up to _MAX_REDIRECTS hops,
@@ -151,11 +154,10 @@ def fetch_bytes(
             raise FetchError(f"redirect loop at {current_url!r}")
         seen_urls.add(current_url)
 
-        scheme, host, port, _ = _validate_url(current_url, allow_http=allow_http)
-        # Validate + pin the IP. Don't actually override httpx's
-        # connection address (more invasive transport hooks needed);
-        # the validation + the single-resolve-window already defends
-        # against rebinding for the duration of THIS request.
+        scheme, host, port, _ = _validate_url(current_url)
+        # Validate the resolved IP. We do NOT override httpx's connect
+        # address — httpx re-resolves at connect time, leaving a small
+        # rebinding race that v1.1 will close with a custom transport.
         _ = _resolve_and_validate(host, port)
 
         try:
