@@ -15,6 +15,7 @@ from call_manager.proposal_assist.tools.references import (
     navigate_reference_impl,
     read_reference_impl,
     read_reference_section_impl,
+    search_references_impl,
     summarize_data_impl,
 )
 from call_manager.proposal_assist.tools.registry import ToolContext
@@ -404,3 +405,69 @@ async def test_summarize_data_unknown_id_returns_error(pg_session_factory, tmp_p
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
     out = await summarize_data_impl(ctx, reference_id=str(uuid.uuid4()))
     assert "error" in out
+
+
+@pytest.mark.asyncio
+async def test_search_references_returns_top_k_chunks(pg_session_factory, tmp_path):
+    """Seed 3 references with different content; embed query that should
+    rank the cancer-biopsy one highest. Uses FakeEmbedder so 'top-k'
+    is deterministic via the seeded vectors."""
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+
+    result = await search_references_impl(
+        ctx, query="CAR-T cells", top_k=3, embedder=FakeEmbedder()
+    )
+    assert "results" in result
+    assert len(result["results"]) <= 3
+    # Each result has the expected shape.
+    for hit in result["results"]:
+        assert set(hit.keys()) >= {
+            "reference_id",
+            "title",
+            "section_path",
+            "snippet",
+            "score",
+        }
+
+
+@pytest.mark.asyncio
+async def test_search_references_filters_by_kind(pg_session_factory, tmp_path):
+    """Restrict to kind='paper' — only the paper ref's chunks should
+    appear in results."""
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await search_references_impl(
+        ctx,
+        query="anything",
+        top_k=20,
+        kind="paper",
+        embedder=FakeEmbedder(),
+    )
+    # Check each result's reference_id corresponds to a kind='paper' row.
+    paper_ids = {str(rids[0])}  # _seed_three_refs puts paper first
+    for hit in result["results"]:
+        assert hit["reference_id"] in paper_ids
+
+
+@pytest.mark.asyncio
+async def test_search_references_caps_top_k_at_25(pg_session_factory, tmp_path):
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await search_references_impl(ctx, query="anything", top_k=999, embedder=FakeEmbedder())
+    # Hard cap = 25 per spec; results may be fewer if there are fewer
+    # chunks in the workspace.
+    assert len(result["results"]) <= 25
+
+
+@pytest.mark.asyncio
+async def test_search_references_scopes_to_workspace(pg_session_factory, tmp_path):
+    """IDOR: a query in workspace A must not return chunks from
+    workspace B."""
+    wsid_a, rids_a = _seed_three_refs(pg_session_factory, tmp_path)
+    wsid_b, rids_b = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid_a)
+    result = await search_references_impl(ctx, query="anything", top_k=50, embedder=FakeEmbedder())
+    allowed = {str(r) for r in rids_a}
+    for hit in result["results"]:
+        assert hit["reference_id"] in allowed

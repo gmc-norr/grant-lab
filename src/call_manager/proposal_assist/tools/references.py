@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.references.embed import Embedder
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.registry import ToolContext
 
@@ -81,8 +82,70 @@ async def search_references_impl(
     query: str,
     top_k: int = 8,
     kind: str | None = None,
+    embedder: Embedder | None = None,
 ) -> dict[str, Any]:
-    return {"error": "not implemented"}
+    """Semantic search via pgvector HNSW. Returns the top-k most
+    relevant chunks across the workspace's references, optionally
+    filtered by kind. embedder defaults to OllamaEmbedClient via
+    settings.embedding_model.
+
+    The `embedder` kwarg is the test-injection seam — production code
+    leaves it None and the function constructs the adapter."""
+    if top_k > 25:
+        top_k = 25  # spec hard cap
+
+    if embedder is None:
+        from call_manager.embeddings.client import OllamaEmbedClient
+        from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
+
+        client = OllamaEmbedClient(
+            base_url=ctx.settings.ollama_url,
+            model=ctx.settings.embedding_model,
+        )
+        embedder = OllamaEmbedderAdapter(client)
+
+    query_vec = embedder.embed(query)
+
+    with ctx.session_factory() as s:
+        # HNSW cosine distance via pgvector; lower distance = more
+        # relevant. Filter to workspace_id (IDOR defense) and the
+        # current embedding_model (model-version safety).
+        stmt = (
+            select(
+                ReferenceChunk.reference_id,
+                ReferenceChunk.section_path,
+                ReferenceChunk.text,
+                ReferenceChunk.embedding.cosine_distance(query_vec).label("distance"),
+                Reference.title,
+                Reference.kind,
+                Reference.filename,
+            )
+            .join(Reference, Reference.id == ReferenceChunk.reference_id)
+            .where(
+                ReferenceChunk.workspace_id == ctx.workspace_id,
+                ReferenceChunk.embedding_model == embedder.model,
+                Reference.text_status == "done",
+            )
+            .order_by("distance")
+            .limit(top_k)
+        )
+        if kind:
+            stmt = stmt.where(Reference.kind == kind)
+        rows = list(s.execute(stmt))
+
+    results = []
+    for row in rows:
+        snippet = row.text[:300] + ("…" if len(row.text) > 300 else "")
+        results.append(
+            {
+                "reference_id": str(row.reference_id),
+                "title": row.title or row.filename,
+                "section_path": row.section_path,
+                "snippet": snippet,
+                "score": float(1.0 - row.distance),  # cosine similarity
+            }
+        )
+    return {"query": query, "results": results}
 
 
 async def navigate_reference_impl(
