@@ -376,3 +376,116 @@ async def summarize_data_impl(
         "filename": ref.filename,
         "schema_and_sample": text_path.read_text(encoding="utf-8"),
     }
+
+
+async def fetch_reference_impl(
+    ctx: ToolContext,
+    *,
+    input: str,  # noqa: A002
+    kind: str = "paper",
+) -> dict[str, Any]:
+    """Agent-side mid-turn fetch. Atomic per-turn cap enforced BEFORE
+    the fetch: UPDATE turn_jobs SET fetch_count = fetch_count + 1
+    WHERE workspace_id = ? AND status = 'running' AND fetch_count < 3
+    RETURNING fetch_count.
+
+    Validates input shape FIRST (cheap, doesn't cost the budget).
+    If a bad input would have wasted a cap slot, the user gets
+    nothing while the budget shrinks — bad UX. Detect-then-decrement
+    isn't atomic but the test confirms invalid input doesn't increment.
+    """
+    from sqlalchemy import update as _sql_update
+
+    from call_manager.db.models import TurnJob
+    from call_manager.proposal_assist.references.dispatcher import (
+        detect_source_type,
+        dispatch_fetch,
+    )
+    from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
+    from call_manager.proposal_assist.references.fetcher import FetchError, SSRFError
+    from call_manager.proposal_assist.references.ingest import ingest_bytes
+    from call_manager.proposal_assist.references.storage import ReferenceStorage
+
+    # Validate input shape first — bad input shouldn't cost the budget.
+    try:
+        detect_source_type(input)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    if kind not in ("paper", "prior_proposal", "analysis", "data"):
+        return {"error": f"invalid kind: {kind!r}"}
+
+    # Atomic cap-check + increment. Returns the new fetch_count, or
+    # 0 rows if either (a) no running turn exists for this workspace
+    # or (b) fetch_count was already 3.
+    with ctx.session_factory() as s:
+        result = s.execute(
+            _sql_update(TurnJob)
+            .where(
+                TurnJob.workspace_id == ctx.workspace_id,
+                TurnJob.status == "running",
+                TurnJob.fetch_count < 3,
+            )
+            .values(fetch_count=TurnJob.fetch_count + 1)
+            .returning(TurnJob.fetch_count)
+        )
+        new_count_row = result.first()
+        s.commit()
+        if new_count_row is None:
+            # Either no running turn OR cap reached.
+            return {
+                "error": (
+                    "fetch cap reached (3 per turn) OR no running turn for "
+                    "this workspace — please ask the user to upload the "
+                    "reference manually via the /references panel."
+                )
+            }
+        new_count = new_count_row[0]
+
+    # Do the fetch + ingest. From here, failures DON'T undo the
+    # increment (it's the agent's responsibility to not retry on
+    # failure). Slice 5 may add explicit decrement on FetchError.
+    try:
+        data, filename, mime_type, source_meta = dispatch_fetch(input)
+    except SSRFError as e:
+        return {"error": f"SSRF refused: {e}", "fetch_count": new_count}
+    except FetchError as e:
+        return {"error": f"fetch failed: {e}", "fetch_count": new_count}
+
+    storage = ReferenceStorage(root=Path(ctx.settings.workspaces_dir))
+    from call_manager.embeddings.client import OllamaEmbedClient
+
+    embed_client = OllamaEmbedClient(
+        base_url=ctx.settings.ollama_url,
+        model=ctx.settings.embedding_model,
+    )
+    embedder = OllamaEmbedderAdapter(embed_client)
+
+    with ctx.session_factory() as s:
+        try:
+            ingest_result = ingest_bytes(
+                session_factory=ctx.session_factory,
+                session=s,
+                storage=storage,
+                embedder=embedder,
+                workspace_id=ctx.workspace_id,
+                kind=kind,
+                source_type=source_meta["source"],
+                source_uri=input,
+                filename=filename,
+                mime_type=mime_type,
+                data=data,
+                uploaded_by=None,  # agent-initiated, no actor_id
+            )
+            s.commit()
+        except Exception as e:
+            s.rollback()
+            return {"error": f"ingest failed: {e}", "fetch_count": new_count}
+
+    return {
+        "reference_id": str(ingest_result.reference_id),
+        "filename": filename,
+        "source_type": source_meta["source"],
+        "fetch_count": new_count,
+        "text_status": ingest_result.text_status,
+    }
