@@ -1,9 +1,12 @@
 """SSRF defenses for the references fetcher. Each test exercises one
 defense; together they cover the rev4 Codex High #2 attack surface
 (scheme allowlist, private-IP block, DNS rebinding, redirect validation,
-response-size cap)."""
+response-size cap).
 
-import socket
+Unlike the other reference tests, the `fake_public_dns` fixture is
+opted into per-test rather than autouse — the rebinding-validation test
+needs to install its own getaddrinfo monkeypatch, so it must not
+collide with an autouse fixture."""
 
 import pytest
 
@@ -12,33 +15,6 @@ from call_manager.proposal_assist.references.fetcher import (
     SSRFError,
     fetch_bytes,
 )
-
-
-@pytest.fixture
-def fake_public_dns(monkeypatch):
-    """Pretend *.example.com resolves to a real public IP (8.8.8.8) for
-    httpx_mock tests that don't (and can't) hit real DNS. Other hostnames
-    fall through to the real resolver. We use 8.8.8.8 rather than a
-    TEST-NET address because Python's ipaddress.is_private treats
-    documentation ranges (192.0.2/24, 198.51.100/24, 203.0.113/24) as
-    private, which would defeat the test."""
-    real_getaddrinfo = socket.getaddrinfo
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        if host.endswith(".example.com") or host == "example.com":
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    6,
-                    "",
-                    ("8.8.8.8", 0),
-                )
-            ]
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    return fake_getaddrinfo
 
 
 def test_rejects_non_http_scheme():

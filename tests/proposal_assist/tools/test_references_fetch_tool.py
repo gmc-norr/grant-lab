@@ -3,7 +3,6 @@ Uses atomic UPDATE turn_jobs SET fetch_count = fetch_count + 1
 WHERE workspace_id = ? AND status = 'running' AND fetch_count < 3
 RETURNING fetch_count."""
 
-import socket
 import uuid
 from datetime import UTC, datetime
 
@@ -21,37 +20,10 @@ from call_manager.db.models import (
 from call_manager.proposal_assist.tools.references import fetch_reference_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 
-
-@pytest.fixture(autouse=True)
-def fake_public_dns(monkeypatch):
-    """pytest-httpx mocks at the httpx transport layer, NOT the socket
-    layer, so the SSRF resolver still attempts real DNS for hosts
-    referenced by tests. Pretend arxiv.org resolves to a real public
-    IP (8.8.8.8). Other hostnames fall through."""
-    real_getaddrinfo = socket.getaddrinfo
-
-    _fake_hosts = {
-        "api.crossref.org",
-        "eutils.ncbi.nlm.nih.gov",
-        "arxiv.org",
-        "example.com",
-    }
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        if host in _fake_hosts or host.endswith(".example.com"):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    6,
-                    "",
-                    ("8.8.8.8", 0),
-                )
-            ]
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    return fake_getaddrinfo
+# Every test reaches the SSRF resolver through fetch_reference_impl;
+# apply the shared fake_public_dns fixture from tests/proposal_assist/
+# conftest.py to all tests in this module.
+pytestmark = pytest.mark.usefixtures("fake_public_dns")
 
 
 def _make_ctx(pg_session_factory, tmp_path, workspace_id):

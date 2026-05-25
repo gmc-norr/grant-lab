@@ -1,7 +1,10 @@
 """POST /workspaces/<id>/references/fetch — UI counterpart to the
-agent's fetch_reference MCP tool. Owner-only; same auth as upload."""
+agent's fetch_reference MCP tool. Owner-only; same auth as upload.
 
-import socket
+`fake_public_dns` lives in tests/proposal_assist/conftest.py; tests
+that hit the SSRF resolver request it by name (kept non-autouse so
+the 403/400 tests below don't pay the DNS monkeypatch cost)."""
+
 import uuid
 
 import pytest
@@ -11,42 +14,6 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Reference, User, Workspace
 from call_manager.main import create_app
-
-
-@pytest.fixture
-def fake_public_dns(monkeypatch):
-    """pytest-httpx mocks at the httpx transport layer, NOT the socket
-    layer, so the SSRF resolver still attempts real DNS for hosts
-    referenced by tests. Pretend the known mocked hostnames resolve to
-    a real public IP (8.8.8.8). Other hostnames fall through.
-
-    We use 8.8.8.8 rather than a TEST-NET address because Python's
-    ipaddress.is_private treats the documentation ranges as private,
-    which would defeat the SSRF check."""
-    real_getaddrinfo = socket.getaddrinfo
-
-    _fake_hosts = {
-        "api.crossref.org",
-        "eutils.ncbi.nlm.nih.gov",
-        "arxiv.org",
-        "example.com",
-    }
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        if host in _fake_hosts or host.endswith(".example.com"):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    6,
-                    "",
-                    ("8.8.8.8", 0),
-                )
-            ]
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    return fake_getaddrinfo
 
 
 def _build_app(monkeypatch, pg_url, tmp_path):

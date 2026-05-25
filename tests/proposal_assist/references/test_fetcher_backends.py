@@ -2,8 +2,6 @@
 extracts the actual PDF/XML URL, then delegates to fetch_bytes for
 the SSRF-safe download."""
 
-import socket
-
 import pytest
 
 from call_manager.proposal_assist.references.fetcher import (
@@ -14,42 +12,10 @@ from call_manager.proposal_assist.references.fetcher import (
     fetch_pubmed_pmid,
 )
 
-
-@pytest.fixture(autouse=True)
-def fake_public_dns(monkeypatch):
-    """pytest-httpx mocks at the httpx transport layer, NOT the socket
-    layer, so our SSRF resolver still attempts real DNS for hosts referenced
-    by tests. Pretend the known mocked hostnames resolve to a real public
-    IP (8.8.8.8). Other hostnames fall through to the real resolver.
-
-    We use 8.8.8.8 rather than a TEST-NET address because Python's
-    ipaddress.is_private treats the documentation ranges as private,
-    which would defeat the SSRF check."""
-    real_getaddrinfo = socket.getaddrinfo
-
-    _fake_hosts = {
-        "api.crossref.org",
-        "www.nejm.org",
-        "eutils.ncbi.nlm.nih.gov",
-        "arxiv.org",
-        "example.com",
-    }
-
-    def fake_getaddrinfo(host, *args, **kwargs):
-        if host in _fake_hosts or host.endswith(".example.com"):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    6,
-                    "",
-                    ("8.8.8.8", 0),
-                )
-            ]
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    return fake_getaddrinfo
+# Every test here hits a mocked hostname through fetch_bytes, which
+# validates DNS via socket.getaddrinfo. Apply the shared fixture from
+# tests/proposal_assist/conftest.py to all tests in this module.
+pytestmark = pytest.mark.usefixtures("fake_public_dns")
 
 
 def test_fetch_crossref_resolves_doi_to_publisher_pdf(httpx_mock):
