@@ -4,6 +4,16 @@
 
 ## Revisions
 
+**rev3 (2026-05-25, after user direction):** PageIndex deferred to v1.1; local RAG is the primary navigation path. The section-aware chunker already produces a usable structure — `navigate_reference` derives the outline from `SELECT DISTINCT section_path FROM reference_chunks` instead of calling an LLM. Removes ~30% of the rev2 complexity:
+
+- No `_reference_indexing_tick` worker (Stage 2 was PageIndex + text-retry; both gone — text failures are surface-level in v1, user retries via UI).
+- No `llm_usage` ledger table (no non-turn LLM spend exists in v1's references subsystem). The Codex High #1 motivation for the ledger was PageIndex; without it, B8's existing cap is sufficient. Compaction's missing accounting is a pre-existing issue separate from this subsystem and out of scope here.
+- No cap-query change (`caps.py` keeps summing only chat_turns).
+- New tool `read_reference_section(reference_id, section_path)` returns chunks concatenated for a section — provides the "read all of Methods" capability without an LLM-generated outline.
+- `outline_status`, `outline_error`, `outline_indexed_at` columns kept as v1.1 scaffolding (default `'skipped'` on every v1 insert). v1.1 changes the default + wires the worker; no schema migration needed at that point.
+
+PageIndex remains the chosen v1.1 enhancement when better outlines for weak-structure PDFs become a real pain point.
+
 **rev2 (2026-05-25, after Codex review of rev1):**
 
 1. **PageIndex cost is now first-class** (Codex High). Added a `llm_usage` ledger table for non-turn LLM spend (outline generation today; compaction + future server-side LLM use later). `check_daily_token_cap` and `check_global_daily_token_cap` UNION chat_turns and llm_usage. rev1's claim that PageIndex "rides along" with the existing cap was wrong — caps.py sums only `chat_turns.tokens_in/out`, so a non-turn worker had no ledger row.
@@ -46,7 +56,7 @@ The new code must be consistent with patterns landed across the proposal-assist 
 |---|---|
 | Content types in v1 | All four: papers, prior proposals, analyses, data files |
 | Cross-workspace sharing | Copy-on-add (snapshot). No shared library. |
-| Agent interface | Browse + semantic search + PageIndex navigation. All three. |
+| Agent interface | v1: Browse + semantic search + chunk-derived outline navigation. v1.1: PageIndex-generated outlines layer on top of the same `navigate_reference` tool. |
 | Auto-fetch sources | Crossref (DOI) + PubMed (PMID/PMC XML) + arXiv + Anthropic Web Fetch |
 | Who can add refs | Both user (UI upload) and agent (mid-turn `fetch_reference`) |
 | Embedding model | Local Ollama `mxbai-embed-large` (matches dev .env, avoids bge-m3 NaN bug) |
@@ -67,7 +77,7 @@ var/workspaces/<workspace_id>/
     └── <reference_id>/
         ├── original.<ext>         (uploaded/fetched bytes — pdf, docx, md, csv, ...)
         ├── text.txt               (extracted plain text — input for chunk+embed)
-        └── outline.json           (PageIndex output, written when async job completes)
+        └── outline.json           (v1.1 only — PageIndex output; absent in v1)
 ```
 
 ### Database schema
@@ -89,9 +99,12 @@ CREATE TABLE references (
                     CHECK (text_status IN ('pending','running','done','failed','skipped')),
     text_error      TEXT,
     text_indexed_at TIMESTAMPTZ,           -- non-null once chunks + embeddings written
-    -- PageIndex outline status (separate so navigate_reference can distinguish
-    -- "extraction failed" from "outline still indexing")
-    outline_status  TEXT NOT NULL DEFAULT 'pending'
+    -- PageIndex outline status — v1.1 scaffolding. v1 inserts always
+    -- use 'skipped' because PageIndex is deferred (rev3). When v1.1
+    -- lands, the default changes to 'pending' and the worker starts
+    -- populating outline_indexed_at. Kept now so v1.1 doesn't need
+    -- a schema migration.
+    outline_status  TEXT NOT NULL DEFAULT 'skipped'
                     CHECK (outline_status IN ('pending','running','done','failed','skipped')),
     outline_error   TEXT,
     outline_indexed_at TIMESTAMPTZ,
@@ -99,9 +112,10 @@ CREATE TABLE references (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_references_ws ON references(workspace_id);
--- Worker backlog index — picks rows that need either text indexing or outline.
--- Excludes 'done', 'failed', 'skipped'. `kind=data` inserts use
--- text_status='skipped' AND outline_status='skipped' so they never appear here.
+-- Admin-panel backlog index — picks rows currently being indexed.
+-- v1 only has text_status (outline always 'skipped'); v1.1 will use both.
+-- Excludes 'done', 'failed', 'skipped'. `kind=data` rows use
+-- text_status='skipped' so they never appear here.
 CREATE INDEX ix_references_indexing_backlog ON references(workspace_id, created_at)
     WHERE text_status IN ('pending','running')
        OR outline_status IN ('pending','running');
@@ -121,33 +135,16 @@ CREATE TABLE reference_chunks (
 CREATE INDEX ix_reference_chunks_ws_embedding ON reference_chunks
     USING hnsw (embedding vector_cosine_ops);
 
--- Non-turn LLM spend ledger (rev2). The B8 daily-cap query UNIONs chat_turns
--- with this table so PageIndex outline + future compaction calls + server-side
--- web fetches that go through Anthropic land on the cap. Without this,
--- non-turn callers spend tokens that are invisible to the cap.
-CREATE TABLE llm_usage (
-    id              BIGSERIAL PRIMARY KEY,
-    workspace_id    UUID REFERENCES workspaces(id) ON DELETE CASCADE,  -- NULL allowed for
-                                                                       -- global system jobs
-    kind            TEXT NOT NULL CHECK (kind IN
-                    ('outline','compaction','fetch_assist','other')),
-    tokens_in       INTEGER NOT NULL DEFAULT 0,
-    tokens_out      INTEGER NOT NULL DEFAULT 0,
-    model           TEXT,
-    related_id      UUID,                         -- e.g. reference_id for kind='outline'
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX ix_llm_usage_ws_created ON llm_usage(workspace_id, created_at);
-
 -- Additive changes to existing tables:
 ALTER TABLE turn_jobs ADD COLUMN fetch_count INTEGER NOT NULL DEFAULT 0;
 ```
 
-**Cap query update (Codex High #1):** `check_daily_token_cap(workspace_id)` and `check_global_daily_token_cap()` in `caps.py` change from summing only `chat_turns` to summing the UNION of `chat_turns.tokens_in/out` and `llm_usage.tokens_in/out` over today's Stockholm-day window. Two-row aggregate inside a single CTE; reuses the existing `_stockholm_day_start_utc()` helper.
+**Cap query unchanged in v1.** rev2 proposed a `llm_usage` ledger + UNION-with-chat_turns cap query to capture non-turn Anthropic spend (PageIndex worker). rev3 has no non-turn LLM spend in v1's references subsystem (PageIndex deferred; the agent's `fetch_reference` uses server-side httpx, not Claude web-fetch). So `caps.py` keeps its existing chat_turns-only sum. When v1.1 lands PageIndex, the ledger + query change land with it as one slice.
 
 Notes:
-- `kind=data` rows insert with `text_status='skipped' AND outline_status='skipped'` so they never appear in any backlog query and are never picked by the worker (Codex High #3). Accessed via the `summarize_data` tool, which derives its output on-the-fly from the file on disk + the schema/sample stored in `text.txt`.
-- `outline_status` lets `navigate_reference` return a clean "still indexing, retry in 30s" response. `text_status` is the parallel signal for `search_references` (Codex Medium #4).
+- `kind=data` rows insert with `text_status='skipped' AND outline_status='skipped'`. Accessed via the `summarize_data` tool, which derives its output on-the-fly from the file on disk + the schema/sample stored in `text.txt`.
+- v1: all non-data inserts use `outline_status='skipped'` (rev3 — PageIndex deferred). v1.1 changes the default to `'pending'` and starts the worker.
+- `text_status` is the signal for `search_references`. `outline_status` is v1.1 scaffolding for `navigate_reference`'s LLM-outline path.
 - `reference_chunks.workspace_id` denormalized so per-workspace search is a single WHERE without a join.
 - Table naming (`references` is a noisy word) — Codex didn't object; keep for v1. Singular `reference` remains an option for future renaming if it bites.
 
@@ -159,7 +156,7 @@ Notes:
 
 ## Section 2 — Ingestion pipeline
 
-Two entry points (upload + fetch) feed one shared indexing pipeline with two stages (sync RAG + async PageIndex).
+Two entry points (upload + fetch) feed one shared indexing pipeline. v1 has one stage (sync RAG); v1.1 adds Stage 2 (async PageIndex outline).
 
 ```
 [upload (multipart)] ──┐
@@ -172,13 +169,9 @@ Two entry points (upload + fetch) feed one shared indexing pipeline with two sta
                        [chunk + embed (sync, ~1-5s)]
                                      │
                                      ▼
-                        [PageIndex outline job queued]
-                                     │
-                                     ▼
-                       [async worker (scheduler tick)]
-                                     │
-                                     ▼
-                  [outline.json + outline_status='done']
+                      [text_status='done', searchable]
+
+v1.1 only: queue PageIndex outline job → async worker → outline.json + outline_status='done'
 ```
 
 ### Upload entry point
@@ -188,7 +181,7 @@ Two entry points (upload + fetch) feed one shared indexing pipeline with two sta
 1. Validate MIME against allowlist: pdf, md, txt, docx, rtf, csv, xlsx, ipynb.
 2. Stream-read with 50 MB cap (papers are bigger than B7's 5 MB image cap; configurable env `REFERENCES_MAX_BYTES`).
 3. Write atomically (temp + `os.replace`) to `references/<new_id>/original.<ext>`.
-4. Insert `Reference` row with `outline_status='pending'`.
+4. Insert `Reference` row with `text_status='pending'`, `outline_status='skipped'` (v1; v1.1 defaults outline to `'pending'`).
 5. Commit; on commit failure → unlink file.
 6. Synchronously run text-extraction + chunk + embed (Stage 1 below).
 7. Return 200 with the new `Reference` row partial for HTMX swap.
@@ -247,19 +240,18 @@ Embeddings via `OllamaEmbedClient(model=settings.embedding_model)` — already i
 
 On any failure (extractor crash, Ollama unreachable, chunk insert error): UPDATE `text_status='failed'`, `text_error=<message>`, leaving bytes on disk. The worker (Stage 2) retries text+embed when it sees `text_status='failed'` AND `text_error LIKE 'transient:%'` (Ollama-down style), or leaves the row for the user to retry manually otherwise.
 
-### Stage 2 — Async PageIndex outline + text-stage retry (~10-30s per paper)
+### Stage 2 — Deferred to v1.1
 
-New scheduler tick `_reference_indexing_tick`, mirroring B8's `_phase0_tick` + `_compaction_tick`:
+rev3 ships Stage 1 only. Reasoning:
 
-- Interval `REFERENCE_INDEXING_TICK_SECONDS=30` (env, default 30s).
-- **Gated by `DRAFTING_ENABLED`** — kill switch stops it (it spends Anthropic tokens via PageIndex; Stage-1 retries don't, but a single gate keeps the operational story simple).
-- Two responsibilities per tick:
-  1. **Stage-1 retry:** picks rows with `text_status='failed' AND text_error LIKE 'transient:%'`, runs the Stage-1 pipeline again. Local Ollama only — no Anthropic cost. Cap-irrelevant.
-  2. **PageIndex outline:** picks up to N=5 rows with `outline_status='pending' AND kind != 'data' AND text_status='done'` (must have text first). For each: flip outline_status to `'running'`, invoke PageIndex against `original.<ext>`, write `outline.json`, flip to `'done'`, write the LLM usage to `llm_usage(kind='outline', related_id=ref_id, tokens_in/out=...)`. On exception: flip to `'failed'`, store error in `outline_error`.
+- Stage 1 (text extract + chunk + embed) runs synchronously inside the upload/fetch HTTP request, using local Ollama. Typical latency 1–5s for a 20-page paper; fits in the request budget. Ollama-down failure → upload returns 500, atomic ordering cleans up the file and row.
+- Stage 2 (PageIndex outline) was the async/Anthropic-spending part. Deferred per rev3.
+- No async worker tick added in v1. Failure handling is surface-level: the user retries via the UI, or `fetch_reference` returns a clear error.
 
-**Cost accounting (Codex High #1, fixed):** PageIndex calls Anthropic. The worker writes a `llm_usage` row immediately on completion with the actual `tokens_in/tokens_out` returned by the SDK (same parsing as `claude_adapter`'s post-b8-residuals-2 fix). The B8 cap query unions chat_turns and llm_usage, so the outline cost counts.
-
-**Cap-exhausted behavior:** the worker calls `check_global_daily_token_cap` BEFORE each PageIndex invocation. If over, leaves row in `'pending'` and logs (no infinite retry storm; no charge incurred for a request not made). Next day's first tick picks it up.
+When v1.1 lands PageIndex:
+- New tick `_reference_indexing_tick` (mirrors B8 patterns: gated by `DRAFTING_ENABLED`, picks up to N=5 `outline_status='pending'` rows, honors global cap before each call).
+- `llm_usage` ledger table added in the same slice; `caps.py` cap queries updated to UNION chat_turns + llm_usage.
+- `navigate_reference` switches from the v1 chunk-derived outline (see Section 3) to the LLM-generated outline when available.
 
 ### Error handling summary
 
@@ -268,10 +260,8 @@ New scheduler tick `_reference_indexing_tick`, mirroring B8's `_phase0_tick` + `
 | Upload validate | bad MIME / oversize | 400 with `_html.escape`-d message, no row, no file |
 | Upload commit | DB error post-write | Rollback row, unlink file (B7 pattern) |
 | Fetch | paywall / 404 / timeout | Tool error to agent; HTTP 502 to UI. No row inserted. |
-| Text extract (Stage 1) | pdftotext crash / corrupted PDF | Row exists, `text_status='failed'`, `text_error=<exception>`. UI surfaces "extraction failed — re-upload or convert to txt". `search_references` won't find it; `navigate_reference` reports the text failure clearly. |
-| Chunk + embed (Stage 1) | Ollama transient down | Row exists, `text_status='failed'`, `text_error='transient: <message>'`. The Stage-2 worker tick retries Stage 1 on next pass. `search_references` returns "still indexing". |
-| PageIndex outline (Stage 2) | Anthropic 5xx / timeout / parse error | Row → `outline_status='failed'`, `outline_error=<message>`. `navigate_reference` returns "outline failed: <error>". User can retry from UI. `search_references` still works because Stage 1 succeeded. |
-| Cap exhausted | global cap hit during Stage 2 | Row stays `outline_status='pending'`; tick logs + skips. No Anthropic call made. Next day's first tick retries. |
+| Text extract (Stage 1) | pdftotext crash / corrupted PDF | Upload returns 500 / fetch returns tool error. Atomic rollback: no row, no file. User can re-upload after converting. |
+| Chunk + embed (Stage 1) | Ollama transient down | Same — Stage 1 runs synchronously inside the request; failure returns 500/tool-error with cleanup. No partial state on disk. |
 | Mid-turn 4th fetch | atomic UPDATE returns 0 rows (fetch_count already 3) | Tool returns error ("ask user to upload"); agent surfaces in response. Cap is per-turn, not per-workspace-per-day, so the next turn's fetches start fresh. |
 
 ---
@@ -288,15 +278,37 @@ Browse-only metadata listing. Returns `[{id, kind, title, filename, outline_stat
 
 Semantic search over `reference_chunks`. Embed `query` with the current `settings.embedding_model` (filter chunks WHERE `embedding_model = ?` so model-version drift is invisible — incompatible vectors are simply not searched). HNSW lookup with `workspace_id` filter. Returns `[{reference_id, title, section_path, snippet, score}, ...]`. Default `top_k=8`, hard cap 25. Skips references with `text_status != 'done'` (they're either pending, failed, or skipped — none searchable).
 
-### `navigate_reference(reference_id, section_path=None)`
+### `navigate_reference(reference_id)`
 
-PageIndex outline traversal. With no `section_path`: returns the outline JSON. With `section_path`: returns the full text of that section. Status handling (Codex Medium #4):
-- `outline_status='done'` → normal return
-- `outline_status IN ('pending','running')` → `{"status": "indexing", "retry_after_seconds": 30}`
-- `outline_status='failed'` → `{"status": "failed", "error": outline_error, "fallback": "use read_reference(...)"}` (distinct from indexing so the agent stops polling)
-- `outline_status='skipped'` (data kind) → `{"status": "skipped", "kind": "data", "fallback": "use summarize_data(...)"}`
+Returns the document's outline. v1 derives the outline from `SELECT DISTINCT section_path FROM reference_chunks WHERE reference_id = ? ORDER BY chunk_index`, formatted as a tree (parses `"Methods > Statistical analysis"` into nested nodes). No LLM call. Output:
 
-Tool docstring explicitly warns against retry-storming when status is `indexing`.
+```json
+{
+  "title": "...",
+  "outline": [
+    {"section": "Abstract", "children": []},
+    {"section": "Methods", "children": [
+        {"section": "Statistical analysis", "children": []},
+        {"section": "Cohort selection", "children": []}
+    ]},
+    ...
+  ]
+}
+```
+
+Status handling:
+- `text_status='done'` → return the chunk-derived outline above.
+- `text_status IN ('pending','running')` → `{"status": "indexing"}` (Stage 1 in flight; in v1 this only happens for a brief moment during the synchronous upload, but listed for completeness).
+- `text_status='failed'` → `{"status": "failed", "error": text_error}`.
+- `text_status='skipped'` (kind=data) → `{"status": "skipped", "kind": "data", "fallback": "use summarize_data(...)"}`.
+
+When v1.1 PageIndex lands: outline source becomes `outline.json` when `outline_status='done'`, falling back to the chunk-derived outline otherwise. Same tool contract.
+
+### `read_reference_section(reference_id, section_path)`
+
+Returns the concatenated text of all chunks under a given section path. Drilling deeper than a leaf returns 404; passing a non-leaf section_path returns everything underneath. Hard cap 20_000 chars (mirrors `read_reference`'s truncation).
+
+Together with `navigate_reference` this gives the agent the "browse outline, read just Methods" workflow without needing the LLM-generated PageIndex.
 
 ### `read_reference(reference_id, max_chars=20000)`
 
@@ -332,9 +344,9 @@ RETURNING fetch_count;
 
 The MCP handler runs this BEFORE the fetch. If `RETURNING` is empty (no running turn OR cap reached) → return error to the agent. No race possible; the partial unique index on `turn_jobs(workspace_id) WHERE status='running'` (from B6) guarantees at most one running turn per workspace, so the UPDATE targets exactly one row.
 
-If the dispatcher's generic-URL path lands on Claude's web fetch indirectly (it doesn't in v1; rev2 settled this as server-side httpx) and incurs Anthropic spend, that spend lands in `llm_usage(kind='fetch_assist')`. v1 has no such spend — the fetcher uses local httpx — so no `llm_usage` row is written from this path.
+The fetcher uses local httpx (rev2 settled this as server-side; v1 has no Anthropic-spending fetch path). No external cost; no `llm_usage` row.
 
-Returns the new `Reference` row partial once bytes are on disk + Stage 1 complete. PageIndex outline queued async — agent can `search_references` immediately, `navigate_reference` returns "indexing" until the worker catches up.
+Returns the new `Reference` row partial once bytes are on disk + Stage 1 complete (chunks indexed and searchable). v1.1 adds an async PageIndex queue; in v1 there's no Stage 2 to wait for.
 
 ---
 
@@ -397,19 +409,18 @@ The combined estimate flows into the existing `ChatTurn.tokens_in` field. B7-res
 
 `/admin/drafting` (B8) gets two new sections at the bottom:
 
-- **Reference indexing backlog:** count of `references` rows WHERE `text_status IN ('pending','running')` OR `outline_status IN ('pending','running')` across all workspaces, with the oldest pending timestamp. Stale (>1h) entries highlighted — signal that the indexing worker is stuck. Two sub-counts surfaced (text backlog, outline backlog) since they fail for different reasons. `kind=data` rows are excluded (they're `'skipped'`).
+- **Reference indexing failures:** count of `references.text_status='failed'` rows across all workspaces, with the oldest failed timestamp + recent error sample. v1 has no async backlog (Stage 1 is synchronous at upload time), so this view is primarily a health signal — non-zero counts mean Ollama is having trouble or a publisher PDF is unparseable. v1.1 adds an outline-backlog row to this section.
 - **Mid-turn fetch frequency:** count of `turn_jobs.fetch_count > 0` rows from today. Helps spot heavy-fetch agents.
 
 Both read-only — no remediation UI in v1.
 
 ### Cost cap integration
 
-- **No new cap surface, but `caps.py` queries change** (Codex High #1). The B8 daily-cap queries (`check_daily_token_cap`, `check_global_daily_token_cap`) currently sum only `chat_turns.tokens_in/out`. rev2 changes them to sum `chat_turns ∪ llm_usage` for the same Stockholm-day window. PageIndex outline tokens written by the Stage-2 worker land in `llm_usage(kind='outline')` and become visible to both caps.
-- **Reference inclusions pre-counted** at submit time (Codex Medium #5; see Section 4 `submit_user_turn` extension above). A 5-reference turn injecting ~100k chars of reference text contributes its `len // 4` estimate to `ChatTurn.tokens_in` BEFORE the cap check.
+- **No new cap surface in v1.** v1 has no non-turn Anthropic spend in this subsystem (PageIndex deferred to v1.1; fetcher is server-side httpx). The existing B8 cap queries already see all cost — agent-turn input/output tokens including the new reference-inclusion pre-counts.
+- **Reference inclusions pre-counted at submit time** (Codex Medium #5; see Section 4 `submit_user_turn` extension above). A 5-reference turn injecting ~100k chars of reference text contributes its `len // 4` estimate to `ChatTurn.tokens_in` BEFORE the cap check.
 - **Per-turn fetch cap = 3.** Bounded atomically by the `UPDATE ... RETURNING fetch_count` pattern in Section 3.
-- **Outline worker honors global cap** before each PageIndex call (skip + log if exceeded — no Anthropic call, no `llm_usage` row).
 - **Embedding cost = 0 external.** Local Ollama. Intentionally not counted (the cap protects external spend).
-- **Generic URL fetch cost = 0 external** in v1 (server-side httpx, Codex High #2). If a future variant routes fetches through an Anthropic-backed path, those tokens land in `llm_usage(kind='fetch_assist')` and become cap-visible.
+- **Generic URL fetch cost = 0 external.** Server-side httpx (Codex High #2). When v1.1 lands PageIndex, the `llm_usage` ledger + cap-query change land in the same slice.
 
 ---
 
@@ -427,4 +438,6 @@ Both read-only — no remediation UI in v1.
 
 4. **PageIndex install path** — design assumes PageIndex is installable as a Python dep + LLM-backed CLI. Concrete install + setup steps belong in the slice plan.
 
-5. **Backward-compat for existing workspaces.** All existing workspaces predate this subsystem; the migration adds the new tables (`references`, `reference_chunks`, `llm_usage`) and the new `turn_jobs.fetch_count` column (NOT NULL default 0 — additive, no backfill needed).
+5. **Backward-compat for existing workspaces.** All existing workspaces predate this subsystem; the migration adds the new tables (`references`, `reference_chunks`) and the new `turn_jobs.fetch_count` column (NOT NULL default 0 — additive, no backfill needed). v1.1 adds the `llm_usage` table and changes `references.outline_status` default — both also additive.
+
+6. **PageIndex (v1.1)** lands as one slice when better outlines for weak-structure PDFs become a real pain point. The v1 schema scaffolding (`outline_status`, `outline_error`, `outline_indexed_at` columns) means no migration churn at that time — just default change + new worker + new ledger table + cap-query update.
