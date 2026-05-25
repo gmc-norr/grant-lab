@@ -58,9 +58,7 @@ async def list_references_impl(
             stmt = stmt.where(Reference.kind == kind)
         if q:
             like = f"%{q}%"
-            stmt = stmt.where(
-                or_(Reference.title.ilike(like), Reference.filename.ilike(like))
-            )
+            stmt = stmt.where(or_(Reference.title.ilike(like), Reference.filename.ilike(like)))
         rows = list(s.scalars(stmt))
     return {
         "references": [
@@ -176,10 +174,7 @@ async def read_reference_impl(
         return {"error": f"reference {reference_id} not found"}
     if ref.text_status != "done":
         return {
-            "error": (
-                f"reference text status is {ref.text_status!r}; "
-                f"cannot read full text"
-            ),
+            "error": (f"reference text status is {ref.text_status!r}; cannot read full text"),
             "text_status": ref.text_status,
             "text_error": ref.text_error,
         }
@@ -236,4 +231,24 @@ async def summarize_data_impl(
     *,
     reference_id: str,
 ) -> dict[str, Any]:
-    return {"error": "not implemented"}
+    """For kind='data' refs only — return the schema+sample text that
+    Stage 1 produced into text.txt (a markdown table of columns + first
+    5 rows). The agent uses this instead of read_reference for data
+    files so it never sees raw rows."""
+    ref = _load_workspace_reference(ctx, reference_id)
+    if ref is None:
+        return {"error": f"reference {reference_id} not found"}
+    if ref.kind != "data":
+        return {
+            "error": (
+                f"reference kind is {ref.kind!r}, not 'data'; "
+                f"use read_reference or search_references instead"
+            )
+        }
+    text_path = _text_path_for(ctx, ref)
+    if not text_path.exists():
+        return {"error": "extracted text missing on disk"}
+    return {
+        "filename": ref.filename,
+        "schema_and_sample": text_path.read_text(encoding="utf-8"),
+    }

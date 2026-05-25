@@ -10,7 +10,13 @@ from call_manager.config import Settings
 from call_manager.proposal_assist.references.embed import FakeEmbedder
 from call_manager.proposal_assist.references.ingest import ingest_bytes
 from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.proposal_assist.tools.references import list_references_impl
+from call_manager.proposal_assist.tools.references import (
+    list_references_impl,
+    navigate_reference_impl,
+    read_reference_impl,
+    read_reference_section_impl,
+    summarize_data_impl,
+)
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -122,12 +128,6 @@ async def test_list_references_scopes_to_workspace(pg_session_factory, tmp_path)
     assert len(result["references"]) == 3
 
 
-from call_manager.proposal_assist.tools.references import (
-    read_reference_impl,
-    read_reference_section_impl,
-)
-
-
 @pytest.mark.asyncio
 async def test_read_reference_returns_full_text(pg_session_factory, tmp_path):
     wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
@@ -158,9 +158,7 @@ async def test_read_reference_unknown_id_returns_error(pg_session_factory, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_read_reference_cross_workspace_returns_error(
-    pg_session_factory, tmp_path
-):
+async def test_read_reference_cross_workspace_returns_error(pg_session_factory, tmp_path):
     wsid_a, rids_a = _seed_three_refs(pg_session_factory, tmp_path)
     wsid_b, _ = _seed_three_refs(pg_session_factory, tmp_path)
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid_b)
@@ -169,9 +167,7 @@ async def test_read_reference_cross_workspace_returns_error(
 
 
 @pytest.mark.asyncio
-async def test_read_reference_section_returns_concatenated_chunks(
-    pg_session_factory, tmp_path
-):
+async def test_read_reference_section_returns_concatenated_chunks(pg_session_factory, tmp_path):
     """Seed a markdown with multiple sections under the same parent;
     read_reference_section should return all chunks under that path."""
     storage = ReferenceStorage(root=tmp_path)
@@ -233,9 +229,7 @@ Results body.
 
 
 @pytest.mark.asyncio
-async def test_read_reference_section_unknown_path_returns_error(
-    pg_session_factory, tmp_path
-):
+async def test_read_reference_section_unknown_path_returns_error(pg_session_factory, tmp_path):
     wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
     result = await read_reference_section_impl(
@@ -244,13 +238,8 @@ async def test_read_reference_section_unknown_path_returns_error(
     assert "error" in result
 
 
-from call_manager.proposal_assist.tools.references import navigate_reference_impl
-
-
 @pytest.mark.asyncio
-async def test_navigate_reference_returns_hierarchical_outline(
-    pg_session_factory, tmp_path
-):
+async def test_navigate_reference_returns_hierarchical_outline(pg_session_factory, tmp_path):
     """Markdown with H1 + H2 + H3 should produce a nested tree."""
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
@@ -317,9 +306,7 @@ Results.
 
 
 @pytest.mark.asyncio
-async def test_navigate_reference_data_kind_returns_skipped(
-    pg_session_factory, tmp_path
-):
+async def test_navigate_reference_data_kind_returns_skipped(pg_session_factory, tmp_path):
     """kind='data' refs route to the skipped fallback regardless of
     text_status — the agent should be steered to summarize_data."""
     storage = ReferenceStorage(root=tmp_path)
@@ -356,10 +343,64 @@ async def test_navigate_reference_data_kind_returns_skipped(
 
 
 @pytest.mark.asyncio
-async def test_navigate_reference_unknown_id_returns_error(
-    pg_session_factory, tmp_path
-):
+async def test_navigate_reference_unknown_id_returns_error(pg_session_factory, tmp_path):
     wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
     out = await navigate_reference_impl(ctx, reference_id=str(uuid.uuid4()))
+    assert "error" in out
+
+
+@pytest.mark.asyncio
+async def test_summarize_data_csv_returns_schema_and_sample(pg_session_factory, tmp_path):
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    csv = b"patient_id,age,diagnosis\n1,42,ALL\n2,67,AML\n3,55,ALL\n"
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="data",
+            source_type="uploaded",
+            source_uri=None,
+            filename="patients.csv",
+            mime_type="text/csv",
+            data=csv,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await summarize_data_impl(ctx, reference_id=str(rid))
+    assert out["filename"] == "patients.csv"
+    assert "schema_and_sample" in out
+    assert "patient_id" in out["schema_and_sample"]
+    assert "ALL" in out["schema_and_sample"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_data_rejects_non_data_kind(pg_session_factory, tmp_path):
+    """Calling on a kind='paper' ref returns a clear error directing the
+    agent to use read_reference / search_references instead."""
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    # rids[0] is a kind='paper' ref.
+    out = await summarize_data_impl(ctx, reference_id=str(rids[0]))
+    assert "error" in out
+    assert "kind" in out["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_summarize_data_unknown_id_returns_error(pg_session_factory, tmp_path):
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await summarize_data_impl(ctx, reference_id=str(uuid.uuid4()))
     assert "error" in out
