@@ -147,8 +147,9 @@ def _make_one_page_pdf(text: str) -> bytes:
     file. For testability we'll use a hardcoded small PDF — see fixture."""
     # The smallest valid PDF that pdfminer can parse with text is non-trivial
     # to hand-craft. We use reportlab as a test-time helper.
-    from reportlab.pdfgen.canvas import Canvas
     from io import BytesIO
+
+    from reportlab.pdfgen.canvas import Canvas
 
     buf = BytesIO()
     c = Canvas(buf)

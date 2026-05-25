@@ -2,11 +2,10 @@
 basic round-trip works."""
 
 import uuid
-from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import Reference, ReferenceChunk, TurnJob, Workspace
+from call_manager.db.models import Reference, ReferenceChunk, TurnJob
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

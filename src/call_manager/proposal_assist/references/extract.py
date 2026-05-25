@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import json
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 
 class ExtractError(RuntimeError):
@@ -172,7 +172,9 @@ def _extract_csv(data: bytes) -> SectionList:
         header = next(reader)
     except StopIteration:
         raise ExtractError("empty CSV") from None
-    rows = [row for _, row in zip(range(5), reader)]
+    # strict=False: range(5) caps the iteration; we deliberately want
+    # the shorter (≤5 rows when CSV has fewer than 5 data rows).
+    rows = [row for _, row in zip(range(5), reader, strict=False)]
     return [(None, _to_markdown_table(header, rows))]
 
 
@@ -193,7 +195,9 @@ def _extract_xlsx(data: bytes) -> SectionList:
         raise ExtractError("empty xlsx") from None
     header = [str(h) if h is not None else "" for h in header]
     sample = []
-    for _, row in zip(range(5), rows_iter):
+    # strict=False: range(5) caps the iteration; we deliberately want
+    # the shorter (≤5 rows when sheet has fewer than 5 data rows).
+    for _, row in zip(range(5), rows_iter, strict=False):
         sample.append([str(c) if c is not None else "" for c in row])
     return [(None, _to_markdown_table(header, sample))]
 

@@ -3,7 +3,6 @@ filesystem layout, atomic writes, idempotent deletes."""
 
 import os
 import uuid
-from pathlib import Path
 
 import pytest
 

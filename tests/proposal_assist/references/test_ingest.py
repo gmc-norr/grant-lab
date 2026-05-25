@@ -4,8 +4,6 @@ Phase 2 — sync Stage 1 (extract + chunk + embed) in a separate tx.
           On failure, text_status='failed', row + bytes retained.
 """
 
-import uuid
-
 from sqlalchemy import select
 
 from call_manager.db.models import Reference, ReferenceChunk
