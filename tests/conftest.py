@@ -74,7 +74,7 @@ def pg_session_factory(migrated_engine):
     # plans that add tables get isolation for free without having to remember
     # to update this fixture. CASCADE handles FK ordering; RESTART IDENTITY
     # resets sequences so id counters are predictable across tests.
-    table_names = ", ".join(t.name for t in Base.metadata.sorted_tables)
+    table_names = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
     if table_names:
         with migrated_engine.begin() as conn:
             conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))

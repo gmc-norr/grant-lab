@@ -681,6 +681,9 @@ class TurnJob(Base):
         ForeignKey("users.id"),
         nullable=True,
     )
+    fetch_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
 
 
 class ChatSummary(Base):
@@ -1068,3 +1071,93 @@ class ReviewRunItem(Base):
         JSONB,
         nullable=True,
     )
+
+
+class Reference(Base):
+    """A per-workspace reference — uploaded paper, prior proposal, analysis,
+    or data file. See docs/superpowers/specs/2026-05-25-references-corpus-design.md."""
+
+    __tablename__ = "references"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('paper','prior_proposal','analysis','data')",
+            name="ck_references_kind",
+        ),
+        CheckConstraint(
+            "source_type IN ('uploaded','crossref','pubmed','arxiv','web')",
+            name="ck_references_source_type",
+        ),
+        CheckConstraint(
+            "text_status IN ('pending','running','done','failed','skipped')",
+            name="ck_references_text_status",
+        ),
+        CheckConstraint(
+            "outline_status IN ('pending','running','done','failed','skipped')",
+            name="ck_references_outline_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str] = mapped_column(Text, nullable=False)
+    bytes_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="pending"
+    )
+    text_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_indexed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    text_chars_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outline_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="skipped"
+    )
+    outline_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outline_indexed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    uploaded_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ReferenceChunk(Base):
+    """A chunk of a Reference, with its embedding for semantic search."""
+
+    __tablename__ = "reference_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "reference_id", "chunk_index", name="uq_reference_chunks_ref_idx"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    reference_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("references.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    section_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(1024), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(Text, nullable=False)
