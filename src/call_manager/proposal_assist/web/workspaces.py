@@ -134,10 +134,62 @@ def _default_templates() -> Jinja2Templates:
 _DEFAULT_TEMPLATES: Jinja2Templates | None = None
 
 
+def _collect_reference_ids(turns) -> set[str]:
+    """Walk an iterable of ChatTurn rows and return the set of stringified
+    reference_ids embedded in their content blocks.
+
+    Slice 4 residuals: the chat_turn partial needs a {str(uuid): Reference}
+    map to render reference chips with a human-friendly title. The view
+    builds the map by collecting every reference_id mentioned by any
+    turn's content, then querying once — N+1 avoidance for the chat
+    history loop.
+    """
+    ids: set[str] = set()
+    for t in turns:
+        c = t.content
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "reference":
+                    rid = b.get("reference_id")
+                    if rid:
+                        ids.add(str(rid))
+    return ids
+
+
+def _load_reference_map(
+    session: Session,
+    workspace_id: uuid.UUID,
+    reference_ids: set[str],
+) -> dict[str, Reference]:
+    """Resolve a set of stringified UUIDs to Reference rows, scoped to
+    one workspace (defense-in-depth IDOR check — a stale or hostile
+    reference_id from another workspace silently renders as "unknown"
+    rather than leaking a cross-workspace title).
+    """
+    if not reference_ids:
+        return {}
+    uuid_ids: list[uuid.UUID] = []
+    for s in reference_ids:
+        try:
+            uuid_ids.append(uuid.UUID(s))
+        except (ValueError, TypeError):
+            continue
+    if not uuid_ids:
+        return {}
+    rows = session.scalars(
+        select(Reference).where(
+            Reference.workspace_id == workspace_id,
+            Reference.id.in_(uuid_ids),
+        )
+    )
+    return {str(r.id): r for r in rows}
+
+
 def _render_chat_turn_html(
     turn: ChatTurn,
     *,
     templates: Jinja2Templates | None = None,
+    chat_reference_map: dict[str, Reference] | None = None,
 ) -> str:
     """Render one chat_turns row to a small HTML snippet for SSE emission.
 
@@ -152,9 +204,17 @@ def _render_chat_turn_html(
 
     B7 / T4: image blocks in list-of-blocks content render as <img>
     thumbnails. Per-block dispatch lives in the partial.
+
+    Slice 4 residuals: ``chat_reference_map`` resolves reference blocks
+    to a human-friendly title chip. Missing entries render as
+    "(unknown)" — keeps the chat view from crashing if a reference id
+    becomes stale.
     """
     engine = templates if templates is not None else _default_templates()
-    rendered = engine.env.get_template(_CHAT_TURN_PARTIAL).render(turn=turn)
+    rendered = engine.env.get_template(_CHAT_TURN_PARTIAL).render(
+        turn=turn,
+        chat_reference_map=chat_reference_map or {},
+    )
     # SSE `data:` lines cannot contain raw newlines (the protocol
     # uses LF as a record separator). Collapse them — the partial uses
     # ``{%- ... -%}`` to keep this no-op for normal content.
@@ -220,8 +280,17 @@ async def _stream_turn_generator(
                     .order_by(ChatTurn.position)
                 )
             )
+            # Slice 4 residuals: resolve reference-block IDs for THIS
+            # batch in one query so per-turn render can show the chip's
+            # title without an N+1 lookup.
+            ref_ids = _collect_reference_ids(new_rows)
+            ref_map = _load_reference_map(s, workspace_id, ref_ids)
             for turn in new_rows:
-                rendered = _render_chat_turn_html(turn, templates=templates)
+                rendered = _render_chat_turn_html(
+                    turn,
+                    templates=templates,
+                    chat_reference_map=ref_map,
+                )
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
             tj = s.get(TurnJob, turn_job_id)
@@ -403,6 +472,17 @@ def get_workspace_main(
         )
     )
 
+    # Slice 4 residuals: lookup map for any reference-block content
+    # embedded in the chat history. Built in ONE query (set-of-ids ->
+    # in_ select) so the chat history loop's reference chips render with
+    # a human-friendly title without N+1 lookups. Empty when no turn
+    # references anything.
+    chat_reference_map = _load_reference_map(
+        session,
+        workspace_id,
+        _collect_reference_ids(chat_turns),
+    )
+
     # B7: list of workspace-scoped attachments for the composer picker.
     # Ordered newest-first so the most-recently uploaded image surfaces
     # next to the file input. Viewers also see this list (read-only) so
@@ -469,6 +549,7 @@ def get_workspace_main(
             "needs_disclosure": needs_disclosure,
             "workspace_attachments": workspace_attachments,
             "workspace_references": workspace_references,
+            "chat_reference_map": chat_reference_map,
         },
     )
 

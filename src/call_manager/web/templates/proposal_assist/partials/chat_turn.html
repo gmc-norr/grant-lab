@@ -13,9 +13,15 @@
      - {"type": "text", "text": "..."}:  <p>...</p>             (pre-B7 single-dict)
      - {"type": "tool_use",  ...}:       <p><em>(tool call: name)</em></p>
      - {"type": "tool_result", ...}:     <p><em>(tool result)</em></p>
-     - list of blocks: each block is {"type":"text","text":...} or
-       {"type":"image","attachment_id":"<uuid>"}.  Images render as
-       <img src="/workspaces/<wsid>/files/<aid>"> thumbnails.
+     - list of blocks: each block is {"type":"text","text":...},
+       {"type":"image","attachment_id":"<uuid>"}, or
+       {"type":"reference","reference_id":"<uuid>"}. Images render as
+       <img src="/workspaces/<wsid>/files/<aid>"> thumbnails. References
+       render as a small inline chip displaying the reference title/
+       filename, looked up via the ``chat_reference_map`` context var
+       (a {str(uuid): Reference} dict). Refs missing from the map render
+       a defensive "unknown" placeholder so a stale or orphan id never
+       crashes the chat view.
 #}
 <div class="chat-turn" data-role="{{ turn.role }}">
   <strong>{{ turn.role }}:</strong>
@@ -37,6 +43,18 @@
              alt="attached image"
              class="chat-image"
              style="max-width: 300px; max-height: 300px;">
+      {%- elif b is mapping and b.get("type") == "reference" -%}
+        {%- set ref_id = b.get("reference_id") -%}
+        {%- set ref = chat_reference_map.get(ref_id) if chat_reference_map else None -%}
+        <div class="ref-chip" style="display: inline-block; padding: 0.2em 0.5em; margin: 0.25em 0; border: 1px solid #ccc; border-radius: 4px; background: #f6f6f6;">
+          <small>ref:</small>
+          {%- if ref -%}
+            <strong>{{ ref.title or ref.filename }}</strong>
+            <small>[{{ ref.kind }}]</small>
+          {%- else -%}
+            <em>(unknown: {{ ref_id }})</em>
+          {%- endif -%}
+        </div>
       {%- endif -%}
     {%- endfor -%}
   {%- else -%}
