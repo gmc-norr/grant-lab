@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}References — {{ workspace.title }}{% endblock %}
+{% block content %}
+<hgroup>
+  <h1>References — {{ workspace.title|e }}</h1>
+  <p>
+    <a href="/workspaces/{{ workspace.id }}">← back to workspace</a>
+    | <a href="/workspaces/{{ workspace.id }}/files">Files</a>
+  </p>
+</hgroup>
+
+{% if is_owner %}
+<form method="post" enctype="multipart/form-data"
+      action="/workspaces/{{ workspace.id }}/references"
+      hx-post="/workspaces/{{ workspace.id }}/references"
+      hx-target="#reference-list"
+      hx-swap="afterbegin"
+      hx-encoding="multipart/form-data"
+      hx-on::after-request="this.reset()">
+  <label>
+    Kind:
+    <select name="kind">
+      <option value="paper">paper</option>
+      <option value="prior_proposal">prior_proposal</option>
+      <option value="analysis">analysis</option>
+      <option value="data">data</option>
+    </select>
+  </label>
+  <input type="file" name="file" required
+         accept=".pdf,.md,.txt,.docx,.rtf,.csv,.xls,.xlsx,.ipynb">
+  <button type="submit">Upload</button>
+</form>
+{% else %}
+<p><em>(read-only — only the workspace owner can upload references)</em></p>
+{% endif %}
+
+<div id="reference-list">
+  {% for ref in references %}
+    {% include "proposal_assist/partials/reference_row.html" %}
+  {% endfor %}
+</div>
+{% endblock %}
