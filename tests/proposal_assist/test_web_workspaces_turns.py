@@ -681,6 +681,80 @@ def test_post_turn_with_reference_ids_form_field(monkeypatch, pg_url, pg_session
     assert ct.tokens_in == 20 + (len("talk about this") // 4)
 
 
+def test_post_turn_with_reference_ids_only_echoes_reference_chip(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Slice 4 residuals regression: a refs-only turn (no fresh upload,
+    no attachment_ids) must echo the reference chip in the immediate
+    response body — not a text-only render that drops the reference
+    until the SSE re-render lands.
+
+    Asserts:
+      * 200 status with a refs-only request.
+      * Response body contains the reference's title (chip rendered).
+      * Response body does NOT contain raw JSON like ``{'type': 'reference``
+        — proves the block rendered as HTML, not as a repr.
+    """
+    from fastapi.testclient import TestClient
+
+    from call_manager.auth.session_cookie import SessionSigner
+    from call_manager.db.models import Reference, User, Workspace
+    from call_manager.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
+
+    app = create_app()
+    with pg_session_factory() as s:
+        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(owner_id=owner.id, title="T")
+        s.add(ws)
+        s.flush()
+        ref = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="Echo Chip Paper",
+            filename="echo.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=40,
+        )
+        s.add(ref)
+        s.commit()
+        uid, wsid, refid = owner.id, ws.id, ref.id
+
+    client = TestClient(app, raise_server_exceptions=True)
+    client.__enter__()
+    signer: SessionSigner = app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=uid))
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/turns",
+            data={
+                "content": "look at this paper",
+                "reference_ids": str(refid),
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    body = resp.content.decode()
+    # Chip rendered with the reference's picker label (title).
+    assert "Echo Chip Paper" in body
+    # And as the HTML chip wrapper, not raw JSON.
+    assert "ref-chip" in body
+    assert "{'type': 'reference" not in body
+    assert '{"type": "reference' not in body
+
+
 def test_post_turn_with_reference_ids_returns_400_for_pending_reference(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
