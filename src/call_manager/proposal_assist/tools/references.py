@@ -92,7 +92,77 @@ async def navigate_reference_impl(
     *,
     reference_id: str,
 ) -> dict[str, Any]:
-    return {"error": "not implemented"}
+    """Derive an outline from DISTINCT section_path values on the
+    reference's chunks. v1.1 will override this with PageIndex
+    outline.json when outline_status='done'."""
+    ref = _load_workspace_reference(ctx, reference_id)
+    if ref is None:
+        return {"error": f"reference {reference_id} not found"}
+
+    # kind='data' routes to summarize_data — agent never gets an outline
+    # for tabular data files (per spec rev3 Section 3).
+    if ref.kind == "data":
+        return {
+            "status": "skipped",
+            "kind": ref.kind,
+            "fallback": "use summarize_data(reference_id) for data files",
+        }
+
+    # Status routing per spec rev3 Section 3.
+    if ref.text_status in ("pending", "running"):
+        return {"status": "indexing"}
+    if ref.text_status == "failed":
+        return {"status": "failed", "error": ref.text_error}
+    if ref.text_status == "skipped":
+        return {
+            "status": "skipped",
+            "kind": ref.kind,
+            "fallback": "use summarize_data(reference_id) for data files",
+        }
+
+    # text_status == 'done': build outline from chunk section_paths.
+    with ctx.session_factory() as s:
+        rows = list(
+            s.execute(
+                select(ReferenceChunk.section_path)
+                .where(ReferenceChunk.reference_id == ref.id)
+                .order_by(ReferenceChunk.chunk_index)
+            )
+        )
+    section_paths = [r[0] for r in rows if r[0]]
+    outline = _build_outline_tree(section_paths)
+    return {
+        "status": "done",
+        "title": ref.title or ref.filename,
+        "outline": outline,
+    }
+
+
+def _build_outline_tree(section_paths: list[str]) -> list[dict[str, Any]]:
+    """Convert ['A', 'A > B', 'A > B > C', 'A > D', 'E'] into a tree
+    of {section, children: [...]}. Preserves insertion order so the
+    rendering reflects chunk order."""
+    root: list[dict[str, Any]] = []
+    # Track each unique path's node so we can attach children.
+    nodes_by_path: dict[str, dict[str, Any]] = {}
+    seen_paths: list[str] = []
+    for path in section_paths:
+        if path not in seen_paths:
+            seen_paths.append(path)
+    for path in seen_paths:
+        parts = [p.strip() for p in path.split(">")]
+        accumulator = ""
+        parent_children = root
+        for part in parts:
+            accumulator = (accumulator + " > " + part) if accumulator else part
+            if accumulator in nodes_by_path:
+                parent_children = nodes_by_path[accumulator]["children"]
+                continue
+            node = {"section": part, "children": []}
+            nodes_by_path[accumulator] = node
+            parent_children.append(node)
+            parent_children = node["children"]
+    return root
 
 
 async def read_reference_impl(

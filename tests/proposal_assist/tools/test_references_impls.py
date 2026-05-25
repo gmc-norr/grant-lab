@@ -242,3 +242,124 @@ async def test_read_reference_section_unknown_path_returns_error(
         ctx, reference_id=str(rids[0]), section_path="Bogus > Path"
     )
     assert "error" in result
+
+
+from call_manager.proposal_assist.tools.references import navigate_reference_impl
+
+
+@pytest.mark.asyncio
+async def test_navigate_reference_returns_hierarchical_outline(
+    pg_session_factory, tmp_path
+):
+    """Markdown with H1 + H2 + H3 should produce a nested tree."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    md = b"""# Doc
+
+## Methods
+
+Methods top.
+
+### Statistical analysis
+
+Stats.
+
+### Cohort selection
+
+Cohort.
+
+## Results
+
+Results.
+"""
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="doc.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await navigate_reference_impl(ctx, reference_id=str(rid))
+    assert out["status"] == "done"
+    # Outline is a tree of {section, children}.
+    outline = out["outline"]
+    # Find the "Doc" root node.
+    assert any(node["section"] == "Doc" for node in outline)
+    doc = next(n for n in outline if n["section"] == "Doc")
+    # Doc has two children: Methods and Results.
+    child_names = {c["section"] for c in doc["children"]}
+    assert "Methods" in child_names
+    assert "Results" in child_names
+    # Methods has two children: Statistical analysis and Cohort selection.
+    methods = next(c for c in doc["children"] if c["section"] == "Methods")
+    grand_names = {gc["section"] for gc in methods["children"]}
+    assert "Statistical analysis" in grand_names
+    assert "Cohort selection" in grand_names
+
+
+@pytest.mark.asyncio
+async def test_navigate_reference_data_kind_returns_skipped(
+    pg_session_factory, tmp_path
+):
+    """kind='data' refs route to the skipped fallback regardless of
+    text_status — the agent should be steered to summarize_data."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    csv = b"name,age\nalice,30\nbob,25\n"
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="data",
+            source_type="uploaded",
+            source_uri=None,
+            filename="d.csv",
+            mime_type="text/csv",
+            data=csv,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await navigate_reference_impl(ctx, reference_id=str(rid))
+    assert out["status"] == "skipped"
+    assert out["kind"] == "data"
+    assert "summarize_data" in out["fallback"]
+
+
+@pytest.mark.asyncio
+async def test_navigate_reference_unknown_id_returns_error(
+    pg_session_factory, tmp_path
+):
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await navigate_reference_impl(ctx, reference_id=str(uuid.uuid4()))
+    assert "error" in out
