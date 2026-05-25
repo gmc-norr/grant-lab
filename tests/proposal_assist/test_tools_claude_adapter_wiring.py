@@ -91,7 +91,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     # Bare names per SDK docstring example (see Task 7 Step 0).
     # NO mcp__ prefix — confirm we're using the bare form.
     assert not any(t.startswith("mcp__") for t in allowed)
-    # Full allowlist coverage: 8 existing (B5) + 6 new (Slice 2 — references).
+    # Full allowlist coverage: 8 existing (B5) + 6 (Slice 2 — references)
+    # + 1 (Slice 3 — agent-side fetch) = 15.
     expected_tools = {
         # existing eight from B5
         "read_proposal",
@@ -109,5 +110,7 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         "read_reference",
         "read_reference_section",
         "summarize_data",
+        # Slice 3 — agent-side fetch
+        "fetch_reference",
     }
     assert set(allowed) == expected_tools

@@ -234,6 +234,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         return _wrap(await get_profile_impl(ctx))
 
     from call_manager.proposal_assist.tools.references import (
+        fetch_reference_impl,
         list_references_impl,
         navigate_reference_impl,
         read_reference_impl,
@@ -369,6 +370,31 @@ def _collect_tools(ctx: ToolContext) -> list:
     async def summarize_data(args):
         return _wrap(await summarize_data_impl(ctx, reference_id=args["reference_id"]))
 
+    @tool(
+        "fetch_reference",
+        "Fetch a reference from DOI, PMID, arXiv ID, or URL into this "
+        "workspace's corpus. Capped at 3 fetches per turn — if you hit "
+        "the cap, ask the user to upload remaining refs via the UI. "
+        "Returns the new reference_id once the file is on disk and "
+        "indexed (the agent can search_references for it immediately).",
+        {
+            "type": "object",
+            "properties": {
+                "input": {"type": "string"},
+                "kind": {"type": "string", "default": "paper"},
+            },
+            "required": ["input"],
+        },
+    )
+    async def fetch_reference(args):
+        return _wrap(
+            await fetch_reference_impl(
+                ctx,
+                input=args["input"],
+                kind=args.get("kind", "paper"),
+            )
+        )
+
     return [
         # existing eight
         read_proposal,
@@ -386,4 +412,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         read_reference,
         read_reference_section,
         summarize_data,
+        # Slice 3 — agent-side fetch
+        fetch_reference,
     ]

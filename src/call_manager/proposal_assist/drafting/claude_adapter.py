@@ -140,6 +140,8 @@ class ClaudeAgentSDKAdapter:
                 "read_reference",
                 "read_reference_section",
                 "summarize_data",
+                # Slice 3 — agent-side fetch
+                "fetch_reference",
             ]
         options = ClaudeAgentOptions(**options_kwargs)
 

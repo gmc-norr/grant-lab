@@ -1,6 +1,7 @@
 """Shared fixtures for proposal_assist tests. See plan's
 'Project Conventions Reference' section for context."""
 
+import socket
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +11,56 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Call, Source, User
 from call_manager.main import create_app
+
+# Hostnames that reference-fetch tests mock via pytest-httpx. The SSRF
+# resolver in fetcher.py validates via socket.getaddrinfo BEFORE httpx
+# opens a connection, so we have to fake getaddrinfo too — pytest-httpx
+# only mocks the httpx transport layer. Map known mocked hostnames to a
+# real public IP (8.8.8.8); fall through to the real resolver for
+# everything else.
+#
+# We use 8.8.8.8 rather than a TEST-NET address because Python's
+# ipaddress.is_private treats the documentation ranges (192.0.2/24,
+# 198.51.100/24, 203.0.113/24) as private, which would defeat the SSRF
+# check.
+_FAKE_PUBLIC_HOSTS: frozenset[str] = frozenset(
+    {
+        "api.crossref.org",
+        "www.nejm.org",
+        "eutils.ncbi.nlm.nih.gov",
+        "arxiv.org",
+        "example.com",
+    }
+)
+
+
+@pytest.fixture
+def fake_public_dns(monkeypatch):
+    """Patch socket.getaddrinfo so known mocked hostnames resolve to a
+    public IP. Non-autouse — tests that exercise the resolver itself
+    (e.g., the SSRF rebinding-validation test) request it by name only
+    where they need it, so they remain free to install their own
+    getaddrinfo patches.
+
+    Consolidated from 4 near-identical copies across
+    tests/proposal_assist/{references,tools,}*.py."""
+    real_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        if host in _FAKE_PUBLIC_HOSTS or host.endswith(".example.com"):
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("8.8.8.8", 0),
+                )
+            ]
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    return fake_getaddrinfo
 
 
 @pytest.fixture
