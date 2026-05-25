@@ -4,6 +4,16 @@
 
 ## Revisions
 
+**rev4 (2026-05-25, after Codex review of rev3):** Seven findings, all addressed:
+
+1. **Stage 1 failure contract made consistent** (Codex High #1). rev3 said "no row, no file" in the error table but "text_status='failed', bytes on disk" elsewhere — contradictory, and the admin "failures" panel only makes sense with the retain-on-failure model. rev4 commits to: **insert row + commit FIRST, then run Stage 1 in a separate transaction**. On Stage 1 failure, UPDATE `text_status='failed'`, `text_error=<msg>` — row + bytes persist for retry from the UI. The upload handler returns 200 in both cases (success or failure) with the row partial; the partial renders the failure state and a retry button. Pre-commit failures (MIME / size / disk write) still use the B7 atomic cleanup pattern (no row, no file).
+2. **SSRF DNS TOCTOU closed** (Codex High #2). Custom httpx Transport that resolves the hostname once, validates every returned IP against the deny-ranges, then pins the connection to the validated IP. TLS still uses the original hostname for SNI + cert validation. Defends against DNS rebinding (where validation lookup returns public IP but the fetch lookup returns private).
+3. **Raw bytes serve hardened** (Codex High #3). Unlike B7's images-only `Content-Disposition: inline`, references serve a wider MIME range that includes HTML/SVG/HTML-wrapped-PDFs. rev4 sets `Content-Disposition: attachment` always (force download) + `X-Content-Type-Options: nosniff` always. PDFs/images can be browsed-inline via separate (future) preview routes that go through bleach-sanitization; the raw route is download-only.
+4. **User-confirmed table updated** (Codex Medium #4). Stale "Anthropic Web Fetch" row corrected to "Crossref / PubMed / arXiv / generic URL via server-side httpx".
+5. **`text_chars_total` column added** (Codex Medium #5). Populated by Stage 1; used by `submit_user_turn`'s pre-count without a file-read on the hot submit path.
+6. **Reference re-embed gap documented + CLI hook** (Codex Medium #6). Added a brief Open Questions entry plus a note that the existing `embeddings refresh` CLI tick will be extended to cover references. v1 ships with the column populated correctly at insert time; backfill after a future model change is a separate operator action.
+7. **XLSX extraction path filled in** (Codex Low #7). Added `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` with openpyxl schema + first 5 rows extraction.
+
 **rev3 (2026-05-25, after user direction):** PageIndex deferred to v1.1; local RAG is the primary navigation path. The section-aware chunker already produces a usable structure — `navigate_reference` derives the outline from `SELECT DISTINCT section_path FROM reference_chunks` instead of calling an LLM. Removes ~30% of the rev2 complexity:
 
 - No `_reference_indexing_tick` worker (Stage 2 was PageIndex + text-retry; both gone — text failures are surface-level in v1, user retries via UI).
@@ -57,7 +67,7 @@ The new code must be consistent with patterns landed across the proposal-assist 
 | Content types in v1 | All four: papers, prior proposals, analyses, data files |
 | Cross-workspace sharing | Copy-on-add (snapshot). No shared library. |
 | Agent interface | v1: Browse + semantic search + chunk-derived outline navigation. v1.1: PageIndex-generated outlines layer on top of the same `navigate_reference` tool. |
-| Auto-fetch sources | Crossref (DOI) + PubMed (PMID/PMC XML) + arXiv + Anthropic Web Fetch |
+| Auto-fetch sources | Crossref (DOI) + PubMed (PMID/PMC XML) + arXiv + generic URL via server-side httpx (rev2 — NOT Claude web-fetch; the adapter has no built-in tools) |
 | Who can add refs | Both user (UI upload) and agent (mid-turn `fetch_reference`) |
 | Embedding model | Local Ollama `mxbai-embed-large` (matches dev .env, avoids bge-m3 NaN bug) |
 | Chunker | Section-aware (PDF outline / markdown headings / docx heading styles); fallback to recursive 1000-char with 100-char overlap |
@@ -99,6 +109,10 @@ CREATE TABLE references (
                     CHECK (text_status IN ('pending','running','done','failed','skipped')),
     text_error      TEXT,
     text_indexed_at TIMESTAMPTZ,           -- non-null once chunks + embeddings written
+    text_chars_total INTEGER,              -- rev4: total extracted text length, populated by Stage 1.
+                                            -- Used by submit_user_turn for cap pre-count without a
+                                            -- file-read on the hot submit path. NULL when text_status
+                                            -- != 'done'.
     -- PageIndex outline status — v1.1 scaffolding. v1 inserts always
     -- use 'skipped' because PageIndex is deferred (rev3). When v1.1
     -- lands, the default changes to 'pending' and the worker starts
@@ -176,15 +190,25 @@ v1.1 only: queue PageIndex outline job → async worker → outline.json + outli
 
 ### Upload entry point
 
-`POST /workspaces/<id>/references` (multipart). Owner-only. Atomic ordering identical to B7 attachments:
+`POST /workspaces/<id>/references` (multipart). Owner-only. Two-phase: atomic write+row (B7 pattern), then sync Stage 1 in a separate transaction:
+
+**Phase 1 (atomic write + row, rollback on failure):**
 
 1. Validate MIME against allowlist: pdf, md, txt, docx, rtf, csv, xlsx, ipynb.
 2. Stream-read with 50 MB cap (papers are bigger than B7's 5 MB image cap; configurable env `REFERENCES_MAX_BYTES`).
 3. Write atomically (temp + `os.replace`) to `references/<new_id>/original.<ext>`.
 4. Insert `Reference` row with `text_status='pending'`, `outline_status='skipped'` (v1; v1.1 defaults outline to `'pending'`).
-5. Commit; on commit failure → unlink file.
-6. Synchronously run text-extraction + chunk + embed (Stage 1 below).
-7. Return 200 with the new `Reference` row partial for HTMX swap.
+5. Commit. On commit failure → `storage.delete_one` + return 500. On any earlier failure → row never inserted + file never written (atomic cleanup mirrors B7).
+
+**Phase 2 (sync Stage 1, retained-on-failure model — Codex High #1 resolution):**
+
+6. UPDATE `text_status='running'`; run text-extract + chunk + embed.
+7. On success: UPDATE `text_status='done'`, `text_indexed_at=now()`, `text_chars_total=<n>`, INSERT chunks. Same transaction.
+8. **On failure: UPDATE `text_status='failed'`, `text_error=<message>`. Row + bytes persist** so the user can retry from the UI and the admin "failed references" panel reflects the failure. NO atomic rollback for Stage 1 failures.
+
+Return 200 in both Stage 1 outcomes with the row partial (the partial renders the failure state with a retry button when `text_status='failed'`). Pre-Phase-1-commit failures still return 500 (no row to render).
+
+**Why two phases:** Phase 1's atomicity is preserved (we never end with a row pointing at a missing file or vice versa). Phase 2 is sync but separate-transaction so the user gets a fast 200 acknowledging the upload landed; the cap-relevant work (embeddings) succeeds-or-marks-failed. Compare this to B7 attachments which combined everything in one tx because attachment indexing is a synchronous Pillow probe with negligible failure modes.
 
 ### Auto-fetch dispatcher
 
@@ -206,8 +230,8 @@ Detection by regex, in order:
 **SSRF protections (single shared `fetcher.py` module):**
 
 - Scheme allowlist: `https://` by default, `http://` only when `REFERENCES_ALLOW_HTTP=true` (env, off by default). All other schemes (`file://`, `gopher://`, `data:`, ...) rejected.
-- DNS resolution + IP allowlist: resolve hostname, reject if any returned address falls in a private/internal range (RFC1918 10/8, 172.16/12, 192.168/16; loopback 127/8 + ::1; link-local 169.254/16 + fe80::/10; ULA fc00::/7; CGNAT 100.64/10). Re-checked on every redirect target.
-- Redirect limit: max 5 redirects, each one validated by the scheme/IP rules before following.
+- DNS resolution + IP allowlist + IP pinning (rev4 — closes Codex High #2 DNS rebinding gap): resolve hostname **once** via a custom httpx Transport, reject if any returned address falls in a private/internal range (RFC1918 10/8, 172.16/12, 192.168/16; loopback 127/8 + ::1; link-local 169.254/16 + fe80::/10; ULA fc00::/7; CGNAT 100.64/10). **Pin** the connection to the validated IP — TLS verification continues against the original hostname (SNI + cert subject) but the socket connects to the explicit IP. Defends against DNS rebinding (validation lookup returns public IP; fetch lookup would otherwise return private). httpx supports this via a custom `AsyncHTTPTransport` with `local_address`/`socket_options` + a hostname-to-IP override map. Implementation lives in a single `fetcher.py` module shared by the dispatcher and any future fetch caller.
+- Redirect limit: max 5 redirects, each one re-validated by the scheme/IP rules (and re-pinned) before following.
 - Response-size cap: same 50 MB ceiling as the upload path (configurable via `REFERENCES_MAX_BYTES`).
 - Timeout: 15s connect, 60s total.
 - Content-Type sniff: if the response is `text/html` we accept it (some publishers redirect HTML wrappers around PDFs and the agent may want the HTML), but `script` and `iframe` content is stripped during text extraction.
@@ -222,7 +246,9 @@ Each backend returns `(bytes, suggested_filename, source_metadata)`. The dispatc
 | `text/markdown`, `text/plain` | Copy as-is |
 | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | `python-docx` → plain text + heading metadata |
 | `application/rtf` | `striprtf` (small dep) |
-| `text/csv`, `application/vnd.ms-excel` | **Schema + sample only**: column names + first 5 rows. Stored as a small Markdown table in `text.txt`. |
+| `text/csv` | **Schema + sample only**: column names + first 5 rows. Stored as a small Markdown table in `text.txt`. |
+| `application/vnd.ms-excel` (legacy .xls) | Same as CSV (via openpyxl). Schema + first 5 rows from sheet 0. Markdown table. |
+| `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (.xlsx, rev4) | Same as CSV (via openpyxl). Schema + first 5 rows from sheet 0. Markdown table. |
 | `application/x-ipynb+json` | markdown cells + first 200 chars of each code cell + text outputs; skip raw image cells |
 
 Failures here mark the Reference with `outline_status='failed'` and surface a clear error to the user — bytes stay on disk for re-extraction after a fix.
@@ -236,9 +262,9 @@ Section structure is detected first:
 
 One chunk per section. If any section exceeds 1500 chars, sub-chunk recursively with 100-char overlap. `section_path` populated as breadcrumb (`"Methods > Statistical analysis"`). Falls back to plain recursive 1000-char chunks when no structure is detectable.
 
-Embeddings via `OllamaEmbedClient(model=settings.embedding_model)` — already in the stack from call ranking. Each row stores `embedding_model` so a future model change doesn't silently mix incompatible vectors (Codex Medium #6). Batch insert into `reference_chunks` then UPDATE `references.text_status='done'`, `text_indexed_at = now()` in one transaction. ~30-60 chunks × ~50ms per local embedding call → 1.5–5s total for a 20-page paper. Fits in the request budget.
+Embeddings via `OllamaEmbedClient(model=settings.embedding_model)` — already in the stack from call ranking. Each row stores `embedding_model` so a future model change doesn't silently mix incompatible vectors (rev2 Codex Medium #6). Batch insert into `reference_chunks` then UPDATE `references.text_status='done'`, `text_indexed_at = now()`, `text_chars_total = len(extracted_text)` in one transaction (rev4 closure of Codex Medium #5 — `text_chars_total` is what `submit_user_turn` reads for the cap pre-count, avoiding a file-read on the hot submit path). ~30-60 chunks × ~50ms per local embedding call → 1.5–5s total for a 20-page paper. Fits in the request budget.
 
-On any failure (extractor crash, Ollama unreachable, chunk insert error): UPDATE `text_status='failed'`, `text_error=<message>`, leaving bytes on disk. The worker (Stage 2) retries text+embed when it sees `text_status='failed'` AND `text_error LIKE 'transient:%'` (Ollama-down style), or leaves the row for the user to retry manually otherwise.
+On any failure (extractor crash, Ollama unreachable, chunk insert error): UPDATE `text_status='failed'`, `text_error=<message>`, leaving row + bytes on disk. The user retries from the UI (manual retry button on the failed row); v1 has no async retry. The admin panel "failed references" view surfaces the count.
 
 ### Stage 2 — Deferred to v1.1
 
@@ -257,11 +283,11 @@ When v1.1 lands PageIndex:
 
 | Stage | Failure | Behavior |
 |---|---|---|
-| Upload validate | bad MIME / oversize | 400 with `_html.escape`-d message, no row, no file |
-| Upload commit | DB error post-write | Rollback row, unlink file (B7 pattern) |
-| Fetch | paywall / 404 / timeout | Tool error to agent; HTTP 502 to UI. No row inserted. |
-| Text extract (Stage 1) | pdftotext crash / corrupted PDF | Upload returns 500 / fetch returns tool error. Atomic rollback: no row, no file. User can re-upload after converting. |
-| Chunk + embed (Stage 1) | Ollama transient down | Same — Stage 1 runs synchronously inside the request; failure returns 500/tool-error with cleanup. No partial state on disk. |
+| Upload validate (Phase 1) | bad MIME / oversize | 400 with `_html.escape`-d message, no row, no file |
+| Phase 1 commit | DB error after file write | `storage.delete_one`, return 500 (B7 atomic pattern). |
+| Text extract (Stage 1) | pdftotext crash / corrupted PDF | Upload returns 200 with the row in `text_status='failed'`. Row + bytes retained. User retries via UI; admin panel surfaces the failure. |
+| Chunk + embed (Stage 1) | Ollama transient down | Same — `text_status='failed'`, `text_error='transient: <message>'`. UI retry available; admin can see the failure. |
+| Fetch (any source) | publisher 404 / paywall / SSRF reject / timeout | Tool error to agent; HTTP 502 to UI. No row inserted (Phase 1 never reached). |
 | Mid-turn 4th fetch | atomic UPDATE returns 0 rows (fetch_count already 3) | Tool returns error ("ask user to upload"); agent surfaces in response. Cap is per-turn, not per-workspace-per-day, so the next turn's fetches start fresh. |
 
 ---
@@ -382,7 +408,7 @@ Mirrors the B7 files panel.
 - `POST /workspaces/<id>/references/fetch` — form with `input` field; calls the dispatcher (owner-only)
 - `POST /workspaces/<id>/references/<ref_id>/delete` — row-first delete + idempotent unlink (owner-only)
 - `POST /workspaces/<id>/references/<ref_id>/copy_to` — form with `target_workspace_id` (owner of both)
-- `GET /workspaces/<id>/references/<ref_id>/raw` — serve original bytes, auth-checked, sanitized Content-Disposition (owner+viewer)
+- `GET /workspaces/<id>/references/<ref_id>/raw` — serve original bytes, auth-checked (owner+viewer). **Always `Content-Disposition: attachment; filename="<sanitized>"`** (force download, NEVER inline — unlike B7's images-only serve which uses inline; references include HTML/SVG/HTML-wrapped-PDFs that would XSS in the app origin if rendered inline). Plus `X-Content-Type-Options: nosniff` to prevent browser MIME-sniffing into HTML. PDFs/images can be browsed-inline via separate (v1.1+) preview routes that go through bleach-sanitization. Cache-Control: private, max-age=300 (per-user, no proxy share).
 
 ### Chat composer extension
 
@@ -441,3 +467,9 @@ Both read-only — no remediation UI in v1.
 5. **Backward-compat for existing workspaces.** All existing workspaces predate this subsystem; the migration adds the new tables (`references`, `reference_chunks`) and the new `turn_jobs.fetch_count` column (NOT NULL default 0 — additive, no backfill needed). v1.1 adds the `llm_usage` table and changes `references.outline_status` default — both also additive.
 
 6. **PageIndex (v1.1)** lands as one slice when better outlines for weak-structure PDFs become a real pain point. The v1 schema scaffolding (`outline_status`, `outline_error`, `outline_indexed_at` columns) means no migration churn at that time — just default change + new worker + new ledger table + cap-query update.
+
+7. **Reference re-embed after EMBEDDING_MODEL change** (Codex Medium #6). v1 ships with `embedding_model` stamped on each chunk and search filtering by current model — so a model change makes old chunks invisible (correct behavior — incompatible vectors shouldn't be mixed). What's missing is a re-embed path. Options for v1 → v1.1:
+   - Operator runs a one-off `uv run python -m call_manager.references.cli reembed --model <new>` command — re-extracts text from `text.txt` (already on disk), re-chunks, re-embeds, replaces chunks atomically per reference.
+   - Or: extend the existing `embeddings refresh` daily tick (`embeddings/cli.py`) to also walk references. Closer to the existing pattern but adds work to the daily tick.
+
+   v1 ships the CLI option (lower-risk, opt-in per operator action). Belongs in the same slice as the reference ingestion pipeline so it gets tested at land time, not retrofit.
