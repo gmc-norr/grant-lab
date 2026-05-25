@@ -30,6 +30,27 @@
          accept=".pdf,.md,.txt,.docx,.rtf,.csv,.xls,.xlsx,.ipynb">
   <button type="submit">Upload</button>
 </form>
+
+<form method="post"
+      action="/workspaces/{{ workspace.id }}/references/fetch"
+      hx-post="/workspaces/{{ workspace.id }}/references/fetch"
+      hx-target="#reference-list"
+      hx-swap="afterbegin"
+      hx-on::after-request="this.reset()">
+  <label>
+    Fetch by:
+    <input type="text" name="input" required
+           placeholder="DOI, PMID, arXiv ID, or URL"
+           style="min-width: 320px;">
+  </label>
+  <select name="kind">
+    <option value="paper">paper</option>
+    <option value="prior_proposal">prior_proposal</option>
+    <option value="analysis">analysis</option>
+    <option value="data">data</option>
+  </select>
+  <button type="submit">Fetch</button>
+</form>
 {% else %}
 <p><em>(read-only — only the workspace owner can upload references)</em></p>
 {% endif %}

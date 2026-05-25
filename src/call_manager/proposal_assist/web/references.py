@@ -253,6 +253,98 @@ async def upload_reference(
 
 
 # ---------------------------------------------------------------------------
+# POST /workspaces/<id>/references/fetch — fetch by DOI / PMID / arXiv / URL
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{workspace_id}/references/fetch")
+def fetch_reference_route(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+    input: str = Form(...),  # noqa: A002
+    kind: str = Form("paper"),
+) -> HTMLResponse:
+    """User-facing counterpart to the agent's fetch_reference MCP
+    tool. Owner-only; runs the same dispatcher; reuses ingest_bytes."""
+    from call_manager.proposal_assist.references.dispatcher import dispatch_fetch
+    from call_manager.proposal_assist.references.fetcher import (
+        FetchError,
+        SSRFError,
+    )
+
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    if kind not in _ALLOWED_KINDS:
+        return HTMLResponse(
+            f"<p>Invalid kind: {_html.escape(repr(kind))}</p>",
+            status_code=400,
+        )
+
+    try:
+        data, filename, mime_type, source_meta = dispatch_fetch(input)
+    except ValueError as e:
+        # detect_source_type rejected the input.
+        return HTMLResponse(
+            f"<p>{_html.escape(str(e))}</p>",
+            status_code=400,
+        )
+    except SSRFError as e:
+        return HTMLResponse(
+            f"<p>{_html.escape(str(e))}</p>",
+            status_code=400,
+        )
+    except FetchError as e:
+        return HTMLResponse(
+            f"<p>fetch failed: {_html.escape(str(e))}</p>",
+            status_code=502,
+        )
+
+    storage = _storage_for(request)
+    embed_client = request.app.state.embed_client
+    embedder = OllamaEmbedderAdapter(embed_client)
+
+    try:
+        result: IngestResult = ingest_bytes(
+            session_factory=request.app.state.session_factory,
+            session=session,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=ws.id,
+            kind=kind,
+            source_type=source_meta["source"],
+            source_uri=input,
+            filename=_sanitize_filename(filename),
+            mime_type=mime_type,
+            data=data,
+            uploaded_by=user.id,
+        )
+        session.commit()
+    except OSError as e:
+        logger.warning(
+            "fetch_reference_route: write_atomic failed for workspace=%s: %s",
+            ws.id,
+            e,
+        )
+        session.rollback()
+        return HTMLResponse("<p>storage write failed</p>", status_code=500)
+    except ValueError as e:
+        session.rollback()
+        return HTMLResponse(f"<p>{_html.escape(str(e))}</p>", status_code=400)
+
+    # Reload via fresh session to render the final (post-Phase-2) state.
+    factory = request.app.state.session_factory
+    with factory() as s2:
+        ref = s2.scalar(select(Reference).where(Reference.id == result.reference_id))
+        templates = request.app.state.templates
+        return templates.TemplateResponse(
+            request,
+            "proposal_assist/partials/reference_row.html",
+            {"ref": ref, "workspace": ws, "is_owner": True},
+        )
+
+
+# ---------------------------------------------------------------------------
 # GET /workspaces/<id>/references/<id>/raw — serve original bytes
 # ---------------------------------------------------------------------------
 
