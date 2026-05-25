@@ -22,9 +22,7 @@ def test_write_atomic_creates_directories_and_persists_bytes(tmp_path):
     storage = ReferenceStorage(root=tmp_path)
     wsid = uuid.uuid4()
     rid = uuid.uuid4()
-    storage.write_atomic(
-        workspace_id=wsid, reference_id=rid, suffix=".pdf", data=b"PDF bytes"
-    )
+    storage.write_atomic(workspace_id=wsid, reference_id=rid, suffix=".pdf", data=b"PDF bytes")
     p = tmp_path / str(wsid) / "references" / str(rid) / "original.pdf"
     assert p.exists()
     assert p.read_bytes() == b"PDF bytes"
@@ -42,9 +40,7 @@ def test_write_atomic_cleans_partial_on_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "replace", boom)
     with pytest.raises(OSError):
-        storage.write_atomic(
-            workspace_id=wsid, reference_id=rid, suffix=".pdf", data=b"x"
-        )
+        storage.write_atomic(workspace_id=wsid, reference_id=rid, suffix=".pdf", data=b"x")
     target_dir = tmp_path / str(wsid) / "references" / str(rid)
     if target_dir.exists():
         assert list(target_dir.iterdir()) == []
@@ -54,9 +50,7 @@ def test_write_text_persists_text_txt(tmp_path):
     storage = ReferenceStorage(root=tmp_path)
     wsid = uuid.uuid4()
     rid = uuid.uuid4()
-    storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf").parent.mkdir(
-        parents=True
-    )
+    storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf").parent.mkdir(parents=True)
     storage.write_text(workspace_id=wsid, reference_id=rid, text="hello world")
     p = tmp_path / str(wsid) / "references" / str(rid) / "text.txt"
     assert p.exists()
@@ -67,9 +61,7 @@ def test_delete_one_is_idempotent(tmp_path):
     storage = ReferenceStorage(root=tmp_path)
     wsid = uuid.uuid4()
     rid = uuid.uuid4()
-    storage.write_atomic(
-        workspace_id=wsid, reference_id=rid, suffix=".pdf", data=b"x"
-    )
+    storage.write_atomic(workspace_id=wsid, reference_id=rid, suffix=".pdf", data=b"x")
     storage.delete_one(workspace_id=wsid, reference_id=rid)
     assert not (tmp_path / str(wsid) / "references" / str(rid)).exists()
     # Calling again must not raise.

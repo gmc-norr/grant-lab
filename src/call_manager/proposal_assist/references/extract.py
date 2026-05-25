@@ -96,11 +96,7 @@ def _extract_pdf(data: bytes) -> SectionList:
     sections: SectionList = []
     try:
         for page_no, layout in enumerate(extract_pages(io.BytesIO(data)), start=1):
-            parts = [
-                el.get_text()
-                for el in layout
-                if isinstance(el, LTTextContainer)
-            ]
+            parts = [el.get_text() for el in layout if isinstance(el, LTTextContainer)]
             text = "".join(parts).strip()
             if text:
                 sections.append((f"Page {page_no}", text))

@@ -85,9 +85,7 @@ def ingest_bytes(
         suffix=suffix,
         data=data,
     )
-    relative_path = (
-        f"{workspace_id}/references/{reference_id}/original{suffix}"
-    )
+    relative_path = f"{workspace_id}/references/{reference_id}/original{suffix}"
     ref = Reference(
         id=reference_id,
         workspace_id=workspace_id,
@@ -154,9 +152,7 @@ def ingest_bytes(
             ref2.text_indexed_at = datetime.now(UTC)
             ref2.text_chars_total = len(full_text)
             s2.commit()
-        return IngestResult(
-            reference_id=reference_id, text_status="done", text_error=None
-        )
+        return IngestResult(reference_id=reference_id, text_status="done", text_error=None)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
         with session_factory() as s2:
@@ -165,6 +161,4 @@ def ingest_bytes(
                 ref2.text_status = "failed"
                 ref2.text_error = msg
                 s2.commit()
-        return IngestResult(
-            reference_id=reference_id, text_status="failed", text_error=msg
-        )
+        return IngestResult(reference_id=reference_id, text_status="failed", text_error=msg)

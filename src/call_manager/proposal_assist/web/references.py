@@ -66,13 +66,9 @@ def _session_dep(request: Request):
     yield from get_db_dependency(factory)()
 
 
-def _require_owner(
-    *, workspace_id: uuid.UUID, user, session: Session
-) -> Workspace:
+def _require_owner(*, workspace_id: uuid.UUID, user, session: Session) -> Workspace:
     ws = session.scalar(
-        select(Workspace).where(
-            Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None)
-        )
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None))
     )
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
@@ -81,13 +77,9 @@ def _require_owner(
     return ws
 
 
-def _require_owner_or_viewer(
-    *, workspace_id: uuid.UUID, user, session: Session
-) -> Workspace:
+def _require_owner_or_viewer(*, workspace_id: uuid.UUID, user, session: Session) -> Workspace:
     ws = session.scalar(
-        select(Workspace).where(
-            Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None)
-        )
+        select(Workspace).where(Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None))
     )
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
@@ -146,9 +138,7 @@ def references_panel(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> HTMLResponse:
-    ws = _require_owner_or_viewer(
-        workspace_id=workspace_id, user=user, session=session
-    )
+    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
     refs = list(
         session.scalars(
             select(Reference)
@@ -200,9 +190,7 @@ async def upload_reference(
     try:
         data = await _read_capped(file, _MAX_BYTES)
     except HTTPException as e:
-        return HTMLResponse(
-            f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code
-        )
+        return HTMLResponse(f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code)
 
     storage = _storage_for(request)
     embed_client = request.app.state.embed_client  # OllamaEmbedClient from main.py
@@ -269,9 +257,7 @@ def serve_reference_raw(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> Response:
-    ws = _require_owner_or_viewer(
-        workspace_id=workspace_id, user=user, session=session
-    )
+    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
         # Don't leak existence — 404 for cross-workspace lookups too.
@@ -279,9 +265,7 @@ def serve_reference_raw(
 
     storage = _storage_for(request)
     suffix = suffix_for_mime(ref.mime_type)
-    path = storage.path_for(
-        workspace_id=ws.id, reference_id=ref.id, suffix=suffix
-    )
+    path = storage.path_for(workspace_id=ws.id, reference_id=ref.id, suffix=suffix)
     if not path.exists():
         raise HTTPException(status_code=404, detail="reference bytes missing")
 

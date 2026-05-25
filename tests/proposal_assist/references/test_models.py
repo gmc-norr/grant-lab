@@ -84,7 +84,5 @@ def test_turn_jobs_has_fetch_count_column(pg_session_factory):
     """Slice 3 will use this; Slice 1 just verifies the column exists with the right default."""
     with pg_session_factory() as s:
         # No turn job to load, but a SELECT on the column must not raise.
-        result = s.execute(
-            select(TurnJob.fetch_count).limit(1)
-        )
+        result = s.execute(select(TurnJob.fetch_count).limit(1))
         list(result)  # forces query execution

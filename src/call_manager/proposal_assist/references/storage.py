@@ -37,11 +37,7 @@ class ReferenceStorage:
         if suffix not in _ALLOWED_SUFFIXES:
             raise ValueError(f"disallowed suffix: {suffix!r}")
         return (
-            self.root
-            / str(workspace_id)
-            / "references"
-            / str(reference_id)
-            / f"original{suffix}"
+            self.root / str(workspace_id) / "references" / str(reference_id) / f"original{suffix}"
         )
 
     def text_path_for(
@@ -50,13 +46,7 @@ class ReferenceStorage:
         workspace_id: uuid.UUID,
         reference_id: uuid.UUID,
     ) -> Path:
-        return (
-            self.root
-            / str(workspace_id)
-            / "references"
-            / str(reference_id)
-            / "text.txt"
-        )
+        return self.root / str(workspace_id) / "references" / str(reference_id) / "text.txt"
 
     def write_atomic(
         self,
@@ -70,9 +60,7 @@ class ReferenceStorage:
         to the final path. POSIX guarantees the rename is atomic on the
         same filesystem, so concurrent readers see either no file or the
         complete file."""
-        final = self.path_for(
-            workspace_id=workspace_id, reference_id=reference_id, suffix=suffix
-        )
+        final = self.path_for(workspace_id=workspace_id, reference_id=reference_id, suffix=suffix)
         final.parent.mkdir(parents=True, exist_ok=True)
         tmp = final.with_suffix(final.suffix + ".partial")
         try:
@@ -96,9 +84,7 @@ class ReferenceStorage:
     ) -> Path:
         """Persist extracted text.txt alongside the original. Caller has
         already created the ref directory via write_atomic."""
-        p = self.text_path_for(
-            workspace_id=workspace_id, reference_id=reference_id
-        )
+        p = self.text_path_for(workspace_id=workspace_id, reference_id=reference_id)
         p.write_text(text, encoding="utf-8")
         return p
 
@@ -110,8 +96,6 @@ class ReferenceStorage:
     ) -> None:
         """Idempotent: remove the reference's directory (original + text.txt
         + outline.json if present). Caller has already deleted the DB row."""
-        ref_dir = (
-            self.root / str(workspace_id) / "references" / str(reference_id)
-        )
+        ref_dir = self.root / str(workspace_id) / "references" / str(reference_id)
         if ref_dir.exists():
             shutil.rmtree(ref_dir)

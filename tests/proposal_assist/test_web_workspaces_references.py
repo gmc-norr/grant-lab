@@ -2,7 +2,6 @@
 
 import io
 
-import pytest
 from fastapi.testclient import TestClient
 
 from call_manager.auth.session_cookie import SessionSigner
@@ -37,9 +36,7 @@ def _seed_owner_and_workspace(session, *, email="owner@ki.se"):
     return owner.id, ws.id
 
 
-def test_panel_renders_for_owner_empty_list(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_panel_renders_for_owner_empty_list(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)
@@ -52,9 +49,7 @@ def test_panel_renders_for_owner_empty_list(
     assert "references" in resp.text.lower()
 
 
-def test_panel_returns_403_for_non_viewer(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_panel_returns_403_for_non_viewer(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s)
@@ -70,9 +65,7 @@ def test_panel_returns_403_for_non_viewer(
     assert resp.status_code == 403
 
 
-def test_upload_markdown_creates_row(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_upload_markdown_creates_row(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)
@@ -90,15 +83,14 @@ def test_upload_markdown_creates_row(
     assert "hello.md" in resp.text or "Hello" in resp.text
 
     from sqlalchemy import select
+
     with pg_session_factory() as s:
         refs = list(s.scalars(select(Reference).where(Reference.workspace_id == wsid)))
     assert len(refs) == 1
     assert refs[0].text_status == "done"
 
 
-def test_upload_returns_403_for_non_owner(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_upload_returns_403_for_non_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s)
@@ -108,6 +100,7 @@ def test_upload_returns_403_for_non_owner(
         viewer_id = viewer.id
         # Add viewer permission (mirrors B7 pattern; viewers CAN read, can't upload).
         from call_manager.db.models import WorkspaceViewer
+
         s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer_id))
         s.commit()
     client = _authed(app, user_id=viewer_id)
@@ -122,9 +115,7 @@ def test_upload_returns_403_for_non_owner(
     assert resp.status_code == 403
 
 
-def test_upload_rejects_bad_mime(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_upload_rejects_bad_mime(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)
@@ -160,6 +151,7 @@ def test_upload_failed_extraction_persists_row_with_failed_status(
     assert "failed" in resp.text.lower()
 
     from sqlalchemy import select
+
     with pg_session_factory() as s:
         refs = list(s.scalars(select(Reference).where(Reference.workspace_id == wsid)))
     assert len(refs) == 1
@@ -186,6 +178,7 @@ def test_raw_serves_bytes_with_attachment_disposition(
         )
         assert up.status_code == 200
         from sqlalchemy import select
+
         with pg_session_factory() as s:
             ref = s.scalar(select(Reference).where(Reference.workspace_id == wsid))
         resp = client.get(f"/workspaces/{wsid}/references/{ref.id}/raw")
@@ -200,9 +193,7 @@ def test_raw_serves_bytes_with_attachment_disposition(
     assert resp.headers["x-content-type-options"] == "nosniff"
 
 
-def test_raw_returns_404_for_other_workspace_id(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_raw_returns_404_for_other_workspace_id(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Cross-workspace IDOR check: passing the right ref_id but the
     wrong workspace_id in the URL returns 404, not 403 — don't leak
     existence."""
@@ -213,12 +204,13 @@ def test_raw_returns_404_for_other_workspace_id(
     client = _authed(app, user_id=uid_a)
     md = b"# t\n"
     try:
-        up = client.post(
+        client.post(
             f"/workspaces/{wsid_a}/references",
             data={"kind": "paper"},
             files={"file": ("t.md", io.BytesIO(md), "text/markdown")},
         )
         from sqlalchemy import select
+
         with pg_session_factory() as s:
             ref = s.scalar(select(Reference).where(Reference.workspace_id == wsid_a))
         # Now: workspace_a's owner asks for ref_a's bytes via workspace_b's URL.

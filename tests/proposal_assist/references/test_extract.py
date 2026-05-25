@@ -111,9 +111,11 @@ def test_extract_ipynb_splits_markdown_cells_as_sections():
     nb = {
         "cells": [
             {"cell_type": "markdown", "source": ["# Analysis\n", "intro"]},
-            {"cell_type": "code", "source": ["print('hi')"], "outputs": [
-                {"output_type": "stream", "text": "hi\n"}
-            ]},
+            {
+                "cell_type": "code",
+                "source": ["print('hi')"],
+                "outputs": [{"output_type": "stream", "text": "hi\n"}],
+            },
             {"cell_type": "markdown", "source": ["## Results\n", "good"]},
         ],
         "metadata": {},

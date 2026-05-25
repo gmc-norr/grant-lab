@@ -1,7 +1,7 @@
 """Two-phase ingest:
-  Phase 1 — write bytes atomically + insert Reference row + commit.
-  Phase 2 — sync Stage 1 (extract + chunk + embed) in a separate tx.
-            On failure, text_status='failed', row + bytes retained.
+Phase 1 — write bytes atomically + insert Reference row + commit.
+Phase 2 — sync Stage 1 (extract + chunk + embed) in a separate tx.
+          On failure, text_status='failed', row + bytes retained.
 """
 
 import uuid
@@ -18,9 +18,7 @@ from call_manager.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
-def test_ingest_text_markdown_creates_row_and_chunks(
-    pg_session_factory, tmp_path
-):
+def test_ingest_text_markdown_creates_row_and_chunks(pg_session_factory, tmp_path):
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     md = b"# Title\n\nIntro.\n\n## Methods\n\nMethod text.\n"
@@ -56,9 +54,7 @@ def test_ingest_text_markdown_creates_row_and_chunks(
         ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
         chunks = list(
             s.scalars(
-                select(ReferenceChunk).where(
-                    ReferenceChunk.reference_id == result.reference_id
-                )
+                select(ReferenceChunk).where(ReferenceChunk.reference_id == result.reference_id)
             )
         )
 
@@ -75,9 +71,7 @@ def test_ingest_text_markdown_creates_row_and_chunks(
     assert text_p.exists()
 
 
-def test_ingest_extraction_failure_persists_row_with_failed_status(
-    pg_session_factory, tmp_path
-):
+def test_ingest_extraction_failure_persists_row_with_failed_status(pg_session_factory, tmp_path):
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
 
@@ -112,9 +106,7 @@ def test_ingest_extraction_failure_persists_row_with_failed_status(
         ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
         chunks = list(
             s.scalars(
-                select(ReferenceChunk).where(
-                    ReferenceChunk.reference_id == result.reference_id
-                )
+                select(ReferenceChunk).where(ReferenceChunk.reference_id == result.reference_id)
             )
         )
 

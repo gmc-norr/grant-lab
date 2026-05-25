@@ -681,9 +681,7 @@ class TurnJob(Base):
         ForeignKey("users.id"),
         nullable=True,
     )
-    fetch_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
-    )
+    fetch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class ChatSummary(Base):
@@ -1097,9 +1095,7 @@ class Reference(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
@@ -1114,17 +1110,11 @@ class Reference(Base):
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)
     bytes_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    text_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="pending"
-    )
+    text_status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
     text_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    text_indexed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    text_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     text_chars_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    outline_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="skipped"
-    )
+    outline_status: Mapped[str] = mapped_column(Text, nullable=False, server_default="skipped")
     outline_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     outline_indexed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1142,9 +1132,7 @@ class ReferenceChunk(Base):
 
     __tablename__ = "reference_chunks"
     __table_args__ = (
-        UniqueConstraint(
-            "reference_id", "chunk_index", name="uq_reference_chunks_ref_idx"
-        ),
+        UniqueConstraint("reference_id", "chunk_index", name="uq_reference_chunks_ref_idx"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -1153,9 +1141,7 @@ class ReferenceChunk(Base):
         ForeignKey("references.id", ondelete="CASCADE"),
         nullable=False,
     )
-    workspace_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False
-    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     section_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
