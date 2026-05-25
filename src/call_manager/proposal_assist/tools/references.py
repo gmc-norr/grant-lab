@@ -7,6 +7,7 @@ six tools added in Slice 2 are read-only — no mutation, no fetch.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.references.embed import Embedder
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.registry import ToolContext
+
+logger = logging.getLogger(__name__)
 
 
 def _load_workspace_reference(ctx: ToolContext, reference_id: str) -> Reference | None:
@@ -91,8 +94,14 @@ async def search_references_impl(
 
     The `embedder` kwarg is the test-injection seam — production code
     leaves it None and the function constructs the adapter."""
-    if top_k > 25:
-        top_k = 25  # spec hard cap
+    # Clamp top_k to [1, 25]: spec hard cap on the high end;
+    # rejecting <=0 here avoids `.limit(-1)` Postgres errors and
+    # makes the contract explicit.
+    try:
+        top_k_int = int(top_k)
+    except (TypeError, ValueError):
+        top_k_int = 8
+    top_k = max(1, min(top_k_int, 25))
 
     if embedder is None:
         from call_manager.embeddings.client import OllamaEmbedClient
@@ -136,16 +145,54 @@ async def search_references_impl(
     results = []
     for row in rows:
         snippet = row.text[:300] + ("…" if len(row.text) > 300 else "")
+        # pgvector cosine_distance is in [0, 2]. Clamp score to [0, 1]
+        # so the agent sees a familiar 0-1 similarity scale; fully-
+        # opposite vectors get score=0 rather than a confusing negative.
+        score = max(0.0, min(1.0, float(1.0 - row.distance)))
         results.append(
             {
                 "reference_id": str(row.reference_id),
                 "title": row.title or row.filename,
                 "section_path": row.section_path,
                 "snippet": snippet,
-                "score": float(1.0 - row.distance),  # cosine similarity
+                "score": score,
             }
         )
-    return {"query": query, "results": results}
+
+    # Model-drift visibility: if results are empty AND this workspace
+    # has chunks embedded with a different model, surface a warning the
+    # agent can relay to the user (instead of silently returning nothing).
+    warning = None
+    if not results:
+        with ctx.session_factory() as s:
+            other_models = list(
+                s.scalars(
+                    select(ReferenceChunk.embedding_model)
+                    .where(
+                        ReferenceChunk.workspace_id == ctx.workspace_id,
+                        ReferenceChunk.embedding_model != embedder.model,
+                    )
+                    .distinct()
+                )
+            )
+        if other_models:
+            warning = (
+                f"no results with current embedding_model={embedder.model!r}, "
+                f"but this workspace has chunks embedded with "
+                f"{other_models!r} — operator may need to run the reembed CLI"
+            )
+            logger.warning(
+                "search_references: model drift detected for workspace=%s; "
+                "current=%s indexed=%s",
+                ctx.workspace_id,
+                embedder.model,
+                other_models,
+            )
+
+    out: dict[str, Any] = {"query": query, "results": results}
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 async def navigate_reference_impl(
@@ -235,6 +282,17 @@ async def read_reference_impl(
     ref = _load_workspace_reference(ctx, reference_id)
     if ref is None:
         return {"error": f"reference {reference_id} not found"}
+    # Steer kind=data callers to summarize_data — read_reference would
+    # return the schema+sample markdown but the dedicated tool is
+    # clearer (and v1.1 may add real schema dicts there).
+    if ref.kind == "data":
+        return {
+            "error": (
+                f"reference kind is 'data'; use summarize_data(reference_id) "
+                f"instead — read_reference would only return the same "
+                f"schema+sample markdown"
+            )
+        }
     if ref.text_status != "done":
         return {
             "error": (f"reference text status is {ref.text_status!r}; cannot read full text"),
@@ -267,6 +325,12 @@ async def read_reference_section_impl(
         return {"error": f"reference {reference_id} not found"}
     if ref.text_status != "done":
         return {"error": f"reference text status is {ref.text_status!r}"}
+    # Escape LIKE metacharacters (_ and %) in the user-supplied
+    # section_path; otherwise a section name like "Step 1_setup" would
+    # over-match via SQL wildcard semantics. Use backslash as escape.
+    escaped = (
+        section_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
     with ctx.session_factory() as s:
         stmt = (
             select(ReferenceChunk)
@@ -274,7 +338,9 @@ async def read_reference_section_impl(
                 ReferenceChunk.reference_id == ref.id,
                 or_(
                     ReferenceChunk.section_path == section_path,
-                    ReferenceChunk.section_path.like(f"{section_path} > %"),
+                    ReferenceChunk.section_path.like(
+                        f"{escaped} > %", escape="\\"
+                    ),
                 ),
             )
             .order_by(ReferenceChunk.chunk_index)

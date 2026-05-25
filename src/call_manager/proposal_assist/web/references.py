@@ -119,9 +119,17 @@ async def _read_capped(upload: UploadFile, max_bytes: int) -> bytes:
             break
         buf.extend(chunk)
         if len(buf) > max_bytes:
+            # Include the actual size observed so far (capped to max+1)
+            # so the user knows roughly how oversize it is — "your 75 MB
+            # file exceeds the 50 MB limit" is more actionable than
+            # "exceeds 50 MB".
+            observed_mb = len(buf) / (1024 * 1024)
             raise HTTPException(
                 status_code=400,
-                detail=f"file exceeds {max_bytes // (1024 * 1024)} MB limit",
+                detail=(
+                    f"file (>{observed_mb:.1f} MB) exceeds the "
+                    f"{max_bytes // (1024 * 1024)} MB upload limit"
+                ),
             )
     return bytes(buf)
 
