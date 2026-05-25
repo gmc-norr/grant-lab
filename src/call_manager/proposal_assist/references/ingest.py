@@ -115,14 +115,11 @@ def ingest_bytes(
         # inserted (pre-commit) or the commit failed (no row visible).
         # Either way the file is now an orphan; remove it.
         try:
-            storage.delete_one(
-                workspace_id=workspace_id, reference_id=reference_id
-            )
+            storage.delete_one(workspace_id=workspace_id, reference_id=reference_id)
         except Exception:
             # Don't mask the original failure if cleanup also fails.
             logger.exception(
-                "ingest Phase 1 rollback: storage.delete_one failed "
-                "for workspace=%s reference=%s",
+                "ingest Phase 1 rollback: storage.delete_one failed for workspace=%s reference=%s",
                 workspace_id,
                 reference_id,
             )

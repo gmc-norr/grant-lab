@@ -52,6 +52,36 @@ async def lifespan(app: FastAPI):
         allowed_domains=app.state.settings.allowed_email_domains,
     )
 
+    # Sweep stranded reference rows from a prior crash: anything in
+    # text_status='running' is a Phase 2 ingest that didn't complete
+    # (process was killed mid-Stage-1 by SIGTERM, deploy, OOM, etc.).
+    # The retry-via-UI flow lands in Slice 5; for now we just reset
+    # them to 'failed' so the admin panel reflects the truth and the
+    # user can re-upload. Per post-Slice-2 code review.
+    from sqlalchemy import update as _sql_update
+
+    from call_manager.db.models import Reference
+
+    with app.state.session_factory() as _bootstrap_s:
+        n_reset = _bootstrap_s.execute(
+            _sql_update(Reference)
+            .where(Reference.text_status == "running")
+            .values(
+                text_status="failed",
+                text_error="ingest interrupted (server restart before Stage 1 completed)",
+            )
+        ).rowcount
+        _bootstrap_s.commit()
+        if n_reset:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "lifespan startup: reset %d stranded reference rows from "
+                "text_status='running' to 'failed' (likely killed by prior "
+                "restart). Users can re-upload affected refs.",
+                n_reset,
+            )
+
     from call_manager.ingestion.alerts import ConsecutiveFailureTracker
     from call_manager.scheduler import build_scheduler
 

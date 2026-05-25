@@ -471,3 +471,92 @@ async def test_search_references_scopes_to_workspace(pg_session_factory, tmp_pat
     allowed = {str(r) for r in rids_a}
     for hit in result["results"]:
         assert hit["reference_id"] in allowed
+
+
+@pytest.mark.asyncio
+async def test_search_references_top_k_boundaries(pg_session_factory, tmp_path):
+    """Residuals fix: top_k=0 and top_k=-1 must NOT reach Postgres
+    .limit() (which would error or return rubbish). Clamped to [1, 25]."""
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+
+    # top_k=0: clamps to 1, returns at most 1 result.
+    r0 = await search_references_impl(ctx, query="anything", top_k=0, embedder=FakeEmbedder())
+    assert len(r0["results"]) <= 1
+
+    # top_k=-5: same clamp.
+    rn = await search_references_impl(ctx, query="anything", top_k=-5, embedder=FakeEmbedder())
+    assert len(rn["results"]) <= 1
+
+    # top_k=999: clamps to 25.
+    rh = await search_references_impl(ctx, query="anything", top_k=999, embedder=FakeEmbedder())
+    assert len(rh["results"]) <= 25
+
+
+@pytest.mark.asyncio
+async def test_search_references_score_is_clamped_to_unit_interval(pg_session_factory, tmp_path):
+    """Residuals fix: cosine_distance is [0, 2]; raw score = 1-distance
+    could be negative for fully-opposite vectors. The agent should see
+    a clean [0, 1] similarity scale."""
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await search_references_impl(ctx, query="anything", top_k=10, embedder=FakeEmbedder())
+    for hit in result["results"]:
+        assert 0.0 <= hit["score"] <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_search_references_warns_on_embedding_model_drift(pg_session_factory, tmp_path):
+    """Residuals fix: if results are empty AND chunks exist with a
+    DIFFERENT embedding_model, surface a `warning` key so the agent
+    can tell the user about the operator-action gap."""
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+
+    # Verify drift: query with a NEW model that doesn't match the
+    # chunks' embedding_model (which is FakeEmbedder's default
+    # "fake-embedder"). With a different .model, the filter excludes
+    # all chunks and we expect empty + warning.
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    different = FakeEmbedder(model="different-model")
+    result = await search_references_impl(ctx, query="anything", top_k=10, embedder=different)
+    assert result["results"] == []
+    assert "warning" in result
+    assert "different-model" in result["warning"]
+    assert "fake-embedder" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_read_reference_data_kind_steers_to_summarize(pg_session_factory, tmp_path):
+    """Residuals fix: read_reference on kind='data' should steer the
+    agent to summarize_data instead of returning the schema+sample."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    csv = b"a,b\n1,2\n"
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"r-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+        uid = user.id
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="data",
+            source_type="uploaded",
+            source_uri=None,
+            filename="d.csv",
+            mime_type="text/csv",
+            data=csv,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await read_reference_impl(ctx, reference_id=str(rid))
+    assert "error" in out
+    assert "summarize_data" in out["error"]

@@ -306,9 +306,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def navigate_reference(args):
-        return _wrap(
-            await navigate_reference_impl(ctx, reference_id=args["reference_id"])
-        )
+        return _wrap(await navigate_reference_impl(ctx, reference_id=args["reference_id"]))
 
     @tool(
         "read_reference",
@@ -369,9 +367,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def summarize_data(args):
-        return _wrap(
-            await summarize_data_impl(ctx, reference_id=args["reference_id"])
-        )
+        return _wrap(await summarize_data_impl(ctx, reference_id=args["reference_id"]))
 
     return [
         # existing eight

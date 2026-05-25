@@ -191,26 +191,26 @@ def test_phase1_commit_failure_cleans_bytes(pg_session_factory, tmp_path, monkey
 
     monkeypatch.setattr(Session, "commit", boom_then_real)
 
-    with pg_session_factory() as s:
-        with pytest.raises(RuntimeError, match="simulated Phase 1 commit failure"):
-            ingest_bytes(
-                session_factory=pg_session_factory,
-                session=s,
-                storage=storage,
-                embedder=embedder,
-                workspace_id=wsid,
-                kind="paper",
-                source_type="uploaded",
-                source_uri=None,
-                filename="t.md",
-                mime_type="text/markdown",
-                data=md,
-                uploaded_by=uid,
-            )
+    with (
+        pg_session_factory() as s,
+        pytest.raises(RuntimeError, match="simulated Phase 1 commit failure"),
+    ):
+        ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="t.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
 
     # The bytes that were briefly on disk must be cleaned up.
     workspace_refs_dir = tmp_path / str(wsid) / "references"
     leftover = list(workspace_refs_dir.iterdir()) if workspace_refs_dir.exists() else []
-    assert leftover == [], (
-        f"Phase 1 commit-failure must unlink bytes; found leftover: {leftover}"
-    )
+    assert leftover == [], f"Phase 1 commit-failure must unlink bytes; found leftover: {leftover}"

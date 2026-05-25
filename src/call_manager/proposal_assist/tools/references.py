@@ -182,8 +182,7 @@ async def search_references_impl(
                 f"{other_models!r} — operator may need to run the reembed CLI"
             )
             logger.warning(
-                "search_references: model drift detected for workspace=%s; "
-                "current=%s indexed=%s",
+                "search_references: model drift detected for workspace=%s; current=%s indexed=%s",
                 ctx.workspace_id,
                 embedder.model,
                 other_models,
@@ -288,9 +287,9 @@ async def read_reference_impl(
     if ref.kind == "data":
         return {
             "error": (
-                f"reference kind is 'data'; use summarize_data(reference_id) "
-                f"instead — read_reference would only return the same "
-                f"schema+sample markdown"
+                "reference kind is 'data'; use summarize_data(reference_id) "
+                "instead — read_reference would only return the same "
+                "schema+sample markdown"
             )
         }
     if ref.text_status != "done":
@@ -328,9 +327,7 @@ async def read_reference_section_impl(
     # Escape LIKE metacharacters (_ and %) in the user-supplied
     # section_path; otherwise a section name like "Step 1_setup" would
     # over-match via SQL wildcard semantics. Use backslash as escape.
-    escaped = (
-        section_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    )
+    escaped = section_path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     with ctx.session_factory() as s:
         stmt = (
             select(ReferenceChunk)
@@ -338,9 +335,7 @@ async def read_reference_section_impl(
                 ReferenceChunk.reference_id == ref.id,
                 or_(
                     ReferenceChunk.section_path == section_path,
-                    ReferenceChunk.section_path.like(
-                        f"{escaped} > %", escape="\\"
-                    ),
+                    ReferenceChunk.section_path.like(f"{escaped} > %", escape="\\"),
                 ),
             )
             .order_by(ReferenceChunk.chunk_index)

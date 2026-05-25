@@ -220,3 +220,47 @@ def test_raw_returns_404_for_other_workspace_id(monkeypatch, pg_url, pg_session_
     # owner_a isn't allowed on workspace_b → 403 from the workspace check.
     # That's fine (doesn't leak existence). Accept either 403 or 404.
     assert resp.status_code in (403, 404)
+
+
+def test_raw_returns_404_when_same_owner_of_both_workspaces(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Residuals fix: previous test softly accepted 403 OR 404 because
+    the owner check fires first. Tighten with a same-owner setup so the
+    serve route reaches the cross-workspace check and returns 404
+    (don't leak existence)."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        # ONE owner with TWO workspaces.
+        owner = User(email="dual-owner@ki.se")
+        s.add(owner)
+        s.flush()
+        ws_a = Workspace(owner_id=owner.id, title="A")
+        ws_b = Workspace(owner_id=owner.id, title="B")
+        s.add(ws_a)
+        s.add(ws_b)
+        s.commit()
+        uid, wsid_a, wsid_b = owner.id, ws_a.id, ws_b.id
+
+    client = _authed(app, user_id=uid)
+    md = b"# t\n"
+    try:
+        up = client.post(
+            f"/workspaces/{wsid_a}/references",
+            data={"kind": "paper"},
+            files={"file": ("hello.md", io.BytesIO(md), "text/markdown")},
+        )
+        assert up.status_code == 200
+        from sqlalchemy import select
+
+        with pg_session_factory() as s:
+            ref = s.scalar(select(Reference).where(Reference.workspace_id == wsid_a))
+        # Same owner; owner check passes for wsid_b too. The serve
+        # route's ref.workspace_id != ws.id check is what should 404.
+        resp = client.get(f"/workspaces/{wsid_b}/references/{ref.id}/raw")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert resp.status_code == 404, (
+        f"cross-workspace serve must return 404 (not leak existence); got {resp.status_code}"
+    )
