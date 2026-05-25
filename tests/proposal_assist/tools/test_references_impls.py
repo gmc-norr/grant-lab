@@ -120,3 +120,125 @@ async def test_list_references_scopes_to_workspace(pg_session_factory, tmp_path)
     result = await list_references_impl(ctx)
     # Only wsid_a's 3 refs visible.
     assert len(result["references"]) == 3
+
+
+from call_manager.proposal_assist.tools.references import (
+    read_reference_impl,
+    read_reference_section_impl,
+)
+
+
+@pytest.mark.asyncio
+async def test_read_reference_returns_full_text(pg_session_factory, tmp_path):
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await read_reference_impl(ctx, reference_id=str(rids[0]))
+    assert "text" in result
+    # Markdown extractor stores section bodies only (heading text is the
+    # breadcrumb on the section, not part of the body). Assert against body.
+    assert "Notes on therapy" in result["text"]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_read_reference_truncates_at_max_chars(pg_session_factory, tmp_path):
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await read_reference_impl(ctx, reference_id=str(rids[0]), max_chars=10)
+    assert len(result["text"]) == 10
+    assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_read_reference_unknown_id_returns_error(pg_session_factory, tmp_path):
+    wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await read_reference_impl(ctx, reference_id=str(uuid.uuid4()))
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_read_reference_cross_workspace_returns_error(
+    pg_session_factory, tmp_path
+):
+    wsid_a, rids_a = _seed_three_refs(pg_session_factory, tmp_path)
+    wsid_b, _ = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid_b)
+    result = await read_reference_impl(ctx, reference_id=str(rids_a[0]))
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_read_reference_section_returns_concatenated_chunks(
+    pg_session_factory, tmp_path
+):
+    """Seed a markdown with multiple sections under the same parent;
+    read_reference_section should return all chunks under that path."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    md = b"""# Doc
+
+## Methods
+
+Methods top text.
+
+### Statistical analysis
+
+Stats body.
+
+### Cohort selection
+
+Cohort body.
+
+## Results
+
+Results body.
+"""
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="doc.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    # Request the "Methods" parent — should include the top + both children.
+    out = await read_reference_section_impl(
+        ctx, reference_id=str(rid), section_path="Doc > Methods"
+    )
+    assert "text" in out
+    assert "Methods top text" in out["text"]
+    assert "Stats body" in out["text"]
+    assert "Cohort body" in out["text"]
+    # Should NOT include Results.
+    assert "Results body" not in out["text"]
+
+
+@pytest.mark.asyncio
+async def test_read_reference_section_unknown_path_returns_error(
+    pg_session_factory, tmp_path
+):
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await read_reference_section_impl(
+        ctx, reference_id=str(rids[0]), section_path="Bogus > Path"
+    )
+    assert "error" in result
