@@ -55,6 +55,7 @@ from call_manager.config import Settings
 from call_manager.db.models import (
     Attachment,
     ChatTurn,
+    Reference,
     TurnJob,
     Workspace,
     WorkspaceEvent,
@@ -70,28 +71,44 @@ from call_manager.proposal_assist.turns.caps import (
     check_global_daily_token_cap,
 )
 
-MAX_ATTACHMENTS_PER_TURN = 5
-"""Public per-turn attachment cap. Imported by web/workspaces.py so the
-web-layer pre-check and the submit-layer authoritative check use one
-constant — drift in either direction would cause a UX/contract mismatch.
+MAX_TURN_INCLUSIONS = 5
+"""Combined per-turn ceiling on attachments + references. Imported by
+web/workspaces.py so the web-layer pre-check and the submit-layer
+authoritative check use one constant — drift in either direction would
+cause a UX/contract mismatch.
 """
+
+REFERENCE_TEXT_BUDGET_CHARS = 50_000
+"""Per-reference truncation budget for content injection. The resolver
+caps each reference's text at this length, so the cap pre-count uses
+``min(text_chars_total, REFERENCE_TEXT_BUDGET_CHARS)`` to match — over-
+counting would refuse legitimately small turns; under-counting would
+let cap-bypass attacks through. Mirrored in
+``call_manager.proposal_assist.attachments.resolver`` (duplicated to
+avoid a cyclic import; keep in sync)."""
 
 
 def _build_user_content(
     *,
     content_text: str,
     attachment_ids: list[uuid.UUID] | None,
+    reference_ids: list[uuid.UUID] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Shape the ``ChatTurn.content`` payload.
 
     Text-only submits keep the legacy dict shape so existing renderers
-    and adapters don't have to special-case the common path.
+    and adapters don't have to special-case the common path. When
+    either ``attachment_ids`` or ``reference_ids`` is non-empty, we
+    emit a list of blocks: the user text first, then image blocks
+    (one per attachment), then reference blocks (one per reference).
     """
-    if not attachment_ids:
+    if not attachment_ids and not reference_ids:
         return {"type": "text", "text": content_text}
     blocks: list[dict[str, Any]] = [{"type": "text", "text": content_text}]
-    for aid in attachment_ids:
+    for aid in attachment_ids or []:
         blocks.append({"type": "image", "attachment_id": str(aid)})
+    for rid in reference_ids or []:
+        blocks.append({"type": "reference", "reference_id": str(rid)})
     return blocks
 
 
@@ -160,6 +177,7 @@ def submit_user_turn(
     workspace_id: uuid.UUID,
     content_text: str,
     attachment_ids: list[uuid.UUID] | None = None,
+    reference_ids: list[uuid.UUID] | None = None,
     submitted_by_user_id: int | None,
     settings: Settings,
     tokens_in: int | None = None,
@@ -178,8 +196,9 @@ def submit_user_turn(
     ``attachment_ids``: optional list of pre-existing
     :class:`~call_manager.db.models.Attachment` row ids to attach to
     this turn (B7). Each id is validated to belong to ``workspace_id``;
-    cross-workspace references raise ``ValueError``. Total
-    attachments are capped at 5 per turn; over-cap raises ``ValueError``.
+    cross-workspace references raise ``ValueError``. Combined inclusions
+    (``attachment_ids`` + ``reference_ids``) are capped at
+    ``MAX_TURN_INCLUSIONS`` per turn; over-cap raises ``ValueError``.
     Rows with NULL ``tokens_estimate`` trigger a disk re-probe via
     ``workspaces_dir`` — missing file ⇒ ``ValueError``.
 
@@ -229,14 +248,14 @@ def submit_user_turn(
     if not content_text and attachment_ids:
         raise ValueError("content_text required when attachments are present")
 
+    # ---- Combined inclusions cap (attachments + references) ----------
+    n_inclusions = len(attachment_ids or []) + len(reference_ids or [])
+    if n_inclusions > MAX_TURN_INCLUSIONS:
+        raise ValueError(f"too many inclusions: {n_inclusions} > {MAX_TURN_INCLUSIONS}")
+
     # ---- B7 attachment resolution + token pre-count -----------------
     attachments: list[Attachment] = []
     if attachment_ids:
-        if len(attachment_ids) > MAX_ATTACHMENTS_PER_TURN:
-            raise ValueError(
-                f"too many attachments: {len(attachment_ids)} > {MAX_ATTACHMENTS_PER_TURN}"
-            )
-
         # Resolve all rows in one query, then re-order by request order
         # so the rendered chat turn shows the user's chosen sequence.
         requested = list(attachment_ids)
@@ -269,10 +288,42 @@ def submit_user_turn(
             workspaces_dir=ws_dir,
         )
 
-        if tokens_in is None:
-            tokens_in = sum(att.tokens_estimate or 0 for att in attachments) + (
-                len(content_text) // 4
-            )
+    # ---- Slice 4 reference resolution + IDOR validation --------------
+    # Runs inside the workspace FOR UPDATE lock window so a concurrent
+    # mutation can't slip a not-yet-done reference past us. Validates
+    # existence + workspace membership + text_status='done' (the
+    # contract for "the resolver can find text.txt"). Single query +
+    # request-order iteration mirrors the attachment block above.
+    references: list[Reference] = []
+    if reference_ids:
+        ref_rows = list(session.scalars(select(Reference).where(Reference.id.in_(reference_ids))))
+        ref_by_id = {r.id: r for r in ref_rows}
+        for rid in reference_ids:
+            ref = ref_by_id.get(rid)
+            if ref is None:
+                raise ValueError(f"reference {rid} does not belong to workspace {workspace_id}")
+            if ref.workspace_id != workspace_id:
+                # Cross-workspace: indistinguishable from "not found"
+                # to avoid leaking ref ids across tenants.
+                raise ValueError(f"reference {rid} does not belong to workspace {workspace_id}")
+            if ref.text_status != "done":
+                raise ValueError(f"reference {rid} is not ready (text_status={ref.text_status!r})")
+            references.append(ref)
+
+    if tokens_in is None and (attachments or references):
+        # ``text_chars_total`` is NULL for the extracted-but-not-counted
+        # edge case — treat as 0 (defensive: the resolver still finds
+        # text.txt; the SDK's TurnDoneEvent corrects the running total
+        # post-call). Cap the per-ref contribution at the resolver's
+        # truncation budget so we don't overestimate large refs.
+        ref_chars = sum(
+            min((r.text_chars_total or 0), REFERENCE_TEXT_BUDGET_CHARS) for r in references
+        )
+        tokens_in = (
+            sum(att.tokens_estimate or 0 for att in attachments)
+            + (ref_chars // 4)
+            + (len(content_text) // 4)
+        )
 
     # Global cap check (org-wide guardrail). Read-only — no global
     # advisory lock. See check_global_daily_token_cap docstring.
@@ -300,6 +351,7 @@ def submit_user_turn(
     content = _build_user_content(
         content_text=content_text,
         attachment_ids=attachment_ids,
+        reference_ids=reference_ids,
     )
 
     user_turn = ChatTurn(

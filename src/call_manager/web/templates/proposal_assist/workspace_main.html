@@ -58,6 +58,25 @@
         {% endif %}
       </details>
 
+      <details>
+        <summary>Attach references ({{ workspace_references|length }} ready in workspace)</summary>
+
+        {% if workspace_references %}
+        <fieldset>
+          <legend>Pick from this workspace:</legend>
+          {% for ref in workspace_references %}
+          <label class="ref-pick" style="display: block; margin: 0.25em 0;">
+            <input type="checkbox" name="reference_ids" value="{{ ref.id }}">
+            <strong>{{ ref.title or ref.filename }}</strong>
+            <small>[{{ ref.kind }}]</small>
+          </label>
+          {% endfor %}
+        </fieldset>
+        {% else %}
+        <p><em>No references ready. Upload via the <a href="/workspaces/{{ workspace.id }}/references">references panel</a>.</em></p>
+        {% endif %}
+      </details>
+
       <button type="submit">Send</button>
     </form>
     {% else %}

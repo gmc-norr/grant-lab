@@ -304,3 +304,197 @@ def test_resolve_unsupported_suffix_raises(pg_session_factory, tmp_path):
             workspace_id=ws_id,
             content=[{"type": "image", "attachment_id": str(aid)}],
         )
+
+
+# ---------------------------------------------------------------------------
+# Slice 4: reference block resolution
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_reference_block_injects_truncated_text(pg_session_factory, tmp_path):
+    """A reference block resolves to a text block wrapped in
+    <system>Reference: <title> ... </system>, truncated at the budget."""
+    from call_manager.db.models import Reference
+    from call_manager.proposal_assist.attachments.resolver import (
+        resolve_user_content,
+    )
+
+    with pg_session_factory() as s:
+        _, ws = _seed_user_and_workspace(s)
+        ref = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="Test Title",
+            filename="t.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=100,
+        )
+        s.add(ref)
+        s.commit()
+        ref_dir = tmp_path / str(ws.id) / "references" / str(ref.id)
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "text.txt").write_text("paper body content here")
+        wsid, refid = ws.id, ref.id
+
+    with pg_session_factory() as s:
+        out = resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=wsid,
+            content=[
+                {"type": "text", "text": "discuss"},
+                {"type": "reference", "reference_id": str(refid)},
+            ],
+        )
+    assert isinstance(out, list)
+    assert out[0] == {"type": "text", "text": "discuss"}
+    assert out[1]["type"] == "text"
+    body = out[1]["text"]
+    assert "<system>Reference: Test Title" in body
+    assert "paper body content here" in body
+    assert "</system>" in body
+
+
+def test_resolve_reference_truncates_at_budget(pg_session_factory, tmp_path):
+    """Text longer than REFERENCE_TEXT_BUDGET_CHARS gets cut + truncation suffix."""
+    from call_manager.db.models import Reference
+    from call_manager.proposal_assist.attachments.resolver import (
+        REFERENCE_TEXT_BUDGET_CHARS,
+        resolve_user_content,
+    )
+
+    with pg_session_factory() as s:
+        _, ws = _seed_user_and_workspace(s)
+        ref = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title=None,
+            filename="big.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=200_000,
+        )
+        s.add(ref)
+        s.commit()
+        ref_dir = tmp_path / str(ws.id) / "references" / str(ref.id)
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "text.txt").write_text("x" * 200_000)
+        wsid, refid = ws.id, ref.id
+
+    with pg_session_factory() as s:
+        out = resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=wsid,
+            content=[
+                {"type": "text", "text": "discuss"},
+                {"type": "reference", "reference_id": str(refid)},
+            ],
+        )
+    body = out[1]["text"]
+    # 50K chars of x's, then a truncation marker. The marker contains
+    # one extra "x" (in "text"), so the total x-count is budget + 1.
+    assert body.count("x") == REFERENCE_TEXT_BUDGET_CHARS + 1
+    # The contiguous run of x's stops exactly at the budget boundary.
+    assert "x" * REFERENCE_TEXT_BUDGET_CHARS in body
+    assert "x" * (REFERENCE_TEXT_BUDGET_CHARS + 1) not in body
+    assert "[truncated" in body
+    # The truncation message tells the agent which MCP tools to use as
+    # a fallback so it isn't stuck with just the prefix.
+    assert "search_references" in body
+    assert "read_reference_section" in body
+    # Falls back to filename when title is None
+    assert "big.pdf" in body
+
+
+def test_resolve_reference_cross_workspace_rejected(pg_session_factory, tmp_path):
+    """IDOR: reference belongs to a different workspace than the content."""
+    from call_manager.db.models import Reference
+    from call_manager.proposal_assist.attachments.resolver import (
+        AttachmentResolutionError,
+        resolve_user_content,
+    )
+
+    with pg_session_factory() as s:
+        u, ws_a = _seed_user_and_workspace(s)
+        ws_b = Workspace(title="ws-b", owner_id=u.id)
+        s.add(ws_b)
+        s.flush()
+        ref_b = Reference(
+            workspace_id=ws_b.id,
+            kind="paper",
+            title="X",
+            filename="x.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=10,
+        )
+        s.add(ref_b)
+        s.commit()
+        ws_a_id, ref_b_id = ws_a.id, ref_b.id
+
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="does not belong"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=ws_a_id,
+            content=[
+                {"type": "text", "text": "hi"},
+                {"type": "reference", "reference_id": str(ref_b_id)},
+            ],
+        )
+
+
+def test_resolve_reference_missing_text_file_rejected(pg_session_factory, tmp_path):
+    """text_status='done' but text.txt missing → AttachmentResolutionError.
+    This is the contract: 'done' means the file is on disk."""
+    from call_manager.db.models import Reference
+    from call_manager.proposal_assist.attachments.resolver import (
+        AttachmentResolutionError,
+        resolve_user_content,
+    )
+
+    with pg_session_factory() as s:
+        _, ws = _seed_user_and_workspace(s)
+        ref = Reference(
+            workspace_id=ws.id,
+            kind="paper",
+            title="X",
+            filename="x.pdf",
+            storage_path=f"references/{uuid.uuid4()}/original.pdf",
+            mime_type="application/pdf",
+            source_type="uploaded",
+            uploaded_by=None,
+            text_status="done",
+            text_chars_total=10,
+        )
+        s.add(ref)
+        s.commit()
+        wsid, refid = ws.id, ref.id
+
+    with (
+        pg_session_factory() as s,
+        pytest.raises(AttachmentResolutionError, match="text.*missing"),
+    ):
+        resolve_user_content(
+            session=s,
+            workspaces_dir=tmp_path,
+            workspace_id=wsid,
+            content=[
+                {"type": "text", "text": "hi"},
+                {"type": "reference", "reference_id": str(refid)},
+            ],
+        )

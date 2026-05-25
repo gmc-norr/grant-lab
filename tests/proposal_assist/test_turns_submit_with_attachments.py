@@ -181,7 +181,7 @@ def test_submit_with_more_than_5_attachments_raises(
 
     six_ids = [uuid.uuid4() for _ in range(6)]
     with pg_session_factory() as s:
-        with pytest.raises(ValueError, match="too many attachments"):
+        with pytest.raises(ValueError, match="too many inclusions"):
             submit_user_turn(
                 session=s,
                 workspace_id=wsid,

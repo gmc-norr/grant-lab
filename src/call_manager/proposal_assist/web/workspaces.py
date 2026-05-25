@@ -31,6 +31,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     Attachment,
     ChatTurn,
+    Reference,
     TurnJob,
     User,
     Workspace,
@@ -49,7 +50,7 @@ from call_manager.proposal_assist.tools.proposal import read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import (
-    MAX_ATTACHMENTS_PER_TURN,
+    MAX_TURN_INCLUSIONS,
     submit_user_turn,
 )
 from call_manager.proposal_assist.web.files import (
@@ -133,10 +134,62 @@ def _default_templates() -> Jinja2Templates:
 _DEFAULT_TEMPLATES: Jinja2Templates | None = None
 
 
+def _collect_reference_ids(turns) -> set[str]:
+    """Walk an iterable of ChatTurn rows and return the set of stringified
+    reference_ids embedded in their content blocks.
+
+    Slice 4 residuals: the chat_turn partial needs a {str(uuid): Reference}
+    map to render reference chips with a human-friendly title. The view
+    builds the map by collecting every reference_id mentioned by any
+    turn's content, then querying once — N+1 avoidance for the chat
+    history loop.
+    """
+    ids: set[str] = set()
+    for t in turns:
+        c = t.content
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "reference":
+                    rid = b.get("reference_id")
+                    if rid:
+                        ids.add(str(rid))
+    return ids
+
+
+def _load_reference_map(
+    session: Session,
+    workspace_id: uuid.UUID,
+    reference_ids: set[str],
+) -> dict[str, Reference]:
+    """Resolve a set of stringified UUIDs to Reference rows, scoped to
+    one workspace (defense-in-depth IDOR check — a stale or hostile
+    reference_id from another workspace silently renders as "unknown"
+    rather than leaking a cross-workspace title).
+    """
+    if not reference_ids:
+        return {}
+    uuid_ids: list[uuid.UUID] = []
+    for s in reference_ids:
+        try:
+            uuid_ids.append(uuid.UUID(s))
+        except (ValueError, TypeError):
+            continue
+    if not uuid_ids:
+        return {}
+    rows = session.scalars(
+        select(Reference).where(
+            Reference.workspace_id == workspace_id,
+            Reference.id.in_(uuid_ids),
+        )
+    )
+    return {str(r.id): r for r in rows}
+
+
 def _render_chat_turn_html(
     turn: ChatTurn,
     *,
     templates: Jinja2Templates | None = None,
+    chat_reference_map: dict[str, Reference] | None = None,
 ) -> str:
     """Render one chat_turns row to a small HTML snippet for SSE emission.
 
@@ -151,9 +204,17 @@ def _render_chat_turn_html(
 
     B7 / T4: image blocks in list-of-blocks content render as <img>
     thumbnails. Per-block dispatch lives in the partial.
+
+    Slice 4 residuals: ``chat_reference_map`` resolves reference blocks
+    to a human-friendly title chip. Missing entries render as
+    "(unknown)" — keeps the chat view from crashing if a reference id
+    becomes stale.
     """
     engine = templates if templates is not None else _default_templates()
-    rendered = engine.env.get_template(_CHAT_TURN_PARTIAL).render(turn=turn)
+    rendered = engine.env.get_template(_CHAT_TURN_PARTIAL).render(
+        turn=turn,
+        chat_reference_map=chat_reference_map or {},
+    )
     # SSE `data:` lines cannot contain raw newlines (the protocol
     # uses LF as a record separator). Collapse them — the partial uses
     # ``{%- ... -%}`` to keep this no-op for normal content.
@@ -219,8 +280,17 @@ async def _stream_turn_generator(
                     .order_by(ChatTurn.position)
                 )
             )
+            # Slice 4 residuals: resolve reference-block IDs for THIS
+            # batch in one query so per-turn render can show the chip's
+            # title without an N+1 lookup.
+            ref_ids = _collect_reference_ids(new_rows)
+            ref_map = _load_reference_map(s, workspace_id, ref_ids)
             for turn in new_rows:
-                rendered = _render_chat_turn_html(turn, templates=templates)
+                rendered = _render_chat_turn_html(
+                    turn,
+                    templates=templates,
+                    chat_reference_map=ref_map,
+                )
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
             tj = s.get(TurnJob, turn_job_id)
@@ -402,6 +472,17 @@ def get_workspace_main(
         )
     )
 
+    # Slice 4 residuals: lookup map for any reference-block content
+    # embedded in the chat history. Built in ONE query (set-of-ids ->
+    # in_ select) so the chat history loop's reference chips render with
+    # a human-friendly title without N+1 lookups. Empty when no turn
+    # references anything.
+    chat_reference_map = _load_reference_map(
+        session,
+        workspace_id,
+        _collect_reference_ids(chat_turns),
+    )
+
     # B7: list of workspace-scoped attachments for the composer picker.
     # Ordered newest-first so the most-recently uploaded image surfaces
     # next to the file input. Viewers also see this list (read-only) so
@@ -412,6 +493,23 @@ def get_workspace_main(
             select(Attachment)
             .where(Attachment.workspace_id == workspace_id)
             .order_by(Attachment.uploaded_at.desc())
+        )
+    )
+
+    # Slice 4: list of done-references for the composer picker. Filtered
+    # server-side to ``text_status='done'`` because submit_user_turn
+    # rejects anything else — keeping the template dumb means the picker
+    # never shows a checkbox that would fail validation. Pending / failed
+    # refs still appear on the /references panel (where the user manages
+    # them); only the composer picker hides them.
+    workspace_references = list(
+        session.scalars(
+            select(Reference)
+            .where(
+                Reference.workspace_id == workspace_id,
+                Reference.text_status == "done",
+            )
+            .order_by(Reference.created_at.desc())
         )
     )
 
@@ -450,6 +548,8 @@ def get_workspace_main(
             "artifact_raw": raw,
             "needs_disclosure": needs_disclosure,
             "workspace_attachments": workspace_attachments,
+            "workspace_references": workspace_references,
+            "chat_reference_map": chat_reference_map,
         },
     )
 
@@ -492,6 +592,7 @@ async def post_turn(
     session: Session = Depends(_session_dep),  # noqa: B008
     content: str = Form(...),
     attachment_ids: list[uuid.UUID] = Form(default_factory=list),  # noqa: B008
+    reference_ids: list[uuid.UUID] = Form(default_factory=list),  # noqa: B008
     files: list[UploadFile] = File(default_factory=list),  # noqa: B008
 ) -> HTMLResponse:
     """Enqueue a user turn and return TWO HTML fragments (H1):
@@ -567,6 +668,18 @@ async def post_turn(
 
     # --- Inline upload branch (same ordering as files.py:upload_file) ---
     real_files = [f for f in files if f and f.filename]
+    # Slice 4 residuals: early cap-check BEFORE the upload loop. The
+    # post-upload check below still runs (defense-in-depth + correct
+    # behavior if a file silently drops), but this short-circuit avoids
+    # decoding + writing N files to disk when the request was clearly
+    # over the cap from the start. No rollback needed — nothing has
+    # been written yet.
+    early_inclusions = len(real_files) + len(attachment_ids) + len(reference_ids)
+    if early_inclusions > MAX_TURN_INCLUSIONS:
+        return HTMLResponse(
+            f"<p>Too many inclusions: {early_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
+            status_code=400,
+        )
     new_upload_ids: list[uuid.UUID] = []
     for upload in real_files:
         content_type = (upload.content_type or "").lower()
@@ -642,15 +755,19 @@ async def post_turn(
         session.add(att)
         new_upload_ids.append(aid)
 
-    # Combine: new uploads + explicit references. Order preserved so the
-    # composer's display order matches what we render in the chat row.
+    # Combine: new uploads + explicit attachment refs. Order preserved
+    # so the composer's display order matches what we render in the
+    # chat row.
     all_ids: list[uuid.UUID] = new_upload_ids + list(attachment_ids)
-    if len(all_ids) > MAX_ATTACHMENTS_PER_TURN:
+    # Slice 4: combined inclusion cap covers attachments + references.
+    # Pre-check here saves a wasted submit_user_turn DB round-trip and
+    # gives a single error format for both kinds.
+    all_inclusions = len(all_ids) + len(reference_ids)
+    if all_inclusions > MAX_TURN_INCLUSIONS:
         session.rollback()
         _rollback_created_uploads()
         return HTMLResponse(
-            f"<p>Too many attachments: {len(all_ids)} > "
-            f"{MAX_ATTACHMENTS_PER_TURN} max per turn.</p>",
+            f"<p>Too many inclusions: {all_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
             status_code=400,
         )
 
@@ -660,6 +777,7 @@ async def post_turn(
             workspace_id=ws.id,
             content_text=content,
             attachment_ids=all_ids or None,
+            reference_ids=list(reference_ids) or None,
             submitted_by_user_id=user.id,
             settings=settings,
             workspaces_dir=Path(settings.workspaces_dir),
@@ -698,13 +816,21 @@ async def post_turn(
     # partial — the single source of truth for chat-turn HTML — so the
     # immediate echo, the SSE renderer, and the history loop all agree.
     # We build a content shape that matches what submit_user_turn just
-    # persisted: list of {text} + {image} blocks when attachments are
-    # present, single text dict otherwise. Jinja's auto-escape inside
-    # the partial handles HTML in `content`.
-    if all_ids:
-        echo_content: object = [{"type": "text", "text": content}] + [
-            {"type": "image", "attachment_id": str(aid)} for aid in all_ids
-        ]
+    # persisted: list of {text} + {image} + {reference} blocks when any
+    # inclusions are present, single text dict otherwise. Jinja's auto-
+    # escape inside the partial handles HTML in `content`.
+    #
+    # Slice 4 residuals fix: the prior condition (`if all_ids`) treated
+    # a refs-only turn as text-only, so the user got no visible chip
+    # in the echo until the SSE re-render landed. Including
+    # `reference_ids` in the trigger condition + emitting reference
+    # blocks in the echo restores immediate feedback.
+    if all_ids or reference_ids:
+        echo_content: object = (
+            [{"type": "text", "text": content}]
+            + [{"type": "image", "attachment_id": str(aid)} for aid in all_ids]
+            + [{"type": "reference", "reference_id": str(rid)} for rid in reference_ids]
+        )
     else:
         echo_content = {"type": "text", "text": content}
     echo_turn = ChatTurn(
@@ -712,9 +838,17 @@ async def post_turn(
         role="user",
         content=echo_content,  # type: ignore[arg-type]
     )
+    # Load the just-attached references for the echo partial so the
+    # chip shows a title/filename (not the "(unknown)" fallback). Scoped
+    # to this workspace — same query the history-loop path uses.
+    echo_ref_map = _load_reference_map(
+        session,
+        ws.id,
+        {str(rid) for rid in reference_ids},
+    )
     user_turn_html = request.app.state.templates.env.get_template(
         _CHAT_TURN_PARTIAL,
-    ).render(turn=echo_turn)
+    ).render(turn=echo_turn, chat_reference_map=echo_ref_map)
     sse_connector = (
         f"<div id='sse-mount-{job.id}' "
         f"hx-ext='sse' "
