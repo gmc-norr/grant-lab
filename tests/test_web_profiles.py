@@ -1174,3 +1174,16 @@ def test_edit_rejects_unknown_level(monkeypatch, pg_url, pg_session_factory):
             follow_redirects=False,
         )
     assert r.status_code == 400
+
+
+def test_new_form_has_kind_and_unit_and_individual_fields(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/profiles/new")
+    assert r.status_code == 200
+    body = r.text
+    assert 'value="organizational_unit"' in body and 'value="individual"' in body
+    assert 'name="career_stage"' in body  # individual field
+    assert 'name="capabilities"' in body  # unit field
+    assert 'name="funding_instruments"' in body

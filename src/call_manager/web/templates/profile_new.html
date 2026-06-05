@@ -2,44 +2,119 @@
 {% block title %}New profile — Call Monitor{% endblock %}
 {% block content %}
 <p><a href="/profiles">&larr; All profiles</a></p>
-
 <hgroup>
   <h1>Create a profile</h1>
-  <p>The app fetches each member's recent PubMed publications and asks the local LLM to draft a description plus rubric (areas, budget range, must-include keywords, exclusions). You can edit before it goes live. Usually 10–30 seconds.</p>
+  <p>Pick a kind, add seed data, and the local LLM drafts a description plus
+     rubric. You can edit before it goes live.</p>
 </hgroup>
 
 <form method="post" action="/profiles/new">
-  <label>
-    Profile name
+  <label>Profile name
     <input type="text" name="name" required maxlength="200"
-           placeholder="e.g. Digital Pathology & Imaging AI">
+           placeholder="e.g. Digital Pathology Lab">
   </label>
 
-  <label>
-    Kind
-    <select name="kind">
-      <option value="group" selected>Research group</option>
-      <option value="org">Organization</option>
-      <option value="user">Individual user</option>
+  <label>Kind
+    <select name="kind" id="kind-select" onchange="toggleKind()">
+      <option value="organizational_unit" selected>Organizational unit</option>
+      <option value="individual">Individual researcher</option>
     </select>
   </label>
 
-  <label>
-    Member ORCIDs <small class="muted">(one per line)</small>
-    <textarea name="orcids" rows="3" placeholder="0000-0001-2345-6789"></textarea>
+  <fieldset id="unit-fields">
+    <label>Level
+      <select name="level">
+        <option value="">(unspecified)</option>
+        <option value="lab">Lab</option>
+        <option value="group">Research group</option>
+        <option value="department">Department</option>
+        <option value="clinic">Clinic</option>
+        <option value="institution">Institution</option>
+        <option value="other">Other</option>
+      </select>
+    </label>
+    <label>Organization type
+      <select name="org_type">
+        <option value="">(unspecified)</option>
+        <option value="research_organisation">Research organisation</option>
+        <option value="university_hospital">University hospital</option>
+        <option value="public_body">Public body</option>
+        <option value="sme">SME</option>
+        <option value="other">Other</option>
+      </select>
+    </label>
+    <label>Mission / strategy / capabilities <small class="muted">(free text)</small>
+      <textarea name="mission_text" rows="4"
+                placeholder="What this unit does; biobanks, cohorts, core facilities..."></textarea>
+    </label>
+    <label>Capabilities <small class="muted">(one per line: biobank, clinical_trials_unit, imaging_core, registry, cohort...)</small>
+      <textarea name="capabilities" rows="3"></textarea>
+    </label>
+    <label>Patient populations <small class="muted">(one per line)</small>
+      <textarea name="patient_populations" rows="2"></textarea>
+    </label>
+    <label>Scale <small class="muted">(free text, e.g. ~400 researchers)</small>
+      <input type="text" name="scale" maxlength="200">
+    </label>
+  </fieldset>
+
+  <fieldset id="individual-fields" hidden>
+    <label>Career stage
+      <select name="career_stage">
+        <option value="">(unspecified)</option>
+        <option value="phd_student">PhD student</option>
+        <option value="postdoc">Postdoc</option>
+        <option value="junior_pi">Junior PI</option>
+        <option value="senior_pi">Senior PI</option>
+        <option value="group_leader">Group leader</option>
+      </select>
+    </label>
+    <label>Role <small class="muted">(free text)</small>
+      <input type="text" name="role" maxlength="200">
+    </label>
+    <label>Years since PhD <small class="muted">(0–80)</small>
+      <input type="text" name="years_since_phd">
+    </label>
+    <label>Host institution <small class="muted">(free text)</small>
+      <input type="text" name="host_institution" maxlength="200">
+    </label>
+    <label>Country <small class="muted">(e.g. SE)</small>
+      <input type="text" name="country" maxlength="200">
+    </label>
+  </fieldset>
+
+  <label>Applicant types <small class="muted">(one per line: solo_pi, consortium_coordinator, consortium_partner, institution)</small>
+    <textarea name="applicant_types" rows="2"></textarea>
+  </label>
+  <label>Funding instruments <small class="muted">(one per line: project_grant, fellowship, mobility, infrastructure, programme)</small>
+    <textarea name="funding_instruments" rows="2"></textarea>
+  </label>
+  <label>Funder exclusions <small class="muted">(one per line, e.g. defence)</small>
+    <textarea name="funder_exclusions" rows="2"></textarea>
+  </label>
+  <label>Research areas <small class="muted">(one per line)</small>
+    <textarea name="areas" rows="3"></textarea>
   </label>
 
-  <label>
-    Members by name <small class="muted">(one per line, format: <code>Last F | Affiliation</code>)</small>
-    <textarea name="names_affiliations" rows="3"
-              placeholder="Smith J | Karolinska Institutet"></textarea>
+  <label>Member ORCIDs <small class="muted">(one per line; for an individual, your own)</small>
+    <textarea name="orcids" rows="2" placeholder="0000-0001-2345-6789"></textarea>
   </label>
-
-  <label>
-    Pasted past grants <small class="muted">(optional, titles + abstracts)</small>
-    <textarea name="pasted_grants" rows="6"></textarea>
+  <label>Members by name <small class="muted">(one per line: <code>Last F | Affiliation</code>)</small>
+    <textarea name="names_affiliations" rows="2"></textarea>
+  </label>
+  <label>Pasted past grants <small class="muted">(optional, titles + abstracts)</small>
+    <textarea name="pasted_grants" rows="4"></textarea>
   </label>
 
   <button type="submit">Bootstrap profile</button>
 </form>
+
+<script>
+  function toggleKind() {
+    var k = document.getElementById('kind-select').value;
+    document.getElementById('unit-fields').hidden = (k !== 'organizational_unit');
+    document.getElementById('individual-fields').hidden = (k !== 'individual');
+  }
+  toggleKind();
+</script>
 {% endblock %}
