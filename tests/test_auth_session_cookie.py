@@ -11,7 +11,17 @@ from call_manager.auth.session_cookie import (
 def test_roundtrip():
     signer = SessionSigner(secret="x" * 32, max_age_seconds=3600)
     cookie = signer.make(user_id=42)
-    assert signer.verify(cookie) == 42
+    data = signer.verify(cookie)
+    assert data.user_id == 42
+    assert data.session_epoch == 0
+
+
+def test_roundtrip_with_epoch():
+    signer = SessionSigner(secret="x" * 32, max_age_seconds=3600)
+    cookie = signer.make(user_id=42, session_epoch=7)
+    data = signer.verify(cookie)
+    assert data.user_id == 42
+    assert data.session_epoch == 7
 
 
 def test_tampered_cookie_rejected():

@@ -125,3 +125,42 @@ def test_chat_request_shape_is_openai_compatible():
     assert body["temperature"] == 0
     assert body["response_format"] == {"type": "json_object"}
     assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_chat_sends_num_predict_token_cap():
+    """A degenerate (looping) generation must be bounded by an output-token
+    ceiling, not only the 120s wall-clock timeout. Verify num_predict reaches
+    the wire via Ollama's options block."""
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json=_FAKE_RESPONSE)
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=httpx.MockTransport(handler),
+        num_predict=1234,
+    )
+    client.chat(messages=[{"role": "user", "content": "hi"}])
+    assert captured["body"]["options"]["num_predict"] == 1234
+
+
+def test_chat_default_num_predict_is_bounded():
+    """The default ceiling is finite (not unlimited) so the cap applies even
+    when callers don't pass num_predict explicitly."""
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json=_FAKE_RESPONSE)
+
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=httpx.MockTransport(handler),
+    )
+    client.chat(messages=[{"role": "user", "content": "hi"}])
+    np = captured["body"]["options"]["num_predict"]
+    assert isinstance(np, int) and 0 < np <= 8192

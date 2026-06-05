@@ -191,6 +191,9 @@ def test_raw_serves_bytes_with_attachment_disposition(
     assert cd.startswith("attachment;")
     # nosniff to prevent MIME-sniffing into HTML.
     assert resp.headers["x-content-type-options"] == "nosniff"
+    # FileResponse streams the file and sets Content-Length (rather than
+    # buffering the whole file in memory via path.read_bytes()).
+    assert int(resp.headers["content-length"]) == len(md)
 
 
 def test_raw_returns_404_for_other_workspace_id(monkeypatch, pg_url, pg_session_factory, tmp_path):

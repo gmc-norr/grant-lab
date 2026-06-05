@@ -109,6 +109,34 @@ def test_empty_result_for_one_member_does_not_fail_others():
     assert any(p.pmid == "12345678" for p in pubs)
 
 
+def test_query_for_sanitizes_entrez_injection():
+    """Injection defense: a member name/affiliation containing field tags or
+    boolean operators must not change the structure of the Entrez term — the
+    values are stripped of metacharacters and matched as quoted phrases."""
+    from call_manager.profiles.pubmed import _query_for
+
+    member = Member(
+        name='Smith J"[au] OR 1[uid] OR "',
+        affiliation="Karolinska [ad] AND hacked",
+    )
+    q = _query_for(member)
+    # The only field tags present are the two we intentionally emit.
+    assert q.count("[au]") == 1
+    assert q.count("[ad]") == 1
+    # No injected uid tag, no stray quotes that would break out of our phrase.
+    assert "[uid]" not in q
+    # Exactly one structural AND (ours, joining au + ad) — the injected
+    # boolean operators were neutralized.
+    assert q.count(" AND ") == 1
+    assert " OR " not in q
+
+
+def test_query_for_orcid_unaffected():
+    from call_manager.profiles.pubmed import _query_for
+
+    assert _query_for(Member(orcid="0000-0001-2345-6789")) == "0000-0001-2345-6789[AUID]"
+
+
 def test_http_error_raises_pubmed_error():
     def handler(request):
         return httpx.Response(503)

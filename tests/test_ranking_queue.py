@@ -150,8 +150,40 @@ def test_requeue_stuck_running_recovers_crashed_workers(pg_session_factory, prof
     with pg_session_factory() as s:
         row = s.execute(select(RankingJob)).scalar_one()
     assert row.status == RankingJobStatus.PENDING
-    # attempts NOT incremented — the previous run never reached mark_failed
-    assert row.attempts == 0
+    # attempts IS now incremented on requeue so a job that reliably crashes
+    # the worker eventually dead-letters instead of looping forever.
+    assert row.attempts == 1
+
+
+def test_requeue_stuck_running_dead_letters_persistent_crasher(pg_session_factory, profile_factory):
+    """A job that has already consumed its attempts and is found stuck in
+    RUNNING again must transition to FAILED (dead-letter), not back to
+    PENDING — otherwise a payload that reliably crashes the worker before
+    mark_failed runs would loop forever. Regression for the crash-loop gap."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call(s)
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
+        claimed = claim_pending_jobs(s, limit=1)
+        # Already at the last attempt (attempts == MAX_ATTEMPTS - 1 == 4),
+        # and stuck in RUNNING past the threshold.
+        s.execute(
+            update(RankingJob)
+            .where(RankingJob.id == claimed[0].id)
+            .values(attempts=4, updated_at=datetime.now(UTC) - timedelta(minutes=10))
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        n = requeue_stuck_running(s)
+        s.commit()
+    assert n == 1
+
+    with pg_session_factory() as s:
+        row = s.execute(select(RankingJob)).scalar_one()
+    assert row.status == RankingJobStatus.FAILED
+    assert row.attempts == 5
+    assert "crash loop" in (row.last_error or "")
 
 
 def _seed_call_with(s, *, external_id: str, published: datetime | None) -> int:

@@ -541,3 +541,147 @@ async def test_finalize_success_clears_user_turn_pre_count(
         assert len(assistant_turns) == 1
         assert assistant_turns[0].tokens_in == 137
         assert assistant_turns[0].tokens_out == 42
+
+
+@pytest.mark.asyncio
+async def test_finalize_success_persists_tokens_on_user_turn_when_no_assistant_text(
+    pg_session_factory,
+    _settings_env,
+):
+    """Cap-bypass regression: when a turn produces no assistant row to
+    stamp (last_assistant_id is None — e.g. only a ToolResultEvent and
+    then done, with no AssistantTextEvent or ToolUseEvent), the SDK-
+    reported tokens were previously dropped AND the user-turn pre-count
+    cleared, so the turn vanished from the daily-cap sum. The tokens
+    must instead be persisted onto the user-turn row so the cap still
+    accounts for the turn."""
+    adapter = FakeAgentAdapter()
+
+    async def tool_only(handle, msg):
+        # No AssistantTextEvent and no ToolUseEvent — neither sets
+        # last_assistant_id, so it stays None at finalize time.
+        yield ToolResultEvent(tool_use_id="u1", content="result", is_error=False)
+        yield TurnDoneEvent(tokens_in=200, tokens_out=80, model="fake", session_id="sTool")
+
+    adapter.send_turn = tool_only  # type: ignore[method-assign]
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    from call_manager.config import Settings
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content_text="hi",
+            submitted_by_user_id=uid,
+            settings=settings,
+        )
+        s.commit()
+        job_id = job.id
+        user_turn_id = job.user_turn_id
+
+    # Simulate a submit-time pre-count on the user-turn row.
+    with pg_session_factory() as s:
+        ut = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        ut.tokens_in = 50
+        s.commit()
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        assistant_turns = list(
+            s.scalars(
+                select(ChatTurn)
+                .where(ChatTurn.workspace_id == wsid)
+                .where(ChatTurn.role == "assistant")
+            )
+        )
+
+    assert job.status == "completed"
+    # No assistant row was written at all (ToolResultEvent writes a
+    # role='tool' row, not an assistant row).
+    assert assistant_turns == []
+    # The SDK-reported tokens land on the user-turn row instead of being
+    # dropped — the daily cap still counts this turn.
+    assert user_turn.tokens_in == 200
+    assert user_turn.tokens_out == 80
+    assert user_turn.model == "fake"
+
+
+@pytest.mark.asyncio
+async def test_finalize_failed_clears_user_turn_pre_count(
+    pg_session_factory,
+    _settings_env,
+):
+    """A turn that fails never produced a real response, so its submit-
+    time pre-count must not keep counting against the daily cap.
+    _finalize_failed must clear the user-turn tokens_in (mirroring
+    _finalize_success)."""
+    adapter = FakeAgentAdapter()
+
+    async def explode(handle, msg):
+        yield AssistantTextEvent(text="started")
+        raise SDKTurnError("boom", status="500")
+
+    adapter.send_turn = explode  # type: ignore[method-assign]
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    from call_manager.config import Settings
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content_text="hi",
+            submitted_by_user_id=uid,
+            settings=settings,
+        )
+        s.commit()
+        job_id = job.id
+        user_turn_id = job.user_turn_id
+
+    with pg_session_factory() as s:
+        ut = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        ut.tokens_in = 123
+        s.commit()
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == job_id))
+        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+
+    assert job.status == "failed"
+    assert user_turn.tokens_in is None, (
+        "failed turn must clear its user-turn pre-count so it stops counting against the daily cap"
+    )

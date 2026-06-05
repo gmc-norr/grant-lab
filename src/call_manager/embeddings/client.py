@@ -8,6 +8,7 @@ exception type for both chat and embed failures.
 from __future__ import annotations
 
 import logging
+import math
 
 import httpx
 
@@ -83,4 +84,14 @@ class OllamaEmbedClient:
                 f"ollama embed returned wrong dimension: got {len(first)}, "
                 f"expected {self._expected_dim}. Wrong model installed?"
             )
-        return [float(x) for x in first]
+        # Reject NaN/Inf: Ollama (0.21) returns NaN components for bge-m3 on
+        # long inputs. A non-finite vector would poison every cosine() it
+        # touches (na/nb → NaN → comparisons silently false) and pgvector
+        # stores it without complaint. Fail loud at the source instead.
+        vec = [float(x) for x in first]
+        if not all(math.isfinite(x) for x in vec):
+            raise LLMError(
+                "ollama embed returned non-finite value (NaN/Inf) — "
+                "likely the long-input NaN bug; refusing to store."
+            )
+        return vec

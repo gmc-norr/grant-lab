@@ -50,7 +50,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -414,8 +414,11 @@ def serve_file(
         raise HTTPException(status_code=404, detail="attachment file missing")
 
     safe_filename = _sanitize_filename(att.filename or f"attachment{suffix}")
-    return Response(
-        content=path.read_bytes(),
+    # Stream the bytes (FileResponse sets Content-Length + chunks) instead
+    # of reading the whole file into memory. Auth checks above are
+    # unchanged; only the response body delivery differs.
+    return FileResponse(
+        path,
         media_type=att.mime_type,
         headers={
             # private: a shared proxy MUST NOT cache and serve to another user.

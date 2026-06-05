@@ -30,7 +30,15 @@ assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
 # Path the weekly eval job writes to and /admin reads from. Computed once
 # at import — env-var override only takes effect on (re-)import. Tests
 # override this constant via monkeypatch.setattr rather than the env var.
-_REPORT_PATH = Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")) / "golden_set_last.json"
+#
+# Anchored to an absolute path: when CALL_MONITOR_DATA_DIR is unset the
+# default "data" is relative to CWD, so the scheduler (writer) and web admin
+# (reader) — which may launch from different working directories — would
+# otherwise resolve it to different files and silently disagree on the last
+# report. resolve() pins it to one absolute location regardless of CWD.
+_REPORT_PATH = (
+    Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")).resolve() / "golden_set_last.json"
+)
 
 
 @dataclass(frozen=True)

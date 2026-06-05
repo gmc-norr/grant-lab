@@ -58,6 +58,31 @@ def test_whoami_works_with_valid_cookie(pg_url, pg_session_factory):
     assert r.json()["email"] == "alice@ki.se"
 
 
+def test_stale_epoch_cookie_rejected(pg_url, pg_session_factory):
+    """A cookie minted at epoch N is rejected once the user's session_epoch
+    advances past N (logout / admin revocation)."""
+    with _mk_app(pg_url) as (app, signer, _):
+        with pg_session_factory() as s:
+            u = User(email="alice@ki.se")
+            s.add(u)
+            s.commit()
+            s.refresh(u)
+            uid = u.id
+
+        # Cookie carries epoch 0 (default).
+        stale_cookie = signer.make(user_id=uid, session_epoch=0)
+
+        # Simulate a logout/revocation bumping the epoch.
+        with pg_session_factory() as s:
+            s.get(User, uid).session_epoch = 1
+            s.commit()
+
+        with TestClient(app) as client:
+            client.cookies.set("session", stale_cookie)
+            r = client.get("/whoami")
+    assert r.status_code == 401
+
+
 def test_require_admin_rejects_non_admin(pg_url, pg_session_factory):
     with _mk_app(pg_url) as (app, signer, _):
         with pg_session_factory() as s:

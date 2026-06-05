@@ -253,12 +253,28 @@ def _extract_ipynb(data: bytes) -> SectionList:
 # ----- helpers --------------------------------------------------------------
 
 
+def _escape_md_cell(value: str) -> str:
+    """Make a cell value safe to embed between ``" | "`` separators.
+
+    A raw ``|`` would be parsed as a column boundary and a newline would
+    terminate the table row, corrupting the rendered table the agent
+    sees. Escape pipes and flatten embedded newlines/carriage returns to
+    spaces."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+    )
+
+
 def _to_markdown_table(header: Iterable[str], rows: Iterable[Iterable[str]]) -> str:
-    header = list(header)
+    header = [_escape_md_cell(h) for h in header]
     lines = ["| " + " | ".join(header) + " |"]
     lines.append("| " + " | ".join("---" for _ in header) + " |")
     for row in rows:
-        cells = list(row)
+        cells = [_escape_md_cell(c) for c in row]
         # Pad/truncate to header length
         cells = (cells + [""] * len(header))[: len(header)]
         lines.append("| " + " | ".join(cells) + " |")

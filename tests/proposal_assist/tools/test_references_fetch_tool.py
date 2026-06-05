@@ -156,6 +156,70 @@ async def test_fetch_reference_4th_attempt_returns_cap_error(
 
 
 @pytest.mark.asyncio
+async def test_fetch_reference_refunds_count_on_fetch_error(
+    pg_session_factory, tmp_path, httpx_mock
+):
+    """Regression: the per-turn slot is reserved (fetch_count += 1)
+    BEFORE the fetch. On a transient FetchError the slot was never spent
+    on usable content, so it must be refunded — otherwise a single flaky
+    URL permanently shrinks the agent's per-turn budget."""
+    # Server returns 500 → fetch_bytes raises FetchError → tool refunds.
+    httpx_mock.add_response(
+        url="https://arxiv.org/pdf/2401.99999.pdf",
+        status_code=500,
+    )
+
+    wsid, jobid = _seed_running_turn(pg_session_factory)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await fetch_reference_impl(ctx, input="2401.99999", embedder=FakeEmbedder())
+    assert "error" in out
+    assert "fetch failed" in out["error"].lower()
+    # The reported count reflects the refund.
+    assert out["fetch_count"] == 0
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
+    # Slot refunded: the failed fetch did not burn the budget.
+    assert job.fetch_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_reference_refund_keeps_other_successful_fetches(
+    pg_session_factory, tmp_path, httpx_mock
+):
+    """A refund must only undo the just-consumed slot, not zero out
+    earlier successful fetches in the same turn."""
+    from io import BytesIO
+
+    from reportlab.pdfgen.canvas import Canvas
+
+    buf = BytesIO()
+    c = Canvas(buf)
+    c.drawString(72, 720, "ok")
+    c.save()
+    pdf_bytes = buf.getvalue()
+
+    wsid, jobid = _seed_running_turn(pg_session_factory)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    embedder = FakeEmbedder()
+
+    # One good fetch → count goes to 1.
+    httpx_mock.add_response(url="https://arxiv.org/pdf/2401.00010.pdf", content=pdf_bytes)
+    out_ok = await fetch_reference_impl(ctx, input="2401.00010", embedder=embedder)
+    assert "error" not in out_ok, out_ok
+
+    # One bad fetch → count goes to 2, then refunded back to 1.
+    httpx_mock.add_response(url="https://arxiv.org/pdf/2401.00011.pdf", status_code=503)
+    out_bad = await fetch_reference_impl(ctx, input="2401.00011", embedder=embedder)
+    assert "error" in out_bad
+    assert out_bad["fetch_count"] == 1
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
+    assert job.fetch_count == 1
+
+
+@pytest.mark.asyncio
 async def test_fetch_reference_with_invalid_input_returns_error(pg_session_factory, tmp_path):
     """Unrecognized input → dispatcher raises ValueError → tool returns
     a clear error. fetch_count NOT incremented (defensive: bad input

@@ -52,6 +52,40 @@ def test_add_viewer_unknown_email_400(
         data={"email": "ghost@nowhere.com"},
     )
     assert response.status_code == 400
+    # No user-enumeration oracle: the rejected email must NOT be echoed
+    # back (a per-email "no user with email X" message would let an owner
+    # probe which addresses have accounts).
+    assert b"ghost@nowhere.com" not in response.content
+
+
+def test_add_viewer_owner_as_viewer_is_noop(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """Adding the workspace OWNER as a viewer is a silent no-op: the owner
+    already has full access, so no redundant WorkspaceViewer row is
+    created. Same redirect as a successful add."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import WorkspaceViewer
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/viewers",
+        data={"email": current_user.email},
+        follow_redirects=False,
+    )
+    assert response.status_code in (302, 303)
+    assert response.headers["location"] == f"/workspaces/{wsid}/settings"
+    with pg_session_factory() as s:
+        rows = list(s.scalars(select(WorkspaceViewer).where(WorkspaceViewer.workspace_id == wsid)))
+    assert rows == []
 
 
 def test_add_viewer_duplicate_is_idempotent(

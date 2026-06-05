@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -370,8 +370,11 @@ def serve_reference_raw(
         raise HTTPException(status_code=404, detail="reference bytes missing")
 
     safe_name = _sanitize_filename(ref.filename)
-    return Response(
-        content=path.read_bytes(),
+    # Stream the bytes (FileResponse sets Content-Length + chunks) instead
+    # of reading the whole file into memory. The hardening headers below
+    # (force-download Content-Disposition, nosniff) are preserved verbatim.
+    return FileResponse(
+        path,
         media_type=ref.mime_type,
         headers={
             # Force download — references serve a wide MIME range

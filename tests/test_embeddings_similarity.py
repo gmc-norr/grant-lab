@@ -44,6 +44,19 @@ def test_cosine_returns_none_when_dimensions_differ():
     assert cosine([1.0, 0.0], [1.0, 0.0, 0.0]) is None
 
 
+def test_cosine_returns_none_on_nan_component():
+    """A NaN component (e.g. a poisoned stored vector) yields a NaN result;
+    treat as UNKNOWN (None) rather than letting NaN propagate into ranking
+    comparisons where every comparison would silently be False."""
+    assert cosine([float("nan"), 1.0], [1.0, 0.0]) is None
+
+
+def test_cosine_returns_none_on_inf_component():
+    """Inf components overflow na*nb to inf and yield a non-finite result —
+    also collapse to None."""
+    assert cosine([float("inf"), 1.0], [1.0, 0.0]) is None
+
+
 def test_build_call_text_concatenates_title_summary_truncated_full_text():
     call = SimpleNamespace(
         title="A Title",

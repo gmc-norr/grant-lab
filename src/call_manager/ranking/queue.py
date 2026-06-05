@@ -141,31 +141,82 @@ def claim_pending_jobs(session: Session, *, limit: int) -> list[RankingJob]:
     return rows
 
 
-def requeue_stuck_running(session: Session) -> int:
-    """Flip jobs that have been RUNNING longer than _STUCK_AFTER back to
-    PENDING. Returns the number requeued. Called at the start of each
-    drain tick — without this, a worker crash mid-tick leaves the
-    claimed jobs in RUNNING forever (claim_pending_jobs only finds
-    PENDING). Note: this does NOT increment `attempts`; the previous
-    run never reached mark_failed so it shouldn't count toward the
-    dead-letter threshold.
+# Mirrors worker.MAX_ATTEMPTS (can't import it — worker imports this module,
+# so the dependency must point one way). Kept in sync deliberately.
+_MAX_ATTEMPTS = 5
+
+
+def requeue_stuck_running(session: Session, *, max_attempts: int = _MAX_ATTEMPTS) -> int:
+    """Recover jobs stuck in RUNNING longer than _STUCK_AFTER (worker crashed
+    mid-tick and never reached mark_done/mark_failed). Returns the number of
+    rows touched (requeued + dead-lettered). Called at the start of each drain
+    tick — without this, claimed jobs sit in RUNNING forever, invisible to
+    claim_pending_jobs (which only finds PENDING).
+
+    Tradeoff (changed behaviour): we now BUMP `attempts` on every requeue and
+    dead-letter (→ FAILED) any job that has already reached `max_attempts`,
+    instead of cycling it back to PENDING unconditionally. The old behaviour
+    never incremented attempts, on the theory that a crash isn't the job's
+    fault — but that let a job which *reliably* crashes the worker (e.g. a
+    payload that triggers an OOM or an unhandled native fault before
+    mark_failed can run) loop through claim → crash → requeue forever, never
+    dead-lettering. Counting the crash toward the threshold caps that at
+    max_attempts.
+
+    The cost: a transient infrastructure blip that kills the worker mid-tick
+    (deploy restart, host OOM from a *neighbour* process) now also burns an
+    attempt against every in-flight job, so an unlucky job could dead-letter
+    a little sooner than it strictly deserves. That's an acceptable trade for
+    bounding the pathological crash-loop — and the operator can re-enqueue a
+    dead-lettered job via /admin/rerank.
     """
     cutoff = datetime.now(UTC) - _STUCK_AFTER
-    result = session.execute(
+    now = datetime.now(UTC)
+
+    # Jobs that have used up their attempts go to the dead-letter (FAILED)
+    # terminal state rather than back to PENDING — this is what stops the
+    # crash-loop. attempts is still bumped so the recorded count is honest.
+    dead = session.execute(
+        update(RankingJob)
+        .where(
+            RankingJob.status == RankingJobStatus.RUNNING,
+            RankingJob.updated_at < cutoff,
+            RankingJob.attempts + 1 >= max_attempts,
+        )
+        .values(
+            status=RankingJobStatus.FAILED,
+            attempts=RankingJob.attempts + 1,
+            last_error="dead-lettered: stuck RUNNING past max_attempts (worker crash loop)",
+            updated_at=now,
+        )
+    )
+    # Everything else still under the threshold goes back to PENDING for retry,
+    # with attempts bumped so it eventually reaches the branch above.
+    requeued = session.execute(
         update(RankingJob)
         .where(
             RankingJob.status == RankingJobStatus.RUNNING,
             RankingJob.updated_at < cutoff,
         )
-        .values(status=RankingJobStatus.PENDING, updated_at=datetime.now(UTC))
+        .values(
+            status=RankingJobStatus.PENDING,
+            attempts=RankingJob.attempts + 1,
+            updated_at=now,
+        )
     )
-    n = result.rowcount or 0
-    if n:
+    n_dead = dead.rowcount or 0
+    n_requeued = requeued.rowcount or 0
+    if n_dead or n_requeued:
         _logger.warning(
             "ranking.requeued_stuck",
-            extra={"event": "ranking_requeued_stuck", "count": n},
+            extra={
+                "event": "ranking_requeued_stuck",
+                "count": n_requeued + n_dead,
+                "requeued": n_requeued,
+                "dead_lettered": n_dead,
+            },
         )
-    return n
+    return n_requeued + n_dead
 
 
 def mark_done(session: Session, job_id: int) -> None:

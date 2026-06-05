@@ -74,6 +74,29 @@ def test_extract_csv_returns_schema_and_sample():
     assert "alice" in text
 
 
+def test_extract_csv_escapes_pipes_and_newlines_in_cells():
+    """Regression: a cell value containing '|' or a newline must not
+    corrupt the rendered markdown table. Pipes are escaped to '\\|' and
+    embedded newlines flattened to spaces so each row stays a single,
+    well-formed table row."""
+    # Quoted field with an embedded pipe AND an embedded newline.
+    csv = b'name,note\nalice,"a|b\nsecond line"\n'
+    sections = extract_text(mime="text/csv", data=csv)
+    _, text = sections[0]
+    lines = text.splitlines()
+    # header + separator + exactly one data row — the embedded newline
+    # must NOT have split the cell into a second table row.
+    assert len(lines) == 3
+    data_row = lines[2]
+    # Pipe is escaped, not left raw (which would read as a new column).
+    assert "a\\|b" in data_row
+    # Newline flattened to a space.
+    assert "second line" in data_row
+    # The data row still has exactly the right number of column
+    # separators (leading "| ", one inner " | ", trailing " |").
+    assert data_row.count(" | ") == 1
+
+
 def test_extract_xlsx_returns_schema_and_sample():
     buf = io.BytesIO()
     wb = Workbook()

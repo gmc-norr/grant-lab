@@ -17,7 +17,7 @@ def test_upsert_inserts_new_row(pg_session_factory):
         was_new = upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(external_id="V-1", url="u", title="T"),
+            call=NormalizedCall(external_id="V-1", url="https://example.org/u", title="T"),
         )
         s.commit()
         assert was_new is True
@@ -31,7 +31,7 @@ def test_upsert_replaces_existing_row_in_place(pg_session_factory):
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(external_id="V-1", url="u", title="OLD"),
+            call=NormalizedCall(external_id="V-1", url="https://example.org/u", title="OLD"),
         )
         s.commit()
         was_new = upsert_call(
@@ -39,7 +39,7 @@ def test_upsert_replaces_existing_row_in_place(pg_session_factory):
             source_id=sid,
             call=NormalizedCall(
                 external_id="V-1",
-                url="u",
+                url="https://example.org/u",
                 title="NEW",
                 deadline=datetime(2026, 6, 1, tzinfo=UTC),
             ),
@@ -59,7 +59,11 @@ def test_upsert_refreshes_fetched_at_on_re_encounter(pg_session_factory):
     calls and by future reaper logic to identify stale rows."""
     with pg_session_factory() as s:
         sid = _vinnova_id(s)
-        upsert_call(s, source_id=sid, call=NormalizedCall(external_id="V-1", url="u", title="T"))
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(external_id="V-1", url="https://example.org/u", title="T"),
+        )
         s.commit()
         first = s.execute(select(Call.fetched_at).where(Call.external_id == "V-1")).scalar_one()
     # Second pass at least 1ms later
@@ -68,7 +72,11 @@ def test_upsert_refreshes_fetched_at_on_re_encounter(pg_session_factory):
     time.sleep(0.01)
     with pg_session_factory() as s:
         sid = _vinnova_id(s)
-        upsert_call(s, source_id=sid, call=NormalizedCall(external_id="V-1", url="u", title="T"))
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(external_id="V-1", url="https://example.org/u", title="T"),
+        )
         s.commit()
         second = s.execute(select(Call.fetched_at).where(Call.external_id == "V-1")).scalar_one()
     assert second >= first
@@ -79,8 +87,16 @@ def test_upsert_is_per_source(pg_session_factory):
     with pg_session_factory() as s:
         eu = s.execute(select(Source.id).where(Source.slug == "eu_portal")).scalar_one()
         vn = s.execute(select(Source.id).where(Source.slug == "vinnova")).scalar_one()
-        upsert_call(s, source_id=eu, call=NormalizedCall(external_id="X-1", url="u", title="T"))
-        upsert_call(s, source_id=vn, call=NormalizedCall(external_id="X-1", url="u", title="T"))
+        upsert_call(
+            s,
+            source_id=eu,
+            call=NormalizedCall(external_id="X-1", url="https://example.org/u", title="T"),
+        )
+        upsert_call(
+            s,
+            source_id=vn,
+            call=NormalizedCall(external_id="X-1", url="https://example.org/u", title="T"),
+        )
         s.commit()
         n = s.execute(select(Call).where(Call.external_id == "X-1")).scalars().all()
     assert len(n) == 2
@@ -99,13 +115,17 @@ def test_upsert_preserves_full_text_when_new_payload_is_none(pg_session_factory)
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text="rich body"),
+            call=NormalizedCall(
+                external_id="V-1", url="https://example.org/u", title="T", full_text="rich body"
+            ),
         )
         s.commit()
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text=None),
+            call=NormalizedCall(
+                external_id="V-1", url="https://example.org/u", title="T", full_text=None
+            ),
         )
         s.commit()
         row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()
@@ -124,14 +144,41 @@ def test_upsert_overwrites_full_text_when_new_payload_is_non_none(pg_session_fac
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text="OLD body"),
+            call=NormalizedCall(
+                external_id="V-1", url="https://example.org/u", title="T", full_text="OLD body"
+            ),
         )
         s.commit()
         upsert_call(
             s,
             source_id=sid,
-            call=NormalizedCall(external_id="V-1", url="u", title="T", full_text="NEW body"),
+            call=NormalizedCall(
+                external_id="V-1", url="https://example.org/u", title="T", full_text="NEW body"
+            ),
         )
         s.commit()
         row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()
     assert row.full_text == "NEW body"
+
+
+def test_upsert_rejects_unsafe_url_centrally(pg_session_factory):
+    """Central chokepoint: even if an adapter forgets is_safe_url, a dangerous
+    href (javascript:/data:/etc.) must never be persisted — it would render as
+    click-to-XSS in the dashboard. upsert_call rejects the record (returns
+    False, writes no row)."""
+    for bad_url in (
+        "javascript:alert(document.cookie)",
+        "data:text/html,<script>alert(1)</script>",
+        "ftp://example.org/file",
+    ):
+        with pg_session_factory() as s:
+            sid = _vinnova_id(s)
+            was_new = upsert_call(
+                s,
+                source_id=sid,
+                call=NormalizedCall(external_id="XSS-1", url=bad_url, title="evil"),
+            )
+            s.commit()
+            assert was_new is False
+            rows = s.execute(select(Call).where(Call.external_id == "XSS-1")).scalars().all()
+        assert rows == []

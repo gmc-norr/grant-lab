@@ -113,6 +113,21 @@ class AnthropicClient:
         except anthropic.APIConnectionError as e:
             raise LLMError(f"anthropic connection error: {e}") from e
 
+        # max_tokens truncation: the model hit the output cap mid-generation,
+        # so `content` is a partial (almost always invalid) JSON fragment.
+        # Letting it flow on would fail parse_response → ParseError → 5 paid
+        # retries → dead-letter, none of which can help: the truncation is
+        # deterministic for this prompt + max_tokens. Surface as LLMError now,
+        # before extracting text. (LLMError still retries via the worker, but
+        # the fix for a persistently-too-long response is to raise max_tokens,
+        # not to keep re-billing the same truncating call. Logged loudly.)
+        if response.stop_reason == "max_tokens":
+            raise LLMError(
+                f"anthropic response truncated at max_tokens={self._max_tokens} "
+                f"(output_tokens={response.usage.output_tokens}); "
+                "raise AnthropicClient max_tokens — retrying cannot help"
+            )
+
         # Extract first text block. Tool calls / thinking blocks shouldn't
         # appear here (we don't request them), but guard anyway.
         text_blocks = [b for b in response.content if b.type == "text"]

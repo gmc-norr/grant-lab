@@ -163,6 +163,144 @@ def test_eu_portal_adapter_populates_full_text():
     assert "translational potential" in nc.full_text
 
 
+def test_fetch_paginates_across_multiple_pages():
+    """Pagination: the adapter must follow pageNumber until the result set is
+    exhausted, not stop after the first page. Before the fix a single GET read
+    only page 1 and silently dropped everything beyond it."""
+
+    # Two full pages then a short page. Page size is 100; a full page returns
+    # 100 results so the adapter knows to request the next one.
+    def _page(items):
+        return {"results": items, "totalResults": 205}
+
+    page1 = _page(
+        [
+            {
+                "identifier": f"P1-{i}",
+                "title": f"call {i}",
+                "url": f"https://ec.europa.eu/topic/{i}",
+            }
+            for i in range(100)
+        ]
+    )
+    page2 = _page(
+        [
+            {
+                "identifier": f"P2-{i}",
+                "title": f"call {i}",
+                "url": f"https://ec.europa.eu/topic/2-{i}",
+            }
+            for i in range(100)
+        ]
+    )
+    page3 = _page(
+        [
+            {
+                "identifier": f"P3-{i}",
+                "title": f"call {i}",
+                "url": f"https://ec.europa.eu/topic/3-{i}",
+            }
+            for i in range(5)
+        ]
+    )
+    pages = {1: page1, 2: page2, 3: page3}
+
+    def handler(request):
+        # pageNumber is in the query string.
+        page_number = int(dict(request.url.params).get("pageNumber", "1"))
+        return httpx.Response(200, json=pages.get(page_number, {"results": []}))
+
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=httpx.MockTransport(handler),
+        extraction_transport=_mock_html_transport(status=404),
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert len(out) == 205
+    ids = {c.external_id for c in out}
+    assert "P1-0" in ids
+    assert "P2-99" in ids
+    assert "P3-4" in ids
+
+
+def test_fetch_pagination_stops_on_empty_page():
+    """If a page comes back empty, pagination terminates even when
+    totalResults claims more remain (defensive against a bad upstream count)."""
+    page1 = {
+        "results": [
+            {"identifier": f"A-{i}", "title": "t", "url": f"https://ec.europa.eu/a/{i}"}
+            for i in range(100)
+        ],
+        "totalResults": 999999,  # lies — there is no page 2
+    }
+
+    def handler(request):
+        page_number = int(dict(request.url.params).get("pageNumber", "1"))
+        if page_number == 1:
+            return httpx.Response(200, json=page1)
+        return httpx.Response(200, json={"results": [], "totalResults": 999999})
+
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=httpx.MockTransport(handler),
+        extraction_transport=_mock_html_transport(status=404),
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert len(out) == 100
+
+
+def test_budget_accepts_float_and_coerces_to_int():
+    """Codex: budgetMin/budgetTotal serialized as floats (12000000.0) were
+    dropped by the old `isinstance(..., int)` check. Accept int|float (not
+    bool) and coerce to int."""
+    body = {
+        "results": [
+            {
+                "identifier": "BUDGET-FLOAT",
+                "title": "t",
+                "url": "https://ec.europa.eu/budget-float",
+                "budgetMin": 250000.0,
+                "budgetTotal": 12000000.5,
+            }
+        ],
+        "totalResults": 1,
+    }
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(body=body),
+        extraction_transport=_mock_html_transport(status=404),
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert len(out) == 1
+    assert out[0].budget_min == 250000
+    assert out[0].budget_max == 12000000
+
+
+def test_budget_rejects_bool_and_non_numeric():
+    """`isinstance(True, int)` is True — a JSON bool must NOT be coerced to a
+    budget. Non-numeric strings are also dropped to None."""
+    body = {
+        "results": [
+            {
+                "identifier": "BUDGET-BAD",
+                "title": "t",
+                "url": "https://ec.europa.eu/budget-bad",
+                "budgetMin": True,
+                "budgetTotal": "lots",
+            }
+        ],
+        "totalResults": 1,
+    }
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(body=body),
+        extraction_transport=_mock_html_transport(status=404),
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert out[0].budget_min is None
+    assert out[0].budget_max is None
+
+
 def test_eu_portal_adapter_full_text_none_on_failure():
     """If the topic-detail page returns 404, full_text is None and the
     NormalizedCall is still produced — ranking can fall back to summary."""

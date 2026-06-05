@@ -271,16 +271,20 @@ def _write_criteria_rows(session, job_call_id, job_profile_id, r: RankResult) ->
     now = datetime.now(UTC)
 
     # Gate rows — write up to and including the failing one (or all if no gate failed).
-    # Order matches rank_pair's evaluation order (budget/trl unconditional,
-    # then timeline, then embedding) — but the visual order in the breakdown
-    # UI follows this list. We keep timeline/budget/trl first (the historical
-    # display order) and append embedding at the end so the embedding row
-    # always appears after the cheap structural gates it depends on having
-    # passed.
+    # Iteration order MUST match rank_pair's / aggregate's short-circuit
+    # precedence: budget → trl → timeline → embedding. When several gates
+    # FAIL, aggregate() picks the *first* in that precedence as the headline
+    # aggregate_reason; if this loop iterated in a different order it would
+    # stop at (and write a FAIL row for) a different gate than the headline,
+    # so the breakdown's terminal FAIL row would contradict aggregate_reason.
+    # Keeping the two orders identical guarantees the row we stop at is the
+    # one the headline reason names. (The breakdown UI renders rows in this
+    # written order — embedding still lands last, after the cheap structural
+    # gates it depends on having passed.)
     gate_results = [
-        ("timeline", r.gates.timeline),
         ("budget", r.gates.budget),
         ("trl", r.gates.trl),
+        ("timeline", r.gates.timeline),
         ("embedding", r.gates.embedding),
     ]
     for name, gr in gate_results:

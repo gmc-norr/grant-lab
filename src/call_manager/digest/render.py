@@ -50,4 +50,8 @@ def render_text(payload: DigestPayload, *, dashboard_url: str) -> str:
 def build_subject(payload: DigestPayload) -> str:
     profile_names = ", ".join(sec.profile_name for sec in payload.sections)
     plural = "s" if payload.total_calls != 1 else ""
-    return f"{payload.total_calls} new funding call{plural} for {profile_names}"
+    subject = f"{payload.total_calls} new funding call{plural} for {profile_names}"
+    # Strip CR/LF so a profile name can't inject extra email headers if the
+    # transport ever stops folding the Subject for us (current SMTP path is
+    # saved by EmailMessage header-folding; Resend uses JSON). Cheap insurance.
+    return subject.replace("\r", " ").replace("\n", " ")

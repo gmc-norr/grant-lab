@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -62,12 +62,24 @@ def calls_index(
     sort: _Sort = Query(default="newest"),  # noqa: B008
     profile: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    page: int = Query(default=1, ge=1),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     profile_id = _parse_optional_profile_id(profile)
     profile = profile_id  # type: ignore[assignment]  # rest of handler uses int
+    _now = datetime.now(UTC)
+    _soon_cutoff = _now + timedelta(days=30)
+    offset = (page - 1) * limit
     session_factory = request.app.state.session_factory
     with session_factory() as session:
+        # Resolve the source slug to an id once. An unknown/stale slug degrades
+        # to "all sources" (selection cleared) rather than a confusing empty
+        # feed with the bad slug still selected.
+        source_id: int | None = None
+        if source:
+            source_id = session.scalar(select(Source.id).where(Source.slug == source))
+            if source_id is None:
+                source = None
         # Validate the requested profile is real AND active before
         # showing the ranked view. Spec (design spec, "Profile deletion
         # is soft") requires inactive profiles to be absent from feeds.
@@ -98,6 +110,7 @@ def calls_index(
                     Call.id.desc(),
                 )
                 .limit(limit)
+                .offset(offset)
             )
         else:
             stmt = (
@@ -105,22 +118,58 @@ def calls_index(
                 .options(joinedload(Call.source))
                 .order_by(*_order_for(sort))
                 .limit(limit)
-            )
-        if source:
-            stmt = stmt.where(
-                Call.source_id == select(Source.id).where(Source.slug == source).scalar_subquery()
+                .offset(offset)
             )
         dismissed_subq = (
             select(UserCallDismissal.call_id)
             .where(UserCallDismissal.user_id == user.id)
             .scalar_subquery()
         )
-        stmt = stmt.where(Call.id.notin_(dismissed_subq))
+        # Filters shared by the page query and the summary aggregates, so the
+        # badges reflect the whole filtered dataset — not just the page.
+        base_filters = [Call.id.notin_(dismissed_subq)]
+        if source_id is not None:
+            base_filters.append(Call.source_id == source_id)
+        stmt = stmt.where(*base_filters)
         rows = session.execute(stmt).unique().all()
         # Normalize to (Call, CallRanking|None) shape regardless of branch
         calls_with_rankings: list[tuple[Call, CallRanking | None]] = [
             (row[0], row[1] if profile is not None else None) for row in rows
         ]
+
+        # Summary metrics computed with aggregates over the full filtered set
+        # (independent of limit/offset), so a corpus larger than one page can't
+        # undercount the badges.
+        total = session.scalar(select(func.count()).select_from(Call).where(*base_filters)) or 0
+        soon_deadline = (
+            session.scalar(
+                select(func.count())
+                .select_from(Call)
+                .where(
+                    *base_filters,
+                    Call.deadline.isnot(None),
+                    Call.deadline > _now,
+                    Call.deadline <= _soon_cutoff,
+                )
+            )
+            or 0
+        )
+        high_score = 0
+        if profile is not None and profile_obj is not None:
+            high_score = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(CallRanking)
+                    .join(Call, Call.id == CallRanking.call_id)
+                    .where(
+                        *base_filters,
+                        CallRanking.profile_id == profile,
+                        CallRanking.aggregate_score >= 70,
+                    )
+                )
+                or 0
+            )
+
         sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
         profiles = (
             session.execute(
@@ -131,23 +180,12 @@ def calls_index(
         )
         session.expunge_all()
 
-    # Dashboard summary metrics. Computed in Python over the same rows the
-    # template renders so the badges always match the visible list — no risk
-    # of "the summary says 4 high-score calls but the list only shows 3".
-    _now = datetime.now(UTC)
-    _soon_cutoff = _now + timedelta(days=30)
-    summary = {
-        "total": len(calls_with_rankings),
-        "high_score": sum(
-            1
-            for _c, r in calls_with_rankings
-            if r is not None and r.aggregate_score is not None and r.aggregate_score >= 70
-        ),
-        "soon_deadline": sum(
-            1
-            for c, _r in calls_with_rankings
-            if c.deadline is not None and _now < c.deadline <= _soon_cutoff
-        ),
+    summary = {"total": total, "high_score": high_score, "soon_deadline": soon_deadline}
+    pagination = {
+        "page": page,
+        "limit": limit,
+        "has_prev": page > 1,
+        "has_next": offset + len(calls_with_rankings) < total,
     }
 
     return request.app.state.templates.TemplateResponse(
@@ -161,6 +199,7 @@ def calls_index(
             "selected_sort": sort,
             "selected_profile_id": profile,
             "summary": summary,
+            "pagination": pagination,
             "now": _now,
             "user": user,
         },

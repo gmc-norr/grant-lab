@@ -4,12 +4,13 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Cookie, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
 from call_manager.auth.domain import domain_allowed
 from call_manager.auth.email import EmailSendFailed
+from call_manager.auth.session_cookie import InvalidSession
 from call_manager.auth.tokens import InvalidToken, consume_token, issue_token
 from call_manager.db.models import User
 
@@ -191,9 +192,10 @@ def login_verify(request: Request, token: str):
         if user is None:
             raise HTTPException(status_code=400, detail="invalid link")
         user.last_login_at = datetime.now(UTC)
+        session_epoch = user.session_epoch
         session.commit()
 
-    cookie_value = session_signer.make(user_id=user_id)
+    cookie_value = session_signer.make(user_id=user_id, session_epoch=session_epoch)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         "session",
@@ -203,18 +205,48 @@ def login_verify(request: Request, token: str):
         secure=settings.cookie_secure,  # True when APP_BASE_URL is https://
         samesite="lax",
     )
+    # The verify URL carries the single-use token in its query string. Suppress
+    # the Referer header so the post-login page (and anything it loads) can't
+    # leak the token to third parties.
+    response.headers["Referrer-Policy"] = "no-referrer"
     _logger.info("verify success", extra={"event": "verify_success"})
     return response
 
 
 @router.post("/logout")
-def logout_submit():
-    """Clear the session cookie and bounce back to the login page.
+def logout_submit(request: Request, session: str | None = Cookie(default=None)):
+    """Bump the user's session epoch, clear the cookie, bounce to /login.
 
     POST (not GET) so a stray link can't end someone's session — same
     safety we get from the CSRF middleware on every other state-changing
-    route. Browsers respect samesite=lax on the deletion too.
+    route.
+
+    Bumping session_epoch invalidates *every* outstanding cookie for this
+    user (other browsers, a stolen copy), not just the one in this browser —
+    stateless signed cookies can't otherwise be revoked before their TTL.
     """
+    settings = request.app.state.settings
+    if session is not None:
+        session_signer = request.app.state.session_signer
+        session_factory = request.app.state.session_factory
+        try:
+            data = session_signer.verify(session)
+        except InvalidSession:
+            data = None
+        if data is not None:
+            with session_factory() as db:
+                user = db.get(User, data.user_id)
+                if user is not None:
+                    user.session_epoch = (user.session_epoch or 0) + 1
+                    db.commit()
+
     response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie("session", samesite="lax")
+    # Mirror the set_cookie attributes so the browser reliably clears it.
+    response.delete_cookie(
+        "session",
+        path="/",
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+    )
     return response

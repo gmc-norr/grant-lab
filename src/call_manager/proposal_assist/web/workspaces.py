@@ -22,7 +22,13 @@ from pathlib import Path
 import bleach
 import markdown
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
@@ -217,8 +223,11 @@ def _render_chat_turn_html(
     )
     # SSE `data:` lines cannot contain raw newlines (the protocol
     # uses LF as a record separator). Collapse them — the partial uses
-    # ``{%- ... -%}`` to keep this no-op for normal content.
-    return rendered.replace("\n", "")
+    # ``{%- ... -%}`` to keep this no-op for normal content. A bare CR
+    # is ALSO a valid SSE line terminator, so user-submitted turn text
+    # containing ``\r`` could otherwise inject extra SSE records; strip
+    # both.
+    return rendered.replace("\r", "").replace("\n", "")
 
 
 # Status values that terminate the SSE stream. Shared so a future
@@ -294,8 +303,8 @@ async def _stream_turn_generator(
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
             tj = s.get(TurnJob, turn_job_id)
-            if tj.status in TERMINAL_STATUSES:
-                yield f"event: done\ndata: {tj.status}\n\n"
+            if tj is None or tj.status in TERMINAL_STATUSES:
+                yield f"event: done\ndata: {tj.status if tj is not None else 'missing'}\n\n"
                 return
         await asyncio.sleep(poll_seconds)
 
@@ -1037,14 +1046,20 @@ def add_viewer(
         session=session,
     )
     target = session.scalar(select(User).where(User.email == email))
+    # Generic error: a per-email "no user with email X" message is a
+    # user-enumeration oracle (lets an owner probe which addresses have
+    # accounts). Keep the failure mode indistinguishable.
     if target is None:
-        raise HTTPException(status_code=400, detail=f"no user with email {email}")
-    existing = (
-        session.query(WorkspaceViewer).filter_by(workspace_id=ws.id, user_id=target.id).first()
-    )
-    if existing is None:
-        session.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
-        session.commit()
+        raise HTTPException(status_code=400, detail="could not add viewer")
+    # The owner already has full access; a viewer row for them would be a
+    # redundant (and confusing) grant. Skip it silently — same redirect.
+    if target.id != ws.owner_id:
+        existing = (
+            session.query(WorkspaceViewer).filter_by(workspace_id=ws.id, user_id=target.id).first()
+        )
+        if existing is None:
+            session.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
+            session.commit()
     return RedirectResponse(
         url=f"/workspaces/{ws.id}/settings",
         status_code=303,
@@ -1169,8 +1184,10 @@ def export_markdown(
     safe_title = (
         "".join(c if c.isalnum() or c in "-_." else "_" for c in ws.title)[:80] or "proposal"
     )
-    return Response(
-        proposal.read_text(),
+    # Stream the file (FileResponse sets Content-Length + streams in
+    # chunks) rather than reading the whole proposal into memory.
+    return FileResponse(
+        proposal,
         media_type="text/markdown",
         headers={
             "Content-Disposition": f'attachment; filename="{safe_title}.md"',

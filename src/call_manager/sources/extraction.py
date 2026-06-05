@@ -22,10 +22,13 @@ import httpx
 import pymupdf
 import trafilatura
 
+from call_manager.sources.types import is_safe_fetch_url
+
 _logger = logging.getLogger(__name__)
 
 DEFAULT_HTML_TIMEOUT = 10.0
 DEFAULT_PDF_TIMEOUT = 30.0
+DEFAULT_HTML_MAX_BYTES = 10 * 1024 * 1024  # 10 MB hard ceiling for HTML pages
 DEFAULT_PDF_MAX_BYTES = 50 * 1024 * 1024  # 50 MB hard ceiling
 
 
@@ -33,20 +36,49 @@ def fetch_html_main_content(
     url: str,
     *,
     timeout: float = DEFAULT_HTML_TIMEOUT,
+    max_bytes: int = DEFAULT_HTML_MAX_BYTES,
     transport: httpx.BaseTransport | None = None,
 ) -> str | None:
     """Fetch URL and extract main content via Trafilatura.
 
-    Returns None on HTTP error, fetch timeout, or if Trafilatura can't
-    identify a main content block. Logs `extraction.html_failed` with
-    the URL and the underlying error.
+    Returns None on HTTP error, fetch timeout, an unsafe/SSRF target, an
+    oversized body, or if Trafilatura can't identify a main content block.
+    Logs `extraction.html_failed` with the URL and the underlying error.
     """
+    # SSRF guard: the URL comes from upstream JSON. Refuse to fetch anything
+    # that resolves to a private/loopback/link-local/metadata address before
+    # opening a connection. is_safe_fetch_url is the single chokepoint.
+    if not is_safe_fetch_url(url):
+        _logger.warning(
+            "extraction.html_failed",
+            extra={"event": "html_failed", "url": url, "error": "unsafe_url"},
+        )
+        return None
+    buf = bytearray()
     try:
-        with httpx.Client(transport=transport, timeout=timeout) as client:
-            resp = client.get(url)
+        with (
+            httpx.Client(transport=transport, timeout=timeout) as client,
+            client.stream("GET", url) as resp,
+        ):
             resp.raise_for_status()
-            html = resp.text
-    except (httpx.HTTPError, ValueError) as e:
+            for chunk in resp.iter_bytes():
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    _logger.warning(
+                        "extraction.html_failed",
+                        extra={
+                            "event": "html_failed",
+                            "url": url,
+                            "error": f"oversized: streamed > {max_bytes} bytes",
+                        },
+                    )
+                    return None
+            # Decode using the charset httpx inferred from headers/content,
+            # falling back to utf-8 with replacement so a bad byte can't crash
+            # the parse (Trafilatura tolerates imperfect text).
+            encoding = resp.encoding or "utf-8"
+            html = bytes(buf).decode(encoding, errors="replace")
+    except (httpx.HTTPError, ValueError, LookupError) as e:
         _logger.warning(
             "extraction.html_failed",
             extra={"event": "html_failed", "url": url, "error": str(e)},
@@ -88,9 +120,15 @@ def fetch_pdf_text(
     once the running byte count exceeds the limit — we never materialize
     a payload larger than `max_bytes` in memory.
 
-    Returns None on HTTP error, oversized payload, PDF parse failure,
-    or empty extraction. Logs `extraction.pdf_failed`.
+    Returns None on HTTP error, an unsafe/SSRF target, oversized payload,
+    PDF parse failure, or empty extraction. Logs `extraction.pdf_failed`.
     """
+    if not is_safe_fetch_url(url):
+        _logger.warning(
+            "extraction.pdf_failed",
+            extra={"event": "pdf_failed", "url": url, "error": "unsafe_url"},
+        )
+        return None
     buf = bytearray()
     try:
         with (

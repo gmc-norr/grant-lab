@@ -77,6 +77,24 @@ def test_embed_rejects_vector_of_bools():
         client.embed("anything")
 
 
+def test_embed_rejects_nan_vector():
+    """Ollama (0.21) returns NaN components for bge-m3 on long inputs. A
+    non-finite vector poisons every cosine() it touches and pgvector stores
+    it silently — reject at the source with LLMError."""
+    vec = [0.1] * 1023 + [float("nan")]
+    client = _client_returning({"embeddings": [vec]})
+    with pytest.raises(LLMError):
+        client.embed("a very long input that triggers the NaN bug")
+
+
+def test_embed_rejects_inf_vector():
+    """Infinity is equally non-finite — also rejected."""
+    vec = [0.1] * 1023 + [float("inf")]
+    client = _client_returning({"embeddings": [vec]})
+    with pytest.raises(LLMError):
+        client.embed("anything")
+
+
 def test_embed_raises_llm_error_on_wrong_dimension():
     """Defensive: if Ollama returns a 768-dim vector when we expected 1024
     (operator pulled bge-base/bge-large by mistake), fail with a clear error

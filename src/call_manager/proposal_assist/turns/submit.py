@@ -296,7 +296,19 @@ def submit_user_turn(
     # request-order iteration mirrors the attachment block above.
     references: list[Reference] = []
     if reference_ids:
-        ref_rows = list(session.scalars(select(Reference).where(Reference.id.in_(reference_ids))))
+        # Scope the query to this workspace (defense-in-depth, matching
+        # the attachment query above). The Python-side
+        # ``ref.workspace_id != workspace_id`` check below still stands
+        # so cross-workspace ids surface the IDOR-safe "does not belong"
+        # error instead of silently dropping to "not found".
+        ref_rows = list(
+            session.scalars(
+                select(Reference).where(
+                    Reference.id.in_(reference_ids),
+                    Reference.workspace_id == workspace_id,
+                )
+            )
+        )
         ref_by_id = {r.id: r for r in ref_rows}
         for rid in reference_ids:
             ref = ref_by_id.get(rid)

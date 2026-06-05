@@ -106,6 +106,65 @@ def test_rubric_review_get_returns_404_for_missing_workspace(
     assert resp.status_code == 404
 
 
+def test_rubric_review_get_soft_deleted_returns_404_for_owner(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    """Soft-deleted-exclusion regression: a soft-deleted workspace is
+    treated as absent (404) even for its owner, so the owner can't keep
+    viewing/mutating the rubric after deletion."""
+    from datetime import UTC, datetime
+
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/rubric-review")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 404
+
+
+def test_rubric_review_post_soft_deleted_returns_404_for_owner(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+):
+    """The POST handler also rejects a soft-deleted workspace (no rubric
+    mutation after deletion)."""
+    from datetime import UTC, datetime
+
+    app = _build_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        uid, wsid = _make_owner_and_workspace(s)
+        ws = s.get(Workspace, wsid)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    client = _authed_client(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/rubric-review",
+            data={
+                "criteria[0][name]": "X",
+                "criteria[0][description]": "x",
+                "criteria[0][weight]": "1.0",
+                "criteria[0][scale_max]": "5",
+                "funder_notes": "",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 404
+
+
 def test_rubric_review_post_writes_edited_event_and_advances_phase(
     monkeypatch,
     pg_url,

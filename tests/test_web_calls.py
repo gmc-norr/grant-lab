@@ -97,6 +97,36 @@ def test_root_filter_by_source(monkeypatch, pg_url, pg_session_factory):
     assert "EU one" not in r.text
 
 
+def test_root_unknown_source_degrades_to_all(monkeypatch, pg_url, pg_session_factory):
+    """A stale/unknown ?source= slug shows all calls (selection cleared),
+    not a confusing empty feed."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?source=does-not-exist")
+    assert r.status_code == 200
+    assert "Vin one" in r.text and "EU one" in r.text
+
+
+def test_root_summary_counts_full_dataset_despite_paging(monkeypatch, pg_url, pg_session_factory):
+    """With limit=1 only one row renders, but the 'Open calls' badge must
+    reflect all 3 seeded calls (summary is computed over the whole dataset,
+    not the visible page), and a Next link is offered."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?limit=1")
+    assert r.status_code == 200
+    # Only one call row on the page...
+    assert r.text.count('class="call-row"') == 1
+    # ...but the summary badge reports the full total of 3.
+    assert ">3</div>" in r.text
+    # ...and pagination offers a next page.
+    assert "page=2" in r.text
+
+
 def test_root_sort_by_deadline(monkeypatch, pg_url, pg_session_factory):
     """sort=deadline orders soonest-deadline first (irrespective of
     publication date). Vin one (May 15) → EU two (June 10) → EU one (July 1)."""

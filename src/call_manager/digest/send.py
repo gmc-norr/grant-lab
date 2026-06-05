@@ -156,8 +156,11 @@ def run_digest(
                     session.commit()
                 except IntegrityError:
                     # uq_digest_runs_user_week tripped — another run
-                    # already recorded a DigestRun for this (user, UTC
-                    # week). Under the single-instance invariant this
+                    # already recorded a DigestRun for this (user,
+                    # Stockholm week). The DB's week_start is truncated in
+                    # Europe/Stockholm (migration 0033), matching the
+                    # week_start() skip check above, so the two layers
+                    # agree. Under the single-instance invariant this
                     # shouldn't happen, but the DB-level guard turns a
                     # would-be double-send into a loud-rollback instead
                     # of a silent duplicate email.

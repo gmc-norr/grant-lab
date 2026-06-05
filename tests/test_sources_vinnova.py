@@ -296,6 +296,55 @@ def test_vinnova_adapter_splits_summary_and_full_text():
     assert "Second paragraph with more detail" in nc.full_text
 
 
+def test_midnight_deadline_today_is_treated_as_end_of_day():
+    """A date-only Stangningsdatum (midnight Stockholm) on the call's CLOSING
+    day must NOT mark the call already-closed. Vinnova emits date-only
+    deadlines as 00:00; treating that literally drops calls on their last day.
+    We bump a midnight deadline to 23:59:59 so the call survives its final
+    day."""
+    # Today's Stockholm date at midnight — without the end-of-day bump this
+    # parses to a deadline already in the past (00:00 < now), wrongly closing.
+    today_sthlm = datetime.now(_STOCKHOLM).date()
+    midnight_today = f"{today_sthlm.isoformat()}T00:00:00"
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "CLOSES-TODAY"}],
+            },
+        ],
+        "/api/ansokningsomgangar/CLOSES-TODAY": [
+            {
+                "Diarienummer": "CLOSES-TODAY",
+                "Titel": "Closes today",
+                "Beskrivning": "x",
+                "Oppningsdatum": "2026-01-01T00:00:00",
+                "Stangningsdatum": midnight_today,
+                "LankLista": [{"URL": "https://www.vinnova.se/e/closes-today"}],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
+    }
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    assert [c.external_id for c in out] == ["CLOSES-TODAY"]
+    # Deadline was bumped to end-of-day, so it's still in the future.
+    assert out[0].deadline > datetime.now(UTC)
+
+
+def test_explicit_time_deadline_not_bumped():
+    """A deadline with an explicit non-midnight time is left exactly as-is —
+    the end-of-day bump only applies to bare-date (midnight) values."""
+    out = list(_make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    # _ROUND_OPEN has Stangningsdatum 2099-12-31T14:00:00 (explicit time).
+    assert out[0].deadline == datetime(2099, 12, 31, 13, 0, tzinfo=UTC)
+
+
 def test_vinnova_adapter_full_text_none_when_no_webtextlista():
     """If the source provides no WebTextLista, full_text is None."""
     routes = {
