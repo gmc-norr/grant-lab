@@ -542,5 +542,25 @@ def test_prompt_includes_eligibility_and_org_context(make_call):
     assert "biobank" in blob
 
 
+def test_funder_exclusions_routed_to_eligibility_not_topic_exclusions(make_call):
+    """funder_exclusions must inform the ELIGIBILITY criterion, never the topic
+    `exclusions` criterion (which stays bound to hard_exclusions). Guards the
+    spec's explicit criterion-placement requirement — asserting placement, not
+    just that the value appears somewhere in the prompt."""
+    system = build_messages(profile=_P(), call=make_call())[0]["content"]
+    # Slice the criterion instructions into the eligibility region (item 2) and
+    # the topic-exclusions region (item 3).
+    assert "2. eligibility" in system and "3. exclusions" in system
+    elig_region = system[system.index("2. eligibility") : system.index("3. exclusions")]
+    excl_region = system[system.index("3. exclusions") :]
+    # The eligibility criterion owns the funder-exclusion guidance.
+    assert "funder" in elig_region.lower()
+    assert "strong negative for eligibility" in elig_region.lower()
+    # The topic-exclusions criterion is bound to hard exclusions...
+    assert "hard exclusion" in excl_region.lower()
+    # ...and its own definition line must NOT pull in funder exclusions.
+    assert "funder" not in excl_region.splitlines()[0].lower()
+
+
 def test_prompt_version_bumped():
     assert PROMPT_VERSION == "v4.0"
