@@ -98,6 +98,30 @@ def test_parse_structured_rejects_years_out_of_range():
 def test_parse_structured_individual_drops_org_namespace():
     out = parse_structured(kind="individual", raw={"capabilities": "biobank"})
     assert "org" not in out or not out["org"].get("capabilities")
+
+
+def test_parse_structured_rejects_over_100_items():
+    with pytest.raises(FieldValidationError) as e:
+        parse_structured(
+            kind="organizational_unit",
+            raw={"capabilities": "\n".join(str(i) for i in range(101))},
+        )
+    assert e.value.status_code == 400
+
+
+def test_sanitize_structured_drops_bad_llm_values():
+    from call_manager.profiles.fields import sanitize_structured
+
+    out = sanitize_structured(
+        kind="individual",
+        structured={
+            "eligibility": {"career_stage": "wizard", "applicant_types": ["solo_pi", "bogus"]},
+            "funding": {"instruments": ["fellowship", "nope"]},
+        },
+    )
+    assert out["eligibility"]["career_stage"] is None
+    assert out["eligibility"]["applicant_types"] == ["solo_pi"]
+    assert out["funding"]["instruments"] == ["fellowship"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -149,10 +173,17 @@ class FieldValidationError(Exception):
 
 
 def _tags(raw, *, field: str) -> list[str]:
-    """Split a textarea (one entry per line) into a capped, length-checked list."""
+    """Split a textarea (one entry per line) into a count/length-checked list.
+
+    Rejects (does not silently truncate) over-count or over-length input — the
+    spec requires a 400, not silent data loss."""
     if raw is None:
         return []
-    items = [ln.strip() for ln in str(raw).splitlines() if ln.strip()][:MAX_LIST_ENTRIES]
+    items = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+    if len(items) > MAX_LIST_ENTRIES:
+        raise FieldValidationError(
+            f"{field}: too many items (max {MAX_LIST_ENTRIES})", status_code=400
+        )
     for item in items:
         if len(item) > MAX_TAG_LEN:
             raise FieldValidationError(
@@ -250,6 +281,71 @@ def parse_structured(*, kind: str, raw: dict) -> dict:
     out["geo"] = {
         "country": _short_text(raw.get("country"), field="country"),
         "host_institution": _short_text(raw.get("host_institution"), field="host_institution"),
+    }
+    return out
+
+
+def sanitize_structured(*, kind: str, structured: dict) -> dict:
+    """Coerce an LLM-suggested (nested) structured dict to a valid shape.
+
+    Unlike parse_structured (strict — raises on bad USER form input), this is
+    LENIENT: it silently drops unknown enum values, over-length items, and
+    over-count lists, because the input is machine-generated bootstrap output,
+    not a user form. Used on create so LLM suggestions are never persisted
+    unvalidated. Returns only the namespaces (caller keeps description/areas/
+    rubric from the draft)."""
+    structured = structured or {}
+
+    def _clean_tags(v):
+        if not isinstance(v, list):
+            return []
+        out = [str(x).strip() for x in v if str(x).strip()][:MAX_LIST_ENTRIES]
+        return [x for x in out if len(x) <= MAX_TAG_LEN]
+
+    def _clean_enum_list(v, allowed):
+        return [x for x in _clean_tags(v) if x in allowed]
+
+    def _clean_enum(v, allowed):
+        v = str(v).strip() if v is not None else ""
+        return v if v in allowed else None
+
+    def _clean_text(v):
+        v = str(v).strip() if v is not None else ""
+        return v[:MAX_SHORT_TEXT] or None
+
+    def _clean_years(v):
+        if isinstance(v, bool) or not isinstance(v, int):
+            return None
+        return v if YEARS_SINCE_PHD_MIN <= v <= YEARS_SINCE_PHD_MAX else None
+
+    elig_in = structured.get("eligibility") or {}
+    org_in = structured.get("org") or {}
+    fund_in = structured.get("funding") or {}
+    geo_in = structured.get("geo") or {}
+
+    eligibility = {
+        "applicant_types": _clean_enum_list(elig_in.get("applicant_types"), APPLICANT_TYPES),
+        "role": _clean_text(elig_in.get("role")),
+        "years_since_phd": _clean_years(elig_in.get("years_since_phd")),
+    }
+    if kind == "individual":
+        eligibility["career_stage"] = _clean_enum(elig_in.get("career_stage"), CAREER_STAGES)
+
+    out: dict = {"eligibility": eligibility}
+    if kind == "organizational_unit":
+        out["org"] = {
+            "org_type": _clean_enum(org_in.get("org_type"), ORG_TYPES),
+            "capabilities": _clean_tags(org_in.get("capabilities")),
+            "patient_populations": _clean_tags(org_in.get("patient_populations")),
+            "scale": _clean_text(org_in.get("scale")),
+        }
+    out["funding"] = {
+        "instruments": _clean_enum_list(fund_in.get("instruments"), FUNDING_INSTRUMENTS),
+        "funder_exclusions": _clean_tags(fund_in.get("funder_exclusions")),
+    }
+    out["geo"] = {
+        "country": _clean_text(geo_in.get("country")),
+        "host_institution": _clean_text(geo_in.get("host_institution")),
     }
     return out
 ```
@@ -426,6 +522,11 @@ def _cfg(pg_url):
 
 
 def test_0034_maps_kinds_and_adds_columns(pg_url):
+    # NOTE: pg_url is the SHARED session container. This test mutates the schema
+    # (downgrade→upgrade) and seeds rows, so the finally MUST (a) delete the
+    # seeded rows and (b) leave the schema at head, or it poisons later tests
+    # that assume a clean head schema (pg_session_factory truncates rows but not
+    # schema version).
     cfg = _cfg(pg_url)
     command.upgrade(cfg, "head")
     command.downgrade(cfg, "0033")  # back to the pre-redesign enum schema
@@ -465,7 +566,12 @@ def test_0034_maps_kinds_and_adds_columns(pg_url):
                 )
             ).scalar_one() == "YES"
     finally:
+        # Hermetic cleanup: drop the rows we seeded and guarantee head schema.
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM profiles WHERE name IN ('Org A','Grp B','Dr C')"))
+            c.execute(text("DELETE FROM users WHERE email='m@ki.se'"))
         eng.dispose()
+        command.upgrade(cfg, "head")  # restore for subsequent tests
 
 
 def test_0034_downgrade_runs_clean(pg_url):
@@ -985,6 +1091,14 @@ def test_create_individual_persists_eligibility(monkeypatch, pg_url, pg_session_
             follow_redirects=False,
         )
     assert r.status_code == 303
+    from sqlalchemy import select
+    from call_manager.db.models import Profile
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Dr A")).scalar_one()
+        assert p.kind == "individual"
+        assert "solo_pi" in p.structured["eligibility"]["applicant_types"]
+        assert p.structured["eligibility"]["career_stage"] == "postdoc"
+        assert p.structured["geo"]["host_institution"] == "Karolinska"
 
 
 def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_factory):
@@ -1013,7 +1127,11 @@ Extend `profile_new_submit` to accept the new form fields, validate via `parse_s
 
 ```python
 from fastapi import HTTPException
-from call_manager.profiles.fields import FieldValidationError, parse_structured
+from call_manager.profiles.fields import (
+    FieldValidationError,
+    parse_structured,
+    sanitize_structured,
+)
 from call_manager.db.models import ProfileKind, ProfileLevel
 ```
 
@@ -1085,13 +1203,20 @@ def profile_new_submit(
     )
     # ... existing pubmed/ollama bootstrap call (unchanged) ...
 
-    # Merge: bootstrap draft.structured is the base; user-entered values win.
+    # Merge: bootstrap draft is the base, but its LLM-suggested namespaces are
+    # SANITIZED before they are ever persisted (parse_structured guards user
+    # input; sanitize_structured guards machine input). User-entered values then
+    # win over the sanitized suggestions.
+    draft_clean = sanitize_structured(kind=kind, structured=draft.structured)
     merged = dict(draft.structured)
     merged["areas"] = user_structured["areas"] or draft.structured.get("areas", [])
     for ns in ("eligibility", "org", "funding", "geo"):
-        if ns in user_structured:
-            merged.setdefault(ns, {})
-            merged[ns] = {**merged.get(ns, {}), **{k: v for k, v in user_structured[ns].items() if v not in (None, [], "")}}
+        base_ns = draft_clean.get(ns, {})
+        user_ns = {
+            k: v for k, v in user_structured.get(ns, {}).items() if v not in (None, [], "")
+        }
+        if base_ns or user_ns:
+            merged[ns] = {**base_ns, **user_ns}
 
     profile = Profile(
         name=name, kind=kind, level=level_val,
@@ -1146,7 +1271,7 @@ def test_edit_persists_new_fields_and_schedules_backfill(monkeypatch, pg_url, pg
     with client:
         r = client.post(
             f"/profiles/{pid}/edit",
-            data={"description": "d", "org_type": "university_hospital",
+            data={"description": "d", "level": "clinic", "org_type": "university_hospital",
                   "capabilities": "biobank\nimaging_core", "budget_currency": ""},
             follow_redirects=False,
         )
@@ -1155,8 +1280,27 @@ def test_edit_persists_new_fields_and_schedules_backfill(monkeypatch, pg_url, pg
     assert scheduled["backfill"] == 1
     with pg_session_factory() as s:
         got = s.get(Profile, pid)
+        assert got.level == "clinic"  # editable level persisted (was NULL for migrated orgs)
         assert got.structured["org"]["org_type"] == "university_hospital"
         assert "biobank" in got.structured["org"]["capabilities"]
+
+
+def test_edit_rejects_unknown_level(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    from call_manager.db.models import Profile, User
+    with pg_session_factory() as s:
+        u = User(email="o2@ki.se"); s.add(u); s.flush()
+        p = Profile(name="Lab2", kind="organizational_unit", level=None,
+                    description="d", structured={"areas": []}, created_by=u.id)
+        s.add(p); s.commit(); pid, uid = p.id, u.id
+    client = _logged_in(app, pg_session_factory, user_id=uid)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={"description": "d", "level": "galaxy", "budget_currency": ""},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
 ```
 
 > Adapt `_logged_in(... user_id=)` to whatever the existing helper supports; the point is to POST as the profile owner.
@@ -1168,9 +1312,17 @@ Expected: FAIL (edit route ignores org_type/capabilities)
 
 - [ ] **Step 3: Write minimal implementation**
 
-Extend `profile_edit_submit` to accept the new fields, validate via `parse_structured` (kind read from the loaded profile), and merge into `structured` alongside the existing rubric keys. The existing background `_refresh_and_backfill_in_background` task already always runs `backfill_profile` (re-rank) and only re-embeds when `description` changed — keep that. Add the new `Form(...)` params (same names as Task 7) and replace the `p.structured = {...}` assignment:
+Extend `profile_edit_submit` to accept the new fields **including `level`**, validate via `parse_structured` (kind read from the loaded profile), assign `p.level` for organizational units, and merge into `structured` alongside the existing rubric keys. The existing background `_refresh_and_backfill_in_background` task already always runs `backfill_profile` (re-rank) and only re-embeds when `description` changed — keep that. Add the new `Form(...)` params — same names as Task 7 **plus `level: str = Form("")`** — and replace the `p.structured = {...}` assignment:
 
 ```python
+    # Level is editable for organizational units (migrated org rows start NULL,
+    # and the spec promises owners can fill it in here). Ignored for individuals.
+    if p.kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
+        lv = (level or "").strip() or None
+        if lv is not None and lv not in {x.value for x in ProfileLevel}:
+            raise HTTPException(status_code=400, detail=f"unknown level: {level!r}")
+        p.level = lv
+
     # existing rubric keys (kept) ...
     base = {
         "areas": _split_lines(areas),
@@ -1376,7 +1528,7 @@ Rewrite `profile_new.html`'s form to: a `kind` select with `organizational_unit`
 {% endblock %}
 ```
 
-For `profile_edit.html`: add the same field groups (rendered with `{% if profile.kind == 'individual' %}` / `'organizational_unit'`), pre-filled from `profile.structured.get(ns, {})`. Use Jinja `profile.structured.get('org', {}).get('capabilities', []) | join('\n')` style. For `profile_detail.html`: add a read-only section listing the populated new fields (skip empties), and show `profile.level` next to the kind.
+For `profile_edit.html`: add the same field groups (rendered with `{% if profile.kind == 'individual' %}` / `'organizational_unit'`), pre-filled from `profile.structured.get(ns, {})`. Use Jinja `profile.structured.get('org', {}).get('capabilities', []) | join('\n')` style. **For organizational units, include a `level` `<select name="level">`** (same options as `profile_new.html`) pre-selected to `profile.level` so the owner can fill in the NULL level on migrated orgs — this is the field Task 8 persists. For `profile_detail.html`: add a read-only section listing the populated new fields (skip empties), and show `profile.level` next to the kind.
 
 > Keep the existing budget/currency/TRL/must_include/hard_exclusions blocks in `profile_edit.html` exactly as they are; just add the new groups around them. Read the current files before editing and preserve existing structure.
 
@@ -1561,14 +1713,17 @@ Expected: PASS (both — they assert already-correct behavior; if `build_message
 
 - [ ] **Step 3: Full suite + lint**
 
-Run:
+Run (do NOT pipe pytest through grep — that masks its exit code; the APScheduler
+"Event loop is closed" teardown lines are harmless noise, not failures):
 ```bash
-uv run pytest -q -p no:cacheprovider 2>&1 | grep -E "passed|failed|error" | grep -vE "raised an exception|Event loop|I/O"
+uv run pytest -q -p no:cacheprovider   # exit code is authoritative
 uv run ruff format src/ tests/ alembic/
 uv run ruff check --fix src/ tests/ alembic/
 uv run ruff check src/ tests/ alembic/
 ```
-Expected: full suite passes (0 failed); ruff clean.
+Expected: pytest exits 0 (look at the `N passed` summary line, not a grep); ruff clean.
+If you must filter the noise, use `set -o pipefail` first so a failing run still
+fails the pipe.
 
 - [ ] **Step 4: Fix any regressions**
 
@@ -1577,7 +1732,8 @@ Likely touch points if red: other tests that construct `Profile(kind="group"|"or
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A
+# Explicit paths — avoid `git add -A` (untracked var/ runtime dir must stay out).
+git add src/ tests/ alembic/ docs/
 git commit -m "test(profiles): redesign e2e + backward-compat; suite green"
 ```
 
