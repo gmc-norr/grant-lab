@@ -60,7 +60,7 @@ def test_post_new_with_call_and_profile_links(
         prof = Profile(
             name="P",
             description="d",
-            kind="group",
+            kind="organizational_unit",
             created_by=current_user.id,
         )
         s.add(prof)

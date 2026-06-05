@@ -69,7 +69,7 @@ def _run_round_trip(engine, alembic_cfg):
                 "INSERT INTO profiles (name, kind, description, structured, "
                 "                       created_by, is_active, "
                 "                       created_at, updated_at) "
-                "VALUES ('RT', 'group', '', '{}'::jsonb, :uid, true, now(), now())"
+                "VALUES ('RT', 'organizational_unit', '', '{}'::jsonb, :uid, true, now(), now())"
             ),
             {"uid": uid},
         )

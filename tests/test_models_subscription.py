@@ -12,7 +12,11 @@ def _user_and_profile(s, email="u@ki.se", profile_name="G"):
     s.add(u)
     s.flush()
     p = Profile(
-        name=profile_name, kind=ProfileKind.GROUP, description="", structured={}, created_by=u.id
+        name=profile_name,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
+        description="",
+        structured={},
+        created_by=u.id,
     )
     s.add(p)
     s.flush()

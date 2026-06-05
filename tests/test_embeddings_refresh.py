@@ -36,7 +36,7 @@ def _seed_profile(s, *, name: str = "P") -> int:
     s.flush()
     p = Profile(
         name=name,
-        kind=ProfileKind.GROUP,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
         description=f"{name} description",
         structured={"areas": [], "hard_exclusions": []},
         created_by=u.id,

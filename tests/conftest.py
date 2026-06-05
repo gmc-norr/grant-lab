@@ -100,7 +100,8 @@ def profile_factory(pg_session_factory):
     def _make(
         *,
         name: str = "Group A",
-        kind: ProfileKind = ProfileKind.GROUP,
+        kind: ProfileKind = ProfileKind.ORGANIZATIONAL_UNIT,
+        level: str | None = "group",
         description: str = "Cancer immunotherapy and digital pathology research.",
         structured: dict | None = None,
     ) -> tuple[int, int]:
@@ -111,6 +112,7 @@ def profile_factory(pg_session_factory):
             p = Profile(
                 name=name,
                 kind=kind,
+                level=level if kind == ProfileKind.ORGANIZATIONAL_UNIT else None,
                 description=description,
                 structured=structured or {},
                 created_by=u.id,

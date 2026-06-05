@@ -22,7 +22,7 @@ def test_build_messages_includes_profile_and_call_blocks():
         (),
         {
             "name": "Pathology",
-            "kind": type("K", (), {"value": "group"})(),
+            "kind": type("K", (), {"value": "organizational_unit"})(),
             "description": "Digital pathology AI",
             "structured": {
                 "areas": ["digital pathology", "AI"],
@@ -67,7 +67,7 @@ def test_build_messages_fences_untrusted_call_body_against_injection():
         (),
         {
             "name": "Onc",
-            "kind": type("K", (), {"value": "group"})(),
+            "kind": type("K", (), {"value": "organizational_unit"})(),
             "description": "Oncology",
             "structured": {"areas": ["oncology"], "hard_exclusions": []},
         },
@@ -111,7 +111,7 @@ def test_build_messages_concatenates_summary_and_full_text():
     profile = SimpleNamespace(
         name="Cancer Research",
         description="cancer biomarkers",
-        kind=SimpleNamespace(value="group"),
+        kind=SimpleNamespace(value="organizational_unit"),
         structured={"areas": [], "hard_exclusions": []},
     )
     call = SimpleNamespace(
@@ -140,7 +140,7 @@ def test_build_messages_uses_summary_only_when_full_text_is_none():
     profile = SimpleNamespace(
         name="P",
         description="d",
-        kind=SimpleNamespace(value="group"),
+        kind=SimpleNamespace(value="organizational_unit"),
         structured={"areas": [], "hard_exclusions": []},
     )
     call = SimpleNamespace(
@@ -165,7 +165,7 @@ def test_build_messages_uses_full_text_only_when_summary_is_none():
     profile = SimpleNamespace(
         name="P",
         description="d",
-        kind=SimpleNamespace(value="group"),
+        kind=SimpleNamespace(value="organizational_unit"),
         structured={"areas": [], "hard_exclusions": []},
     )
     call = SimpleNamespace(
@@ -199,7 +199,7 @@ def test_build_messages_truncates_at_call_text_limit():
     profile = SimpleNamespace(
         name="P",
         description="d",
-        kind=SimpleNamespace(value="group"),
+        kind=SimpleNamespace(value="organizational_unit"),
         structured={"areas": [], "hard_exclusions": []},
     )
     huge_full_text = "x" * 30_000
@@ -233,7 +233,7 @@ def test_build_messages_truncates_combined_summary_plus_full_text():
     profile = SimpleNamespace(
         name="P",
         description="d",
-        kind=SimpleNamespace(value="group"),
+        kind=SimpleNamespace(value="organizational_unit"),
         structured={"areas": [], "hard_exclusions": []},
     )
     summary = "Short abstract."
@@ -288,7 +288,7 @@ def test_build_messages_includes_analysis_block_when_enabled():
 
         @property
         def kind(self):
-            return type("K", (), {"value": "group"})()
+            return type("K", (), {"value": "organizational_unit"})()
 
     @dataclass
     class _C:

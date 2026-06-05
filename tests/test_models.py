@@ -49,7 +49,11 @@ def test_active_profile_name_is_unique_at_db_level(pg_session_factory):
         s.flush()
         s.add(
             Profile(
-                name="dup", kind=ProfileKind.GROUP, created_by=u.id, description="", structured={}
+                name="dup",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                created_by=u.id,
+                description="",
+                structured={},
             )
         )
         s.commit()
@@ -58,7 +62,11 @@ def test_active_profile_name_is_unique_at_db_level(pg_session_factory):
         u = s.execute(select(User).where(User.email == "owner@ki.se")).scalar_one()
         s.add(
             Profile(
-                name="dup", kind=ProfileKind.GROUP, created_by=u.id, description="", structured={}
+                name="dup",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                created_by=u.id,
+                description="",
+                structured={},
             )
         )
         s.commit()
@@ -76,7 +84,7 @@ def test_inactive_profile_reuses_name(pg_session_factory):
         s.flush()
         old = Profile(
             name="shared",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             created_by=u.id,
             description="",
             structured={},
@@ -90,7 +98,7 @@ def test_inactive_profile_reuses_name(pg_session_factory):
         s.add(
             Profile(
                 name="shared",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 created_by=u.id,
                 description="",
                 structured={},

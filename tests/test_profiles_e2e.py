@@ -109,7 +109,8 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
             "/profiles/new",
             data={
                 "name": "E2E Profile",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",

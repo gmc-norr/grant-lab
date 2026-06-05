@@ -55,7 +55,7 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
         s.flush()
         p1 = Profile(
             name="P1",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": [],
@@ -70,7 +70,7 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
         )
         p2 = Profile(
             name="P2",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": [],

@@ -12,7 +12,9 @@ def test_call_detail_includes_best_profile_id_when_ranking_exists(
         call = Call(source_id=src.id, external_id="c1", title="A", url="http://x/c1")
         s.add(call)
         s.flush()
-        prof = Profile(name="P", description="d", kind="group", created_by=current_user.id)
+        prof = Profile(
+            name="P", description="d", kind="organizational_unit", created_by=current_user.id
+        )
         s.add(prof)
         s.flush()
         s.add(
@@ -74,8 +76,12 @@ def test_call_detail_picks_highest_scoring_profile_among_users_profiles(
         call = Call(source_id=src.id, external_id="c1", title="A", url="http://x/c1")
         s.add(call)
         s.flush()
-        low = Profile(name="Low", description="d", kind="group", created_by=current_user.id)
-        high = Profile(name="High", description="d", kind="group", created_by=current_user.id)
+        low = Profile(
+            name="Low", description="d", kind="organizational_unit", created_by=current_user.id
+        )
+        high = Profile(
+            name="High", description="d", kind="organizational_unit", created_by=current_user.id
+        )
         s.add_all([low, high])
         s.flush()
         s.add(
@@ -122,7 +128,9 @@ def test_call_detail_excludes_other_users_profiles(
         call = Call(source_id=src.id, external_id="c1", title="A", url="http://x/c1")
         s.add(call)
         s.flush()
-        their_prof = Profile(name="Theirs", description="d", kind="group", created_by=other.id)
+        their_prof = Profile(
+            name="Theirs", description="d", kind="organizational_unit", created_by=other.id
+        )
         s.add(their_prof)
         s.flush()
         s.add(

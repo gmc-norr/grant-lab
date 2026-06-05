@@ -87,7 +87,7 @@ def test_e2e_pipeline(pg_session_factory):
         s.flush()
         p = Profile(
             name="E2E",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": ["AI for medical imaging"],
@@ -132,7 +132,7 @@ def test_e2e_pipeline(pg_session_factory):
     # Topic 5 (logprob expected ~5.0) × 20 = 100, no penalty.
     assert ranking.aggregate_score >= 99
     assert ranking.aggregate_reason is None
-    assert ranking.prompt_version == "v3.0"
+    assert ranking.prompt_version == "v4.0"
 
     by_name = {c.criterion: c for c in criteria}
     assert set(by_name.keys()) >= {"topic_fit", "eligibility", "exclusions", "timeline"}
@@ -233,7 +233,7 @@ def _setup_profile(pg_session_factory, *, profile_embedding):
         s.flush()
         p = Profile(
             name="Cancer biomarker group",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="Cancer biomarker research and digital pathology.",
             structured={
                 "areas": ["cancer biomarker"],

@@ -263,7 +263,8 @@ def test_profile_new_rejects_too_long_name(monkeypatch, pg_url, pg_session_facto
             "/profiles/new",
             data={
                 "name": "X" * 201,
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -281,7 +282,8 @@ def test_profile_new_rejects_oversized_grants(monkeypatch, pg_url, pg_session_fa
             "/profiles/new",
             data={
                 "name": "X",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "a" * 100_001,
@@ -339,7 +341,8 @@ def test_profile_new_rejects_duplicate_active_name(
             "/profiles/new",
             data={
                 "name": "Duplicate me",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "x",
@@ -349,8 +352,10 @@ def test_profile_new_rejects_duplicate_active_name(
     assert r.status_code == 409
 
 
-def test_profile_new_coerces_invalid_kind_to_group(monkeypatch, pg_url, pg_session_factory):
-    """Unknown kind value silently coerces to 'group'."""
+def test_profile_new_coerces_invalid_kind_to_organizational_unit(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Unknown kind value silently coerces to 'organizational_unit'."""
     from unittest.mock import patch
 
     from call_manager.profiles.seed import DraftProfile
@@ -391,10 +396,10 @@ def test_profile_new_coerces_invalid_kind_to_group(monkeypatch, pg_url, pg_sessi
 
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Coerced kind")).scalar_one()
-    assert p.kind == ProfileKind.GROUP
+    assert p.kind == ProfileKind.ORGANIZATIONAL_UNIT
 
 
-def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
+def test_profile_new_kind_organizational_unit(monkeypatch, pg_url, pg_session_factory):
     from unittest.mock import patch
 
     from call_manager.profiles.seed import DraftProfile
@@ -423,7 +428,7 @@ def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
             "/profiles/new",
             data={
                 "name": "Org profile",
-                "kind": "org",
+                "kind": "organizational_unit",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -435,7 +440,7 @@ def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
 
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Org profile")).scalar_one()
-    assert p.kind == ProfileKind.ORG
+    assert p.kind == ProfileKind.ORGANIZATIONAL_UNIT
 
 
 def test_profile_new_requires_auth(monkeypatch, pg_url):
@@ -445,7 +450,8 @@ def test_profile_new_requires_auth(monkeypatch, pg_url):
             "/profiles/new",
             data={
                 "name": "x",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -550,7 +556,7 @@ def test_profile_edit_allows_owner(monkeypatch, pg_url, pg_session_factory):
         s.flush()
         p = Profile(
             name="My profile",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="mine",
             structured={},
             created_by=u.id,
@@ -773,7 +779,8 @@ def test_profile_create_triggers_embedding_refresh(
             "/profiles/new",
             data={
                 "name": "Embed on create",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "x",
@@ -991,7 +998,8 @@ def test_profile_create_embed_failure_does_not_500(
             "/profiles/new",
             data={
                 "name": "Create-embed-fails",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
