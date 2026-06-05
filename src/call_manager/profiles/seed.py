@@ -37,9 +37,11 @@ class Publication:
 @dataclass
 class SeedInput:
     name: str  # profile name, user-visible
-    kind: str  # 'org' | 'group' | 'user'
+    kind: str  # 'organizational_unit' | 'individual'
+    level: str | None = None  # organizational unit level; None for individuals
     members: list[Member] = field(default_factory=list)
     pasted_grants: str = ""  # free text — titles + abstracts pasted in by user
+    mission_text: str = ""  # org units: mission/strategy/capabilities free text
 
 
 @dataclass

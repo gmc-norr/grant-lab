@@ -92,7 +92,7 @@ def test_admin_shows_embedding_coverage_counts(monkeypatch, pg_url, pg_session_f
         s.add(
             Profile(
                 name="P1",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description="P1 desc",
                 structured={},
                 created_by=owner.id,
@@ -105,7 +105,7 @@ def test_admin_shows_embedding_coverage_counts(monkeypatch, pg_url, pg_session_f
         s.add(
             Profile(
                 name="P2",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description="P2 desc",
                 structured={},
                 created_by=owner.id,
@@ -148,7 +148,7 @@ def test_admin_embedding_coverage_excludes_blank_description_profiles(
         s.add(
             Profile(
                 name="PA",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description="actual desc",
                 structured={},
                 created_by=owner.id,
@@ -161,7 +161,7 @@ def test_admin_embedding_coverage_excludes_blank_description_profiles(
         s.add(
             Profile(
                 name="PB",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description="",
                 structured={},
                 created_by=owner.id,
@@ -174,7 +174,7 @@ def test_admin_embedding_coverage_excludes_blank_description_profiles(
         s.add(
             Profile(
                 name="PC",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description="   ",
                 structured={},
                 created_by=owner.id,

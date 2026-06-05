@@ -53,7 +53,7 @@ def _seed_user_with_payload(s, *, email):
     s.flush()
     p = Profile(
         name=f"P-{email}",
-        kind=ProfileKind.GROUP,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
         description="",
         structured={
             "areas": [],

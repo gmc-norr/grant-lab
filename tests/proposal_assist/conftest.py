@@ -181,7 +181,7 @@ def make_profile(session, *, name: str = "Test PI Profile") -> "Profile":  # noq
     u = make_user(session, email=f"profile-owner-{name.lower().replace(' ', '-')}@ki.se")
     p = Profile(
         name=name,
-        kind=ProfileKind.GROUP,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
         description="AI-assisted diagnosis of cancer biopsies, histopathology.",
         created_by=u.id,
     )

@@ -9,9 +9,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Profile, ProfileKind, User
+from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
 from call_manager.embeddings.refresh import refresh_profile_embedding
 from call_manager.profiles.bootstrap import bootstrap_profile
+from call_manager.profiles.fields import (
+    MAX_LIST_ENTRIES,
+    MAX_TAG_LEN,
+    FieldValidationError,
+    parse_structured,
+    sanitize_structured,
+)
 from call_manager.profiles.pubmed import PubMedClient
 from call_manager.profiles.seed import Member, SeedInput
 from call_manager.ranking.backfill import backfill_profile
@@ -62,16 +69,63 @@ def profile_new_submit(
     request: Request,
     background: BackgroundTasks,
     name: str = Form(...),
-    kind: str = Form("group"),
+    kind: str = Form("organizational_unit"),
+    level: str = Form(""),
     orcids: str = Form(""),
     names_affiliations: str = Form(""),
     pasted_grants: str = Form(""),
+    mission_text: str = Form(""),
+    # new structured inputs (validated via parse_structured)
+    areas: str = Form(""),
+    career_stage: str = Form(""),
+    applicant_types: str = Form(""),
+    role: str = Form(""),
+    years_since_phd: str = Form(""),
+    org_type: str = Form(""),
+    capabilities: str = Form(""),
+    patient_populations: str = Form(""),
+    scale: str = Form(""),
+    funding_instruments: str = Form(""),
+    funder_exclusions: str = Form(""),
+    country: str = Form(""),
+    host_institution: str = Form(""),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     if len(name) > 200:
         raise HTTPException(status_code=400, detail="name too long (max 200 chars)")
     if len(pasted_grants) > 100_000:
         raise HTTPException(status_code=413, detail="pasted grants too large (max 100 KB)")
+    if kind not in {k.value for k in ProfileKind}:
+        kind = ProfileKind.ORGANIZATIONAL_UNIT.value
+    level_val: str | None = None
+    if kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
+        level_val = level.strip() or None
+        if level_val is not None and level_val not in {x.value for x in ProfileLevel}:
+            raise HTTPException(status_code=400, detail=f"unknown level: {level!r}")
+
+    # Validate the new structured inputs up-front (before the LLM round-trip).
+    try:
+        user_structured = parse_structured(
+            kind=kind,
+            raw={
+                "areas": areas,
+                "career_stage": career_stage,
+                "applicant_types": applicant_types,
+                "role": role,
+                "years_since_phd": years_since_phd,
+                "org_type": org_type,
+                "capabilities": capabilities,
+                "patient_populations": patient_populations,
+                "scale": scale,
+                "funding_instruments": funding_instruments,
+                "funder_exclusions": funder_exclusions,
+                "country": country,
+                "host_institution": host_institution,
+            },
+        )
+    except FieldValidationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
+
     session_factory = request.app.state.session_factory
     # Early bail-out for an existing active name — saves an expensive LLM
     # round-trip for the obvious duplicate case. The DB-level partial unique
@@ -84,22 +138,54 @@ def profile_new_submit(
         if existing is not None:
             raise HTTPException(status_code=409, detail="profile name already exists")
     members = _parse_members(orcids, names_affiliations)
-    if kind not in {k.value for k in ProfileKind}:
-        kind = "group"
-    seed = SeedInput(name=name, kind=kind, members=members, pasted_grants=pasted_grants)
+    seed = SeedInput(
+        name=name,
+        kind=kind,
+        level=level_val,
+        members=members,
+        pasted_grants=pasted_grants,
+        mission_text=mission_text,
+    )
 
     settings = request.app.state.settings
     pubmed = PubMedClient()
     ollama = OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model)
     draft = bootstrap_profile(seed=seed, pubmed=pubmed, ollama=ollama)
 
+    # Merge: bootstrap draft is the base, but its LLM-suggested namespaces are
+    # SANITIZED before they are ever persisted (parse_structured guards user
+    # input; sanitize_structured guards machine input). User-entered values then
+    # win over the sanitized suggestions.
+    draft_clean = sanitize_structured(kind=kind, structured=draft.structured)
+    merged = dict(draft.structured)
+    # Drop the four LLM namespaces seeded from the RAW draft. They are
+    # reintroduced below from the SANITIZED base + validated user input only —
+    # a raw namespace that sanitize_structured drops for this kind (e.g. an
+    # `org` block on an individual) must never reach the DB. See code review of
+    # Task 7: without this, an unvalidated namespace the loop can't overwrite
+    # (empty base, no user input) survived verbatim.
+    for ns in ("eligibility", "org", "funding", "geo"):
+        merged.pop(ns, None)
+    # The draft-areas fallback is raw LLM output, so apply the same count/length
+    # caps parse_structured enforces on user input before persisting it.
+    draft_areas = [x for x in draft.structured.get("areas", []) if len(str(x)) <= MAX_TAG_LEN][
+        :MAX_LIST_ENTRIES
+    ]
+    merged["areas"] = user_structured["areas"] or draft_areas
+    for ns in ("eligibility", "org", "funding", "geo"):
+        base_ns = draft_clean.get(ns, {})
+        user_ns = {k: v for k, v in user_structured.get(ns, {}).items() if v not in (None, [], "")}
+        if base_ns or user_ns:
+            merged[ns] = {**base_ns, **user_ns}
+
     try:
         with session_factory() as session:
             profile = Profile(
                 name=name,
-                kind=ProfileKind(kind),
+                kind=kind,
+                level=level_val,
                 description=draft.description,
-                structured=draft.structured,
+                structured=merged,
                 created_by=user.id,
             )
             session.add(profile)
@@ -180,6 +266,20 @@ def profile_edit_submit(
     trl_max: str = Form(""),
     must_include: str = Form(""),
     hard_exclusions: str = Form(""),
+    level: str = Form(""),
+    # new structured inputs (validated via parse_structured)
+    career_stage: str = Form(""),
+    applicant_types: str = Form(""),
+    role: str = Form(""),
+    years_since_phd: str = Form(""),
+    org_type: str = Form(""),
+    capabilities: str = Form(""),
+    patient_populations: str = Form(""),
+    scale: str = Form(""),
+    funding_instruments: str = Form(""),
+    funder_exclusions: str = Form(""),
+    country: str = Form(""),
+    host_institution: str = Form(""),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     if len(description) > 50_000:
@@ -225,7 +325,17 @@ def profile_edit_submit(
         # adding work between this assignment and the commit (or moving the
         # commit earlier) won't accidentally invalidate the comparison.
         description_changed = old_description.strip() != description.strip()
-        p.structured = {
+        # Level is editable for organizational units (migrated org rows start
+        # NULL, and the spec promises owners can fill it in here). Ignored for
+        # individuals.
+        if p.kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
+            lv = (level or "").strip() or None
+            if lv is not None and lv not in {x.value for x in ProfileLevel}:
+                raise HTTPException(status_code=400, detail=f"unknown level: {level!r}")
+            p.level = lv
+
+        # existing rubric keys (kept) ...
+        base = {
             "areas": _split_lines(areas),
             "budget_min": parsed_budget_min,
             "budget_max": parsed_budget_max,
@@ -234,6 +344,32 @@ def profile_edit_submit(
             "must_include": _split_lines(must_include),
             "hard_exclusions": _split_lines(hard_exclusions),
         }
+        try:
+            new_ns = parse_structured(
+                kind=p.kind,
+                raw={
+                    "areas": areas,
+                    "career_stage": career_stage,
+                    "applicant_types": applicant_types,
+                    "role": role,
+                    "years_since_phd": years_since_phd,
+                    "org_type": org_type,
+                    "capabilities": capabilities,
+                    "patient_populations": patient_populations,
+                    "scale": scale,
+                    "funding_instruments": funding_instruments,
+                    "funder_exclusions": funder_exclusions,
+                    "country": country,
+                    "host_institution": host_institution,
+                },
+            )
+        except FieldValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        # base owns areas/budget/trl/must_include/hard_exclusions; new_ns owns
+        # the namespaces. parse_structured also returns "areas" — base wins (it
+        # parsed the same input), so drop new_ns["areas"].
+        new_ns.pop("areas", None)
+        p.structured = {**base, **new_ns}
         p.budget_currency = normalized_currency or None
         session.commit()
 

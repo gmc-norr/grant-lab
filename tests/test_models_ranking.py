@@ -14,7 +14,7 @@ from call_manager.db.models import (
 )
 
 
-def _profile(s, name="Group A", kind=ProfileKind.GROUP):
+def _profile(s, name="Group A", kind=ProfileKind.ORGANIZATIONAL_UNIT):
     u = User(email="creator@ki.se")
     s.add(u)
     s.flush()
@@ -40,7 +40,7 @@ def test_can_create_profile(pg_session_factory):
         assert p.id is not None
         assert p.is_active is True
         assert p.created_at is not None
-        assert p.kind == ProfileKind.GROUP
+        assert p.kind == ProfileKind.ORGANIZATIONAL_UNIT
 
 
 def test_call_ranking_composite_pk(pg_session_factory):

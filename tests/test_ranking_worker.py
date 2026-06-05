@@ -31,7 +31,7 @@ def _seed(s):
     s.flush()
     p = Profile(
         name="P",
-        kind=ProfileKind.GROUP,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
         description="",
         structured={"areas": ["AI"], "hard_exclusions": []},
         created_by=u.id,
@@ -128,7 +128,7 @@ def test_worker_writes_call_ranking_with_aggregate_and_reason(pg_session_factory
     # Topic 4 (logprob expected ≈ 4.0 with strong probability) × 20 ≈ 80
     assert 75 <= r.aggregate_score <= 85
     assert r.aggregate_reason is None
-    assert r.prompt_version == "v3.0"
+    assert r.prompt_version == "v4.0"
 
 
 def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):
@@ -164,7 +164,7 @@ def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
         s.flush()
         p = Profile(
             name="SC",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,
@@ -235,7 +235,7 @@ def test_worker_must_include_with_failing_timeline_persists_llm_score(
         # Profile has must_include=["pathology"].
         p = Profile(
             name="MI",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": ["pathology"],
@@ -481,7 +481,7 @@ def test_worker_must_include_override_appears_in_summary(pg_session_factory):
         s.flush()
         p = Profile(
             name="OVR",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": ["pathology"],

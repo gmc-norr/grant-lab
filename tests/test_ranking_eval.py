@@ -85,7 +85,7 @@ def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_pat
         s.flush()
         p = Profile(
             name="GE",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,
@@ -152,7 +152,7 @@ def test_run_golden_set_eval_n_compared_reflects_actual_rows(pg_session_factory,
         s.flush()
         p = Profile(
             name="M2",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,
@@ -242,7 +242,7 @@ def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_pat
         s.flush()
         p = Profile(
             name="Dup",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={"areas": [], "hard_exclusions": []},
             created_by=u.id,

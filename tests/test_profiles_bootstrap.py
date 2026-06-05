@@ -60,7 +60,7 @@ def test_bootstrap_happy_path():
     ollama = OllamaClient(base_url="http://x", model="gemma4:e4b-q8", transport=_ollama_mock())
     seed = SeedInput(
         name="Pathology AI",
-        kind="group",
+        kind="organizational_unit",
         members=[Member(orcid="0000-0001-2345-6789")],
         pasted_grants="",
     )
@@ -81,7 +81,7 @@ def test_bootstrap_with_no_publications_still_drafts_from_grants():
     ollama = OllamaClient(base_url="http://x", model="gemma4:e4b-q8", transport=_ollama_mock())
     seed = SeedInput(
         name="Pathology AI",
-        kind="group",
+        kind="organizational_unit",
         members=[Member(orcid="0000-0001-2345-6789")],
         pasted_grants="Past grant: digital pathology pilot 2023",
     )
@@ -102,7 +102,7 @@ def test_bootstrap_pubmed_failure_falls_back_to_grants_only():
     ollama = OllamaClient(base_url="http://x", model="gemma4:e4b-q8", transport=_ollama_mock())
     seed = SeedInput(
         name="Pathology AI",
-        kind="group",
+        kind="organizational_unit",
         members=[Member(orcid="0000-0001-2345-6789")],
         pasted_grants="Past grant: digital pathology pilot 2023",
     )
@@ -129,9 +129,47 @@ def test_bootstrap_malformed_llm_envelope_does_not_throw():
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json=bad_envelope)),
     )
     seed = SeedInput(
-        name="X", kind="group", members=[Member(orcid="0000-0001-2345-6789")], pasted_grants=""
+        name="X",
+        kind="organizational_unit",
+        members=[Member(orcid="0000-0001-2345-6789")],
+        pasted_grants="",
     )
     draft = bootstrap_profile(seed=seed, pubmed=empty_pubmed, ollama=ollama)
     # Doesn't throw, returns empty-ish draft
     assert draft.description == ""
     assert draft.structured["areas"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 6: kind/level/mission_text wired through bootstrap_profile
+# ---------------------------------------------------------------------------
+
+
+class _FakeOllama:
+    def __init__(self, content):
+        self._content = content
+
+    def chat(self, *, messages):
+        # Assert the org-unit mission text reached the prompt.
+        assert any("biobank" in m["content"] for m in messages)
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+class _FakePubMed:
+    def fetch_publications(self, members):
+        return []
+
+
+def test_bootstrap_org_unit_uses_mission_text():
+    seed = SeedInput(
+        name="Path Lab",
+        kind="organizational_unit",
+        level="lab",
+        mission_text="We run a biobank.",
+    )
+    draft = bootstrap_profile(
+        seed=seed,
+        pubmed=_FakePubMed(),
+        ollama=_FakeOllama('{"description":"d","org":{"capabilities":["biobank"]}}'),
+    )
+    assert draft.structured.get("org", {}).get("capabilities") == ["biobank"]

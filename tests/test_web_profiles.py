@@ -14,24 +14,55 @@ def _setup(monkeypatch, pg_url):
     return create_app()
 
 
-def _logged_in(app, pg_session_factory, *, is_admin: bool = True):
+def _logged_in(app, pg_session_factory, *, is_admin: bool = True, user_id: int | None = None):
     """Default `is_admin=True` so existing tests that edit profiles they
     didn't create still work under the owner-or-admin gate. Tests that
     exercise the non-admin path should pass `is_admin=False` explicitly.
+
+    Pass `user_id=` to log in as an existing user (e.g. the profile owner)
+    instead of minting a fresh `u@ki.se`.
     """
-    with pg_session_factory() as s:
-        u = User(email="u@ki.se", is_admin=is_admin)
-        s.add(u)
-        s.commit()
-        s.refresh(u)
-        uid = u.id
+    if user_id is not None:
+        uid = user_id
+    else:
+        with pg_session_factory() as s:
+            u = User(email="u@ki.se", is_admin=is_admin)
+            s.add(u)
+            s.commit()
+            s.refresh(u)
+            uid = u.id
     signer: SessionSigner = app.state.session_signer
     client = TestClient(app)
     client.cookies.set("session", signer.make(user_id=uid))
     return client
 
 
-def test_profiles_list_requires_auth(monkeypatch, pg_url):
+def _app(monkeypatch, pg_url):
+    """Alias for _setup — matches the Task 7 plan's helper name."""
+    return _setup(monkeypatch, pg_url)
+
+
+def _patch_bootstrap(monkeypatch, *, structured=None, description="fake draft"):
+    """Patch bootstrap_profile so no real PubMed/Ollama call happens. The fake
+    draft carries an EMPTY structured payload by default so Task 7 tests assert
+    the USER-entered values, not the LLM suggestion. monkeypatch auto-undoes the
+    patch at test teardown."""
+    from call_manager.profiles.seed import DraftProfile
+
+    fake_draft = DraftProfile(
+        description=description,
+        structured=structured if structured is not None else {"areas": []},
+        publications_fetched=0,
+        publications_skipped=0,
+    )
+    monkeypatch.setattr(
+        "call_manager.web.routes.profiles.bootstrap_profile",
+        lambda **_: fake_draft,
+    )
+    return fake_draft
+
+
+def test_profiles_list_requires_auth(monkeypatch, pg_url, migrated_engine):
     app = _setup(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.get("/profiles")
@@ -99,10 +130,14 @@ def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_
             "/profiles/new",
             data={
                 "name": "Pathology AI",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "department",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "dummy",
+                "applicant_types": "institution",
+                "org_type": "university_hospital",
+                "country": "Sweden",
             },
             follow_redirects=False,
         )
@@ -113,6 +148,12 @@ def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_
         p = s.execute(select(Profile).where(Profile.name == "Pathology AI")).scalar_one()
     assert p.description == "fake draft description"
     assert p.structured["areas"] == ["digital pathology"]
+    # User-entered structured namespaces are persisted (not just the redirect).
+    assert "institution" in p.structured["eligibility"]["applicant_types"]
+    assert p.structured["org"]["org_type"] == "university_hospital"
+    assert p.structured["geo"]["country"] == "Sweden"
+    assert p.kind == "organizational_unit"
+    assert p.level == "department"
     assert p.is_active is True
 
 
@@ -222,7 +263,8 @@ def test_profile_new_rejects_too_long_name(monkeypatch, pg_url, pg_session_facto
             "/profiles/new",
             data={
                 "name": "X" * 201,
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -240,7 +282,8 @@ def test_profile_new_rejects_oversized_grants(monkeypatch, pg_url, pg_session_fa
             "/profiles/new",
             data={
                 "name": "X",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "a" * 100_001,
@@ -298,7 +341,8 @@ def test_profile_new_rejects_duplicate_active_name(
             "/profiles/new",
             data={
                 "name": "Duplicate me",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "x",
@@ -308,8 +352,10 @@ def test_profile_new_rejects_duplicate_active_name(
     assert r.status_code == 409
 
 
-def test_profile_new_coerces_invalid_kind_to_group(monkeypatch, pg_url, pg_session_factory):
-    """Unknown kind value silently coerces to 'group'."""
+def test_profile_new_coerces_invalid_kind_to_organizational_unit(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Unknown kind value silently coerces to 'organizational_unit'."""
     from unittest.mock import patch
 
     from call_manager.profiles.seed import DraftProfile
@@ -350,10 +396,10 @@ def test_profile_new_coerces_invalid_kind_to_group(monkeypatch, pg_url, pg_sessi
 
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Coerced kind")).scalar_one()
-    assert p.kind == ProfileKind.GROUP
+    assert p.kind == ProfileKind.ORGANIZATIONAL_UNIT
 
 
-def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
+def test_profile_new_kind_organizational_unit(monkeypatch, pg_url, pg_session_factory):
     from unittest.mock import patch
 
     from call_manager.profiles.seed import DraftProfile
@@ -382,7 +428,7 @@ def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
             "/profiles/new",
             data={
                 "name": "Org profile",
-                "kind": "org",
+                "kind": "organizational_unit",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -394,17 +440,18 @@ def test_profile_new_kind_org(monkeypatch, pg_url, pg_session_factory):
 
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Org profile")).scalar_one()
-    assert p.kind == ProfileKind.ORG
+    assert p.kind == ProfileKind.ORGANIZATIONAL_UNIT
 
 
-def test_profile_new_requires_auth(monkeypatch, pg_url):
+def test_profile_new_requires_auth(monkeypatch, pg_url, migrated_engine):
     app = _setup(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.post(
             "/profiles/new",
             data={
                 "name": "x",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -509,7 +556,7 @@ def test_profile_edit_allows_owner(monkeypatch, pg_url, pg_session_factory):
         s.flush()
         p = Profile(
             name="My profile",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="mine",
             structured={},
             created_by=u.id,
@@ -732,7 +779,8 @@ def test_profile_create_triggers_embedding_refresh(
             "/profiles/new",
             data={
                 "name": "Embed on create",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "x",
@@ -950,7 +998,8 @@ def test_profile_create_embed_failure_does_not_500(
             "/profiles/new",
             data={
                 "name": "Create-embed-fails",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
@@ -961,3 +1010,188 @@ def test_profile_create_embed_failure_does_not_500(
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Create-embed-fails")).scalar_one()
     assert p.embedding is None  # embed failed, but profile exists
+
+
+def test_create_individual_persists_eligibility(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)  # existing helper in this test module
+    _patch_bootstrap(monkeypatch)  # existing helper that fakes pubmed+ollama draft
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Dr A",
+                "kind": "individual",
+                "orcids": "0000-0001-2345-6789",
+                "career_stage": "postdoc",
+                "applicant_types": "solo_pi",
+                "host_institution": "Karolinska",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    from sqlalchemy import select
+
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Dr A")).scalar_one()
+        assert p.kind == "individual"
+        assert "solo_pi" in p.structured["eligibility"]["applicant_types"]
+        assert p.structured["eligibility"]["career_stage"] == "postdoc"
+        assert p.structured["geo"]["host_institution"] == "Karolinska"
+
+
+def test_create_individual_drops_raw_llm_org_namespace_and_caps_areas(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Regression: the bootstrap draft's RAW structured carried an `org`
+    namespace (invalid for an individual) and an over-length `areas` item.
+    sanitize_structured drops `org` for kind=individual, so it must not survive
+    into the DB; the raw `areas` fallback must respect the count/length caps."""
+    from call_manager.profiles.fields import MAX_TAG_LEN
+
+    overlong = "x" * (MAX_TAG_LEN + 5)
+    _patch_bootstrap(
+        monkeypatch,
+        structured={
+            "areas": ["valid area", overlong],
+            # An individual has no `org` namespace; the LLM emitted one anyway.
+            "org": {
+                "org_type": "EVIL_UNVALIDATED",
+                "capabilities": ["a" * 999],
+            },
+        },
+    )
+    app = _app(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Dr Org",
+                "kind": "individual",
+                "career_stage": "postdoc",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Dr Org")).scalar_one()
+        assert p.kind == "individual"
+        # The raw, unsanitized org namespace must NOT have reached the DB.
+        assert not p.structured.get("org")
+        # Raw draft areas respect the caps: over-length item dropped.
+        assert p.structured["areas"] == ["valid area"]
+        assert all(len(a) <= MAX_TAG_LEN for a in p.structured["areas"])
+
+
+def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _patch_bootstrap(monkeypatch)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={"name": "Dr B", "kind": "individual", "career_stage": "wizard"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+
+
+def test_edit_persists_new_fields_and_schedules_backfill(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    scheduled = {"backfill": 0}
+    import call_manager.web.routes.profiles as profiles_mod
+
+    monkeypatch.setattr(
+        profiles_mod,
+        "backfill_profile",
+        lambda **kw: scheduled.__setitem__("backfill", scheduled["backfill"] + 1),
+    )
+    # create an org-unit profile directly
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        from call_manager.db.models import User
+
+        u = User(email="o@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="Lab",
+            kind="organizational_unit",
+            level="lab",
+            description="d",
+            structured={"areas": []},
+            created_by=u.id,
+        )
+        s.add(p)
+        s.commit()
+        pid, uid = p.id, u.id
+    client = _logged_in(app, pg_session_factory, user_id=uid)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "d",
+                "level": "clinic",
+                "org_type": "university_hospital",
+                "capabilities": "biobank\nimaging_core",
+                "budget_currency": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    # background task ran the re-rank even though description didn't change
+    assert scheduled["backfill"] == 1
+    with pg_session_factory() as s:
+        got = s.get(Profile, pid)
+        assert got.level == "clinic"  # editable level persisted (was NULL for migrated orgs)
+        assert got.structured["org"]["org_type"] == "university_hospital"
+        assert "biobank" in got.structured["org"]["capabilities"]
+
+
+def test_edit_rejects_unknown_level(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    from call_manager.db.models import Profile, User
+
+    with pg_session_factory() as s:
+        u = User(email="o2@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="Lab2",
+            kind="organizational_unit",
+            level=None,
+            description="d",
+            structured={"areas": []},
+            created_by=u.id,
+        )
+        s.add(p)
+        s.commit()
+        pid, uid = p.id, u.id
+    client = _logged_in(app, pg_session_factory, user_id=uid)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={"description": "d", "level": "galaxy", "budget_currency": ""},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+
+
+def test_new_form_has_kind_and_unit_and_individual_fields(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/profiles/new")
+    assert r.status_code == 200
+    body = r.text
+    assert 'value="organizational_unit"' in body and 'value="individual"' in body
+    assert 'name="career_stage"' in body  # individual field
+    assert 'name="capabilities"' in body  # unit field
+    assert 'name="funding_instruments"' in body

@@ -31,7 +31,7 @@ def _seed(s, *, n_calls: int = 3, n_profiles: int = 2) -> None:
         s.add(
             Profile(
                 name=f"P{i}",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description=f"Description for P{i}",
                 structured={},
                 created_by=u.id,
@@ -118,7 +118,7 @@ def test_cli_backfill_terminates_when_only_blank_description_profiles_remain(
         s.add(
             Profile(
                 name="BlankCLI",
-                kind=ProfileKind.GROUP,
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
                 description="",
                 structured={},
                 created_by=u.id,

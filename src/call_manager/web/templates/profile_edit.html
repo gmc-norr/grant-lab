@@ -20,6 +20,84 @@
     <textarea name="areas" rows="4">{{ profile.structured.areas | join('\n') if profile.structured.areas else '' }}</textarea>
   </label>
 
+  {% set elig = profile.structured.get('eligibility', {}) %}
+  {% set org = profile.structured.get('org', {}) %}
+  {% set funding = profile.structured.get('funding', {}) %}
+  {% set geo = profile.structured.get('geo', {}) %}
+
+  {% if profile.kind == 'organizational_unit' %}
+  <fieldset>
+    <label>Level
+      <select name="level">
+        <option value="" {% if not profile.level %}selected{% endif %}>(unspecified)</option>
+        <option value="lab" {% if profile.level == 'lab' %}selected{% endif %}>Lab</option>
+        <option value="group" {% if profile.level == 'group' %}selected{% endif %}>Research group</option>
+        <option value="department" {% if profile.level == 'department' %}selected{% endif %}>Department</option>
+        <option value="clinic" {% if profile.level == 'clinic' %}selected{% endif %}>Clinic</option>
+        <option value="institution" {% if profile.level == 'institution' %}selected{% endif %}>Institution</option>
+        <option value="other" {% if profile.level == 'other' %}selected{% endif %}>Other</option>
+      </select>
+    </label>
+    <label>Organization type
+      <select name="org_type">
+        <option value="" {% if not org.get('org_type') %}selected{% endif %}>(unspecified)</option>
+        <option value="research_organisation" {% if org.get('org_type') == 'research_organisation' %}selected{% endif %}>Research organisation</option>
+        <option value="university_hospital" {% if org.get('org_type') == 'university_hospital' %}selected{% endif %}>University hospital</option>
+        <option value="public_body" {% if org.get('org_type') == 'public_body' %}selected{% endif %}>Public body</option>
+        <option value="sme" {% if org.get('org_type') == 'sme' %}selected{% endif %}>SME</option>
+        <option value="other" {% if org.get('org_type') == 'other' %}selected{% endif %}>Other</option>
+      </select>
+    </label>
+    <label>Capabilities <small class="muted">(one per line)</small>
+      <textarea name="capabilities" rows="3">{{ org.get('capabilities', []) | join('\n') }}</textarea>
+    </label>
+    <label>Patient populations <small class="muted">(one per line)</small>
+      <textarea name="patient_populations" rows="2">{{ org.get('patient_populations', []) | join('\n') }}</textarea>
+    </label>
+    <label>Scale <small class="muted">(free text)</small>
+      <input type="text" name="scale" maxlength="200" value="{{ org.get('scale') or '' }}">
+    </label>
+  </fieldset>
+  {% endif %}
+
+  {% if profile.kind == 'individual' %}
+  <fieldset>
+    <label>Career stage
+      <select name="career_stage">
+        <option value="" {% if not elig.get('career_stage') %}selected{% endif %}>(unspecified)</option>
+        <option value="phd_student" {% if elig.get('career_stage') == 'phd_student' %}selected{% endif %}>PhD student</option>
+        <option value="postdoc" {% if elig.get('career_stage') == 'postdoc' %}selected{% endif %}>Postdoc</option>
+        <option value="junior_pi" {% if elig.get('career_stage') == 'junior_pi' %}selected{% endif %}>Junior PI</option>
+        <option value="senior_pi" {% if elig.get('career_stage') == 'senior_pi' %}selected{% endif %}>Senior PI</option>
+        <option value="group_leader" {% if elig.get('career_stage') == 'group_leader' %}selected{% endif %}>Group leader</option>
+      </select>
+    </label>
+    <label>Role <small class="muted">(free text)</small>
+      <input type="text" name="role" maxlength="200" value="{{ elig.get('role') or '' }}">
+    </label>
+    <label>Years since PhD <small class="muted">(0–80)</small>
+      <input type="text" name="years_since_phd" value="{{ '' if elig.get('years_since_phd') is none else elig.get('years_since_phd') }}">
+    </label>
+  </fieldset>
+  {% endif %}
+
+  <label>Host institution
+    <input type="text" name="host_institution" maxlength="200" value="{{ geo.get('host_institution') or '' }}">
+  </label>
+  <label>Country (e.g. SE)
+    <input type="text" name="country" maxlength="200" value="{{ geo.get('country') or '' }}">
+  </label>
+
+  <label>Applicant types <small class="muted">(one per line: solo_pi, consortium_coordinator, consortium_partner, institution)</small>
+    <textarea name="applicant_types" rows="2">{{ elig.get('applicant_types', []) | join('\n') }}</textarea>
+  </label>
+  <label>Funding instruments <small class="muted">(one per line: project_grant, fellowship, mobility, infrastructure, programme)</small>
+    <textarea name="funding_instruments" rows="2">{{ funding.get('instruments', []) | join('\n') }}</textarea>
+  </label>
+  <label>Funder exclusions <small class="muted">(one per line)</small>
+    <textarea name="funder_exclusions" rows="2">{{ funding.get('funder_exclusions', []) | join('\n') }}</textarea>
+  </label>
+
   <div class="grid">
     <label>
       Budget min

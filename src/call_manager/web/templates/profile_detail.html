@@ -9,7 +9,10 @@
       {{ profile.name }}
       {% if not profile.is_active %}<small class="muted">(inactive)</small>{% endif %}
     </h1>
-    <p>{{ profile.kind.value if profile.kind.value is defined else profile.kind }}</p>
+    <p>
+      {{ profile.kind.value if profile.kind.value is defined else profile.kind }}
+      {% if profile.level %}<small class="muted">· {{ profile.level }}</small>{% endif %}
+    </p>
   </hgroup>
   <div role="group">
     <a href="/?profile={{ profile.id }}" role="button">Ranked feed →</a>
@@ -65,4 +68,63 @@
     </dd>
   </dl>
 </article>
+
+{% set elig = profile.structured.get('eligibility', {}) %}
+{% set org = profile.structured.get('org', {}) %}
+{% set funding = profile.structured.get('funding', {}) %}
+{% set geo = profile.structured.get('geo', {}) %}
+{% set has_profile_fields =
+     org.get('org_type') or org.get('capabilities') or org.get('patient_populations')
+     or org.get('scale') or elig.get('career_stage') or elig.get('applicant_types')
+     or elig.get('role') or elig.get('years_since_phd') is not none
+     or funding.get('instruments') or funding.get('funder_exclusions')
+     or geo.get('country') or geo.get('host_institution') %}
+{% if has_profile_fields %}
+<article>
+  <header><strong>Profile</strong></header>
+  <dl>
+    {% if org.get('org_type') %}
+      <dt>Organization type</dt><dd>{{ org.get('org_type') }}</dd>
+    {% endif %}
+    {% if org.get('capabilities') %}
+      <dt>Capabilities</dt>
+      <dd>{% for c in org.get('capabilities') %}<code style="margin-right:0.3em">{{ c }}</code>{% endfor %}</dd>
+    {% endif %}
+    {% if org.get('patient_populations') %}
+      <dt>Patient populations</dt>
+      <dd>{% for p in org.get('patient_populations') %}<code style="margin-right:0.3em">{{ p }}</code>{% endfor %}</dd>
+    {% endif %}
+    {% if org.get('scale') %}
+      <dt>Scale</dt><dd>{{ org.get('scale') }}</dd>
+    {% endif %}
+    {% if elig.get('career_stage') %}
+      <dt>Career stage</dt><dd>{{ elig.get('career_stage') }}</dd>
+    {% endif %}
+    {% if elig.get('role') %}
+      <dt>Role</dt><dd>{{ elig.get('role') }}</dd>
+    {% endif %}
+    {% if elig.get('years_since_phd') is not none %}
+      <dt>Years since PhD</dt><dd>{{ elig.get('years_since_phd') }}</dd>
+    {% endif %}
+    {% if elig.get('applicant_types') %}
+      <dt>Applicant types</dt>
+      <dd>{% for a in elig.get('applicant_types') %}<code style="margin-right:0.3em">{{ a }}</code>{% endfor %}</dd>
+    {% endif %}
+    {% if funding.get('instruments') %}
+      <dt>Funding instruments</dt>
+      <dd>{% for i in funding.get('instruments') %}<code style="margin-right:0.3em">{{ i }}</code>{% endfor %}</dd>
+    {% endif %}
+    {% if funding.get('funder_exclusions') %}
+      <dt>Funder exclusions</dt>
+      <dd>{% for f in funding.get('funder_exclusions') %}<code style="margin-right:0.3em">{{ f }}</code>{% endfor %}</dd>
+    {% endif %}
+    {% if geo.get('host_institution') %}
+      <dt>Host institution</dt><dd>{{ geo.get('host_institution') }}</dd>
+    {% endif %}
+    {% if geo.get('country') %}
+      <dt>Country</dt><dd>{{ geo.get('country') }}</dd>
+    {% endif %}
+  </dl>
+</article>
+{% endif %}
 {% endblock %}

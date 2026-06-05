@@ -28,7 +28,7 @@ def _seed_user_with_profile(s, *, email="u@ki.se", profile_name="P", must_includ
     s.flush()
     p = Profile(
         name=profile_name,
-        kind=ProfileKind.GROUP,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
         description="",
         structured={
             "areas": [],
@@ -223,7 +223,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(pg_session_facto
         s.flush()
         p_must = Profile(
             name="MustProfile",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": [],
@@ -238,7 +238,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(pg_session_facto
         )
         p_top = Profile(
             name="TopProfile",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": [],
@@ -294,7 +294,7 @@ def test_assemble_handles_profile_missing_must_include_key(pg_session_factory, n
         s.flush()
         p = Profile(
             name="Legacy",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={},  # no must_include key
             created_by=u.id,
@@ -410,7 +410,7 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(pg_session_factory, 
         s.flush()
         p_low = Profile(
             name="LowProfile",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": [],
@@ -425,7 +425,7 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(pg_session_factory, 
         )
         p_high = Profile(
             name="HighProfile",
-            kind=ProfileKind.GROUP,
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
             description="",
             structured={
                 "areas": [],
