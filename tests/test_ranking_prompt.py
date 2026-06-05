@@ -11,9 +11,9 @@ from call_manager.ranking.prompt import (
 )
 
 
-def test_prompt_version_bumped_to_v3():
+def test_prompt_version_bumped_to_v4():
     """The prompt's input shape changed — bump PROMPT_VERSION for audit/A-B."""
-    assert PROMPT_VERSION == "v3.0"
+    assert PROMPT_VERSION == "v4.0"
 
 
 def test_build_messages_includes_profile_and_call_blocks():
@@ -490,3 +490,57 @@ def test_parse_response_verification_tolerates_whitespace_normalization():
     haystack = "AI for medical\nimaging in cancer\xa0screening and treatment"
     parsed = parse_response(content, verification_text=haystack)
     assert parsed.topic_fit_quoted == "imaging in cancer screening"
+
+
+# --- Task 10: profile eligibility/org context enrichment ----------------------
+
+
+@pytest.fixture
+def make_call():
+    """Minimal call stub factory matching what build_messages reads."""
+    from types import SimpleNamespace
+
+    def _make(**overrides):
+        defaults = dict(
+            title="A call",
+            summary="Some summary text.",
+            full_text=None,
+            programme="Vinnova",
+            deadline=None,
+            budget_min=None,
+            budget_max=None,
+            currency=None,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    return _make
+
+
+class _P:  # minimal profile stub matching what build_messages reads
+    name = "Lab"
+    kind = "organizational_unit"
+    description = "d"
+    budget_currency = None
+    structured = {
+        "areas": ["oncology"],
+        "hard_exclusions": [],
+        "org": {"org_type": "university_hospital", "capabilities": ["biobank"]},
+        "eligibility": {"applicant_types": ["consortium_partner"]},
+        "funding": {"instruments": ["infrastructure"], "funder_exclusions": ["defence"]},
+        "geo": {"country": "SE"},
+    }
+
+
+def test_prompt_includes_eligibility_and_org_context(make_call):
+    msgs = build_messages(profile=_P(), call=make_call())
+    blob = "\n".join(m["content"] for m in msgs)
+    assert "university_hospital" in blob
+    assert "consortium_partner" in blob
+    assert "infrastructure" in blob
+    assert "defence" in blob  # funder_exclusions surfaced
+    assert "biobank" in blob
+
+
+def test_prompt_version_bumped():
+    assert PROMPT_VERSION == "v4.0"

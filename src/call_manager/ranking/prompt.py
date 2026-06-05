@@ -7,7 +7,7 @@ from dataclasses import dataclass
 # Bump only when the prompt structure changes in a way that warrants
 # re-ranking. Stored on every CallRanking row so historical scores stay
 # attributable to the regime that produced them.
-PROMPT_VERSION = "v3.0"
+PROMPT_VERSION = "v4.0"
 CALL_TEXT_LIMIT = 16000
 
 
@@ -62,14 +62,25 @@ PROFILE:
   Description: {description}
   Research areas: {areas}
   Hard exclusions: {hard_exclusions}
+  Eligibility & organizational context:
+{eligibility_block}
 
 CRITERIA:
   1. topic_fit (integer 0-5): how well the call's scope aligns with
      the profile's research areas. 5 = direct match on a named area;
      3 = adjacent/applicable; 1 = tangential; 0 = unrelated.
-  2. eligibility (pass | fail | unclear): whether a profile of this
-     kind would be eligible to apply. fail = clearly ineligible based
-     on a stated requirement. unclear = cannot determine from the text.
+  2. eligibility (pass | fail | unclear): would this profile's applicant
+     type / career stage / organization type be eligible to apply?
+     Consider the eligibility & organizational context above — weigh the
+     applicant types, career stage, organization type, country, and host
+     institution against the call's stated requirements. Treat the
+     "Funder/instrument exclusions" as a STRONG NEGATIVE for eligibility
+     (the applicant will not pursue those funders/instruments). The
+     capabilities, patient populations, and funding instruments sought are
+     supporting context. pass = eligible; fail = clearly ineligible based
+     on a stated requirement; unclear = cannot determine from the text.
+     Do NOT treat funder exclusions as a TOPIC exclusion — topic exclusions
+     are handled separately by the exclusions criterion below.
   3. exclusions (pass | fail): whether the call violates any of the
      profile's hard exclusions.
 
@@ -139,6 +150,36 @@ CALL_BODY>>>
 """
 
 
+def _eligibility_block(structured: dict) -> str:
+    """Format the new namespaced eligibility/org/funding/geo fields for the
+    PROFILE block. Skips empty fields; returns a placeholder when nothing is
+    populated so the template line never renders bare."""
+    elig = structured.get("eligibility") or {}
+    org = structured.get("org") or {}
+    funding = structured.get("funding") or {}
+    geo = structured.get("geo") or {}
+    lines = []
+    if elig.get("career_stage"):
+        lines.append(f"  Career stage: {elig['career_stage']}")
+    if elig.get("applicant_types"):
+        lines.append(f"  Applicant types: {', '.join(elig['applicant_types'])}")
+    if org.get("org_type"):
+        lines.append(f"  Organization type: {org['org_type']}")
+    if org.get("capabilities"):
+        lines.append(f"  Capabilities: {', '.join(org['capabilities'])}")
+    if org.get("patient_populations"):
+        lines.append(f"  Patient populations: {', '.join(org['patient_populations'])}")
+    if funding.get("instruments"):
+        lines.append(f"  Funding instruments sought: {', '.join(funding['instruments'])}")
+    if funding.get("funder_exclusions"):
+        lines.append(f"  Funder/instrument exclusions: {', '.join(funding['funder_exclusions'])}")
+    if geo.get("country"):
+        lines.append(f"  Country: {geo['country']}")
+    if geo.get("host_institution"):
+        lines.append(f"  Host institution: {geo['host_institution']}")
+    return "\n".join(lines) if lines else "  (none specified)"
+
+
 def build_messages(*, profile, call, enable_analysis: bool = False) -> list[dict]:
     """Build the criterion-rubric prompt. Profile block first so the
     Ollama prefix cache is reused across calls scored against the same
@@ -163,6 +204,7 @@ def build_messages(*, profile, call, enable_analysis: bool = False) -> list[dict
         description=profile.description or "",
         areas=", ".join(structured.get("areas") or []) or "(none)",
         hard_exclusions=", ".join(structured.get("hard_exclusions") or []) or "(none)",
+        eligibility_block=_eligibility_block(structured),
         analysis_schema=_ANALYSIS_SCHEMA_FRAGMENT if enable_analysis else "",
         analysis_instructions=_ANALYSIS_INSTRUCTIONS_FRAGMENT if enable_analysis else "",
     )
