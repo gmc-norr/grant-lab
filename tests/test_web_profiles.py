@@ -31,6 +31,31 @@ def _logged_in(app, pg_session_factory, *, is_admin: bool = True):
     return client
 
 
+def _app(monkeypatch, pg_url):
+    """Alias for _setup — matches the Task 7 plan's helper name."""
+    return _setup(monkeypatch, pg_url)
+
+
+def _patch_bootstrap(monkeypatch, *, structured=None, description="fake draft"):
+    """Patch bootstrap_profile so no real PubMed/Ollama call happens. The fake
+    draft carries an EMPTY structured payload by default so Task 7 tests assert
+    the USER-entered values, not the LLM suggestion. monkeypatch auto-undoes the
+    patch at test teardown."""
+    from call_manager.profiles.seed import DraftProfile
+
+    fake_draft = DraftProfile(
+        description=description,
+        structured=structured if structured is not None else {"areas": []},
+        publications_fetched=0,
+        publications_skipped=0,
+    )
+    monkeypatch.setattr(
+        "call_manager.web.routes.profiles.bootstrap_profile",
+        lambda **_: fake_draft,
+    )
+    return fake_draft
+
+
 def test_profiles_list_requires_auth(monkeypatch, pg_url):
     app = _setup(monkeypatch, pg_url)
     with TestClient(app) as client:
@@ -99,10 +124,14 @@ def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_
             "/profiles/new",
             data={
                 "name": "Pathology AI",
-                "kind": "group",
+                "kind": "organizational_unit",
+                "level": "department",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "dummy",
+                "applicant_types": "institution",
+                "org_type": "university_hospital",
+                "country": "Sweden",
             },
             follow_redirects=False,
         )
@@ -113,6 +142,12 @@ def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_
         p = s.execute(select(Profile).where(Profile.name == "Pathology AI")).scalar_one()
     assert p.description == "fake draft description"
     assert p.structured["areas"] == ["digital pathology"]
+    # User-entered structured namespaces are persisted (not just the redirect).
+    assert "institution" in p.structured["eligibility"]["applicant_types"]
+    assert p.structured["org"]["org_type"] == "university_hospital"
+    assert p.structured["geo"]["country"] == "Sweden"
+    assert p.kind == "organizational_unit"
+    assert p.level == "department"
     assert p.is_active is True
 
 
@@ -961,3 +996,46 @@ def test_profile_create_embed_failure_does_not_500(
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Create-embed-fails")).scalar_one()
     assert p.embedding is None  # embed failed, but profile exists
+
+
+def test_create_individual_persists_eligibility(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)  # existing helper in this test module
+    _patch_bootstrap(monkeypatch)  # existing helper that fakes pubmed+ollama draft
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Dr A",
+                "kind": "individual",
+                "orcids": "0000-0001-2345-6789",
+                "career_stage": "postdoc",
+                "applicant_types": "solo_pi",
+                "host_institution": "Karolinska",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    from sqlalchemy import select
+
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Dr A")).scalar_one()
+        assert p.kind == "individual"
+        assert "solo_pi" in p.structured["eligibility"]["applicant_types"]
+        assert p.structured["eligibility"]["career_stage"] == "postdoc"
+        assert p.structured["geo"]["host_institution"] == "Karolinska"
+
+
+def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _patch_bootstrap(monkeypatch)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={"name": "Dr B", "kind": "individual", "career_stage": "wizard"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
