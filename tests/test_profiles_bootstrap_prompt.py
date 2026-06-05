@@ -14,13 +14,15 @@ _FAKE_PUBS = [
 
 
 def test_prompt_version_is_v1():
-    assert BOOTSTRAP_PROMPT_VERSION == "v1"
+    # Updated: version was bumped to v2 in Task 5 (kind-aware bootstrap prompt).
+    assert BOOTSTRAP_PROMPT_VERSION == "v2"
 
 
 def test_messages_include_publications_and_grants():
     msgs = build_bootstrap_messages(
         profile_name="Pathology AI",
-        kind="group",
+        kind="organizational_unit",
+        level="group",
         publications=_FAKE_PUBS,
         pasted_grants="Past grant: digital pathology pilot 2023",
     )
@@ -69,3 +71,47 @@ def test_parse_invalid_json_raises():
 
     with pytest.raises(BootstrapParseError):
         parse_bootstrap_response("not json")
+
+
+def test_org_unit_prompt_mentions_capabilities_not_members():
+    msgs = build_bootstrap_messages(
+        profile_name="Path Lab",
+        kind="organizational_unit",
+        level="lab",
+        publications=[],
+        pasted_grants="",
+        mission_text="We operate a biobank and an imaging core.",
+    )
+    system = msgs[0]["content"]
+    user = msgs[1]["content"]
+    assert "organizational_unit" in system or "organizational unit" in system.lower()
+    assert "capabilities" in system.lower()
+    assert "biobank" in user  # mission text is included
+
+
+def test_individual_prompt_mentions_career_stage():
+    msgs = build_bootstrap_messages(
+        profile_name="Dr A",
+        kind="individual",
+        level=None,
+        publications=[],
+        pasted_grants="",
+        mission_text="",
+    )
+    assert "career" in msgs[0]["content"].lower()
+
+
+def test_parse_bootstrap_keeps_new_namespaces_when_present():
+    content = (
+        '{"description":"d","areas":["x"],'
+        '"org":{"capabilities":["biobank"]},'
+        '"funding":{"instruments":["infrastructure"]}}'
+    )
+    draft = parse_bootstrap_response(content)
+    assert draft.structured["areas"] == ["x"]
+    assert draft.structured.get("org", {}).get("capabilities") == ["biobank"]
+    assert draft.structured.get("funding", {}).get("instruments") == ["infrastructure"]
+
+
+def test_bootstrap_prompt_version_bumped():
+    assert BOOTSTRAP_PROMPT_VERSION == "v2"
