@@ -135,3 +135,38 @@ def test_bootstrap_malformed_llm_envelope_does_not_throw():
     # Doesn't throw, returns empty-ish draft
     assert draft.description == ""
     assert draft.structured["areas"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 6: kind/level/mission_text wired through bootstrap_profile
+# ---------------------------------------------------------------------------
+
+
+class _FakeOllama:
+    def __init__(self, content):
+        self._content = content
+
+    def chat(self, *, messages):
+        # Assert the org-unit mission text reached the prompt.
+        assert any("biobank" in m["content"] for m in messages)
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+class _FakePubMed:
+    def fetch_publications(self, members):
+        return []
+
+
+def test_bootstrap_org_unit_uses_mission_text():
+    seed = SeedInput(
+        name="Path Lab",
+        kind="organizational_unit",
+        level="lab",
+        mission_text="We run a biobank.",
+    )
+    draft = bootstrap_profile(
+        seed=seed,
+        pubmed=_FakePubMed(),
+        ollama=_FakeOllama('{"description":"d","org":{"capabilities":["biobank"]}}'),
+    )
+    assert draft.structured.get("org", {}).get("capabilities") == ["biobank"]

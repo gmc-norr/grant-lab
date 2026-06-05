@@ -52,8 +52,10 @@ def bootstrap_profile(
     messages = build_bootstrap_messages(
         profile_name=seed.name,
         kind=seed.kind,
+        level=seed.level,
         publications=publications,
         pasted_grants=seed.pasted_grants,
+        mission_text=seed.mission_text,
     )
     description = ""
     structured: dict = {
