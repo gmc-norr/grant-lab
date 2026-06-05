@@ -13,6 +13,8 @@ from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
 from call_manager.embeddings.refresh import refresh_profile_embedding
 from call_manager.profiles.bootstrap import bootstrap_profile
 from call_manager.profiles.fields import (
+    MAX_LIST_ENTRIES,
+    MAX_TAG_LEN,
     FieldValidationError,
     parse_structured,
     sanitize_structured,
@@ -156,7 +158,20 @@ def profile_new_submit(
     # win over the sanitized suggestions.
     draft_clean = sanitize_structured(kind=kind, structured=draft.structured)
     merged = dict(draft.structured)
-    merged["areas"] = user_structured["areas"] or draft.structured.get("areas", [])
+    # Drop the four LLM namespaces seeded from the RAW draft. They are
+    # reintroduced below from the SANITIZED base + validated user input only —
+    # a raw namespace that sanitize_structured drops for this kind (e.g. an
+    # `org` block on an individual) must never reach the DB. See code review of
+    # Task 7: without this, an unvalidated namespace the loop can't overwrite
+    # (empty base, no user input) survived verbatim.
+    for ns in ("eligibility", "org", "funding", "geo"):
+        merged.pop(ns, None)
+    # The draft-areas fallback is raw LLM output, so apply the same count/length
+    # caps parse_structured enforces on user input before persisting it.
+    draft_areas = [x for x in draft.structured.get("areas", []) if len(str(x)) <= MAX_TAG_LEN][
+        :MAX_LIST_ENTRIES
+    ]
+    merged["areas"] = user_structured["areas"] or draft_areas
     for ns in ("eligibility", "org", "funding", "geo"):
         base_ns = draft_clean.get(ns, {})
         user_ns = {k: v for k, v in user_structured.get(ns, {}).items() if v not in (None, [], "")}

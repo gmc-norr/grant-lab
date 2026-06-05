@@ -1034,6 +1034,53 @@ def test_create_individual_persists_eligibility(monkeypatch, pg_url, pg_session_
         assert p.structured["geo"]["host_institution"] == "Karolinska"
 
 
+def test_create_individual_drops_raw_llm_org_namespace_and_caps_areas(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Regression: the bootstrap draft's RAW structured carried an `org`
+    namespace (invalid for an individual) and an over-length `areas` item.
+    sanitize_structured drops `org` for kind=individual, so it must not survive
+    into the DB; the raw `areas` fallback must respect the count/length caps."""
+    from call_manager.profiles.fields import MAX_TAG_LEN
+
+    overlong = "x" * (MAX_TAG_LEN + 5)
+    _patch_bootstrap(
+        monkeypatch,
+        structured={
+            "areas": ["valid area", overlong],
+            # An individual has no `org` namespace; the LLM emitted one anyway.
+            "org": {
+                "org_type": "EVIL_UNVALIDATED",
+                "capabilities": ["a" * 999],
+            },
+        },
+    )
+    app = _app(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            "/profiles/new",
+            data={
+                "name": "Dr Org",
+                "kind": "individual",
+                "career_stage": "postdoc",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        p = s.execute(select(Profile).where(Profile.name == "Dr Org")).scalar_one()
+        assert p.kind == "individual"
+        # The raw, unsanitized org namespace must NOT have reached the DB.
+        assert not p.structured.get("org")
+        # Raw draft areas respect the caps: over-length item dropped.
+        assert p.structured["areas"] == ["valid area"]
+        assert all(len(a) <= MAX_TAG_LEN for a in p.structured["areas"])
+
+
 def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     _patch_bootstrap(monkeypatch)
