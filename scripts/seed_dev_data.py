@@ -53,7 +53,8 @@ _NOW = datetime.now(UTC)
 
 _PROFILE = {
     "name": "Digital Pathology & Imaging AI",
-    "kind": ProfileKind.GROUP,
+    "kind": ProfileKind.ORGANIZATIONAL_UNIT,
+    "level": "group",
     "description": (
         "Clinical research group at the hospital developing and validating "
         "AI/ML for digital pathology, radiology, and federated learning across "
@@ -301,6 +302,7 @@ def main() -> int:
             profile = Profile(
                 name=_PROFILE["name"],
                 kind=_PROFILE["kind"],
+                level=_PROFILE["level"],
                 description=_PROFILE["description"],
                 structured=_PROFILE["structured"],
                 budget_currency=_PROFILE["budget_currency"],

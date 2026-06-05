@@ -62,7 +62,7 @@ def _patch_bootstrap(monkeypatch, *, structured=None, description="fake draft"):
     return fake_draft
 
 
-def test_profiles_list_requires_auth(monkeypatch, pg_url):
+def test_profiles_list_requires_auth(monkeypatch, pg_url, migrated_engine):
     app = _setup(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.get("/profiles")
@@ -443,7 +443,7 @@ def test_profile_new_kind_organizational_unit(monkeypatch, pg_url, pg_session_fa
     assert p.kind == ProfileKind.ORGANIZATIONAL_UNIT
 
 
-def test_profile_new_requires_auth(monkeypatch, pg_url):
+def test_profile_new_requires_auth(monkeypatch, pg_url, migrated_engine):
     app = _setup(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.post(
