@@ -217,6 +217,16 @@ class Settings(BaseSettings):
     def _ensure_trailing_slash(cls, v: str) -> str:
         return v if v.endswith("/") else v + "/"
 
+    @field_validator("app_base_url", mode="after")
+    @classmethod
+    def _require_url_scheme(cls, v: str) -> str:
+        # cookie_secure keys off this URL's scheme; a scheme-less value would
+        # silently disable Secure cookies (and flip the email-sender fallback
+        # in main.py). Fail fast on a malformed APP_BASE_URL instead.
+        if not v.lower().startswith(("http://", "https://")):
+            raise ValueError("APP_BASE_URL must start with http:// or https://")
+        return v
+
     @field_validator("allowed_email_domains", "initial_admin_emails", mode="before")
     @classmethod
     def _split_csv(cls, v):

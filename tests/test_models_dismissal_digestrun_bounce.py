@@ -63,22 +63,25 @@ def test_digest_run_stores_included_call_ids(pg_session_factory):
 
 
 def test_digest_run_week_start_generated_from_sent_at(pg_session_factory):
-    """The DB populates week_start = date_trunc('week', sent_at, 'UTC').
+    """The DB populates week_start = date_trunc('week', sent_at,
+    'Europe/Stockholm') — matching digest.send.week_start() so the app's
+    skip check and the DB's unique constraint agree on week boundaries.
     The app never sets it directly — verify it appears on read."""
+    from zoneinfo import ZoneInfo
+
     with pg_session_factory() as s:
         uid, _cid = _user_and_call(s)
-        # Wednesday 2026-04-22 14:30 UTC — date_trunc('week', ..., 'UTC')
-        # gives Monday 2026-04-20 00:00 UTC.
+        # Wednesday 2026-04-22 14:30 UTC. Monday 00:00 Europe/Stockholm of
+        # that week is 2026-04-20 00:00 +02:00 == 2026-04-19 22:00 UTC.
         sent = datetime(2026, 4, 22, 14, 30, tzinfo=UTC)
         s.add(DigestRun(user_id=uid, included_call_ids=[], sent_at=sent))
         s.commit()
     with pg_session_factory() as s:
         run = s.execute(select(DigestRun)).scalar_one()
     assert run.week_start is not None
-    assert run.week_start.year == 2026
-    assert run.week_start.month == 4
-    assert run.week_start.day == 20  # Monday of that week
-    assert run.week_start.hour == 0
+    # Compare as an instant: Stockholm-Monday-midnight for this week.
+    expected = datetime(2026, 4, 20, tzinfo=ZoneInfo("Europe/Stockholm"))
+    assert run.week_start == expected
 
 
 def test_digest_run_user_week_uniqueness(pg_session_factory):

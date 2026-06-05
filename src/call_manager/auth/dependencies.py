@@ -12,14 +12,18 @@ def get_current_user(request: Request, session: str | None = Cookie(default=None
     signer = request.app.state.session_signer
     session_factory = request.app.state.session_factory
     try:
-        user_id = signer.verify(session)
+        data = signer.verify(session)
     except InvalidSession as e:
         raise HTTPException(status_code=401, detail="invalid session") from e
 
     with session_factory() as db:
-        user = db.get(User, user_id)
+        user = db.get(User, data.user_id)
         if user is None:
             raise HTTPException(status_code=401, detail="user not found")
+        # Reject cookies minted before a logout / admin revocation bumped the
+        # epoch. Stateless cookies are otherwise valid for their full TTL.
+        if user.session_epoch != data.session_epoch:
+            raise HTTPException(status_code=401, detail="session revoked")
         db.expunge(user)
     return user
 

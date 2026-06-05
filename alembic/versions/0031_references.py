@@ -8,10 +8,10 @@ Two new tables (references, reference_chunks) and ALTER turn_jobs ADD fetch_coun
 See docs/superpowers/specs/2026-05-25-references-corpus-design.md for details.
 """
 
-from alembic import op
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 
+from alembic import op
 
 revision = "0031"
 down_revision = "0030"
@@ -81,8 +81,7 @@ def upgrade() -> None:
         "references",
         ["workspace_id", "created_at"],
         postgresql_where=sa.text(
-            "text_status IN ('pending','running') "
-            "OR outline_status IN ('pending','running')"
+            "text_status IN ('pending','running') OR outline_status IN ('pending','running')"
         ),
     )
 
@@ -105,9 +104,7 @@ def upgrade() -> None:
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("embedding", Vector(1024), nullable=False),
         sa.Column("embedding_model", sa.Text(), nullable=False),
-        sa.UniqueConstraint(
-            "reference_id", "chunk_index", name="uq_reference_chunks_ref_idx"
-        ),
+        sa.UniqueConstraint("reference_id", "chunk_index", name="uq_reference_chunks_ref_idx"),
     )
     # HNSW index for semantic search; pgvector already loaded by earlier migration.
     op.execute(

@@ -480,6 +480,54 @@ def test_refresh_missing_tick_force_propagates_to_per_row_helpers(pg_session_fac
         assert s.get(Profile, pid).embedding_model == "bge-m3"
 
 
+def test_refresh_missing_tick_drains_backlog_in_one_call(pg_session_factory):
+    """Daily-tick drain: with more NULL rows than batch_size, a single tick
+    invocation loops over batches until the backlog is exhausted — it no
+    longer leaves the remainder for "tomorrow". Before the fix this would
+    take ceil(N / batch_size) days to recover after a model swap."""
+    with pg_session_factory() as s:
+        for i in range(5):
+            _seed_call(s, title=f"Drain{i}")
+        s.commit()
+
+    client = _fake_client(vec=[0.1] * 1024)
+    # batch_size=2 forces at least 3 batches to drain 5 calls.
+    summary = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=2,
+    )
+    assert summary["calls_embedded"] == 5
+
+    with pg_session_factory() as s:
+        for i in range(5):
+            cid = s.execute(select(Call.id).where(Call.external_id == f"Drain{i}-1")).scalar_one()
+            assert s.get(Call, cid).embedding is not None
+
+
+def test_refresh_missing_tick_drain_stops_when_all_remaining_fail(pg_session_factory):
+    """The drain loop must terminate (not infinite-loop) when every remaining
+    row fails to embed — "no successful embeds this batch" is the stop signal."""
+    with pg_session_factory() as s:
+        _seed_call(s, title="AlwaysFail1")
+        _seed_call(s, title="AlwaysFail2")
+        s.commit()
+
+    client = MagicMock()
+    client.model = "bge-m3"
+    client.embed.side_effect = LLMError("ollama permanently down")
+
+    summary = refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory,
+        embed_client=client,
+        batch_size=1,
+    )
+    # One batch of failures, no progress → stop. Exactly batch_size failures
+    # recorded (the loop breaks after the first zero-progress batch).
+    assert summary["calls_embedded"] == 0
+    assert summary["calls_failed"] >= 1
+
+
 def test_refresh_profile_embedding_clears_when_description_blank(pg_session_factory):
     """Codex M2 regression: clearing description removes the stale embedding."""
     with pg_session_factory() as s:

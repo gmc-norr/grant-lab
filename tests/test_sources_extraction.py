@@ -45,7 +45,7 @@ def _pdf_transport(
 
 def test_fetch_html_main_content_extracts_main_drops_chrome():
     text = fetch_html_main_content(
-        "https://example.test/call",
+        "https://example.com/call",
         transport=_html_transport(_SAMPLE_HTML),
     )
     assert text is not None
@@ -59,7 +59,7 @@ def test_fetch_html_main_content_extracts_main_drops_chrome():
 
 def test_fetch_html_main_content_returns_none_on_404():
     text = fetch_html_main_content(
-        "https://example.test/missing",
+        "https://example.com/missing",
         transport=_html_transport("not found", status=404),
     )
     assert text is None
@@ -67,7 +67,7 @@ def test_fetch_html_main_content_returns_none_on_404():
 
 def test_fetch_html_main_content_returns_none_on_empty_body():
     text = fetch_html_main_content(
-        "https://example.test/empty",
+        "https://example.com/empty",
         transport=_html_transport("<html><body></body></html>"),
     )
     # Trafilatura returns None for empty body
@@ -77,7 +77,7 @@ def test_fetch_html_main_content_returns_none_on_empty_body():
 def test_fetch_pdf_text_extracts_text_from_real_pdf():
     pdf_bytes = Path(__file__).parent.joinpath("fixtures/sample_call.pdf").read_bytes()
     text = fetch_pdf_text(
-        "https://example.test/call.pdf",
+        "https://example.com/call.pdf",
         transport=_pdf_transport(pdf_bytes),
     )
     assert text is not None
@@ -87,7 +87,7 @@ def test_fetch_pdf_text_extracts_text_from_real_pdf():
 
 def test_fetch_pdf_text_returns_none_on_404():
     text = fetch_pdf_text(
-        "https://example.test/missing.pdf",
+        "https://example.com/missing.pdf",
         transport=_pdf_transport(b"not found", status=404),
     )
     assert text is None
@@ -95,7 +95,7 @@ def test_fetch_pdf_text_returns_none_on_404():
 
 def test_fetch_pdf_text_returns_none_on_corrupt_pdf():
     text = fetch_pdf_text(
-        "https://example.test/garbage.pdf",
+        "https://example.com/garbage.pdf",
         transport=_pdf_transport(b"not actually a pdf"),
     )
     assert text is None
@@ -107,7 +107,7 @@ def test_fetch_pdf_text_rejects_oversized_response():
     # 2 MB of zeros — much larger than max_bytes=1 MB; streaming should abort.
     huge = b"\x00" * (2 * 1024 * 1024)
     text = fetch_pdf_text(
-        "https://example.test/huge.pdf",
+        "https://example.com/huge.pdf",
         transport=_pdf_transport(huge),
         max_bytes=1 * 1024 * 1024,
     )
@@ -119,7 +119,7 @@ def test_fetch_html_main_content_logs_warning_on_failure(caplog):
 
     with caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"):
         fetch_html_main_content(
-            "https://example.test/missing",
+            "https://example.com/missing",
             transport=_html_transport("", status=500),
         )
     assert any(
@@ -133,12 +133,65 @@ def test_fetch_pdf_text_logs_warning_on_failure(caplog):
 
     with caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"):
         fetch_pdf_text(
-            "https://example.test/missing.pdf",
+            "https://example.com/missing.pdf",
             transport=_pdf_transport(b"", status=500),
         )
     assert any(
         "pdf_failed" in (r.getMessage() or "") or "pdf_failed" in r.message for r in caplog.records
     )
+
+
+def test_fetch_html_rejects_loopback_url_without_fetching():
+    """SSRF guard: a URL resolving to loopback must be refused before any
+    connection is opened. The transport raises if it's ever invoked."""
+
+    def boom(_req: httpx.Request) -> httpx.Response:
+        raise AssertionError("transport must not be called for an unsafe URL")
+
+    text = fetch_html_main_content(
+        "https://127.0.0.1/internal",
+        transport=httpx.MockTransport(boom),
+    )
+    assert text is None
+
+
+def test_fetch_html_rejects_cloud_metadata_url():
+    """SSRF guard: the cloud metadata endpoint (link-local 169.254.169.254)
+    is the canonical SSRF target — must be refused."""
+
+    def boom(_req: httpx.Request) -> httpx.Response:
+        raise AssertionError("transport must not be called for metadata URL")
+
+    text = fetch_html_main_content(
+        "http://169.254.169.254/latest/meta-data/",
+        transport=httpx.MockTransport(boom),
+    )
+    assert text is None
+
+
+def test_fetch_pdf_rejects_private_ip_url():
+    """SSRF guard applies to the PDF path too (it also fetches upstream URLs)."""
+
+    def boom(_req: httpx.Request) -> httpx.Response:
+        raise AssertionError("transport must not be called for an unsafe URL")
+
+    text = fetch_pdf_text(
+        "https://10.0.0.5/secret.pdf",
+        transport=httpx.MockTransport(boom),
+    )
+    assert text is None
+
+
+def test_fetch_html_rejects_oversized_body():
+    """HTML path now caps body size like the PDF path — a huge page is
+    aborted mid-stream and yields None."""
+    huge = "<html><body>" + ("x" * (2 * 1024 * 1024)) + "</body></html>"
+    text = fetch_html_main_content(
+        "https://example.com/huge",
+        transport=_html_transport(huge),
+        max_bytes=1 * 1024 * 1024,
+    )
+    assert text is None
 
 
 def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
@@ -154,7 +207,7 @@ def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
         caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"),
     ):
         text = fetch_html_main_content(
-            "https://example.test/call",
+            "https://example.com/call",
             transport=_html_transport(_SAMPLE_HTML),
         )
     assert text is None

@@ -131,8 +131,10 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         # Per spec line 417: match against title, summary, AND keywords.
         # We collapse keywords to a space-joined string and ilike-search;
         # this keeps the SQL simple and lets PG's text matching handle
-        # case-insensitivity. The GIN index on keywords is bypassed (full
-        # scan), but at v1 corpus size (thousands of calls) this is fine.
+        # case-insensitivity. The leading-wildcard ILIKE on title/summary/
+        # full_text is backed by pg_trgm GIN indexes (migration 0033) so it's
+        # an index lookup, not a sequential scan; the array_to_string(keywords)
+        # term still scans but is cheap relative to full_text.
         #
         # Codex Plan F regression fix: also ilike against `Call.full_text`.
         # After Plan F moved Vinnova's substantive prose out of `summary`

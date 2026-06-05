@@ -15,6 +15,13 @@ _logger = logging.getLogger(__name__)
 # Pin a versioned path so a portal-side rev to v4 is a deliberate code change.
 _SEARCH_PATH = "/info/funding-tenders/opportunities/api/v3.0/notices/search"
 
+# Page size per request and a hard cap on page count. The cap is a defensive
+# guard against an upstream that never decrements its remaining-results count
+# (which would otherwise spin forever). 200 * 100 = 20k calls is far beyond
+# the realistic OPEN+FORTHCOMING set.
+_PAGE_SIZE = 100
+_MAX_PAGES = 200
+
 # ---------------------------------------------------------------------------
 # Plan F (full-text ingestion) — investigation outcome
 # ---------------------------------------------------------------------------
@@ -50,6 +57,18 @@ def _parse_iso(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+def _coerce_budget(value) -> int | None:
+    """Coerce a budget field to int. Accepts int or float (the portal often
+    serializes amounts as floats, e.g. 12000000.0); rejects bool and anything
+    non-numeric. Returns None when the value isn't a usable number.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
 
 
 class EUPortalAdapter:
@@ -90,26 +109,51 @@ class EUPortalAdapter:
         # CLOSED entries indefinitely. Currently the orchestrator is
         # additive-only — by design at v1 — but worth scheduling once the
         # ranking and digest layers exist.
+        seen = 0
         try:
             with httpx.Client(
                 base_url=self._base_url,
                 transport=self._transport,
                 timeout=self._timeout,
             ) as client:
-                resp = client.get(_SEARCH_PATH, params=params)
-                resp.raise_for_status()
-                payload = resp.json()
+                # Paginate: the search API returns one page of `results` at a
+                # time. A single GET silently truncated to the first page,
+                # dropping every call beyond it. Loop over pageNumber until we
+                # exhaust the result set (empty page, or seen >= totalResults),
+                # bounded by _MAX_PAGES so a misbehaving server can't spin us
+                # forever.
+                for page_number in range(1, _MAX_PAGES + 1):
+                    page_params = [
+                        *params,
+                        ("pageSize", str(_PAGE_SIZE)),
+                        ("pageNumber", str(page_number)),
+                    ]
+                    # The v3.0 search endpoint expects a query body; `text="*"`
+                    # matches all notices (server-side date/status filtering is
+                    # applied via the params above).
+                    resp = client.post(_SEARCH_PATH, params=page_params, json={"text": "*"})
+                    resp.raise_for_status()
+                    payload = resp.json()
+
+                    results = payload.get("results", []) if isinstance(payload, dict) else []
+                    if not results:
+                        break
+                    for item in results:
+                        normalized = self._normalize(item)
+                        if normalized is not None:
+                            yield normalized
+                    seen += len(results)
+
+                    total = payload.get("totalResults") if isinstance(payload, dict) else None
+                    if isinstance(total, int) and seen >= total:
+                        break
+                    if len(results) < _PAGE_SIZE:
+                        # A short page means there is no next page.
+                        break
         except httpx.HTTPError as e:
             raise AdapterError(f"EU Portal fetch failed: {e}") from e
         except ValueError as e:  # JSON decode
             raise AdapterError(f"EU Portal returned non-JSON body: {e}") from e
-
-        results = payload.get("results", []) if isinstance(payload, dict) else []
-        for item in results:
-            normalized = self._normalize(item)
-            if normalized is None:
-                continue
-            yield normalized
 
     def _normalize(self, item: dict) -> NormalizedCall | None:
         # Required fields per our contract.
@@ -143,10 +187,8 @@ class EUPortalAdapter:
             summary=item.get("summary"),
             full_text=full_text,
             deadline=_parse_iso(item.get("deadlineDate")),
-            budget_min=item.get("budgetMin") if isinstance(item.get("budgetMin"), int) else None,
-            budget_max=(
-                item.get("budgetTotal") if isinstance(item.get("budgetTotal"), int) else None
-            ),
+            budget_min=_coerce_budget(item.get("budgetMin")),
+            budget_max=_coerce_budget(item.get("budgetTotal")),
             currency=item.get("currency"),
             programme=item.get("programmeName"),
             keywords=list(item.get("keywords") or []),

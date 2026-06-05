@@ -33,6 +33,27 @@ def _isolate_report_path(monkeypatch, tmp_path):
     yield
 
 
+def test_default_report_path_is_absolute(monkeypatch, tmp_path):
+    """The module-level default report path must be absolute. It's computed
+    once at import via resolve(); pinning it to an absolute location means the
+    scheduler (writer) and web admin (reader) — which share this single
+    module-level constant — never resolve "data/..." against differing CWDs
+    and silently disagree on the last golden-set report.
+
+    The autouse fixture monkeypatches _REPORT_PATH, so recompute the default
+    expression here (with the env var unset) rather than read the patched
+    constant."""
+    import os
+    from pathlib import Path
+
+    monkeypatch.delenv("CALL_MONITOR_DATA_DIR", raising=False)
+    default = (
+        Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")).resolve() / "golden_set_last.json"
+    )
+    assert default.is_absolute()
+    assert default.name == "golden_set_last.json"
+
+
 def test_kendalls_tau_perfect_correlation():
     """Identical orderings → tau = 1."""
     assert kendalls_tau([1, 2, 3, 4], [1, 2, 3, 4]) == 1.0

@@ -112,6 +112,31 @@ def test_response_size_cap_enforced(httpx_mock, fake_public_dns):
         fetch_bytes("https://public.example.com/big.pdf", max_bytes=50 * 1024 * 1024)
 
 
+def test_size_cap_aborts_during_streaming(httpx_mock, fake_public_dns):
+    """Regression: the size cap must be enforced incrementally while
+    streaming, not after the whole body is materialised. A body just
+    over a small cap is rejected, and the abort error names max_bytes."""
+    body = b"y" * 5000
+    httpx_mock.add_response(
+        url="https://public.example.com/medium.bin",
+        content=body,
+    )
+    with pytest.raises(FetchError, match="max_bytes=1024"):
+        fetch_bytes("https://public.example.com/medium.bin", max_bytes=1024)
+
+
+def test_size_cap_allows_body_at_limit(httpx_mock, fake_public_dns):
+    """A body exactly at max_bytes is returned; only strictly-larger
+    bodies are rejected (boundary of the streaming check)."""
+    body = b"z" * 1024
+    httpx_mock.add_response(
+        url="https://public.example.com/exact.bin",
+        content=body,
+    )
+    data = fetch_bytes("https://public.example.com/exact.bin", max_bytes=1024)
+    assert data == body
+
+
 def test_successful_fetch_returns_bytes(httpx_mock, fake_public_dns):
     """Sanity: a 200 OK with reasonable size returns the bytes verbatim."""
     httpx_mock.add_response(

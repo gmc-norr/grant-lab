@@ -13,6 +13,7 @@ turn-run path. The Claude adapter stays ignorant of both.
 from __future__ import annotations
 
 import base64
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,25 @@ REFERENCE_TEXT_BUDGET_CHARS = 50_000
 sync; the constants are duplicated rather than imported to avoid a
 cyclic module dep (submit imports resolver context indirectly via
 processor)."""
+
+
+def _strip_system_tags(text: str) -> str:
+    """Neutralise reference-supplied text that could spoof the trusted
+    ``<system>...</system>`` wrapper used for content injection.
+
+    Reference bodies can be agent-fetched from arbitrary URLs, so they
+    are attacker-controlled. A body containing ``</system>`` could close
+    the wrapper early and inject elevated-trust instructions; an opening
+    ``<system>`` could fabricate a second trusted block. We rewrite the
+    angle brackets of any ``<system>`` / ``</system>`` token (case-
+    insensitive, tolerant of internal whitespace) to fullwidth
+    look-alikes so the content stays human-readable but can no longer
+    be parsed as a real delimiter.
+    """
+    return _SYSTEM_TAG_RE.sub(lambda m: m.group(0).replace("<", "＜").replace(">", "＞"), text)
+
+
+_SYSTEM_TAG_RE = re.compile(r"<\s*/?\s*system\s*>", re.IGNORECASE)
 
 
 class AttachmentResolutionError(RuntimeError):
@@ -159,6 +179,12 @@ def resolve_user_content(
                 )
             else:
                 body = full_text
+            # Reference content is attacker-controlled (agent-fetched from
+            # arbitrary URLs). Neutralise any embedded <system>/</system>
+            # token so a body or label can't break out of the trusted
+            # wrapper and inject elevated-trust instructions.
+            body = _strip_system_tags(body)
+            display_label = _strip_system_tags(display_label or "")
             wrapped = f"<system>Reference: {display_label}\n\n{body}\n</system>"
             out.append({"type": "text", "text": wrapped})
         else:

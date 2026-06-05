@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import text
 
@@ -18,5 +20,8 @@ def healthz(request: Request) -> dict[str, str]:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001 — surface any DB error as 503
-        raise HTTPException(status_code=503, detail=f"db unavailable: {exc}") from exc
+        # /healthz is unauthenticated; don't echo the driver exception (it can
+        # carry the DSN/host). Log it server-side, return a static message.
+        logging.getLogger(__name__).warning("healthz db check failed: %s", exc)
+        raise HTTPException(status_code=503, detail="db unavailable") from exc
     return {"status": "ok"}

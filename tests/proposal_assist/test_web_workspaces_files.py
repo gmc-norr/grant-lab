@@ -424,6 +424,9 @@ def test_serve_owner_returns_bytes(
     assert "private" in resp.headers.get("cache-control", "").lower()
     # Sanitized filename appears in Content-Disposition.
     assert "served.png" in resp.headers.get("content-disposition", "")
+    # FileResponse streams the file and sets Content-Length (rather than
+    # buffering the whole file in memory via path.read_bytes()).
+    assert int(resp.headers["content-length"]) == len(data)
 
 
 def test_serve_viewer_returns_bytes(

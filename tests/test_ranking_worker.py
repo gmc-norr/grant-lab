@@ -153,9 +153,11 @@ def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):
     assert by_name["timeline"].rating == "pass"
 
 
-def test_worker_short_circuit_writes_only_failing_gate_row(pg_session_factory):
-    """If timeline fails AND no must_include match, only timeline criterion row
-    is written. No LLM row."""
+def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
+    """If timeline fails AND no must_include match, rows are written up to and
+    including the timeline FAIL — i.e. the gates that precede timeline in the
+    short-circuit precedence (budget, trl, both PASS here) plus timeline=fail.
+    No LLM row, no embedding row (timeline short-circuits before it)."""
     with pg_session_factory() as s:
         u = User(email="sc@ki.se")
         s.add(u)
@@ -209,7 +211,10 @@ def test_worker_short_circuit_writes_only_failing_gate_row(pg_session_factory):
     assert r.aggregate_score == 0
     assert r.aggregate_reason == "timeline"
     by_name = {c.criterion: c for c in criteria}
-    assert set(by_name.keys()) == {"timeline"}
+    # budget + trl precede timeline in precedence (neither FAILs here), then
+    # the timeline FAIL stops the sparse write. The terminal FAIL row matches
+    # the headline aggregate_reason; no embedding/LLM rows past the stop.
+    assert set(by_name.keys()) == {"budget", "trl", "timeline"}
     assert by_name["timeline"].rating == "fail"
 
 
@@ -332,8 +337,12 @@ def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
     with pg_session_factory() as s:
         criteria_after_second = s.execute(select(CallRankingCriterion)).scalars().all()
     by_name = {c.criterion: c for c in criteria_after_second}
-    # CRITICAL: stale topic_fit / eligibility / exclusions / budget / trl rows are GONE.
-    assert set(by_name.keys()) == {"timeline"}
+    # CRITICAL: stale topic_fit / eligibility / exclusions (LLM rows) and the
+    # embedding row are GONE. The timeline short-circuit writes the gates that
+    # precede it in precedence (budget, trl — both PASS) plus timeline=fail.
+    assert set(by_name.keys()) == {"budget", "trl", "timeline"}
+    assert "topic_fit" not in by_name
+    assert "embedding" not in by_name
     assert by_name["timeline"].rating == "fail"
 
 
@@ -565,6 +574,60 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
     assert by_name["trl"].rating == "pass"
     assert by_name["embedding"].rating == "fail"
     assert by_name["embedding"].rationale == "topic_dissimilar"
+
+
+def test_worker_criteria_terminal_fail_row_matches_aggregate_reason(
+    pg_session_factory,
+    monkeypatch,
+):
+    """When multiple gates FAIL, the terminal FAIL row written to the
+    breakdown must name the SAME gate as the headline aggregate_reason.
+
+    aggregate() picks budget over timeline (its short-circuit precedence is
+    budget → trl → timeline → embedding). _write_criteria_rows must iterate
+    in that same precedence, otherwise — with both budget and timeline
+    failing — it would stop at timeline and write a 'timeline' FAIL row that
+    contradicts the 'budget' headline. Regression for that divergence."""
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.rank_pair import RankResult
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        s.commit()
+
+    # Both timeline AND budget FAIL. aggregate's precedence makes budget the
+    # headline reason; the breakdown must stop at budget, not timeline.
+    stub_result = RankResult(
+        score=0,
+        reason="budget",
+        gates=Gates(
+            timeline=GateResult(GateStatus.FAIL, reason="expired"),
+            budget=GateResult(GateStatus.FAIL, reason="currency_mismatch"),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=None,
+        must_include_override=False,
+        model="",
+        prompt_version="v3.0",
+        raw_response={},
+        embed_similarity=None,
+    )
+
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_k: stub_result)
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+
+    with pg_session_factory() as s:
+        ranking = s.execute(select(CallRanking)).scalar_one()
+        criteria = s.execute(select(CallRankingCriterion)).scalars().all()
+    by_name = {c.criterion: c for c in criteria}
+    # Only budget was reached (it's first in precedence among the FAILs).
+    assert set(by_name.keys()) == {"budget"}
+    assert by_name["budget"].rating == "fail"
+    # The terminal FAIL row and the headline reason name the same gate.
+    assert ranking.aggregate_reason == "budget"
+    assert by_name["budget"].rationale == "currency_mismatch"
 
 
 def test_worker_preserves_embed_similarity_when_new_rank_returns_none(

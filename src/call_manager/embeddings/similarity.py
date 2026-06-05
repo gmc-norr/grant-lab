@@ -32,7 +32,13 @@ def cosine(a: list[float] | None, b: list[float] | None) -> float | None:
     # promote the accumulator to numpy.float32 and we'd return numpy.float32,
     # violating the `float | None` annotation. Cheap and keeps the type
     # contract honest at the call boundary.
-    return float(dot / math.sqrt(na * nb))
+    result = float(dot / math.sqrt(na * nb))
+    # Guard against non-finite results: a NaN/Inf component (or overflow in
+    # na*nb) would produce NaN/Inf here. Treat as UNKNOWN (None) rather than
+    # letting a poisoned score propagate into ranking comparisons.
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def build_call_text(call) -> str:

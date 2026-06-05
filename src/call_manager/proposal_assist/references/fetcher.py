@@ -162,38 +162,50 @@ def fetch_bytes(
 
         try:
             # follow_redirects=False so we re-validate each hop ourselves.
-            with httpx.Client(
-                follow_redirects=False,
-                timeout=timeout_s,
-                headers={"User-Agent": user_agent},
-            ) as client:
-                response = client.get(current_url)
+            # Stream so we can enforce the size cap incrementally and abort
+            # as soon as max_bytes is exceeded — a non-streaming
+            # client.get() would materialise the entire (potentially
+            # multi-GB) body into memory BEFORE the len() check.
+            with (
+                httpx.Client(
+                    follow_redirects=False,
+                    timeout=timeout_s,
+                    headers={"User-Agent": user_agent},
+                ) as client,
+                client.stream("GET", current_url) as response,
+            ):
+                # Redirect?
+                if response.status_code in (301, 302, 303, 307, 308):
+                    loc = response.headers.get("location")
+                    if not loc:
+                        raise FetchError(f"{response.status_code} response missing Location header")
+                    # Resolve relative redirects against the current URL.
+                    from urllib.parse import urljoin
+
+                    current_url = urljoin(current_url, loc)
+                    continue
+
+                if response.status_code >= 400:
+                    # read() the (error) body so we can echo a snippet.
+                    response.read()
+                    raise FetchError(
+                        f"HTTP {response.status_code} for {current_url!r}: {response.text[:200]!r}"
+                    )
+
+                # Accumulate chunks, aborting the moment the running
+                # total exceeds max_bytes.
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes(chunk_size=_CHUNK_BYTES):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise FetchError(
+                            f"response from {current_url!r} exceeds max_bytes={max_bytes}"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
         except httpx.RequestError as e:
             raise FetchError(f"request failed for {current_url!r}: {e}") from e
-
-        # Redirect?
-        if response.status_code in (301, 302, 303, 307, 308):
-            loc = response.headers.get("location")
-            if not loc:
-                raise FetchError(f"{response.status_code} response missing Location header")
-            # Resolve relative redirects against the current URL.
-            from urllib.parse import urljoin
-
-            current_url = urljoin(current_url, loc)
-            continue
-
-        if response.status_code >= 400:
-            raise FetchError(
-                f"HTTP {response.status_code} for {current_url!r}: {response.text[:200]!r}"
-            )
-
-        # Body size cap.
-        body = response.content
-        if len(body) > max_bytes:
-            raise FetchError(
-                f"response from {current_url!r} ({len(body)} bytes) exceeds max_bytes={max_bytes}"
-            )
-        return body
 
     raise FetchError(f"too many redirects (>{_MAX_REDIRECTS}) starting from {url!r}")
 

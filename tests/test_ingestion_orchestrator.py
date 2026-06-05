@@ -34,7 +34,7 @@ class _FailingAdapter:
     slug = "vinnova"
 
     def fetch_new_calls(self, since):
-        yield NormalizedCall(external_id="P-1", url="u", title="T")  # one good
+        yield NormalizedCall(external_id="P-1", url="https://example.org/u", title="T")  # one good
         raise AdapterError("network blip mid-stream")
 
 
@@ -46,8 +46,8 @@ def test_successful_run_persists_and_advances_timestamp(pg_session_factory):
     sender = InMemoryEmailSender()
     adapter = _StaticAdapter(
         [
-            NormalizedCall(external_id="V-1", url="u1", title="One"),
-            NormalizedCall(external_id="V-2", url="u2", title="Two"),
+            NormalizedCall(external_id="V-1", url="https://example.org/u1", title="One"),
+            NormalizedCall(external_id="V-2", url="https://example.org/u2", title="Two"),
         ]
     )
 
@@ -70,7 +70,9 @@ def test_successful_run_persists_and_advances_timestamp(pg_session_factory):
 
 def test_second_run_updates_existing_and_inserts_new(pg_session_factory):
     sender = InMemoryEmailSender()
-    a1 = _StaticAdapter([NormalizedCall(external_id="V-1", url="u", title="OLD")])
+    a1 = _StaticAdapter(
+        [NormalizedCall(external_id="V-1", url="https://example.org/u", title="OLD")]
+    )
     run_ingestion(
         session_factory=pg_session_factory,
         adapter=a1,
@@ -80,8 +82,8 @@ def test_second_run_updates_existing_and_inserts_new(pg_session_factory):
 
     a2 = _StaticAdapter(
         [
-            NormalizedCall(external_id="V-1", url="u", title="NEW"),
-            NormalizedCall(external_id="V-2", url="u", title="Brand new"),
+            NormalizedCall(external_id="V-1", url="https://example.org/u", title="NEW"),
+            NormalizedCall(external_id="V-2", url="https://example.org/u", title="Brand new"),
         ]
     )
     result = run_ingestion(

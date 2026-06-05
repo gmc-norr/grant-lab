@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import httpx
@@ -63,15 +64,41 @@ class PubMedClient:
         return pubs
 
 
+# Entrez term metacharacters / boolean operators we must neutralize so a
+# member's name or affiliation can't smuggle field tags ("[au]"), boolean
+# logic (AND/OR/NOT), or grouping/quoting into the constructed query.
+_ENTREZ_METACHARS = re.compile(r"[\[\]()\"]")
+_ENTREZ_BOOLEANS = re.compile(r"\b(AND|OR|NOT)\b")
+
+
+def _sanitize_entrez_value(value: str) -> str:
+    """Strip Entrez metacharacters and field tags from a user-supplied value
+    so it can be safely embedded in a term as a quoted phrase.
+
+    Removes brackets/parens/quotes (which could open a field tag like ``[au]``
+    or close our own quoting), neutralizes the boolean operators AND/OR/NOT,
+    and collapses whitespace. The result is wrapped in double quotes by the
+    caller so it is matched as a literal phrase.
+    """
+    cleaned = _ENTREZ_METACHARS.sub(" ", value)
+    cleaned = _ENTREZ_BOOLEANS.sub(" ", cleaned)
+    return " ".join(cleaned.split())
+
+
 def _query_for(member: Member) -> str:
     if member.orcid:
         # ORCID in PubMed's AUID field. Bare ORCID is the documented
         # term syntax; some indexers also accept orcid:... — the portal
-        # treats them equivalently.
+        # treats them equivalently. ORCID format is validated at Member
+        # construction, so no metacharacters can appear here.
         return f"{member.orcid}[AUID]"
     # name + affiliation fallback. [au] is the author field, [ad] the
-    # affiliation field. Both are fuzzy by nature.
-    return f"{member.name}[au] AND {member.affiliation}[ad]"
+    # affiliation field. Both are fuzzy by nature. Sanitize + quote the
+    # user-supplied values so they can't inject field tags or boolean
+    # operators into the Entrez term (query-injection defense).
+    name = _sanitize_entrez_value(member.name or "")
+    affiliation = _sanitize_entrez_value(member.affiliation or "")
+    return f'"{name}"[au] AND "{affiliation}"[ad]'
 
 
 def _describe(member: Member) -> str:

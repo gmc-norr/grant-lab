@@ -25,6 +25,13 @@ class OllamaClient:
     mode; combined with Gemma 4's native function-calling/JSON support,
     this near-eliminates parse failures.
 
+    `num_predict` caps output tokens. The criterion JSON (3 ratings +
+    rationales + quotes, plus the optional analysis block) fits well under
+    this; the ceiling exists so a degenerate generation (the model looping
+    on whitespace/repetition) is bounded by tokens rather than only by the
+    120s wall-clock timeout, which would otherwise burn a full slot per
+    runaway pair.
+
     Vendor swap: pointing this at OpenAI/Anthropic-compatible endpoints
     (Together, Groq, etc.) is a `base_url` + `model` config change.
 
@@ -45,11 +52,13 @@ class OllamaClient:
         model: str,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 120.0,  # 120s: cold model load on 2080 Ti can take 30-60s
+        num_predict: int = 2048,  # output-token ceiling; bounds runaway generations
     ):
         self._base_url = base_url.rstrip("/")
         self.model = model  # public so rank_pair can fall back to it
         self._transport = transport
         self._timeout = timeout
+        self._num_predict = num_predict
 
     def chat(
         self,
@@ -65,6 +74,11 @@ class OllamaClient:
             "response_format": (
                 response_format if response_format is not None else {"type": "json_object"}
             ),
+            # Ollama-native generation knobs. `num_predict` caps output
+            # tokens so a degenerate (looping) generation can't run out the
+            # full 120s timeout. Ollama reads max-token from options.num_predict
+            # on its OpenAI-compatible endpoint.
+            "options": {"num_predict": self._num_predict},
         }
         try:
             with httpx.Client(

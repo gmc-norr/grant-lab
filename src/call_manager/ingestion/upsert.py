@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Call
-from call_manager.sources.types import NormalizedCall
+from call_manager.sources.types import NormalizedCall, is_safe_url
+
+_logger = logging.getLogger(__name__)
 
 
 def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bool:
@@ -29,6 +33,21 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
     row instead.** That keeps ranking idempotent regardless of any
     future relaxation of the single-instance constraint.
     """
+    # Central URL-safety chokepoint: even if a future adapter forgets to call
+    # is_safe_url, a dangerous href (javascript:/data:/etc.) must never reach
+    # the DB — it would render as click-to-XSS in the dashboard. `url` is
+    # NOT NULL, so we reject the whole record rather than persist a bad href.
+    if not is_safe_url(call.url):
+        _logger.warning(
+            "ingestion.upsert.skip_unsafe_url",
+            extra={
+                "event": "skip_unsafe_url",
+                "source_id": source_id,
+                "external_id": call.external_id,
+            },
+        )
+        return False
+
     payload = {
         "source_id": source_id,
         "external_id": call.external_id,

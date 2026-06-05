@@ -278,6 +278,15 @@ async def read_reference_impl(
     reference_id: str,
     max_chars: int = 20_000,
 ) -> dict[str, Any]:
+    # Clamp max_chars to [1, 100_000]: mirrors the hard caps on
+    # search_references (top_k<=25) and list_references (limit<=200) so a
+    # caller can't request an unbounded slab of text. Coerce bad input to
+    # the default rather than erroring.
+    try:
+        max_chars_int = int(max_chars)
+    except (TypeError, ValueError):
+        max_chars_int = 20_000
+    max_chars = max(1, min(max_chars_int, 100_000))
     ref = _load_workspace_reference(ctx, reference_id)
     if ref is None:
         return {"error": f"reference {reference_id} not found"}
@@ -447,15 +456,39 @@ async def fetch_reference_impl(
             }
         new_count = new_count_row[0]
 
-    # Do the fetch + ingest. From here, failures DON'T undo the
-    # increment (it's the agent's responsibility to not retry on
-    # failure). Slice 5 may add explicit decrement on FetchError.
+    def _refund_fetch_slot() -> None:
+        """Decrement the per-turn fetch_count we just consumed.
+
+        The cap slot is reserved with an atomic increment BEFORE the
+        fetch so concurrent tool calls can't oversubscribe the budget.
+        When the fetch or ingest fails (transient network error, SSRF
+        refusal, parse failure), the slot was never spent on usable
+        content — refund it so a single flaky URL doesn't burn the
+        agent's whole per-turn budget. Scoped to the running turn so a
+        refund can't push another turn's count negative.
+        """
+        with ctx.session_factory() as s2:
+            s2.execute(
+                _sql_update(TurnJob)
+                .where(
+                    TurnJob.workspace_id == ctx.workspace_id,
+                    TurnJob.status == "running",
+                    TurnJob.fetch_count > 0,
+                )
+                .values(fetch_count=TurnJob.fetch_count - 1)
+            )
+            s2.commit()
+
+    # Do the fetch + ingest. On failure we refund the cap slot above so a
+    # transient error doesn't permanently shrink the per-turn budget.
     try:
         data, filename, mime_type, source_meta = dispatch_fetch(input)
     except SSRFError as e:
-        return {"error": f"SSRF refused: {e}", "fetch_count": new_count}
+        _refund_fetch_slot()
+        return {"error": f"SSRF refused: {e}", "fetch_count": new_count - 1}
     except FetchError as e:
-        return {"error": f"fetch failed: {e}", "fetch_count": new_count}
+        _refund_fetch_slot()
+        return {"error": f"fetch failed: {e}", "fetch_count": new_count - 1}
 
     storage = ReferenceStorage(root=Path(ctx.settings.workspaces_dir))
     if embedder is None:
@@ -487,7 +520,8 @@ async def fetch_reference_impl(
             s.commit()
         except Exception as e:
             s.rollback()
-            return {"error": f"ingest failed: {e}", "fetch_count": new_count}
+            _refund_fetch_slot()
+            return {"error": f"ingest failed: {e}", "fetch_count": new_count - 1}
 
     return {
         "reference_id": str(ingest_result.reference_id),

@@ -129,6 +129,13 @@ def refresh_profile_embedding(
     return True
 
 
+# Safety cap on the number of batches the daily tick will drain in one call.
+# At batch_size=200 this is 200*200 = 40k rows of progress per tick — well
+# beyond any realistic backlog, while still bounding the worst case so a
+# pathological "always-makes-1-row-of-progress" loop can't run unbounded.
+_TICK_MAX_BATCHES = 200
+
+
 def refresh_missing_embeddings_tick(
     *,
     session_factory,
@@ -137,8 +144,98 @@ def refresh_missing_embeddings_tick(
     force: bool = False,
     after_call_id: int = 0,
     after_profile_id: int = 0,
+    max_batches: int = _TICK_MAX_BATCHES,
 ) -> dict[str, int]:
-    """Daily tick: scan for NULL-embedding rows AND rows whose embedding_model
+    """Daily tick entry point. Drains the NULL/mismatched-model backlog by
+    looping `_refresh_missing_embeddings_batch` until a batch makes no
+    progress (everything left is failing) or `max_batches` is reached.
+
+    A single batch processes at most `batch_size` rows. Before this drain
+    loop, recovery after a model swap silently took (backlog / batch_size)
+    DAYS — one batch per daily tick. Now a single tick catches up the whole
+    embeddable backlog (bounded by `max_batches` as a safety cap).
+
+    Force mode (cursor-driven backfill from the CLI) is NOT drained here:
+    the CLI owns the cursor walk via `after_call_id`/`after_profile_id` and
+    calls the batch directly through this function with `max_batches=1`
+    semantics. So under `force=True` we run exactly one batch and return,
+    preserving the cursor contract.
+    """
+    if force:
+        # Single batch — the CLI's outer loop drives cursor pagination.
+        return _refresh_missing_embeddings_batch(
+            session_factory=session_factory,
+            embed_client=embed_client,
+            batch_size=batch_size,
+            force=True,
+            after_call_id=after_call_id,
+            after_profile_id=after_profile_id,
+        )
+
+    totals = {
+        "calls_embedded": 0,
+        "calls_failed": 0,
+        "profiles_embedded": 0,
+        "profiles_failed": 0,
+        "max_call_id": after_call_id,
+        "max_profile_id": after_profile_id,
+    }
+    # Walk forward with id-cursors so each batch processes NEW rows. This
+    # both lets us drain a backlog larger than one batch AND avoids re-trying
+    # the same just-failed rows within a single tick (a failed row stays NULL
+    # but its id is behind the cursor, so the next daily tick retries it).
+    cursor_call_id = after_call_id
+    cursor_profile_id = after_profile_id
+    for _ in range(max_batches):
+        summary = _refresh_missing_embeddings_batch(
+            session_factory=session_factory,
+            embed_client=embed_client,
+            batch_size=batch_size,
+            force=False,
+            after_call_id=cursor_call_id,
+            after_profile_id=cursor_profile_id,
+        )
+        for key in (
+            "calls_embedded",
+            "calls_failed",
+            "profiles_embedded",
+            "profiles_failed",
+        ):
+            totals[key] += summary[key]
+        totals["max_call_id"] = max(totals["max_call_id"], summary["max_call_id"])
+        totals["max_profile_id"] = max(totals["max_profile_id"], summary["max_profile_id"])
+        # Stop when a batch processed nothing — both cursors have walked past
+        # the end of the NULL/mismatched set. Using "rows processed" (embedded
+        # + failed) rather than "embeds succeeded" means an all-failing final
+        # batch still terminates: the cursor advanced past those ids.
+        processed = (
+            summary["calls_embedded"]
+            + summary["calls_failed"]
+            + summary["profiles_embedded"]
+            + summary["profiles_failed"]
+        )
+        if processed == 0:
+            break
+        cursor_call_id = summary["max_call_id"]
+        cursor_profile_id = summary["max_profile_id"]
+
+    _logger.info(
+        "embeddings.refresh_missing_tick.drain_summary",
+        extra={"event": "embedding_refresh_tick_drain_summary", **totals},
+    )
+    return totals
+
+
+def _refresh_missing_embeddings_batch(
+    *,
+    session_factory,
+    embed_client: OllamaEmbedClient,
+    batch_size: int = 200,
+    force: bool = False,
+    after_call_id: int = 0,
+    after_profile_id: int = 0,
+) -> dict[str, int]:
+    """One batch: scan for NULL-embedding rows AND rows whose embedding_model
     differs from the currently-configured model — embed both. Per-row
     try/except so one bad row doesn't kill the batch. Returns a summary
     dict for logging.

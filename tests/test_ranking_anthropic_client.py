@@ -246,12 +246,34 @@ def test_chat_strips_markdown_fence_from_response():
 def test_finish_reason_maps_anthropic_stop_to_openai_vocab():
     """Anthropic uses end_turn/max_tokens/refusal; OpenAI uses stop/
     length/content_filter. Map so anything inspecting finish_reason
-    on the envelope sees the OpenAI vocabulary."""
+    on the envelope sees the OpenAI vocabulary.
+
+    Exercise the mapper directly: a `max_tokens` *response* now raises
+    LLMError (see test_chat_raises_on_max_tokens_truncation), so we
+    verify the vocabulary mapping on the helper rather than the envelope.
+    """
+    from call_manager.ranking.anthropic_client import _map_stop_reason
+
+    assert _map_stop_reason("max_tokens") == "length"
+    assert _map_stop_reason("end_turn") == "stop"
+    assert _map_stop_reason("refusal") == "content_filter"
+
+
+def test_chat_raises_on_max_tokens_truncation():
+    """stop_reason='max_tokens' means content is a truncated JSON fragment.
+    It would fail parse_response → ParseError → 5 paid retries → dead-letter,
+    and retrying cannot help (truncation is deterministic). Surface it as
+    LLMError immediately, before the (useless) partial content escapes."""
     client = AnthropicClient(api_key="sk-test")
-    with patch.object(
-        client._client.messages,
-        "create",
-        return_value=_fake_response("{}", stop_reason="max_tokens"),
+    # Even though the body looks like it starts valid JSON, it's truncated.
+    truncated = '{"topic_fit": {"rating": 4, "rationale": "the call'
+    with (
+        patch.object(
+            client._client.messages,
+            "create",
+            return_value=_fake_response(truncated, stop_reason="max_tokens"),
+        ),
+        pytest.raises(LLMError) as exc_info,
     ):
-        env = _call_chat(client)
-    assert env["choices"][0]["finish_reason"] == "length"
+        _call_chat(client)
+    assert "max_tokens" in str(exc_info.value)

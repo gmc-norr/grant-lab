@@ -15,11 +15,18 @@ _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 _ACCEPT_V2 = "application/vnd.vinnova.opendata.2.0+json"
 
 
-def _parse_iso_stockholm(s: str | None) -> datetime | None:
+def _parse_iso_stockholm(s: str | None, *, end_of_day_if_midnight: bool = False) -> datetime | None:
     """Parse a naive ISO timestamp from Vinnova (e.g. ``"2022-04-11T00:00:00"``)
     and interpret it as Europe/Stockholm wall-clock time.
 
     Returns a UTC-aware datetime, or None on any malformed / missing input.
+
+    When ``end_of_day_if_midnight`` is set and the parsed time is exactly
+    midnight (00:00:00), the timestamp is bumped to 23:59:59 of the same
+    Stockholm day. Vinnova emits date-only ``Stangningsdatum`` as midnight,
+    and a deadline of "midnight today" would mark a call still-open on its
+    closing day as already closed. Treating a bare date as end-of-day keeps
+    the call live through its final day.
     """
     if not s:
         return None
@@ -27,6 +34,8 @@ def _parse_iso_stockholm(s: str | None) -> datetime | None:
         naive = datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+    if end_of_day_if_midnight and naive.time() == naive.time().min:
+        naive = naive.replace(hour=23, minute=59, second=59, microsecond=0)
     local = naive.replace(tzinfo=_STOCKHOLM)
     return local.astimezone(UTC)
 
@@ -190,7 +199,7 @@ class VinnovaAdapter:
         # Vinnova's data and ranking against an open-ended deadline confuses
         # the dashboard's deadline-sorted feed. Revisit if real perpetuals
         # ever surface and matter to a hospital-research user.
-        deadline = _parse_iso_stockholm(item.get("Stangningsdatum"))
+        deadline = _parse_iso_stockholm(item.get("Stangningsdatum"), end_of_day_if_midnight=True)
         if deadline is None or deadline <= now_utc:
             _logger.debug(
                 "vinnova.skip_closed",

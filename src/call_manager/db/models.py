@@ -57,6 +57,12 @@ class User(Base):
     digest_disabled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Monotonic counter embedded in the signed session cookie. Bumping it
+    # (on logout or admin revocation) invalidates every outstanding cookie
+    # for this user, since sessions are otherwise stateless signed tokens.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     magic_link_tokens: Mapped[list[MagicLinkToken]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -110,6 +116,39 @@ class Call(Base):
         Index("ix_calls_keywords_gin", "keywords", postgresql_using="gin"),
         Index("ix_calls_deadline", "deadline"),
         Index("ix_calls_published_at", "published_at"),
+        # Embedding + model are written together (see migration 0007). Declared
+        # here so the model — not just the migration — is the source of truth;
+        # otherwise autogenerate would emit a spurious DROP for these.
+        CheckConstraint(
+            "(embedding IS NULL) = (embedding_model IS NULL)",
+            name="ck_calls_embedding_model_paired",
+        ),
+        Index(
+            "ix_calls_embedding_null",
+            "id",
+            postgresql_where=text("embedding IS NULL"),
+        ),
+        # Trigram GIN indexes back the digest must-include ILIKE '%term%'
+        # matching (see digest.assemble) — leading-wildcard LIKE is otherwise
+        # a sequential scan. Requires the pg_trgm extension (migration 0033).
+        Index(
+            "ix_calls_title_trgm",
+            "title",
+            postgresql_using="gin",
+            postgresql_ops={"title": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_calls_summary_trgm",
+            "summary",
+            postgresql_using="gin",
+            postgresql_ops={"summary": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_calls_full_text_trgm",
+            "full_text",
+            postgresql_using="gin",
+            postgresql_ops={"full_text": "gin_trgm_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -173,6 +212,17 @@ class Profile(Base):
             "name",
             unique=True,
             postgresql_where=text("is_active = true"),
+        ),
+        # Mirror migration 0007's embedding constraints/indexes in the ORM so
+        # the model stays the source of truth (autogenerate parity).
+        CheckConstraint(
+            "(embedding IS NULL) = (embedding_model IS NULL)",
+            name="ck_profiles_embedding_model_paired",
+        ),
+        Index(
+            "ix_profiles_embedding_null",
+            "id",
+            postgresql_where=text("embedding IS NULL"),
         ),
     )
 
@@ -336,12 +386,16 @@ class DigestRun(Base):
         ARRAY(BigInteger), nullable=False, default=list
     )
     # Populated by the DB via `GENERATED ALWAYS AS (date_trunc('week',
-    # sent_at, 'UTC')) STORED`. The Computed() marker tells SQLAlchemy
-    # to leave it out of INSERT/UPDATE statements. Backs the unique
-    # index that enforces one-digest-per-user-per-UTC-week idempotency.
+    # sent_at, 'Europe/Stockholm')) STORED`. The Computed() marker tells
+    # SQLAlchemy to leave it out of INSERT/UPDATE statements. Backs the
+    # unique index that enforces one-digest-per-user-per-Stockholm-week
+    # idempotency. MUST use the same timezone as digest.send.week_start()
+    # — a UTC truncation here disagrees with the app's Stockholm-week skip
+    # check in the Sun-22:00..Mon-00:00-UTC seam, causing missed/duplicate
+    # digests (see migration 0033).
     week_start: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        Computed("date_trunc('week', sent_at, 'UTC')", persisted=True),
+        Computed("date_trunc('week', sent_at, 'Europe/Stockholm')", persisted=True),
         nullable=True,
     )
 
@@ -446,11 +500,14 @@ class Workspace(Base):
         BigInteger,
         ForeignKey("calls.id", ondelete="SET NULL"),
         nullable=True,
+        # Indexed so deleting a Call (SET NULL) doesn't full-scan workspaces.
+        index=True,
     )
     profile_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("profiles.id", ondelete="SET NULL"),
         nullable=True,
+        index=True,
     )
     status: Mapped[str] = mapped_column(
         Text,
@@ -660,6 +717,7 @@ class TurnJob(Base):
         UUID(as_uuid=True),
         ForeignKey("chat_turns.id", ondelete="SET NULL"),
         nullable=True,
+        index=True,
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -680,6 +738,7 @@ class TurnJob(Base):
         BigInteger,
         ForeignKey("users.id"),
         nullable=True,
+        index=True,
     )
     fetch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
@@ -748,6 +807,7 @@ class ArtifactVersion(Base):
         UUID(as_uuid=True),
         ForeignKey("chat_turns.id", ondelete="SET NULL"),
         nullable=True,
+        index=True,
     )
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -787,6 +847,7 @@ class Attachment(Base):
         BigInteger,
         ForeignKey("users.id"),
         nullable=False,
+        index=True,
     )
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -996,6 +1057,7 @@ class ReviewRun(Base):
         UUID(as_uuid=True),
         ForeignKey("review_runs.id"),
         nullable=True,
+        index=True,
     )
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1141,7 +1203,13 @@ class ReferenceChunk(Base):
         ForeignKey("references.id", ondelete="CASCADE"),
         nullable=False,
     )
-    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Denormalized from the parent Reference for single-table search filters.
+    # FK (CASCADE) ensures it can't point at a non-existent/deleted workspace.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     section_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)

@@ -38,6 +38,9 @@ def test_export_returns_proposal_md_bytes(
     cd = response.headers["content-disposition"]
     assert "attachment" in cd
     assert "MyProposal" in cd
+    # FileResponse streams the file and sets Content-Length (rather than
+    # reading the whole proposal into memory).
+    assert int(response.headers["content-length"]) == len(b"# Title\n\nBody.")
 
 
 def test_export_404_when_no_proposal_yet(

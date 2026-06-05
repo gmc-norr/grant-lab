@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ipaddress
+import socket
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 
 class AdapterError(Exception):
@@ -22,6 +25,69 @@ def is_safe_url(url: str) -> bool:
     """
     lower = url.lower()
     return lower.startswith(("http://", "https://"))
+
+
+def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Reject IPs that point inside the deployment's own network: loopback,
+    private RFC1918, link-local (incl. 169.254.169.254 cloud metadata),
+    multicast, reserved, and the unspecified address.
+    """
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def is_safe_fetch_url(url: str) -> bool:
+    """Stronger check for URLs we are about to *fetch* (not just store).
+
+    On top of the scheme check, resolve the host and reject any address that
+    falls in a private/loopback/link-local/metadata range — closing the SSRF
+    hole where upstream JSON points `url` at an internal service or the cloud
+    metadata endpoint (169.254.169.254). A literal IP host is checked
+    directly; a name is resolved via DNS and every returned address must pass.
+
+    Returns False on a malformed URL, missing host, or DNS failure — callers
+    treat False as "do not fetch".
+    """
+    if not is_safe_url(url):
+        return False
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+
+    # Literal IP host: check directly (no DNS).
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        return not _ip_is_blocked(ip)
+
+    # Hostname: resolve and require EVERY resolved address to be public,
+    # so a name with both a public and an internal A record can't slip
+    # an internal target past us.
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    addrs = {info[4][0] for info in infos}
+    if not addrs:
+        return False
+    for addr in addrs:
+        try:
+            if _ip_is_blocked(ipaddress.ip_address(addr)):
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 @dataclass(slots=True)

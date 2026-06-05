@@ -176,6 +176,7 @@ async def process_turn_once(
                 error=f"attachment_resolution_failed: {e}",
                 tokens_in=0,
                 tokens_out=0,
+                user_turn_id=user_turn_id,
             )
             return
 
@@ -253,6 +254,7 @@ async def process_turn_once(
             error=f"sdk_turn_error: {sdk_error}{status_suffix}",
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            user_turn_id=user_turn_id,
         )
     else:
         assert other_error is not None
@@ -264,6 +266,7 @@ async def process_turn_once(
             error=f"processor_failure: {type(other_error).__name__}: {other_error}",
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            user_turn_id=user_turn_id,
         )
         if not isinstance(other_error, Exception):
             raise other_error
@@ -297,22 +300,36 @@ def _finalize_success(
     session_id: str | None,
 ) -> None:
     with session_factory() as s:
+        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
         if last_assistant_id is not None:
             turn = s.scalar(select(ChatTurn).where(ChatTurn.id == last_assistant_id))
             if turn is not None:
                 turn.tokens_in = tokens_in or None
                 turn.tokens_out = tokens_out or None
                 turn.model = model
-        # B7 cap-accounting fix: submit_user_turn pre-stamps the USER
-        # chat_turns row with an estimate (sum of attachment vision
-        # tokens + len(text)//4). The SDK's TurnDoneEvent.tokens_in
-        # already includes those user-input tokens. Leaving the
-        # pre-count in place would double-count input on the next
-        # daily-cap query. Clear it so the cap sum reflects only
-        # the SDK-reported truth on the assistant row.
-        user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
-        if user_turn is not None:
-            user_turn.tokens_in = None
+            # B7 cap-accounting fix: submit_user_turn pre-stamps the USER
+            # chat_turns row with an estimate (sum of attachment vision
+            # tokens + len(text)//4). The SDK's TurnDoneEvent.tokens_in
+            # already includes those user-input tokens. Leaving the
+            # pre-count in place would double-count input on the next
+            # daily-cap query. Clear it so the cap sum reflects only
+            # the SDK-reported truth on the assistant row.
+            if user_turn is not None:
+                user_turn.tokens_in = None
+        elif user_turn is not None:
+            # No assistant text row was emitted this turn (e.g. the turn
+            # produced only tool events). There is no assistant row to
+            # stamp the SDK-reported totals onto. Persist them onto the
+            # user-turn row instead — discarding them would drop the
+            # turn's input/output from the daily-cap sum, AND clearing
+            # the pre-count (the `if last_assistant_id` branch above)
+            # without re-stamping would let the turn bypass the cap
+            # entirely. Replace the submit-time estimate with the
+            # SDK truth (tokens_in already includes user-input tokens).
+            user_turn.tokens_in = tokens_in or None
+            user_turn.tokens_out = tokens_out or None
+            if model is not None:
+                user_turn.model = model
         job = s.scalar(select(TurnJob).where(TurnJob.id == turn_job_id))
         if job is not None:
             job.status = "completed"
@@ -346,8 +363,18 @@ def _finalize_failed(
     error: str,
     tokens_in: int,
     tokens_out: int,
+    user_turn_id: uuid.UUID | None = None,
 ) -> None:
     with session_factory() as s:
+        # Clear the submit-time pre-count on the user-turn row: a turn
+        # that failed never produced a real assistant response, so the
+        # estimate should not keep counting against the daily cap.
+        # (_finalize_success clears this too; mirror the behaviour here
+        # so a failed turn doesn't permanently burn cap budget.)
+        if user_turn_id is not None:
+            user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+            if user_turn is not None:
+                user_turn.tokens_in = None
         job = s.scalar(select(TurnJob).where(TurnJob.id == turn_job_id))
         if job is not None:
             job.status = "failed"

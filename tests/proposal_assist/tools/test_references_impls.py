@@ -151,6 +151,28 @@ async def test_read_reference_truncates_at_max_chars(pg_session_factory, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_read_reference_clamps_max_chars(pg_session_factory, tmp_path):
+    """Regression: max_chars must be clamped to a sane upper bound
+    (100_000), mirroring the top_k<=25 and limit<=200 caps on the other
+    reference tools. An absurd max_chars must not let the agent request
+    an unbounded slab; a non-positive value falls back to a sane read."""
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    # Huge request: the seeded body is short, so we still get the whole
+    # (untruncated) body — the point is the call doesn't honor an
+    # unbounded slice. total_chars stays the true short length.
+    result = await read_reference_impl(ctx, reference_id=str(rids[0]), max_chars=10_000_000)
+    assert result["truncated"] is False
+    assert len(result["text"]) == result["total_chars"]
+    assert result["total_chars"] < 100_000
+
+    # Non-positive max_chars is coerced to a positive read, not a crash
+    # or an empty/negative slice.
+    result_zero = await read_reference_impl(ctx, reference_id=str(rids[0]), max_chars=0)
+    assert len(result_zero["text"]) >= 1
+
+
+@pytest.mark.asyncio
 async def test_read_reference_unknown_id_returns_error(pg_session_factory, tmp_path):
     wsid, _ = _seed_three_refs(pg_session_factory, tmp_path)
     ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
