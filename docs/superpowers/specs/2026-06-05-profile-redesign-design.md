@@ -80,8 +80,14 @@ Single `profiles` table retained. Changes:
   change a clean data migration and aligns with the newer Text+Check convention
   used by `Workspace.status`, `TurnJob.status`, etc. (the model review flagged the
   enum-vs-text inconsistency).
-- **`level`**: `Text` nullable, `CheckConstraint('lab','group','department','clinic','institution','other')`.
-  Set for `organizational_unit`; `NULL` for `individual`.
+- **`level`**: `Text` **nullable for all kinds**,
+  `CheckConstraint('lab','group','department','clinic','institution','other')`.
+  Conventionally populated for `organizational_unit` and left `NULL` for
+  `individual`, but `NULL` is *also valid for a unit* (e.g. migrated `org` rows
+  whose owner hasn't picked a level yet). **Do not** add a cross-field
+  `kind='organizational_unit' ⇒ level NOT NULL` constraint — it would reject
+  migrated orgs and in-progress edits. The Check validates membership only when
+  a value is present.
 - **`parent_profile_id`**: `BigInteger` nullable, `ForeignKey('profiles.id', ondelete='SET NULL')`,
   indexed. Reserved for future hierarchy; **no v1 logic reads it**.
 - **`structured`** (JSONB): gains the namespaced keys below. Existing keys
@@ -123,9 +129,28 @@ geo:
   host_institution:  text | null    # free text
 ```
 
-Validation lives in the route layer (as today), not the DB — enums above are
-validated against allow-lists in `profiles.py`; free-text/tag lists are bounded
-by the existing `_MAX_LIST_ENTRIES` / length caps.
+### Validation caps (concrete)
+
+Validation lives in the route layer (as today), not the DB. The existing
+`_split_lines` only caps entry **count** (`_MAX_LIST_ENTRIES = 100`), not item or
+field length — so the new fields need explicit bounds:
+
+- **Enum fields** (`applicant_types`, `career_stage`, `org_type`,
+  `funding.instruments`, `level`): validated against the allow-lists above;
+  unknown value → `400`. Empty/omitted allowed.
+- **Tag lists** (`org.capabilities`, `org.patient_populations`,
+  `funding.funder_exclusions`): reuse `_MAX_LIST_ENTRIES` (100) for count **and**
+  add a per-item length cap `_MAX_TAG_LEN = 80` (over-length item → `400`). A new
+  `_split_tags(raw, max_len)` helper enforces both (or extend `_split_lines`).
+- **Single-value free text** (`eligibility.role`, `org.scale`,
+  `geo.host_institution`): `_MAX_SHORT_TEXT = 200` chars each → `413` over cap
+  (matches the existing name/description over-length behavior).
+- **`eligibility.years_since_phd`**: optional int, bounded `[0, 80]` via the
+  existing `_bounded_int` helper.
+- **`geo.country`**: `_MAX_SHORT_TEXT`; no ISO-membership check in v1 (free text).
+
+Tests assert each cap rejects over-length/over-count/garbage input with the
+stated status code, not just "list caps enforced".
 
 ## Creation + bootstrap (kind-branched)
 
@@ -222,11 +247,20 @@ There are two distinct triggers, and they behave differently:
 - **A code-only prompt-template change** (this redesign bumps `prompt_version`)
   does **not** auto-rerank. `prompt_version` is a debug/provenance label;
   `reconcile_missing_rankings` only fills *missing* pairs, and feed/digest do not
-  filter by version. **Deploy step (required):** after deploying, trigger a full
+  filter by version. **Deploy step (required):** after deploying, trigger a
   re-rank via `POST /admin/rerank`
-  ([admin.py](../../../src/call_manager/web/routes/admin.py)), or a one-off
-  `DELETE FROM call_rankings` followed by the reconciler. This must be called out
-  in the rollout runbook, not assumed.
+  ([admin.py](../../../src/call_manager/web/routes/admin.py)). It enqueues
+  `backfill_profile` per active profile, which re-scores via idempotent upsert on
+  `call_rankings` (and re-writes `call_ranking_criteria`). **Do not** use a
+  `DELETE FROM call_rankings` fallback: both `backfill_profile` and
+  `reconcile_missing_rankings` only cover the recent ~90-day window, so a broad
+  delete permanently drops older rankings (never re-created) and orphans
+  `call_ranking_criteria` rows (they FK to `calls`/`profiles`, not to
+  `call_rankings`, so they don't cascade). **Scope note:** `/admin/rerank` re-ranks
+  only the last 90 days; rankings older than that retain the previous
+  `prompt_version`. That is acceptable — such calls are past deadline and out of
+  the feed/digest windows — but it means a prompt change is not retroactively
+  applied to the full history, by design.
 
 ## Migration & backward compatibility
 
@@ -284,7 +318,10 @@ between bootstrap, the edit form, and the ranking prompt.
   `kind` values are restored (downgrade is documented-lossy).
 - Kind-branched bootstrap: individual seeds from ORCID; org seeds from
   mission text with no members; field suggestions match kind.
-- Validation: new enum allow-lists reject garbage; list caps enforced.
+- Validation (per "Validation caps"): enum allow-lists reject unknown values
+  (`400`); tag lists reject >100 items and >80-char items (`400`); single-value
+  free text (`role`/`scale`/`host_institution`/`country`) rejects >200 chars
+  (`413`); `years_since_phd` rejects out-of-`[0,80]` (`400`).
 - Per-kind form rendering (individual vs unit sections present/absent).
 - Ranking prompt: includes the new fields per kind; `funder_exclusions` appears
   in the eligibility-criterion context, not the topic-`exclusions` criterion.
