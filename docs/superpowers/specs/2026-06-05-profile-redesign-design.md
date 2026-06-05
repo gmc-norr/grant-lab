@@ -171,17 +171,68 @@ parses and validates the new fields into the namespaced `structured` shape.
 ## Ranking integration
 
 [prompt.py](../../../src/call_manager/ranking/prompt.py): the PROFILE block gains
-a kind-aware eligibility/org/funding/geo section, and the **eligibility** criterion
-instruction is extended to weigh `applicant_types` / `career_stage` / `org_type`
-against the call's stated eligibility. No new gate; the existing LLM
-`eligibility` rating (pass/unclear/fail) already flows into the score.
+a kind-aware eligibility/org/funding/geo section. Criterion assignment is
+explicit:
 
-`prompt_version` is bumped, which marks existing `call_rankings` rows stale and
-triggers re-ranking through the normal backfill path.
+- **`eligibility`** criterion instruction is extended to weigh
+  `eligibility.applicant_types` / `eligibility.career_stage` /
+  `org.org_type` / `geo.country` / `geo.host_institution` against the call's
+  stated eligibility.
+- **`funding.funder_exclusions`** feeds the **`eligibility`** criterion as
+  context ("the applicant will not pursue these funders/instruments") — it is a
+  funder/instrument-fit concern, **not** a topic concern, so it does **not** go to
+  the topic `exclusions` criterion (which stays bound to `hard_exclusions` and
+  hard-scores topic matches ≤10). `funding.instruments` and `org.capabilities` /
+  `org.patient_populations` are added as context to the `topic_fit` /
+  `eligibility` reasoning.
+- **No new gate** — the existing LLM `eligibility` rating (pass/unclear/fail)
+  already flows into the score.
+
+### New fields are prompt-only; the embedding is unchanged (deliberate)
+
+`build_profile_text` ([similarity.py](../../../src/call_manager/embeddings/similarity.py))
+stays `description + areas`. The new fields are **prompt-only** and do **not**
+enter the embedding vector. Consequence to accept explicitly: the embedding
+pre-gate ([rank_pair.py](../../../src/call_manager/ranking/rank_pair.py)) can
+short-circuit a pair to FAIL *before* the LLM runs, so the new fields cannot
+rescue a call the embedding gate hard-fails.
+
+- This is correct for the eligibility/funding/geo fields — they are **not
+  topical**, so they should not move a topic-similarity vector.
+- It is a **known limitation** for the two topical org fields
+  (`org.capabilities`, `org.patient_populations`): a relevant call could be
+  embedding-hard-failed before the LLM sees those capabilities. The hard-fail
+  band is narrow (cosine `< 0.20`; the `[0.20, 0.30)` UNKNOWN band already
+  reaches the LLM), and `must_include` remains the escape hatch, so we accept
+  this for v1 rather than expand the embedding input and its invalidation logic.
+  A follow-up may add `org.capabilities` to `build_profile_text` **with** the
+  matching edit-time re-embed trigger; out of scope here.
+
+### Re-ranking after this change
+
+There are two distinct triggers, and they behave differently:
+
+- **Editing a profile** already re-ranks: the edit handler always schedules
+  `backfill_profile` ([profiles.py](../../../src/call_manager/web/routes/profiles.py)),
+  which enqueues jobs for every call in the window (its `ON CONFLICT` guards only
+  *active jobs*, not existing `call_rankings`), so existing rows are re-scored and
+  the LLM sees the new fields. This holds even when only the new (non-description)
+  fields change — the re-embed is skipped (keyed off `description`), but the
+  backfill re-rank still runs.
+- **A code-only prompt-template change** (this redesign bumps `prompt_version`)
+  does **not** auto-rerank. `prompt_version` is a debug/provenance label;
+  `reconcile_missing_rankings` only fills *missing* pairs, and feed/digest do not
+  filter by version. **Deploy step (required):** after deploying, trigger a full
+  re-rank via `POST /admin/rerank`
+  ([admin.py](../../../src/call_manager/web/routes/admin.py)), or a one-off
+  `DELETE FROM call_rankings` followed by the reconciler. This must be called out
+  in the rollout runbook, not assumed.
 
 ## Migration & backward compatibility
 
-One Alembic migration:
+One Alembic migration.
+
+**Upgrade:**
 
 1. Convert `kind` to Text+Check; data map: `org`→`organizational_unit`,
    `group`→`organizational_unit`, `user`→`individual`. Drop the `profile_kind`
@@ -190,8 +241,19 @@ One Alembic migration:
    migrated from `org` — the owner picks the real level on next edit).
 3. Add `parent_profile_id` (FK, indexed) — nullable, unused by v1 logic.
 4. New `structured` keys need no migration — absent keys default via `.get()`.
-5. After deploy, the `prompt_version` bump re-ranks the last 90 days through the
-   existing backfill mechanism.
+
+**Downgrade (explicitly lossy):** `organizational_unit`→`group`,
+`individual`→`user`; revert `kind` to the `profile_kind` enum; drop `level`,
+`parent_profile_id`, and the new `structured.*` namespaces. This is **not a
+faithful inverse** — the original `org` vs `group` distinction is unrecoverable
+(both collapsed to `organizational_unit` on upgrade), and `level` /
+`parent_profile_id` / new fields are dropped. The round-trip test asserts the
+*schema* round-trips and that downgrade runs cleanly, **not** that pre-upgrade
+`kind` values are restored. Treat downgrade as a break-glass schema rollback,
+not a data-preserving operation.
+
+**Rollout:** after deploy, run the explicit re-rank step (see "Re-ranking after
+this change" above) — the `prompt_version` bump does not re-rank on its own.
 
 Existing profiles remain fully functional throughout: untouched `structured`
 keys, owner sets `level`/new fields at leisure.
@@ -216,13 +278,21 @@ between bootstrap, the edit form, and the ranking prompt.
 
 ## Testing
 
-- Migration round-trip (up/down) + `kind`/`level` data mapping.
+- Migration: upgrade `kind`/`level` data mapping (`org`/`group`→unit,
+  `user`→individual; `group`→`level='group'`, `org`→`level=NULL`). Downgrade runs
+  cleanly and the schema round-trips; the test does **not** assert pre-upgrade
+  `kind` values are restored (downgrade is documented-lossy).
 - Kind-branched bootstrap: individual seeds from ORCID; org seeds from
   mission text with no members; field suggestions match kind.
 - Validation: new enum allow-lists reject garbage; list caps enforced.
 - Per-kind form rendering (individual vs unit sections present/absent).
-- Ranking prompt includes the new fields for each kind; `prompt_version`
-  changed → stale rows re-ranked.
+- Ranking prompt: includes the new fields per kind; `funder_exclusions` appears
+  in the eligibility-criterion context, not the topic-`exclusions` criterion.
+- **Re-rank on edit:** editing *only* the new (non-description) fields schedules a
+  `backfill_profile` re-rank (so the LLM re-evaluates) and does **not** schedule a
+  re-embed.
+- **Embedding unchanged:** `build_profile_text` output is unaffected by the new
+  fields (still `description + areas`).
 - Backward-compat: a pre-migration profile (old `structured`, no new keys) ranks
   without error.
 
