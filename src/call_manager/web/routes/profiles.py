@@ -251,6 +251,20 @@ def profile_edit_submit(
     trl_max: str = Form(""),
     must_include: str = Form(""),
     hard_exclusions: str = Form(""),
+    level: str = Form(""),
+    # new structured inputs (validated via parse_structured)
+    career_stage: str = Form(""),
+    applicant_types: str = Form(""),
+    role: str = Form(""),
+    years_since_phd: str = Form(""),
+    org_type: str = Form(""),
+    capabilities: str = Form(""),
+    patient_populations: str = Form(""),
+    scale: str = Form(""),
+    funding_instruments: str = Form(""),
+    funder_exclusions: str = Form(""),
+    country: str = Form(""),
+    host_institution: str = Form(""),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     if len(description) > 50_000:
@@ -296,7 +310,17 @@ def profile_edit_submit(
         # adding work between this assignment and the commit (or moving the
         # commit earlier) won't accidentally invalidate the comparison.
         description_changed = old_description.strip() != description.strip()
-        p.structured = {
+        # Level is editable for organizational units (migrated org rows start
+        # NULL, and the spec promises owners can fill it in here). Ignored for
+        # individuals.
+        if p.kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
+            lv = (level or "").strip() or None
+            if lv is not None and lv not in {x.value for x in ProfileLevel}:
+                raise HTTPException(status_code=400, detail=f"unknown level: {level!r}")
+            p.level = lv
+
+        # existing rubric keys (kept) ...
+        base = {
             "areas": _split_lines(areas),
             "budget_min": parsed_budget_min,
             "budget_max": parsed_budget_max,
@@ -305,6 +329,32 @@ def profile_edit_submit(
             "must_include": _split_lines(must_include),
             "hard_exclusions": _split_lines(hard_exclusions),
         }
+        try:
+            new_ns = parse_structured(
+                kind=p.kind,
+                raw={
+                    "areas": areas,
+                    "career_stage": career_stage,
+                    "applicant_types": applicant_types,
+                    "role": role,
+                    "years_since_phd": years_since_phd,
+                    "org_type": org_type,
+                    "capabilities": capabilities,
+                    "patient_populations": patient_populations,
+                    "scale": scale,
+                    "funding_instruments": funding_instruments,
+                    "funder_exclusions": funder_exclusions,
+                    "country": country,
+                    "host_institution": host_institution,
+                },
+            )
+        except FieldValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        # base owns areas/budget/trl/must_include/hard_exclusions; new_ns owns
+        # the namespaces. parse_structured also returns "areas" — base wins (it
+        # parsed the same input), so drop new_ns["areas"].
+        new_ns.pop("areas", None)
+        p.structured = {**base, **new_ns}
         p.budget_currency = normalized_currency or None
         session.commit()
 

@@ -14,17 +14,23 @@ def _setup(monkeypatch, pg_url):
     return create_app()
 
 
-def _logged_in(app, pg_session_factory, *, is_admin: bool = True):
+def _logged_in(app, pg_session_factory, *, is_admin: bool = True, user_id: int | None = None):
     """Default `is_admin=True` so existing tests that edit profiles they
     didn't create still work under the owner-or-admin gate. Tests that
     exercise the non-admin path should pass `is_admin=False` explicitly.
+
+    Pass `user_id=` to log in as an existing user (e.g. the profile owner)
+    instead of minting a fresh `u@ki.se`.
     """
-    with pg_session_factory() as s:
-        u = User(email="u@ki.se", is_admin=is_admin)
-        s.add(u)
-        s.commit()
-        s.refresh(u)
-        uid = u.id
+    if user_id is not None:
+        uid = user_id
+    else:
+        with pg_session_factory() as s:
+            u = User(email="u@ki.se", is_admin=is_admin)
+            s.add(u)
+            s.commit()
+            s.refresh(u)
+            uid = u.id
     signer: SessionSigner = app.state.session_signer
     client = TestClient(app)
     client.cookies.set("session", signer.make(user_id=uid))
@@ -1036,6 +1042,88 @@ def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_fac
         r = client.post(
             "/profiles/new",
             data={"name": "Dr B", "kind": "individual", "career_stage": "wizard"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+
+
+def test_edit_persists_new_fields_and_schedules_backfill(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    scheduled = {"backfill": 0}
+    import call_manager.web.routes.profiles as profiles_mod
+
+    monkeypatch.setattr(
+        profiles_mod,
+        "backfill_profile",
+        lambda **kw: scheduled.__setitem__("backfill", scheduled["backfill"] + 1),
+    )
+    # create an org-unit profile directly
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        from call_manager.db.models import User
+
+        u = User(email="o@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="Lab",
+            kind="organizational_unit",
+            level="lab",
+            description="d",
+            structured={"areas": []},
+            created_by=u.id,
+        )
+        s.add(p)
+        s.commit()
+        pid, uid = p.id, u.id
+    client = _logged_in(app, pg_session_factory, user_id=uid)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "d",
+                "level": "clinic",
+                "org_type": "university_hospital",
+                "capabilities": "biobank\nimaging_core",
+                "budget_currency": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    # background task ran the re-rank even though description didn't change
+    assert scheduled["backfill"] == 1
+    with pg_session_factory() as s:
+        got = s.get(Profile, pid)
+        assert got.level == "clinic"  # editable level persisted (was NULL for migrated orgs)
+        assert got.structured["org"]["org_type"] == "university_hospital"
+        assert "biobank" in got.structured["org"]["capabilities"]
+
+
+def test_edit_rejects_unknown_level(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    from call_manager.db.models import Profile, User
+
+    with pg_session_factory() as s:
+        u = User(email="o2@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="Lab2",
+            kind="organizational_unit",
+            level=None,
+            description="d",
+            structured={"areas": []},
+            created_by=u.id,
+        )
+        s.add(p)
+        s.commit()
+        pid, uid = p.id, u.id
+    client = _logged_in(app, pg_session_factory, user_id=uid)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={"description": "d", "level": "galaxy", "budget_currency": ""},
             follow_redirects=False,
         )
     assert r.status_code == 400
