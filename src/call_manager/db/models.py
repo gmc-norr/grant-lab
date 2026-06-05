@@ -188,9 +188,17 @@ class Call(Base):
 
 
 class ProfileKind(enum.StrEnum):
-    ORG = "org"
+    ORGANIZATIONAL_UNIT = "organizational_unit"
+    INDIVIDUAL = "individual"
+
+
+class ProfileLevel(enum.StrEnum):
+    LAB = "lab"
     GROUP = "group"
-    USER = "user"
+    DEPARTMENT = "department"
+    CLINIC = "clinic"
+    INSTITUTION = "institution"
+    OTHER = "other"
 
 
 class RankingJobStatus(enum.StrEnum):
@@ -224,13 +232,25 @@ class Profile(Base):
             "id",
             postgresql_where=text("embedding IS NULL"),
         ),
+        CheckConstraint(
+            "kind IN ('organizational_unit','individual')",
+            name="ck_profiles_kind",
+        ),
+        CheckConstraint(
+            "level IS NULL OR level IN ('lab','group','department','clinic','institution','other')",
+            name="ck_profiles_level",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    kind: Mapped[ProfileKind] = mapped_column(
-        Enum(ProfileKind, name="profile_kind", values_callable=lambda e: [m.value for m in e]),
-        nullable=False,
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_profile_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     structured: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
