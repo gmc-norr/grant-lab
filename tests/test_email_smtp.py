@@ -69,3 +69,37 @@ def test_smtp_no_login_when_no_user(monkeypatch):
     r = client.send(to="u@ki.se", subject="hi", html="<p></p>", text="")
     assert r.ok
     fake_conn.login.assert_not_called()
+
+
+def test_magic_link_smtp_starttls_uses_verifying_context(monkeypatch):
+    """The magic-link SMTPEmailSender must call STARTTLS with an explicit
+    SSL context that verifies the server cert. A bare conn.starttls() uses
+    Python's CERT_NONE default (no cert/hostname verification), which lets
+    an active MITM intercept the magic link.
+    """
+    import ssl
+
+    from call_manager.auth.email import SMTPEmailSender
+
+    fake_smtp_class = MagicMock()
+    fake_conn = MagicMock()
+    fake_smtp_class.return_value.__enter__.return_value = fake_conn
+    monkeypatch.setattr("call_manager.auth.email.smtplib.SMTP", fake_smtp_class)
+
+    sender = SMTPEmailSender(
+        host="smtp.example.com",
+        port=587,
+        user="u",
+        password="p",
+        from_address="bot@ki.se",
+    )
+    sender.send(to="u@ki.se", subject="hi", text_body="link")
+
+    fake_conn.starttls.assert_called_once()
+    _, kwargs = fake_conn.starttls.call_args
+    ctx = kwargs.get("context")
+    assert isinstance(ctx, ssl.SSLContext)
+    # A default context verifies the cert chain and the hostname.
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+    fake_conn.login.assert_called_once_with("u", "p")

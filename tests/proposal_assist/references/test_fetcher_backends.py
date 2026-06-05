@@ -22,7 +22,8 @@ def test_fetch_crossref_resolves_doi_to_publisher_pdf(httpx_mock):
     """Crossref API returns a `link` array; we pick the PDF link and
     fetch it via fetch_bytes (SSRF-safe)."""
     httpx_mock.add_response(
-        url="https://api.crossref.org/works/10.1056/NEJMms1411398",
+        # DOI is percent-encoded (safe="") so '/' becomes %2F.
+        url="https://api.crossref.org/works/10.1056%2FNEJMms1411398",
         json={
             "message": {
                 "title": ["A study on AI in pathology"],
@@ -51,7 +52,7 @@ def test_fetch_crossref_no_pdf_link_raises(httpx_mock):
     """Some DOIs have only HTML links; we don't try to download those
     (the user can upload manually)."""
     httpx_mock.add_response(
-        url="https://api.crossref.org/works/10.1234/no-pdf",
+        url="https://api.crossref.org/works/10.1234%2Fno-pdf",
         json={
             "message": {
                 "title": ["Paywalled paper"],
@@ -122,6 +123,56 @@ def test_fetch_arxiv_pulls_pdf(httpx_mock):
     assert filename == "arxiv-2401.12345.pdf"
     assert mime == "application/pdf"
     assert meta["arxiv_id"] == "2401.12345"
+
+
+def test_fetch_pubmed_entity_expansion_is_rejected(httpx_mock):
+    """A malicious elink response with an XML entity-expansion (billion
+    laughs) payload must be refused by defusedxml, surfaced as a
+    FetchError rather than exhausting memory."""
+    elink_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pmc&id=42"
+    )
+    bomb = (
+        '<?xml version="1.0"?>'
+        "<!DOCTYPE lolz ["
+        '<!ENTITY lol "lol">'
+        '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
+        '<!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">'
+        "]>"
+        "<eLinkResult><LinkSet><Id>&lol3;</Id></LinkSet></eLinkResult>"
+    )
+    httpx_mock.add_response(url=elink_url, text=bomb)
+    with pytest.raises(FetchError):
+        fetch_pubmed_pmid("42")
+
+
+def test_fetch_crossref_url_encodes_doi(httpx_mock):
+    """A DOI containing characters that are significant in a URL path
+    (e.g. '#', '?') must be percent-encoded so it can't break out of the
+    Crossref works/ path or inject query params."""
+    import urllib.parse
+
+    doi = "10.1234/weird#frag?x=1"
+    api_url = "https://api.crossref.org/works/" + urllib.parse.quote(doi, safe="")
+    httpx_mock.add_response(
+        url=api_url,
+        json={
+            "message": {
+                "title": ["Edge case DOI"],
+                "link": [
+                    {
+                        "URL": "https://example.com/p.pdf",
+                        "content-type": "application/pdf",
+                    }
+                ],
+            }
+        },
+    )
+    httpx_mock.add_response(url="https://example.com/p.pdf", content=b"%PDF-1.4\nok")
+    bytes_, _filename, mime, meta = fetch_crossref_doi(doi)
+    assert bytes_ == b"%PDF-1.4\nok"
+    assert mime == "application/pdf"
+    assert meta["doi"] == doi
 
 
 def test_fetch_generic_url_returns_bytes_with_mime_sniff(httpx_mock):

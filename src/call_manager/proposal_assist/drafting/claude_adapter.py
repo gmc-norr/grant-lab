@@ -101,6 +101,23 @@ class ClaudeAgentSDKAdapter:
         the workspace's git-backed repo directory. The directory is not
         created here — Phase 0 is responsible for that.
         """
+        options_kwargs = self._build_options_kwargs(context)
+        options = ClaudeAgentOptions(**options_kwargs)
+
+        client = ClaudeSDKClient(options=options)
+        await client.connect()
+
+        return AgentHandle(
+            workspace_id=context.workspace_id,
+            state={"client": client},
+        )
+
+    def _build_options_kwargs(self, context: LaunchContext) -> dict[str, Any]:
+        """Assemble the ClaudeAgentOptions kwargs for this launch.
+
+        Split out from launch() so the security-boundary wiring can be unit
+        tested without a live SDK subprocess (connect()).
+        """
         workspace_id = context.workspace_id
         repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
 
@@ -111,15 +128,20 @@ class ClaudeAgentSDKAdapter:
         )
         if context.resume_session_id is not None:
             options_kwargs["resume"] = context.resume_session_id
+
+        # CRITICAL security boundary (Codex B2): allowed_tools alone does NOT
+        # disable Claude Code's built-in toolbox. The disable is `tools=[]`
+        # PLUS `strict_mcp_config=True`. These MUST be set unconditionally —
+        # with permission_mode defaulting to "bypassPermissions", an adapter
+        # constructed without a tools_factory would otherwise expose the FULL
+        # built-in bash/file toolbox in the workspace repo with no permission
+        # prompts (a latent RCE-class footgun). Always strip the built-ins;
+        # only wire the MCP server + its allowlist when a factory is present.
+        options_kwargs["tools"] = []
+        options_kwargs["strict_mcp_config"] = True
         if self._tools_factory is not None:
             mcp_server = self._tools_factory(repo_dir, workspace_id)
             options_kwargs["mcp_servers"] = {"proposal_assist": mcp_server}
-            # CRITICAL security boundary (Codex B2): allowed_tools alone does NOT
-            # disable Claude Code's built-in toolbox. The disable is `tools=[]`
-            # PLUS `strict_mcp_config=True`. Together with mcp_servers, the agent
-            # sees ONLY our 8 MCP tools.
-            options_kwargs["tools"] = []
-            options_kwargs["strict_mcp_config"] = True
             # Bare tool names per the SDK's docstring example
             # (claude_agent_sdk/__init__.py:352 — "allowed_tools=['add','multiply']"
             # paired with mcp_servers={'calc': calculator}). The SDK forwards the
@@ -143,15 +165,7 @@ class ClaudeAgentSDKAdapter:
                 # Slice 3 — agent-side fetch
                 "fetch_reference",
             ]
-        options = ClaudeAgentOptions(**options_kwargs)
-
-        client = ClaudeSDKClient(options=options)
-        await client.connect()
-
-        return AgentHandle(
-            workspace_id=workspace_id,
-            state={"client": client},
-        )
+        return options_kwargs
 
     async def send_turn(
         self,

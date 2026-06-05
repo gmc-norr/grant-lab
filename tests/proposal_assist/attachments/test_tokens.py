@@ -49,3 +49,21 @@ def test_estimate_from_bytes_png():
 def test_estimate_from_bytes_rejects_non_image():
     with pytest.raises(ValueError):
         estimate_image_tokens_from_bytes(b"not an image")
+
+
+def test_estimate_from_bytes_rejects_decompression_bomb(monkeypatch):
+    """A crafted image declaring an enormous pixel count must be refused
+    (Pillow raises DecompressionBombError) rather than allocating GBs."""
+    from PIL import Image
+
+    from call_manager.proposal_assist.attachments import tokens as tokens_mod
+
+    # The module must set a finite MAX_IMAGE_PIXELS cap.
+    assert Image.MAX_IMAGE_PIXELS is not None
+
+    # Build an image whose pixel count exceeds the module's cap. Use a
+    # temporarily-lowered cap so the test image stays tiny/fast.
+    monkeypatch.setattr(tokens_mod.Image, "MAX_IMAGE_PIXELS", 10)
+    data = _make_image_bytes(100, 100, fmt="PNG")  # 10_000 px > 10
+    with pytest.raises(ValueError):
+        estimate_image_tokens_from_bytes(data)

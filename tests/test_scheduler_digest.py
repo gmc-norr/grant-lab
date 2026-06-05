@@ -69,3 +69,20 @@ def test_scheduler_skips_digest_weekly_without_email_client(
     sched = _build(pg_session_factory, with_digest=False)
     assert sched.get_job("digest:weekly") is None
     sched.shutdown(wait=False)
+
+
+def test_digest_job_sets_generous_misfire_grace_time(
+    pg_session_factory,
+    _settings_env,
+):
+    """APScheduler's default misfire_grace_time is 1s, so a restart/GC at the
+    Monday 07:00 fire instant would silently drop the whole week's digest.
+    The digest job must set an explicit, generous grace (the DigestRun
+    week-uniqueness guard makes a late run safe)."""
+    sched = _build(pg_session_factory, with_digest=True)
+    job = sched.get_job("digest:weekly")
+    assert job is not None
+    # Must be explicitly set and far larger than the 1-second default.
+    assert job.misfire_grace_time is not None
+    assert job.misfire_grace_time >= 6 * 3600
+    sched.shutdown(wait=False)

@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 import httpx
 
 from call_manager.sources.extraction import fetch_html_main_content
-from call_manager.sources.types import AdapterError, NormalizedCall, is_safe_url
+from call_manager.sources.types import (
+    AdapterError,
+    NeedsBody,
+    NormalizedCall,
+    is_safe_url,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -96,7 +101,19 @@ class EUPortalAdapter:
         self._extraction_transport = extraction_transport
         self._timeout = timeout
 
-    def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
+    def fetch_new_calls(
+        self, since: datetime, *, needs_body: NeedsBody | None = None
+    ) -> Iterator[NormalizedCall]:
+        # `needs_body(identifier) -> bool`: the orchestrator builds this from a
+        # cheap DB query of which calls already have a non-null `full_text`.
+        # When it returns False we SKIP the topic-detail scrape entirely — the
+        # body is already in the DB and upsert.py coalesces None over the
+        # existing value. This turns the per-run cost from "scrape every call"
+        # (hundreds of serial blocking HTTP+parse calls) into "scrape only
+        # brand-new / body-less calls". When `needs_body` is None (e.g. CLI
+        # one-shots that don't wire it), we fall back to always scraping, the
+        # pre-fix behavior.
+        #
         # Repeated `status` params (status=OPEN&status=FORTHCOMING) are the
         # safest cross-API encoding — comma-separated values get URL-encoded
         # to %2C and not all servers reverse that.
@@ -139,7 +156,7 @@ class EUPortalAdapter:
                     if not results:
                         break
                     for item in results:
-                        normalized = self._normalize(item)
+                        normalized = self._normalize(item, needs_body=needs_body)
                         if normalized is not None:
                             yield normalized
                     seen += len(results)
@@ -155,7 +172,9 @@ class EUPortalAdapter:
         except ValueError as e:  # JSON decode
             raise AdapterError(f"EU Portal returned non-JSON body: {e}") from e
 
-    def _normalize(self, item: dict) -> NormalizedCall | None:
+    def _normalize(
+        self, item: dict, *, needs_body: NeedsBody | None = None
+    ) -> NormalizedCall | None:
         # Required fields per our contract.
         external_id = item.get("identifier")
         title = item.get("title")
@@ -174,11 +193,16 @@ class EUPortalAdapter:
             )
             return None
 
-        # Best-effort scrape of the topic-detail page for the call body.
-        # `fetch_html_main_content` returns None on HTTP error / empty
-        # extraction (and logs); we just propagate that — ranking can still
-        # use `summary` alone if the scrape fails.
-        full_text = fetch_html_main_content(str(url), transport=self._extraction_transport)
+        # Best-effort scrape of the topic-detail page for the call body —
+        # but only when the body is actually needed. `needs_body` returns
+        # False for calls already ingested with a non-null `full_text`, so we
+        # skip the (blocking, serial) scrape and let upsert's coalesce keep the
+        # existing body. When `needs_body` is None we always scrape (CLI /
+        # pre-fix behavior). `fetch_html_main_content` returns None on HTTP
+        # error / empty extraction (and logs); ranking can still use `summary`.
+        full_text: str | None = None
+        if needs_body is None or needs_body(str(external_id)):
+            full_text = fetch_html_main_content(str(url), transport=self._extraction_transport)
 
         return NormalizedCall(
             external_id=str(external_id),

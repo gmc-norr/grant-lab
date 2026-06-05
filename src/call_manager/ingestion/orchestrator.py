@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -18,6 +20,21 @@ from call_manager.sources.types import AdapterError, SourceAdapter
 _logger = logging.getLogger(__name__)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _accepts_needs_body(fetch: Callable) -> bool:
+    """True if `fetch_new_calls` accepts a `needs_body` keyword argument.
+
+    Tolerates older `(self, since)` adapters / test doubles. A signature with
+    **kwargs is treated as accepting it too.
+    """
+    try:
+        params = inspect.signature(fetch).parameters
+    except (TypeError, ValueError):
+        return False
+    if "needs_body" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 @dataclass
@@ -97,6 +114,39 @@ def run_ingestion(
         source_id = src.id
         since = src.last_fetched_at or _EPOCH
 
+    # Build a cheap `needs_body(external_id) -> bool` predicate from a single
+    # indexed query of which calls for this source already have a non-null
+    # `full_text`. Adapters that scrape a separate detail page for the body
+    # (e.g. EU portal) consult this to SKIP re-scraping already-ingested calls
+    # — turning hundreds of serial blocking HTTP+parse calls per run into a
+    # scrape of only brand-new / body-less calls. Adapters whose source carries
+    # the body inline (Vinnova) ignore the predicate.
+    with session_factory() as session:
+        have_body_ids = set(
+            session.execute(
+                select(Call.external_id).where(
+                    Call.source_id == source_id,
+                    Call.full_text.is_not(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    def _needs_body(external_id: str) -> bool:
+        return external_id not in have_body_ids
+
+    # Only pass `needs_body` to adapters whose `fetch_new_calls` accepts it.
+    # The SourceAdapter protocol declares the kwarg, but minimal/legacy
+    # adapters (and some test doubles) may still use the older `(self, since)`
+    # signature; calling those with an unexpected kwarg would raise TypeError.
+    # Inspect once and degrade gracefully — a body-inline adapter that ignores
+    # the predicate loses nothing.
+    if _accepts_needs_body(adapter.fetch_new_calls):
+        fetch = adapter.fetch_new_calls(since=since, needs_body=_needs_body)
+    else:
+        fetch = adapter.fetch_new_calls(since=since)
+
     inserted = updated = 0
     error_msg: str | None = None
     touched_call_ids: list[int] = []
@@ -104,7 +154,7 @@ def run_ingestion(
     # --- Step 1: upsert calls + advance source timestamp (one transaction) ---
     try:
         with session_factory() as session:
-            for call in adapter.fetch_new_calls(since=since):
+            for call in fetch:
                 was_new = upsert_call(session, source_id=source_id, call=call)
                 if was_new:
                     inserted += 1

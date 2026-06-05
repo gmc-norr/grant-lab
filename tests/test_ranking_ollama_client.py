@@ -103,6 +103,32 @@ def test_chat_raises_on_null_message_content():
         client.chat(messages=[{"role": "user", "content": "hi"}])
 
 
+def test_chat_raises_on_length_truncation():
+    """If Ollama stops at the num_predict ceiling (finish_reason 'length'),
+    the content is a partial, almost-certainly-invalid JSON fragment. Mirror
+    the Anthropic client: raise LLMError before that truncated body reaches
+    the parser, instead of dead-lettering on a misleading ParseError."""
+    truncated = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "model": "gemma4:e4b-q8",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": '{"topic_fit": {"rat'},
+                "finish_reason": "length",
+            }
+        ],
+    }
+    client = OllamaClient(
+        base_url="http://localhost:11434",
+        model="gemma4:e4b-q8",
+        transport=_mock(body=truncated),
+    )
+    with pytest.raises(LLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}])
+
+
 def test_chat_request_shape_is_openai_compatible():
     """Verify model + temperature + response_format reach the wire as
     the OpenAI-compatible API expects them."""

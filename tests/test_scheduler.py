@@ -171,3 +171,75 @@ def test_build_scheduler_includes_rank_drain_job(_settings_env):
     job_ids = sorted(j.id for j in sched.get_jobs())
     assert "rank:drain" in job_ids
     sched.shutdown(wait=False)
+
+
+def test_build_scheduler_includes_turn_reaper_job(_settings_env):
+    """The stuck-turn reaper must be scheduled so a wedged workspace
+    (turn_jobs row stuck status='running') gets unwedged."""
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+
+    settings = Settings()
+
+    def session_factory():
+        return None
+
+    workspace_controller = build_workspace_controller(
+        settings=settings,
+        session_factory=session_factory,
+    )
+    sched = build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=workspace_controller,
+        start=False,
+    )
+    assert sched.get_job("turn_reaper") is not None
+    sched.shutdown(wait=False)
+
+
+def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
+    """Daily crons must set an explicit misfire_grace_time well above the
+    1-second APScheduler default so a restart at the fire instant doesn't
+    drop the run."""
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+
+    settings = Settings()
+
+    def session_factory():
+        return None
+
+    workspace_controller = build_workspace_controller(
+        settings=settings,
+        session_factory=session_factory,
+    )
+    sched = build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=workspace_controller,
+        start=False,
+    )
+    for jid in (
+        "ingest:eu_portal",
+        "ingest:vinnova",
+        "golden_eval:weekly",
+        "embeddings:refresh-missing",
+        "ranking:reconcile",
+    ):
+        job = sched.get_job(jid)
+        assert job is not None, jid
+        assert job.misfire_grace_time is not None and job.misfire_grace_time >= 6 * 3600, jid
+    sched.shutdown(wait=False)

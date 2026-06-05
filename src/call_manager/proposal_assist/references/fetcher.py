@@ -10,13 +10,18 @@ module, which:
    block below is the actual SSRF defense.
 2. Resolves DNS for validation, checks every returned IP against the
    private/internal range deny-list. Rejects if any address is private.
-3. VALIDATES the resolved IP against the deny-list, but does NOT pin
-   the connection. httpx re-resolves the hostname at connect time, so
-   a determined attacker rebinding DNS between validation and fetch
-   can still hit a private IP. True pinning (a custom httpx.HTTPTransport
-   that overrides connect_socket) is a v1.1 follow-up. The validate-once
-   pattern closes the common-case rebinding window but is not a hard
-   guarantee.
+3. VALIDATES the resolved IP against the deny-list AND PINS the
+   connection to that literal IP via _PinnedResolverTransport. httpx no
+   longer re-resolves the hostname at connect time, so a determined
+   attacker rebinding DNS between validation and fetch cannot flip to a
+   private IP — we connect to the exact IP we validated. The original
+   Host header and TLS SNI/cert validation are preserved.
+
+   Residual: the pin map keys on the hostname string, so this defeats
+   classic time-of-check/time-of-use rebinding. It does NOT cover a
+   server that legitimately resolves to multiple IPs where one rotates
+   private mid-session; we pin the FIRST validated answer per hop, which
+   is the standard SSRF-pinning posture.
 4. Re-validates every redirect target up to a configurable max-redirect
    count.
 5. Caps response size at max_bytes; reads in chunks.
@@ -33,10 +38,12 @@ import ipaddress
 import json
 import logging
 import socket
-import xml.etree.ElementTree as ET
+import urllib.parse
 from urllib.parse import urlparse
 
 import httpx
+from defusedxml import ElementTree as DET
+from defusedxml.common import DefusedXmlException
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +116,42 @@ def _resolve_and_validate(host: str, port: int) -> str:
     return addrs[0]
 
 
+class _PinnedNetworkBackend:
+    """Wraps httpcore's network backend so TCP connects go to a
+    pre-validated IP instead of a freshly-resolved hostname.
+
+    DNS-rebinding SSRF defense: the caller resolves the host ONCE to a
+    public IP (via _resolve_and_validate), then this backend forces the
+    socket connect to that literal IP. TLS SNI and certificate validation
+    are unaffected — httpcore derives those from the connection ORIGIN
+    (the request URL's hostname), not from the ``host`` argument to
+    ``connect_tcp`` — so the Host header and cert hostname stay correct
+    while the socket targets the pinned IP. No URL rewriting, so request
+    mocking and Host headers behave normally.
+    """
+
+    def __init__(self, inner, pin_map: dict[str, str]):
+        self._inner = inner
+        self._pin_map = pin_map
+
+    def connect_tcp(self, host: str, port: int, *args, **kwargs):
+        pinned = self._pin_map.get(host, host)
+        return self._inner.connect_tcp(pinned, port, *args, **kwargs)
+
+    def __getattr__(self, name):
+        # Delegate connect_unix_socket / anything else to the real backend.
+        return getattr(self._inner, name)
+
+
+def _pinned_transport(pin_map: dict[str, str]) -> httpx.HTTPTransport:
+    """Build an HTTPTransport whose network backend pins hostnames in
+    ``pin_map`` to their validated IPs at socket-connect time."""
+    transport = httpx.HTTPTransport()
+    pool = transport._pool
+    pool._network_backend = _PinnedNetworkBackend(pool._network_backend, pin_map)
+    return transport
+
+
 def _validate_url(url: str) -> tuple[str, str, int, str]:
     """Returns (scheme, host, port, path-and-query). Raises SSRFError
     on any safety violation.
@@ -155,10 +198,14 @@ def fetch_bytes(
         seen_urls.add(current_url)
 
         scheme, host, port, _ = _validate_url(current_url)
-        # Validate the resolved IP. We do NOT override httpx's connect
-        # address — httpx re-resolves at connect time, leaving a small
-        # rebinding race that v1.1 will close with a custom transport.
-        _ = _resolve_and_validate(host, port)
+        # Resolve + validate ONCE, then pin the connection to that literal
+        # IP. _pinned_transport routes the TCP connect to the validated IP
+        # instead of letting httpx re-resolve the hostname at connect time,
+        # closing the DNS-rebinding window. The original Host header and TLS
+        # SNI/cert validation are preserved. We re-resolve and re-pin on
+        # EVERY redirect hop (loop continues below).
+        pinned_ip = _resolve_and_validate(host, port)
+        transport = _pinned_transport({host: pinned_ip})
 
         try:
             # follow_redirects=False so we re-validate each hop ourselves.
@@ -171,6 +218,7 @@ def fetch_bytes(
                     follow_redirects=False,
                     timeout=timeout_s,
                     headers={"User-Agent": user_agent},
+                    transport=transport,
                 ) as client,
                 client.stream("GET", current_url) as response,
             ):
@@ -233,7 +281,10 @@ def _infer_mime_from_filename(filename: str) -> str:
 def fetch_crossref_doi(doi: str) -> tuple[bytes, str, str, dict]:
     """Resolve a DOI via Crossref API, find the publisher PDF link,
     fetch it via fetch_bytes."""
-    api_url = f"https://api.crossref.org/works/{doi}"
+    # Percent-encode the DOI so characters significant in a URL path/query
+    # (e.g. '#', '?', '/') can't break out of the works/ path or inject
+    # query parameters into the Crossref request.
+    api_url = f"https://api.crossref.org/works/{urllib.parse.quote(doi, safe='')}"
     meta_bytes = fetch_bytes(api_url, max_bytes=1 * 1024 * 1024)  # 1 MB cap on metadata
     try:
         api_data = json.loads(meta_bytes)
@@ -277,8 +328,12 @@ def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
     elink_bytes = fetch_bytes(elink_url, max_bytes=512 * 1024)
 
     try:
-        root = ET.fromstring(elink_bytes)
-    except ET.ParseError as e:
+        # defusedxml refuses entity-expansion / external-entity / DTD
+        # attacks (billion laughs) that the stdlib parser is vulnerable to.
+        root = DET.fromstring(elink_bytes)
+    except DefusedXmlException as e:
+        raise FetchError(f"elink returned unsafe XML for PMID {pmid!r}: {e}") from e
+    except DET.ParseError as e:
         raise FetchError(f"elink returned non-XML for PMID {pmid!r}: {e}") from e
     pmc_ids = [el.text for el in root.iter("Id") if el.text]
     if not pmc_ids:

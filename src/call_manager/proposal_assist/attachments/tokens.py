@@ -15,9 +15,18 @@ import io
 import math
 
 from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombError
 
 _MAX_LONG_SIDE = 1568
 _TOKENS_PER_PIXEL_DENOMINATOR = 750
+
+# Decompression-bomb guard: cap the pixel count Pillow will accept before
+# it raises DecompressionBombError. Pillow's library default is ~178 Mpx;
+# we set a finite, explicit cap here so a crafted image (tiny on disk,
+# enormous in pixels) can't drive a multi-GB allocation when we probe
+# dimensions. 64 Mpx (~8000x8000) is far larger than any legitimate
+# attachment but still bounded.
+Image.MAX_IMAGE_PIXELS = 64 * 1024 * 1024
 
 
 def estimate_image_tokens(width: int, height: int) -> int:
@@ -41,7 +50,16 @@ def estimate_image_tokens_from_bytes(data: bytes) -> int:
     Raises ValueError if the bytes are not a recognized image format."""
     try:
         with Image.open(io.BytesIO(data)) as img:
+            # Pillow raises DecompressionBombError during open() for images
+            # whose declared pixel count is well over MAX_IMAGE_PIXELS; we
+            # also re-check explicitly below to catch the warning-band case.
             width, height = img.size
+            if width * height > Image.MAX_IMAGE_PIXELS:
+                raise DecompressionBombError(
+                    f"image pixel count {width * height} exceeds cap {Image.MAX_IMAGE_PIXELS}"
+                )
+    except DecompressionBombError as e:
+        raise ValueError(f"image too large (decompression-bomb guard): {e}") from e
     except UnidentifiedImageError as e:
         raise ValueError(f"unrecognized image data: {e}") from e
     return estimate_image_tokens(width, height)

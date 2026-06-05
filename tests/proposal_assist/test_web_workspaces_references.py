@@ -196,6 +196,35 @@ def test_raw_serves_bytes_with_attachment_disposition(
     assert int(resp.headers["content-length"]) == len(md)
 
 
+def test_soft_delete_scrubs_reference_bytes(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Compliance: soft-deleting a workspace must remove the references
+    tree (original bytes + extracted text.txt) from disk, mirroring the
+    attachment scrub. DB rows are intentionally retained for the audit
+    trail; only the on-disk bytes are gone."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s)
+    client = _authed(app, user_id=uid)
+    md = b"# Hello\n\nworld\n"
+    try:
+        up = client.post(
+            f"/workspaces/{wsid}/references",
+            data={"kind": "paper"},
+            files={"file": ("hello.md", io.BytesIO(md), "text/markdown")},
+        )
+        assert up.status_code == 200, up.text
+
+        refs_dir = tmp_path / str(wsid) / "references"
+        assert refs_dir.exists(), "reference bytes should be on disk after upload"
+
+        resp = client.post(f"/workspaces/{wsid}/delete", follow_redirects=False)
+    finally:
+        client.__exit__(None, None, None)
+
+    assert resp.status_code in (303, 307)
+    assert not refs_dir.exists(), "references tree must be scrubbed on soft-delete"
+
+
 def test_raw_returns_404_for_other_workspace_id(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Cross-workspace IDOR check: passing the right ref_id but the
     wrong workspace_id in the URL returns 404, not 403 — don't leak

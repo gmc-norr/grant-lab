@@ -128,7 +128,7 @@ def test_worker_writes_call_ranking_with_aggregate_and_reason(pg_session_factory
     # Topic 4 (logprob expected ≈ 4.0 with strong probability) × 20 ≈ 80
     assert 75 <= r.aggregate_score <= 85
     assert r.aggregate_reason is None
-    assert r.prompt_version == "v4.0"
+    assert r.prompt_version == "v4.1"
 
 
 def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):

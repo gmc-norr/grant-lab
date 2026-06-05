@@ -223,7 +223,9 @@ def profile_detail(
     session_factory = request.app.state.session_factory
     with session_factory() as session:
         p = session.get(Profile, profile_id)
-        if p is None:
+        # Archived profiles are hidden everywhere else (index/feeds filter on
+        # is_active); a direct URL must 404 too, not leak a readable detail page.
+        if p is None or p.is_active is False:
             raise HTTPException(status_code=404, detail="profile not found")
         session.expunge(p)
     return request.app.state.templates.TemplateResponse(
@@ -242,7 +244,8 @@ def profile_edit_form(
     session_factory = request.app.state.session_factory
     with session_factory() as session:
         p = session.get(Profile, profile_id)
-        if p is None:
+        # Same archived-is-hidden contract as profile_detail.
+        if p is None or p.is_active is False:
             raise HTTPException(status_code=404, detail="profile not found")
         session.expunge(p)
     return request.app.state.templates.TemplateResponse(
@@ -306,7 +309,9 @@ def profile_edit_submit(
     description_changed = False
     with session_factory() as session:
         p = session.get(Profile, profile_id)
-        if p is None:
+        # Archived profiles are not editable by direct POST either — match the
+        # 404 the detail/edit-form GETs now return.
+        if p is None or p.is_active is False:
             raise HTTPException(status_code=404, detail="profile not found")
         # Owner-or-admin policy. The profile `created_by` column records
         # the creator; admins can edit anyone's. Returning 403 (not 404)

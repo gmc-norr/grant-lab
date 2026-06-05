@@ -99,3 +99,17 @@ class ReferenceStorage:
         ref_dir = self.root / str(workspace_id) / "references" / str(reference_id)
         if ref_dir.exists():
             shutil.rmtree(ref_dir)
+
+    def delete_workspace(self, *, workspace_id: uuid.UUID) -> None:
+        """Idempotent: remove the workspace's ``references/`` subdir
+        (every reference's original bytes + extracted text.txt).
+
+        Mirrors ``AttachmentStorage.delete_workspace``. Only this subdir
+        is removed; sibling ``repo/`` (B5) and ``attachments/`` (B7) trees
+        are untouched. No-op if the subdir doesn't exist (covers
+        workspaces that never had any references). Called from the
+        workspace soft-delete handler so reference bytes don't survive the
+        compliance scrub."""
+        target = self.root / str(workspace_id) / "references"
+        if target.exists():
+            shutil.rmtree(target)

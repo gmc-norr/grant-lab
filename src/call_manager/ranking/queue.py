@@ -25,6 +25,13 @@ _STUCK_AFTER = timedelta(minutes=5)
 # a manual /admin/rerank would recover it over.
 _RECONCILE_DAYS = 90
 
+# How long a terminally-FAILED (dead-lettered) ranking_job suppresses
+# reconcile/backfill re-enqueue of the same (call, profile) pair. Without
+# this window a dead-lettered pair — which has no CallRanking and no active
+# job — gets re-enqueued on every daily tick, burning attempts forever.
+# Bounded (not forever) so a long-ago transient failure eventually retries.
+_DEAD_LETTER_SUPPRESS_DAYS = 7
+
 
 def enqueue_for_pair(session: Session, *, call_id: int, profile_id: int) -> bool:
     """Enqueue a ranking job for the (call, profile) pair.
@@ -87,8 +94,17 @@ def reconcile_missing_rankings(session: Session) -> int:
 
     Excludes calls with NULL published_at (same as backfill_profile —
     we can't bound their age, so we defer to the manual-rerank path).
+
+    Also excludes pairs with a recent terminally-FAILED (dead-lettered)
+    ranking_job. Such a pair has neither a CallRanking nor an active job,
+    so without this guard reconcile would re-enqueue it every daily tick,
+    burning attempts indefinitely. The suppression is time-bounded
+    (`_DEAD_LETTER_SUPPRESS_DAYS`): a long-ago transient failure becomes
+    eligible again rather than being abandoned forever. Operators can still
+    force an immediate retry via /admin/rerank.
     """
     cutoff = datetime.now(UTC) - timedelta(days=_RECONCILE_DAYS)
+    dead_letter_cutoff = datetime.now(UTC) - timedelta(days=_DEAD_LETTER_SUPPRESS_DAYS)
     result = session.execute(
         text(
             """
@@ -102,11 +118,18 @@ def reconcile_missing_rankings(session: Session) -> int:
                 SELECT 1 FROM call_rankings cr
                 WHERE cr.call_id = c.id AND cr.profile_id = p.id
               )
+              AND NOT EXISTS (
+                SELECT 1 FROM ranking_jobs rj
+                WHERE rj.call_id = c.id
+                  AND rj.profile_id = p.id
+                  AND rj.status = 'failed'
+                  AND rj.updated_at > :dead_letter_cutoff
+              )
             ON CONFLICT (call_id, profile_id)
               WHERE status IN ('pending', 'running') DO NOTHING
             """
         ),
-        {"cutoff": cutoff},
+        {"cutoff": cutoff, "dead_letter_cutoff": dead_letter_cutoff},
     )
     n = result.rowcount or 0
     if n:

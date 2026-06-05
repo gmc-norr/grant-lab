@@ -108,4 +108,19 @@ class OllamaClient:
         content = message.get("content")
         if not isinstance(content, str) or not content:
             raise LLMError(f"Ollama envelope missing non-empty message.content: {envelope!r}")
+
+        # num_predict truncation: the model hit the output-token ceiling
+        # mid-generation, so `content` is a partial (almost always invalid)
+        # JSON fragment. Letting it flow on would fail parse_response →
+        # ParseError → paid retries → dead-letter, none of which help: the
+        # truncation is deterministic for this prompt + num_predict. Mirror
+        # the Anthropic client (stop_reason == 'max_tokens') and surface as
+        # LLMError now, before extracting text. The fix for a persistently
+        # over-long response is to raise num_predict, not re-run the same call.
+        if choices[0].get("finish_reason") == "length":
+            raise LLMError(
+                f"Ollama response truncated at num_predict={self._num_predict} "
+                "(finish_reason='length'); raise OllamaClient num_predict — "
+                "retrying cannot help"
+            )
         return envelope

@@ -114,3 +114,34 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         "fetch_reference",
     }
     assert set(allowed) == expected_tools
+
+
+def test_options_strip_builtin_tools_even_without_tools_factory():
+    """SECURITY: tools=[] + strict_mcp_config=True must be set UNCONDITIONALLY.
+
+    With permission_mode defaulting to "bypassPermissions", an adapter built
+    with tools_factory=None would otherwise expose Claude Code's full built-in
+    bash/file toolbox in the workspace repo with no permission prompts — a
+    latent RCE-class footgun. We assert the built-ins are stripped even when
+    no MCP factory is present, and that no MCP wiring leaks through.
+    """
+    from call_manager.proposal_assist.drafting.claude_adapter import (
+        ClaudeAgentSDKAdapter,
+    )
+    from call_manager.proposal_assist.drafting.contract import LaunchContext
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="x",
+        workspaces_dir="/tmp",
+        tools_factory=None,
+    )
+    ctx = LaunchContext(workspace_id=uuid.uuid4())
+    kwargs = adapter._build_options_kwargs(ctx)
+
+    assert kwargs["tools"] == []
+    assert kwargs["strict_mcp_config"] is True
+    # No factory ⇒ no MCP server and no allowlist wiring.
+    assert "mcp_servers" not in kwargs
+    assert "allowed_tools" not in kwargs
+    # Default permission mode is the dangerous one — confirms the fix matters.
+    assert kwargs["permission_mode"] == "bypassPermissions"

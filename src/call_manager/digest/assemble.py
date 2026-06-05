@@ -94,12 +94,16 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         .scalars()
         .all()
     )
-    # Bound prior_ids to the last 26 weeks. Calls older than ~6 months are
-    # excluded by the `Call.deadline > now` filter anyway, so this is a pure
-    # memory bound with no behavior change. Without it, included_call_ids
-    # grows unboundedly (weekly digest x 25 calls = thousands of ids over
-    # years).
-    prior_cutoff = now - timedelta(weeks=26)
+    # Bound prior_ids to the last 78 weeks (~18 months). This MUST comfortably
+    # exceed the longest realistic call deadline: EU portal calls routinely
+    # carry 9-12 month deadlines, and a call still inside its deadline window
+    # must stay in prior_ids or it gets RE-SENT as "new". A 26-week bound
+    # dropped a 9-12 month-deadline call out of prior_ids around week 27 while
+    # `Call.deadline > now` still kept it eligible — so it re-surfaced. 78
+    # weeks covers the longest realistic deadline with margin. Memory cost is
+    # trivial (~25 calls/week × 78 ≈ 2k ids), and the deadline filter still
+    # prunes anything genuinely expired.
+    prior_cutoff = now - timedelta(weeks=78)
     prior_ids: set[int] = set()
     for run in (
         session.execute(

@@ -8,11 +8,23 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from call_manager.sources.types import AdapterError, NormalizedCall, is_safe_url
+from call_manager.sources.types import (
+    AdapterError,
+    NeedsBody,
+    NormalizedCall,
+    is_safe_url,
+)
 
 _logger = logging.getLogger(__name__)
 _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 _ACCEPT_V2 = "application/vnd.vinnova.opendata.2.0+json"
+
+# How many round-fetches may fail back-to-back before we treat the run as a
+# systemic outage and abort. A single flaky round (transient 5xx, malformed
+# body) is logged and skipped so the rest of the batch still commits; the
+# idempotent upsert fills the gap on the next tick. Only a sustained run of
+# consecutive failures (server down, auth revoked) escalates to AdapterError.
+_MAX_CONSECUTIVE_ROUND_FAILURES = 5
 
 
 def _parse_iso_stockholm(s: str | None, *, end_of_day_if_midnight: bool = False) -> datetime | None:
@@ -111,7 +123,13 @@ class VinnovaAdapter:
         self._timeout = timeout
         self._sleep_between_rounds = sleep_between_rounds
 
-    def fetch_new_calls(self, since: datetime) -> Iterator[NormalizedCall]:
+    def fetch_new_calls(
+        self, since: datetime, *, needs_body: NeedsBody | None = None
+    ) -> Iterator[NormalizedCall]:
+        # `needs_body` is ignored: Vinnova's round endpoint returns the full
+        # call body inline (WebTextLista), so there's no separate detail page
+        # to skip-scrape. Accepted to satisfy the SourceAdapter protocol.
+        del needs_body
         # The endpoint takes a date suffix: modified-since semantics.
         date_suffix = since.astimezone(_STOCKHOLM).date().isoformat()
         programmes_path = f"/api/utlysningar/{date_suffix}"
@@ -132,6 +150,7 @@ class VinnovaAdapter:
                     )
 
                 first_round = True
+                consecutive_failures = 0
                 for programme in programmes:
                     for round_ref in programme.get("AnsokningsomgangDnrLista") or []:
                         dnr = round_ref.get("DiarienummerAnsokningsomgang")
@@ -141,22 +160,45 @@ class VinnovaAdapter:
                             time.sleep(self._sleep_between_rounds)
                         first_round = False
 
-                        # An HTTP error on any one round aborts the whole
-                        # batch (raise_for_status → AdapterError below). The
-                        # orchestrator's idempotent upsert tolerates that:
-                        # the next tick re-fetches and picks up where we
-                        # stopped. Per-round try/except would swallow
-                        # systemic outages we want to alert on.
+                        # Per-round resilience: a single flaky round (transient
+                        # 5xx, request error, malformed body) is logged and
+                        # SKIPPED so the rest of the batch still commits — the
+                        # idempotent upsert fills the gap next tick. We only
+                        # abort the whole run when failures pile up
+                        # consecutively (≥ _MAX_CONSECUTIVE_ROUND_FAILURES),
+                        # which signals a systemic outage worth alerting on
+                        # rather than one bad record. A previous version raised
+                        # on the first round error, discarding every
+                        # already-yielded call and risking the run getting
+                        # permanently stuck on the same flaky round.
                         round_path = f"/api/ansokningsomgangar/{dnr}"
-                        round_resp = client.get(round_path, headers={"Accept": _ACCEPT_V2})
-                        round_resp.raise_for_status()
-                        round_list = round_resp.json()
-
-                        if not isinstance(round_list, list):
-                            raise AdapterError(
-                                f"Vinnova /ansokningsomgangar/{dnr} returned non-list: "
-                                f"{type(round_list).__name__}"
+                        try:
+                            round_resp = client.get(round_path, headers={"Accept": _ACCEPT_V2})
+                            round_resp.raise_for_status()
+                            round_list = round_resp.json()
+                            if not isinstance(round_list, list):
+                                raise ValueError(f"non-list payload: {type(round_list).__name__}")
+                        except (httpx.HTTPError, ValueError) as e:
+                            consecutive_failures += 1
+                            _logger.warning(
+                                "vinnova.round_failed",
+                                extra={
+                                    "event": "round_failed",
+                                    "dnr": str(dnr),
+                                    "consecutive_failures": consecutive_failures,
+                                    "error": str(e),
+                                },
                             )
+                            if consecutive_failures >= _MAX_CONSECUTIVE_ROUND_FAILURES:
+                                raise AdapterError(
+                                    f"Vinnova aborted after {consecutive_failures} "
+                                    f"consecutive round failures (last dnr {dnr}): {e}"
+                                ) from e
+                            continue
+
+                        # A successful round resets the consecutive-failure
+                        # streak — only back-to-back failures escalate.
+                        consecutive_failures = 0
 
                         if not round_list:
                             continue

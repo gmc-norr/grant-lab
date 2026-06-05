@@ -63,14 +63,22 @@ def downgrade() -> None:
     op.drop_index("ix_profiles_parent_profile_id", table_name="profiles")
     op.drop_constraint("fk_profiles_parent_profile_id", "profiles", type_="foreignkey")
     op.drop_column("profiles", "parent_profile_id")
-    op.drop_constraint("ck_profiles_level", "profiles", type_="check")
+    # IF EXISTS: tolerate a schema where a later migration (or operational fix)
+    # has already replaced these check constraints — the downgrade should still
+    # complete rather than error on a missing constraint.
+    op.execute("ALTER TABLE profiles DROP CONSTRAINT IF EXISTS ck_profiles_level")
     op.drop_column("profiles", "level")
     # Lossy: collapse back to the legacy enum domain.
-    op.drop_constraint("ck_profiles_kind", "profiles", type_="check")
+    op.execute("ALTER TABLE profiles DROP CONSTRAINT IF EXISTS ck_profiles_kind")
     op.execute(
         "UPDATE profiles SET kind = CASE "
         "WHEN kind = 'organizational_unit' THEN 'group' "
         "WHEN kind = 'individual' THEN 'user' ELSE kind END"
     )
     op.execute("CREATE TYPE profile_kind AS ENUM ('org','group','user')")
+    # Guard the cast: any kind value outside the legacy enum domain (e.g. a
+    # post-redesign kind that the CASE above didn't remap) would make the
+    # USING kind::profile_kind cast fail. Collapse stragglers to 'group' so the
+    # downgrade can never error on unexpected data.
+    op.execute("UPDATE profiles SET kind = 'group' WHERE kind NOT IN ('org','group','user')")
     op.execute("ALTER TABLE profiles ALTER COLUMN kind TYPE profile_kind USING kind::profile_kind")

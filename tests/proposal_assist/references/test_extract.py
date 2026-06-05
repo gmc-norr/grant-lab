@@ -164,6 +164,94 @@ def test_extract_unsupported_mime_raises():
         extract_text(mime="application/octet-stream", data=b"x")
 
 
+def _make_zip_bomb(member_uncompressed: int) -> bytes:
+    """Build a tiny ZIP whose single member declares a large uncompressed
+    size but compresses to a handful of bytes (highly compressible)."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", b"\x00" * member_uncompressed)
+    return buf.getvalue()
+
+
+def test_extract_docx_rejects_decompression_bomb():
+    """A ZIP container whose declared uncompressed size exceeds the cap
+    is refused BEFORE python-docx tries to inflate it."""
+    bomb = _make_zip_bomb(300 * 1024 * 1024)  # 300 MB > 200 MB cap
+    # Small on-disk size, huge declared uncompressed size.
+    assert len(bomb) < 1 * 1024 * 1024
+    with pytest.raises(ExtractError, match="uncompressed"):
+        extract_text(
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=bomb,
+        )
+
+
+def test_extract_xlsx_rejects_decompression_bomb():
+    bomb = _make_zip_bomb(300 * 1024 * 1024)
+    with pytest.raises(ExtractError, match="uncompressed"):
+        extract_text(
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            data=bomb,
+        )
+
+
+def test_extract_docx_rejects_absurd_entry_count():
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i in range(20_001):
+            zf.writestr(f"f{i}.xml", b"x")
+    with pytest.raises(ExtractError, match="entr"):
+        extract_text(
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            data=buf.getvalue(),
+        )
+
+
+def test_extract_xlsx_no_active_sheet_raises():
+    """When openpyxl reports no active worksheet, raise ExtractError
+    instead of an AttributeError on None.iter_rows."""
+    import openpyxl
+
+    class _FakeWB:
+        active = None
+
+    def _fake_load_workbook(*args, **kwargs):
+        return _FakeWB()
+
+    orig = openpyxl.load_workbook
+    openpyxl.load_workbook = _fake_load_workbook
+    try:
+        # Build a real (tiny) valid xlsx so the bomb-check passes; the
+        # patched load_workbook then returns a wb with active=None.
+        buf = io.BytesIO()
+        wb = Workbook()
+        wb.active.append(["a"])
+        wb.save(buf)
+        with pytest.raises(ExtractError, match="no active sheet"):
+            extract_text(
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                data=buf.getvalue(),
+            )
+    finally:
+        openpyxl.load_workbook = orig
+
+
+def test_extract_csv_caps_header_columns():
+    # 200 columns in header; only first 100 should be kept.
+    header = ",".join(f"c{i}" for i in range(200)).encode()
+    csv = header + b"\n" + b",".join(b"v" for _ in range(200)) + b"\n"
+    sections = extract_text(mime="text/csv", data=csv)
+    _, text = sections[0]
+    header_line = text.splitlines()[0]
+    # Header cells are separated by " | "; count columns.
+    n_cols = header_line.count(" | ") + 1
+    assert n_cols == 100
+
+
 def _make_one_page_pdf(text: str) -> bytes:
     """Generate a minimal one-page PDF without requiring reportlab.
     Uses pdfminer's pdfwriter? Actually simplest is to ship a fixture

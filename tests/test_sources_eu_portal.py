@@ -163,6 +163,56 @@ def test_eu_portal_adapter_populates_full_text():
     assert "translational potential" in nc.full_text
 
 
+def test_existing_call_with_full_text_is_not_rescraped():
+    """Reliability: an EU call already ingested WITH full_text must NOT be
+    re-scraped on every run — that's hundreds of serial blocking HTTP calls.
+    The orchestrator passes a `needs_body(identifier)` predicate built from a
+    cheap DB query; when it returns False the adapter skips the scrape (the
+    extraction transport would raise if hit)."""
+
+    def boom(request):
+        raise AssertionError("extraction transport must not be called for an existing call")
+
+    # needs_body returns False for the one identifier in _FAKE_OK_BODY → skip.
+    already_have = {"HORIZON-HLTH-2026-DISEASE-03-15"}
+
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(),
+        extraction_transport=httpx.MockTransport(boom),
+    )
+    out = list(
+        adapter.fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC),
+            needs_body=lambda identifier: identifier not in already_have,
+        )
+    )
+    assert len(out) == 1
+    # full_text left None — we did not scrape; upsert coalesce preserves the
+    # existing body in the DB.
+    assert out[0].full_text is None
+
+
+def test_new_call_is_scraped_even_with_needs_body():
+    """A brand-new call (needs_body returns True) IS scraped for its body."""
+    html = "<html><body><main><article><p>Brand new body text here.</p>"
+    html += "</article></main></body></html>"
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(),
+        extraction_transport=_mock_html_transport(status=200, html=html),
+    )
+    out = list(
+        adapter.fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC),
+            needs_body=lambda identifier: True,
+        )
+    )
+    assert len(out) == 1
+    assert out[0].full_text is not None
+    assert "Brand new body text" in out[0].full_text
+
+
 def test_fetch_paginates_across_multiple_pages():
     """Pagination: the adapter must follow pageNumber until the result set is
     exhausted, not stop after the first page. Before the fix a single GET read

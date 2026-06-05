@@ -255,6 +255,80 @@ def test_profile_view_404_for_unknown(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 404
 
 
+def _archive(pg_session_factory, pid):
+    from call_manager.db.models import Profile
+
+    with pg_session_factory() as s:
+        s.get(Profile, pid).is_active = False
+        s.commit()
+
+
+def test_archived_profile_detail_is_404(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    """An archived (is_active=False) profile must 404 on direct-URL view,
+    matching how the index/feeds hide it."""
+    pid, _ = profile_factory(name="Archived view")
+    _archive(pg_session_factory, pid)
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/profiles/{pid}")
+    assert r.status_code == 404
+
+
+def test_archived_profile_edit_form_is_404(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(name="Archived edit form")
+    _archive(pg_session_factory, pid)
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get(f"/profiles/{pid}/edit")
+    assert r.status_code == 404
+
+
+def test_archived_profile_edit_submit_is_404(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    pid, _ = profile_factory(name="Archived edit submit")
+    _archive(pg_session_factory, pid)
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "should not save",
+                "areas": "",
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "",
+                "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 404
+
+
+def test_browser_404_gets_html_api_gets_json(monkeypatch, pg_url, pg_session_factory):
+    """A browser (Accept: text/html) hitting a 404 route gets a styled HTML
+    page; a JSON/API caller still gets the raw JSON {"detail": ...} body."""
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        html = client.get("/profiles/99999", headers={"Accept": "text/html"})
+        api = client.get("/profiles/99999", headers={"Accept": "application/json"})
+    assert html.status_code == 404
+    assert "text/html" in html.headers["content-type"]
+    assert "<html" in html.text.lower()
+    assert api.status_code == 404
+    assert "application/json" in api.headers["content-type"]
+    assert api.json()["detail"] == "profile not found"
+
+
 def test_profile_new_rejects_too_long_name(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)

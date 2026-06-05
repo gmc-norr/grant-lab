@@ -146,6 +146,75 @@ def test_http_error_raises_pubmed_error():
         client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
 
 
+def test_esearch_retries_once_on_429():
+    """E-utilities 429 (rate-limited) is retried once after a short backoff
+    rather than failing the whole fetch. The second attempt succeeds."""
+    attempts = {"n": 0}
+
+    def handler(request):
+        url = str(request.url)
+        if "esearch.fcgi" in url:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return httpx.Response(429, json={})
+            return httpx.Response(200, json=_FAKE_ESEARCH)
+        return httpx.Response(200, json=_FAKE_ESUMMARY)
+
+    client = PubMedClient(
+        transport=httpx.MockTransport(handler),
+        sleep_between_members=0,
+        retry_backoff=0,
+    )
+    pubs = client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
+    assert attempts["n"] == 2  # first 429, then retried successfully
+    assert len(pubs) == 2
+
+
+def test_esearch_retries_once_on_503_then_gives_up():
+    """A persistent 503 (both attempts fail) still raises PubMedError after the
+    single retry is exhausted."""
+    attempts = {"n": 0}
+
+    def handler(request):
+        if "esearch.fcgi" in str(request.url):
+            attempts["n"] += 1
+        return httpx.Response(503)
+
+    client = PubMedClient(
+        transport=httpx.MockTransport(handler),
+        sleep_between_members=0,
+        retry_backoff=0,
+    )
+    with pytest.raises(PubMedError):
+        client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
+    assert attempts["n"] == 2  # initial + one retry
+
+
+def test_api_key_and_tool_email_included_in_request():
+    """When api_key/tool/email are configured they ride along on the
+    E-utilities query params (NCBI's documented identification + higher rate
+    limit)."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if "esearch.fcgi" in str(request.url):
+            return httpx.Response(200, json=_FAKE_ESEARCH)
+        return httpx.Response(200, json=_FAKE_ESUMMARY)
+
+    client = PubMedClient(
+        transport=httpx.MockTransport(handler),
+        sleep_between_members=0,
+        api_key="SECRET-KEY",
+        tool="call-manager",
+        email="ops@ki.se",
+    )
+    client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
+    assert any("api_key=SECRET-KEY" in u for u in seen)
+    assert any("tool=call-manager" in u for u in seen)
+    assert any("email=ops%40ki.se" in u or "email=ops@ki.se" in u for u in seen)
+
+
 def test_member_rejects_malformed_orcid():
     with pytest.raises(ValueError, match="invalid ORCID"):
         Member(orcid="not-an-orcid")

@@ -47,6 +47,7 @@ from call_manager.db.models import (
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
+from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
     get_artifact_history_impl,
@@ -1149,12 +1150,27 @@ def soft_delete(
     # audit trail preserved); only the bytes are removed. Errors here
     # are non-fatal: the workspace is already soft-deleted at the DB
     # level, which is the durable user-visible state.
-    storage = AttachmentStorage(root=Path(request.app.state.settings.workspaces_dir))
+    workspaces_dir = Path(request.app.state.settings.workspaces_dir)
+    storage = AttachmentStorage(root=workspaces_dir)
     try:
         storage.delete_workspace(workspace_id=workspace_id)
     except OSError:
         logger.warning(
             "soft_delete: attachment cleanup failed for workspace %s; "
+            "files will be collected by future sweep",
+            workspace_id,
+            exc_info=True,
+        )
+    # Also scrub reference bytes (original files + extracted text.txt).
+    # Same compliance promise as attachments — DB rows remain for the
+    # audit trail, only the on-disk bytes are removed. Best-effort; an
+    # error here is non-fatal (the workspace is already soft-deleted).
+    ref_storage = ReferenceStorage(root=workspaces_dir)
+    try:
+        ref_storage.delete_workspace(workspace_id=workspace_id)
+    except OSError:
+        logger.warning(
+            "soft_delete: reference cleanup failed for workspace %s; "
             "files will be collected by future sweep",
             workspace_id,
             exc_info=True,

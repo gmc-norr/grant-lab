@@ -109,6 +109,74 @@ def test_compact_workspace_writes_summary_row(
     assert summaries[0].summarized_through == last_turn_id
 
 
+def test_compact_workspace_resets_sdk_session_by_default(
+    pg_session_factory,
+    _settings_env,
+):
+    """compact_workspace clears workspaces.last_sdk_session_id in the same
+    transaction that writes the summary, so the next turn starts a fresh SDK
+    session (claude_adapter only passes resume=<id> when the column is
+    non-NULL). Without this, the resumed session grows unbounded until the
+    daily token cap wedges the workspace."""
+    from call_manager.config import Settings
+    from call_manager.db.models import Workspace
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        ws.last_sdk_session_id = "session-abc-123"
+        make_chat_turn(s, ws, role="user", content={"type": "text", "text": "hi"})
+        make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "hello"})
+        s.commit()
+        wsid = ws.id
+
+    client = _stub_summarizer_client("A summary.")
+    compact_workspace(
+        session_factory=pg_session_factory,
+        workspace_id=wsid,
+        summarizer_client=client,
+        settings=settings,
+    )
+
+    with pg_session_factory() as s:
+        ws = s.scalar(select(Workspace).where(Workspace.id == wsid))
+        assert ws.last_sdk_session_id is None
+        # Summary still written in the same transaction.
+        summaries = list(s.scalars(select(ChatSummary).where(ChatSummary.workspace_id == wsid)))
+        assert len(summaries) == 1
+
+
+def test_compact_workspace_keeps_sdk_session_when_reset_disabled(
+    pg_session_factory,
+    _settings_env,
+):
+    """reset_sdk_session=False preserves last_sdk_session_id (escape hatch
+    for callers that want a summary without a cold-session reset)."""
+    from call_manager.config import Settings
+    from call_manager.db.models import Workspace
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        ws.last_sdk_session_id = "session-keep-me"
+        make_chat_turn(s, ws, role="user", content={"type": "text", "text": "hi"})
+        s.commit()
+        wsid = ws.id
+
+    client = _stub_summarizer_client("A summary.")
+    compact_workspace(
+        session_factory=pg_session_factory,
+        workspace_id=wsid,
+        summarizer_client=client,
+        settings=settings,
+        reset_sdk_session=False,
+    )
+
+    with pg_session_factory() as s:
+        ws = s.scalar(select(Workspace).where(Workspace.id == wsid))
+        assert ws.last_sdk_session_id == "session-keep-me"
+
+
 def test_compact_workspace_only_summarizes_new_turns_after_prior_summary(
     pg_session_factory,
     _settings_env,

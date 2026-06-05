@@ -228,14 +228,31 @@ def create_app() -> FastAPI:
     # case should redirect. Detect via the Accept header — curl / fetch
     # without Accept: text/html still gets the JSON 401, which keeps
     # api-ish callers and the test suite happy.
+    # Statuses for which a browser (Accept: text/html) gets a styled HTML
+    # error page instead of a raw JSON body. 401 is handled separately
+    # (redirect to /login). API/non-HTML callers always get JSON.
+    _HTML_ERROR_STATUSES = {400, 403, 404, 409, 413}
+
     @app.exception_handler(HTTPException)
     async def _redirect_html_401(request: Request, exc: HTTPException):
-        if exc.status_code == 401 and "text/html" in request.headers.get("accept", ""):
+        wants_html = "text/html" in request.headers.get("accept", "")
+        if exc.status_code == 401 and wants_html:
             # Preserve the originally-requested path so the user lands back
             # there post-login. /login itself doesn't read this yet — but
             # encoding it now means the next-URL feature is a one-line
             # change in the login_verify handler.
             return RedirectResponse(url="/login", status_code=303)
+        if wants_html and exc.status_code in _HTML_ERROR_STATUSES:
+            # A browser hitting a 403/404/etc. should see a styled page, not
+            # a bare {"detail": ...} JSON blob. JSON is reserved for API
+            # callers (no text/html in Accept).
+            return app.state.templates.TemplateResponse(
+                request=request,
+                name="error.html",
+                context={"status_code": exc.status_code, "message": exc.detail},
+                status_code=exc.status_code,
+                headers=getattr(exc, "headers", None) or None,
+            )
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},

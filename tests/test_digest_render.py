@@ -170,6 +170,32 @@ def test_text_link_goes_to_in_app():
     assert "http://app.example.com/calls/42" in text
 
 
+def test_days_until_is_deterministic_with_explicit_now():
+    """`_days_until` must use the threaded-in `now`, not datetime.now(UTC),
+    so 'in N days' is consistent with deadline filtering and reproducible in
+    tests. With now pinned, a deadline exactly 14 days out renders 'in 14 days'
+    regardless of wall-clock time."""
+    now = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    entry = DigestCallEntry(
+        call_id=1,
+        title="Deadline call",
+        summary=None,
+        deadline=now + timedelta(days=14),
+        score=80,
+        rationale=None,
+        url="http://app/calls/1",
+        bucket="top",
+        also_in_profiles=[],
+    )
+    section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
+    payload = DigestPayload(user_id=1, user_email="u@ki.se", sections=[section], total_calls=1)
+
+    html = render_html(payload, dashboard_url="http://app/", now=now)
+    text = render_text(payload, dashboard_url="http://app/", now=now)
+    assert "in 14 days" in html
+    assert "in 14 days" in text
+
+
 def test_html_escapes_xss_in_title():
     """Autoescape must be active for HTML template — user-supplied content is not raw."""
     xss_entry = DigestCallEntry(

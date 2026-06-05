@@ -93,8 +93,8 @@ def run_digest(
                 if payload is None:
                     continue
 
-                html = render_html(payload, dashboard_url=settings.admin_dashboard_url)
-                text = render_text(payload, dashboard_url=settings.admin_dashboard_url)
+                html = render_html(payload, dashboard_url=settings.admin_dashboard_url, now=now)
+                text = render_text(payload, dashboard_url=settings.admin_dashboard_url, now=now)
                 subject = build_subject(payload)
 
                 if settings.digest_dry_run:

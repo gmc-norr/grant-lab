@@ -199,6 +199,99 @@ def test_http_error_raises_adapter_error():
         list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
 
 
+def test_single_flaky_round_does_not_abort_batch():
+    """A 500 on ONE round must not discard the other rounds' calls. The
+    flaky round is logged and skipped; partial progress is yielded so the
+    idempotent upsert can fill the gap next run."""
+    rounds = {
+        "/api/ansokningsomgangar/R1": [
+            {
+                "Diarienummer": "R1",
+                "Titel": "Round one",
+                "Beskrivning": "x",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "LankLista": [{"URL": "https://www.vinnova.se/e/r1"}],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
+        # R2 returns a 500 — handled below.
+        "/api/ansokningsomgangar/R3": [
+            {
+                "Diarienummer": "R3",
+                "Titel": "Round three",
+                "Beskrivning": "x",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "LankLista": [{"URL": "https://www.vinnova.se/e/r3"}],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
+    }
+    programmes = [
+        {
+            "Diarienummer": "P",
+            "Titel": "T",
+            "AnsokningsomgangDnrLista": [
+                {"DiarienummerAnsokningsomgang": "R1"},
+                {"DiarienummerAnsokningsomgang": "R2"},
+                {"DiarienummerAnsokningsomgang": "R3"},
+            ],
+        }
+    ]
+
+    def handler(request):
+        path = str(request.url.path)
+        if "/api/utlysningar/" in path:
+            return httpx.Response(200, json=programmes)
+        if "R2" in path:
+            return httpx.Response(500)
+        for needle, body in rounds.items():
+            if needle in path:
+                return httpx.Response(200, json=body)
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    adapter = VinnovaAdapter(
+        base_url="https://data.vinnova.se",
+        transport=httpx.MockTransport(handler),
+        sleep_between_rounds=0,
+    )
+    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert [c.external_id for c in out] == ["R1", "R3"]
+
+
+def test_many_consecutive_round_failures_abort():
+    """If rounds keep failing back-to-back past the threshold, abort with an
+    AdapterError — that's a systemic outage worth alerting on, not a single
+    flaky round."""
+    n_rounds = 10
+    programmes = [
+        {
+            "Diarienummer": "P",
+            "Titel": "T",
+            "AnsokningsomgangDnrLista": [
+                {"DiarienummerAnsokningsomgang": f"R{i}"} for i in range(n_rounds)
+            ],
+        }
+    ]
+
+    def handler(request):
+        path = str(request.url.path)
+        if "/api/utlysningar/" in path:
+            return httpx.Response(200, json=programmes)
+        return httpx.Response(500)
+
+    adapter = VinnovaAdapter(
+        base_url="https://data.vinnova.se",
+        transport=httpx.MockTransport(handler),
+        sleep_between_rounds=0,
+    )
+    with pytest.raises(AdapterError):
+        list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+
+
 def test_non_list_payload_raises():
     def handler(request):
         return httpx.Response(200, json={"not": "a list"})

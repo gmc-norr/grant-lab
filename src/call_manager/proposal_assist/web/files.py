@@ -52,6 +52,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -70,6 +71,13 @@ _MAX_BYTES = 5 * 1024 * 1024  # 5 MB per image.
 _CHUNK_BYTES = 64 * 1024
 
 _ALLOWED_MIMES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
+
+# Decompression-bomb guard: cap the pixel count Pillow will accept before
+# probing dimensions, so a tiny-on-disk image declaring an enormous pixel
+# count can't drive a multi-GB allocation. 64 Mpx (~8000x8000) far exceeds
+# any legitimate attachment but is bounded. (tokens.py sets the same cap on
+# import; we set it here too so this module is self-contained.)
+Image.MAX_IMAGE_PIXELS = 64 * 1024 * 1024
 
 _SUFFIX_BY_MIME = {
     "image/png": ".png",
@@ -249,6 +257,14 @@ def _probe_image_format(data: bytes) -> tuple[str, int, int]:
         with Image.open(io.BytesIO(data)) as img:
             fmt = img.format
             width, height = img.size
+            if width * height > Image.MAX_IMAGE_PIXELS:
+                raise DecompressionBombError(
+                    f"image pixel count {width * height} exceeds cap {Image.MAX_IMAGE_PIXELS}"
+                )
+    except DecompressionBombError as e:
+        raise HTTPException(
+            status_code=400, detail=f"image too large (decompression-bomb guard): {e}"
+        ) from e
     except (UnidentifiedImageError, OSError) as e:
         raise HTTPException(status_code=400, detail=f"unrecognised image data: {e}") from e
     if fmt not in _PIL_FORMAT_TO_MIME:

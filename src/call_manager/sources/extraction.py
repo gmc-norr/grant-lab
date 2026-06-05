@@ -22,9 +22,58 @@ import httpx
 import pymupdf
 import trafilatura
 
-from call_manager.sources.types import is_safe_fetch_url
+from call_manager.sources.types import (
+    is_safe_fetch_url,
+    pinned_transport_for,
+)
 
 _logger = logging.getLogger(__name__)
+
+
+def _resolve_transport(
+    url: str, transport: httpx.BaseTransport | None
+) -> httpx.BaseTransport | None:
+    """Return the httpx transport to use for fetching `url`, or None if the URL
+    is unsafe (caller must abort).
+
+    - Tests inject a `transport` (MockTransport, which never opens a socket):
+      we keep the existing `is_safe_fetch_url` guard and use it verbatim.
+    - Production passes no transport: we resolve+validate the host ONCE and
+      return an IP-pinned transport so httpx connects to the validated address
+      instead of re-resolving the hostname at connect time. This closes the
+      DNS-rebinding window that `is_safe_fetch_url` alone left open (validate
+      then connect race on the same hostname).
+    """
+    if transport is not None:
+        return transport if is_safe_fetch_url(url) else None
+    return pinned_transport_for(url)
+
+
+def _reject_redirect(url: str, resp: httpx.Response, *, event: str) -> None:
+    """Log and refuse a redirect response on a validated-URL fetch.
+
+    We never follow redirects (follow_redirects=False) on these streams:
+    is_safe_fetch_url validated the original host, but a 3xx Location could
+    point at an internal/metadata address that was never checked. We
+    re-validate the Location purely for the log line, then return None — a
+    redirect always aborts the fetch. Returns None so callers can
+    `return _reject_redirect(...)`.
+    """
+    location = resp.headers.get("location", "")
+    location_safe = bool(location) and is_safe_fetch_url(location)
+    _logger.warning(
+        f"extraction.{event}",
+        extra={
+            "event": event,
+            "url": url,
+            "error": (
+                f"refused redirect ({resp.status_code}) to {location!r} "
+                f"(target_safe={location_safe})"
+            ),
+        },
+    )
+    return None
+
 
 DEFAULT_HTML_TIMEOUT = 10.0
 DEFAULT_PDF_TIMEOUT = 30.0
@@ -47,8 +96,10 @@ def fetch_html_main_content(
     """
     # SSRF guard: the URL comes from upstream JSON. Refuse to fetch anything
     # that resolves to a private/loopback/link-local/metadata address before
-    # opening a connection. is_safe_fetch_url is the single chokepoint.
-    if not is_safe_fetch_url(url):
+    # opening a connection. In production this also IP-PINS the connection to
+    # the validated address (see _resolve_transport), closing DNS-rebinding.
+    fetch_transport = _resolve_transport(url, transport)
+    if fetch_transport is None:
         _logger.warning(
             "extraction.html_failed",
             extra={"event": "html_failed", "url": url, "error": "unsafe_url"},
@@ -57,9 +108,18 @@ def fetch_html_main_content(
     buf = bytearray()
     try:
         with (
-            httpx.Client(transport=transport, timeout=timeout) as client,
+            # follow_redirects=False is a second SSRF mitigation on top of the
+            # IP-pin: we validated the ORIGINAL host, but a 3xx could redirect
+            # to an internal/metadata target that was never checked. We refuse
+            # to follow redirects at all; if upstream returns a 3xx we
+            # re-validate its Location (for the log) and bail.
+            httpx.Client(
+                transport=fetch_transport, timeout=timeout, follow_redirects=False
+            ) as client,
             client.stream("GET", url) as resp,
         ):
+            if resp.is_redirect:
+                return _reject_redirect(url, resp, event="html_failed")
             resp.raise_for_status()
             for chunk in resp.iter_bytes():
                 buf.extend(chunk)
@@ -123,7 +183,8 @@ def fetch_pdf_text(
     Returns None on HTTP error, an unsafe/SSRF target, oversized payload,
     PDF parse failure, or empty extraction. Logs `extraction.pdf_failed`.
     """
-    if not is_safe_fetch_url(url):
+    fetch_transport = _resolve_transport(url, transport)
+    if fetch_transport is None:
         _logger.warning(
             "extraction.pdf_failed",
             extra={"event": "pdf_failed", "url": url, "error": "unsafe_url"},
@@ -132,9 +193,16 @@ def fetch_pdf_text(
     buf = bytearray()
     try:
         with (
-            httpx.Client(transport=transport, timeout=timeout) as client,
+            # follow_redirects=False — same SSRF mitigation as the HTML path
+            # (IP-pinned connection plus no-redirect-following). See
+            # fetch_html_main_content for the rationale.
+            httpx.Client(
+                transport=fetch_transport, timeout=timeout, follow_redirects=False
+            ) as client,
             client.stream("GET", url) as resp,
         ):
+            if resp.is_redirect:
+                return _reject_redirect(url, resp, event="pdf_failed")
             resp.raise_for_status()
             for chunk in resp.iter_bytes():
                 buf.extend(chunk)

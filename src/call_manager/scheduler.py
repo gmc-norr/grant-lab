@@ -111,6 +111,10 @@ def build_scheduler(
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            # APScheduler's default misfire_grace_time is 1 second, so a
+            # restart/GC/long-prior-job at the fire instant drops the run
+            # entirely. Give daily crons a 6h grace so a late wake still runs.
+            misfire_grace_time=6 * 3600,
         )
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
@@ -166,6 +170,7 @@ def build_scheduler(
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=6 * 3600,
     )
 
     def _embeddings_tick() -> None:
@@ -191,6 +196,7 @@ def build_scheduler(
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=6 * 3600,
     )
 
     def _reconcile_rankings_tick() -> None:
@@ -228,6 +234,7 @@ def build_scheduler(
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=6 * 3600,
     )
 
     if digest_email_client is not None and digest_settings is not None:
@@ -270,6 +277,11 @@ def build_scheduler(
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            # Weekly digest is the worst to drop on a misfire — a restart at
+            # Mon 07:00 would skip the whole week. The DigestRun week-uniqueness
+            # guard makes a generous grace safe (a late run still de-dupes), so
+            # allow a full day of grace to catch a delayed Monday wake.
+            misfire_grace_time=24 * 3600,
         )
     else:
         _logger.info(
@@ -436,6 +448,33 @@ def build_scheduler(
         _turn_drain_tick,
         trigger=IntervalTrigger(seconds=settings.turn_drain_tick_seconds),
         id="turn_drain",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Stuck-turn reaper. A turn cancelled by _turn_drain_tick's
+    # fut.result(timeout=300) keeps running on the app loop with the handle
+    # cached and its turn_jobs row stuck status='running'. The drain query
+    # excludes that workspace forever (orphan sweep only runs on a COLD
+    # launch). This periodic sweep marks any 'running' row older than the TTL
+    # as 'failed' so the workspace unwedges and the next drain can proceed.
+    # Pure DB work — runs synchronously in APScheduler's threadpool with its
+    # own short-lived session, so no app_loop dispatch is needed.
+    def _turn_reaper_tick() -> None:
+        from call_manager.proposal_assist.turns.reaper import reap_stuck_turns
+
+        try:
+            reap_stuck_turns(session_factory=session_factory)
+        except Exception:
+            _logger.exception("turn_reaper tick failed")
+
+    sched.add_job(
+        _turn_reaper_tick,
+        # Run every 5 minutes. The TTL (15 min default) is the real safety
+        # bound; the tick cadence just determines how soon after the TTL a
+        # wedged workspace gets freed.
+        trigger=IntervalTrigger(seconds=300),
+        id="turn_reaper",
         max_instances=1,
         coalesce=True,
     )

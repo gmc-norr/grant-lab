@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from dataclasses import dataclass, field
 from email.message import EmailMessage as _EmailMessage
 from typing import Protocol
@@ -91,7 +92,13 @@ class SMTPEmailSender:
 
         try:
             with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as conn:
-                conn.starttls()
+                # Verify the server cert + hostname. A bare starttls() uses
+                # Python's CERT_NONE default, which silently accepts any cert
+                # and leaves the magic link (a 15-min bearer token) open to an
+                # active MITM. create_default_context() enables CERT_REQUIRED
+                # and check_hostname.
+                ctx = ssl.create_default_context()
+                conn.starttls(context=ctx)
                 if self.user and self.password:
                     conn.login(self.user, self.password)
                 conn.sendmail(self.from_address, [to], msg.as_string())

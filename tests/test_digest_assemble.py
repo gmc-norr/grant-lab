@@ -352,19 +352,19 @@ def test_assemble_excludes_already_in_prior_digest(pg_session_factory, now):
     assert "Old" not in titles
 
 
-def test_assemble_prior_ids_bounded_to_26_weeks(pg_session_factory, now):
-    """DigestRun rows older than 26 weeks should not contribute to the
-    excluded set. (Their calls are excluded by the deadline filter anyway,
+def test_assemble_prior_ids_bounded_to_78_weeks(pg_session_factory, now):
+    """DigestRun rows older than the 78-week window should not contribute to
+    the excluded set. (Their calls are excluded by the deadline filter anyway,
     but this avoids loading thousands of stale ids into Python over years.)"""
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
         cid_ancient = _seed_call(s, title="Ancient", score=85, profile_id=pid)
-        # A 27-week-old DigestRun: the bound should drop it from prior_ids,
-        # so the call is surfaced again.
+        # A 79-week-old DigestRun: just past the bound, so it drops out of
+        # prior_ids and the call is surfaced again.
         ancient_run = DigestRun(
             user_id=uid,
             included_call_ids=[cid_ancient],
-            sent_at=now - timedelta(weeks=27),
+            sent_at=now - timedelta(weeks=79),
         )
         s.add(ancient_run)
         s.commit()
@@ -372,6 +372,37 @@ def test_assemble_prior_ids_bounded_to_26_weeks(pg_session_factory, now):
         payload = assemble_for_user(s, user_id=uid, now=now)
     titles = [e.title for sec in payload.sections for e in sec.entries]
     assert "Ancient" in titles
+
+
+def test_assemble_long_deadline_call_not_resent_after_26_weeks(pg_session_factory, now):
+    """Regression: a call with a long (9-12 month) deadline that was sent in a
+    digest 30 weeks ago must NOT be re-sent. The old 26-week prior_ids bound
+    dropped it while `Call.deadline > now` still kept it eligible, causing a
+    duplicate send. The 78-week window keeps it excluded."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        # Long-deadline call: still open (deadline ~5 months out), but it was
+        # first surfaced 30 weeks ago — outside the OLD 26-week window, inside
+        # the new 78-week one.
+        cid = _seed_call(
+            s,
+            title="LongDeadline",
+            score=85,
+            profile_id=pid,
+            deadline=now + timedelta(weeks=20),
+        )
+        s.add(
+            DigestRun(
+                user_id=uid,
+                included_call_ids=[cid],
+                sent_at=now - timedelta(weeks=30),
+            )
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    titles = [] if payload is None else [e.title for sec in payload.sections for e in sec.entries]
+    assert "LongDeadline" not in titles
 
 
 def test_assemble_excludes_past_deadline(pg_session_factory, now):

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete, select
 
 from call_manager.auth.dependencies import get_current_user
@@ -37,7 +37,7 @@ def me_page(request: Request, user: User = Depends(get_current_user)):  # noqa: 
     )
 
 
-@router.post("/me/name", response_class=HTMLResponse)
+@router.post("/me/name")
 def update_name(
     request: Request,
     name: str = Form(""),
@@ -50,28 +50,13 @@ def update_name(
             raise HTTPException(status_code=401, detail="user not found")
         db_user.name = name.strip() or None
         session.commit()
-        session.refresh(db_user)
-        profiles = (
-            session.execute(
-                select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name)
-            )
-            .scalars()
-            .all()
-        )
-        subscribed_ids = set(
-            session.execute(select(Subscription.profile_id).where(Subscription.user_id == user.id))
-            .scalars()
-            .all()
-        )
-        session.expunge_all()
-    return request.app.state.templates.TemplateResponse(
-        request=request,
-        name="me.html",
-        context={"user": db_user, "profiles": profiles, "subscribed_ids": subscribed_ids},
-    )
+    # Post/Redirect/Get: the /me form is a plain full-page POST (no HTMX),
+    # so redirect to a fresh GET. A browser refresh after submit re-issues
+    # the GET, not the POST — no double-submit.
+    return RedirectResponse(url="/me", status_code=303)
 
 
-@router.post("/me/subscriptions", response_class=HTMLResponse)
+@router.post("/me/subscriptions")
 async def update_subscriptions(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
@@ -101,26 +86,26 @@ async def update_subscriptions(
             if desired_subscribed_ids
             else set()
         )
-        session.execute(delete(Subscription).where(Subscription.user_id == user.id))
-        for pid in valid_ids:
-            session.add(Subscription(user_id=user.id, profile_id=pid))
-        session.commit()
-        profiles = (
-            session.execute(
-                select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name)
-            )
-            .scalars()
-            .all()
-        )
-        subscribed_ids = set(
+        # DIFF rather than delete-all-then-reinsert. Reinserting would reset
+        # each surviving row's digest_enabled flag back to the default True,
+        # silently re-enabling a digest the user had turned off. Touch only
+        # the rows that actually changed.
+        existing_ids = set(
             session.execute(select(Subscription.profile_id).where(Subscription.user_id == user.id))
             .scalars()
             .all()
         )
-        session.refresh(db_user)
-        session.expunge_all()
-    return request.app.state.templates.TemplateResponse(
-        request=request,
-        name="me.html",
-        context={"user": db_user, "profiles": profiles, "subscribed_ids": subscribed_ids},
-    )
+        to_remove = existing_ids - valid_ids
+        to_add = valid_ids - existing_ids
+        if to_remove:
+            session.execute(
+                delete(Subscription).where(
+                    Subscription.user_id == user.id,
+                    Subscription.profile_id.in_(to_remove),
+                )
+            )
+        for pid in to_add:
+            session.add(Subscription(user_id=user.id, profile_id=pid))
+        session.commit()
+    # Post/Redirect/Get — see update_name above.
+    return RedirectResponse(url="/me", status_code=303)

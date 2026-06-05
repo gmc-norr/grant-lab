@@ -52,7 +52,8 @@ def test_detect_unknown_raises():
 def test_dispatch_routes_doi_to_crossref(httpx_mock):
     """Sanity round-trip: dispatch_fetch with a DOI hits Crossref + PDF."""
     httpx_mock.add_response(
-        url="https://api.crossref.org/works/10.1234/test",
+        # DOI is percent-encoded (safe="") so '/' becomes %2F.
+        url="https://api.crossref.org/works/10.1234%2Ftest",
         json={
             "message": {
                 "title": ["t"],

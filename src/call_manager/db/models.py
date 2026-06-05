@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -402,6 +403,15 @@ class DigestRun(Base):
     )
     # BigInteger[] (NOT Integer[]) because calls.id is BigInteger — silently
     # truncating a 2^31+ id would be a nasty post-release bug.
+    #
+    # DENORMALIZED AUDIT SNAPSHOT — INTENTIONALLY NO FK / NO REFERENTIAL
+    # INTEGRITY. This is an immutable historical record of exactly which call
+    # ids went into a given digest at send time. It must NEVER be re-resolved
+    # against the calls table to "freshen" it: calls can be deleted, merged, or
+    # re-ranked afterwards, and the snapshot must still reflect what was sent.
+    # If these ids are ever joined back to calls, tolerate misses (a missing
+    # call is expected, not an error) — do not add a FK and do not assume every
+    # id still exists.
     included_call_ids: Mapped[list[int]] = mapped_column(
         ARRAY(BigInteger), nullable=False, default=list
     )
@@ -513,7 +523,9 @@ class Workspace(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     owner_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("users.id"),
+        # Explicit RESTRICT makes the (previously default NO ACTION) delete
+        # policy intentional: a user who owns workspaces cannot be hard-deleted.
+        ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
     call_id: Mapped[int | None] = mapped_column(
@@ -593,7 +605,9 @@ class Workspace(Base):
         Integer,
         nullable=True,
     )
-    review_dollar_cap_override: Mapped[float | None] = mapped_column(
+    # Numeric(...) hydrates to decimal.Decimal, not float — annotate as such so
+    # arithmetic with Decimal callers stays type-correct (float mixing raises).
+    review_dollar_cap_override: Mapped[Decimal | None] = mapped_column(
         Numeric(6, 3),
         nullable=True,
     )
@@ -756,7 +770,8 @@ class TurnJob(Base):
     )
     submitted_by_user_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("users.id"),
+        # Explicit RESTRICT — matches the prior default NO ACTION behavior.
+        ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
     )
@@ -865,7 +880,8 @@ class Attachment(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("users.id"),
+        # Explicit RESTRICT — matches the prior default NO ACTION behavior.
+        ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
@@ -982,7 +998,8 @@ class PhaseApproval(Base):
     )
     approving_user_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("users.id"),
+        # Explicit RESTRICT — matches the prior default NO ACTION behavior.
+        ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
     approved_artifact_sha: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1085,7 +1102,8 @@ class ReviewRun(Base):
         Integer,
         nullable=True,
     )
-    estimated_dollars: Mapped[float | None] = mapped_column(
+    # Numeric(...) hydrates to decimal.Decimal, not float (see ReviewRun above).
+    estimated_dollars: Mapped[Decimal | None] = mapped_column(
         Numeric(6, 3),
         nullable=True,
     )
@@ -1142,7 +1160,8 @@ class ReviewRunItem(Base):
         Integer,
         nullable=True,
     )
-    estimated_dollars: Mapped[float | None] = mapped_column(
+    # Numeric(...) hydrates to decimal.Decimal, not float (see ReviewRun above).
+    estimated_dollars: Mapped[Decimal | None] = mapped_column(
         Numeric(6, 4),
         nullable=True,
     )
@@ -1202,7 +1221,11 @@ class Reference(Base):
         DateTime(timezone=True), nullable=True
     )
     uploaded_by: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("users.id"), nullable=True
+        # Explicit RESTRICT — matches the prior default NO ACTION behavior.
+        BigInteger,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -70,6 +70,25 @@ def _summarized_through_position(session: Session, workspace_id: uuid.UUID) -> i
     return int(boundary_pos) if boundary_pos is not None else None
 
 
+def latest_summary_text(session: Session, workspace_id: uuid.UUID) -> str | None:
+    """Return the text of the most recent compaction summary for a workspace,
+    or None if there is no summary yet.
+
+    "Most recent" is defined by joining to the boundary chat_turn and ordering
+    by chat_turns.position DESC (NOT chat_summaries.created_at, which has the
+    statement-time tie problem). Used by the turn processor to re-inject prior
+    context into the first turn after an SDK-session reset (see
+    `compact_workspace`'s reset_sdk_session and processor._prepend_summary).
+    """
+    return session.execute(
+        select(ChatSummary.summary)
+        .join(ChatTurn, ChatSummary.summarized_through == ChatTurn.id)
+        .where(ChatSummary.workspace_id == workspace_id)
+        .order_by(ChatTurn.position.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 def _un_summarized_stats(
     session: Session,
     workspace_id: uuid.UUID,
@@ -104,10 +123,17 @@ def compact_workspace(
     workspace_id: uuid.UUID,
     summarizer_client: Any,  # duck-typed: AnthropicClient or stub
     settings: Settings,
+    reset_sdk_session: bool = True,
 ) -> ChatSummary | None:
     """Roll un-summarized turns for one workspace into a chat_summaries
     row. Returns the new summary row, or None if there were no turns
-    to summarize."""
+    to summarize.
+
+    reset_sdk_session: when True (the default — compaction is only invoked
+    after needs_compaction trips), clear workspaces.last_sdk_session_id in the
+    SAME transaction that writes the summary so the next turn starts a fresh
+    SDK session. See the in-body comment for the full rationale.
+    """
     with session_factory() as s:
         boundary_pos = _summarized_through_position(s, workspace_id)
         turns_q = select(ChatTurn).where(ChatTurn.workspace_id == workspace_id)
@@ -138,6 +164,28 @@ def compact_workspace(
             model=used_model,
         )
         s.add(new_summary)
+
+        # Codex M-finding: compaction was decorative — the chat_summaries row
+        # was written but never fed back, so the resumed SDK session grew
+        # unbounded until the daily token cap wedged the workspace. Reset the
+        # SDK session so the NEXT turn starts fresh (claude_adapter only passes
+        # resume=<id> when last_sdk_session_id is non-NULL — clearing it forces
+        # a cold session). Done in the SAME transaction as the summary write so
+        # we never clear the session without a durable summary to fall back on.
+        # compact_workspace is only called once needs_compaction has tripped,
+        # so a summary here always means the session was overgrown.
+        #
+        # Summary re-injection: the turn processor prepends this summary to the
+        # FIRST turn after the reset (processor._prepend_summary, gated on
+        # last_sdk_session_id IS NULL via latest_summary_text), so the fresh SDK
+        # session — which has no server-side history — still gets the prior
+        # context. After that turn completes, _finalize_success persists the new
+        # session_id, so the injection fires exactly once per reset.
+        if reset_sdk_session:
+            ws = s.scalar(select(Workspace).where(Workspace.id == workspace_id))
+            if ws is not None:
+                ws.last_sdk_session_id = None
+
         s.commit()
         s.refresh(new_summary)
         return new_summary

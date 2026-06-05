@@ -134,6 +134,77 @@ def test_me_post_silently_drops_inactive_profile_subscribe(
     assert subs == []
 
 
+def test_subscription_edit_preserves_digest_enabled(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Editing the subscription set must NOT reset an existing row's
+    digest_enabled flag. Regression: a delete-all-then-reinsert handler
+    silently flipped a user-disabled digest back to the default True.
+    """
+    p1, _ = profile_factory(name="Kept")
+    p2, _ = profile_factory(name="Added")
+    app = _setup(monkeypatch, pg_url)
+    uid = _user(pg_session_factory)
+    with pg_session_factory() as s:
+        # User is subscribed to p1 but has DISABLED its digest.
+        s.add(Subscription(user_id=uid, profile_id=p1, digest_enabled=False))
+        s.commit()
+
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        # Re-save with p1 still checked plus a newly-added p2.
+        r = client.post(
+            "/me/subscriptions",
+            data={f"subscribe_{p1}": "on", f"subscribe_{p2}": "on"},
+        )
+    assert r.status_code == 200
+    with pg_session_factory() as s:
+        rows = {
+            row.profile_id: row
+            for row in s.execute(select(Subscription).where(Subscription.user_id == uid)).scalars()
+        }
+    assert set(rows) == {p1, p2}
+    # The pre-existing p1 row kept its disabled digest.
+    assert rows[p1].digest_enabled is False
+    # The freshly-inserted p2 row defaults to enabled.
+    assert rows[p2].digest_enabled is True
+
+
+def test_subscriptions_post_redirects_to_me(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Post/Redirect/Get: a plain form POST returns a 303 to /me so a
+    browser refresh doesn't re-submit."""
+    p1, _ = profile_factory(name="Group A")
+    app = _setup(monkeypatch, pg_url)
+    uid = _user(pg_session_factory)
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.post(
+            "/me/subscriptions",
+            data={f"subscribe_{p1}": "on"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/me"
+
+
+def test_name_post_redirects_to_me(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    uid = _user(pg_session_factory)
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.post("/me/name", data={"name": "Alice"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/me"
+
+
 def test_name_post_does_not_touch_subscriptions(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):

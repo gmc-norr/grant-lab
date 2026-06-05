@@ -108,16 +108,26 @@ def login_submit(request: Request, email: str = Form(...)):
             extra={"event": "login_rate_limited_ip", "ip": client_ip},
         )
         return response
-    if not email_limiter.allow(email_normalized):
-        _logger.info(
-            "login rate-limited by email",
-            extra={"event": "login_rate_limited_email", "email_fp": email_fp},
-        )
-        return response
+    # Domain check BEFORE the per-email limiter. Consuming the per-email
+    # bucket for an address that will never receive mail (disallowed domain)
+    # lets an attacker lock out any *known* allowed email by spamming it
+    # — a targeted account-lockout DoS. Only emails that resolve to a real,
+    # mail-eligible user should spend a per-email token. The IP limiter
+    # above still caps every request regardless of domain.
+    #
+    # The response is identical on every branch (the shared `response`
+    # object), so reordering does NOT change what the client observes —
+    # the enumeration-resistance contract is preserved.
     if not domain_allowed(email_normalized, settings.allowed_email_domains):
         _logger.info(
             "login rejected: domain not allowed",
             extra={"event": "login_domain_rejected", "email_fp": email_fp},
+        )
+        return response
+    if not email_limiter.allow(email_normalized):
+        _logger.info(
+            "login rate-limited by email",
+            extra={"event": "login_rate_limited_email", "email_fp": email_fp},
         )
         return response
 

@@ -332,6 +332,93 @@ def test_reconcile_ignores_calls_with_null_published_at(pg_session_factory, prof
     assert n == 0
 
 
+def _seed_failed_job(s, *, call_id: int, profile_id: int, updated_at: datetime) -> None:
+    """Insert a terminally-FAILED (dead-lettered) ranking_job for the pair,
+    with updated_at rewound to the given time."""
+    job = RankingJob(
+        call_id=call_id,
+        profile_id=profile_id,
+        status=RankingJobStatus.FAILED,
+        attempts=5,
+        last_error="dead-lettered",
+    )
+    s.add(job)
+    s.flush()
+    s.execute(update(RankingJob).where(RankingJob.id == job.id).values(updated_at=updated_at))
+
+
+def test_reconcile_skips_pair_with_recent_dead_lettered_job(pg_session_factory, profile_factory):
+    """A terminally-FAILED (dead-lettered) pair has no CallRanking and no
+    active job, so the naive reconcile SELECT re-enqueues it every daily tick,
+    burning attempts forever. A recent failed job must suppress re-enqueue."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call_with(
+            s, external_id="RC-DL", published=datetime.now(UTC) - timedelta(days=1)
+        )
+        _seed_failed_job(
+            s,
+            call_id=call_id,
+            profile_id=profile_id,
+            updated_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        n = reconcile_missing_rankings(s)
+        s.commit()
+
+    assert n == 0
+    with pg_session_factory() as s:
+        active = (
+            s.execute(
+                select(RankingJob).where(
+                    RankingJob.status.in_([RankingJobStatus.PENDING, RankingJobStatus.RUNNING])
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert active == []  # not re-enqueued
+
+
+def test_reconcile_re_enqueues_pair_with_old_dead_lettered_job(pg_session_factory, profile_factory):
+    """An OLD failed job (past the suppression window) no longer blocks
+    reconcile — the pair becomes eligible again so a long-ago transient
+    failure isn't permanently abandoned."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call_with(
+            s, external_id="RC-DL-OLD", published=datetime.now(UTC) - timedelta(days=1)
+        )
+        _seed_failed_job(
+            s,
+            call_id=call_id,
+            profile_id=profile_id,
+            updated_at=datetime.now(UTC) - timedelta(days=30),
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        n = reconcile_missing_rankings(s)
+        s.commit()
+
+    assert n == 1
+    with pg_session_factory() as s:
+        pending = (
+            s.execute(
+                select(RankingJob).where(
+                    RankingJob.call_id == call_id,
+                    RankingJob.profile_id == profile_id,
+                    RankingJob.status == RankingJobStatus.PENDING,
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(pending) == 1
+
+
 def test_requeue_stuck_running_leaves_recently_running_alone(pg_session_factory, profile_factory):
     """A job that's actively running (updated within the threshold) must
     NOT be requeued — that would risk double-running the same job."""
