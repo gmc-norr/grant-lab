@@ -42,6 +42,7 @@ def backfill_original_sha256(session: Session, references_root: Path | str) -> i
         abs_path = Path(references_root) / ref.storage_path
     """
     root = Path(references_root)
+    root_resolved = root.resolve()
     stmt = select(Reference).where(Reference.original_sha256.is_(None))
     # Materialises all NULL rows at once — acceptable for a one-time backfill.
     # Switch to yield_per/pagination if this is ever promoted to a recurring
@@ -50,7 +51,14 @@ def backfill_original_sha256(session: Session, references_root: Path | str) -> i
 
     count = 0
     for ref in rows:
-        path = root / ref.storage_path
+        abs_path = (root_resolved / ref.storage_path).resolve()
+        if not abs_path.is_relative_to(root_resolved):
+            log.warning(
+                "backfill: skipping reference %s: storage_path escapes references_root",
+                ref.id,
+            )
+            continue
+        path = abs_path
         if not path.is_file():
             continue
         try:

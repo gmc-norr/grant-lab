@@ -185,6 +185,46 @@ def test_backfill_skips_unreadable_file(pg_session_factory, tmp_path, monkeypatc
         assert r.original_sha256 is None
 
 
+def test_backfill_skips_escaping_storage_path(pg_session_factory, tmp_path):
+    """A Reference whose storage_path escapes references_root (e.g. via '../..')
+    must be silently skipped — original_sha256 stays NULL, no exception raised,
+    no file outside the root is read."""
+    from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+
+    with pg_session_factory() as session:
+        owner = make_user(session)
+        ws = make_workspace(session, owner=owner)
+        session.commit()
+
+        # Build a Reference whose storage_path traverses above tmp_path.
+        ref = Reference(
+            id=uuid.uuid4(),
+            workspace_id=ws.id,
+            kind="paper",
+            source_type="uploaded",
+            filename="escape.pdf",
+            storage_path="../../etc/passwd",  # path-traversal attempt
+            mime_type="application/pdf",
+            bytes_total=0,
+            uploaded_by=ws.owner_id,
+            original_sha256=None,
+        )
+        session.add(ref)
+        session.commit()
+        ref_id = ref.id
+
+        count = backfill_original_sha256(session, tmp_path)
+        session.commit()
+
+    # The escaping path must be skipped — count stays 0, sha256 stays NULL.
+    assert count == 0
+
+    with pg_session_factory() as session:
+        r = session.scalar(select(Reference).where(Reference.id == ref_id))
+        assert r is not None
+        assert r.original_sha256 is None
+
+
 # ---------------------------------------------------------------------------
 # 2. Migration round-trip (light)
 # ---------------------------------------------------------------------------

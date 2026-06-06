@@ -547,6 +547,6 @@ def fetch_generic_url(url: str) -> tuple[bytes, str, str, dict]:
         mime,
         {
             "url": url,
-            "source": "generic",
+            "source": "web",
         },
     )

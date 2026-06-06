@@ -732,6 +732,111 @@ def test_phase3_retry_on_integrity_error_recovers_citekey(
     assert call_counts["n"] >= 2
 
 
+def test_phase3_retry_exhaustion_marks_metadata_failed(pg_session_factory, tmp_path, monkeypatch):
+    """When every citekey attempt collides (all 4 attempts raise IntegrityError),
+    Phase 3 must be non-fatal: ingest returns a successful IngestResult and the
+    reference row ends with metadata_status='failed'.
+
+    Strategy: pre-insert a Reference with citekey='exhausted2020' in the same
+    workspace; monkeypatch generate_citekey to ALWAYS return that same key so
+    every attempt hits the DB uniqueness constraint. The outer Phase-3 except
+    catches the re-raised IntegrityError and marks the row 'failed'.
+    """
+    import hashlib as _hashlib
+    import uuid as _uuid
+
+    import call_manager.proposal_assist.references.ingest as ingest_module
+
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    md = b"# Paper\n\nBody.\n"
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+
+    # Pre-insert a Reference that permanently holds citekey='exhausted2020' so
+    # every attempt by the new ingest will collide.
+    fixed_citekey = "exhausted2020"
+    blocker_id = _uuid.uuid4()
+    dummy = b"blocker"
+    with pg_session_factory() as s:
+        from call_manager.db.models import Reference as _Ref
+
+        blocker = _Ref(
+            id=blocker_id,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            title="Blocker",
+            filename="blocker.md",
+            storage_path=f"{wsid}/references/{blocker_id}/original.md",
+            mime_type="text/markdown",
+            bytes_total=len(dummy),
+            original_sha256=_hashlib.sha256(dummy).hexdigest(),
+            text_status="done",
+            outline_status="skipped",
+            uploaded_by=None,
+            citekey=fixed_citekey,
+            metadata_status="extracted",
+        )
+        s.add(blocker)
+        s.commit()
+
+    # Monkeypatch: always return the colliding citekey — no escape after N retries.
+    monkeypatch.setattr(
+        ingest_module,
+        "generate_citekey",
+        lambda csl, workspace_id, session: fixed_citekey,
+    )
+
+    stub_service = _StubCitationService(
+        _FakeCitationLLMResult(
+            data={
+                "title": "Exhausted Retry Paper",
+                "author": [{"family": "Exhausted"}],
+                "issued": {"date-parts": [[2020]]},
+            },
+            usage=_FakeLLMUsage(),
+            model="m",
+            cap_exceeded=False,
+        )
+    )
+
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="exhausted.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=None,
+            citation_service=stub_service,
+        )
+        s.commit()
+
+    # Phase 3 exhaustion is non-fatal — IngestResult must be returned.
+    assert isinstance(result, IngestResult)
+    assert result.text_status == "done"
+
+    # The reference must exist and have metadata_status='failed' (retry exhausted).
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
+
+    assert ref is not None
+    assert ref.metadata_status == "failed"
+
+
 class _EmptyCitationService:
     """Returns empty data dict — simulates LLM returning no extractable fields."""
 

@@ -203,6 +203,9 @@ def test_fetch_generic_url_returns_bytes_with_mime_sniff(httpx_mock):
     assert filename == "paper.pdf"
     assert mime == "application/pdf"
     assert meta["url"] == "https://example.com/paper.pdf"
+    # source must be "web" to match the DB CHECK constraint and dispatcher
+    # classification — not "generic" (which was the old, broken value).
+    assert meta["source"] == "web"
 
 
 # ---------------------------------------------------------------------------

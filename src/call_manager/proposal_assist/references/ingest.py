@@ -265,6 +265,16 @@ def ingest_bytes(
                     for attempt in range(4):
                         try:
                             ref3 = s3.get(Reference, reference_id)
+                            if ref3 is None:
+                                # Concurrent delete between attempts — nothing to update.
+                                logger.warning(
+                                    "ingest Phase 3 retry: ref vanished workspace=%s "
+                                    "reference=%s (attempt %d) — aborting citekey loop",
+                                    workspace_id,
+                                    reference_id,
+                                    attempt,
+                                )
+                                break
                             if csl:
                                 ref3.csl_json_extracted = csl
                                 title_val = csl.get("title")
