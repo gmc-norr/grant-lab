@@ -193,6 +193,24 @@ class Settings(BaseSettings):
             "per-workspace cap."
         ),
     )
+    citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
+    citation_llm_model: str = Field(default="", alias="CITATION_LLM_MODEL")
+    citation_llm_timeout_seconds: float = Field(default=60.0, alias="CITATION_LLM_TIMEOUT_SECONDS")
+    citation_llm_max_output_tokens: int = Field(
+        default=1024, alias="CITATION_LLM_MAX_OUTPUT_TOKENS"
+    )
+    citation_llm_daily_token_cap_input: int = Field(
+        default=200_000, alias="CITATION_LLM_DAILY_TOKEN_CAP_INPUT"
+    )
+    citation_llm_daily_token_cap_output: int = Field(
+        default=50_000, alias="CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
+    )
+    global_citation_llm_daily_token_cap_input: int = Field(
+        default=2_000_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_INPUT"
+    )
+    global_citation_llm_daily_token_cap_output: int = Field(
+        default=500_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
+    )
     compaction_turn_threshold: int = Field(
         default=100,
         alias="COMPACTION_TURN_THRESHOLD",
