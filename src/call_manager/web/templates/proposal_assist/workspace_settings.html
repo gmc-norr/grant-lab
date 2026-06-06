@@ -30,7 +30,7 @@
 
 <h2 style="margin-top: 2em; color: #c00;">Danger zone</h2>
 <form method="post" action="/workspaces/{{ workspace.id }}/delete"
-      onsubmit="return confirm('Soft-delete this workspace? It will be hidden from the list but can be recovered by an admin.');">
+      data-confirm="Soft-delete this workspace? It will be hidden from the list but can be recovered by an admin.">
   <button type="submit" style="background: #c00; color: white;">Soft delete</button>
 </form>
 

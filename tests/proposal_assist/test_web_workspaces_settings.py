@@ -73,6 +73,47 @@ def test_post_settings_updates_title_status_deadline(
     assert ws.deadline.year == 2026
 
 
+def test_post_settings_rejects_invalid_status(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """An out-of-allowlist status returns a clean 400, not a DB-constraint 500."""
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/settings",
+        data={"title": "ok", "status": "not-a-real-status"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+
+
+def test_post_settings_rejects_blank_title(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/settings",
+        data={"title": "   ", "status": "drafting"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+
+
 def test_soft_delete_redirects_and_excludes_from_list(
     client_authed_owner,
     pg_session_factory,

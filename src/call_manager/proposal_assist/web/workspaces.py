@@ -74,6 +74,9 @@ from call_manager.workspaces import create_workspace as _create_workspace
 # Valid Workspace.status values (mirrors the ck_workspaces_status CHECK
 # constraint in db/models.py). Used to allowlist the ?status filter.
 _WORKSPACE_STATUSES = frozenset({"drafting", "submitted", "awarded", "rejected", "abandoned"})
+# Upper bound on a workspace title — bounds the form field so a multi-MB
+# title can't be buffered into the DB. Generous for human-entered titles.
+_MAX_WORKSPACE_TITLE_LEN = 500
 # Upper bound on the workspaces index list (most-recently-updated first).
 _WORKSPACE_LIST_LIMIT = 200
 
@@ -424,6 +427,9 @@ def post_new_workspace(
     deadline: str | None = Form(None),
 ) -> RedirectResponse:
     """Create + enqueue Phase 0 + redirect to the new workspace's main view."""
+    title = title.strip()
+    if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
+        raise HTTPException(status_code=400, detail="invalid title")
     parsed_deadline = _parse_deadline_form(deadline)
 
     ws = _create_workspace(
@@ -1135,6 +1141,14 @@ def post_settings(
         user=user,
         session=session,
     )
+    # Allowlist the status before assignment. The DB CHECK constraint would
+    # also reject a bogus value, but as an IntegrityError that escapes to the
+    # global handler as a 500 — validate up front for a clean 400 instead.
+    if status not in _WORKSPACE_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid status")
+    title = title.strip()
+    if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
+        raise HTTPException(status_code=400, detail="invalid title")
     ws.title = title
     ws.status = status
     ws.deadline = _parse_deadline_form(deadline)

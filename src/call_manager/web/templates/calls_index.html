@@ -57,7 +57,7 @@
 <form method="get" action="/" class="filter-bar">
   <label>
     Source
-    <select name="source" onchange="this.form.submit()">
+    <select name="source" data-autosubmit>
       <option value="">All sources</option>
       {% for s in sources %}
         <option value="{{ s.slug }}" {% if s.slug == selected_source %}selected{% endif %}>{{ s.name }}</option>
@@ -66,7 +66,7 @@
   </label>
   <label>
     Profile
-    <select name="profile" onchange="this.form.submit()">
+    <select name="profile" data-autosubmit>
       <option value="">— No profile —</option>
       {% for p in profiles %}
         <option value="{{ p.id }}" {% if p.id == selected_profile_id %}selected{% endif %}>{{ p.name }}</option>
@@ -76,7 +76,7 @@
   {% if not selected_profile_id %}
     <label>
       Sort
-      <select name="sort" onchange="this.form.submit()">
+      <select name="sort" data-autosubmit>
         <option value="newest" {% if selected_sort == "newest" %}selected{% endif %}>Newest first</option>
         <option value="deadline" {% if selected_sort == "deadline" %}selected{% endif %}>Soonest deadline</option>
       </select>

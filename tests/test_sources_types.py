@@ -115,9 +115,42 @@ def test_pinned_network_backend_rewrites_connect_host():
     inner = _FakeInner()
     backend = _PinnedNetworkBackend(inner, {"example.com": "93.184.216.34"})
     assert backend.connect_tcp("example.com", 443) == "conn"
-    # A host not in the pin map passes through unchanged.
+    assert inner.calls == [("93.184.216.34", 443)]
+
+
+def test_pinned_backend_revalidates_unpinned_public_host(monkeypatch):
+    """A host NOT in the pin map is validated-and-pinned on the fly (resolving
+    to a public IP), never connected by raw hostname — closes the DNS-rebinding
+    window the pin map exists to defend."""
+
+    class _FakeInner:
+        def __init__(self):
+            self.calls = []
+
+        def connect_tcp(self, host, port, *args, **kwargs):
+            self.calls.append((host, port))
+            return "conn"
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("93.184.216.34"))
+    inner = _FakeInner()
+    backend = _PinnedNetworkBackend(inner, {})
     backend.connect_tcp("other.example", 80)
-    assert inner.calls == [("93.184.216.34", 443), ("other.example", 80)]
+    # Connected to the validated literal IP, NOT the raw re-resolvable hostname.
+    assert inner.calls == [("93.184.216.34", 80)]
+
+
+def test_pinned_backend_refuses_unpinned_private_host(monkeypatch):
+    """An un-pinned host resolving to a private IP is refused, not connected."""
+    import pytest
+
+    class _FakeInner:
+        def connect_tcp(self, host, port, *args, **kwargs):
+            raise AssertionError("must not connect a private-resolving host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("10.0.0.1"))
+    backend = _PinnedNetworkBackend(_FakeInner(), {})
+    with pytest.raises(AdapterError):
+        backend.connect_tcp("rebind.example", 80)
 
 
 def test_pinned_transport_for_unsafe_returns_none(monkeypatch):

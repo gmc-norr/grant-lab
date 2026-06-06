@@ -1,7 +1,22 @@
 from typing import Annotated
 
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Known development / placeholder session secrets that must never be accepted in
+# a production (https) deployment — exact-match so a legitimate random token
+# can't trip a false positive. The `min_length=16` Field constraint is the floor
+# everywhere; this list + the 32-char prod minimum is the extra bar for
+# internet-exposed deploys.
+_DEV_SECRET_SENTINELS = frozenset(
+    {
+        "dev-only-session-secret-not-for-prod",
+        "test-secret-at-least-16-chars",
+        "changeme",
+        "change-me",
+        "secret",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -235,6 +250,13 @@ class Settings(BaseSettings):
     # the hospital-internal default; shorten via env for high-security
     # deployments.
     session_max_age_seconds: int = Field(default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS")
+    # App-level cap on request body size (bytes). Backstop behind a reverse
+    # proxy's client_max_body_size. Must exceed the largest legitimate upload:
+    # reference uploads are capped at 50 MiB (references web route), so the
+    # default leaves headroom for multipart overhead. 0 disables the check.
+    max_request_body_bytes: int = Field(
+        default=64 * 1024 * 1024, ge=0, alias="MAX_REQUEST_BODY_BYTES"
+    )
     digest_dry_run: bool = Field(default=False, alias="DIGEST_DRY_RUN")
     admin_dashboard_url: str = Field(default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL")
 
@@ -242,6 +264,30 @@ class Settings(BaseSettings):
     @classmethod
     def _ensure_trailing_slash(cls, v: str) -> str:
         return v if v.endswith("/") else v + "/"
+
+    @model_validator(mode="after")
+    def _require_strong_secret_in_prod(self):
+        """Refuse to start with a weak/placeholder SESSION_SECRET in production.
+
+        Gated on `APP_BASE_URL` being https:// (the same signal that drives
+        `cookie_secure` and the email-sender fallback), so local dev/tests over
+        plain HTTP are unaffected. A short or known-placeholder signing key
+        would let an attacker forge session cookies → full account/admin
+        takeover, so we fail loud instead of silently accepting it.
+        """
+        if self.app_base_url.lower().startswith("https://"):
+            if len(self.session_secret) < 32:
+                raise ValueError(
+                    "SESSION_SECRET must be at least 32 characters when "
+                    "APP_BASE_URL is https:// (production). Generate one with: "
+                    'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+                )
+            if self.session_secret.lower() in _DEV_SECRET_SENTINELS:
+                raise ValueError(
+                    "SESSION_SECRET is a known development placeholder; set a "
+                    "real random secret in production (APP_BASE_URL is https://)."
+                )
+        return self
 
     @field_validator("app_base_url", mode="after")
     @classmethod
@@ -261,6 +307,23 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [p.strip().lower() for p in v.split(",") if p.strip()]
         return v
+
+    @field_validator("allowed_email_domains", mode="after")
+    @classmethod
+    def _normalize_domains(cls, v: list[str]) -> list[str]:
+        # Canonicalize each allowlist entry to IDNA/punycode so the stored
+        # allowlist lives in the same space the login check normalizes into
+        # (auth.domain.normalize_domain) — an IDN homoglyph can't impersonate
+        # an ASCII entry. Fail fast on a malformed configured domain.
+        from call_manager.auth.domain import normalize_domain
+
+        out: list[str] = []
+        for d in v:
+            try:
+                out.append(normalize_domain(d))
+            except ValueError as e:
+                raise ValueError(f"ALLOWED_EMAIL_DOMAINS contains an invalid domain: {d!r}") from e
+        return out
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -70,6 +70,23 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["ClaudeAgentSDKAdapter", "SDKTurnError"]
 
+# App secrets that must NOT reach the drafting subprocess. The SDK *merges*
+# ClaudeAgentOptions.env over the inherited process environment (it cannot
+# delete inherited keys — see subprocess_cli.py), so we neutralize each by
+# overriding it to an empty string. ANTHROPIC_API_KEY is deliberately NOT
+# here: the drafting agent IS a Claude client and needs it to authenticate.
+# This is defense-in-depth behind the tools=[]/strict_mcp_config boundary —
+# if a future tool or settings-injected hook ever gains file/shell access,
+# these secrets still aren't sitting in its environment.
+_SCRUBBED_ENV_KEYS = (
+    "DATABASE_URL",
+    "SESSION_SECRET",
+    "RESEND_API_KEY",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "VINNOVA_API_KEY",
+)
+
 
 class ClaudeAgentSDKAdapter:
     """Wraps claude-agent-sdk in a per-workspace persistent client.
@@ -139,6 +156,16 @@ class ClaudeAgentSDKAdapter:
         # only wire the MCP server + its allowlist when a factory is present.
         options_kwargs["tools"] = []
         options_kwargs["strict_mcp_config"] = True
+        # Don't load filesystem settings (project/user ~/.claude/settings.json).
+        # Same security boundary as tools=[]: those files can carry hooks,
+        # permission grants, and MCP server defs that would broaden what the
+        # bypassPermissions agent can do beyond the empty built-in set. The
+        # cwd is inside the app tree, so the CLI would otherwise discover the
+        # project's .claude/settings.json. Pass [] for SDK isolation mode.
+        options_kwargs["setting_sources"] = []
+        # Neutralize app secrets in the subprocess environment (see
+        # _SCRUBBED_ENV_KEYS). Merged over inherited env by the SDK.
+        options_kwargs["env"] = {key: "" for key in _SCRUBBED_ENV_KEYS}
         if self._tools_factory is not None:
             mcp_server = self._tools_factory(repo_dir, workspace_id)
             options_kwargs["mcp_servers"] = {"proposal_assist": mcp_server}

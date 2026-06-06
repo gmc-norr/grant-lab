@@ -8,7 +8,9 @@ from call_manager.main import create_app
 
 def _set_min_env(monkeypatch, database_url):
     monkeypatch.setenv("DATABASE_URL", database_url)
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    # These tests use an https APP_BASE_URL, which now requires a strong
+    # (>=32 char, non-placeholder) SESSION_SECRET — see config validator.
+    monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
 
 

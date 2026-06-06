@@ -15,7 +15,7 @@
   </label>
 
   <label>Kind
-    <select name="kind" id="kind-select" onchange="toggleKind()">
+    <select name="kind" id="kind-select">
       <option value="organizational_unit" selected>Organizational unit</option>
       <option value="individual">Individual researcher</option>
     </select>
@@ -110,12 +110,6 @@
   <button type="submit">Bootstrap profile</button>
 </form>
 
-<script>
-  function toggleKind() {
-    var k = document.getElementById('kind-select').value;
-    document.getElementById('unit-fields').hidden = (k !== 'organizational_unit');
-    document.getElementById('individual-fields').hidden = (k !== 'individual');
-  }
-  toggleKind();
-</script>
+{# Kind-toggle logic lives in /static/app.js (keyed off #kind-select) so the
+   app can ship a strict CSP with no inline scripts. #}
 {% endblock %}

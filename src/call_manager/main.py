@@ -33,6 +33,11 @@ from call_manager.web.filters import (
     model_label,
     note_category_heading,
 )
+from call_manager.web.middleware import (
+    MaxBodySizeMiddleware,
+    SecurityHeadersMiddleware,
+    build_csp,
+)
 from call_manager.web.routes import admin, auth, calls, health, me, profiles
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
@@ -221,6 +226,34 @@ def create_app() -> FastAPI:
     # for the design rationale. Layers on top of the session cookie's
     # SameSite=lax (set in routes/auth.py).
     app.add_middleware(OriginCSRFMiddleware, expected_base_url=settings.app_base_url)
+
+    # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
+    # referrer-policy). HSTS only when the deployment is https (cookie_secure).
+    app.add_middleware(SecurityHeadersMiddleware, csp=build_csp(), hsts=settings.cookie_secure)
+    # Body-size cap. add_middleware prepends, so adding this LAST makes it the
+    # outermost layer — an oversized body is rejected (413) before routing,
+    # CSRF, or any handler reads it. Skipped entirely when set to 0.
+    if settings.max_request_body_bytes:
+        app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_body_bytes)
+
+    # Deployment-topology warning: when running https (i.e. production, behind
+    # a TLS-terminating proxy) without TRUSTED_PROXY, the rate limiter keys off
+    # request.client.host — which is the PROXY's IP for every request, so all
+    # clients collapse into one bucket. Set TRUSTED_PROXY=true (and
+    # TRUSTED_PROXY_HOPS) AND ensure the edge proxy OVERWRITES inbound
+    # X-Forwarded-For. (If you genuinely terminate TLS in-process with no proxy,
+    # leaving TRUSTED_PROXY=false is correct and this warning is expected.)
+    if settings.cookie_secure and not settings.trusted_proxy:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "startup: APP_BASE_URL is https but TRUSTED_PROXY=false. If the app "
+            "sits behind a reverse proxy, per-IP rate limiting will bucket ALL "
+            "clients under the proxy's IP. Set TRUSTED_PROXY=true + "
+            "TRUSTED_PROXY_HOPS and have the proxy overwrite X-Forwarded-For. "
+            "Ignore this only if TLS terminates in-process with no proxy.",
+            extra={"event": "startup_trusted_proxy_unset"},
+        )
 
     # Redirect unauthenticated HTML requests to /login instead of returning
     # the raw JSON 401 from get_current_user. The auth dependency raises

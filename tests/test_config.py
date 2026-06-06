@@ -15,7 +15,8 @@ def test_settings_parse_domain_list_from_csv(monkeypatch):
 
 def test_cookie_secure_follows_app_base_url(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    # Strong secret so the https branch passes the prod-secret validator.
+    monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
 
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
@@ -34,6 +35,50 @@ def test_settings_parse_initial_admins_csv(monkeypatch):
 
     s = Settings()
     assert s.initial_admin_emails == ["a@ki.se", "b@ki.se"]
+
+
+def test_https_rejects_short_session_secret(monkeypatch):
+    """In production (https) a <32-char SESSION_SECRET is refused."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "short-but-16-chars")  # 18 chars, < 32
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+
+    with pytest.raises(ValueError, match="at least 32"):
+        Settings()
+
+
+def test_https_rejects_dev_placeholder_secret(monkeypatch):
+    """A known dev placeholder secret is refused in production even if long."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "dev-only-session-secret-not-for-prod")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+
+    with pytest.raises(ValueError, match="placeholder"):
+        Settings()
+
+
+def test_http_allows_weak_secret_for_dev(monkeypatch):
+    """Plain-HTTP dev is unaffected by the prod strong-secret rule."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+
+    assert Settings().session_secret == "test-secret-at-least-16-chars"
+
+
+def test_allowed_domains_normalized_to_punycode(monkeypatch):
+    """A Unicode allowlist entry is stored in its punycode form so the login
+    check (which also normalizes) compares like-for-like."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se, KAROLINSKA.SE")
+
+    s = Settings()
+    assert s.allowed_email_domains == ["ki.se", "karolinska.se"]
 
 
 def test_settings_require_session_secret(monkeypatch):
@@ -55,7 +100,7 @@ def test_create_app_refuses_to_start_without_resend_key_in_prod(monkeypatch, pg_
     from call_manager.main import create_app
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
     monkeypatch.delenv("RESEND_API_KEY", raising=False)

@@ -25,6 +25,11 @@ docs/**/*.pdf
 # Runtime data (e.g. golden_set_last.json written by weekly eval job)
 data/
 
+# Per-workspace git repos + uploaded attachments (WORKSPACES_DIR default is
+# var/workspaces). Holds confidential proposal drafts and tenant uploads —
+# never commit. In production point WORKSPACES_DIR outside the repo entirely.
+var/
+
 # OS
 .DS_Store
 Thumbs.db

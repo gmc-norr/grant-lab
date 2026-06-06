@@ -324,6 +324,8 @@ docs/superpowers/
 
 ## Running
 
+### Development (local, plain HTTP)
+
 ```bash
 uv sync
 uv run alembic upgrade head
@@ -331,7 +333,26 @@ uv run python -m call_manager.embeddings.cli backfill   # see Deploy procedure
 uv run uvicorn call_manager.main:create_app --factory --reload
 ```
 
+`--reload` is a **development-only** flag (filesystem watcher, single worker). Never use it in production.
+
 Required env: `DATABASE_URL`, `SESSION_SECRET`, `ALLOWED_EMAIL_DOMAINS`, `INITIAL_ADMIN_EMAIL`, `OLLAMA_URL`, `GEMMA_MODEL` (default `gemma4:e4b-it-q4_K_M`), `EMBEDDING_MODEL` (default `bge-m3`).
+
+### Production deployment (internet exposure)
+
+This app is designed to run **behind a TLS-terminating reverse proxy** (Nginx/Traefik/Apache). Several defenses key off that topology — do not expose `uvicorn` directly.
+
+1. **Terminate TLS at the proxy; bind the app to loopback.** Run uvicorn on `127.0.0.1` (no `--reload`, `--workers 1` — see scheduler note below) and let the proxy forward HTTP to it:
+   ```bash
+   uv run uvicorn call_manager.main:create_app --factory --host 127.0.0.1 --port 8000
+   ```
+2. **Set `APP_BASE_URL=https://your-host`.** This drives `Secure` session cookies, `HSTS`, and the email-sender refuse-to-start guard. With an `https` base URL the app **refuses to start** unless `SESSION_SECRET` is ≥32 chars and not a known placeholder, and unless a real email transport (`RESEND_API_KEY` or `SMTP_HOST`) is configured.
+3. **Configure the proxy-IP topology for rate limiting.** Set `TRUSTED_PROXY=true` and `TRUSTED_PROXY_HOPS=<number of trusted proxies>`, and ensure the edge proxy **overwrites** (does not append to) the inbound `X-Forwarded-For` header. Without this, per-IP rate limiting buckets every client under the proxy's IP. (If you genuinely terminate TLS in-process with no proxy, leave `TRUSTED_PROXY=false`; the app logs a startup warning either way so you can confirm.)
+4. **Cap request body size at the proxy.** Set e.g. `client_max_body_size 64m;` (Nginx). The app also enforces `MAX_REQUEST_BODY_BYTES` (default 64 MiB) as a backstop; the largest legitimate upload is a 50 MiB reference document.
+5. **Generate a strong `SESSION_SECRET`:** `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+6. **Keep `var/` (workspaces + attachments) off the repo and image.** It holds confidential proposal drafts; it is gitignored, and in production `WORKSPACES_DIR` should point outside the deploy tree.
+7. **Run exactly one app instance (scheduler constraint).** The in-process APScheduler (ingest/rank/digest/compaction ticks) assumes a single instance. Running multiple workers or replicas would duplicate ticks — duplicate weekly digests and duplicate Anthropic spend. Use `--workers 1` and a single container/host until a leader-election guard is added.
+
+Recommended security headers are emitted by the app itself (CSP `script-src 'self'`, `HSTS` when https, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`).
 
 ## Deploy procedure
 

@@ -199,6 +199,37 @@ def resolve_pinned_ip(url: str) -> str | None:
     return addrs[0]
 
 
+def _resolve_and_validate_public_ip(host: str, port: int) -> str:
+    """Resolve `host` and return a validated public IP, raising on a
+    private/blocked or unresolvable address.
+
+    The on-miss path for `_PinnedNetworkBackend`: a connect for a host that
+    was never pre-pinned must NOT fall through to connecting the raw,
+    re-resolvable hostname — that would reopen the DNS-rebinding window the
+    pin map exists to close. A literal-IP host is checked directly; a name is
+    resolved and EVERY answer must be public.
+    """
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _ip_is_blocked(literal):
+            raise AdapterError(f"refused to connect to blocked IP {host!r}")
+        return host
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise AdapterError(f"DNS resolution failed for {host!r}: {e}") from e
+    addrs = [info[4][0] for info in infos]
+    if not addrs:
+        raise AdapterError(f"no DNS answers for {host!r}")
+    for addr in addrs:
+        if _ip_is_blocked(ipaddress.ip_address(addr)):
+            raise AdapterError(f"refused to connect to {host!r} → blocked IP {addr!r}")
+    return addrs[0]
+
+
 class _PinnedNetworkBackend:
     """Wraps httpcore's network backend so TCP connects target a pre-validated
     IP instead of a freshly-resolved hostname.
@@ -217,7 +248,12 @@ class _PinnedNetworkBackend:
         self._pin_map = pin_map
 
     def connect_tcp(self, host: str, port: int, *args: object, **kwargs: object) -> object:
-        pinned = self._pin_map.get(host, host)
+        pinned = self._pin_map.get(host)
+        if pinned is None:
+            # Defense in depth: never connect the raw (re-resolvable) hostname
+            # for a host we didn't pre-pin — that would reopen the DNS-rebinding
+            # window. Validate-and-pin on the fly (raises on a private IP).
+            pinned = _resolve_and_validate_public_ip(host, port)
         return self._inner.connect_tcp(pinned, port, *args, **kwargs)
 
     def __getattr__(self, name: str) -> object:

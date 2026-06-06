@@ -418,3 +418,31 @@ async def test_send_turn_falls_back_to_assistant_usage_if_result_missing():
     # input_tokens=100, no cache_* fields → tokens_in=100.
     assert done.tokens_in == 100
     assert done.tokens_out == 50
+
+
+# ---------------------------------------------------------------------------
+# Subprocess hardening (no SDK calls): secret-scrub env + setting_sources=[]
+# ---------------------------------------------------------------------------
+
+
+def test_build_options_disables_filesystem_settings():
+    """setting_sources=[] keeps the bypassPermissions agent from loading
+    project/user .claude/settings.json (hooks, permission grants, MCP defs)."""
+    adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
+    kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
+    assert kwargs["setting_sources"] == []
+    # The existing built-in-toolbox lockdown must remain.
+    assert kwargs["tools"] == []
+    assert kwargs["strict_mcp_config"] is True
+
+
+def test_build_options_scrubs_app_secrets_from_env():
+    """App secrets are neutralized (empty) in the subprocess env; the SDK
+    merges options.env over the inherited environment, so empty == removed."""
+    adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
+    kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
+    env = kwargs["env"]
+    for key in ("DATABASE_URL", "SESSION_SECRET", "RESEND_API_KEY", "SMTP_PASSWORD"):
+        assert env[key] == ""
+    # The agent IS a Claude client — its own API key must NOT be scrubbed.
+    assert "ANTHROPIC_API_KEY" not in env
