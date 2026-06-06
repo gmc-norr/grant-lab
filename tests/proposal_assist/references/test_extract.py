@@ -128,6 +128,22 @@ def test_extract_pdf_returns_one_section_per_page():
     assert "Hello world" in full_text
 
 
+def test_extract_pdf_truncation_emits_visible_marker():
+    """A PDF over the page cap must surface a visible truncation marker, not
+    silently drop the tail (so the agent isn't misled into treating the
+    extracted text as the whole document)."""
+    from call_manager.proposal_assist.references import extract as extract_mod
+
+    pdf_bytes = _make_multi_page_pdf(extract_mod._MAX_PDF_PAGES + 5)
+    sections = extract_text(mime="application/pdf", data=pdf_bytes)
+    # Page sections are capped at the limit; one extra marker section appended.
+    page_sections = [s for s in sections if (s[0] or "").startswith("Page ")]
+    assert len(page_sections) <= extract_mod._MAX_PDF_PAGES
+    marker = sections[-1]
+    assert marker[0] == "[truncated]"
+    assert "truncated" in marker[1].lower()
+
+
 def test_extract_ipynb_splits_markdown_cells_as_sections():
     import json
 
@@ -267,5 +283,20 @@ def _make_one_page_pdf(text: str) -> bytes:
     for line in text.split("\n"):
         c.drawString(72, 720, line)
         c.translate(0, -14)
+    c.save()
+    return buf.getvalue()
+
+
+def _make_multi_page_pdf(n_pages: int) -> bytes:
+    """Generate an n-page PDF (one line of text per page) for cap tests."""
+    from io import BytesIO
+
+    from reportlab.pdfgen.canvas import Canvas
+
+    buf = BytesIO()
+    c = Canvas(buf)
+    for i in range(n_pages):
+        c.drawString(72, 720, f"page {i + 1} content")
+        c.showPage()
     c.save()
     return buf.getvalue()

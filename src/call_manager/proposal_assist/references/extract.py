@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import zipfile
 from collections.abc import Iterable
+
+logger = logging.getLogger(__name__)
 
 
 class ExtractError(RuntimeError):
@@ -129,9 +132,14 @@ def _extract_pdf(data: bytes) -> SectionList:
     except Exception as e:
         raise ExtractError(f"pdfminer load failed: {e}") from e
     sections: SectionList = []
+    truncated = False
     try:
         for page_no, layout in enumerate(extract_pages(io.BytesIO(data)), start=1):
             if page_no > _MAX_PDF_PAGES:
+                # There is at least one more page than the cap; stop and record
+                # that we truncated so the caller/agent isn't misled into
+                # treating the extracted text as the whole document.
+                truncated = True
                 break
             parts = [el.get_text() for el in layout if isinstance(el, LTTextContainer)]
             text = "".join(parts).strip()
@@ -141,6 +149,19 @@ def _extract_pdf(data: bytes) -> SectionList:
         raise ExtractError(f"pdf extraction failed: {e}") from e
     if not sections:
         raise ExtractError("pdf produced no text")
+    if truncated:
+        logger.warning(
+            "pdf extraction truncated at %d pages; document has more",
+            _MAX_PDF_PAGES,
+        )
+        sections.append(
+            (
+                "[truncated]",
+                f"[PDF truncated: only the first {_MAX_PDF_PAGES} pages were "
+                "extracted; the document has additional pages that are not "
+                "included in this text.]",
+            )
+        )
     return sections
 
 
