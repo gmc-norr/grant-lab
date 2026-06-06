@@ -123,12 +123,14 @@ async def search_references_impl(
         stmt = (
             select(
                 ReferenceChunk.reference_id,
+                ReferenceChunk.chunk_index,
                 ReferenceChunk.section_path,
                 ReferenceChunk.text,
                 ReferenceChunk.embedding.cosine_distance(query_vec).label("distance"),
                 Reference.title,
                 Reference.kind,
                 Reference.filename,
+                Reference.citekey,
             )
             .join(Reference, Reference.id == ReferenceChunk.reference_id)
             .where(
@@ -153,10 +155,12 @@ async def search_references_impl(
         results.append(
             {
                 "reference_id": str(row.reference_id),
+                "chunk_index": row.chunk_index,
                 "title": row.title or row.filename,
                 "section_path": row.section_path,
                 "snippet": snippet,
                 "score": score,
+                "citekey": row.citekey,
             }
         )
 
@@ -357,6 +361,7 @@ async def read_reference_section_impl(
         "section_path": section_path,
         "text": "\n\n".join(c.text for c in chunks),
         "chunk_count": len(chunks),
+        "chunk_indexes": [c.chunk_index for c in chunks],
     }
 
 

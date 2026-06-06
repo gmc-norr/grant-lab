@@ -548,6 +548,161 @@ async def test_search_references_warns_on_embedding_model_drift(pg_session_facto
 
 
 @pytest.mark.asyncio
+async def test_search_references_includes_chunk_index_and_citekey(pg_session_factory, tmp_path):
+    """search_references results must include chunk_index (int) and citekey
+    (str or None). Seed one ref with a citekey and one without; assert both
+    fields are present and have the expected values."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    # Seed two refs — paper (will get citekey) and analysis (no citekey).
+    with pg_session_factory() as s:
+        result_paper = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="paper_citekey.md",
+            mime_type="text/markdown",
+            data=b"# Alpha\n\nContent alpha.",
+            uploaded_by=uid,
+        )
+        s.commit()
+        paper_rid = result_paper.reference_id
+
+    with pg_session_factory() as s:
+        result_analysis = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="analysis",
+            source_type="uploaded",
+            source_uri=None,
+            filename="analysis_no_citekey.md",
+            mime_type="text/markdown",
+            data=b"# Beta\n\nContent beta.",
+            uploaded_by=uid,
+        )
+        s.commit()
+        analysis_rid = result_analysis.reference_id
+
+    # Set a citekey on the paper ref only.
+    expected_citekey = "Smith2024"
+    with pg_session_factory() as s:
+        from call_manager.db.models import Reference as _Reference
+
+        ref = s.get(_Reference, paper_rid)
+        ref.citekey = expected_citekey
+        s.commit()
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await search_references_impl(
+        ctx, query="alpha beta", top_k=10, embedder=FakeEmbedder()
+    )
+    assert "results" in result
+    assert len(result["results"]) >= 2
+
+    # All hits must carry chunk_index (int) and citekey (str or None).
+    for hit in result["results"]:
+        assert "chunk_index" in hit, f"chunk_index missing from hit: {hit}"
+        assert "citekey" in hit, f"citekey missing from hit: {hit}"
+        assert isinstance(hit["chunk_index"], int)
+        assert hit["citekey"] is None or isinstance(hit["citekey"], str)
+
+    # Hit from the paper ref should carry the citekey we set.
+    paper_hits = [h for h in result["results"] if h["reference_id"] == str(paper_rid)]
+    assert paper_hits, "expected at least one hit from the paper ref"
+    assert paper_hits[0]["citekey"] == expected_citekey
+
+    # Hit from the analysis ref (no citekey) should carry None.
+    analysis_hits = [h for h in result["results"] if h["reference_id"] == str(analysis_rid)]
+    assert analysis_hits, "expected at least one hit from the analysis ref"
+    assert analysis_hits[0]["citekey"] is None
+
+    # Existing keys must still be present (back-compat).
+    for hit in result["results"]:
+        assert set(hit.keys()) >= {"reference_id", "title", "section_path", "snippet", "score"}
+
+
+@pytest.mark.asyncio
+async def test_read_reference_section_includes_chunk_indexes(pg_session_factory, tmp_path):
+    """read_reference_section result must include chunk_indexes (list of ints,
+    sorted ascending). Seed a multi-section document and assert the field."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    md = b"""# Doc
+
+## Methods
+
+Methods top text.
+
+### Statistical analysis
+
+Stats body.
+
+### Cohort selection
+
+Cohort body.
+
+## Results
+
+Results body.
+"""
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="doc_idx.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await read_reference_section_impl(
+        ctx, reference_id=str(rid), section_path="Doc > Methods"
+    )
+    assert "chunk_indexes" in out, f"chunk_indexes missing from result: {out}"
+    idxs = out["chunk_indexes"]
+    assert isinstance(idxs, list)
+    assert len(idxs) >= 1
+    assert all(isinstance(i, int) for i in idxs)
+    # Must be sorted ascending.
+    assert idxs == sorted(idxs), f"chunk_indexes not sorted: {idxs}"
+    # chunk_count must still match the number of indexes returned.
+    assert out["chunk_count"] == len(idxs)
+    # Existing keys must still be present (back-compat).
+    assert set(out.keys()) >= {"section_path", "text", "chunk_count"}
+
+
+@pytest.mark.asyncio
 async def test_read_reference_data_kind_steers_to_summarize(pg_session_factory, tmp_path):
     """Residuals fix: read_reference on kind='data' should steer the
     agent to summarize_data instead of returning the schema+sample."""
