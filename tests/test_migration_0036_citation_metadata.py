@@ -24,8 +24,14 @@ def test_0036_round_trip(migrated_engine, pg_url):
     engine = create_engine(pg_url)
     try:
         with engine.connect() as conn:
-            assert {"csl_json", "csl_json_extracted", "citekey", "metadata_status",
-                    "metadata_source", "original_sha256"} <= _columns(conn, "references")
+            assert {
+                "csl_json",
+                "csl_json_extracted",
+                "citekey",
+                "metadata_status",
+                "metadata_source",
+                "original_sha256",
+            } <= _columns(conn, "references")
             assert "citation_llm_usage" in inspect(conn).get_table_names()
             idx = {i["name"] for i in inspect(conn).get_indexes("citation_llm_usage")}
             assert "ix_citation_llm_usage_created" in idx
@@ -41,8 +47,14 @@ def test_0036_round_trip(migrated_engine, pg_url):
 
         command.downgrade(_cfg(pg_url), "0035")
         with engine.connect() as conn:
-            added = {"csl_json", "csl_json_extracted", "citekey",
-                     "metadata_status", "metadata_source", "original_sha256"}
+            added = {
+                "csl_json",
+                "csl_json_extracted",
+                "citekey",
+                "metadata_status",
+                "metadata_source",
+                "original_sha256",
+            }
             assert added.isdisjoint(_columns(conn, "references"))
             assert "citation_llm_usage" not in inspect(conn).get_table_names()
             ref_checks = {c["name"] for c in inspect(conn).get_check_constraints("references")}

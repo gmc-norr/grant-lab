@@ -1292,9 +1292,7 @@ class CitationLlmUsage(Base):
 
     __tablename__ = "citation_llm_usage"
     __table_args__ = (
-        CheckConstraint(
-            "status IN ('ok','failed','timeout')", name="ck_citation_llm_usage_status"
-        ),
+        CheckConstraint("status IN ('ok','failed','timeout')", name="ck_citation_llm_usage_status"),
         CheckConstraint(
             "tokens_in >= 0 AND tokens_out >= 0", name="ck_citation_llm_usage_tokens_nonneg"
         ),

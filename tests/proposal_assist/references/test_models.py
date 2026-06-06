@@ -98,13 +98,24 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
 
     rid = uuid.uuid4()
     with pg_session_factory() as s:
-        s.add(Reference(
-            id=rid, workspace_id=wsid, kind="paper", source_type="uploaded",
-            source_uri=None, filename="p.pdf", storage_path="x", mime_type="application/pdf",
-            csl_json={"title": "T"}, csl_json_extracted={"title": "T?"},
-            citekey="smith2021", metadata_status="approved", metadata_source="llm",
-            original_sha256=sha,
-        ))
+        s.add(
+            Reference(
+                id=rid,
+                workspace_id=wsid,
+                kind="paper",
+                source_type="uploaded",
+                source_uri=None,
+                filename="p.pdf",
+                storage_path="x",
+                mime_type="application/pdf",
+                csl_json={"title": "T"},
+                csl_json_extracted={"title": "T?"},
+                citekey="smith2021",
+                metadata_status="approved",
+                metadata_source="llm",
+                original_sha256=sha,
+            )
+        )
         s.commit()
 
     with pg_session_factory() as s:
@@ -115,11 +126,19 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
 
     # CHECK rejects a bad status.
     with pg_session_factory() as s:
-        s.add(Reference(
-            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
-            source_uri=None, filename="q.pdf", storage_path="y", mime_type="application/pdf",
-            metadata_status="bogus",
-        ))
+        s.add(
+            Reference(
+                id=uuid.uuid4(),
+                workspace_id=wsid,
+                kind="paper",
+                source_type="uploaded",
+                source_uri=None,
+                filename="q.pdf",
+                storage_path="y",
+                mime_type="application/pdf",
+                metadata_status="bogus",
+            )
+        )
         try:
             s.commit()
             raise AssertionError("expected IntegrityError on bad metadata_status")
@@ -128,11 +147,19 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
 
     # CHECK rejects a non-64-hex original_sha256.
     with pg_session_factory() as s:
-        s.add(Reference(
-            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
-            source_uri=None, filename="r.pdf", storage_path="z", mime_type="application/pdf",
-            original_sha256="abc123",
-        ))
+        s.add(
+            Reference(
+                id=uuid.uuid4(),
+                workspace_id=wsid,
+                kind="paper",
+                source_type="uploaded",
+                source_uri=None,
+                filename="r.pdf",
+                storage_path="z",
+                mime_type="application/pdf",
+                original_sha256="abc123",
+            )
+        )
         try:
             s.commit()
             raise AssertionError("expected IntegrityError on bad original_sha256")
@@ -142,10 +169,18 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
     # Server default applies 'pending' when metadata_status is omitted.
     rid2 = uuid.uuid4()
     with pg_session_factory() as s:
-        s.add(Reference(
-            id=rid2, workspace_id=wsid, kind="paper", source_type="uploaded",
-            source_uri=None, filename="s.pdf", storage_path="s", mime_type="application/pdf",
-        ))
+        s.add(
+            Reference(
+                id=rid2,
+                workspace_id=wsid,
+                kind="paper",
+                source_type="uploaded",
+                source_uri=None,
+                filename="s.pdf",
+                storage_path="s",
+                mime_type="application/pdf",
+            )
+        )
         s.commit()
     with pg_session_factory() as s:
         ref2 = s.scalar(select(Reference).where(Reference.id == rid2))
@@ -155,8 +190,14 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
 def test_reference_citekey_unique_per_workspace(pg_session_factory):
     def _ref(wsid, name):
         return Reference(
-            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
-            source_uri=None, filename=name, storage_path=name, mime_type="application/pdf",
+            id=uuid.uuid4(),
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename=name,
+            storage_path=name,
+            mime_type="application/pdf",
             citekey="smith2021",
         )
 
@@ -184,9 +225,16 @@ def test_reference_citekey_unique_per_workspace(pg_session_factory):
     # NULL citekey is outside the partial index — duplicates allowed in one workspace.
     def _ref_no_citekey(wsid, name):
         return Reference(
-            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
-            source_uri=None, filename=name, storage_path=name, mime_type="application/pdf",
+            id=uuid.uuid4(),
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename=name,
+            storage_path=name,
+            mime_type="application/pdf",
         )
+
     with pg_session_factory() as s:
         s.add(_ref_no_citekey(a, "4.pdf"))
         s.add(_ref_no_citekey(a, "5.pdf"))
@@ -200,8 +248,16 @@ def test_citation_llm_usage_insert_and_nonneg(pg_session_factory):
         wsid = ws.id
 
     with pg_session_factory() as s:
-        s.add(CitationLlmUsage(workspace_id=wsid, op="metadata_extract", status="ok",
-                               tokens_in=100, tokens_out=20, model="gemma"))
+        s.add(
+            CitationLlmUsage(
+                workspace_id=wsid,
+                op="metadata_extract",
+                status="ok",
+                tokens_in=100,
+                tokens_out=20,
+                model="gemma",
+            )
+        )
         s.commit()
     with pg_session_factory() as s:
         row = s.scalar(select(CitationLlmUsage).where(CitationLlmUsage.workspace_id == wsid))

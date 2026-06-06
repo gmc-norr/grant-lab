@@ -135,8 +135,11 @@ def test_global_cap_blocks_without_calling(pg_session_factory):
         ),
     )
     with pg_session_factory() as s:
-        s.add(CitationLlmUsage(workspace_id=wsid, op="metadata_extract", status="ok",
-                               tokens_in=25, tokens_out=0))
+        s.add(
+            CitationLlmUsage(
+                workspace_id=wsid, op="metadata_extract", status="ok", tokens_in=25, tokens_out=0
+            )
+        )
         s.commit()
     res = svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
     assert res.cap_exceeded is True and res.cap_scope == "global"
