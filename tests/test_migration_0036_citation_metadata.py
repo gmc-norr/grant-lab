@@ -30,11 +30,24 @@ def test_0036_round_trip(migrated_engine, pg_url):
             idx = {i["name"] for i in inspect(conn).get_indexes("citation_llm_usage")}
             assert "ix_citation_llm_usage_created" in idx
             assert "ix_citation_llm_usage_ws_created" in idx
+            ref_checks = {c["name"] for c in inspect(conn).get_check_constraints("references")}
+            assert "ck_references_metadata_status" in ref_checks
+            assert "ck_references_original_sha256_hex" in ref_checks
+            usage_checks = {
+                c["name"] for c in inspect(conn).get_check_constraints("citation_llm_usage")
+            }
+            assert "ck_citation_llm_usage_status" in usage_checks
+            assert "ck_citation_llm_usage_tokens_nonneg" in usage_checks
 
         command.downgrade(_cfg(pg_url), "0035")
         with engine.connect() as conn:
-            assert "original_sha256" not in _columns(conn, "references")
+            added = {"csl_json", "csl_json_extracted", "citekey",
+                     "metadata_status", "metadata_source", "original_sha256"}
+            assert added.isdisjoint(_columns(conn, "references"))
             assert "citation_llm_usage" not in inspect(conn).get_table_names()
+            ref_checks = {c["name"] for c in inspect(conn).get_check_constraints("references")}
+            assert "ck_references_metadata_status" not in ref_checks
+            assert "ck_references_original_sha256_hex" not in ref_checks
     finally:
         # ALWAYS restore head, even if an assertion above failed — later tests
         # in this session reuse the shared container at head.

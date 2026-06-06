@@ -17,6 +17,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
+# revision identifiers, used by Alembic.
 revision = "0036"
 down_revision = "0035"
 branch_labels = None
@@ -66,7 +67,10 @@ def upgrade() -> None:
             server_default=sa.func.now(),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["workspace_id"], ["workspaces.id"], ondelete="CASCADE",
+            name="fk_citation_llm_usage_workspace_id",
+        ),
         sa.CheckConstraint(
             "status IN ('ok','failed','timeout')", name="ck_citation_llm_usage_status"
         ),
