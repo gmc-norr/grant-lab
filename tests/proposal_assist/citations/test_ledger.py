@@ -1,0 +1,323 @@
+"""Tests for the citations.json v2 in-memory ledger module.
+
+Written TDD-first: all tests must fail before ledger.py exists,
+then pass after implementation. No database, no file I/O, no git.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+
+import pytest
+
+from call_manager.proposal_assist.citations.ledger import (
+    LEDGER_VERSION,
+    append_evidence,
+    citekeys_in_use,
+    dump_ledger,
+    empty_ledger,
+    find_by_citekey,
+    find_by_id,
+    load_ledger,
+    new_ev_id,
+    remove_evidence,
+    update_evidence,
+)
+
+# ---------------------------------------------------------------------------
+# empty_ledger / dump_ledger / load_ledger basics
+# ---------------------------------------------------------------------------
+
+
+def test_empty_ledger_shape():
+    ledger = empty_ledger()
+    assert ledger["version"] == LEDGER_VERSION
+    assert ledger["evidence"] == []
+
+
+def test_dump_ledger_ends_with_newline():
+    text = dump_ledger(empty_ledger())
+    assert text.endswith("\n")
+
+
+def test_dump_ledger_sorted_keys():
+    ledger = {"version": LEDGER_VERSION, "evidence": [{"z": 1, "a": 2}]}
+    text = dump_ledger(ledger)
+    data = json.loads(text)
+    # Verify round-trips cleanly
+    assert data["evidence"][0] == {"z": 1, "a": 2}
+    # Confirm keys in the serialised text are sorted (version < evidence in raw JSON)
+    # "evidence" < "version" alphabetically — so "evidence" must appear first
+    ev_pos = text.index('"evidence"')
+    ver_pos = text.index('"version"')
+    assert ev_pos < ver_pos
+
+
+def test_round_trip_empty_via_dump_load():
+    text = dump_ledger(empty_ledger())
+    loaded = load_ledger(text)
+    assert loaded == empty_ledger()
+
+
+def test_load_ledger_none_returns_empty():
+    assert load_ledger(None) == empty_ledger()
+
+
+def test_load_ledger_empty_string_returns_empty():
+    assert load_ledger("") == empty_ledger()
+
+
+def test_load_ledger_whitespace_only_returns_empty():
+    assert load_ledger("   \n\t  ") == empty_ledger()
+
+
+def test_load_ledger_valid_v2():
+    doc = json.dumps({"version": 2, "evidence": [{"id": "ev-aabbccddeeff"}]})
+    ledger = load_ledger(doc)
+    assert ledger["version"] == 2
+    assert len(ledger["evidence"]) == 1
+
+
+def test_load_ledger_missing_evidence_key_defaults_to_empty_list():
+    """A v2 doc without the evidence key should get defaulted to []."""
+    doc = json.dumps({"version": 2})
+    ledger = load_ledger(doc)
+    assert ledger["evidence"] == []
+
+
+def test_load_ledger_wrong_version_raises():
+    doc = json.dumps({"version": 1, "evidence": []})
+    with pytest.raises(ValueError, match="unsupported citations.json"):
+        load_ledger(doc)
+
+
+def test_load_ledger_non_dict_raises():
+    with pytest.raises((ValueError, AttributeError)):
+        load_ledger(json.dumps([1, 2, 3]))
+
+
+def test_load_ledger_non_list_evidence_raises():
+    doc = json.dumps({"version": 2, "evidence": {"not": "a list"}})
+    with pytest.raises(ValueError, match="'evidence' must be a list"):
+        load_ledger(doc)
+
+
+# ---------------------------------------------------------------------------
+# new_ev_id
+# ---------------------------------------------------------------------------
+
+
+def test_new_ev_id_format():
+    ev_id = new_ev_id()
+    assert re.fullmatch(r"ev-[0-9a-f]{12}", ev_id), f"Unexpected id: {ev_id!r}"
+
+
+def test_new_ev_id_unique():
+    ids = {new_ev_id() for _ in range(200)}
+    assert len(ids) == 200
+
+
+# ---------------------------------------------------------------------------
+# append_evidence — non-mutating
+# ---------------------------------------------------------------------------
+
+
+def _make_row(ev_id: str = "ev-aabbccddeeff", citekey: str = "smith2021") -> dict:
+    return {
+        "id": ev_id,
+        "citekey": citekey,
+        "reference_id": "ref-uuid",
+        "locator": {"chunk_index": 0, "section_path": "Abstract"},
+        "source_content_hash": None,
+        "chunk_content_hash": "abc123",
+        "evidence_quote": "some quoted text",
+        "evidence_quote_offsets": [0, 16],
+        "stance": "supports",
+        "confidence": "high",
+        "claim_context": {"text": "claim sentence", "hash": "def456"},
+        "citation_snapshot": "Smith et al. (2021)",
+        "created_at": "2026-06-07T00:00:00Z",
+        "updated_at": "2026-06-07T00:00:00Z",
+    }
+
+
+def test_append_evidence_returns_new_ledger_with_row():
+    original = empty_ledger()
+    row = _make_row()
+    result = append_evidence(original, row)
+    assert len(result["evidence"]) == 1
+    assert result["evidence"][0] is row
+
+
+def test_append_evidence_does_not_mutate_input():
+    original = empty_ledger()
+    row = _make_row()
+    append_evidence(original, row)
+    assert original["evidence"] == []  # original untouched
+
+
+def test_append_evidence_preserves_version():
+    ledger = empty_ledger()
+    result = append_evidence(ledger, _make_row())
+    assert result["version"] == LEDGER_VERSION
+
+
+def test_append_evidence_accumulates():
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000002", "beta"))
+    assert len(ledger["evidence"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# remove_evidence — non-mutating
+# ---------------------------------------------------------------------------
+
+
+def test_remove_evidence_removes_by_id():
+    row = _make_row("ev-aabbccddeeff")
+    ledger = append_evidence(empty_ledger(), row)
+    new_ledger, removed = remove_evidence(ledger, "ev-aabbccddeeff")
+    assert removed is True
+    assert new_ledger["evidence"] == []
+
+
+def test_remove_evidence_missing_id_returns_false():
+    row = _make_row("ev-aabbccddeeff")
+    ledger = append_evidence(empty_ledger(), row)
+    new_ledger, removed = remove_evidence(ledger, "ev-nonexistent00")
+    assert removed is False
+    assert len(new_ledger["evidence"]) == 1
+
+
+def test_remove_evidence_does_not_mutate_input():
+    row = _make_row("ev-aabbccddeeff")
+    original = append_evidence(empty_ledger(), row)
+    original_len = len(original["evidence"])
+    remove_evidence(original, "ev-aabbccddeeff")
+    assert len(original["evidence"]) == original_len
+
+
+def test_remove_evidence_preserves_other_rows():
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000002", "beta"))
+    new_ledger, removed = remove_evidence(ledger, "ev-000000000001")
+    assert removed is True
+    assert len(new_ledger["evidence"]) == 1
+    assert new_ledger["evidence"][0]["id"] == "ev-000000000002"
+
+
+# ---------------------------------------------------------------------------
+# update_evidence — non-mutating
+# ---------------------------------------------------------------------------
+
+
+def test_update_evidence_merges_fields():
+    row = _make_row("ev-aabbccddeeff")
+    ledger = append_evidence(empty_ledger(), row)
+    new_ledger, updated = update_evidence(
+        ledger, "ev-aabbccddeeff", stance="refutes", confidence="low"
+    )
+    assert updated is True
+    updated_row = find_by_id(new_ledger, "ev-aabbccddeeff")
+    assert updated_row["stance"] == "refutes"
+    assert updated_row["confidence"] == "low"
+    # Other fields preserved
+    assert updated_row["citekey"] == "smith2021"
+
+
+def test_update_evidence_absent_id_returns_false():
+    ledger = append_evidence(empty_ledger(), _make_row("ev-aabbccddeeff"))
+    new_ledger, updated = update_evidence(ledger, "ev-nonexistent00", stance="refutes")
+    assert updated is False
+    assert len(new_ledger["evidence"]) == 1
+
+
+def test_update_evidence_does_not_mutate_input_row():
+    row = _make_row("ev-aabbccddeeff")
+    ledger = append_evidence(empty_ledger(), row)
+    original_stance = ledger["evidence"][0]["stance"]
+    update_evidence(ledger, "ev-aabbccddeeff", stance="refutes")
+    # The row inside ledger["evidence"] must be unchanged
+    assert ledger["evidence"][0]["stance"] == original_stance
+
+
+def test_update_evidence_preserves_other_rows():
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000002", "beta"))
+    new_ledger, _ = update_evidence(ledger, "ev-000000000001", confidence="medium")
+    unchanged = find_by_id(new_ledger, "ev-000000000002")
+    assert unchanged["confidence"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# find_by_id
+# ---------------------------------------------------------------------------
+
+
+def test_find_by_id_hit():
+    row = _make_row("ev-aabbccddeeff")
+    ledger = append_evidence(empty_ledger(), row)
+    found = find_by_id(ledger, "ev-aabbccddeeff")
+    assert found is not None
+    assert found["id"] == "ev-aabbccddeeff"
+
+
+def test_find_by_id_miss():
+    ledger = empty_ledger()
+    assert find_by_id(ledger, "ev-aabbccddeeff") is None
+
+
+# ---------------------------------------------------------------------------
+# find_by_citekey
+# ---------------------------------------------------------------------------
+
+
+def test_find_by_citekey_returns_all_matching():
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _make_row("ev-000000000001", "jones2020"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000002", "jones2020"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000003", "other2019"))
+    results = find_by_citekey(ledger, "jones2020")
+    assert len(results) == 2
+    assert all(r["citekey"] == "jones2020" for r in results)
+
+
+def test_find_by_citekey_no_match_returns_empty_list():
+    ledger = append_evidence(empty_ledger(), _make_row("ev-aabbccddeeff", "smith2021"))
+    assert find_by_citekey(ledger, "nobody1900") == []
+
+
+# ---------------------------------------------------------------------------
+# citekeys_in_use
+# ---------------------------------------------------------------------------
+
+
+def test_citekeys_in_use_returns_set():
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000002", "alpha"))
+    ledger = append_evidence(ledger, _make_row("ev-000000000003", "beta"))
+    keys = citekeys_in_use(ledger)
+    assert keys == {"alpha", "beta"}
+
+
+def test_citekeys_in_use_empty_ledger():
+    assert citekeys_in_use(empty_ledger()) == set()
+
+
+def test_citekeys_in_use_ignores_rows_without_citekey():
+    ledger = empty_ledger()
+    # Row with citekey missing entirely
+    row_no_key = {k: v for k, v in _make_row("ev-000000000001", "alpha").items() if k != "citekey"}
+    ledger = append_evidence(ledger, row_no_key)
+    # Row with empty-string citekey (falsy) — should also be ignored
+    row_empty_key = {**_make_row("ev-000000000002", ""), "citekey": ""}
+    ledger = append_evidence(ledger, row_empty_key)
+    # Row with a real citekey
+    ledger = append_evidence(ledger, _make_row("ev-000000000003", "real2023"))
+    keys = citekeys_in_use(ledger)
+    assert keys == {"real2023"}
