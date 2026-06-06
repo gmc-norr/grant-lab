@@ -16,9 +16,10 @@ class AnchorError(ValueError):
 
 
 # A full marker: [@citekey]<!-- ev:ev-<hex> -->
-# citekey  — lowercase alnum, underscores, hyphens (covers smith2021, ref-a1b2c3d4e5f6,
-#            smith2021a, etc.)
-# ev_id    — ev- followed by at least 6 hex chars (ledger produces 12-char hex)
+# citekey  — alnum (upper or lower), underscores, hyphens (covers smith2021,
+#            ref-a1b2c3d4e5f6, smith2021a, etc.)
+# ev_id    — ev- followed by at least 6 hex chars (ledger ev ids are 12 hex,
+#            but the regex floor is 6)
 MARKER_RE = re.compile(r"\[@(?P<citekey>[A-Za-z0-9_-]+)\]<!-- ev:(?P<ev_id>ev-[0-9a-f]{6,}) -->")
 
 
@@ -42,17 +43,34 @@ def find_markers(text: str) -> list[dict]:
 
 def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
     """Insert ``[@citekey]<!-- ev:ev_id -->`` immediately AFTER the unique ``anchor``
-    substring. Raises :class:`AnchorError` if ``anchor`` occurs 0 or >1 times."""
+    substring. Raises :class:`AnchorError` if ``anchor`` occurs 0 or >1 times.
+
+    Anchor occurrences that overlap an existing marker span are ignored, so that
+    a citekey substring appearing only inside ``[@citekey]<!-- ev:... -->`` does
+    not falsely match.
+    """
     if not anchor:
         raise AnchorError("anchor must be a non-empty string")
-    count = text.count(anchor)
-    if count == 0:
+    marker_spans = [(m["start"], m["end"]) for m in find_markers(text)]
+
+    def _overlaps_marker(pos: int, end: int) -> bool:
+        return any(ms < end and pos < me for ms, me in marker_spans)
+
+    occurrences: list[int] = []
+    start = 0
+    while True:
+        pos = text.find(anchor, start)
+        if pos == -1:
+            break
+        if not _overlaps_marker(pos, pos + len(anchor)):
+            occurrences.append(pos)
+        start = pos + 1
+    if not occurrences:
         raise AnchorError("anchor not found")
-    if count > 1:
-        raise AnchorError(f"anchor is ambiguous (found {count} times)")
-    idx = text.index(anchor) + len(anchor)
-    marker = build_marker(citekey, ev_id)
-    return text[:idx] + marker + text[idx:]
+    if len(occurrences) > 1:
+        raise AnchorError(f"anchor is ambiguous (found {len(occurrences)} times)")
+    idx = occurrences[0] + len(anchor)
+    return text[:idx] + build_marker(citekey, ev_id) + text[idx:]
 
 
 def remove_marker(text: str, ev_id: str) -> tuple[str, bool]:
@@ -60,6 +78,8 @@ def remove_marker(text: str, ev_id: str) -> tuple[str, bool]:
 
     Returns ``(new_text, removed)`` where *removed* is ``True`` when the
     marker was found and deleted, ``False`` when it was not present.
+    The marker is replaced with an empty string; surrounding whitespace in the
+    original text is left as-is (callers may normalise if needed).
     """
     removed = False
 

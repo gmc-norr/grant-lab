@@ -104,6 +104,18 @@ def test_find_markers_ref_style_citekey() -> None:
     assert result[0]["citekey"] == "ref-a1b2c3d4e5f6"
 
 
+def test_find_markers_adjacent_no_separator() -> None:
+    """Two markers with no whitespace between them must both be returned in order."""
+    m1 = "[@jones2020]<!-- ev:ev-000000000001 -->"
+    m2 = "[@smith2021]<!-- ev:ev-000000000002 -->"
+    text = f"Claim {m1}{m2} done."
+    result = find_markers(text)
+    assert len(result) == 2
+    assert result[0]["citekey"] == "jones2020"
+    assert result[1]["citekey"] == "smith2021"
+    assert result[0]["start"] < result[1]["start"]
+
+
 # ---------------------------------------------------------------------------
 # insert_marker
 # ---------------------------------------------------------------------------
@@ -149,6 +161,34 @@ def test_insert_marker_preserves_rest_of_document() -> None:
     assert "[@ref-abcdef123456]<!-- ev:ev-111111111111 -->" in result
 
 
+def test_insert_marker_anchor_only_inside_existing_marker_raises() -> None:
+    """An anchor that appears only inside an existing marker span is ignored;
+    the function must raise AnchorError('anchor not found')."""
+    # "smith2021" appears solely as part of [@smith2021]<!-- ev:ev-aaaaaaaaaaaa -->
+    text = "Some prose [@smith2021]<!-- ev:ev-aaaaaaaaaaaa --> more prose."
+    with pytest.raises(AnchorError, match="not found"):
+        insert_marker(text, "smith2021", "jones2022", "ev-bbbbbbbbbbbb")
+
+
+def test_insert_marker_anchor_in_prose_and_unrelated_marker_substring() -> None:
+    """Anchor that occurs once in prose inserts correctly even when an unrelated
+    marker also contains a matching substring (the marker occurrence is ignored)."""
+    # "smith2021" appears in prose AND inside an unrelated marker for jones2020
+    # that happens to have "smith2021" in its ev comment — we use a citekey that
+    # shares the anchor text only inside the marker.
+    text = "See smith2021 for details [@smith2021]<!-- ev:ev-aaaaaaaaaaaa --> already cited."
+    # "smith2021" occurs once in prose (before "for details") and once inside
+    # the existing marker — the marker occurrence must be ignored, leaving
+    # exactly one valid occurrence → insert succeeds.
+    result = insert_marker(text, "smith2021", "jones2022", "ev-bbbbbbbbbbbb")
+    expected_new_marker = "[@jones2022]<!-- ev:ev-bbbbbbbbbbbb -->"
+    assert expected_new_marker in result
+    # The new marker is placed right after the prose "smith2021"
+    prose_idx = result.index("smith2021")
+    anchor_end = prose_idx + len("smith2021")
+    assert result[anchor_end : anchor_end + len(expected_new_marker)] == expected_new_marker
+
+
 # ---------------------------------------------------------------------------
 # remove_marker
 # ---------------------------------------------------------------------------
@@ -159,6 +199,8 @@ def test_remove_marker_removes_matching_ev_id() -> None:
     new_text, removed = remove_marker(text, "ev-aaaaaaaaaaaa")
     assert removed is True
     assert "[@smith2021]<!-- ev:ev-aaaaaaaaaaaa -->" not in new_text
+    # Double space is the expected, accepted artifact of replacing the marker
+    # with ""; callers normalise whitespace if they care.
     assert new_text == "Fact  is established."
 
 
@@ -204,6 +246,14 @@ def test_remove_marker_ev_id_not_found_text_unchanged() -> None:
     new_text, removed = remove_marker(text, "ev-bbbbbbbbbbbb")
     assert removed is False
     assert new_text == text
+
+
+def test_remove_marker_immediately_before_comma() -> None:
+    """Removing a marker that sits directly before a comma leaves no stray space."""
+    text = "Fact[@k]<!-- ev:ev-aaaaaaaaaaaa -->, more."
+    new_text, removed = remove_marker(text, "ev-aaaaaaaaaaaa")
+    assert removed is True
+    assert new_text == "Fact, more."
 
 
 # ---------------------------------------------------------------------------
