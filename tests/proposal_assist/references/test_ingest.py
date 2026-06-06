@@ -529,6 +529,209 @@ def test_phase3_failure_is_nonfatal(pg_session_factory, tmp_path, monkeypatch):
     assert ref.metadata_status == "failed"
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 citekey collision / retry tests (concurrent-ingest hardening)
+# ---------------------------------------------------------------------------
+
+
+def test_phase3_sequential_same_author_year_assigns_distinct_citekeys(pg_session_factory, tmp_path):
+    """Two sequential ingests in the same workspace with identical author/year
+    must produce distinct citekeys: smith2021 and smith2021a.
+
+    This exercises generate_citekey's suffix logic end-to-end through Phase 3
+    and locks in that the second reference is NOT dropped or failed.
+    """
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    md = b"# Paper\n\nBody.\n"
+    same_csl = {
+        "title": "T",
+        "author": [{"family": "Smith"}],
+        "issued": {"date-parts": [[2021]]},
+    }
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+
+    # First ingest — should get smith2021.
+    with pg_session_factory() as s:
+        r1 = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="paper1.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=None,
+            citation_service=_StubCitationService(
+                _FakeCitationLLMResult(
+                    data=same_csl,
+                    usage=_FakeLLMUsage(),
+                    model="m",
+                    cap_exceeded=False,
+                )
+            ),
+        )
+        s.commit()
+
+    # Second ingest — same workspace, same CSL → should get smith2021a.
+    with pg_session_factory() as s:
+        r2 = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="paper2.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=None,
+            citation_service=_StubCitationService(
+                _FakeCitationLLMResult(
+                    data=same_csl,
+                    usage=_FakeLLMUsage(),
+                    model="m",
+                    cap_exceeded=False,
+                )
+            ),
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        ref1 = s.scalar(select(Reference).where(Reference.id == r1.reference_id))
+        ref2 = s.scalar(select(Reference).where(Reference.id == r2.reference_id))
+
+    assert ref1.citekey == "smith2021"
+    assert ref2.citekey == "smith2021a"
+    assert ref2.metadata_status == "extracted"  # NOT failed, NOT null
+
+
+def test_phase3_retry_on_integrity_error_recovers_citekey(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """Simulated commit race: force IntegrityError on the first citekey commit,
+    verify the retry path recovers and produces a valid citekey (not 'failed').
+
+    Strategy: pre-commit a Reference row with citekey='smith2021' so the DB
+    uniqueness constraint fires; monkeypatch generate_citekey in the ingest
+    module to return that taken key on the first call and a free key on the
+    second, simulating the window between SELECT and COMMIT being won by a
+    concurrent transaction.
+    """
+    import uuid as _uuid
+
+    import call_manager.proposal_assist.references.ingest as ingest_module
+
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    md = b"# Paper\n\nBody.\n"
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+
+    # Pre-insert a Reference that already holds citekey='smith2021' so the DB
+    # unique constraint fires when the retry's first attempt tries to commit it.
+    import hashlib
+
+    preexisting_id = _uuid.uuid4()
+    with pg_session_factory() as s:
+        from call_manager.db.models import Reference as _Ref
+
+        dummy_bytes = b"dummy"
+        preexisting = _Ref(
+            id=preexisting_id,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            title="Pre-existing paper",
+            filename="pre.md",
+            storage_path=f"{wsid}/references/{preexisting_id}/original.md",
+            mime_type="text/markdown",
+            bytes_total=len(dummy_bytes),
+            original_sha256=hashlib.sha256(dummy_bytes).hexdigest(),
+            text_status="done",
+            outline_status="skipped",
+            uploaded_by=None,
+            citekey="smith2021",
+            metadata_status="extracted",
+        )
+        s.add(preexisting)
+        s.commit()
+
+    # Monkeypatch generate_citekey: first call returns the taken key, second
+    # returns a free one — simulating what happens when a concurrent ingest
+    # commits smith2021 between our SELECT and COMMIT.
+    call_counts = {"n": 0}
+
+    def patched_generate_citekey(csl, workspace_id, session):
+        call_counts["n"] += 1
+        if call_counts["n"] == 1:
+            return "smith2021"  # already taken → IntegrityError on commit
+        return "smith2021a"  # free on retry
+
+    monkeypatch.setattr(ingest_module, "generate_citekey", patched_generate_citekey)
+
+    stub_service = _StubCitationService(
+        _FakeCitationLLMResult(
+            data={
+                "title": "T",
+                "author": [{"family": "Smith"}],
+                "issued": {"date-parts": [[2021]]},
+            },
+            usage=_FakeLLMUsage(),
+            model="m",
+            cap_exceeded=False,
+        )
+    )
+
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="paper.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=None,
+            citation_service=stub_service,
+        )
+        s.commit()
+
+    assert isinstance(result, IngestResult)
+    assert result.text_status == "done"
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
+
+    # The retry must have recovered: valid citekey, not failed.
+    assert ref.citekey == "smith2021a"
+    assert ref.metadata_status == "extracted"
+    # Confirm the patch was actually triggered (retry happened).
+    assert call_counts["n"] >= 2
+
+
 class _EmptyCitationService:
     """Returns empty data dict — simulates LLM returning no extractable fields."""
 

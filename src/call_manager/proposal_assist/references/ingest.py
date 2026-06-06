@@ -30,6 +30,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Reference, ReferenceChunk
@@ -255,21 +256,31 @@ def ingest_bytes(
                         citation_service=citation_service,
                     )
 
-                    if csl:
-                        ref3.csl_json_extracted = csl
-                        title_val = csl.get("title")
-                        if isinstance(title_val, str) and title_val:
-                            ref3.title = title_val
-                        ref3.metadata_source = source
-                        ref3.metadata_status = status
-                        ref3.citekey = generate_citekey(csl, workspace_id, s3)
-                    else:
-                        ref3.metadata_status = "failed"
-                        # Still assign a fallback citekey so a metadata-less reference can
-                        # be cited downstream (generate_citekey({}) → "ref-<12hex>").
-                        if ref3.citekey is None:
-                            ref3.citekey = generate_citekey({}, workspace_id, s3)
-                    s3.commit()
+                    # Assign citekey + commit with retry: a concurrent ingest of
+                    # the same author/year can win the unique (workspace_id,
+                    # citekey) index between our SELECT and COMMIT; on conflict,
+                    # roll back and re-derive (we'll now see the competitor and
+                    # pick the next suffix).
+                    key_source = csl if csl else {}
+                    for attempt in range(4):
+                        try:
+                            ref3 = s3.get(Reference, reference_id)
+                            if csl:
+                                ref3.csl_json_extracted = csl
+                                title_val = csl.get("title")
+                                if isinstance(title_val, str) and title_val:
+                                    ref3.title = title_val
+                                ref3.metadata_source = source
+                                ref3.metadata_status = status
+                            else:
+                                ref3.metadata_status = "failed"
+                            ref3.citekey = generate_citekey(key_source, workspace_id, s3)
+                            s3.commit()
+                            break
+                        except IntegrityError:
+                            s3.rollback()
+                            if attempt == 3:
+                                raise  # let outer Phase-3 except mark it failed
         except Exception:
             logger.warning(
                 "ingest Phase 3 failed for workspace=%s reference=%s — "
