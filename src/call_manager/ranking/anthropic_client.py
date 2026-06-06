@@ -196,8 +196,16 @@ def _map_stop_reason(anthropic_stop: str | None) -> str:
     }.get(anthropic_stop or "", "stop")
 
 
-_FENCE_RE = re.compile(
+# Whole-response fence: the entire (stripped) reply is a single ```...``` block.
+_FENCE_WHOLE_RE = re.compile(
     r"\A\s*```(?:json|JSON)?\s*\n?(?P<body>.*?)\n?```\s*\Z",
+    re.DOTALL,
+)
+# Embedded fence: a ```json ... ``` block sitting anywhere inside prose
+# ("Here is the JSON:\n```json\n{...}\n```"). Non-greedy body so we take the
+# first complete block.
+_FENCE_EMBEDDED_RE = re.compile(
+    r"```(?:json|JSON)?\s*\n?(?P<body>.*?)```",
     re.DOTALL,
 )
 
@@ -208,14 +216,20 @@ def _strip_markdown_fence(text: str) -> str:
     raw JSON. The downstream parser uses `json.loads()` directly and
     fails on the fence prefix ("Expecting value: line 1 column 1").
 
-    Strip a single outer fence if present; leave everything else alone
-    so a response that's already raw JSON is unaffected. We deliberately
-    don't try to extract JSON from prose preambles — that's a different
-    failure mode the prompt should handle, not silent recovery code.
+    Recovery, in order:
+      1. The whole reply is one fence → return its body.
+      2. A fenced block sits inside a prose preamble/suffix → return the
+         first block's body. This is the common "Here is the JSON: ```...```"
+         case, more likely on the analysis-enabled (Sonnet) path.
+    A response that's already raw JSON (no fence) is returned unchanged.
     """
     if not text:
         return text
-    m = _FENCE_RE.match(text.strip())
+    stripped = text.strip()
+    m = _FENCE_WHOLE_RE.match(stripped)
+    if m:
+        return m.group("body").strip()
+    m = _FENCE_EMBEDDED_RE.search(stripped)
     if m:
         return m.group("body").strip()
     return text

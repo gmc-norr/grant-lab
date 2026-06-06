@@ -13,6 +13,7 @@ the other one.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -32,6 +33,7 @@ async def drain_turn_queue_tick(
     controller: WorkspaceController,
     workspaces_dir: Path | None = None,
     drafting_enabled: bool = True,
+    turn_max_seconds: float | None = None,
 ) -> int:
     """Find workspaces with queued turn_jobs; pick the oldest queued
     job per workspace; dispatch process_turn_once for each. Returns the
@@ -78,13 +80,34 @@ async def drain_turn_queue_tick(
     dispatched = 0
     for turn_id, workspace_id in rows:
         try:
-            await process_turn_once(
+            coro = process_turn_once(
                 session_factory=session_factory,
                 controller=controller,
                 turn_job_id=turn_id,
                 workspaces_dir=workspaces_dir,
             )
+            # Bound each turn in-loop. asyncio.wait_for cancels the coroutine
+            # on timeout, which raises CancelledError at the streaming await
+            # inside process_turn_once; that path finalizes the turn as failed
+            # and releases the workspace's running-row CLEANLY. This is the
+            # primary mechanism that keeps a slow/hung turn from being
+            # abandoned by the scheduler's fut.result timeout and later reaped
+            # while still live (the data-corruption window). The reaper remains
+            # only as a backstop for a truly wedged loop.
+            if turn_max_seconds is not None:
+                await asyncio.wait_for(coro, timeout=turn_max_seconds)
+            else:
+                await coro
             dispatched += 1
+        except TimeoutError:
+            logger.warning(
+                "drain_turn_queue_tick: turn_job %s (workspace %s) exceeded "
+                "turn_max_seconds=%s and was cancelled+failed in-loop",
+                turn_id,
+                workspace_id,
+                turn_max_seconds,
+                extra={"event": "turn_timed_out", "turn_job_id": str(turn_id)},
+            )
         except Exception:
             logger.exception(
                 "drain_turn_queue_tick: process_turn_once raised for turn_job %s "

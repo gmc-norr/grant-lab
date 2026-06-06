@@ -298,7 +298,11 @@ class CallRanking(Base):
     __tablename__ = "call_rankings"
     __table_args__ = (
         # Covers WHERE profile_id=? ORDER BY aggregate_score DESC, the hot
-        # dashboard query. NULLS LAST so unranked calls sort to the bottom.
+        # dashboard query. NB: aggregate_score is NOT NULL, so an UNRANKED call
+        # simply has no call_rankings row at all — it never appears in this
+        # index. The trailing NULLS LAST is therefore a no-op on real data;
+        # it's retained only to match the existing on-disk index DDL (changing
+        # it would force a cosmetic migration for zero behavioural gain).
         Index(
             "ix_call_rankings_profile_score",
             "profile_id",

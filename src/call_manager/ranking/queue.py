@@ -16,9 +16,12 @@ _LAST_ERROR_MAX = 2000
 # worker process either crashed (SIGKILL, OOM, dev-server Ctrl-C) or
 # something hangs indefinitely. The reaper requeues it as PENDING so the
 # next tick retries. Set generously to avoid double-running a slow but
-# legitimate Gemma call (single-instance Ollama on a 2080 Ti is well
-# under 60s per ranking, but bursts of dozens at once could queue up).
-_STUCK_AFTER = timedelta(minutes=5)
+# legitimate Gemma call: a batch of `batch_size` jobs is processed serially
+# and each can take up to the per-call LLM timeout, so the worst-case batch
+# wall-clock is batch_size × timeout. The worker also heartbeats updated_at
+# as it starts each job (see touch_running_job), so a long batch keeps its
+# in-flight jobs "fresh" and only a genuinely crashed/hung job ages past this.
+_STUCK_AFTER = timedelta(minutes=15)
 
 # How far back reconcile looks. Matches backfill_profile's BACKFILL_DAYS
 # so a pair missed by the orchestrator gets caught within the same window
@@ -162,6 +165,17 @@ def claim_pending_jobs(session: Session, *, limit: int) -> list[RankingJob]:
         row.updated_at = now
     session.flush()
     return rows
+
+
+def touch_running_job(session: Session, job_id: int) -> None:
+    """Heartbeat: bump a RUNNING job's updated_at to now so a long serial
+    batch doesn't let the stuck-reaper mistake an in-flight job for a dead
+    one. No-op if the job is no longer RUNNING (already finished/failed)."""
+    session.execute(
+        update(RankingJob)
+        .where(RankingJob.id == job_id, RankingJob.status == RankingJobStatus.RUNNING)
+        .values(updated_at=datetime.now(UTC))
+    )
 
 
 # Mirrors worker.MAX_ATTEMPTS (can't import it — worker imports this module,

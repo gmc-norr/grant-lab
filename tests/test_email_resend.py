@@ -88,6 +88,41 @@ def test_resend_missing_field_is_transport_error_not_bounce():
         client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
 
 
+def test_resend_sender_side_validation_error_is_transport_not_bounce():
+    """Resend reuses validation_error for sender-side faults too (e.g. an
+    unverified `from` domain). Those must NOT count as a per-recipient bounce,
+    or a single config mistake would auto-disable every recipient."""
+
+    def handler(req):
+        return httpx.Response(
+            422,
+            json={
+                "name": "validation_error",
+                "message": "The from domain is not verified.",
+            },
+        )
+
+    client = ResendClient(api_key="k", from_addr="bot@unverified.example", transport=_mock(handler))
+    with pytest.raises(EmailTransportError):
+        client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
+
+
+def test_resend_recipient_validation_error_is_bounce():
+    """A validation_error whose message is about the recipient address IS a
+    per-recipient bounce."""
+
+    def handler(req):
+        return httpx.Response(
+            422,
+            json={"name": "validation_error", "message": "Invalid `to` email address"},
+        )
+
+    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    r = client.send(to="bad", subject="s", html="<p></p>", text="")
+    assert not r.ok
+    assert r.bounce_reason
+
+
 def test_resend_authorization_header_set():
     captured = {}
 

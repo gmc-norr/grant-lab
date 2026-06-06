@@ -29,6 +29,13 @@ def _escape_like(term: str) -> str:
 
 DIGEST_BORDERLINE_LOWER = 45
 DIGEST_BUCKET_SIZE = 5
+# must_include is the user's escape hatch, so it gets a larger cap than the
+# score buckets — but it MUST be bounded. A broad term ("cancer", "research")
+# ILIKE-matches title/summary/full_text/keywords across the whole non-excluded
+# Call table; uncapped, the first digest after a backfill could put thousands
+# of calls into one email and one DigestRun.included_call_ids. Soonest-deadline
+# calls are kept first; the rest are summarized as "+N more" by the renderer.
+DIGEST_MUST_INCLUDE_CAP = 25
 
 
 @dataclass
@@ -169,6 +176,12 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                         ]
                     ),
                 )
+                # Bound the escape hatch: soonest-deadline calls first (NULL
+                # deadlines last), capped. Without this a broad term scans and
+                # returns the entire non-excluded Call table. Over-fetch by one
+                # bucket-worth so the renderer can show an accurate "+N more".
+                .order_by(Call.deadline.asc().nullslast())
+                .limit(DIGEST_MUST_INCLUDE_CAP)
             )
             for c, rk in session.execute(must_q).all():
                 per_call[c.id].append((profile, "must_include", rk))
@@ -258,7 +271,12 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         for bucket_name in ("top", "borderline"):
             buckets[bucket_name].sort(key=lambda e: e.score or 0, reverse=True)
             buckets[bucket_name] = buckets[bucket_name][:DIGEST_BUCKET_SIZE]
-        # must_include kept fully (no cap) since they're the user's escape hatch
+        # must_include is the user's escape hatch so it gets a larger cap than
+        # the score buckets, but it is still bounded (see DIGEST_MUST_INCLUDE_CAP)
+        # so a broad term can't flood the email. The per-profile dedup above may
+        # leave fewer than the query LIMIT; cap again here defensively.
+        buckets["must_include"].sort(key=lambda e: (e.deadline is None, e.deadline))
+        buckets["must_include"] = buckets["must_include"][:DIGEST_MUST_INCLUDE_CAP]
         ordered = buckets["must_include"] + buckets["top"] + buckets["borderline"]
         if not ordered:
             continue

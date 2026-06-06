@@ -37,6 +37,7 @@ def _build_embed_client() -> OllamaEmbedClient:
     return OllamaEmbedClient(
         base_url=settings.ollama_url,
         model=settings.embedding_model,
+        expected_dim=settings.embedding_dim,
     )
 
 

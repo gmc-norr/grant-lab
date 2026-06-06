@@ -222,12 +222,17 @@ def test_strip_markdown_fence_leaves_raw_json_alone():
     assert _strip_markdown_fence(text) == text
 
 
-def test_strip_markdown_fence_no_partial_strip():
-    """If the response has prose before/after the fence (e.g.
-    'Here's the analysis: ```json...```'), don't strip — that's a
-    different failure mode the prompt should fix, not silent recovery."""
+def test_strip_markdown_fence_extracts_from_prose_preamble():
+    """A fenced block inside a prose preamble (e.g.
+    'Here's the analysis: ```json...```') IS recovered — a single stray
+    preamble token must not dead-letter the pair through five paid retries."""
     text = 'Here\'s the answer: ```json\n{"a": 1}\n```'
-    # The fence isn't at the start, so leave the whole string alone
+    assert _strip_markdown_fence(text) == '{"a": 1}'
+
+
+def test_strip_markdown_fence_leaves_raw_json_untouched():
+    """A response that is already raw JSON (no fence) is returned verbatim."""
+    text = '{"a": 1, "b": [2, 3]}'
     assert _strip_markdown_fence(text) == text
 
 

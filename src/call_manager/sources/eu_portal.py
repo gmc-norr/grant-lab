@@ -12,6 +12,7 @@ from call_manager.sources.types import (
     NeedsBody,
     NormalizedCall,
     is_safe_url,
+    request_with_retry,
 )
 
 _logger = logging.getLogger(__name__)
@@ -148,7 +149,9 @@ class EUPortalAdapter:
                     # The v3.0 search endpoint expects a query body; `text="*"`
                     # matches all notices (server-side date/status filtering is
                     # applied via the params above).
-                    resp = client.post(_SEARCH_PATH, params=page_params, json={"text": "*"})
+                    resp = request_with_retry(
+                        client, "POST", _SEARCH_PATH, params=page_params, json={"text": "*"}
+                    )
                     resp.raise_for_status()
                     payload = resp.json()
 

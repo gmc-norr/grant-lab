@@ -45,7 +45,9 @@ _ALLOWED_MIMES = frozenset(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/rtf",
         "text/csv",
-        "application/vnd.ms-excel",
+        # Legacy .xls (application/vnd.ms-excel) is intentionally NOT accepted:
+        # openpyxl can't read the binary BIFF format, so it would always fail
+        # extraction. Users should upload .xlsx (OOXML).
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/x-ipynb+json",
     }

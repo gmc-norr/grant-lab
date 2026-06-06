@@ -72,10 +72,11 @@ def extract_text(*, mime: str, data: bytes) -> SectionList:
         return _extract_rtf(data)
     if mime == "text/csv":
         return _extract_csv(data)
-    if mime in (
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ):
+    # Only the OOXML (.xlsx) MIME is handled — openpyxl cannot read the legacy
+    # binary BIFF (.xls / application/vnd.ms-excel) format, so that MIME is not
+    # accepted at upload (see web/references.py) and would only ever reach here
+    # via a mis-sniff; treat it as unsupported rather than fail deep in openpyxl.
+    if mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         return _extract_xlsx(data)
     if mime == "application/x-ipynb+json":
         return _extract_ipynb(data)

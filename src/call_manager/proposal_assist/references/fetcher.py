@@ -135,7 +135,14 @@ class _PinnedNetworkBackend:
         self._pin_map = pin_map
 
     def connect_tcp(self, host: str, port: int, *args, **kwargs):
-        pinned = self._pin_map.get(host, host)
+        pinned = self._pin_map.get(host)
+        if pinned is None:
+            # Defense in depth: a connect for a host we didn't pre-pin must NOT
+            # fall through to connecting the raw (re-resolvable) hostname — that
+            # would reopen the DNS-rebinding window the pin map exists to close.
+            # Validate-and-pin it on the fly so every connect targets a
+            # confirmed-public literal IP (raises SSRFError on a private one).
+            pinned = _resolve_and_validate(host, port)
         return self._inner.connect_tcp(pinned, port, *args, **kwargs)
 
     def __getattr__(self, name):
@@ -180,10 +187,28 @@ def fetch_bytes(
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     user_agent: str = "call-manager-references/1.0",
 ) -> bytes:
+    """Fetch the bytes at `url` (see _fetch_url_bytes); returns only the body.
+
+    Kept as the stable entry point for callers that don't need the
+    server-declared Content-Type (arXiv/PubMed/DOI shape their own MIME).
+    """
+    body, _content_type = _fetch_url_bytes(
+        url, max_bytes=max_bytes, timeout_s=timeout_s, user_agent=user_agent
+    )
+    return body
+
+
+def _fetch_url_bytes(
+    url: str,
+    *,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    user_agent: str = "call-manager-references/1.0",
+) -> tuple[bytes, str]:
     """Fetch the bytes at `url`, following up to _MAX_REDIRECTS hops,
     enforcing SSRF defenses at every hop, capping at max_bytes.
 
-    Returns the raw bytes on success. Raises:
+    Returns (raw bytes, response Content-Type) on success. Raises:
     - SSRFError on any safety violation (scheme, private IP, redirect
       to private IP).
     - FetchError on HTTP error (4xx/5xx), oversize, timeout, DNS
@@ -251,7 +276,8 @@ def fetch_bytes(
                             f"response from {current_url!r} exceeds max_bytes={max_bytes}"
                         )
                     chunks.append(chunk)
-                return b"".join(chunks)
+                content_type = response.headers.get("content-type", "")
+                return b"".join(chunks), content_type
         except httpx.RequestError as e:
             raise FetchError(f"request failed for {current_url!r}: {e}") from e
 
@@ -265,7 +291,7 @@ _FILENAME_TO_MIME = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".rtf": "application/rtf",
     ".csv": "text/csv",
-    ".xls": "application/vnd.ms-excel",
+    # Legacy .xls (BIFF) is unsupported downstream (openpyxl reads OOXML only).
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".ipynb": "application/x-ipynb+json",
 }
@@ -276,6 +302,31 @@ def _infer_mime_from_filename(filename: str) -> str:
         if filename.lower().endswith(suffix):
             return mime
     return "application/pdf"  # most common fallback for academic content
+
+
+_ALLOWED_SNIFF_MIMES = frozenset(_FILENAME_TO_MIME.values())
+
+
+def _sniff_mime(body: bytes, content_type: str, filename: str) -> str:
+    """Determine a reference's MIME by trusting the BYTES and the server's
+    declared Content-Type over the URL string.
+
+    Priority:
+      1. Unambiguous magic numbers (most trustworthy — the URL suffix is
+         attacker-controlled and the old code blindly defaulted unknown
+         content to application/pdf).
+      2. The response Content-Type, if it is a type we can actually extract.
+      3. The URL filename suffix (legacy fallback).
+    """
+    head = body[:8]
+    if head[:5] == b"%PDF-":
+        return "application/pdf"
+    if head[:5] == b"{\\rtf":
+        return "application/rtf"
+    base_ct = content_type.split(";")[0].strip().lower()
+    if base_ct in _ALLOWED_SNIFF_MIMES:
+        return base_ct
+    return _infer_mime_from_filename(filename)
 
 
 def fetch_crossref_doi(doi: str) -> tuple[bytes, str, str, dict]:
@@ -375,13 +426,14 @@ def fetch_arxiv(arxiv_id: str) -> tuple[bytes, str, str, dict]:
 
 
 def fetch_generic_url(url: str) -> tuple[bytes, str, str, dict]:
-    """Generic URL fetch via SSRF-safe fetch_bytes. The MIME is inferred
-    from the URL path's filename suffix (fetch_bytes doesn't surface
-    response headers); filename from the URL path."""
-    body = fetch_bytes(url)
+    """Generic URL fetch via SSRF-safe _fetch_url_bytes. The MIME is sniffed
+    from the response bytes + server Content-Type (NOT blindly from the URL
+    suffix), so a crafted URL can't dictate how the downstream parser treats
+    the content. Filename is derived from the URL path."""
+    body, content_type = _fetch_url_bytes(url)
     parsed = urlparse(url)
     filename = parsed.path.split("/")[-1] or "fetched-reference"
-    mime = _infer_mime_from_filename(filename)
+    mime = _sniff_mime(body, content_type, filename)
     return (
         body,
         filename,

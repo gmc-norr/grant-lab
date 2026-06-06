@@ -110,6 +110,7 @@ async def search_references_impl(
         client = OllamaEmbedClient(
             base_url=ctx.settings.ollama_url,
             model=ctx.settings.embedding_model,
+            expected_dim=ctx.settings.embedding_dim,
         )
         embedder = OllamaEmbedderAdapter(client)
 
@@ -498,6 +499,7 @@ async def fetch_reference_impl(
         embed_client = OllamaEmbedClient(
             base_url=ctx.settings.ollama_url,
             model=ctx.settings.embedding_model,
+            expected_dim=ctx.settings.embedding_dim,
         )
         embedder = OllamaEmbedderAdapter(embed_client)
 

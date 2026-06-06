@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,6 +11,59 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 import httpx
+
+_logger = logging.getLogger(__name__)
+
+# Transient HTTP statuses worth a retry (server-side or gateway hiccups).
+_RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+
+
+def request_with_retry(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    attempts: int = 3,
+    backoff_base: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
+    **kwargs,
+) -> httpx.Response:
+    """Issue an HTTP request, retrying transient failures with exponential
+    backoff. Retries on httpx.TransportError (network/timeout) and on 5xx
+    gateway statuses; returns the response otherwise (incl. 4xx, which the
+    caller's raise_for_status handles). The final attempt's error/response is
+    surfaced unchanged so existing error handling still applies.
+
+    Without this, a single transient 5xx on the source's list/page fetch
+    fails the entire ingestion run for one tick.
+    """
+    last_exc: httpx.TransportError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = client.request(method, url, **kwargs)
+        except httpx.TransportError as e:
+            last_exc = e
+            if attempt == attempts:
+                raise
+        else:
+            if resp.status_code in _RETRYABLE_STATUS and attempt < attempts:
+                _logger.warning(
+                    "sources.request_retry",
+                    extra={
+                        "event": "request_retry",
+                        "url": url,
+                        "status": resp.status_code,
+                        "attempt": attempt,
+                    },
+                )
+            else:
+                return resp
+        # Exponential backoff before the next attempt (0.5s, 1s, 2s, ...).
+        sleep(backoff_base * (2 ** (attempt - 1)))
+    # Unreachable: the loop either returns or re-raises on the last attempt.
+    assert last_exc is not None
+    raise last_exc
+
 
 # Predicate the orchestrator passes to `fetch_new_calls` so an adapter can skip
 # expensive per-call body scraping for calls already ingested with a non-null

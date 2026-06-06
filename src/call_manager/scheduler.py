@@ -431,6 +431,7 @@ def build_scheduler(
             controller=workspace_controller,
             workspaces_dir=Path(settings.workspaces_dir),
             drafting_enabled=settings.drafting_enabled,
+            turn_max_seconds=settings.turn_max_seconds,
         )
         if app_loop is None:
             try:
@@ -440,7 +441,16 @@ def build_scheduler(
             return
         fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
         try:
-            fut.result(timeout=300)
+            # Backstop only: each turn is now bounded in-loop by
+            # settings.turn_max_seconds (drain wraps process_turn_once in
+            # asyncio.wait_for), so this timeout just caps how long the
+            # scheduler thread watches one tick. Give a single slow-but-legal
+            # turn room to finish inside the watched window. If a tick with
+            # many workspaces still exceeds it, abandoning the watch is now
+            # SAFE: the coroutine keeps draining (each turn still bounded) and
+            # finalize is status-conditional, so no terminal state is
+            # resurrected and no duplicate audit event is emitted.
+            fut.result(timeout=settings.turn_max_seconds + 60)
         except Exception:
             _logger.exception("turn_drain tick failed")
 

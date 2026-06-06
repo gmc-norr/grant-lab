@@ -29,14 +29,36 @@ class EmailClient(Protocol):
 # Other 4xx (auth, rate-limit, server-side validation) → transport error
 # (don't count, alert). Rate-limit is sender-scoped on Resend; treating it
 # as a per-recipient bounce would auto-disable users for our quota issue.
-# NOTE: "missing_field" is intentionally excluded. It indicates a sender-side
-# payload regression (our code forgot a required field — e.g. "from"). Counting
-# it as a bounce would auto-disable every recipient we try to email for our own
-# config/code bug, not their address. Raise EmailTransportError instead.
+# Resend "name" values that are UNCONDITIONALLY per-recipient bounces.
+# "invalid_email" is reliably address-level.
+# NOTE: "missing_field" is excluded (sender-side payload regression).
+# "validation_error" is NOT in this set because Resend reuses it for BOTH
+# sender-side faults (unverified/malformed "from" domain, bad field shapes)
+# AND recipient-address faults. Counting every validation_error as a bounce
+# would auto-disable every recipient after 3 weekly cycles for OUR config bug.
+# It is disambiguated by message inspection in send() (see _is_recipient_validation).
 _RESEND_BOUNCE_NAMES = {
-    "validation_error",
     "invalid_email",
 }
+
+# Substrings that mark a validation_error as a SENDER-side fault (our config),
+# which must NOT count as a per-recipient bounce.
+_RESEND_SENDER_SIDE_HINTS = ("from", "domain", "api_key", "api key", "verif")
+# Substrings that mark a validation_error as a RECIPIENT-address fault.
+# (`to` is backtick-quoted as Resend renders the field name; bare "to" would
+# match far too many unrelated words.)
+_RESEND_RECIPIENT_HINTS = ("`to`", "recipient", "email", "address")
+
+
+def _is_recipient_validation(message: str) -> bool:
+    """True when a Resend validation_error message indicates a bad RECIPIENT
+    address (→ bounce) rather than a sender-side payload/config fault
+    (→ transport error). Sender-side hints win ties: better to alert on our
+    own config than to silently disable a real user."""
+    msg = message.lower()
+    if any(h in msg for h in _RESEND_SENDER_SIDE_HINTS):
+        return False
+    return any(h in msg for h in _RESEND_RECIPIENT_HINTS)
 
 
 class ResendClient:
@@ -90,12 +112,16 @@ class ResendClient:
                 err = {}
             name = str(err.get("name") or "")
             message = str(err.get("message") or "")
-            if name in _RESEND_BOUNCE_NAMES:
+            is_bounce = name in _RESEND_BOUNCE_NAMES or (
+                name == "validation_error" and _is_recipient_validation(message)
+            )
+            if is_bounce:
                 return SendResult(
                     ok=False,
                     bounce_reason=f"{name}: {message}" if message else name,
                 )
-            # 4xx that ISN'T a per-address issue (e.g. auth_error, rate_limit_exceeded) → transport
+            # 4xx that ISN'T a per-address issue (auth_error, rate_limit_exceeded,
+            # or a sender-side validation_error) → transport error (alert, don't count)
             raise EmailTransportError(f"resend {resp.status_code} {name}: {message}")
 
         # 5xx

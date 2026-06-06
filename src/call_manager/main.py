@@ -289,7 +289,9 @@ def create_app() -> FastAPI:
     # per-call pattern); for localhost Ollama the TCP cost is negligible.
     # Worth revisiting if we ever serve embeddings from a remote endpoint.
     app.state.embed_client = OllamaEmbedClient(
-        base_url=settings.ollama_url, model=settings.embedding_model
+        base_url=settings.ollama_url,
+        model=settings.embedding_model,
+        expected_dim=settings.embedding_dim,
     )
 
     # Vendored static assets (htmx.min.js lives here). Serving locally

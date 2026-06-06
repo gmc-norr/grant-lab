@@ -14,6 +14,7 @@ from call_manager.ranking.queue import (
     mark_done,
     mark_failed,
     requeue_stuck_running,
+    touch_running_job,
 )
 from call_manager.ranking.rank_pair import RankResult, rank_pair
 
@@ -80,6 +81,10 @@ def drain_queue(
         processed += 1
         try:
             with session_factory() as session:
+                # Heartbeat the running job so a long serial batch keeps this
+                # row "fresh" and the stuck-reaper won't requeue an in-flight
+                # job (which would double-process it once ticks could overlap).
+                touch_running_job(session, job_id)
                 call = session.get(Call, call_id)
                 profile = session.get(Profile, profile_id)
                 if call is None or profile is None:

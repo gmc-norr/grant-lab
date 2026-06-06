@@ -263,7 +263,20 @@ def _safe_cosine(profile, call) -> float | None:
 
     p_model = getattr(profile, "embedding_model", None)
     c_model = getattr(call, "embedding_model", None)
-    if p_model is not None and c_model is not None and p_model != c_model:
+    p_vec = getattr(profile, "embedding", None)
+    c_vec = getattr(call, "embedding", None)
+    # A meaningful cosine requires BOTH vectors to come from the SAME model.
+    # Treat as UNKNOWN (None) when:
+    #   - the models are known and differ, OR
+    #   - exactly one model is known while the other is NULL but both vectors
+    #     exist. The asymmetric case (e.g. the profile was re-embedded under a
+    #     named model but a legacy call row predates the embedding_model column)
+    #     is exactly the "meaningless cosine" this guard exists to prevent, so
+    #     we must NOT fall through to a naive comparison.
+    both_vectors_present = p_vec is not None and c_vec is not None
+    models_known_and_differ = p_model is not None and c_model is not None and p_model != c_model
+    one_model_unknown = (p_model is None) != (c_model is None)
+    if models_known_and_differ or (one_model_unknown and both_vectors_present):
         _logger.warning(
             "ranking.embedding_model_mismatch",
             extra={
@@ -275,7 +288,4 @@ def _safe_cosine(profile, call) -> float | None:
             },
         )
         return None
-    return cosine(
-        getattr(profile, "embedding", None),
-        getattr(call, "embedding", None),
-    )
+    return cosine(p_vec, c_vec)

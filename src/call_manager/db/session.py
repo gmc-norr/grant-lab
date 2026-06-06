@@ -19,6 +19,15 @@ def make_engine(database_url: str) -> Engine:
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
+    # expire_on_commit=False keeps ORM attributes usable after commit (the
+    # request-scoped dependency reads response data post-commit). This factory
+    # ALSO backs the APScheduler workers, where stale reads would be a hazard
+    # IF a worker held one session across multiple commits and reused
+    # previously-loaded objects. INVARIANT: every worker opens a FRESH session
+    # per unit of work and re-`select()`s the rows it acts on each tick — the
+    # ranking worker re-opens a session per job, the digest loop per user, the
+    # reaper/drain per sweep. Preserve that pattern; do not thread a single
+    # long-lived session through a polling loop under this factory.
     return sessionmaker(engine, expire_on_commit=False, class_=Session)
 
 

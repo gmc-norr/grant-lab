@@ -13,6 +13,7 @@ from call_manager.sources.types import (
     NeedsBody,
     NormalizedCall,
     is_safe_url,
+    request_with_retry,
 )
 
 _logger = logging.getLogger(__name__)
@@ -140,7 +141,9 @@ class VinnovaAdapter:
                 transport=self._transport,
                 timeout=self._timeout,
             ) as client:
-                resp = client.get(programmes_path, headers={"Accept": _ACCEPT_V2})
+                resp = request_with_retry(
+                    client, "GET", programmes_path, headers={"Accept": _ACCEPT_V2}
+                )
                 resp.raise_for_status()
                 programmes = resp.json()
 

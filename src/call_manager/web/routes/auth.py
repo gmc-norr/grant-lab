@@ -33,17 +33,20 @@ def _email_fingerprint(email: str) -> str:
 def _client_ip(request: Request) -> str:
     """Resolve the caller's IP.
 
-    When `settings.trusted_proxy` is True, we read the **rightmost** entry
-    in X-Forwarded-For. Nginx's `$proxy_add_x_forwarded_for` (and most
-    reverse proxies on default settings) *appends* the connecting-peer IP
-    to any XFF the client sent, so the rightmost is the only IP the
-    trusted proxy vouches for — the leftmost is whatever the client
-    wanted to claim, which makes it a free rate-limit bypass if trusted.
+    When `settings.trusted_proxy` is True, we read the client IP from
+    X-Forwarded-For. Each trusted reverse-proxy hop *appends* the
+    connecting-peer IP (Nginx's `$proxy_add_x_forwarded_for` and most
+    proxies on default settings), so with `trusted_proxy_hops = N` the
+    real client is the Nth entry from the right. Anything to the LEFT of
+    that is client-supplied and untrusted — taking it would be a free
+    rate-limit bypass.
 
-    Deployments with multiple trusted hops need to strip proxy IPs off
-    the right before the client IP emerges; that's out of scope for v1
-    (single hospital-edge proxy). If we ever terminate TLS behind a
-    second trusted layer, generalize this to `split(",")[-hops]`.
+    `trusted_proxy_hops` MUST match the actual deployment topology. If it
+    is too small, an attacker's spoofed XFF entry leaks through; if it is
+    too large (more hops claimed than exist), every external client
+    collapses into one bucket. We therefore reject (400) an XFF that has
+    fewer entries than the configured hop count rather than silently
+    falling back to a spoofable or shared value.
 
     Otherwise we use `request.client` directly and fail loudly (400) if
     it's absent — silently bucketing unknown clients into a shared
@@ -53,12 +56,17 @@ def _client_ip(request: Request) -> str:
     if getattr(settings, "trusted_proxy", False):
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            # Rightmost non-empty entry. `split(",")` followed by reversed
-            # walk handles stray whitespace and trailing commas defensively.
-            for entry in reversed(xff.split(",")):
-                peer = entry.strip()
-                if peer:
-                    return peer
+            hops = getattr(settings, "trusted_proxy_hops", 1)
+            # Keep only non-empty entries (tolerate stray whitespace / trailing
+            # commas), preserving left-to-right order.
+            entries = [e.strip() for e in xff.split(",") if e.strip()]
+            if len(entries) >= hops:
+                # Nth-from-the-right: index -hops.
+                return entries[-hops]
+            # Fewer entries than trusted hops — the header doesn't match the
+            # configured topology. Don't trust a value we can't place; fail
+            # loudly rather than mis-bucket.
+            raise HTTPException(status_code=400, detail="malformed X-Forwarded-For")
     if request.client is None:
         raise HTTPException(status_code=400, detail="cannot determine client")
     return request.client.host

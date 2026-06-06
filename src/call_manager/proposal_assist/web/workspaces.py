@@ -71,6 +71,30 @@ from call_manager.proposal_assist.web.files import (
 )
 from call_manager.workspaces import create_workspace as _create_workspace
 
+# Valid Workspace.status values (mirrors the ck_workspaces_status CHECK
+# constraint in db/models.py). Used to allowlist the ?status filter.
+_WORKSPACE_STATUSES = frozenset({"drafting", "submitted", "awarded", "rejected", "abandoned"})
+# Upper bound on the workspaces index list (most-recently-updated first).
+_WORKSPACE_LIST_LIMIT = 200
+
+
+def _parse_deadline_form(deadline: str | None):
+    """Parse an optional ISO-8601 deadline from a form field.
+
+    Returns a datetime or None. Raises HTTPException(400) on a malformed
+    string instead of letting datetime.fromisoformat's ValueError bubble up
+    as an unhandled 500 (the global handler only catches HTTPException).
+    """
+    from datetime import datetime
+
+    if not deadline:
+        return None
+    try:
+        return datetime.fromisoformat(deadline)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid deadline (expected ISO-8601)") from e
+
+
 # Rev2 / Codex H2: sanitize agent-controlled markdown before render.
 _ALLOWED_TAGS = [
     "h1",
@@ -400,11 +424,7 @@ def post_new_workspace(
     deadline: str | None = Form(None),
 ) -> RedirectResponse:
     """Create + enqueue Phase 0 + redirect to the new workspace's main view."""
-    from datetime import datetime
-
-    parsed_deadline = None
-    if deadline:
-        parsed_deadline = datetime.fromisoformat(deadline)
+    parsed_deadline = _parse_deadline_form(deadline)
 
     ws = _create_workspace(
         session=session,
@@ -428,6 +448,11 @@ def list_workspaces(
 ) -> HTMLResponse:
     """List workspaces visible to the user: owned OR viewer-of, not
     soft-deleted. Optional ?status=drafting|submitted|... filter."""
+    # Allowlist the filter: an arbitrary ?status is harmless to the DB
+    # (parameterized) but matches nothing useful, so reject unknown values with
+    # a 400 rather than silently returning an empty list and hiding the typo.
+    if status is not None and status not in _WORKSPACE_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid status filter")
     viewer_ids = session.scalars(
         select(WorkspaceViewer.workspace_id).where(
             WorkspaceViewer.user_id == user.id,
@@ -446,6 +471,10 @@ def list_workspaces(
     )
     if status:
         q = q.where(Workspace.status == status)
+    # Bound the result set. A user with many workspaces (owned + viewer-of)
+    # would otherwise get an unbounded SELECT; the index view shows the most
+    # recently-updated _WORKSPACE_LIST_LIMIT.
+    q = q.limit(_WORKSPACE_LIST_LIMIT)
     workspaces = list(session.scalars(q))
     templates = request.app.state.templates
     return templates.TemplateResponse(
@@ -1101,8 +1130,6 @@ def post_settings(
     status: str = Form(...),
     deadline: str | None = Form(None),
 ):
-    from datetime import datetime
-
     ws = _require_owner(
         workspace_id=workspace_id,
         user=user,
@@ -1110,10 +1137,7 @@ def post_settings(
     )
     ws.title = title
     ws.status = status
-    if deadline:
-        ws.deadline = datetime.fromisoformat(deadline)
-    else:
-        ws.deadline = None
+    ws.deadline = _parse_deadline_form(deadline)
     session.commit()
     return RedirectResponse(url=f"/workspaces/{ws.id}", status_code=303)
 

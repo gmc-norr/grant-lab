@@ -110,11 +110,45 @@ def run_digest(
                     )
                     continue
 
+                # Claim the (user, Stockholm-week) slot BEFORE sending. The
+                # email is an irreversible side effect, so the dedup guard must
+                # gate it, not merely audit it after the fact. We insert+flush
+                # the DigestRun first; if uq_digest_runs_user_week trips, another
+                # run already owns this week and we skip the send entirely —
+                # which is the only ordering that actually prevents a duplicate
+                # *email* (the previous order prevented only a duplicate row,
+                # after the email had already gone out). The DB's week_start is
+                # truncated in Europe/Stockholm (migration 0033), matching the
+                # week_start() skip check above.
+                digest_run = DigestRun(
+                    user_id=uid,
+                    included_call_ids=[e.call_id for sec in payload.sections for e in sec.entries],
+                    sent_at=now,
+                )
+                session.add(digest_run)
+                try:
+                    session.flush()
+                except IntegrityError:
+                    session.rollback()
+                    _logger.warning(
+                        "digest.duplicate_week_rejected_by_db",
+                        extra={
+                            "event": "digest_duplicate_week_rejected",
+                            "user_id": uid,
+                            "week_start": week_start_dt.isoformat(),
+                        },
+                    )
+                    continue
+
                 try:
                     result = email_client.send(
                         to=payload.user_email, subject=subject, html=html, text=text
                     )
                 except EmailTransportError as e:
+                    # The send never completed — release the claim so a later
+                    # run can retry this week. (Test contract: no DigestRun row
+                    # on transport error.)
+                    session.rollback()
                     summary.transport_errors += 1
                     _logger.warning(
                         "digest.transport_error",
@@ -124,6 +158,11 @@ def run_digest(
 
                 user = session.get(User, uid)
                 if not result.ok:
+                    # Bounce: delivery was attempted but rejected. Drop the
+                    # week-claim (test contract: no DigestRun row on bounce) but
+                    # still record the bounce against the user in the same
+                    # transaction.
+                    session.delete(digest_run)
                     summary.bounces += 1
                     user.digest_bounce_count = (user.digest_bounce_count or 0) + 1
                     _logger.warning(
@@ -141,39 +180,9 @@ def run_digest(
                     session.commit()
                     continue
 
-                # Success
+                # Success: keep the claim, reset the bounce counter.
                 user.digest_bounce_count = 0
-                session.add(
-                    DigestRun(
-                        user_id=uid,
-                        included_call_ids=[
-                            e.call_id for sec in payload.sections for e in sec.entries
-                        ],
-                        sent_at=now,
-                    )
-                )
-                try:
-                    session.commit()
-                except IntegrityError:
-                    # uq_digest_runs_user_week tripped — another run
-                    # already recorded a DigestRun for this (user,
-                    # Stockholm week). The DB's week_start is truncated in
-                    # Europe/Stockholm (migration 0033), matching the
-                    # week_start() skip check above, so the two layers
-                    # agree. Under the single-instance invariant this
-                    # shouldn't happen, but the DB-level guard turns a
-                    # would-be double-send into a loud-rollback instead
-                    # of a silent duplicate email.
-                    session.rollback()
-                    _logger.warning(
-                        "digest.duplicate_week_rejected_by_db",
-                        extra={
-                            "event": "digest_duplicate_week_rejected",
-                            "user_id": uid,
-                            "week_start": week_start_dt.isoformat(),
-                        },
-                    )
-                    continue
+                session.commit()
                 summary.emails_sent += 1
             except Exception as e:  # noqa: BLE001
                 _logger.exception(

@@ -48,6 +48,40 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
         )
         return False
 
+    # Bounded-column guards. The DB columns external_id/currency/programme are
+    # VARCHAR(200/8/200); adapters pass upstream values through str() unchecked,
+    # so a single oversized identifier would raise DataError and roll back the
+    # WHOLE batch transaction (and re-fail it every tick — a poison record).
+    # external_id is the dedup IDENTITY (NOT NULL): we cannot truncate it
+    # without risking a collision/identity change, so an over-length one means
+    # the record is rejected outright (like an unsafe URL). currency/programme
+    # are nullable, non-identity metadata: a junk-length currency is coerced to
+    # NULL and an over-length programme is truncated, so the call still ingests.
+    if len(call.external_id) > 200:
+        _logger.warning(
+            "ingestion.upsert.skip_oversize_external_id",
+            extra={
+                "event": "skip_oversize_external_id",
+                "source_id": source_id,
+                "external_id_len": len(call.external_id),
+            },
+        )
+        return False
+    currency = call.currency
+    if currency is not None and len(currency) > 8:
+        _logger.warning(
+            "ingestion.upsert.dropped_oversize_currency",
+            extra={"event": "dropped_oversize_currency", "external_id": call.external_id},
+        )
+        currency = None
+    programme = call.programme
+    if programme is not None and len(programme) > 200:
+        _logger.warning(
+            "ingestion.upsert.truncated_programme",
+            extra={"event": "truncated_programme", "external_id": call.external_id},
+        )
+        programme = programme[:200]
+
     payload = {
         "source_id": source_id,
         "external_id": call.external_id,
@@ -58,8 +92,8 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
         "deadline": call.deadline,
         "budget_min": call.budget_min,
         "budget_max": call.budget_max,
-        "currency": call.currency,
-        "programme": call.programme,
+        "currency": currency,
+        "programme": programme,
         "keywords": call.keywords,
         "published_at": call.published_at,
         "raw": call.raw,

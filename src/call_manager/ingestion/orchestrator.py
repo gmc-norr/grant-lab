@@ -156,18 +156,27 @@ def run_ingestion(
         with session_factory() as session:
             for call in fetch:
                 was_new = upsert_call(session, source_id=source_id, call=call)
-                if was_new:
-                    inserted += 1
-                else:
-                    updated += 1
                 # Look up the row's id for the embed/enqueue steps.
                 # autoflush=True means the prior INSERT/UPDATE is visible here.
+                # upsert_call returns False without writing a row when it SKIPS
+                # the record (e.g. the is_safe_url chokepoint rejected the href).
+                # For a brand-new skipped call there is no row, so scalar_one()
+                # would raise NoResultFound and abort the ENTIRE batch
+                # transaction. Use scalar_one_or_none() and skip the absent row.
                 cid = session.execute(
                     select(Call.id).where(
                         Call.source_id == source_id,
                         Call.external_id == call.external_id,
                     )
-                ).scalar_one()
+                ).scalar_one_or_none()
+                if cid is None:
+                    # Skipped (unsafe URL); no row persisted. Don't count it as
+                    # inserted/updated and don't enqueue downstream work.
+                    continue
+                if was_new:
+                    inserted += 1
+                else:
+                    updated += 1
                 touched_call_ids.append(cid)
             # Advance timestamp inside the same transaction as the upserts so
             # a failure rolls back atomically.

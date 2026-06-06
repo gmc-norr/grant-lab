@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     # `proxy_set_header X-Forwarded-For`). When False, X-Forwarded-For
     # is ignored so an attacker can't spoof their rate-limit bucket.
     trusted_proxy: bool = Field(default=False, alias="TRUSTED_PROXY")
+    # Number of trusted reverse-proxy hops between the client and the app. Each
+    # trusted hop appends one entry to X-Forwarded-For, so the real client IP is
+    # the Nth-from-the-right entry. With the default 1 (single hospital-edge
+    # proxy) the rightmost entry is used. Set to 2+ when TLS terminates behind a
+    # second trusted layer; otherwise every external client would collapse into
+    # one rate-limit bucket (the inner proxy's fixed IP). Only consulted when
+    # trusted_proxy is True. Must be >= 1.
+    trusted_proxy_hops: int = Field(default=1, ge=1, alias="TRUSTED_PROXY_HOPS")
     eu_portal_base_url: str = Field(default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL")
     vinnova_base_url: str = Field(default="https://data.vinnova.se", alias="VINNOVA_BASE_URL")
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
@@ -32,6 +40,12 @@ class Settings(BaseSettings):
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q4_K_M", alias="GEMMA_MODEL")
     embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
+    # Expected embedding dimension. MUST match the model in EMBEDDING_MODEL and
+    # the Vector(N) column width in db/models.py. bge-m3 and the dev fallback
+    # mxbai-embed-large are both 1024; a swap to e.g. nomic-embed-text (768)
+    # requires changing this AND a migration. Surfaced as config (not hardcoded
+    # in the client) so the dimension and the model name can't silently drift.
+    embedding_dim: int = Field(default=1024, ge=1, alias="EMBEDDING_DIM")
     # Cosine-similarity threshold for the embedding pre-gate. Pairs
     # below this (computed by the caller, not the gate) are zeroed out
     # before the LLM is invoked. Default 0.30 chosen from BGE-M3's typical
@@ -194,6 +208,18 @@ class Settings(BaseSettings):
             "latency; higher = less polling overhead. B6's SSE bridge "
             "may add its own zero-latency wakeup so this is a floor, "
             "not the only mechanism."
+        ),
+    )
+    turn_max_seconds: int = Field(
+        default=600,
+        alias="TURN_MAX_SECONDS",
+        description=(
+            "Hard wall-clock bound on a single turn's processing inside the "
+            "drain tick. A turn that exceeds this is cancelled in-loop and "
+            "finalized as failed, releasing the workspace's running-row "
+            "cleanly. MUST stay comfortably below the reaper TTL "
+            "(reaper.DEFAULT_REAP_TTL_SECONDS) so a slow-but-live turn is "
+            "bounded by this clean path, not reaped while still streaming."
         ),
     )
     remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")

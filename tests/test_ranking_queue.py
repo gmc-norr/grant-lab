@@ -11,6 +11,7 @@ from call_manager.db.models import (
     Source,
 )
 from call_manager.ranking.queue import (
+    _STUCK_AFTER,
     claim_pending_jobs,
     enqueue_for_pair,
     mark_done,
@@ -18,6 +19,10 @@ from call_manager.ranking.queue import (
     reconcile_missing_rankings,
     requeue_stuck_running,
 )
+
+# Rewind comfortably past the stuck threshold so these tests stay correct if
+# _STUCK_AFTER is retuned.
+_PAST_STUCK = _STUCK_AFTER + timedelta(minutes=1)
 
 
 def _seed_call(s) -> int:
@@ -134,11 +139,11 @@ def test_requeue_stuck_running_recovers_crashed_workers(pg_session_factory, prof
         call_id = _seed_call(s)
         enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         claimed = claim_pending_jobs(s, limit=1)
-        # Simulate "stuck for >5 minutes": rewind updated_at directly.
+        # Simulate "stuck past the threshold": rewind updated_at directly.
         s.execute(
             update(RankingJob)
             .where(RankingJob.id == claimed[0].id)
-            .values(updated_at=datetime.now(UTC) - timedelta(minutes=10))
+            .values(updated_at=datetime.now(UTC) - _PAST_STUCK)
         )
         s.commit()
 
@@ -170,7 +175,7 @@ def test_requeue_stuck_running_dead_letters_persistent_crasher(pg_session_factor
         s.execute(
             update(RankingJob)
             .where(RankingJob.id == claimed[0].id)
-            .values(attempts=4, updated_at=datetime.now(UTC) - timedelta(minutes=10))
+            .values(attempts=4, updated_at=datetime.now(UTC) - _PAST_STUCK)
         )
         s.commit()
 

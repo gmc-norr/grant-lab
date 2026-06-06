@@ -281,6 +281,7 @@ async def process_turn_once(
             tokens_out=tokens_out,
             model=model,
             session_id=session_id,
+            session_id_at_claim=ws_session_id,
         )
     elif sdk_error is not None:
         status_suffix = f"; status={sdk_error.status}" if sdk_error.status is not None else ""
@@ -336,6 +337,7 @@ def _finalize_success(
     tokens_out: int,
     model: str | None,
     session_id: str | None,
+    session_id_at_claim: str | None = None,
 ) -> None:
     with session_factory() as s:
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
@@ -368,14 +370,46 @@ def _finalize_success(
             user_turn.tokens_out = tokens_out or None
             if model is not None:
                 user_turn.model = model
-        job = s.scalar(select(TurnJob).where(TurnJob.id == turn_job_id))
-        if job is not None:
-            job.status = "completed"
-            job.completed_at = datetime.now(UTC)
+        # Transition the job ONLY if it is still 'running'. If the reaper
+        # already marked it 'failed' (this turn outran the reaper TTL), or a
+        # second turn somehow re-used the row, we must NOT resurrect it to
+        # 'completed' — that would overwrite the terminal state and emit a
+        # duplicate cloud_turn_completed event. Conditional UPDATE makes the
+        # finalize a no-op in that case; the token stamping above is harmless
+        # (it only records real usage on the assistant row).
+        claimed = s.execute(
+            update(TurnJob)
+            .where(TurnJob.id == turn_job_id, TurnJob.status == "running")
+            .values(status="completed", completed_at=datetime.now(UTC))
+        )
+        if (claimed.rowcount or 0) == 0:
+            s.rollback()
+            logger.warning(
+                "process_turn_once: turn_job %s finished but was no longer "
+                "'running' (likely reaped); skipping completed-finalize to "
+                "avoid resurrecting terminal state",
+                turn_job_id,
+                extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
+            )
+            return
         if session_id is not None:
-            ws = s.scalar(select(Workspace).where(Workspace.id == workspace_id))
-            if ws is not None:
-                ws.last_sdk_session_id = session_id
+            # Guard the compaction session-reset race: compaction runs as its
+            # own tick and may set last_sdk_session_id=NULL while this turn is
+            # in flight (to force one-shot summary re-injection on the next
+            # turn). If we unconditionally wrote the new session_id back, we'd
+            # resurrect a session that lacks the compaction summary and the
+            # next turn would skip re-injection. Only persist when the column
+            # is still exactly what it was at claim time (IS NOT DISTINCT FROM
+            # handles the NULL==NULL first-turn / post-reset cases); a
+            # concurrent compaction reset makes this a no-op.
+            s.execute(
+                update(Workspace)
+                .where(
+                    Workspace.id == workspace_id,
+                    Workspace.last_sdk_session_id.is_not_distinct_from(session_id_at_claim),
+                )
+                .values(last_sdk_session_id=session_id)
+            )
         s.add(
             WorkspaceEvent(
                 workspace_id=workspace_id,
@@ -413,11 +447,26 @@ def _finalize_failed(
             user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
             if user_turn is not None:
                 user_turn.tokens_in = None
-        job = s.scalar(select(TurnJob).where(TurnJob.id == turn_job_id))
-        if job is not None:
-            job.status = "failed"
-            job.error = error
-            job.completed_at = datetime.now(UTC)
+        # Conditional transition (mirrors _finalize_success): only fail a job
+        # still 'running'. If the reaper already failed it, re-failing would
+        # emit a duplicate cloud_turn_failed event and clobber the reaper's
+        # error string. The missing-user-turn finalize path can run before any
+        # 'running' state is set in pathological cases, so we tolerate a
+        # missing row (rowcount 0) by skipping the audit event.
+        failed = s.execute(
+            update(TurnJob)
+            .where(TurnJob.id == turn_job_id, TurnJob.status == "running")
+            .values(status="failed", error=error, completed_at=datetime.now(UTC))
+        )
+        if (failed.rowcount or 0) == 0:
+            s.commit()  # persist the tokens_in clearing, skip the duplicate event
+            logger.warning(
+                "process_turn_once: turn_job %s failed-finalize is a no-op "
+                "(no 'running' row — already terminal/reaped)",
+                turn_job_id,
+                extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
+            )
+            return
         s.add(
             WorkspaceEvent(
                 workspace_id=workspace_id,
