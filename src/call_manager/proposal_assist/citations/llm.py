@@ -8,13 +8,20 @@ this class directly.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from call_manager.config import Settings
 
+logger = logging.getLogger(__name__)
+
 
 class CitationLLMConfigError(RuntimeError):
     """Misconfigured citation LLM (e.g. provider=anthropic with no API key)."""
+
+
+class CitationLLMOutputError(RuntimeError):
+    """The LLM returned content that wasn't a JSON object."""
 
 
 @dataclass
@@ -45,16 +52,23 @@ class StructuredLLM:
         content = resp["choices"][0]["message"]["content"]
         usage = resp.get("usage") or {}
         # Anthropic reports cache-read / cache-creation tokens SEPARATELY from
-        # prompt_tokens; true input usage is their sum. Ollama returns neither
-        # (the .get(...,0) defaults make this safe for both).
+        # prompt_tokens; true input usage is their sum. Those fields are present
+        # but may be None (not absent) when caching isn't used, so coerce
+        # None -> 0. Ollama omits them entirely (the `or 0` handles both).
         tokens_in = (
-            int(usage.get("prompt_tokens", 0))
-            + int(usage.get("cache_read_input_tokens", 0))
-            + int(usage.get("cache_creation_input_tokens", 0))
+            int(usage.get("prompt_tokens") or 0)
+            + int(usage.get("cache_read_input_tokens") or 0)
+            + int(usage.get("cache_creation_input_tokens") or 0)
         )
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            raise CitationLLMOutputError(f"expected a JSON object, got {type(parsed).__name__}")
         return LLMResult(
-            data=json.loads(content),
-            usage=LLMUsage(tokens_in=tokens_in, tokens_out=int(usage.get("completion_tokens", 0))),
+            data=parsed,
+            usage=LLMUsage(
+                tokens_in=tokens_in,
+                tokens_out=int(usage.get("completion_tokens") or 0),
+            ),
             model=resp.get("model", self.model),
         )
 
@@ -66,6 +80,11 @@ def build_citation_llm(settings: Settings) -> StructuredLLM:
             raise CitationLLMConfigError(
                 "CITATION_LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is unset"
             )
+        logger.warning(
+            "citation LLM provider is 'anthropic' — uploaded reference text will "
+            "be sent to an EXTERNAL API. Set CITATION_LLM_PROVIDER=ollama to keep "
+            "extraction on-prem.",
+        )
         from call_manager.ranking.anthropic_client import AnthropicClient
 
         model = settings.citation_llm_model or settings.remote_rank_model

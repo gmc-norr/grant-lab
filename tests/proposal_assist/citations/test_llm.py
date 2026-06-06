@@ -80,3 +80,36 @@ def test_build_citation_llm_rejects_unknown_provider():
     object.__setattr__(s, "citation_llm_provider", "bogus")
     with pytest.raises(CitationLLMConfigError):
         build_citation_llm(s)
+
+
+def test_complete_json_handles_none_cache_tokens():
+    # Anthropic sends cache fields as None (present, not absent) when caching
+    # is unused; tokens_in must treat them as 0, not crash.
+    client = _FakeClient(
+        '{"ok": true}',
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "cache_read_input_tokens": None,
+            "cache_creation_input_tokens": None,
+        },
+    )
+    result = StructuredLLM(client, "fake-model").complete_json(system="s", user="u")
+    assert result.usage.tokens_in == 10
+    assert result.usage.tokens_out == 4
+
+
+def test_complete_json_raises_on_invalid_json():
+    client = _FakeClient("not json at all")
+    import json
+
+    with pytest.raises(json.JSONDecodeError):
+        StructuredLLM(client, "fake-model").complete_json(system="s", user="u")
+
+
+def test_complete_json_raises_on_non_dict_json():
+    from call_manager.proposal_assist.citations.llm import CitationLLMOutputError
+
+    client = _FakeClient("[1, 2, 3]")
+    with pytest.raises(CitationLLMOutputError):
+        StructuredLLM(client, "fake-model").complete_json(system="s", user="u")

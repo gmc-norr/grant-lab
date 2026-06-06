@@ -149,3 +149,13 @@ def test_create_app_allows_console_sender_in_dev_without_resend_key(monkeypatch,
         assert isinstance(app.state.email_sender, ConsoleEmailSender)
     finally:
         app.state.engine.dispose()
+
+
+def test_citation_llm_provider_defaults_to_local(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    from call_manager.config import Settings
+
+    assert Settings().citation_llm_provider == "ollama"
