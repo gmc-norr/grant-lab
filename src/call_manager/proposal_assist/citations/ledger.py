@@ -21,13 +21,16 @@ def load_ledger(text: str | None) -> dict:
     """Parse citations.json text. Absent/empty → empty ledger. Validates version."""
     if not text or not text.strip():
         return empty_ledger()
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"citations.json is not valid JSON: {exc}") from exc
     if not isinstance(data, dict) or data.get("version") != LEDGER_VERSION:
         raise ValueError(f"unsupported citations.json (expected version {LEDGER_VERSION})")
-    data.setdefault("evidence", [])
-    if not isinstance(data["evidence"], list):
+    evidence = data.get("evidence", [])
+    if not isinstance(evidence, list):
         raise ValueError("citations.json 'evidence' must be a list")
-    return data
+    return {"version": LEDGER_VERSION, "evidence": evidence}
 
 
 def dump_ledger(ledger: dict) -> str:
@@ -67,6 +70,8 @@ def remove_evidence(ledger: dict, ev_id: str) -> tuple[dict, bool]:
 def update_evidence(ledger: dict, ev_id: str, **fields) -> tuple[dict, bool]:
     """Return (new_ledger, updated?). Shallow-merges `fields` into the matching row.
     Does not mutate input rows."""
+    if "id" in fields:
+        raise ValueError("evidence 'id' is immutable")
     updated = False
     out = []
     for e in ledger["evidence"]:

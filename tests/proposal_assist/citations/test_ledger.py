@@ -92,9 +92,19 @@ def test_load_ledger_wrong_version_raises():
         load_ledger(doc)
 
 
-def test_load_ledger_non_dict_raises():
-    with pytest.raises((ValueError, AttributeError)):
+def test_load_ledger_non_dict_array_raises():
+    with pytest.raises(ValueError, match="unsupported citations.json"):
         load_ledger(json.dumps([1, 2, 3]))
+
+
+def test_load_ledger_non_dict_scalar_raises():
+    with pytest.raises(ValueError, match="unsupported citations.json"):
+        load_ledger(json.dumps(42))
+
+
+def test_load_ledger_malformed_json_raises():
+    with pytest.raises(ValueError):
+        load_ledger("{broken json")
 
 
 def test_load_ledger_non_list_evidence_raises():
@@ -321,3 +331,27 @@ def test_citekeys_in_use_ignores_rows_without_citekey():
     ledger = append_evidence(ledger, _make_row("ev-000000000003", "real2023"))
     keys = citekeys_in_use(ledger)
     assert keys == {"real2023"}
+
+
+# ---------------------------------------------------------------------------
+# round-trip with evidence row
+# ---------------------------------------------------------------------------
+
+
+def test_round_trip_with_evidence_row():
+    """Non-empty ledger survives dump → load unchanged."""
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _make_row("ev-aabbccddeeff", "smith2021"))
+    assert load_ledger(dump_ledger(ledger)) == ledger
+
+
+# ---------------------------------------------------------------------------
+# update_evidence — id immutability guard
+# ---------------------------------------------------------------------------
+
+
+def test_update_evidence_id_immutable_raises():
+    row = _make_row("ev-aabbccddeeff")
+    ledger = append_evidence(empty_ledger(), row)
+    with pytest.raises(ValueError, match="immutable"):
+        update_evidence(ledger, "ev-aabbccddeeff", id="ev-other")
