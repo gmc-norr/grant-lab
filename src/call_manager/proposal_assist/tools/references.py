@@ -361,7 +361,9 @@ async def read_reference_section_impl(
         "section_path": section_path,
         "text": "\n\n".join(c.text for c in chunks),
         "chunk_count": len(chunks),
-        "chunk_indexes": [c.chunk_index for c in chunks],
+        # `chunks` is fetched ORDER BY chunk_index; sort() makes the ascending
+        # invariant explicit so a future query refactor can't silently break it.
+        "chunk_indexes": sorted(c.chunk_index for c in chunks),
     }
 
 

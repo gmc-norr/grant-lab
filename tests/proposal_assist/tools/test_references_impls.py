@@ -7,6 +7,7 @@ import uuid
 import pytest
 
 from call_manager.config import Settings
+from call_manager.db.models import Reference as _Reference
 from call_manager.proposal_assist.references.embed import FakeEmbedder
 from call_manager.proposal_assist.references.ingest import ingest_bytes
 from call_manager.proposal_assist.references.storage import ReferenceStorage
@@ -601,8 +602,6 @@ async def test_search_references_includes_chunk_index_and_citekey(pg_session_fac
     # Set a citekey on the paper ref only.
     expected_citekey = "Smith2024"
     with pg_session_factory() as s:
-        from call_manager.db.models import Reference as _Reference
-
         ref = s.get(_Reference, paper_rid)
         ref.citekey = expected_citekey
         s.commit()
