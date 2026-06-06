@@ -418,3 +418,60 @@ def test_pubmed_malformed_xml_still_returns_ids(httpx_mock):
     assert meta["source"] == "pubmed"
     # title/authors may be absent — no crash required
     assert "title" not in meta or isinstance(meta.get("title"), str)
+
+
+def test_pubmed_jats_title_with_inline_markup(httpx_mock):
+    """An <article-title> containing inline child elements (e.g. <italic>)
+    must produce the FULL concatenated text, not just the text node before
+    the first child tag."""
+    elink_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pmc&id=77001122"
+    )
+    elink_xml = (
+        '<?xml version="1.0"?>'
+        "<eLinkResult><LinkSet><LinkSetDb><Link>"
+        "<Id>PMC700100</Id>"
+        "</Link></LinkSetDb></LinkSet></eLinkResult>"
+    )
+    httpx_mock.add_response(url=elink_url, text=elink_xml)
+
+    efetch_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=PMC700100&rettype=xml"
+    )
+    efetch_xml = (
+        '<?xml version="1.0"?>'
+        "<article>"
+        "  <front>"
+        "    <article-meta>"
+        "      <title-group>"
+        "        <article-title>"
+        "A study of <italic>Homo sapiens</italic> cells"
+        "        </article-title>"
+        "      </title-group>"
+        "    </article-meta>"
+        "  </front>"
+        "</article>"
+    )
+    httpx_mock.add_response(url=efetch_url, text=efetch_xml)
+
+    bytes_, filename, mime, meta = fetch_pubmed_pmid("77001122")
+
+    assert meta["title"] == "A study of Homo sapiens cells"
+
+
+def test_fetch_arxiv_version_suffix_passes_through(httpx_mock):
+    """An arxiv_id with a version suffix (e.g. 2401.12345v2) contains only
+    alphanumeric characters and dots/hyphens — urllib.parse.quote(safe='')
+    must not alter it, so the Atom URL is correct and the PDF is fetched."""
+    arxiv_id = "2401.12345v2"
+    httpx_mock.add_response(
+        url=f"https://export.arxiv.org/api/query?id_list={arxiv_id}",
+        status_code=500,  # metadata failure is non-fatal
+    )
+    httpx_mock.add_response(
+        url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+        content=b"%PDF-1.4\nversioned",
+    )
+    bytes_, filename, mime, meta = fetch_arxiv(arxiv_id)
+    assert bytes_ == b"%PDF-1.4\nversioned"
+    assert meta["arxiv_id"] == arxiv_id

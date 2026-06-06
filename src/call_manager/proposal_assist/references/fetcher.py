@@ -419,8 +419,10 @@ def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
         # article-title: try without namespace first (most PMC JATS is
         # namespace-free), then with common JATS namespace as fallback.
         title_el = article_root.find(".//article-title")
-        if title_el is not None and title_el.text:
-            meta["title"] = title_el.text.strip()
+        if title_el is not None:
+            title_text = "".join(title_el.itertext()).strip()
+            if title_text:
+                meta["title"] = title_text
 
         # Contributors: .//contrib[@contrib-type='author']/name
         authors: list[dict[str, str]] = []
@@ -437,7 +439,7 @@ def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
                 authors.append(entry)
         if authors:
             meta["authors"] = authors
-    except (DefusedXmlException, DET.ParseError, Exception) as exc:
+    except (DefusedXmlException, DET.ParseError) as exc:
         logger.warning("PubMed JATS XML parse failed for PMID %r / %r: %s", pmid, pmc_id, exc)
 
     return (
@@ -458,7 +460,7 @@ def _fetch_arxiv_atom_meta(arxiv_id: str) -> dict:
     str), year (int), url (str).  Never raises — logs and returns {} on
     any fetch or parse failure so that the PDF fetch can proceed.
     """
-    atom_url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    atom_url = f"https://export.arxiv.org/api/query?id_list={urllib.parse.quote(arxiv_id, safe='')}"
     try:
         atom_bytes = fetch_bytes(atom_url, max_bytes=256 * 1024)
     except FetchError as exc:
