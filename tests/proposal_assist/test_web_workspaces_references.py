@@ -555,6 +555,237 @@ def test_upload_wires_citation_service_extraction(
     assert ref.title == "Wired Title"
 
 
+# ---------------------------------------------------------------------------
+# FIX 1 — reject empty approvals
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_post_empty_title_returns_400(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """POST with all fields blank must be rejected with 400; the reference
+    must remain in its original status and csl_json must be unchanged."""
+    from sqlalchemy import select
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="empty-approve@ki.se")
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={
+                "title": "",
+                "authors": "",
+                "year": "",
+                "venue": "",
+                "doi": "",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 400, f"expected 400 on blank form, got {resp.status_code}"
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == ref_id))
+    # Status must not have been advanced to 'approved'.
+    assert ref.metadata_status != "approved", (
+        f"blank approval must not mutate status; got {ref.metadata_status!r}"
+    )
+    # Approved csl_json must not have been written (original extracted CSL intact).
+    assert ref.csl_json is None or ref.csl_json.get("title") != "", (
+        "csl_json must be unchanged after rejected blank approval"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — upgrade fallback citekey on approve
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_post_upgrades_fallback_citekey(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Approving with author+year upgrades a ref-<hex> citekey to
+    the human-readable form (e.g. 'smith2022')."""
+    from sqlalchemy import select
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="upgrade-key@ki.se")
+        ref = Reference(
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            filename="test.pdf",
+            storage_path="fake/path",
+            mime_type="application/pdf",
+            uploaded_by=uid,
+            citekey="ref-abc123def456",
+            metadata_status="failed",
+        )
+        s.add(ref)
+        s.commit()
+        ref_id = ref.id
+
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={
+                "title": "T",
+                "authors": "Smith, Jane",
+                "year": "2022",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 303, f"expected redirect, got {resp.status_code}: {resp.text}"
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == ref_id))
+    assert ref.metadata_status == "approved"
+    assert ref.citekey == "smith2022", (
+        f"fallback citekey must be upgraded to human-readable; got {ref.citekey!r}"
+    )
+
+
+def test_metadata_post_does_not_overwrite_existing_human_readable_citekey(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """A reference that already has a human-readable citekey must keep it
+    even when the owner approves metadata with different author/year."""
+    from sqlalchemy import select
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="keep-key@ki.se")
+        ref = Reference(
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            filename="test.pdf",
+            storage_path="fake/path",
+            mime_type="application/pdf",
+            uploaded_by=uid,
+            citekey="jones2019",
+            metadata_status="extracted",
+            csl_json_extracted={
+                "title": "Old Title",
+                "author": [{"family": "Jones", "given": "A"}],
+                "issued": {"date-parts": [[2019]]},
+            },
+        )
+        s.add(ref)
+        s.commit()
+        ref_id = ref.id
+
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={
+                "title": "New Title",
+                "authors": "Brown, Bob",
+                "year": "2023",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 303
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == ref_id))
+    assert ref.metadata_status == "approved"
+    assert ref.citekey == "jones2019", (
+        f"human-readable citekey must not be overwritten; got {ref.citekey!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — viewer denied on metadata routes + upload degrades on LLM error
+# ---------------------------------------------------------------------------
+
+
+def test_viewer_denied_on_metadata_get_and_post(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """WorkspaceViewer (read-only) must receive 403 on both GET and POST
+    of the owner-only metadata review routes."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner_id, wsid = _seed_owner_and_workspace(s, email="viewer-meta-owner@ki.se")
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=owner_id)
+        viewer = User(email="viewer-meta@ki.se")
+        s.add(viewer)
+        s.flush()
+        from call_manager.db.models import WorkspaceViewer
+
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
+        s.commit()
+        viewer_id = viewer.id
+
+    client = _authed(app, user_id=viewer_id)
+    try:
+        get_resp = client.get(f"/workspaces/{wsid}/references/{ref_id}/metadata")
+        post_resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={"title": "X"},
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert get_resp.status_code == 403, (
+        f"viewer GET metadata must be 403; got {get_resp.status_code}"
+    )
+    assert post_resp.status_code == 403, (
+        f"viewer POST metadata must be 403; got {post_resp.status_code}"
+    )
+
+
+def test_upload_degrades_gracefully_when_llm_raises(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Phase 3 failure (LLM raises RuntimeError) must not bubble up as a
+    500 — the upload should still succeed (200) and create the Reference
+    row with text_status='done' and metadata_status reflecting degraded
+    extraction (not 500)."""
+    from sqlalchemy import select
+
+    class _RaisingCitationService:
+        def complete_json(self, *, workspace_id, op, system, user):
+            raise RuntimeError("simulated LLM failure")
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    app.state.citation_service = _RaisingCitationService()
+
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="llm-raise@ki.se")
+    client = _authed(app, user_id=uid)
+    md = b"# LLM Raise Test\n\nSome abstract.\n"
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references",
+            data={"kind": "paper"},
+            files={"file": ("llm_raise.md", io.BytesIO(md), "text/markdown")},
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, (
+        f"upload must succeed (200) even when LLM raises; got {resp.status_code}: {resp.text}"
+    )
+
+    with pg_session_factory() as s:
+        refs = list(s.scalars(select(Reference).where(Reference.workspace_id == wsid)))
+    assert len(refs) == 1, "Reference row must be created despite LLM failure"
+    ref = refs[0]
+    # The file was valid markdown so text extraction should have succeeded.
+    assert ref.text_status == "done", f"expected text_status='done', got {ref.text_status!r}"
+    # Metadata extraction must have degraded — status should be 'failed' or 'pending',
+    # NOT 'extracted' (since the LLM raised).
+    assert ref.metadata_status != "extracted", (
+        f"LLM-raise must degrade metadata_status; got {ref.metadata_status!r}"
+    )
+
+
 def test_metadata_author_family_only_round_trips(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Structured family-only authors must survive the textarea round-trip.
 

@@ -490,11 +490,39 @@ async def post_reference_metadata(
     if doi:
         csl["DOI"] = doi
 
+    # FIX 1: reject empty approvals — require at least a title.
+    if not csl or not csl.get("title"):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least a title before approving.",
+        )
+
     ref.csl_json = csl
     if isinstance(csl.get("title"), str) and csl["title"]:
         ref.title = csl["title"]
     ref.metadata_status = "approved"
-    session.commit()
+
+    # FIX 2: upgrade a fallback citekey to a human-readable one on approve.
+    if ref.citekey is None or ref.citekey.startswith("ref-"):
+        from call_manager.proposal_assist.references.csl import generate_citekey
+
+        new_key = generate_citekey(csl, ws.id, session)
+        if new_key and not new_key.startswith("ref-"):
+            ref.citekey = new_key
+
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        # Re-fetch to get a clean state, then re-apply everything except citekey.
+        ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+        ref.csl_json = csl
+        if isinstance(csl.get("title"), str) and csl["title"]:
+            ref.title = csl["title"]
+        ref.metadata_status = "approved"
+        session.commit()
 
     target = f"/workspaces/{ws.id}/references"
     return Response(status_code=303, headers={"Location": target})
