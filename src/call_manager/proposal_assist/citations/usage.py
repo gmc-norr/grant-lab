@@ -32,7 +32,16 @@ def _stockholm_day_start_utc() -> datetime:
     return midnight.astimezone(_UTC)
 
 
-def record_usage(session, *, workspace_id, op, status, tokens_in=0, tokens_out=0, model=None):
+def record_usage(
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    op: str,
+    status: str,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    model: str | None = None,
+) -> None:
     """Append one usage row. Caller commits."""
     session.add(
         CitationLlmUsage(
@@ -57,7 +66,9 @@ def _sum_today(session: Session, *, workspace_id: uuid.UUID | None) -> tuple[int
     return int(row[0]), int(row[1])
 
 
-def check_citation_caps(session, workspace_id, *, settings: Settings) -> CapStatus:
+def check_citation_caps(
+    session: Session, workspace_id: uuid.UUID, *, settings: Settings
+) -> CapStatus:
     """Read-only; `>=` hard ceiling (matches turns/caps.py). Workspace first."""
     ws_in, ws_out = _sum_today(session, workspace_id=workspace_id)
     if (

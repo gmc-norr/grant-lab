@@ -120,3 +120,25 @@ def test_cap_exceeded_returns_typed_result_without_calling(pg_session_factory):
     assert res.data is None
     assert llm.called == 0  # client NOT invoked when capped
     assert len(_rows(pg_session_factory, wsid)) == 1  # no new row for the blocked call
+
+
+def test_global_cap_blocks_without_calling(pg_session_factory):
+    wsid = _ws(pg_session_factory)
+    llm = _OkLLM()
+    # Workspace cap high, global cap low → the global branch must trip.
+    svc = CitationLLMService(
+        session_factory=pg_session_factory,
+        llm=llm,
+        settings=_settings(
+            citation_llm_daily_token_cap_input=10_000_000,
+            global_citation_llm_daily_token_cap_input=20,
+        ),
+    )
+    with pg_session_factory() as s:
+        s.add(CitationLlmUsage(workspace_id=wsid, op="metadata_extract", status="ok",
+                               tokens_in=25, tokens_out=0))
+        s.commit()
+    res = svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
+    assert res.cap_exceeded is True and res.cap_scope == "global"
+    assert llm.called == 0
+    assert len(_rows(pg_session_factory, wsid)) == 1

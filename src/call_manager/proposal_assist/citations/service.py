@@ -10,6 +10,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy.orm import sessionmaker
+
 from call_manager.config import Settings
 from call_manager.proposal_assist.citations.llm import LLMUsage, StructuredLLM
 from call_manager.proposal_assist.citations.usage import check_citation_caps, record_usage
@@ -25,7 +27,9 @@ class CitationLLMResult:
 
 
 class CitationLLMService:
-    def __init__(self, *, session_factory, llm: StructuredLLM, settings: Settings) -> None:
+    def __init__(
+        self, *, session_factory: sessionmaker, llm: StructuredLLM, settings: Settings
+    ) -> None:
         self._session_factory = session_factory
         self._llm = llm
         self._settings = settings
@@ -43,6 +47,11 @@ class CitationLLMService:
         try:
             result = self._llm.complete_json(system=system, user=user)
         except TimeoutError:
+            # NOTE: OllamaClient/AnthropicClient currently wrap transport
+            # timeouts as LLMError (httpx.TimeoutException does NOT subclass
+            # builtin TimeoutError), so this branch only fires for clients that
+            # propagate TimeoutError directly. Timeout-vs-failed refinement is
+            # deferred to Slice 3's audit service.
             self._record(workspace_id, op, "timeout", 0, 0, None)
             raise
         except Exception:
