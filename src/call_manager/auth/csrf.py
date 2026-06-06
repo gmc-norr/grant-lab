@@ -45,31 +45,39 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
 def _hostport(url: str) -> str | None:
-    """Return `host[:port]` from a URL, or None if unparseable/empty.
+    """Return a canonical `scheme://host[:port]` origin key, or None if
+    unparseable/empty.
 
-    Normalizes the bare-loopback aliases (`localhost`, `127.0.0.1`, `::1`)
-    onto a single canonical token. They route to the same host on every
-    OS, so a dev box configured as `http://localhost:8000` should accept
+    Scheme IS part of the key: an `Origin: http://example.com` must NOT match a
+    configured `https://example.com`, or a network MITM that downgrades to
+    plaintext could forge a same-origin-looking request.
+
+    Normalizes the bare-loopback aliases (`localhost`, `127.0.0.1`, `::1`) onto
+    a single canonical host token. They route to the same host on every OS, so
+    a dev box configured as `http://localhost:8000` should accept
     `Origin: http://127.0.0.1:8000` (and vice versa) — otherwise VSCode
-    port-forwarding and equivalent dev tooling trip the CSRF middleware.
-    Production URLs use real hostnames where this collapse has no effect.
+    port-forwarding and equivalent dev tooling trip the middleware. Production
+    URLs use real hostnames where this collapse has no effect.
     """
     if not url:
         return None
     try:
         parsed = urlparse(url)
+        # .port is parsed lazily and raises ValueError on a malformed port
+        # (e.g. "http://host:notaport"). Access it INSIDE the try so a hostile/
+        # garbled Origin yields a clean mismatch (403), not a 500.
+        port = parsed.port
     except ValueError:
         return None
-    # urlparse.hostname unwraps IPv6 brackets and lowercases the host —
-    # both useful for the loopback-alias collapse below. .port gives the
-    # int or None; we render it back to a string in the canonical form.
+    # urlparse.hostname unwraps IPv6 brackets and lowercases the host.
     host = parsed.hostname
     if not host:
         return None
     if host in ("localhost", "127.0.0.1", "::1"):
         host = "localhost"
-    port = parsed.port
-    return f"{host}:{port}" if port else host
+    scheme = (parsed.scheme or "").lower()
+    hostport = f"{host}:{port}" if port else host
+    return f"{scheme}://{hostport}" if scheme else hostport
 
 
 class OriginCSRFMiddleware(BaseHTTPMiddleware):

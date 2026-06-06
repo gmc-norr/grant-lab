@@ -23,6 +23,7 @@ from call_manager.db.models import Workspace
 from call_manager.proposal_assist.drafting.contract import (
     AgentHandle,
     LaunchContext,
+    SDKTurnError,
     StreamEvent,
 )
 from call_manager.proposal_assist.drafting.locking import (
@@ -180,9 +181,20 @@ class WorkspaceController:
         finally block so that sweep_idle never terminates a handle mid-stream,
         even if the turn takes longer than workspace_idle_timeout_seconds.
         decrement_in_flight also bumps last_touched_monotonic, so a separate
-        touch() call is no longer needed."""
+        touch() call is no longer needed.
+
+        Concurrency guard: begin_in_flight_exclusive refuses to start if another
+        turn is already streaming for this workspace (e.g. the reaper freed the
+        DB row while the prior turn's coroutine is still live). That would run
+        two turns against one SDK subprocess; instead we raise SDKTurnError so
+        the second turn finalizes as failed and the drain retries it once the
+        first releases."""
         handle = await self.launch(workspace_id)
-        await self._registry.increment_in_flight(workspace_id)
+        if not await self._registry.begin_in_flight_exclusive(workspace_id):
+            raise SDKTurnError(
+                f"workspace {workspace_id} already has a turn in flight; "
+                "refusing to run a second turn against the same subprocess"
+            )
         try:
             async for event in self._registry.send_turn(handle, user_message):
                 yield event

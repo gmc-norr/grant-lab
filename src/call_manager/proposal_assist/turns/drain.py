@@ -20,7 +20,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from call_manager.db.models import TurnJob
+from call_manager.db.models import TurnJob, Workspace
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
 from call_manager.proposal_assist.turns.processor import process_turn_once
 
@@ -61,10 +61,18 @@ async def drain_turn_queue_tick(
         running_subq = (
             select(TurnJob.workspace_id).where(TurnJob.status == "running")
         ).scalar_subquery()
+        # Exclude soft-deleted workspaces: a deleted workspace must not keep
+        # spending tokens / editing its repo on queued turns. (The soft_delete
+        # handler also marks queued jobs failed, but this is the durable gate —
+        # a turn queued in a race with deletion still won't be dispatched.)
+        deleted_subq = (
+            select(Workspace.id).where(Workspace.soft_deleted_at.is_not(None))
+        ).scalar_subquery()
         stmt = (
             select(TurnJob.id, TurnJob.workspace_id)
             .where(TurnJob.status == "queued")
             .where(TurnJob.workspace_id.notin_(running_subq))
+            .where(TurnJob.workspace_id.notin_(deleted_subq))
             .distinct(TurnJob.workspace_id)
             .order_by(TurnJob.workspace_id, TurnJob.queued_at, TurnJob.id)
         )

@@ -7,8 +7,10 @@ from sqlalchemy import select
 from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from call_manager.proposal_assist.phases.setup import (
+    MAX_SETUP_ATTEMPTS,
     Phase0Worker,
     claim_next_setup_job,
+    requeue_stuck_setup_jobs,
 )
 from tests.proposal_assist.conftest import make_call, make_profile, make_workspace
 
@@ -453,3 +455,89 @@ def test_claim_next_returns_oldest_by_queued_at(pg_session_factory):
         s.commit()
         assert claimed is not None
         assert claimed.workspace_id == ws_b.id
+
+
+def test_requeue_stuck_setup_jobs_requeues_crashed_running(pg_session_factory):
+    """A setup job abandoned in 'running' (worker crashed before a terminal
+    transition) is reset to 'queued' with started_at cleared so the next tick
+    re-claims it — otherwise it's invisible to the queued-only peek forever."""
+    from datetime import UTC, datetime, timedelta
+
+    from call_manager.proposal_assist.phases.setup import STUCK_SETUP_AFTER
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        job = WorkspaceSetupJob(
+            workspace_id=ws.id,
+            status="running",
+            started_at=datetime.now(UTC) - (STUCK_SETUP_AFTER + timedelta(minutes=1)),
+        )
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    with pg_session_factory() as s:
+        n = requeue_stuck_setup_jobs(s)
+        s.commit()
+    assert n == 1
+
+    with pg_session_factory() as s:
+        row = s.get(WorkspaceSetupJob, job_id)
+        assert row.status == "queued"
+        assert row.started_at is None
+        assert row.attempts == 1
+
+
+def test_requeue_stuck_setup_jobs_dead_letters_after_max_attempts(pg_session_factory):
+    """A stuck running job that has exhausted its attempts is dead-lettered to
+    'failed' rather than looping forever."""
+    from datetime import UTC, datetime, timedelta
+
+    from call_manager.proposal_assist.phases.setup import STUCK_SETUP_AFTER
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        job = WorkspaceSetupJob(
+            workspace_id=ws.id,
+            status="running",
+            attempts=MAX_SETUP_ATTEMPTS - 1,
+            started_at=datetime.now(UTC) - (STUCK_SETUP_AFTER + timedelta(minutes=1)),
+        )
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    with pg_session_factory() as s:
+        n = requeue_stuck_setup_jobs(s)
+        s.commit()
+    assert n == 1
+
+    with pg_session_factory() as s:
+        row = s.get(WorkspaceSetupJob, job_id)
+        assert row.status == "failed"
+        assert row.attempts == MAX_SETUP_ATTEMPTS
+        assert row.completed_at is not None
+
+
+def test_requeue_stuck_setup_jobs_ignores_waiting_for_rubric_review(pg_session_factory):
+    """'waiting_for_rubric_review' is a legitimate non-terminal state awaiting
+    human action — the reaper must never touch it, however old it is."""
+    from datetime import UTC, datetime, timedelta
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        job = WorkspaceSetupJob(
+            workspace_id=ws.id,
+            status="waiting_for_rubric_review",
+            started_at=datetime.now(UTC) - timedelta(days=7),
+        )
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    with pg_session_factory() as s:
+        assert requeue_stuck_setup_jobs(s) == 0
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"

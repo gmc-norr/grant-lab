@@ -1169,6 +1169,15 @@ def soft_delete(
         session=session,
     )
     ws.soft_deleted_at = datetime.now(UTC)
+    # Cancel any QUEUED turns for this workspace so a deletion-race turn can't
+    # be dispatched and start spending tokens / editing the repo. Running turns
+    # are left to finish (bounded by turn_max_seconds + the reaper); the drain
+    # query also excludes soft-deleted workspaces, so no NEW turn is dispatched.
+    session.execute(
+        update(TurnJob)
+        .where(TurnJob.workspace_id == workspace_id, TurnJob.status == "queued")
+        .values(status="failed", error="workspace soft-deleted", completed_at=datetime.now(UTC))
+    )
     session.commit()
     # B7: scrub attachment bytes from disk. DB rows remain (compliance —
     # audit trail preserved); only the bytes are removed. Errors here

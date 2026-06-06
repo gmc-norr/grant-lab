@@ -104,3 +104,22 @@ def test_origin_matches_when_port_included():
         bad = c.post("/do", headers={"Origin": "http://example.com"})
     assert ok.status_code == 200
     assert bad.status_code == 403
+
+
+def test_scheme_downgrade_origin_is_rejected():
+    """An http:// Origin must NOT match an https:// configured origin — scheme
+    is part of the same-origin definition; ignoring it would let a network MITM
+    forge a same-origin-looking request over plaintext."""
+    app = _mk_app("https://example.com")
+    with TestClient(app) as c:
+        r = c.post("/do", headers={"Origin": "http://example.com"})
+    assert r.status_code == 403
+
+
+def test_malformed_origin_port_is_rejected_not_500():
+    """A garbled Origin port must yield a clean 403 mismatch, not a 500 from
+    urlparse's lazy .port ValueError."""
+    app = _mk_app("https://example.com")
+    with TestClient(app) as c:
+        r = c.post("/do", headers={"Origin": "https://example.com:notaport"})
+    assert r.status_code == 403

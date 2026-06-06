@@ -158,6 +158,26 @@ class SubprocessRegistry:
                 entry.in_flight += 1
                 entry.last_touched_monotonic = time.monotonic()
 
+    async def begin_in_flight_exclusive(self, workspace_id: uuid.UUID) -> bool:
+        """Atomically begin a turn IFF no other turn is in flight for this
+        workspace. Returns True on success (in_flight incremented), False if a
+        turn is already live (caller must NOT start) or the handle is gone.
+
+        This serializes turns at the subprocess level: the DB partial-unique
+        index normally guarantees one running turn_jobs row per workspace, but
+        the stuck-turn reaper can free that row while the original turn's
+        coroutine is still streaming. Without this guard the next drain tick
+        would start a second send_turn against the SAME ClaudeSDKClient,
+        interleaving transcripts and racing proposal edits. Checked under the
+        same lock that guards in_flight so the test-and-increment is atomic."""
+        async with self._lock:
+            entry = self._entries.get(workspace_id)
+            if entry is None or entry.in_flight > 0:
+                return False
+            entry.in_flight += 1
+            entry.last_touched_monotonic = time.monotonic()
+            return True
+
     async def decrement_in_flight(self, workspace_id: uuid.UUID) -> None:
         """Signal that a send_turn iteration has finished (or been abandoned).
         Also bumps last_touched_monotonic so the handle's idle clock resets."""

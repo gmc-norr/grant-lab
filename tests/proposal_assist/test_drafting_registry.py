@@ -240,3 +240,29 @@ async def test_decrement_in_flight_makes_handle_sweepable_again():
 
     assert swept == 1
     assert len(adapter.terminations) == 1
+
+
+@pytest.mark.asyncio
+async def test_begin_in_flight_exclusive_refuses_second_concurrent_turn():
+    """The exclusive guard serializes turns at the subprocess level: once a
+    turn is in flight, a second begin_in_flight_exclusive returns False so the
+    reaper-freed-row race can't run two turns against one SDK client."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    wsid = uuid.uuid4()
+    await _install_handle(registry, wsid)
+
+    # First turn claims exclusivity.
+    assert await registry.begin_in_flight_exclusive(wsid) is True
+    # Second concurrent attempt is refused while the first is in flight.
+    assert await registry.begin_in_flight_exclusive(wsid) is False
+    # After the first releases, a new turn may begin again.
+    await registry.decrement_in_flight(wsid)
+    assert await registry.begin_in_flight_exclusive(wsid) is True
+
+
+@pytest.mark.asyncio
+async def test_begin_in_flight_exclusive_false_for_unknown_workspace():
+    """No entry (handle gone / never launched) → refuse, don't crash."""
+    registry = SubprocessRegistry(adapter=FakeAgentAdapter(), idle_seconds=600)
+    assert await registry.begin_in_flight_exclusive(uuid.uuid4()) is False

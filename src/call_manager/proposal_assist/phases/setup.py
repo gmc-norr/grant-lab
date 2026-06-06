@@ -19,11 +19,11 @@ import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import (
@@ -44,6 +44,67 @@ from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 logger = logging.getLogger(__name__)
 
 MAX_SETUP_ATTEMPTS = 5
+
+# A setup job that's been 'running' longer than this is presumed abandoned —
+# the worker process crashed between the status='running' commit and a terminal
+# transition. Phase-0 extraction (a couple of LLM calls) is well under this, so
+# a generous bound avoids reaping a slow-but-live job. NB: 'waiting_for_rubric_review'
+# is a legitimate non-terminal state awaiting HUMAN action and is NEVER reaped.
+STUCK_SETUP_AFTER = timedelta(minutes=30)
+
+
+def requeue_stuck_setup_jobs(session: Session, *, max_attempts: int = MAX_SETUP_ATTEMPTS) -> int:
+    """Recover setup jobs stuck in 'running' past STUCK_SETUP_AFTER (worker
+    crashed before a terminal transition). Jobs with attempts left go back to
+    'queued' (started_at cleared) so the next tick re-claims them; jobs that
+    have exhausted attempts are dead-lettered to 'failed'. Mirrors the ranking
+    queue's requeue_stuck_running. Returns the number of rows touched. Caller
+    commits.
+
+    Without this a crash leaves the job 'running' forever — run_phase0_tick only
+    looks for 'queued' rows, so the workspace never finishes setup."""
+    now = datetime.now(UTC)
+    cutoff = now - STUCK_SETUP_AFTER
+    # Dead-letter first (so the requeue UPDATE below can't re-touch these rows).
+    dead = session.execute(
+        update(WorkspaceSetupJob)
+        .where(
+            WorkspaceSetupJob.status == "running",
+            WorkspaceSetupJob.started_at.is_not(None),
+            WorkspaceSetupJob.started_at < cutoff,
+            WorkspaceSetupJob.attempts + 1 >= max_attempts,
+        )
+        .values(
+            status="failed",
+            attempts=WorkspaceSetupJob.attempts + 1,
+            last_error="dead-lettered: stuck running past max_attempts (worker crash)",
+            completed_at=now,
+        )
+    )
+    requeued = session.execute(
+        update(WorkspaceSetupJob)
+        .where(
+            WorkspaceSetupJob.status == "running",
+            WorkspaceSetupJob.started_at.is_not(None),
+            WorkspaceSetupJob.started_at < cutoff,
+        )
+        .values(
+            status="queued",
+            attempts=WorkspaceSetupJob.attempts + 1,
+            started_at=None,
+        )
+    )
+    n = (dead.rowcount or 0) + (requeued.rowcount or 0)
+    if n:
+        logger.warning(
+            "phase0.requeued_stuck",
+            extra={
+                "event": "phase0_requeued_stuck",
+                "dead_lettered": dead.rowcount or 0,
+                "requeued": requeued.rowcount or 0,
+            },
+        )
+    return n
 
 
 class _AnthropicClientLike(Protocol):
@@ -329,6 +390,11 @@ def run_phase0_tick(
     immediately unused.
     """
     with session_factory() as session:
+        # First recover any job abandoned in 'running' by a crashed worker —
+        # without this it stays invisible to the queued-only peek below forever.
+        requeue_stuck_setup_jobs(session)
+        session.commit()
+
         # Cheap peek: any queued job at all?
         has_work = session.scalar(
             select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.status == "queued").limit(1)

@@ -206,3 +206,49 @@ async def test_drain_skips_workspace_with_running_turn(
     with pg_session_factory() as s:
         still_queued = s.get(TurnJob, queued_id)
         assert still_queued.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_drain_skips_soft_deleted_workspace(
+    pg_session_factory,
+    _settings_env,
+):
+    """A queued turn for a soft-deleted workspace must NOT be dispatched —
+    a deleted workspace mustn't keep spending tokens or editing its repo."""
+    from datetime import UTC, datetime
+
+    adapter = FakeAgentAdapter()
+    # No scripted turn: a wrongful dispatch would make the adapter raise.
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+        t = ChatTurn(workspace_id=ws.id, role="user", content="q")
+        s.add(t)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id,
+            user_turn_id=t.id,
+            status="queued",
+            submitted_by_user_id=user.id,
+        )
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    dispatched = await drain_turn_queue_tick(
+        session_factory=pg_session_factory,
+        controller=controller,
+    )
+    assert dispatched == 0
+    assert adapter.launches == []
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status == "queued"

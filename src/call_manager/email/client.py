@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import smtplib
+import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Protocol
@@ -161,7 +162,11 @@ class SMTPClient:
 
         try:
             with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as conn:
-                conn.starttls()
+                # Verify the server cert + hostname. A bare starttls() uses
+                # Python's CERT_NONE default, which silently accepts any cert
+                # and leaves the digest contents + SMTP credentials open to an
+                # active MITM. Mirrors the magic-link sender in auth/email.py.
+                conn.starttls(context=ssl.create_default_context())
                 if self._user and self._password:
                     conn.login(self._user, self._password)
                 conn.sendmail(self._from, [to], msg.as_string())
