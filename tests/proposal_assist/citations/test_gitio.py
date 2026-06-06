@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import call_manager.proposal_assist.citations.gitio as _gitio_mod
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     write_and_commit_files,
@@ -203,3 +204,89 @@ def test_noop_returns_head_without_new_commit(repo: Path) -> None:
 
     assert sha == initial_head
     assert _commit_count_since_initial(repo) == count_before
+
+
+# ---------------------------------------------------------------------------
+# Test 4: git-add failure triggers rollback of partial writes (FIX 1 / FIX 5)
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_on_git_add_failure(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When git add raises CalledProcessError: modified file restored,
+    newly-created file removed, index clean, unrelated dirty file untouched,
+    GitCommitError raised."""
+    import subprocess as _sp
+
+    original_proposal = (repo / "proposal.md").read_text()
+
+    # Unrelated tracked-but-dirty file — must remain untouched after rollback.
+    sidecar = repo / "sidecar.txt"
+    sidecar.write_text("clean")
+    _sp.run(["git", "add", "sidecar.txt"], cwd=repo, check=True)
+    _sp.run(["git", "commit", "-q", "-m", "add sidecar"], cwd=repo, check=True)
+    sidecar.write_text("DIRTY uncommitted edits")
+
+    initial_head = _head_sha(repo)
+
+    real_run = _gitio_mod.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "add":
+            raise _sp.CalledProcessError(
+                returncode=128,
+                cmd=cmd,
+                stderr=b"simulated git add failure",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(_gitio_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(GitCommitError):
+        write_and_commit_files(
+            repo,
+            {
+                "proposal.md": "# Proposal\n\nShould not land.\n",
+                "citations.json": '{"version": 1, "evidence": []}\n',
+            },
+            message="agent: this add will fail",
+        )
+
+    # proposal.md is restored.
+    assert (repo / "proposal.md").read_text() == original_proposal
+
+    # citations.json was newly created — must be removed.
+    assert not (repo / "citations.json").exists()
+
+    # Index is clean (nothing staged).
+    assert _index_clean(repo)
+
+    # HEAD has not advanced.
+    assert _head_sha(repo) == initial_head
+
+    # Unrelated dirty file is untouched.
+    assert sidecar.read_text() == "DIRTY uncommitted edits"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: non-str file value raises TypeError (FIX 2)
+# ---------------------------------------------------------------------------
+
+
+def test_none_value_raises_type_error(repo: Path) -> None:
+    """Passing None as a file value raises TypeError before any file is touched."""
+    with pytest.raises(TypeError, match="file content must be str"):
+        write_and_commit_files(repo, {"x.md": None}, message="should not run")  # type: ignore[dict-item]
+
+    # No file was written.
+    assert not (repo / "x.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Test 6: path traversal raises ValueError (FIX 3)
+# ---------------------------------------------------------------------------
+
+
+def test_traversal_path_raises_value_error(repo: Path) -> None:
+    """A relative path that escapes repo_dir raises ValueError."""
+    with pytest.raises(ValueError, match="path escapes repo_dir"):
+        write_and_commit_files(repo, {"../escape.md": "x"}, message="should not run")
