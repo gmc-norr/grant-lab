@@ -100,13 +100,7 @@ def extract_reference_metadata(
     # ------------------------------------------------------------------
     # 5. Determine source label and status.
     # ------------------------------------------------------------------
-    if llm_data:
-        source = "llm"
-    elif heuristic:
-        source = "heuristic"
-    else:
-        source = "heuristic"
-
+    source = "llm" if llm_data else "heuristic"
     status = "extracted" if csl else "failed"
 
     return (csl, source, status)
