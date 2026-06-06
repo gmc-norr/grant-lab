@@ -44,9 +44,13 @@ def upgrade() -> None:
         references_root = Path(os.environ.get("WORKSPACES_DIR", "var/workspaces"))
 
         bind = op.get_bind()
-        session = orm.Session(bind=bind)
-        count = backfill_original_sha256(session, references_root)
-        session.flush()
+        # Alembic owns the surrounding transaction and commits when the
+        # migration's transaction block exits; we only need the session to
+        # flush its mutations (autoflush handles that). Use a context manager
+        # so the session is always closed even on the best-effort error path.
+        with orm.Session(bind=bind) as session:
+            count = backfill_original_sha256(session, references_root)
+            session.flush()
         log.info("0037 backfill: updated original_sha256 for %d reference(s)", count)
     except Exception:
         log.warning(
