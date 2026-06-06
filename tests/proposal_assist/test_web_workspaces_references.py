@@ -296,3 +296,153 @@ def test_raw_returns_404_when_same_owner_of_both_workspaces(
     assert resp.status_code == 404, (
         f"cross-workspace serve must return 404 (not leak existence); got {resp.status_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 1B Task 6 — metadata review/correct/approve routes
+# ---------------------------------------------------------------------------
+
+
+def _seed_reference_with_extracted(session, *, workspace_id, uploaded_by):
+    """Seed a Reference row with csl_json_extracted set."""
+    ref = Reference(
+        workspace_id=workspace_id,
+        kind="paper",
+        source_type="uploaded",
+        filename="test.pdf",
+        storage_path="fake/path",
+        mime_type="application/pdf",
+        uploaded_by=uploaded_by,
+        csl_json_extracted={
+            "title": "Extracted",
+            "author": [{"family": "Smith", "given": "J"}],
+            "issued": {"date-parts": [[2021]]},
+        },
+        metadata_status="extracted",
+    )
+    session.add(ref)
+    session.commit()
+    return ref.id
+
+
+def test_metadata_get_owner_sees_extracted(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """GET /workspaces/<id>/references/<id>/metadata as owner returns 200
+    and renders the extracted CSL data (title + first author)."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s)
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/references/{ref_id}/metadata")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    assert "Extracted" in resp.text
+    assert "Smith" in resp.text
+
+
+def test_metadata_post_owner_approves(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """POST as owner with edited fields produces an approved Reference."""
+    from sqlalchemy import select
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s)
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={
+                "title": "Corrected Title",
+                "authors": "Roe, Jane\nDoe, John",
+                "year": "2022",
+                "venue": "Nature",
+                "doi": "10/x",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    # Expect a redirect (303) to the references list.
+    assert resp.status_code == 303
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == ref_id))
+    assert ref.metadata_status == "approved"
+    assert ref.csl_json["title"] == "Corrected Title"
+    assert ref.csl_json["author"] == [
+        {"family": "Roe", "given": "Jane"},
+        {"family": "Doe", "given": "John"},
+    ]
+    assert ref.csl_json["issued"] == {"date-parts": [[2022]]}
+    assert ref.csl_json["container-title"] == "Nature"
+    assert ref.csl_json["DOI"] == "10/x"
+    assert ref.title == "Corrected Title"
+
+
+def test_metadata_get_non_owner_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Non-owner GET on metadata review → 403."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s)
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
+        other = User(email="noowner@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+    client = _authed(app, user_id=other_id)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/references/{ref_id}/metadata")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
+
+
+def test_metadata_post_non_owner_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Non-owner POST on metadata review → 403."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s)
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
+        other = User(email="noowner2@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+    client = _authed(app, user_id=other_id)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={"title": "X"},
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
+
+
+def test_metadata_get_cross_workspace_returns_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Reference belonging to a different workspace → 404 (cross-workspace IDOR)."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        # Owner has two workspaces; ref is in ws_a.
+        owner = User(email="cross-owner@ki.se")
+        s.add(owner)
+        s.flush()
+        ws_a = Workspace(owner_id=owner.id, title="A")
+        ws_b = Workspace(owner_id=owner.id, title="B")
+        s.add(ws_a)
+        s.add(ws_b)
+        s.commit()
+        uid, wsid_a, wsid_b = owner.id, ws_a.id, ws_b.id
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid_a, uploaded_by=uid)
+    client = _authed(app, user_id=uid)
+    try:
+        # Fetch ref_a's metadata via ws_b's URL.
+        resp = client.get(f"/workspaces/{wsid_b}/references/{ref_id}/metadata")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 404

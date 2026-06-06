@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Review metadata — {{ ref.filename|e }}{% endblock %}
+
+{% block content %}
+<hgroup>
+  <h1>Review metadata — {{ ref.filename|e }}</h1>
+  <p>
+    <a href="/workspaces/{{ workspace.id }}/references">← back to references</a>
+  </p>
+</hgroup>
+
+<p>Status: <strong>{{ ref.metadata_status }}</strong></p>
+
+<form method="post"
+      action="/workspaces/{{ workspace.id }}/references/{{ ref.id }}/metadata">
+  <label>
+    Title
+    <input type="text" name="title" value="{{ title }}" style="width: 100%;">
+  </label>
+
+  <label>
+    Authors (one per line — "Family, Given" or free text)
+    <textarea name="authors" rows="5" style="width: 100%;">{{ authors_text }}</textarea>
+  </label>
+
+  <label>
+    Year
+    <input type="text" name="year" value="{{ year }}" style="width: 8em;">
+  </label>
+
+  <label>
+    Venue (journal / conference)
+    <input type="text" name="venue" value="{{ venue }}" style="width: 100%;">
+  </label>
+
+  <label>
+    DOI
+    <input type="text" name="doi" value="{{ doi }}" style="width: 100%;">
+  </label>
+
+  <button type="submit">Approve metadata</button>
+</form>
+{% endblock %}

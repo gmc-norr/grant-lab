@@ -11,6 +11,7 @@ retain-on-failure. See ingest.py.
 
 from __future__ import annotations
 
+import contextlib
 import html as _html
 import logging
 import re
@@ -344,6 +345,139 @@ def fetch_reference_route(
             "proposal_assist/partials/reference_row.html",
             {"ref": ref, "workspace": ws, "is_owner": True},
         )
+
+
+# ---------------------------------------------------------------------------
+# GET  /workspaces/<id>/references/<id>/metadata — owner metadata review form
+# POST /workspaces/<id>/references/<id>/metadata — owner metadata approve/correct
+# ---------------------------------------------------------------------------
+
+
+def _authors_to_lines(authors: list) -> str:
+    """Convert a CSL author list to a newline-separated string for the textarea."""
+    lines = []
+    for a in authors:
+        if isinstance(a, dict):
+            family = a.get("family", "")
+            given = a.get("given", "")
+            if family:
+                lines.append(f"{family}, {given}".rstrip(", ") if given else family)
+            elif a.get("literal"):
+                lines.append(a["literal"])
+        else:
+            lines.append(str(a))
+    return "\n".join(lines)
+
+
+def _parse_authors(text: str) -> list[dict]:
+    """Parse a newline-separated author string into a CSL author list.
+
+    Lines of the form "Family, Given" are split; everything else becomes
+    ``{"literal": line}``. Blank lines are skipped.
+    """
+    authors = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "," in line:
+            family, _, given = line.partition(",")
+            given = given.strip()
+            family = family.strip()
+            authors.append({"family": family, "given": given})
+        else:
+            authors.append({"literal": line})
+    return authors
+
+
+@router.get("/{workspace_id}/references/{reference_id}/metadata", response_class=HTMLResponse)
+def get_reference_metadata(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+    if ref is None or ref.workspace_id != ws.id:
+        raise HTTPException(status_code=404, detail="reference not found")
+
+    csl: dict = ref.csl_json or ref.csl_json_extracted or {}
+
+    # Derive display values from the best-available CSL.
+    title = csl.get("title", "")
+    authors_text = _authors_to_lines(csl.get("author") or [])
+    issued = csl.get("issued") or {}
+    date_parts = issued.get("date-parts") or []
+    year = str(date_parts[0][0]) if date_parts and date_parts[0] else ""
+    venue = csl.get("container-title", "")
+    doi = csl.get("DOI", "")
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "proposal_assist/reference_metadata_review.html",
+        {
+            "workspace": ws,
+            "ref": ref,
+            "title": title,
+            "authors_text": authors_text,
+            "year": year,
+            "venue": venue,
+            "doi": doi,
+        },
+    )
+
+
+@router.post("/{workspace_id}/references/{reference_id}/metadata")
+async def post_reference_metadata(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> Response:
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+    if ref is None or ref.workspace_id != ws.id:
+        raise HTTPException(status_code=404, detail="reference not found")
+
+    form = dict(await request.form())
+
+    csl: dict = {}
+
+    title = (form.get("title") or "").strip()
+    if title:
+        csl["title"] = title
+
+    authors_text = form.get("authors") or ""
+    parsed_authors = _parse_authors(authors_text)
+    if parsed_authors:
+        csl["author"] = parsed_authors
+
+    year_raw = (form.get("year") or "").strip()
+    if year_raw:
+        with contextlib.suppress(ValueError):
+            csl["issued"] = {"date-parts": [[int(year_raw)]]}
+
+    venue = (form.get("venue") or "").strip()
+    if venue:
+        csl["container-title"] = venue
+
+    doi = (form.get("doi") or "").strip()
+    if doi:
+        csl["DOI"] = doi
+
+    ref.csl_json = csl
+    if isinstance(csl.get("title"), str) and csl["title"]:
+        ref.title = csl["title"]
+    ref.metadata_status = "approved"
+    session.commit()
+
+    target = f"/workspaces/{ws.id}/references"
+    if "HX-Request" in request.headers:
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=303, headers={"Location": target})
 
 
 # ---------------------------------------------------------------------------
