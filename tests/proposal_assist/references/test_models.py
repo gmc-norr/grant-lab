@@ -4,8 +4,9 @@ basic round-trip works."""
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import Reference, ReferenceChunk, TurnJob
+from call_manager.db.models import CitationLlmUsage, Reference, ReferenceChunk, TurnJob
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -88,14 +89,6 @@ def test_turn_jobs_has_fetch_count_column(pg_session_factory):
 
 
 def test_reference_metadata_columns_round_trip(pg_session_factory):
-    import uuid
-
-    from sqlalchemy import select
-    from sqlalchemy.exc import IntegrityError
-
-    from call_manager.db.models import Reference
-    from tests.proposal_assist.conftest import make_user, make_workspace
-
     sha = "a" * 64  # valid lowercase 64-hex
 
     with pg_session_factory() as s:
@@ -146,15 +139,20 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
         except IntegrityError:
             pass
 
+    # Server default applies 'pending' when metadata_status is omitted.
+    rid2 = uuid.uuid4()
+    with pg_session_factory() as s:
+        s.add(Reference(
+            id=rid2, workspace_id=wsid, kind="paper", source_type="uploaded",
+            source_uri=None, filename="s.pdf", storage_path="s", mime_type="application/pdf",
+        ))
+        s.commit()
+    with pg_session_factory() as s:
+        ref2 = s.scalar(select(Reference).where(Reference.id == rid2))
+        assert ref2.metadata_status == "pending"
+
 
 def test_reference_citekey_unique_per_workspace(pg_session_factory):
-    import uuid
-
-    from sqlalchemy.exc import IntegrityError
-
-    from call_manager.db.models import Reference
-    from tests.proposal_assist.conftest import make_user, make_workspace
-
     def _ref(wsid, name):
         return Reference(
             id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
@@ -183,14 +181,19 @@ def test_reference_citekey_unique_per_workspace(pg_session_factory):
         except IntegrityError:
             pass
 
+    # NULL citekey is outside the partial index — duplicates allowed in one workspace.
+    def _ref_no_citekey(wsid, name):
+        return Reference(
+            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
+            source_uri=None, filename=name, storage_path=name, mime_type="application/pdf",
+        )
+    with pg_session_factory() as s:
+        s.add(_ref_no_citekey(a, "4.pdf"))
+        s.add(_ref_no_citekey(a, "5.pdf"))
+        s.commit()  # must not raise
+
 
 def test_citation_llm_usage_insert_and_nonneg(pg_session_factory):
-    from sqlalchemy import select
-    from sqlalchemy.exc import IntegrityError
-
-    from call_manager.db.models import CitationLlmUsage
-    from tests.proposal_assist.conftest import make_user, make_workspace
-
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s))
         s.commit()
@@ -209,5 +212,13 @@ def test_citation_llm_usage_insert_and_nonneg(pg_session_factory):
         try:
             s.commit()
             raise AssertionError("expected IntegrityError on negative tokens")
+        except IntegrityError:
+            pass
+
+    with pg_session_factory() as s:
+        s.add(CitationLlmUsage(workspace_id=wsid, op="x", status="invalid"))
+        try:
+            s.commit()
+            raise AssertionError("expected IntegrityError on invalid status")
         except IntegrityError:
             pass
