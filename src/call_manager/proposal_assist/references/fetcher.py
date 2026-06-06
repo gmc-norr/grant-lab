@@ -34,6 +34,7 @@ Per spec rev4 Codex High #2 (with rev5 honesty pass on pinning).
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import logging
@@ -357,15 +358,23 @@ def fetch_crossref_doi(doi: str) -> tuple[bytes, str, str, dict]:
 
     title = " ".join(message.get("title", []))[:200] or doi
     filename = f"doi-{doi.replace('/', '_')}.pdf"
+    meta: dict = {
+        "doi": doi,
+        "title": title,
+        "source": "crossref",
+    }
+    # Include the full Crossref message dict so csl_from_source_meta can
+    # consume author/issued/container-title without a second API call.
+    # Defensive: api_data.get("message") may be None/absent if the JSON
+    # shape is unexpected — omit the key rather than storing None.
+    raw_message = api_data.get("message")
+    if raw_message is not None:
+        meta["message"] = raw_message
     return (
         pdf_bytes,
         filename,
         "application/pdf",
-        {
-            "doi": doi,
-            "title": title,
-            "source": "crossref",
-        },
+        meta,
     )
 
 
@@ -398,30 +407,122 @@ def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
     )
     xml_bytes = fetch_bytes(efetch_url)
 
+    meta: dict = {
+        "pmid": pmid,
+        "pmc_id": pmc_id,
+        "source": "pubmed",
+    }
+    # Parse JATS XML for bibliographic fields. Non-fatal: if the XML is
+    # malformed or lacks expected elements we just return the IDs.
+    try:
+        article_root = DET.fromstring(xml_bytes)
+        # article-title: try without namespace first (most PMC JATS is
+        # namespace-free), then with common JATS namespace as fallback.
+        title_el = article_root.find(".//article-title")
+        if title_el is not None and title_el.text:
+            meta["title"] = title_el.text.strip()
+
+        # Contributors: .//contrib[@contrib-type='author']/name
+        authors: list[dict[str, str]] = []
+        for contrib in article_root.findall(".//contrib[@contrib-type='author']"):
+            name_el = contrib.find("name")
+            if name_el is None:
+                continue
+            surname_el = name_el.find("surname")
+            given_el = name_el.find("given-names")
+            if surname_el is not None and surname_el.text:
+                entry: dict[str, str] = {"family": surname_el.text.strip()}
+                if given_el is not None and given_el.text:
+                    entry["given"] = given_el.text.strip()
+                authors.append(entry)
+        if authors:
+            meta["authors"] = authors
+    except (DefusedXmlException, DET.ParseError, Exception) as exc:
+        logger.warning("PubMed JATS XML parse failed for PMID %r / %r: %s", pmid, pmc_id, exc)
+
     return (
         xml_bytes,
         f"pmid-{pmid}-{pmc_id}.xml",
         "application/xml",
-        {
-            "pmid": pmid,
-            "pmc_id": pmc_id,
-            "source": "pubmed",
-        },
+        meta,
     )
 
 
+_ATOM_NS = "http://www.w3.org/2005/Atom"
+
+
+def _fetch_arxiv_atom_meta(arxiv_id: str) -> dict:
+    """Fetch and parse the arXiv Atom API entry for ``arxiv_id``.
+
+    Returns a (possibly empty) dict with keys: title, authors (list of
+    str), year (int), url (str).  Never raises — logs and returns {} on
+    any fetch or parse failure so that the PDF fetch can proceed.
+    """
+    atom_url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    try:
+        atom_bytes = fetch_bytes(atom_url, max_bytes=256 * 1024)
+    except FetchError as exc:
+        logger.warning("arXiv Atom fetch failed for %r: %s", arxiv_id, exc)
+        return {}
+
+    try:
+        root = DET.fromstring(atom_bytes)
+    except (DefusedXmlException, DET.ParseError) as exc:
+        logger.warning("arXiv Atom XML parse failed for %r: %s", arxiv_id, exc)
+        return {}
+
+    entry = root.find(f"{{{_ATOM_NS}}}entry")
+    if entry is None:
+        logger.warning("arXiv Atom response for %r has no <entry>", arxiv_id)
+        return {}
+
+    meta: dict = {}
+
+    title_el = entry.find(f"{{{_ATOM_NS}}}title")
+    if title_el is not None and title_el.text:
+        meta["title"] = title_el.text.strip()
+
+    authors = [
+        name_el.text.strip()
+        for author_el in entry.findall(f"{{{_ATOM_NS}}}author")
+        for name_el in [author_el.find(f"{{{_ATOM_NS}}}name")]
+        if name_el is not None and name_el.text
+    ]
+    if authors:
+        meta["authors"] = authors
+
+    published_el = entry.find(f"{{{_ATOM_NS}}}published")
+    if published_el is not None and published_el.text and len(published_el.text) >= 4:
+        with contextlib.suppress(ValueError):
+            meta["year"] = int(published_el.text[:4])
+
+    id_el = entry.find(f"{{{_ATOM_NS}}}id")
+    if id_el is not None and id_el.text:
+        meta["url"] = id_el.text.strip()
+
+    return meta
+
+
 def fetch_arxiv(arxiv_id: str) -> tuple[bytes, str, str, dict]:
-    """arXiv ID → arxiv.org/pdf/<id>.pdf (open access by default)."""
+    """arXiv ID → arxiv.org/pdf/<id>.pdf (open access by default).
+
+    Also fetches the Atom API metadata entry and merges title, authors,
+    year, url into the returned meta dict.  Atom fetch/parse failure is
+    non-fatal: the PDF is returned with just arxiv_id + source.
+    """
+    atom_meta = _fetch_arxiv_atom_meta(arxiv_id)
     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
     pdf_bytes = fetch_bytes(pdf_url)
+    meta: dict = {
+        "arxiv_id": arxiv_id,
+        "source": "arxiv",
+    }
+    meta.update(atom_meta)
     return (
         pdf_bytes,
         f"arxiv-{arxiv_id}.pdf",
         "application/pdf",
-        {
-            "arxiv_id": arxiv_id,
-            "source": "arxiv",
-        },
+        meta,
     )
 
 

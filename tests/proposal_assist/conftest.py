@@ -29,6 +29,7 @@ _FAKE_PUBLIC_HOSTS: frozenset[str] = frozenset(
         "www.nejm.org",
         "eutils.ncbi.nlm.nih.gov",
         "arxiv.org",
+        "export.arxiv.org",
         "example.com",
     }
 )
