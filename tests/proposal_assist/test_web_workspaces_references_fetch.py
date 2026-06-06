@@ -5,6 +5,7 @@ agent's fetch_reference MCP tool. Owner-only; same auth as upload.
 that hit the SSRF resolver request it by name (kept non-autouse so
 the 403/400 tests below don't pay the DNS monkeypatch cost)."""
 
+import re
 import uuid
 
 import pytest
@@ -14,6 +15,29 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Reference, User, Workspace
 from call_manager.main import create_app
+
+_ARXIV_ATOM_URL = re.compile(r"https://export\.arxiv\.org/api/query.*")
+_EMPTY_ATOM_FEED = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+
+@pytest.fixture(autouse=True)
+def _mock_arxiv_atom(httpx_mock):
+    """Register a reusable stub for the arXiv Atom metadata endpoint.
+
+    fetch_arxiv() calls _fetch_arxiv_atom_meta() which GETs
+    https://export.arxiv.org/api/query?id_list=<id> for every arXiv
+    fetch.  The call is non-fatal (failures are caught + logged), but
+    pytest-httpx errors at teardown for any outbound request that has no
+    registered mock.  An empty <feed> (no <entry>) makes the metadata
+    parse return nothing, keeping these tests focused on the
+    fetch/ingest behaviour they assert.
+    """
+    httpx_mock.add_response(
+        url=_ARXIV_ATOM_URL,
+        text=_EMPTY_ATOM_FEED,
+        is_reusable=True,
+        is_optional=True,
+    )
 
 
 def _build_app(monkeypatch, pg_url, tmp_path):
