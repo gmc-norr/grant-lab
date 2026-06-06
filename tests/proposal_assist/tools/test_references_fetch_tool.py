@@ -3,6 +3,7 @@ Uses atomic UPDATE turn_jobs SET fetch_count = fetch_count + 1
 WHERE workspace_id = ? AND status = 'running' AND fetch_count < 3
 RETURNING fetch_count."""
 
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -25,6 +26,29 @@ from call_manager.proposal_assist.tools.registry import ToolContext
 # apply the shared fake_public_dns fixture from tests/proposal_assist/
 # conftest.py to all tests in this module.
 pytestmark = pytest.mark.usefixtures("fake_public_dns")
+
+_ARXIV_ATOM_URL = re.compile(r"https://export\.arxiv\.org/api/query.*")
+_EMPTY_ATOM_FEED = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+
+@pytest.fixture(autouse=True)
+def _mock_arxiv_atom(httpx_mock):
+    """Register a reusable stub for the arXiv Atom metadata endpoint.
+
+    fetch_arxiv() calls _fetch_arxiv_atom_meta() which GETs
+    https://export.arxiv.org/api/query?id_list=<id> for every arXiv
+    fetch.  The call is non-fatal (failures are caught + logged), but
+    pytest-httpx errors at teardown for any outbound request that has no
+    registered mock.  An empty <feed> (no <entry>) makes the metadata
+    parse return nothing, keeping these tests focused on
+    fetch-count/cap/refund behaviour rather than metadata.
+    """
+    httpx_mock.add_response(
+        url=_ARXIV_ATOM_URL,
+        text=_EMPTY_ATOM_FEED,
+        is_reusable=True,
+        is_optional=True,
+    )
 
 
 def _make_ctx(pg_session_factory, tmp_path, workspace_id):
