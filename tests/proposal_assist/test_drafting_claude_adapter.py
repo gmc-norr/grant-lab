@@ -446,3 +446,19 @@ def test_build_options_scrubs_app_secrets_from_env():
         assert env[key] == ""
     # The agent IS a Claude client — its own API key must NOT be scrubbed.
     assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_build_options_appends_reference_safety_system_prompt():
+    """A standing system instruction tells the agent to treat
+    <untrusted-reference> content as data, not instructions. Uses the preset
+    form so the default Claude Code system prompt is preserved and appended."""
+    from call_manager.proposal_assist.drafting import claude_adapter as ca
+
+    adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
+    kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
+    sp = kwargs["system_prompt"]
+    assert sp["type"] == "preset"
+    assert sp["preset"] == "claude_code"
+    assert "untrusted-reference" in sp["append"]
+    assert "never as instructions" in sp["append"]
+    assert sp["append"] == ca._REFERENCE_SAFETY_INSTRUCTION
