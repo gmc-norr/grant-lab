@@ -194,7 +194,12 @@ class Settings(BaseSettings):
         ),
     )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
-    citation_llm_model: str = Field(default="", alias="CITATION_LLM_MODEL")
+    citation_llm_model: str = Field(
+        default="",
+        alias="CITATION_LLM_MODEL",
+        description="Empty string = use the provider's default model "
+        "(GEMMA_MODEL for ollama, REMOTE_RANK_MODEL for anthropic).",
+    )
     citation_llm_timeout_seconds: float = Field(default=60.0, alias="CITATION_LLM_TIMEOUT_SECONDS")
     citation_llm_max_output_tokens: int = Field(
         default=1024, alias="CITATION_LLM_MAX_OUTPUT_TOKENS"

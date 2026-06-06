@@ -62,3 +62,21 @@ def test_build_citation_llm_anthropic_requires_key():
     object.__setattr__(s, "anthropic_api_key", None)
     with pytest.raises(CitationLLMConfigError):
         build_citation_llm(s)
+
+
+def test_build_citation_llm_rejects_unknown_provider():
+    import os
+
+    from call_manager.config import Settings
+
+    for k, v in {
+        "DATABASE_URL": "postgresql://x",
+        "SESSION_SECRET": "test-secret-at-least-16-chars",
+        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "APP_BASE_URL": "http://localhost:8000",
+    }.items():
+        os.environ.setdefault(k, v)
+    s = Settings()
+    object.__setattr__(s, "citation_llm_provider", "bogus")
+    with pytest.raises(CitationLLMConfigError):
+        build_citation_llm(s)

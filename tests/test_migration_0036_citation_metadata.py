@@ -44,6 +44,8 @@ def test_0036_round_trip(migrated_engine, pg_url):
             }
             assert "ck_citation_llm_usage_status" in usage_checks
             assert "ck_citation_llm_usage_tokens_nonneg" in usage_checks
+            ref_idx = {i["name"] for i in inspect(conn).get_indexes("references")}
+            assert "uq_references_workspace_citekey" in ref_idx
 
         command.downgrade(_cfg(pg_url), "0035")
         with engine.connect() as conn:
@@ -60,6 +62,8 @@ def test_0036_round_trip(migrated_engine, pg_url):
             ref_checks = {c["name"] for c in inspect(conn).get_check_constraints("references")}
             assert "ck_references_metadata_status" not in ref_checks
             assert "ck_references_original_sha256_hex" not in ref_checks
+            ref_idx = {i["name"] for i in inspect(conn).get_indexes("references")}
+            assert "uq_references_workspace_citekey" not in ref_idx
     finally:
         # ALWAYS restore head, even if an assertion above failed — later tests
         # in this session reuse the shared container at head.

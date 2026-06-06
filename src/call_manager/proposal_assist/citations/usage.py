@@ -70,6 +70,10 @@ def check_citation_caps(
     session: Session, workspace_id: uuid.UUID, *, settings: Settings
 ) -> CapStatus:
     """Read-only; `>=` hard ceiling (matches turns/caps.py). Workspace first."""
+    # Soft guardrail, not an exact ledger: this reads usage then the caller
+    # makes the call + records in separate sessions, so two concurrent calls
+    # near the ceiling can both pass and overshoot by one. Matches the
+    # intentional approximate-cap semantics in turns/caps.py.
     ws_in, ws_out = _sum_today(session, workspace_id=workspace_id)
     if (
         ws_in >= settings.citation_llm_daily_token_cap_input

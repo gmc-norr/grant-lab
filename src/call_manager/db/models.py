@@ -1303,7 +1303,7 @@ class CitationLlmUsage(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        ForeignKey("workspaces.id", ondelete="CASCADE", name="fk_citation_llm_usage_workspace_id"),
         nullable=False,
     )
     op: Mapped[str] = mapped_column(Text, nullable=False)
