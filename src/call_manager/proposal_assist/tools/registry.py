@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import sessionmaker
 
     from call_manager.config import Settings
+    from call_manager.proposal_assist.citations import CitationLLMService
 
 
 @dataclass
@@ -41,6 +42,8 @@ class ToolContext:
     repo_dir: Path
     session_factory: sessionmaker
     settings: Settings
+    # Phase 3 metadata extraction; None disables LLM extraction gracefully.
+    citation_service: CitationLLMService | None = field(default=None)
 
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:

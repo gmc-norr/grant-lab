@@ -14,6 +14,7 @@ from call_manager.config import Settings
 from call_manager.db.session import make_engine, make_session_factory
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
+from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.web.files import (
     router as files_router,
 )
@@ -295,6 +296,13 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
+    # Phase 3 metadata extraction service. build_citation_service constructs a
+    # StructuredLLM but does NOT open any connection at this point — the LLM
+    # client is lazy/per-call, so this is safe at startup. Routes pass this
+    # through to ingest_bytes so extraction runs in production.
+    app.state.citation_service = build_citation_service(
+        settings=settings, session_factory=session_factory
+    )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     # Per design spec: web layer renders all timestamps in Europe/Stockholm.
     # Templates use `{{ dt | display_dt }}` / `{{ dt | display_date }}` —

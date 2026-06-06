@@ -949,6 +949,7 @@ def _make_tool_ctx(request: Request, ws: Workspace) -> ToolContext:
         repo_dir=Path(settings.workspaces_dir) / str(ws.id) / "repo",
         session_factory=request.app.state.session_factory,
         settings=settings,
+        citation_service=getattr(request.app.state, "citation_service", None),
     )
 
 

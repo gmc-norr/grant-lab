@@ -256,3 +256,96 @@ async def test_fetch_reference_with_invalid_input_returns_error(pg_session_facto
     with pg_session_factory() as s:
         job = s.scalar(select(TurnJob).where(TurnJob.id == jobid))
     assert job.fetch_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Slice 1B Task 7 — source_meta and ctx.citation_service wired through
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
+    pg_session_factory, tmp_path, httpx_mock, monkeypatch
+):
+    """fetch_reference_impl must pass source_meta and ctx.citation_service to
+    ingest_bytes so Phase 3 wiring is live on the tool path.
+
+    Strategy: monkeypatch ingest_bytes to capture its kwargs; verify that
+    source_meta is forwarded (not just source_meta["source"]) and that
+    citation_service is ctx.citation_service.
+    """
+    from io import BytesIO
+
+    from reportlab.pdfgen.canvas import Canvas
+
+    from call_manager.proposal_assist.references.ingest import IngestResult
+
+    captured: dict = {}
+
+    buf = BytesIO()
+    c = Canvas(buf)
+    c.drawString(72, 720, "source meta test")
+    c.save()
+    pdf_bytes = buf.getvalue()
+
+    httpx_mock.add_response(
+        url="https://arxiv.org/pdf/2401.77777.pdf",
+        content=pdf_bytes,
+    )
+
+    wsid, _jobid = _seed_running_turn(pg_session_factory)
+
+    class _FakeCitationService:
+        def complete_json(self, *, workspace_id, op, system, user):
+            pass  # not expected to be called in this test
+
+    fake_service = _FakeCitationService()
+
+    # Build a ToolContext with citation_service set.
+    from call_manager.config import Settings
+    from call_manager.proposal_assist.tools.registry import ToolContext
+
+    settings = Settings.model_construct(workspaces_dir=str(tmp_path))
+
+    # Use dataclass replace to add citation_service once the field exists.
+    # After implementation, ToolContext will have citation_service; we set it
+    # here to verify the impl passes it through.
+    ctx = ToolContext(
+        workspace_id=wsid,
+        repo_dir=tmp_path / str(wsid) / "repo",
+        session_factory=pg_session_factory,
+        settings=settings,
+        citation_service=fake_service,
+    )
+
+    # Monkeypatch ingest_bytes at its canonical import path. fetch_reference_impl
+    # uses `from call_manager.proposal_assist.references.ingest import ingest_bytes`
+    # inside the function, so we patch the ingest module directly.
+    import uuid as _uuid
+
+    import call_manager.proposal_assist.references.ingest as _ingest_mod
+
+    def _fake_ingest_bytes(**kwargs):
+        captured.update(kwargs)
+        # Return a minimal IngestResult so the tool's error handling doesn't fire.
+        return IngestResult(
+            reference_id=_uuid.uuid4(),
+            text_status="done",
+            text_error=None,
+        )
+
+    monkeypatch.setattr(_ingest_mod, "ingest_bytes", _fake_ingest_bytes)
+
+    await fetch_reference_impl(ctx, input="2401.77777", embedder=FakeEmbedder())
+
+    # Key assertions: source_meta and citation_service were forwarded to ingest_bytes.
+    assert "source_meta" in captured, "fetch_reference_impl must pass source_meta= to ingest_bytes"
+    assert isinstance(captured["source_meta"], dict), (
+        "source_meta must be the full dict from dispatch_fetch, not just a string"
+    )
+    assert "citation_service" in captured, (
+        "fetch_reference_impl must pass citation_service= to ingest_bytes"
+    )
+    assert captured["citation_service"] is fake_service, (
+        "citation_service must be ctx.citation_service"
+    )

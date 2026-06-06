@@ -478,6 +478,83 @@ def test_metadata_post_cross_workspace_returns_404(
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Slice 1B Task 7 — citation_service wired through upload + fetch routes
+# ---------------------------------------------------------------------------
+
+
+def test_upload_wires_citation_service_extraction(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """upload_reference must pass citation_service to ingest_bytes so Phase 3
+    extraction fires in production (not just in unit tests).
+
+    Strategy: override app.state.citation_service with a fake that returns a
+    fixed CitationLLMResult; upload a small text/markdown file; assert the
+    Reference row has metadata_status='extracted' (not 'pending') and that
+    title was filled from the LLM result.
+    """
+    from dataclasses import dataclass
+
+    from sqlalchemy import select
+
+    @dataclass
+    class _FakeLLMUsage:
+        tokens_in: int = 0
+        tokens_out: int = 0
+
+    @dataclass
+    class _FakeCitationResult:
+        data: dict | None
+        usage: object | None
+        model: str | None
+        cap_exceeded: bool = False
+        cap_scope: object | None = None
+
+    class _FakeCitationService:
+        def complete_json(self, *, workspace_id, op, system, user):
+            return _FakeCitationResult(
+                data={
+                    "title": "Wired Title",
+                    "author": [{"family": "Smith"}],
+                    "issued": {"date-parts": [[2021]]},
+                },
+                usage=_FakeLLMUsage(),
+                model="m",
+                cap_exceeded=False,
+            )
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    # Override the citation_service with our fake BEFORE the test client hits the
+    # upload route.  TestClient.app exposes the same app object, so mutations
+    # here are visible inside the handler.
+    app.state.citation_service = _FakeCitationService()
+
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s)
+    client = _authed(app, user_id=uid)
+    md = b"# Wired Title\n\nSome abstract text.\n"
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references",
+            data={"kind": "paper"},
+            files={"file": ("paper.md", io.BytesIO(md), "text/markdown")},
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert resp.status_code == 200, resp.text
+
+    with pg_session_factory() as s:
+        refs = list(s.scalars(select(Reference).where(Reference.workspace_id == wsid)))
+    assert len(refs) == 1
+    ref = refs[0]
+    assert ref.metadata_status == "extracted", (
+        f"Phase 3 must have run; expected 'extracted', got {ref.metadata_status!r}"
+    )
+    assert ref.title == "Wired Title"
+
+
 def test_metadata_author_family_only_round_trips(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Structured family-only authors must survive the textarea round-trip.
 

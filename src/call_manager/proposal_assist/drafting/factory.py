@@ -9,6 +9,7 @@ from __future__ import annotations
 from sqlalchemy.orm import sessionmaker
 
 from call_manager.config import Settings
+from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.drafting.contract import DraftingAgent
 from call_manager.proposal_assist.drafting.controller import (
     WorkspaceController,
@@ -49,12 +50,19 @@ def _build_adapter(settings: Settings, session_factory: sessionmaker) -> Draftin
             build_proposal_assist_mcp_server,
         )
 
+        # Build once; shared across all turns in this process. The service
+        # holds no open connections (LLM client is lazy/per-call).
+        _citation_service = build_citation_service(
+            settings=settings, session_factory=session_factory
+        )
+
         def tools_factory(repo_dir, workspace_id):
             ctx = ToolContext(
                 workspace_id=workspace_id,
                 repo_dir=repo_dir,
                 session_factory=session_factory,
                 settings=settings,
+                citation_service=_citation_service,
             )
             return build_proposal_assist_mcp_server(ctx)
 

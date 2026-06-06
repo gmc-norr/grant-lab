@@ -215,6 +215,8 @@ async def upload_reference(
         # fresh internal sessions. Phase 2 is retain-on-failure: on
         # extract/embed errors the row + bytes stay on disk with
         # text_status='failed'.
+        # Phase 3 (metadata extraction) runs when citation_service is
+        # provided; uploads have no fetcher-supplied source_meta.
         result: IngestResult = ingest_bytes(
             session_factory=request.app.state.session_factory,
             session=session,
@@ -230,6 +232,7 @@ async def upload_reference(
             mime_type=content_type,
             data=data,
             uploaded_by=user.id,
+            citation_service=request.app.state.citation_service,
         )
     except OSError as e:
         logger.warning(
@@ -323,6 +326,8 @@ def fetch_reference_route(
             mime_type=mime_type,
             data=data,
             uploaded_by=user.id,
+            source_meta=source_meta,
+            citation_service=request.app.state.citation_service,
         )
         session.commit()
     except OSError as e:

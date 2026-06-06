@@ -518,6 +518,8 @@ async def fetch_reference_impl(
                 mime_type=mime_type,
                 data=data,
                 uploaded_by=None,  # agent-initiated, no actor_id
+                source_meta=source_meta,
+                citation_service=ctx.citation_service,
             )
             s.commit()
         except Exception as e:
