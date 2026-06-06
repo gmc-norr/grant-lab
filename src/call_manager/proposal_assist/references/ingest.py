@@ -1,4 +1,4 @@
-"""Two-phase reference ingest.
+"""Three-phase reference ingest.
 
 Phase 1 (atomic, B7 pattern): validate, write_atomic, insert Reference
 row, commit. On any failure here → no row, no file (caller raises and
@@ -8,8 +8,18 @@ Phase 2 (sync Stage 1, retain-on-failure): extract text, chunk, embed,
 INSERT chunks, UPDATE text_status='done'. On Stage 1 failure → UPDATE
 text_status='failed' + text_error, leave row + bytes on disk for retry.
 
-The two phases use SEPARATE transactions because Stage 1 can take
-several seconds and we don't want to hold a tx open for that long.
+Phase 3 (optional, non-fatal): bibliographic metadata extraction in its
+own session after Phase 2. Runs a heuristic pass (PDF /Info) and/or an
+LLM pass via CitationLLMService, then writes csl_json_extracted, title,
+citekey, metadata_status, and metadata_source. Skipped entirely when
+both source_meta and citation_service are absent (metadata_status stays
+'pending'). Any failure in Phase 3 is caught, logged, and
+metadata_status is set to 'failed' — Phase 1+2 result is always
+returned regardless.
+
+The three phases use SEPARATE transactions because Stage 1 and Stage 2
+can take several seconds and we don't want to hold a tx open for that
+long.
 """
 
 from __future__ import annotations
@@ -255,6 +265,10 @@ def ingest_bytes(
                         ref3.citekey = generate_citekey(csl, workspace_id, s3)
                     else:
                         ref3.metadata_status = "failed"
+                        # Still assign a fallback citekey so a metadata-less reference can
+                        # be cited downstream (generate_citekey({}) → "ref-<12hex>").
+                        if ref3.citekey is None:
+                            ref3.citekey = generate_citekey({}, workspace_id, s3)
                     s3.commit()
         except Exception:
             logger.warning(

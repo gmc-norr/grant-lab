@@ -7,6 +7,10 @@ refs use their authoritative provider metadata (verified_external). All LLM
 calls are cap-checked + ledgered by CitationLLMService; cap-exceeded or LLM
 failure degrades gracefully to heuristics — this function never raises on
 extraction failure.
+
+Note: ``generate_citekey`` (which requires a DB session for uniqueness
+checks) is intentionally called by the ingest layer, not here, so this
+module stays free of DB/session concerns.
 """
 
 from __future__ import annotations

@@ -527,3 +527,62 @@ def test_phase3_failure_is_nonfatal(pg_session_factory, tmp_path, monkeypatch):
 
     assert ref is not None
     assert ref.metadata_status == "failed"
+
+
+class _EmptyCitationService:
+    """Returns empty data dict — simulates LLM returning no extractable fields."""
+
+    def complete_json(self, *, workspace_id, op, system, user):
+        return _FakeCitationLLMResult(
+            data={},
+            usage=None,
+            model=None,
+            cap_exceeded=False,
+        )
+
+
+def test_phase3_empty_csl_assigns_fallback_citekey(pg_session_factory, tmp_path):
+    """When the citation_service returns an empty dict (no extractable CSL),
+    metadata_status must be 'failed' AND a fallback citekey of the form
+    'ref-<12hex>' must still be assigned so the reference is citeable downstream.
+    """
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    # Plain-text upload with no PDF metadata — heuristic produces nothing,
+    # LLM returns empty dict.
+    txt = b"Some plain text with no bibliographic information.\n"
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="plain.txt",
+            mime_type="text/plain",
+            data=txt,
+            uploaded_by=None,
+            citation_service=_EmptyCitationService(),
+        )
+        s.commit()
+
+    assert isinstance(result, IngestResult)
+    assert result.text_status == "done"
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
+
+    assert ref.metadata_status == "failed"
+    assert ref.citekey is not None
+    assert ref.citekey.startswith("ref-")
