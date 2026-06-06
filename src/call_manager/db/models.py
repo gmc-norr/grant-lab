@@ -1198,6 +1198,21 @@ class Reference(Base):
             "outline_status IN ('pending','running','done','failed','skipped')",
             name="ck_references_outline_status",
         ),
+        CheckConstraint(
+            "metadata_status IN ('pending','extracted','verified_external','approved','failed')",
+            name="ck_references_metadata_status",
+        ),
+        CheckConstraint(
+            "original_sha256 IS NULL OR original_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_references_original_sha256_hex",
+        ),
+        Index(
+            "uq_references_workspace_citekey",
+            "workspace_id",
+            "citekey",
+            unique=True,
+            postgresql_where=text("citekey IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1234,6 +1249,12 @@ class Reference(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    csl_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    csl_json_extracted: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    citekey: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    metadata_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReferenceChunk(Base):
@@ -1262,3 +1283,36 @@ class ReferenceChunk(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(1024), nullable=False)
     embedding_model: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class CitationLlmUsage(Base):
+    """Append-only ledger of every LLM call the citation subsystem makes
+    (metadata extraction now; audit later). Basis for per-workspace + global
+    daily caps. Written only via CitationLLMService. See the spec."""
+
+    __tablename__ = "citation_llm_usage"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok','failed','timeout')", name="ck_citation_llm_usage_status"
+        ),
+        CheckConstraint(
+            "tokens_in >= 0 AND tokens_out >= 0", name="ck_citation_llm_usage_tokens_nonneg"
+        ),
+        Index("ix_citation_llm_usage_ws_created", "workspace_id", "created_at"),
+        Index("ix_citation_llm_usage_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    op: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
