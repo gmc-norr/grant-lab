@@ -14,6 +14,7 @@ several seconds and we don't want to hold a tx open for that long.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
@@ -92,6 +93,7 @@ def ingest_bytes(
     )
     try:
         relative_path = f"{workspace_id}/references/{reference_id}/original{suffix}"
+        original_sha256 = hashlib.sha256(data).hexdigest()
         ref = Reference(
             id=reference_id,
             workspace_id=workspace_id,
@@ -103,6 +105,7 @@ def ingest_bytes(
             storage_path=relative_path,
             mime_type=mime_type,
             bytes_total=len(data),
+            original_sha256=original_sha256,
             text_status="pending",
             outline_status="skipped",  # v1; v1.1 changes to 'pending'
             uploaded_by=uploaded_by,

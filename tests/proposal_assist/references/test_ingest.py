@@ -214,3 +214,45 @@ def test_phase1_commit_failure_cleans_bytes(pg_session_factory, tmp_path, monkey
     workspace_refs_dir = tmp_path / str(wsid) / "references"
     leftover = list(workspace_refs_dir.iterdir()) if workspace_refs_dir.exists() else []
     assert leftover == [], f"Phase 1 commit-failure must unlink bytes; found leftover: {leftover}"
+
+
+def test_ingest_records_original_sha256(pg_session_factory, tmp_path):
+    import hashlib
+
+    from sqlalchemy import select
+
+    from call_manager.db.models import Reference
+    from call_manager.proposal_assist.references.embed import FakeEmbedder
+    from call_manager.proposal_assist.references.ingest import ingest_bytes
+    from call_manager.proposal_assist.references.storage import ReferenceStorage
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    storage = ReferenceStorage(root=tmp_path)
+    data = b"# Title\n\nBody.\n"
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s))
+        s.commit()
+        wsid = ws.id
+
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=FakeEmbedder(),
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="p.md",
+            mime_type="text/markdown",
+            data=data,
+            uploaded_by=None,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == result.reference_id))
+    assert ref.original_sha256 == hashlib.sha256(data).hexdigest()
+    assert ref.metadata_status == "pending"
