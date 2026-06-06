@@ -2,36 +2,37 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Lay the data + LLM-infrastructure foundation for citation provenance — CSL bibliographic metadata columns on `references`, original-bytes hashing at ingest, a shared structured-completion LLM client, and a per-workspace/global usage ledger with caps.
+**Revision 2** — incorporates a Codex review of this plan (enforced LLM service, cache-token accounting, explicit citation-LLM provider settings, index/constraint hardening, migration-test safety).
 
-**Architecture:** This is **Slice 1A** of the citation-provenance spec ([`docs/superpowers/specs/2026-06-06-citation-provenance-evidence-ledger-design.md`](../specs/2026-06-06-citation-provenance-evidence-ledger-design.md)). It builds the pieces every later slice depends on but adds no user-visible behavior yet: schema (migration 0036), the `original_sha256` freeze anchor, a `StructuredLLM` wrapper over the existing ranking clients (reused by metadata extraction now and the audit service later), and the `citation_llm_usage` ledger + cap helper. Slice 1B (extended fetchers, heuristic+LLM extraction wired into ingest, citekey generation, owner approval UI) and Slices 2–4 follow in separate plans.
+**Goal:** Lay the data + LLM-infrastructure foundation for citation provenance — CSL bibliographic metadata columns on `references`, original-bytes hashing at ingest, and a single **enforced** citation-LLM service that checks caps and records all usage to a ledger.
 
-**Tech Stack:** Python 3.12, SQLAlchemy 2.x + Alembic, PostgreSQL 16 (JSONB), pytest with the session-scoped pgvector testcontainer (`pg_session_factory` / `migrated_engine` fixtures from `tests/conftest.py`). LLM clients: `call_manager.ranking.anthropic_client.AnthropicClient`, `call_manager.ranking.ollama_client.OllamaClient` (both already return an OpenAI-shaped envelope with a `usage` block).
+**Architecture:** This is **Slice 1A** of the citation-provenance spec ([`docs/superpowers/specs/2026-06-06-citation-provenance-evidence-ledger-design.md`](../specs/2026-06-06-citation-provenance-evidence-ledger-design.md)). It builds the pieces every later slice depends on but adds no user-visible behavior: schema (migration 0036), the `original_sha256` freeze anchor, and `CitationLLMService` — the only supported way to call an LLM in the citation subsystem (it wraps a structured client, enforces per-workspace/global daily caps, and writes a `citation_llm_usage` row on success/failure/timeout). Slice 1B (extended fetchers, heuristic+LLM extraction wired into ingest, citekey generation, owner approval UI, and lazy-hashing of pre-existing references — see "Deferred") and Slices 2–4 follow.
+
+**Tech Stack:** Python 3.12, SQLAlchemy 2.x + Alembic, PostgreSQL 16 (JSONB), pytest with the session-scoped pgvector testcontainer (`pg_session_factory` / `migrated_engine` from `tests/conftest.py`). LLM clients: `call_manager.ranking.anthropic_client.AnthropicClient`, `call_manager.ranking.ollama_client.OllamaClient` — both return an OpenAI-shaped envelope with a `usage` block (Anthropic additionally exposes `cache_read_input_tokens` / `cache_creation_input_tokens`).
 
 ---
 
 ## File Structure
 
-- `alembic/versions/0036_citation_metadata_foundation.py` — **new** migration (references columns + `citation_llm_usage` table). Down-revision `0035`.
-- `src/call_manager/db/models.py` — **modify**: add metadata columns to `Reference`; add `CitationLlmUsage` model.
-- `src/call_manager/proposal_assist/references/ingest.py` — **modify**: compute + store `original_sha256` at ingest.
-- `src/call_manager/config.py` — **modify**: add citation-LLM daily cap settings.
-- `src/call_manager/proposal_assist/citations/__init__.py` — **new** (empty package marker).
-- `src/call_manager/proposal_assist/citations/llm.py` — **new**: `StructuredLLM` wrapper + `build_citation_llm(settings)` factory.
-- `src/call_manager/proposal_assist/citations/usage.py` — **new**: `record_usage(...)` + `check_citation_caps(...)`.
-- Tests: `tests/test_migration_0036_citation_metadata.py`, `tests/proposal_assist/references/test_ingest.py` (append), `tests/proposal_assist/citations/test_llm.py` (new), `tests/proposal_assist/citations/test_usage.py` (new), plus a `Reference`/`CitationLlmUsage` model test in `tests/proposal_assist/references/test_models.py` (append).
+- `alembic/versions/0036_citation_metadata_foundation.py` — **new** migration (references columns + `citation_llm_usage` table, CHECKs, indexes). Down-revision `0035`.
+- `src/call_manager/db/models.py` — **modify**: metadata columns + `original_sha256` hex CHECK on `Reference`; new `CitationLlmUsage` model with `__table_args__` indexes matching the migration.
+- `src/call_manager/proposal_assist/references/ingest.py` — **modify**: compute + store `original_sha256`.
+- `src/call_manager/config.py` — **modify**: citation-LLM provider/model/timeout/max-output settings + daily cap settings.
+- `src/call_manager/proposal_assist/citations/__init__.py` — **new** (empty).
+- `src/call_manager/proposal_assist/citations/llm.py` — **new**: `StructuredLLM` (internal) + `build_citation_llm(settings)` + `CitationLLMConfigError`.
+- `src/call_manager/proposal_assist/citations/usage.py` — **new**: `record_usage(...)` + `check_citation_caps(...)` (internals).
+- `src/call_manager/proposal_assist/citations/service.py` — **new**: `CitationLLMService` — the only supported citation-LLM call path.
+- Tests: `tests/test_migration_0036_citation_metadata.py`, `tests/proposal_assist/references/test_ingest.py` (append), `tests/proposal_assist/references/test_models.py` (append), `tests/proposal_assist/citations/test_llm.py`, `tests/proposal_assist/citations/test_service.py`.
 
 ---
 
-### Task 1: Migration 0036 — references metadata columns + `citation_llm_usage`
+### Task 1: Migration 0036 — references columns + `citation_llm_usage` (with CHECKs + indexes)
 
 **Files:**
 - Create: `alembic/versions/0036_citation_metadata_foundation.py`
 - Test: `tests/test_migration_0036_citation_metadata.py`
 
 - [ ] **Step 1: Write the migration**
-
-Create `alembic/versions/0036_citation_metadata_foundation.py`:
 
 ```python
 """Citation metadata foundation: references CSL columns + citation_llm_usage
@@ -74,7 +75,11 @@ def upgrade() -> None:
         "references",
         "metadata_status IN ('pending','extracted','verified_external','approved','failed')",
     )
-    # citekey is unique per workspace, only when assigned.
+    op.create_check_constraint(
+        "ck_references_original_sha256_hex",
+        "references",
+        "original_sha256 IS NULL OR original_sha256 ~ '^[0-9a-f]{64}$'",
+    )
     op.create_index(
         "uq_references_workspace_citekey",
         "references",
@@ -102,18 +107,25 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status IN ('ok','failed','timeout')", name="ck_citation_llm_usage_status"
         ),
+        sa.CheckConstraint(
+            "tokens_in >= 0 AND tokens_out >= 0", name="ck_citation_llm_usage_tokens_nonneg"
+        ),
     )
+    # Composite serves the per-workspace daily sum; standalone created_at
+    # serves the GLOBAL daily sum (which filters created_at only — the
+    # composite's leading workspace_id column can't serve it efficiently).
     op.create_index(
-        "ix_citation_llm_usage_ws_created",
-        "citation_llm_usage",
-        ["workspace_id", "created_at"],
+        "ix_citation_llm_usage_ws_created", "citation_llm_usage", ["workspace_id", "created_at"]
     )
+    op.create_index("ix_citation_llm_usage_created", "citation_llm_usage", ["created_at"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_citation_llm_usage_created", table_name="citation_llm_usage")
     op.drop_index("ix_citation_llm_usage_ws_created", table_name="citation_llm_usage")
     op.drop_table("citation_llm_usage")
     op.drop_index("uq_references_workspace_citekey", table_name="references")
+    op.drop_constraint("ck_references_original_sha256_hex", "references", type_="check")
     op.drop_constraint("ck_references_metadata_status", "references", type_="check")
     for col in (
         "original_sha256",
@@ -126,15 +138,13 @@ def downgrade() -> None:
         op.drop_column("references", col)
 ```
 
-- [ ] **Step 2: Write the round-trip migration test**
-
-Create `tests/test_migration_0036_citation_metadata.py` (mirrors the 0035 test; `pg_url` is the SHARED container so the test MUST leave the schema at head):
+- [ ] **Step 2: Write the round-trip migration test (restores head in `finally`)**
 
 ```python
 """Round-trip checks for migration 0036 (citation metadata foundation).
 
 pg_url is the SHARED session container; this test downgrades then upgrades,
-so it MUST leave the schema at head for later tests.
+so it MUST leave the schema at head for later tests — done in finally.
 """
 
 from alembic.config import Config
@@ -156,51 +166,46 @@ def _columns(conn, table):
 def test_0036_round_trip(migrated_engine, pg_url):
     engine = create_engine(pg_url)
     try:
-        # At head: new columns + table present.
         with engine.connect() as conn:
-            assert {"csl_json", "csl_json_extracted", "citekey",
-                    "metadata_status", "metadata_source", "original_sha256"} <= _columns(conn, "references")
+            assert {"csl_json", "csl_json_extracted", "citekey", "metadata_status",
+                    "metadata_source", "original_sha256"} <= _columns(conn, "references")
             assert "citation_llm_usage" in inspect(conn).get_table_names()
+            idx = {i["name"] for i in inspect(conn).get_indexes("citation_llm_usage")}
+            assert "ix_citation_llm_usage_created" in idx
+            assert "ix_citation_llm_usage_ws_created" in idx
 
-        # Downgrade to 0035: everything 0036 added is gone.
         command.downgrade(_cfg(pg_url), "0035")
         with engine.connect() as conn:
             assert "original_sha256" not in _columns(conn, "references")
             assert "citation_llm_usage" not in inspect(conn).get_table_names()
-
-        # Upgrade back to head (leave schema as later tests expect).
-        command.upgrade(_cfg(pg_url), "head")
-        with engine.connect() as conn:
-            cols = _columns(conn, "references")
-            assert "original_sha256" in cols and "csl_json" in cols
-            assert "citation_llm_usage" in inspect(conn).get_table_names()
     finally:
+        # ALWAYS restore head, even if an assertion above failed — later tests
+        # in this session reuse the shared container at head.
+        command.upgrade(_cfg(pg_url), "head")
         engine.dispose()
 ```
-
-(The `metadata_status` CHECK constraint is exercised at the ORM layer in Task 2.)
 
 - [ ] **Step 3: Run the migration test**
 
 Run: `uv run pytest tests/test_migration_0036_citation_metadata.py -v`
-Expected: PASS (columns + table appear at head, vanish at 0035, return at head).
+Expected: PASS (columns + table + both indexes at head; gone at 0035; restored).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add alembic/versions/0036_citation_metadata_foundation.py tests/test_migration_0036_citation_metadata.py
-git commit -m "feat(citations): migration 0036 — references metadata columns + citation_llm_usage"
+git commit -m "feat(citations): migration 0036 — references metadata + citation_llm_usage (checks+indexes)"
 ```
 
 ---
 
-### Task 2: Models — `Reference` metadata columns + `CitationLlmUsage`
+### Task 2: Models — `Reference` columns + `CitationLlmUsage`
 
 **Files:**
 - Modify: `src/call_manager/db/models.py`
 - Test: `tests/proposal_assist/references/test_models.py` (append)
 
-- [ ] **Step 1: Write the failing model test**
+- [ ] **Step 1: Write the failing model tests**
 
 Append to `tests/proposal_assist/references/test_models.py`:
 
@@ -211,6 +216,8 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
     from sqlalchemy.exc import IntegrityError
     from call_manager.db.models import Reference
     from tests.proposal_assist.conftest import make_user, make_workspace
+
+    sha = "a" * 64  # valid lowercase 64-hex
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s))
@@ -224,7 +231,7 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
             source_uri=None, filename="p.pdf", storage_path="x", mime_type="application/pdf",
             csl_json={"title": "T"}, csl_json_extracted={"title": "T?"},
             citekey="smith2021", metadata_status="approved", metadata_source="llm",
-            original_sha256="abc123",
+            original_sha256=sha,
         ))
         s.commit()
 
@@ -232,8 +239,7 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
         ref = s.scalar(select(Reference).where(Reference.id == rid))
         assert ref.csl_json == {"title": "T"}
         assert ref.citekey == "smith2021"
-        assert ref.metadata_status == "approved"
-        assert ref.original_sha256 == "abc123"
+        assert ref.original_sha256 == sha
 
     # CHECK rejects a bad status.
     with pg_session_factory() as s:
@@ -248,10 +254,59 @@ def test_reference_metadata_columns_round_trip(pg_session_factory):
         except IntegrityError:
             pass
 
+    # CHECK rejects a non-64-hex original_sha256.
+    with pg_session_factory() as s:
+        s.add(Reference(
+            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
+            source_uri=None, filename="r.pdf", storage_path="z", mime_type="application/pdf",
+            original_sha256="abc123",
+        ))
+        try:
+            s.commit()
+            raise AssertionError("expected IntegrityError on bad original_sha256")
+        except IntegrityError:
+            pass
 
-def test_citation_llm_usage_insert(pg_session_factory):
+
+def test_reference_citekey_unique_per_workspace(pg_session_factory):
+    import uuid
+    from sqlalchemy.exc import IntegrityError
+    from call_manager.db.models import Reference
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    def _ref(wsid, name):
+        return Reference(
+            id=uuid.uuid4(), workspace_id=wsid, kind="paper", source_type="uploaded",
+            source_uri=None, filename=name, storage_path=name, mime_type="application/pdf",
+            citekey="smith2021",
+        )
+
+    with pg_session_factory() as s:
+        ws_a = make_workspace(s, owner=make_user(s, email="a@ki.se"))
+        ws_b = make_workspace(s, owner=make_user(s, email="b@ki.se"))
+        s.commit()
+        a, b = ws_a.id, ws_b.id
+
+    # Same citekey in DIFFERENT workspaces is allowed.
+    with pg_session_factory() as s:
+        s.add(_ref(a, "1.pdf"))
+        s.add(_ref(b, "2.pdf"))
+        s.commit()
+
+    # Duplicate citekey in the SAME workspace is rejected.
+    with pg_session_factory() as s:
+        s.add(_ref(a, "3.pdf"))
+        try:
+            s.commit()
+            raise AssertionError("expected IntegrityError on duplicate workspace citekey")
+        except IntegrityError:
+            pass
+
+
+def test_citation_llm_usage_insert_and_nonneg(pg_session_factory):
     import uuid
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
     from call_manager.db.models import CitationLlmUsage
     from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -261,25 +316,30 @@ def test_citation_llm_usage_insert(pg_session_factory):
         wsid = ws.id
 
     with pg_session_factory() as s:
-        s.add(CitationLlmUsage(
-            workspace_id=wsid, op="metadata_extract", status="ok",
-            tokens_in=100, tokens_out=20, model="gemma",
-        ))
+        s.add(CitationLlmUsage(workspace_id=wsid, op="metadata_extract", status="ok",
+                               tokens_in=100, tokens_out=20, model="gemma"))
         s.commit()
-
     with pg_session_factory() as s:
         row = s.scalar(select(CitationLlmUsage).where(CitationLlmUsage.workspace_id == wsid))
         assert row.op == "metadata_extract" and row.tokens_in == 100
+
+    with pg_session_factory() as s:
+        s.add(CitationLlmUsage(workspace_id=wsid, op="x", status="ok", tokens_in=-1))
+        try:
+            s.commit()
+            raise AssertionError("expected IntegrityError on negative tokens")
+        except IntegrityError:
+            pass
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run pytest tests/proposal_assist/references/test_models.py -v -k "metadata_columns or citation_llm_usage"`
-Expected: FAIL (`TypeError: 'csl_json' is an invalid keyword argument` / `ImportError: cannot import name 'CitationLlmUsage'`).
+Run: `uv run pytest tests/proposal_assist/references/test_models.py -v -k "metadata_columns or citekey_unique or citation_llm_usage"`
+Expected: FAIL (invalid kwargs / `ImportError: CitationLlmUsage`).
 
-- [ ] **Step 3: Add the columns to `Reference`**
+- [ ] **Step 3: Add columns + CHECKs to `Reference`**
 
-In `src/call_manager/db/models.py`, inside `class Reference(Base)`: add the new columns after `created_at` (any position among the mapped columns works) and add the CHECK to `__table_args__`:
+In `class Reference(Base)`, add columns:
 
 ```python
     csl_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -290,30 +350,48 @@ In `src/call_manager/db/models.py`, inside `class Reference(Base)`: add the new 
     original_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
 ```
 
-Add to `Reference.__table_args__` (it is a tuple of constraints):
+Add to `Reference.__table_args__`:
 
 ```python
         CheckConstraint(
             "metadata_status IN ('pending','extracted','verified_external','approved','failed')",
             name="ck_references_metadata_status",
         ),
+        CheckConstraint(
+            "original_sha256 IS NULL OR original_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_references_original_sha256_hex",
+        ),
+        Index(
+            "uq_references_workspace_citekey",
+            "workspace_id",
+            "citekey",
+            unique=True,
+            postgresql_where=text("citekey IS NOT NULL"),
+        ),
 ```
 
-- [ ] **Step 4: Add the `CitationLlmUsage` model**
+(If `Index` / `text` aren't yet imported in `models.py`, add them: `from sqlalchemy import ... Index, text`. Check the existing import block first and only add what's missing.)
 
-In `src/call_manager/db/models.py`, after `class ReferenceChunk(Base)`:
+- [ ] **Step 4: Add the `CitationLlmUsage` model (indexes match the migration exactly)**
+
+After `class ReferenceChunk(Base)`:
 
 ```python
 class CitationLlmUsage(Base):
     """Append-only ledger of every LLM call the citation subsystem makes
-    (metadata extraction now; validate/list audit later). Basis for the
-    per-workspace + global daily caps. See the citation-provenance spec."""
+    (metadata extraction now; audit later). Basis for per-workspace + global
+    daily caps. Written only via CitationLLMService. See the spec."""
 
     __tablename__ = "citation_llm_usage"
     __table_args__ = (
         CheckConstraint(
             "status IN ('ok','failed','timeout')", name="ck_citation_llm_usage_status"
         ),
+        CheckConstraint(
+            "tokens_in >= 0 AND tokens_out >= 0", name="ck_citation_llm_usage_tokens_nonneg"
+        ),
+        Index("ix_citation_llm_usage_ws_created", "workspace_id", "created_at"),
+        Index("ix_citation_llm_usage_created", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -321,7 +399,6 @@ class CitationLlmUsage(Base):
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     op: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
@@ -333,18 +410,18 @@ class CitationLlmUsage(Base):
     )
 ```
 
-(`BigInteger`, `Integer`, `Text`, `DateTime`, `ForeignKey`, `CheckConstraint`, `func`, `UUID`, `Mapped`, `mapped_column`, `uuid`, `datetime` are all already imported in `models.py`.)
+Note: `workspace_id` does **not** use `index=True` — its index is the composite `ix_citation_llm_usage_ws_created` declared above, matching the migration (no stray `ix_citation_llm_usage_workspace_id`).
 
 - [ ] **Step 5: Run the model tests**
 
-Run: `uv run pytest tests/proposal_assist/references/test_models.py -v -k "metadata_columns or citation_llm_usage"`
+Run: `uv run pytest tests/proposal_assist/references/test_models.py -v -k "metadata_columns or citekey_unique or citation_llm_usage"`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/call_manager/db/models.py tests/proposal_assist/references/test_models.py
-git commit -m "feat(citations): Reference metadata columns + CitationLlmUsage model"
+git commit -m "feat(citations): Reference metadata columns + CitationLlmUsage model (checks+indexes)"
 ```
 
 ---
@@ -356,8 +433,6 @@ git commit -m "feat(citations): Reference metadata columns + CitationLlmUsage mo
 - Test: `tests/proposal_assist/references/test_ingest.py` (append)
 
 - [ ] **Step 1: Write the failing test**
-
-Append to `tests/proposal_assist/references/test_ingest.py`:
 
 ```python
 def test_ingest_records_original_sha256(pg_session_factory, tmp_path):
@@ -392,20 +467,20 @@ def test_ingest_records_original_sha256(pg_session_factory, tmp_path):
     assert ref.metadata_status == "pending"
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest tests/proposal_assist/references/test_ingest.py::test_ingest_records_original_sha256 -v`
-Expected: FAIL (`assert None == '<hash>'` — column exists but is never set).
+Expected: FAIL (`assert None == '<hash>'`).
 
 - [ ] **Step 3: Set `original_sha256` in `ingest_bytes`**
 
-In `src/call_manager/proposal_assist/references/ingest.py`: add `import hashlib` to the imports at the top, then in `ingest_bytes`, before the `ref = Reference(...)` construction add:
+Add `import hashlib` at the top of `ingest.py`. In `ingest_bytes`, before `ref = Reference(...)`:
 
 ```python
     original_sha256 = hashlib.sha256(data).hexdigest()
 ```
 
-and pass it into the `Reference(...)` call (add the keyword alongside `bytes_total=len(data),`):
+Add the keyword to the `Reference(...)` call (next to `bytes_total=len(data),`):
 
 ```python
             original_sha256=original_sha256,
@@ -425,24 +500,69 @@ git commit -m "feat(citations): hash original reference bytes (original_sha256) 
 
 ---
 
-### Task 4: Shared structured-completion LLM client
+### Task 4: Citation-LLM settings
+
+**Files:**
+- Modify: `src/call_manager/config.py`
+
+- [ ] **Step 1: Add the settings to `Settings`**
+
+Add to `class Settings` (near the other `*_daily_token_cap_*` fields). Provider defaults to `ollama` so uploaded reference text stays **on-prem by default**:
+
+```python
+    citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
+    citation_llm_model: str = Field(default="", alias="CITATION_LLM_MODEL")
+    citation_llm_timeout_seconds: float = Field(
+        default=60.0, alias="CITATION_LLM_TIMEOUT_SECONDS"
+    )
+    citation_llm_max_output_tokens: int = Field(
+        default=1024, alias="CITATION_LLM_MAX_OUTPUT_TOKENS"
+    )
+    citation_llm_daily_token_cap_input: int = Field(
+        default=200_000, alias="CITATION_LLM_DAILY_TOKEN_CAP_INPUT"
+    )
+    citation_llm_daily_token_cap_output: int = Field(
+        default=50_000, alias="CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
+    )
+    global_citation_llm_daily_token_cap_input: int = Field(
+        default=2_000_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_INPUT"
+    )
+    global_citation_llm_daily_token_cap_output: int = Field(
+        default=500_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
+    )
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add src/call_manager/config.py
+git commit -m "feat(citations): explicit citation-LLM provider/model/timeout/cap settings (local default)"
+```
+
+---
+
+### Task 5: `StructuredLLM` client (cache-token accounting) + factory
 
 **Files:**
 - Create: `src/call_manager/proposal_assist/citations/__init__.py` (empty)
 - Create: `src/call_manager/proposal_assist/citations/llm.py`
 - Test: `tests/proposal_assist/citations/__init__.py` (empty), `tests/proposal_assist/citations/test_llm.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test (incl. cache-token regression)**
 
 Create `tests/proposal_assist/citations/__init__.py` (empty) and `tests/proposal_assist/citations/test_llm.py`:
 
 ```python
-from call_manager.proposal_assist.citations.llm import StructuredLLM
+import pytest
+
+from call_manager.proposal_assist.citations.llm import (
+    CitationLLMConfigError,
+    StructuredLLM,
+    build_citation_llm,
+)
 
 
 class _FakeClient:
-    """Mimics the ranking clients' OpenAI-shaped envelope (incl. usage)."""
-
     def __init__(self, content, usage=None):
         self._content = content
         self._usage = usage or {"prompt_tokens": 10, "completion_tokens": 4}
@@ -450,43 +570,58 @@ class _FakeClient:
 
     def chat(self, *, messages, response_format=None):
         self.calls.append(messages)
-        return {
-            "model": "fake-model",
-            "choices": [{"message": {"role": "assistant", "content": self._content}}],
-            "usage": self._usage,
-        }
+        return {"model": "fake-model",
+                "choices": [{"message": {"role": "assistant", "content": self._content}}],
+                "usage": self._usage}
 
 
 def test_complete_json_parses_and_reports_usage():
-    client = _FakeClient('{"title": "X", "year": 2021}')
-    llm = StructuredLLM(client, "fake-model")
-    result = llm.complete_json(system="extract", user="paper text")
-    assert result.data == {"title": "X", "year": 2021}
+    client = _FakeClient('{"title": "X"}')
+    result = StructuredLLM(client, "fake-model").complete_json(system="s", user="u")
+    assert result.data == {"title": "X"}
     assert result.usage.tokens_in == 10
     assert result.usage.tokens_out == 4
-    assert result.model == "fake-model"
-    # system + user passed through in OpenAI shape.
-    assert client.calls[0][0]["role"] == "system"
-    assert client.calls[0][1]["role"] == "user"
+    assert client.calls[0][0]["role"] == "system" and client.calls[0][1]["role"] == "user"
+
+
+def test_complete_json_sums_anthropic_cache_tokens():
+    # tokens_in must include cache-read + cache-creation, not just prompt_tokens.
+    client = _FakeClient('{"ok": true}', usage={
+        "prompt_tokens": 10, "completion_tokens": 4,
+        "cache_read_input_tokens": 100, "cache_creation_input_tokens": 50,
+    })
+    result = StructuredLLM(client, "fake-model").complete_json(system="s", user="u")
+    assert result.usage.tokens_in == 160  # 10 + 100 + 50
+
+
+def test_build_citation_llm_anthropic_requires_key():
+    from call_manager.config import Settings
+    import os
+    for k, v in {"DATABASE_URL": "postgresql://x", "SESSION_SECRET": "test-secret-at-least-16-chars",
+                 "ALLOWED_EMAIL_DOMAINS": "ki.se", "APP_BASE_URL": "http://localhost:8000"}.items():
+        os.environ.setdefault(k, v)
+    s = Settings()
+    object.__setattr__(s, "citation_llm_provider", "anthropic")
+    object.__setattr__(s, "anthropic_api_key", None)
+    with pytest.raises(CitationLLMConfigError):
+        build_citation_llm(s)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest tests/proposal_assist/citations/test_llm.py -v`
-Expected: FAIL (`ModuleNotFoundError: ...citations.llm`).
+Expected: FAIL (`ModuleNotFoundError`).
 
-- [ ] **Step 3: Implement the client**
+- [ ] **Step 3: Implement the client + factory**
 
-Create `src/call_manager/proposal_assist/citations/__init__.py` (empty file). Create `src/call_manager/proposal_assist/citations/llm.py`:
+Create `src/call_manager/proposal_assist/citations/__init__.py` (empty). Create `src/call_manager/proposal_assist/citations/llm.py`:
 
 ```python
-"""Structured-JSON LLM wrapper for the citation subsystem.
+"""Structured-JSON LLM wrapper for the citation subsystem (internal).
 
-Deliberately built on the ranking clients (AnthropicClient / OllamaClient),
-NOT the streaming drafting SDK: metadata extraction and (later) the citation
-audit run as discrete prompt-in/JSON-out calls whose token usage must be
-accounted in the citation_llm_usage ledger. Both ranking clients already
-return an OpenAI-shaped envelope with a `usage` block.
+Built on the ranking clients (AnthropicClient / OllamaClient), NOT the
+streaming drafting SDK. Public callers go through CitationLLMService, never
+this class directly.
 """
 
 from __future__ import annotations
@@ -495,6 +630,10 @@ import json
 from dataclasses import dataclass
 
 from call_manager.config import Settings
+
+
+class CitationLLMConfigError(RuntimeError):
+    """Misconfigured citation LLM (e.g. provider=anthropic with no API key)."""
 
 
 @dataclass
@@ -512,8 +651,6 @@ class LLMResult:
 
 class StructuredLLM:
     def __init__(self, client, model: str) -> None:
-        # `client` is any object exposing
-        # `.chat(messages=[{role,content}, ...]) -> {choices:[{message:{content}}], usage:{...}, model}`.
         self._client = client
         self.model = model
 
@@ -526,91 +663,93 @@ class StructuredLLM:
         )
         content = resp["choices"][0]["message"]["content"]
         usage = resp.get("usage") or {}
+        # Anthropic reports cache-read / cache-creation tokens SEPARATELY from
+        # prompt_tokens; true input usage is their sum. Ollama returns neither
+        # (the .get(...,0) defaults make this safe for both).
+        tokens_in = (
+            int(usage.get("prompt_tokens", 0))
+            + int(usage.get("cache_read_input_tokens", 0))
+            + int(usage.get("cache_creation_input_tokens", 0))
+        )
         return LLMResult(
             data=json.loads(content),
-            usage=LLMUsage(
-                tokens_in=int(usage.get("prompt_tokens", 0)),
-                tokens_out=int(usage.get("completion_tokens", 0)),
-            ),
+            usage=LLMUsage(tokens_in=tokens_in, tokens_out=int(usage.get("completion_tokens", 0))),
             model=resp.get("model", self.model),
         )
 
 
 def build_citation_llm(settings: Settings) -> StructuredLLM:
-    """Anthropic when ANTHROPIC_API_KEY is set, else local Ollama/Gemma."""
-    if settings.anthropic_api_key:
+    provider = settings.citation_llm_provider.lower()
+    if provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise CitationLLMConfigError(
+                "CITATION_LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is unset"
+            )
         from call_manager.ranking.anthropic_client import AnthropicClient
 
+        model = settings.citation_llm_model or settings.remote_rank_model
         return StructuredLLM(
-            AnthropicClient(api_key=settings.anthropic_api_key, model=settings.remote_rank_model),
-            settings.remote_rank_model,
+            AnthropicClient(
+                api_key=settings.anthropic_api_key,
+                model=model,
+                max_tokens=settings.citation_llm_max_output_tokens,
+                timeout=settings.citation_llm_timeout_seconds,
+            ),
+            model,
         )
-    from call_manager.ranking.ollama_client import OllamaClient
+    if provider == "ollama":
+        from call_manager.ranking.ollama_client import OllamaClient
 
-    return StructuredLLM(
-        OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model),
-        settings.gemma_model,
-    )
+        model = settings.citation_llm_model or settings.gemma_model
+        return StructuredLLM(
+            OllamaClient(
+                base_url=settings.ollama_url,
+                model=model,
+                timeout=settings.citation_llm_timeout_seconds,
+                num_predict=settings.citation_llm_max_output_tokens,
+            ),
+            model,
+        )
+    raise CitationLLMConfigError(f"unknown CITATION_LLM_PROVIDER: {provider!r}")
 ```
 
-- [ ] **Step 4: Run the test**
+- [ ] **Step 4: Run the tests**
 
 Run: `uv run pytest tests/proposal_assist/citations/test_llm.py -v`
-Expected: PASS.
+Expected: PASS (all three, including the cache-token sum).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/call_manager/proposal_assist/citations/__init__.py src/call_manager/proposal_assist/citations/llm.py tests/proposal_assist/citations/__init__.py tests/proposal_assist/citations/test_llm.py
-git commit -m "feat(citations): shared StructuredLLM client over ranking clients"
+git commit -m "feat(citations): StructuredLLM client (cache-token accounting) + provider factory"
 ```
 
 ---
 
-### Task 5: Config caps + usage ledger & cap check
+### Task 6: `CitationLLMService` — the single enforced call path (caps + ledger)
 
 **Files:**
-- Modify: `src/call_manager/config.py`
-- Create: `src/call_manager/proposal_assist/citations/usage.py`
-- Test: `tests/proposal_assist/citations/test_usage.py`
+- Create: `src/call_manager/proposal_assist/citations/usage.py` (internal helpers)
+- Create: `src/call_manager/proposal_assist/citations/service.py`
+- Test: `tests/proposal_assist/citations/test_service.py`
 
-- [ ] **Step 1: Add the cap settings to `Settings`**
+- [ ] **Step 1: Write the failing service tests**
 
-In `src/call_manager/config.py`, add these fields to `class Settings` (next to the other `*_daily_token_cap_*` fields):
-
-```python
-    citation_llm_daily_token_cap_input: int = Field(
-        default=200_000, alias="CITATION_LLM_DAILY_TOKEN_CAP_INPUT"
-    )
-    citation_llm_daily_token_cap_output: int = Field(
-        default=50_000, alias="CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
-    )
-    global_citation_llm_daily_token_cap_input: int = Field(
-        default=2_000_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_INPUT"
-    )
-    global_citation_llm_daily_token_cap_output: int = Field(
-        default=500_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
-    )
-```
-
-- [ ] **Step 2: Write the failing test**
-
-Create `tests/proposal_assist/citations/test_usage.py`:
+Create `tests/proposal_assist/citations/test_service.py`:
 
 ```python
-from call_manager.proposal_assist.citations.usage import (
-    CapStatus,
-    check_citation_caps,
-    record_usage,
-)
+from call_manager.db.models import CitationLlmUsage
+from call_manager.proposal_assist.citations.llm import LLMResult, LLMUsage
+from call_manager.proposal_assist.citations.service import CitationLLMService
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _settings(**over):
     import os
-    os.environ.setdefault("DATABASE_URL", "postgresql://x")
-    os.environ.setdefault("SESSION_SECRET", "test-secret-at-least-16-chars")
-    os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    os.environ.setdefault("APP_BASE_URL", "http://localhost:8000")
+    for k, v in {"DATABASE_URL": "postgresql://x", "SESSION_SECRET": "test-secret-at-least-16-chars",
+                 "ALLOWED_EMAIL_DOMAINS": "ki.se", "APP_BASE_URL": "http://localhost:8000"}.items():
+        os.environ.setdefault(k, v)
     from call_manager.config import Settings
     s = Settings()
     for k, v in over.items():
@@ -619,66 +758,98 @@ def _settings(**over):
 
 
 def _ws(pg_session_factory):
-    from tests.proposal_assist.conftest import make_user, make_workspace
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s))
         s.commit()
         return ws.id
 
 
-def test_record_usage_writes_row(pg_session_factory):
+class _OkLLM:
+    def __init__(self):
+        self.called = 0
+    def complete_json(self, *, system, user):
+        self.called += 1
+        return LLMResult(data={"title": "T"}, usage=LLMUsage(tokens_in=30, tokens_out=5), model="m")
+
+
+class _BoomLLM:
+    def __init__(self, exc):
+        self._exc = exc
+        self.called = 0
+    def complete_json(self, *, system, user):
+        self.called += 1
+        raise self._exc
+
+
+def _rows(pg_session_factory, wsid):
     from sqlalchemy import select
-    from call_manager.db.models import CitationLlmUsage
+    with pg_session_factory() as s:
+        return list(s.scalars(select(CitationLlmUsage).where(CitationLlmUsage.workspace_id == wsid)))
+
+
+def test_success_records_ok(pg_session_factory):
     wsid = _ws(pg_session_factory)
-    with pg_session_factory() as s:
-        record_usage(s, workspace_id=wsid, op="metadata_extract", status="ok",
-                     tokens_in=50, tokens_out=10, model="gemma")
-        s.commit()
-    with pg_session_factory() as s:
-        rows = list(s.scalars(select(CitationLlmUsage).where(CitationLlmUsage.workspace_id == wsid)))
-    assert len(rows) == 1 and rows[0].status == "ok"
+    svc = CitationLLMService(session_factory=pg_session_factory, llm=_OkLLM(), settings=_settings())
+    res = svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
+    assert res.cap_exceeded is False and res.data == {"title": "T"}
+    rows = _rows(pg_session_factory, wsid)
+    assert len(rows) == 1 and rows[0].status == "ok" and rows[0].tokens_in == 30
 
 
-def test_workspace_cap_trips_at_threshold(pg_session_factory):
+def test_failure_records_failed_and_raises(pg_session_factory):
+    import pytest
     wsid = _ws(pg_session_factory)
-    settings = _settings(citation_llm_daily_token_cap_input=100,
-                         global_citation_llm_daily_token_cap_input=10_000_000)
-    with pg_session_factory() as s:
-        assert check_citation_caps(s, wsid, settings=settings) == CapStatus(False, None)
-        record_usage(s, workspace_id=wsid, op="metadata_extract", status="ok",
-                     tokens_in=100, tokens_out=0)
-        s.commit()
-    with pg_session_factory() as s:
-        assert check_citation_caps(s, wsid, settings=settings) == CapStatus(True, "workspace")
+    svc = CitationLLMService(session_factory=pg_session_factory, llm=_BoomLLM(ValueError("x")),
+                             settings=_settings())
+    with pytest.raises(ValueError):
+        svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
+    rows = _rows(pg_session_factory, wsid)
+    assert len(rows) == 1 and rows[0].status == "failed"
 
 
-def test_global_cap_trips_independently(pg_session_factory):
+def test_timeout_records_timeout_and_raises(pg_session_factory):
+    import pytest
     wsid = _ws(pg_session_factory)
-    settings = _settings(citation_llm_daily_token_cap_input=10_000_000,
-                         global_citation_llm_daily_token_cap_input=100)
+    svc = CitationLLMService(session_factory=pg_session_factory, llm=_BoomLLM(TimeoutError()),
+                             settings=_settings())
+    with pytest.raises(TimeoutError):
+        svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
+    rows = _rows(pg_session_factory, wsid)
+    assert len(rows) == 1 and rows[0].status == "timeout"
+
+
+def test_cap_exceeded_returns_typed_result_without_calling(pg_session_factory):
+    wsid = _ws(pg_session_factory)
+    llm = _OkLLM()
+    svc = CitationLLMService(session_factory=pg_session_factory, llm=llm,
+                             settings=_settings(citation_llm_daily_token_cap_input=20))
+    # Pre-load usage to exceed the workspace cap.
     with pg_session_factory() as s:
-        record_usage(s, workspace_id=wsid, op="validate_citation", status="ok",
-                     tokens_in=100, tokens_out=0)
+        s.add(CitationLlmUsage(workspace_id=wsid, op="metadata_extract", status="ok",
+                               tokens_in=25, tokens_out=0))
         s.commit()
-    with pg_session_factory() as s:
-        assert check_citation_caps(s, wsid, settings=settings) == CapStatus(True, "global")
+    res = svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
+    assert res.cap_exceeded is True and res.cap_scope == "workspace"
+    assert res.data is None
+    assert llm.called == 0  # client NOT invoked when capped
+    # No new ledger row was written for the blocked call.
+    assert len(_rows(pg_session_factory, wsid)) == 1
 ```
 
-- [ ] **Step 3: Run it to verify it fails**
+- [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run pytest tests/proposal_assist/citations/test_usage.py -v`
-Expected: FAIL (`ModuleNotFoundError: ...citations.usage`).
+Run: `uv run pytest tests/proposal_assist/citations/test_service.py -v`
+Expected: FAIL (`ModuleNotFoundError: ...citations.service` / `...usage`).
 
-- [ ] **Step 4: Implement the usage ledger + cap check**
+- [ ] **Step 3: Implement the usage helpers**
 
 Create `src/call_manager/proposal_assist/citations/usage.py`:
 
 ```python
-"""citation_llm_usage ledger writes + daily-cap checks.
-
-Mirrors turns/caps.py's Stockholm-day window, but a SEPARATE ledger so audit /
-extraction spend never silently rides on the drafting turn budget.
-"""
+"""citation_llm_usage ledger writes + daily-cap checks (internal to the
+citation subsystem; call via CitationLLMService). Mirrors turns/caps.py's
+Stockholm-day window but a SEPARATE ledger so audit/extraction spend never
+silently rides on the drafting turn budget."""
 
 from __future__ import annotations
 
@@ -709,108 +880,155 @@ def _stockholm_day_start_utc() -> datetime:
     return midnight.astimezone(_UTC)
 
 
-def record_usage(
-    session: Session,
-    *,
-    workspace_id: uuid.UUID,
-    op: str,
-    status: str,
-    tokens_in: int = 0,
-    tokens_out: int = 0,
-    model: str | None = None,
-) -> None:
+def record_usage(session, *, workspace_id, op, status, tokens_in=0, tokens_out=0, model=None):
     """Append one usage row. Caller commits."""
-    session.add(
-        CitationLlmUsage(
-            workspace_id=workspace_id,
-            op=op,
-            status=status,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            model=model,
-        )
-    )
+    session.add(CitationLlmUsage(
+        workspace_id=workspace_id, op=op, status=status,
+        tokens_in=tokens_in, tokens_out=tokens_out, model=model,
+    ))
 
 
 def _sum_today(session: Session, *, workspace_id: uuid.UUID | None) -> tuple[int, int]:
-    day_start = _stockholm_day_start_utc()
     stmt = select(
         func.coalesce(func.sum(CitationLlmUsage.tokens_in), 0),
         func.coalesce(func.sum(CitationLlmUsage.tokens_out), 0),
-    ).where(CitationLlmUsage.created_at >= day_start)
+    ).where(CitationLlmUsage.created_at >= _stockholm_day_start_utc())
     if workspace_id is not None:
         stmt = stmt.where(CitationLlmUsage.workspace_id == workspace_id)
     row = session.execute(stmt).one()
     return int(row[0]), int(row[1])
 
 
-def check_citation_caps(
-    session: Session, workspace_id: uuid.UUID, *, settings: Settings
-) -> CapStatus:
-    """Read-only. `>=` (hard ceiling, matches turns/caps.py). Workspace cap
-    checked first, then the org-wide cap."""
+def check_citation_caps(session, workspace_id, *, settings: Settings) -> CapStatus:
+    """Read-only; `>=` hard ceiling (matches turns/caps.py). Workspace first."""
     ws_in, ws_out = _sum_today(session, workspace_id=workspace_id)
-    if (
-        ws_in >= settings.citation_llm_daily_token_cap_input
-        or ws_out >= settings.citation_llm_daily_token_cap_output
-    ):
+    if (ws_in >= settings.citation_llm_daily_token_cap_input
+            or ws_out >= settings.citation_llm_daily_token_cap_output):
         return CapStatus(True, "workspace")
-
     g_in, g_out = _sum_today(session, workspace_id=None)
-    if (
-        g_in >= settings.global_citation_llm_daily_token_cap_input
-        or g_out >= settings.global_citation_llm_daily_token_cap_output
-    ):
+    if (g_in >= settings.global_citation_llm_daily_token_cap_input
+            or g_out >= settings.global_citation_llm_daily_token_cap_output):
         return CapStatus(True, "global")
-
     return CapStatus(False, None)
 ```
 
-- [ ] **Step 5: Run the tests**
+- [ ] **Step 4: Implement the service**
 
-Run: `uv run pytest tests/proposal_assist/citations/test_usage.py -v`
-Expected: PASS (all three).
+Create `src/call_manager/proposal_assist/citations/service.py`:
+
+```python
+"""The ONLY supported citation-LLM call path.
+
+Every call is cap-checked before and ledger-recorded after (ok/failed/timeout),
+so no caller can spend un-accounted tokens or skip the cap. Returns a typed
+cap-exceeded result WITHOUT invoking the client when over budget.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+from call_manager.config import Settings
+from call_manager.proposal_assist.citations.llm import LLMUsage, StructuredLLM
+from call_manager.proposal_assist.citations.usage import check_citation_caps, record_usage
+
+
+@dataclass
+class CitationLLMResult:
+    data: dict | None
+    usage: LLMUsage | None
+    model: str | None
+    cap_exceeded: bool = False
+    cap_scope: str | None = None
+
+
+class CitationLLMService:
+    def __init__(self, *, session_factory, llm: StructuredLLM, settings: Settings) -> None:
+        self._session_factory = session_factory
+        self._llm = llm
+        self._settings = settings
+
+    def complete_json(
+        self, *, workspace_id: uuid.UUID, op: str, system: str, user: str
+    ) -> CitationLLMResult:
+        with self._session_factory() as s:
+            cap = check_citation_caps(s, workspace_id, settings=self._settings)
+        if cap.exceeded:
+            return CitationLLMResult(
+                data=None, usage=None, model=None, cap_exceeded=True, cap_scope=cap.scope
+            )
+
+        try:
+            result = self._llm.complete_json(system=system, user=user)
+        except TimeoutError:
+            self._record(workspace_id, op, "timeout", 0, 0, None)
+            raise
+        except Exception:
+            self._record(workspace_id, op, "failed", 0, 0, None)
+            raise
+
+        self._record(
+            workspace_id, op, "ok", result.usage.tokens_in, result.usage.tokens_out, result.model
+        )
+        return CitationLLMResult(data=result.data, usage=result.usage, model=result.model)
+
+    def _record(self, workspace_id, op, status, tokens_in, tokens_out, model) -> None:
+        with self._session_factory() as s:
+            record_usage(
+                s, workspace_id=workspace_id, op=op, status=status,
+                tokens_in=tokens_in, tokens_out=tokens_out, model=model,
+            )
+            s.commit()
+```
+
+> Note: real ranking clients surface timeouts as `LLMError`, not `TimeoutError`, so in production most failures record `failed`; the `timeout` branch covers callers/clients that raise a `TimeoutError` (and keeps the contract explicit). Slice 3's audit service can refine timeout classification.
+
+- [ ] **Step 5: Run the service tests**
+
+Run: `uv run pytest tests/proposal_assist/citations/test_service.py -v`
+Expected: PASS (ok/failed/timeout recorded; capped returns typed result, client not called, no row).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/call_manager/config.py src/call_manager/proposal_assist/citations/usage.py tests/proposal_assist/citations/test_usage.py
-git commit -m "feat(citations): citation_llm_usage ledger + per-workspace/global daily caps"
+git add src/call_manager/proposal_assist/citations/usage.py src/call_manager/proposal_assist/citations/service.py tests/proposal_assist/citations/test_service.py
+git commit -m "feat(citations): CitationLLMService — enforced caps + usage ledger on every call"
 ```
 
 ---
 
-### Task 6: Full-suite green + lint
+### Task 7: Full-suite green + lint
 
-- [ ] **Step 1: Run lint + format**
+- [ ] **Step 1: Lint + format**
 
 Run: `uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/`
-Expected: "All checks passed!" and "… already formatted". If format flags files, run `uv run ruff format <files>` and re-stage.
+Expected: "All checks passed!" / "… already formatted". Fix with `uv run ruff format <files>` if needed and re-stage.
 
-- [ ] **Step 2: Run the full suite**
+- [ ] **Step 2: Full suite**
 
 Run: `uv run pytest -q`
-Expected: all tests pass (prior count + the new tests; 1 pre-existing skip).
+Expected: all pass (prior count + new tests; 1 pre-existing skip).
 
-- [ ] **Step 3: Commit any formatting fixups**
+- [ ] **Step 3: Commit any fixups**
 
 ```bash
-git add -A
-git commit -m "chore(citations): ruff format fixups for metadata foundation" || echo "nothing to format"
+git add -A && git commit -m "chore(citations): ruff fixups for metadata foundation" || echo "nothing to format"
 ```
+
+---
+
+## Deferred (explicit responsibility hand-off)
+
+- **Lazy `original_sha256` backfill for pre-existing references** (Codex M5): references created before 0036 have `original_sha256=NULL`, so they can't satisfy the future `source_content_hash` freeze guarantee. **Slice 1B** owns this: when a reference is first cited (or when its metadata is first extracted), if `original_sha256 IS NULL`, read the stored original bytes, hash them, and persist before writing any ledger row. No bulk backfill — lazy, on first use.
+- **Wiring `CitationLLMService` into extraction** is Slice 1B; this plan only builds and unit-tests the service.
 
 ---
 
 ## Self-Review
 
-**Spec coverage (Slice 1A scope):**
-- CSL columns (`csl_json`, `csl_json_extracted`), `citekey`, `metadata_status` (5-state CHECK), `metadata_source`, `original_sha256`, per-workspace unique citekey → Task 1 + Task 2. ✓
-- `citation_llm_usage` ledger table + model → Task 1 + Task 2. ✓
-- `original_sha256` captured at ingest (the "source replaced" freeze anchor) → Task 3. ✓
-- Shared structured-completion client (reused by extraction now, audit later) → Task 4. ✓
-- Per-workspace + global daily caps over the usage ledger → Task 5. ✓
-- **Deferred to Slice 1B (not this plan):** fetcher CSL extension, heuristic+LLM extraction wired into ingest, citekey *generation*, owner approval route/UI, `verified_external` transitions. Called out in the header.
+**Spec coverage (Slice 1A):** CSL columns + `citekey` + `metadata_status` (5-state CHECK) + `metadata_source` + `original_sha256` (hex CHECK) + per-workspace unique citekey → Tasks 1–2. `citation_llm_usage` (nonneg CHECK, composite + standalone `created_at` indexes) → Tasks 1–2. `original_sha256` at ingest → Task 3. Explicit citation-LLM settings (local-default provider) → Task 4. `StructuredLLM` with cache-token accounting → Task 5. `CitationLLMService` as the single enforced caps+ledger path → Task 6. Deferred items explicitly assigned.
 
-**Placeholder scan:** every code/test step contains complete code; the only "if False" line in Task 1 Step 2 is annotated as a deletable no-op (the CHECK is exercised via the ORM in Task 2). No TBD/TODO.
+**Placeholder scan:** every step has complete code; no TBD/TODO.
 
-**Type consistency:** `StructuredLLM.complete_json` returns `LLMResult{data, usage:LLMUsage{tokens_in,tokens_out}, model}` — used consistently in Task 4's test. `check_citation_caps(...) -> CapStatus(exceeded, scope)` and `record_usage(session, *, workspace_id, op, status, tokens_in, tokens_out, model)` match Task 5's tests. `CitationLlmUsage` column names (`op`, `status`, `tokens_in`, `tokens_out`, `model`) match across migration (Task 1), model (Task 2), and ledger writes (Task 5). `metadata_status` value set is identical in the migration CHECK and the model CHECK.
+**Type consistency:** `StructuredLLM.complete_json -> LLMResult{data, usage:LLMUsage{tokens_in,tokens_out}, model}`; `CitationLLMService.complete_json -> CitationLLMResult{data, usage, model, cap_exceeded, cap_scope}`; `check_citation_caps -> CapStatus{exceeded, scope}`; `record_usage(session, *, workspace_id, op, status, tokens_in, tokens_out, model)`. `CitationLlmUsage` columns (`op,status,tokens_in,tokens_out,model,created_at`) and index names (`ix_citation_llm_usage_ws_created`, `ix_citation_llm_usage_created`) are identical across migration (Task 1) and model (Task 2). `metadata_status` value set identical in migration and model CHECKs.
