@@ -51,7 +51,11 @@ def _build_adapter(settings: Settings, session_factory: sessionmaker) -> Draftin
         )
 
         # Build once; shared across all turns in this process. The service
-        # holds no open connections (LLM client is lazy/per-call).
+        # holds no open connections (LLM client is lazy/per-call). This is a
+        # SEPARATE instance from app.state.citation_service (the web layer's):
+        # the drafting agent runs its own tool path. Both share the same
+        # session_factory + settings, so caps/ledger are enforced consistently
+        # against the same DB rows — do not "deduplicate" them into one.
         _citation_service = build_citation_service(
             settings=settings, session_factory=session_factory
         )

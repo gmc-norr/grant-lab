@@ -307,9 +307,8 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
 
     settings = Settings.model_construct(workspaces_dir=str(tmp_path))
 
-    # Use dataclass replace to add citation_service once the field exists.
-    # After implementation, ToolContext will have citation_service; we set it
-    # here to verify the impl passes it through.
+    # Set citation_service on the context so we can verify fetch_reference_impl
+    # forwards it (and source_meta) through to ingest_bytes.
     ctx = ToolContext(
         workspace_id=wsid,
         repo_dir=tmp_path / str(wsid) / "repo",
