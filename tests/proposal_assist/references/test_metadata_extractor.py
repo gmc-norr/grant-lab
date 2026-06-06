@@ -199,3 +199,61 @@ def test_no_citation_service_uploaded_plain_text_heuristic_only():
     assert source == "heuristic"
     assert status == "failed"
     assert csl == {}
+
+
+def test_llm_title_as_list_degrades():
+    """CitationLLMResult with title as a list (non-str) must not crash; the
+    extractor stores it as-is (the ingest layer separately guards str type).
+    Source must be 'llm', status 'extracted'."""
+    llm_result = CitationLLMResult(
+        data={"title": ["Array Title"], "author": [{"family": "Roe"}]},
+        usage=None,
+        model="m",
+        cap_exceeded=False,
+    )
+    stub = _StubCitationService(llm_result)
+
+    csl, source, status = extract_reference_metadata(
+        source_type="uploaded",
+        source_meta=None,
+        mime_type="text/plain",
+        data=None,
+        text="Some reference text",
+        workspace_id=uuid.uuid4(),
+        citation_service=stub,
+    )
+
+    # extractor must not crash and must store whatever the LLM returned
+    assert csl.get("title") == ["Array Title"]
+    assert source == "llm"
+    assert status == "extracted"
+
+
+def test_heuristic_only_when_no_text():
+    """Uploaded PDF with text=None: LLM must not be called; result uses PDF
+    heuristic (metadata_source='heuristic', title from /Info, status='extracted')."""
+    pdf_bytes = _make_pdf(title="PDF Only")
+    stub = _StubCitationService(
+        CitationLLMResult(
+            data={"title": "LLM Title"},
+            usage=None,
+            model="m",
+            cap_exceeded=False,
+        )
+    )
+
+    csl, source, status = extract_reference_metadata(
+        source_type="uploaded",
+        source_meta=None,
+        mime_type="application/pdf",
+        data=pdf_bytes,
+        text=None,
+        workspace_id=uuid.uuid4(),
+        citation_service=stub,
+    )
+
+    # LLM must NOT have been called because text is None
+    assert stub.calls == [], "LLM must not be called when text is None"
+    assert source == "heuristic"
+    assert status == "extracted"
+    assert csl.get("title") == "PDF Only"

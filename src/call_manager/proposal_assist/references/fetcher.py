@@ -403,9 +403,10 @@ def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
     pmc_id = pmc_ids[0]
 
     efetch_url = (
-        f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={pmc_id}&rettype=xml"
+        f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        f"?db=pmc&id={urllib.parse.quote(pmc_id, safe='')}&rettype=xml"
     )
-    xml_bytes = fetch_bytes(efetch_url)
+    xml_bytes = fetch_bytes(efetch_url, max_bytes=10 * 1024 * 1024)
 
     meta: dict = {
         "pmid": pmid,
@@ -416,8 +417,11 @@ def fetch_pubmed_pmid(pmid: str) -> tuple[bytes, str, str, dict]:
     # malformed or lacks expected elements we just return the IDs.
     try:
         article_root = DET.fromstring(xml_bytes)
-        # article-title: try without namespace first (most PMC JATS is
-        # namespace-free), then with common JATS namespace as fallback.
+        # article-title: PMC efetch JATS is namespace-free; the lookup
+        # below works correctly for that format.  If a document were served
+        # with a namespaced JATS root (uncommon in PMC efetch), the
+        # namespace-free find would return None and title/authors would
+        # simply be absent from meta — non-fatal, falls back to IDs.
         title_el = article_root.find(".//article-title")
         if title_el is not None:
             title_text = "".join(title_el.itertext()).strip()
@@ -513,7 +517,7 @@ def fetch_arxiv(arxiv_id: str) -> tuple[bytes, str, str, dict]:
     non-fatal: the PDF is returned with just arxiv_id + source.
     """
     atom_meta = _fetch_arxiv_atom_meta(arxiv_id)
-    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    pdf_url = f"https://arxiv.org/pdf/{urllib.parse.quote(arxiv_id, safe='')}.pdf"
     pdf_bytes = fetch_bytes(pdf_url)
     meta: dict = {
         "arxiv_id": arxiv_id,

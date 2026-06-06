@@ -475,3 +475,66 @@ def test_fetch_arxiv_version_suffix_passes_through(httpx_mock):
     bytes_, filename, mime, meta = fetch_arxiv(arxiv_id)
     assert bytes_ == b"%PDF-1.4\nversioned"
     assert meta["arxiv_id"] == arxiv_id
+
+
+def test_arxiv_atom_no_entry_returns_pdf_without_meta(httpx_mock):
+    """Atom feed with no <entry> element: PDF is still returned, arxiv_id is
+    present, but bibliographic fields (title, authors, year, url) are absent."""
+    arxiv_id = "2401.55555"
+    httpx_mock.add_response(
+        url=f"https://export.arxiv.org/api/query?id_list={arxiv_id}",
+        text='<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>',
+    )
+    httpx_mock.add_response(
+        url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+        content=b"%PDF-1.4\nno-entry",
+    )
+    bytes_, filename, mime, meta = fetch_arxiv(arxiv_id)
+    assert bytes_ == b"%PDF-1.4\nno-entry"
+    assert meta["arxiv_id"] == arxiv_id
+    assert "title" not in meta
+
+
+def test_pubmed_single_author(httpx_mock):
+    """JATS XML with exactly one author: authors list contains one entry
+    with the correct family/given shape; title is parsed correctly."""
+    elink_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pmc&id=33445566"
+    )
+    elink_xml = (
+        '<?xml version="1.0"?>'
+        "<eLinkResult><LinkSet><LinkSetDb><Link>"
+        "<Id>PMC810101</Id>"
+        "</Link></LinkSetDb></LinkSet></eLinkResult>"
+    )
+    httpx_mock.add_response(url=elink_url, text=elink_xml)
+
+    efetch_url = (
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=PMC810101&rettype=xml"
+    )
+    efetch_xml = (
+        '<?xml version="1.0"?>'
+        "<article>"
+        "  <front>"
+        "    <article-meta>"
+        "      <title-group>"
+        "        <article-title>Single Author Study</article-title>"
+        "      </title-group>"
+        "      <contrib-group>"
+        "        <contrib contrib-type='author'>"
+        "          <name>"
+        "            <surname>Roe</surname>"
+        "            <given-names>J</given-names>"
+        "          </name>"
+        "        </contrib>"
+        "      </contrib-group>"
+        "    </article-meta>"
+        "  </front>"
+        "</article>"
+    )
+    httpx_mock.add_response(url=efetch_url, text=efetch_xml)
+
+    bytes_, filename, mime, meta = fetch_pubmed_pmid("33445566")
+
+    assert meta["title"] == "Single Author Study"
+    assert meta["authors"] == [{"family": "Roe", "given": "J"}]

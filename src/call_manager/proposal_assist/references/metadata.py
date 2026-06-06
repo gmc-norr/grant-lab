@@ -91,9 +91,14 @@ def extract_reference_metadata(
                 raw = result.data
                 llm_data = raw if isinstance(raw, dict) else {}
         except Exception:
-            logger.exception(
+            # PRIVACY: exc_info is kept for debuggability — structured LLM
+            # clients raise LLMError with API-status messages, not the user
+            # prompt or reference text.  Do NOT widen this log to include
+            # the user prompt (``text``) or any reference excerpt.
+            logger.warning(
                 "LLM metadata extraction failed (workspace=%s) — degrading to heuristic",
                 workspace_id,
+                exc_info=True,
             )
 
     # ------------------------------------------------------------------
