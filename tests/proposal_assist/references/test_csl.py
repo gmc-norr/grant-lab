@@ -101,8 +101,30 @@ def test_csl_from_crossref_type_mapping():
     assert csl_from_source_meta("crossref", meta4)["type"] == "article"
 
 
+def test_csl_from_crossref_type_extended_map():
+    """Extended type-map entries added in FIX 1."""
+    cases = [
+        ("journal-article", "article-journal"),
+        ("dissertation", "thesis"),
+        ("monograph", "book"),
+        ("book-chapter", "chapter"),
+        ("dataset", "dataset"),
+    ]
+    for crossref_type, expected_csl_type in cases:
+        meta = {"message": {**CROSSREF_MESSAGE, "type": crossref_type}}
+        result = csl_from_source_meta("crossref", meta)["type"]
+        assert result == expected_csl_type, (
+            f"{crossref_type!r} → {result!r}, expected {expected_csl_type!r}"
+        )
+
+
 def test_csl_from_crossref_type_default_for_unknown():
     meta = {"message": {**CROSSREF_MESSAGE, "type": "some-unknown-type"}}
+    assert csl_from_source_meta("crossref", meta)["type"] == "article-journal"
+
+
+def test_csl_from_crossref_type_other_defaults_to_article_journal():
+    meta = {"message": {**CROSSREF_MESSAGE, "type": "other"}}
     assert csl_from_source_meta("crossref", meta)["type"] == "article-journal"
 
 
@@ -307,6 +329,23 @@ def test_csl_from_pdf_info_empty_bytes_returns_empty():
     assert csl == {}
 
 
+def test_csl_from_pdf_info_placeholder_defaults_filtered():
+    """reportlab writes Title=b'untitled' and Author=b'anonymous' when no
+    metadata is set.  The placeholder filter must drop both so the result is {}.
+    """
+    data = _make_pdf()  # no title/author → reportlab defaults
+    csl = csl_from_pdf_info(data)
+    assert csl == {}
+
+
+def test_csl_from_pdf_info_real_metadata_not_filtered():
+    """Real Title/Author values must not be dropped by the placeholder filter."""
+    data = _make_pdf(title="Quantum Mechanics Review", author="Werner Heisenberg")
+    csl = csl_from_pdf_info(data)
+    assert csl["title"] == "Quantum Mechanics Review"
+    assert csl["author"] == [{"literal": "Werner Heisenberg"}]
+
+
 # ---------------------------------------------------------------------------
 # merge_csl
 # ---------------------------------------------------------------------------
@@ -498,3 +537,24 @@ def test_generate_citekey_special_chars_stripped(pg_session_factory):
     # Actually: "m" "ü"(stripped) "l" "l" "e" "r" "-"(stripped) "b" "e" "r" "g" "2" "0" "1" "0"
     # → "mllerberg2010"  (ü → stripped entirely in ASCII re.sub)
     assert key == "mllerberg2010"
+
+
+def test_generate_citekey_unrelated_numeric_suffix_no_spurious_letter(pg_session_factory):
+    """A pre-existing key like 'smith20219' must NOT force a suffix on 'smith2021'.
+
+    The LIKE query matches it, but the narrowing filter should exclude it because
+    it has a digit suffix rather than a single lowercase letter.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s))
+        s.commit()
+        ws_id = ws.id
+
+    with pg_session_factory() as s:
+        _insert_ref_with_citekey(s, ws_id, "smith20219")
+        s.commit()
+
+    csl = {"author": [{"family": "Smith", "given": "Jane"}], "issued": {"date-parts": [[2021]]}}
+    with pg_session_factory() as s:
+        key = generate_citekey(csl, ws_id, s)
+    assert key == "smith2021"

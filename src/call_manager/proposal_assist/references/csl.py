@@ -26,13 +26,23 @@ _CROSSREF_TYPE_MAP: dict[str, str] = {
     "proceedings-article": "paper-conference",
     "book": "book",
     "book-chapter": "chapter",
+    "book-section": "chapter",
+    "monograph": "book",
     "posted-content": "article",
+    "preprint": "article",
     "report": "report",
+    "report-component": "report",
+    "dissertation": "thesis",
     "dataset": "dataset",
+    "peer-review": "article",
 }
 
 # Keys to keep from a Crossref author entry.
 _AUTHOR_KEEP_KEYS = {"family", "given", "literal"}
+
+# Placeholder values commonly written by PDF authoring tools when no real
+# metadata was supplied.  Entries matching these are silently dropped.
+_PLACEHOLDER_VALUES = {"untitled", "untitled-1", "anonymous", "unknown", ""}
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +252,7 @@ def csl_from_pdf_info(data: bytes) -> dict:
             if isinstance(raw_title, bytes):
                 raw_title = raw_title.decode("utf-8", errors="replace")
             title = raw_title.strip()
-            if title:
+            if title and title.lower() not in _PLACEHOLDER_VALUES:
                 out["title"] = title
 
         raw_author = info.get("Author")
@@ -250,7 +260,7 @@ def csl_from_pdf_info(data: bytes) -> dict:
             if isinstance(raw_author, bytes):
                 raw_author = raw_author.decode("utf-8", errors="replace")
             author = raw_author.strip()
-            if author:
+            if author and author.lower() not in _PLACEHOLDER_VALUES:
                 out["author"] = [{"literal": author}]
 
         return out
@@ -304,7 +314,7 @@ def generate_citekey(csl: dict, workspace_id, session: Session) -> str:
 
     try:
         authors = csl.get("author")
-        if authors and isinstance(authors, list) and authors:
+        if authors and isinstance(authors, list):
             first = authors[0]
             if isinstance(first, dict):
                 if "family" in first and first["family"]:
@@ -339,23 +349,30 @@ def generate_citekey(csl: dict, workspace_id, session: Session) -> str:
 
     # Query existing citekeys in the workspace that start with base
     try:
-        existing: set[str] = set(
-            session.scalars(
-                select(Reference.citekey).where(
-                    Reference.workspace_id == workspace_id,
-                    Reference.citekey.like(base + "%"),
-                )
+        rows = session.scalars(
+            select(Reference.citekey).where(
+                Reference.workspace_id == workspace_id,
+                Reference.citekey.like(base + "%"),
             )
         )
+        # Narrow the LIKE result to the base itself and single-lowercase-suffix
+        # variants only, so an unrelated key like "smith20219" doesn't force a
+        # spurious suffix when base is "smith2021".
+        taken = {
+            k
+            for k in rows
+            if k == base
+            or (len(k) == len(base) + 1 and k[len(base) :].islower() and k[len(base) :].isalpha())
+        }
     except Exception:  # noqa: BLE001
-        existing = set()
+        taken = set()
 
-    if base not in existing:
+    if base not in taken:
         return base
 
-    for letter in string.ascii_lowercase:
-        candidate = base + letter
-        if candidate not in existing:
+    for suffix in string.ascii_lowercase:
+        candidate = base + suffix
+        if candidate not in taken:
             return candidate
 
     # Fallback if all 26 suffixes taken (extremely unlikely in v1)
