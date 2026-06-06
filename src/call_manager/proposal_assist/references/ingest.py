@@ -24,11 +24,13 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.references.chunker import chunk_sections
+from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.references.embed import Embedder
 from call_manager.proposal_assist.references.extract import (
     ExtractError,
     extract_text,
 )
+from call_manager.proposal_assist.references.metadata import extract_reference_metadata
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 
 logger = logging.getLogger(__name__)
@@ -75,9 +77,16 @@ def ingest_bytes(
     mime_type: str,
     data: bytes,
     uploaded_by: int | None,
+    source_meta: dict | None = None,
+    citation_service=None,
 ) -> IngestResult:
-    """Run both phases. Caller is responsible for committing the session
-    after Phase 1 (we commit Phase 2 internally on a fresh session)."""
+    """Run all phases. Caller is responsible for committing the session
+    after Phase 1 (we commit Phase 2 and Phase 3 internally on fresh sessions).
+
+    Phase 3 (metadata extraction + citekey) is skipped entirely when both
+    source_meta is falsy and citation_service is None, leaving
+    metadata_status='pending'. Phase 3 failure is non-fatal: Phase 1+2
+    result is always returned."""
 
     suffix = suffix_for_mime(mime_type)
     reference_id = uuid.uuid4()
@@ -175,7 +184,7 @@ def ingest_bytes(
             ref2.text_indexed_at = datetime.now(UTC)
             ref2.text_chars_total = len(full_text)
             s2.commit()
-        return IngestResult(reference_id=reference_id, text_status="done", text_error=None)
+        ingest_result = IngestResult(reference_id=reference_id, text_status="done", text_error=None)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
         logger.exception(
@@ -189,4 +198,86 @@ def ingest_bytes(
                 ref2.text_status = "failed"
                 ref2.text_error = msg
                 s2.commit()
-        return IngestResult(reference_id=reference_id, text_status="failed", text_error=msg)
+        ingest_result = IngestResult(
+            reference_id=reference_id, text_status="failed", text_error=msg
+        )
+
+    # Phase 3: extract bibliographic metadata + assign citekey.
+    # Skip entirely when there is nothing to extract from (preserves prior
+    # behaviour and avoids a pointless DB round-trip for callers that supply
+    # neither source_meta nor citation_service).
+    if source_meta or citation_service is not None:
+        try:
+            with session_factory() as s3:
+                ref3 = s3.get(Reference, reference_id)
+                if ref3 is None:
+                    # Extremely unlikely — Phase 1 succeeded; log and skip.
+                    logger.warning(
+                        "ingest Phase 3: ref not found workspace=%s reference=%s",
+                        workspace_id,
+                        reference_id,
+                    )
+                else:
+                    # Best-effort read of extracted text (written by Phase 2).
+                    extracted_text: str | None = None
+                    if ref3.text_status == "done":
+                        try:
+                            text_path = storage.text_path_for(
+                                workspace_id=workspace_id,
+                                reference_id=reference_id,
+                            )
+                            extracted_text = text_path.read_text(encoding="utf-8")
+                        except Exception:
+                            logger.warning(
+                                "ingest Phase 3: could not read text.txt for "
+                                "workspace=%s reference=%s",
+                                workspace_id,
+                                reference_id,
+                            )
+
+                    csl, source, status = extract_reference_metadata(
+                        source_type=ref3.source_type,
+                        source_meta=source_meta,
+                        mime_type=ref3.mime_type,
+                        data=data,
+                        text=extracted_text,
+                        workspace_id=workspace_id,
+                        citation_service=citation_service,
+                    )
+
+                    if csl:
+                        ref3.csl_json_extracted = csl
+                        title_val = csl.get("title")
+                        if isinstance(title_val, str) and title_val:
+                            ref3.title = title_val
+                        ref3.metadata_source = source
+                        ref3.metadata_status = status
+                        ref3.citekey = generate_citekey(csl, workspace_id, s3)
+                    else:
+                        ref3.metadata_status = "failed"
+                    s3.commit()
+        except Exception:
+            logger.warning(
+                "ingest Phase 3 failed for workspace=%s reference=%s — "
+                "metadata extraction error (Phase 1+2 result preserved)",
+                workspace_id,
+                reference_id,
+                exc_info=True,
+            )
+            # Best-effort: mark metadata_status='failed' so the row reflects
+            # the outcome without masking the Phase 1+2 success.
+            try:
+                with session_factory() as s3:
+                    ref3 = s3.get(Reference, reference_id)
+                    if ref3 is not None:
+                        ref3.metadata_status = "failed"
+                        s3.commit()
+            except Exception:
+                logger.warning(
+                    "ingest Phase 3 fallback status update also failed workspace=%s reference=%s",
+                    workspace_id,
+                    reference_id,
+                    exc_info=True,
+                )
+
+    return ingest_result
