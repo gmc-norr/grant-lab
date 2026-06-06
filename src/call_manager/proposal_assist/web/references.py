@@ -1,9 +1,11 @@
 """Web routes for references — Slice 1 (panel + upload + raw serve).
 
 Permission policy:
-- GET  /workspaces/<id>/references           owner OR viewer
-- POST /workspaces/<id>/references           owner only
-- GET  /workspaces/<id>/references/<id>/raw  owner OR viewer
+- GET  /workspaces/<id>/references                    owner OR viewer
+- POST /workspaces/<id>/references                    owner only
+- GET  /workspaces/<id>/references/<id>/raw           owner OR viewer
+- GET  /workspaces/<id>/references/<id>/metadata      owner only
+- POST /workspaces/<id>/references/<id>/metadata      owner only
 
 Atomicity: mirrors B7 attachments — Phase 1 atomic, Phase 2 sync Stage 1
 retain-on-failure. See ingest.py.
@@ -354,14 +356,20 @@ def fetch_reference_route(
 
 
 def _authors_to_lines(authors: list) -> str:
-    """Convert a CSL author list to a newline-separated string for the textarea."""
+    """Convert a CSL author list to a newline-separated string for the textarea.
+
+    Encoding rules (round-trip safe with ``_parse_authors``):
+    - family + given  → "family, given"
+    - family only     → "family,"  (trailing comma marks it as structured)
+    - literal only    → literal string as-is
+    """
     lines = []
     for a in authors:
         if isinstance(a, dict):
             family = a.get("family", "")
             given = a.get("given", "")
             if family:
-                lines.append(f"{family}, {given}".rstrip(", ") if given else family)
+                lines.append(f"{family}, {given}" if given else f"{family},")
             elif a.get("literal"):
                 lines.append(a["literal"])
         else:
@@ -372,8 +380,13 @@ def _authors_to_lines(authors: list) -> str:
 def _parse_authors(text: str) -> list[dict]:
     """Parse a newline-separated author string into a CSL author list.
 
-    Lines of the form "Family, Given" are split; everything else becomes
-    ``{"literal": line}``. Blank lines are skipped.
+    Decoding rules (inverse of ``_authors_to_lines``):
+    - Lines containing a comma are split on the FIRST comma into family/given.
+      ``given`` is only included in the dict when it is non-empty, so
+      ``"WHO,"`` → ``{"family": "WHO"}`` and ``"Roe, Jane"`` →
+      ``{"family": "Roe", "given": "Jane"}``.
+    - Lines with no comma → ``{"literal": line}``.
+    - Blank lines are skipped.
     """
     authors = []
     for raw_line in text.splitlines():
@@ -382,9 +395,12 @@ def _parse_authors(text: str) -> list[dict]:
             continue
         if "," in line:
             family, _, given = line.partition(",")
-            given = given.strip()
             family = family.strip()
-            authors.append({"family": family, "given": given})
+            given = given.strip()
+            entry: dict = {"family": family}
+            if given:
+                entry["given"] = given
+            authors.append(entry)
         else:
             authors.append({"literal": line})
     return authors
@@ -418,6 +434,7 @@ def get_reference_metadata(
         request,
         "proposal_assist/reference_metadata_review.html",
         {
+            "user": user,
             "workspace": ws,
             "ref": ref,
             "title": title,
@@ -475,8 +492,6 @@ async def post_reference_metadata(
     session.commit()
 
     target = f"/workspaces/{ws.id}/references"
-    if "HX-Request" in request.headers:
-        return Response(status_code=204, headers={"HX-Redirect": target})
     return Response(status_code=303, headers={"Location": target})
 
 

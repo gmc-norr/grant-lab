@@ -446,3 +446,73 @@ def test_metadata_get_cross_workspace_returns_404(
     finally:
         client.__exit__(None, None, None)
     assert resp.status_code == 404
+
+
+def test_metadata_post_cross_workspace_returns_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """POST to ws_b's metadata URL with ws_a's reference id → 404 (cross-workspace IDOR)."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        # Same owner with two workspaces; ref lives in ws_a.
+        owner = User(email="cross-post-owner@ki.se")
+        s.add(owner)
+        s.flush()
+        ws_a = Workspace(owner_id=owner.id, title="A")
+        ws_b = Workspace(owner_id=owner.id, title="B")
+        s.add(ws_a)
+        s.add(ws_b)
+        s.commit()
+        uid, wsid_a, wsid_b = owner.id, ws_a.id, ws_b.id
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid_a, uploaded_by=uid)
+    client = _authed(app, user_id=uid)
+    try:
+        # Post to ws_b's URL with ws_a's ref_id — must not update anything.
+        resp = client.post(
+            f"/workspaces/{wsid_b}/references/{ref_id}/metadata",
+            data={"title": "Should not persist"},
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 404
+
+
+def test_metadata_author_family_only_round_trips(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Structured family-only authors must survive the textarea round-trip.
+
+    ``{"family": "WHO"}`` → ``_authors_to_lines`` → ``"WHO,"``
+    → ``_parse_authors`` → ``{"family": "WHO"}``  (NOT ``{"literal": "WHO"}``).
+
+    Also verifies that "Roe, Jane" still produces ``{"family":"Roe","given":"Jane"}``.
+    """
+    from sqlalchemy import select
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="roundtrip@ki.se")
+        ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{ref_id}/metadata",
+            data={
+                "title": "RT Test",
+                # "WHO," — trailing comma signals structured family-only
+                # "Roe, Jane" — standard family, given
+                "authors": "WHO,\nRoe, Jane",
+                "year": "2024",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 303
+
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.id == ref_id))
+    authors = ref.csl_json["author"]
+    # Family-only author must remain structured (not demoted to literal).
+    assert {"family": "WHO"} in authors, f"expected structured family, got: {authors}"
+    # Standard family+given must still work.
+    assert {"family": "Roe", "given": "Jane"} in authors, f"expected Roe/Jane, got: {authors}"
