@@ -25,7 +25,7 @@ from call_manager.db.models import Reference
 from call_manager.proposal_assist.citations.audit import _APPROVED_METADATA
 from call_manager.proposal_assist.citations.gitio import write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import find_by_citekey
-from call_manager.proposal_assist.citations.markers import find_markers
+from call_manager.proposal_assist.citations.markers import MARKER_RE, find_markers
 
 _REFERENCES_HEADING = "# References\n\n"
 
@@ -427,35 +427,28 @@ def _ordered_unique_citekeys(proposal_text: str) -> list[str]:
     return ordered
 
 
-def build_bibliography(
-    *,
-    proposal_text: str,
-    ledger: dict,
-    session,
-    workspace_id,
-    style: str,
-    repo_dir,
-    commit: bool = True,
-) -> dict:
-    """Render the cited references into a formatted bibliography (fail-closed).
+def _resolve_cited_entries(
+    *, proposal_text: str, ledger: dict, session, workspace_id
+) -> tuple[list[tuple[str, dict]], list[dict]]:
+    """Resolve every cited citekey to its approved csl_json (fail-closed).
 
-    Resolves each marker citekey via the LEDGER (canonical), then the Reference
-    DB row (workspace-scoped). The fail-closed gate refuses to render if ANY
-    cited reference's ``metadata_status`` is not approved AND has no waiver — no
-    partial write. Renders from ``csl_json`` ONLY (the approved canonical), never
-    ``csl_json_extracted``. Only marker-present citekeys are rendered. The result
-    is written to ``bibliography.md`` (a separate git artifact, NEVER merged into
-    proposal.md) when ``commit`` is True.
+    Returns ``(ok_entries, blocked)`` where ``ok_entries`` is a list of
+    ``(citekey, csl_json)`` in document order (one per unique citekey that
+    resolves to an approved, live reference), and ``blocked`` lists the
+    ``{citekey, reference_id, metadata_status, reason}`` dicts for every citekey
+    that fails resolution. The two outputs are mutually exclusive per citekey.
 
-    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}``.
-    Raises :class:`BuildBibliographyBlocked` if any reference is blocked.
+    This is the shared fail-closed resolution used by both
+    :func:`build_bibliography` (the rendered artifact) and :func:`compose_export`
+    (the inline-citation transform), so the export reflects exactly the same
+    contract as the bibliography. Resolution goes via the LEDGER (canonical),
+    then the Reference DB row (workspace-scoped); only ``csl_json`` (the approved
+    canonical) is returned, never ``csl_json_extracted``.
     """
-    citekeys = _ordered_unique_citekeys(proposal_text)
-
     ok_entries: list[tuple[str, dict]] = []
     blocked: list[dict] = []
 
-    for citekey in citekeys:
+    for citekey in _ordered_unique_citekeys(proposal_text):
         rows = find_by_citekey(ledger, citekey)
         if not rows:
             blocked.append(
@@ -530,6 +523,39 @@ def build_bibliography(
         # csl_json ONLY (approved canonical) — never csl_json_extracted.
         ok_entries.append((citekey, ref.csl_json or {}))
 
+    return ok_entries, blocked
+
+
+def build_bibliography(
+    *,
+    proposal_text: str,
+    ledger: dict,
+    session,
+    workspace_id,
+    style: str,
+    repo_dir,
+    commit: bool = True,
+) -> dict:
+    """Render the cited references into a formatted bibliography (fail-closed).
+
+    Resolves each marker citekey via the LEDGER (canonical), then the Reference
+    DB row (workspace-scoped). The fail-closed gate refuses to render if ANY
+    cited reference's ``metadata_status`` is not approved AND has no waiver — no
+    partial write. Renders from ``csl_json`` ONLY (the approved canonical), never
+    ``csl_json_extracted``. Only marker-present citekeys are rendered. The result
+    is written to ``bibliography.md`` (a separate git artifact, NEVER merged into
+    proposal.md) when ``commit`` is True.
+
+    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}``.
+    Raises :class:`BuildBibliographyBlocked` if any reference is blocked.
+    """
+    ok_entries, blocked = _resolve_cited_entries(
+        proposal_text=proposal_text,
+        ledger=ledger,
+        session=session,
+        workspace_id=workspace_id,
+    )
+
     if blocked:
         # Fail-closed: NO render, NO partial write.
         raise BuildBibliographyBlocked(blocked)
@@ -555,3 +581,109 @@ def build_bibliography(
         "citekey_count": len(ok_entries),
         "commit_sha": sha,
     }
+
+
+# ---------------------------------------------------------------------------
+# Composed export (inline citations + appended bibliography)
+# ---------------------------------------------------------------------------
+
+
+def _author_count(authors: object) -> int:
+    """Count authors that have a renderable name (family or literal)."""
+    if not isinstance(authors, list):
+        return 0
+    n = 0
+    for a in authors:
+        if not isinstance(a, dict):
+            continue
+        literal = a.get("literal")
+        family = a.get("family")
+        if (isinstance(literal, str) and literal.strip()) or (
+            isinstance(family, str) and family.strip()
+        ):
+            n += 1
+    return n
+
+
+def _inline_author_year(csl: dict, citekey: str) -> str:
+    """Render an in-text author-year citation, e.g. ``(Smith 2021a)`` or
+    ``(Smith et al. 2021)``. Degrades gracefully: ``(year)`` with no author,
+    ``(citekey)`` with neither — never an empty marker and never a ``[@`` leak.
+    """
+    if not isinstance(csl, dict):
+        csl = {}
+
+    name = ""
+    authors = csl.get("author")
+    if isinstance(authors, list):
+        first = next((a for a in authors if isinstance(a, dict)), None)
+        if first is not None:
+            literal = first.get("literal")
+            family = first.get("family")
+            if isinstance(literal, str) and literal.strip():
+                name = _clean(literal)
+            elif isinstance(family, str) and family.strip():
+                name = _clean(family)
+        if name and _author_count(authors) > 1:
+            name = f"{name} et al."
+
+    year = _year_of(csl)
+    suffix = _suffix_from_citekey(citekey, year)
+    if name and year:
+        return f"({name} {year}{suffix})"
+    if name:
+        return f"({name})"
+    if year:
+        return f"({year}{suffix})"
+    return f"({citekey})"
+
+
+def compose_export(
+    *,
+    proposal_text: str,
+    ledger: dict,
+    session,
+    workspace_id,
+    style: str,
+    bibliography_text: str | None = None,
+) -> str:
+    """Transform inline markers into rendered citations and append the bibliography.
+
+    Each ``[@citekey]<!-- ev:id -->`` marker is replaced (the WHOLE span, so the
+    ``ev`` comment never leaks) with the in-text citation for ``style``:
+      - "vancouver": ``[N]`` where N is the citekey's document-order number;
+      - "author-year": ``(Family Year[suffix])``.
+    Repeated cites of one citekey collapse to the same number / form.
+
+    Fail-closed, identically to :func:`build_bibliography`: if ANY cited reference
+    is unresolved/missing/tombstoned/unapproved, raises
+    :class:`BuildBibliographyBlocked` and produces NOTHING — callers must not
+    serve a half-transformed document. ``bibliography_text`` (typically from a
+    prior ``build_bibliography(commit=False)``) is appended when provided.
+    """
+    ok_entries, blocked = _resolve_cited_entries(
+        proposal_text=proposal_text,
+        ledger=ledger,
+        session=session,
+        workspace_id=workspace_id,
+    )
+    if blocked:
+        raise BuildBibliographyBlocked(blocked)
+
+    csl_by_key = {ck: csl for ck, csl in ok_entries}
+    number_by_key = {ck: i for i, (ck, _csl) in enumerate(ok_entries, start=1)}
+
+    def _replace(m) -> str:
+        citekey = m.group("citekey")
+        if style == "author-year":
+            return _inline_author_year(csl_by_key.get(citekey, {}), citekey)
+        number = number_by_key.get(citekey)
+        # Every marker citekey is in the map (none blocked → none unresolved);
+        # the empty fallback only guards a theoretical miss and never leaks "[@".
+        return f"[{number}]" if number is not None else ""
+
+    composed = MARKER_RE.sub(_replace, proposal_text or "")
+
+    if bibliography_text:
+        composed = composed.rstrip("\n") + "\n\n" + bibliography_text
+    return composed

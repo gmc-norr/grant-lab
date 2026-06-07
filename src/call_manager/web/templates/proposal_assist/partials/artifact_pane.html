@@ -3,6 +3,7 @@
   <a href="/workspaces/{{ workspace.id }}/artifact/raw">View raw</a>
   | <a href="/workspaces/{{ workspace.id }}/artifact/history">History</a>
   | <a href="/workspaces/{{ workspace.id }}/export.md">Export markdown</a>
+  | <a href="/workspaces/{{ workspace.id }}/export-composed.md">Export with citations</a>
 </p>
 {# artifact_rendered is already bleached in the route handler (rev2 / H2),
    so the `| safe` here is trusted output, not raw markdown injection. #}

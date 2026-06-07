@@ -54,4 +54,14 @@
           hx-swap="innerHTML">Run validation (deterministic)</button>
   <div id="audit-results"></div>
 </section>
+
+<section>
+  <h2>Export</h2>
+  <p>
+    <a href="/workspaces/{{ workspace.id }}/export-composed.md">Export with inline citations + bibliography</a>
+  </p>
+  <p><small>Citations are rendered in the workspace's citation style and the
+    bibliography is appended. Export is blocked until every cited reference's
+    metadata is approved (or waived).</small></p>
+</section>
 {% endblock %}

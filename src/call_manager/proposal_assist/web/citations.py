@@ -12,16 +12,22 @@ corrupt/unparseable ledger degrades to an error notice rather than a 500.
 
 from __future__ import annotations
 
+import html as _html
 import logging
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
+from call_manager.proposal_assist.citations.bibliography import (
+    BuildBibliographyBlocked,
+    build_bibliography,
+    compose_export,
+)
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
@@ -155,4 +161,91 @@ def run_validation(
             "issues": issues,
             "ledger_error": None,
         },
+    )
+
+
+def _safe_title(title: str) -> str:
+    """Sanitize a workspace title for a Content-Disposition filename."""
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in title)[:80] or "proposal"
+
+
+@router.get("/{workspace_id}/export-composed.md")
+def export_composed(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+):
+    """Export the proposal with inline citations rendered + bibliography appended.
+
+    Unlike ``export.md`` (which serves raw proposal.md, ev-comments and all), this
+    transforms every ``[@citekey]<!-- ev:id -->`` marker into the workspace's
+    citation style (Vancouver ``[N]`` / author-year ``(Family Year)``), strips all
+    ev-comments, and appends the rendered bibliography.
+
+    Fail-closed: it builds the bibliography first (commit=False); if any cited
+    reference is unapproved/unresolved/tombstoned it returns a 409 listing the
+    blocked references rather than serving a half-transformed document.
+
+    Auth: owner OR viewer (read-only — no commit).
+    """
+    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
+
+    repo_dir = Path(request.app.state.settings.workspaces_dir) / str(ws.id) / "repo"
+    proposal_path = repo_dir / PROPOSAL_FILENAME
+    citations_path = repo_dir / CITATIONS_FILENAME
+
+    if not proposal_path.exists():
+        return HTMLResponse("no proposal.md yet", status_code=404)
+
+    proposal_text = proposal_path.read_text()
+
+    try:
+        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
+    except ValueError as exc:
+        return HTMLResponse(
+            f"citations.json could not be read: {_html.escape(str(exc))}", status_code=409
+        )
+
+    style = ws.citation_style or "vancouver"
+
+    try:
+        # Build the bibliography in-memory (no commit) — this also performs the
+        # fail-closed resolution. compose_export re-runs the same resolution and
+        # will raise identically, so a successful build guarantees a clean compose.
+        bib = build_bibliography(
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=session,
+            workspace_id=ws.id,
+            style=style,
+            repo_dir=repo_dir,
+            commit=False,
+        )
+        composed = compose_export(
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=session,
+            workspace_id=ws.id,
+            style=style,
+            bibliography_text=bib["bibliography_md"] or None,
+        )
+    except BuildBibliographyBlocked as exc:
+        rows = "".join(
+            f"<li><code>{_html.escape(str(b.get('citekey')))}</code>: "
+            f"{_html.escape(str(b.get('reason')))}</li>"
+            for b in exc.blocked
+        )
+        body = (
+            "<h1>Export blocked</h1><p>Some cited references are not citable yet. "
+            "Approve their metadata (or have the owner waive it) and retry.</p>"
+            f"<ul>{rows}</ul>"
+        )
+        return HTMLResponse(body, status_code=409)
+
+    filename = f"{_safe_title(ws.title)}-composed.md"
+    return Response(
+        composed,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

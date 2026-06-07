@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import User, Workspace, WorkspaceViewer
+from call_manager.db.models import Reference, User, Workspace, WorkspaceViewer
 from call_manager.main import create_app
 from call_manager.proposal_assist.citations.ledger import (
     append_evidence,
@@ -13,7 +13,9 @@ from call_manager.proposal_assist.citations.ledger import (
     dump_ledger,
     empty_ledger,
 )
+from call_manager.proposal_assist.citations.markers import build_marker
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
+from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
 
 def _build_app(monkeypatch, pg_url, tmp_path):
@@ -309,3 +311,134 @@ def test_validate_citations_viewer_allowed(monkeypatch, pg_url, pg_session_facto
     assert resp.status_code == 200, resp.text
     body = resp.text
     assert "<html" not in body
+
+
+# ---------------------------------------------------------------------------
+# Task 6: GET /workspaces/{id}/export-composed.md — inline citations + bib
+# ---------------------------------------------------------------------------
+
+_SMITH_CSL = {
+    "author": [{"family": "Smith", "given": "Jane"}],
+    "title": "Adjuvant therapy outcomes",
+    "container-title": "Journal of Oncology",
+    "issued": {"date-parts": [[2021]]},
+}
+
+
+def _seed_composed_workspace(session, tmp_path, *, email, metadata_status="approved"):
+    """Owner + workspace + one approved Reference + proposal.md/citations.json
+    wired together by a single citekey marker. Returns (owner_id, wsid)."""
+    owner = User(email=email)
+    session.add(owner)
+    session.flush()
+    ws = Workspace(owner_id=owner.id, title="T", citation_style="vancouver")
+    session.add(ws)
+    session.flush()
+    ref = Reference(
+        workspace_id=ws.id,
+        kind="paper",
+        source_type="uploaded",
+        filename="seed.pdf",
+        storage_path="seed/seed.pdf",
+        mime_type="application/pdf",
+        citekey="smith2021",
+        csl_json=_SMITH_CSL,
+        metadata_status=metadata_status,
+    )
+    session.add(ref)
+    session.flush()
+    rid, wsid, oid = ref.id, ws.id, owner.id
+    session.commit()
+
+    repo = _repo_dir(tmp_path, wsid)
+    marker = build_marker("smith2021", "ev-aaaaaaaaaaaa")
+    (repo / PROPOSAL_FILENAME).write_text(f"# P\n\nWe argue {marker} here.\n")
+    row = build_evidence_row(
+        ev_id="ev-aaaaaaaaaaaa",
+        citekey="smith2021",
+        reference_id=str(rid),
+        chunk_index=0,
+        section_path="Intro",
+        source_content_hash=None,
+        chunk_content_hash="deadbeef",
+        evidence_quote="x",
+        evidence_quote_offsets=[0, 1],
+        stance="supports",
+        confidence="high",
+        claim_context_text="We argue.",
+        claim_context_hash="cafef00d",
+        citation_snapshot="Smith 2021",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    (repo / CITATIONS_FILENAME).write_text(dump_ledger(append_evidence(empty_ledger(), row)))
+    return oid, wsid
+
+
+def test_export_composed_renders_inline_and_bibliography(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_composed_workspace(s, tmp_path, email="exp-ok@ki.se")
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/export-composed.md")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/markdown")
+    assert "-composed.md" in resp.headers.get("content-disposition", "")
+    body = resp.text
+    # Markers transformed, no leak.
+    assert "[@" not in body
+    assert "<!-- ev:" not in body
+    # Inline vancouver number + appended bibliography.
+    assert "[1]" in body
+    assert "# References" in body
+    assert "Smith" in body
+
+
+def test_export_composed_blocked_when_unapproved(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_composed_workspace(
+            s, tmp_path, email="exp-blocked@ki.se", metadata_status="pending"
+        )
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/export-composed.md")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 409, resp.text
+    # The blocked citekey is surfaced; no half-transformed document served.
+    assert "smith2021" in resp.text
+    assert "[@" not in resp.text
+
+
+def test_export_composed_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        _, wsid = _seed_composed_workspace(s, tmp_path, email="exp-403-owner@ki.se")
+        other = User(email="exp-403-other@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+    client = _authed(app, user_id=other_id)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/export-composed.md")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
+
+
+def test_export_composed_no_proposal_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="exp-404@ki.se")
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/export-composed.md")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 404

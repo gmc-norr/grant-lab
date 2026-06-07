@@ -20,6 +20,7 @@ from call_manager.proposal_assist.citations.bibliography import (
     BIBLIOGRAPHY_FILENAME,
     BuildBibliographyBlocked,
     build_bibliography,
+    compose_export,
 )
 from call_manager.proposal_assist.citations.markers import build_marker
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
@@ -470,3 +471,105 @@ def test_inconsistent_reference_ids_for_one_citekey_blocked(pg_session_factory, 
     assert len(blocked) == 1
     assert blocked[0]["citekey"] == "smith2021"
     assert blocked[0]["reason"] == "unresolved_citekey"
+
+
+# --------------------------------------------------------------------------- #
+# compose_export (inline citations + appended bibliography)
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_vancouver_inline_numbers_document_order(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    rid_a = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    rid_b = _seed_reference(pg_session_factory, wsid, citekey="jones2019", csl_json=JONES_CSL)
+    # smith, jones, then smith AGAIN — repeated citekey must reuse [1].
+    proposal = _proposal(
+        build_marker("smith2021", "ev-aaaaaaaaaaaa"),
+        build_marker("jones2019", "ev-bbbbbbbbbbbb"),
+        build_marker("smith2021", "ev-cccccccccccc"),
+    )
+    ledger = _ledger(
+        [
+            _ledger_row(citekey="smith2021", reference_id=rid_a, ev_id="ev-aaaaaaaaaaaa"),
+            _ledger_row(citekey="jones2019", reference_id=rid_b, ev_id="ev-bbbbbbbbbbbb"),
+            _ledger_row(citekey="smith2021", reference_id=rid_a, ev_id="ev-cccccccccccc"),
+        ]
+    )
+
+    with pg_session_factory() as session:
+        out = compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+        )
+
+    # No marker syntax leaks.
+    assert "[@" not in out
+    assert "<!-- ev:" not in out
+    # smith=1 (twice), jones=2 (once).
+    assert out.count("[1]") == 2
+    assert out.count("[2]") == 1
+
+
+def test_compose_author_year_inline_form_and_suffix(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021a", csl_json=SMITH_CSL)
+    proposal = _proposal(build_marker("smith2021a", "ev-aaaaaaaaaaaa"))
+    ledger = _ledger([_ledger_row(citekey="smith2021a", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session:
+        out = compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="author-year",
+        )
+
+    assert "[@" not in out
+    assert "<!-- ev:" not in out
+    assert "(Smith 2021a)" in out  # single author, year + suffix from citekey
+
+
+def test_compose_appends_bibliography(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    proposal = _proposal(build_marker("smith2021", "ev-aaaaaaaaaaaa"))
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session:
+        out = compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            bibliography_text="# References\n\n[1] Smith J. ...\n",
+        )
+
+    assert "# References" in out
+    assert out.rstrip().endswith("[1] Smith J. ...")
+
+
+def test_compose_fail_closed_on_unapproved(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        citekey="smith2021",
+        csl_json=SMITH_CSL,
+        metadata_status="pending",
+    )
+    proposal = _proposal(build_marker("smith2021", "ev-aaaaaaaaaaaa"))
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session, pytest.raises(BuildBibliographyBlocked):
+        compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+        )
