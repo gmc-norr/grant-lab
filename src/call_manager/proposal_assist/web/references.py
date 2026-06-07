@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Reference, Workspace, WorkspaceViewer
+from call_manager.db.models import Reference, Workspace, WorkspaceEvent, WorkspaceViewer
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 from call_manager.proposal_assist.references.ingest import (
@@ -526,6 +526,58 @@ async def post_reference_metadata(
 
     target = f"/workspaces/{ws.id}/references"
     return Response(status_code=303, headers={"Location": target})
+
+
+# ---------------------------------------------------------------------------
+# POST /workspaces/<id>/references/<id>/waiver — owner overrides the metadata
+# gate so an unapproved reference can still be cited in the bibliography/export.
+# ---------------------------------------------------------------------------
+
+
+_WAIVER_TRUE = frozenset({"true", "1", "on", "yes"})
+
+
+@router.post("/{workspace_id}/references/{reference_id}/waiver", response_class=HTMLResponse)
+def post_reference_waiver(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    waiver: str = Form(...),
+    reason: str = Form(""),
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Set or clear a reference's metadata waiver (owner only).
+
+    The waiver lets the owner deliberately override the fail-closed metadata gate
+    for ONE reference so build_bibliography / composed export can cite it without
+    full metadata approval. The change is audited via a WorkspaceEvent. Returns
+    the updated reference-row partial for an HTMX swap.
+    """
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+    if ref is None or ref.workspace_id != ws.id:
+        raise HTTPException(status_code=404, detail="reference not found")
+
+    new_state = waiver.strip().lower() in _WAIVER_TRUE
+    ref.metadata_waiver = new_state
+    ref.metadata_waiver_reason = (reason.strip() or None) if new_state else None
+
+    session.add(
+        WorkspaceEvent(
+            workspace_id=ws.id,
+            kind="reference_metadata_waived" if new_state else "reference_metadata_waiver_cleared",
+            actor_id=user.id,
+            payload={"reference_id": str(ref.id), "reason": ref.metadata_waiver_reason},
+        )
+    )
+    session.commit()
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/reference_row.html",
+        {"ref": ref, "workspace": ws, "is_owner": True},
+    )
 
 
 # ---------------------------------------------------------------------------
