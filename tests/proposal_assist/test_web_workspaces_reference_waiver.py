@@ -174,6 +174,50 @@ def test_clearing_waiver_reblocks(monkeypatch, pg_url, pg_session_factory, tmp_p
         )
 
 
+def test_clear_with_reason_still_nulls_reason(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Posting waiver=false must null the reason even if a reason field is sent.
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid, rid = _seed(s, email="waive-clear-reason@ki.se")
+        ref = s.get(Reference, rid)
+        ref.metadata_waiver = True
+        ref.metadata_waiver_reason = "old"
+        s.commit()
+
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{rid}/waiver",
+            data={"waiver": "false", "reason": "ignored on clear"},
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref.metadata_waiver is False
+        assert ref.metadata_waiver_reason is None
+
+
+def test_non_member_cannot_waive(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # An authenticated user who is neither owner nor viewer → 403.
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        _, wsid, rid = _seed(s, email="waive-nonmember-owner@ki.se")
+        other = User(email="waive-nonmember-other@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+    client = _authed(app, user_id=other_id)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/references/{rid}/waiver", data={"waiver": "true"})
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
+    with pg_session_factory() as s:
+        assert s.get(Reference, rid).metadata_waiver is False
+
+
 def test_viewer_cannot_waive(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:

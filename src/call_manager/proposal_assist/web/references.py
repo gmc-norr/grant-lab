@@ -535,6 +535,7 @@ async def post_reference_metadata(
 
 
 _WAIVER_TRUE = frozenset({"true", "1", "on", "yes"})
+_MAX_WAIVER_REASON_LEN = 500
 
 
 @router.post("/{workspace_id}/references/{reference_id}/waiver", response_class=HTMLResponse)
@@ -561,14 +562,21 @@ def post_reference_waiver(
 
     new_state = waiver.strip().lower() in _WAIVER_TRUE
     ref.metadata_waiver = new_state
-    ref.metadata_waiver_reason = (reason.strip() or None) if new_state else None
+    # Cap the reason so a stray multi-MB paste can't bloat the row + audit payload.
+    ref.metadata_waiver_reason = (
+        (reason.strip()[:_MAX_WAIVER_REASON_LEN] or None) if new_state else None
+    )
 
     session.add(
         WorkspaceEvent(
             workspace_id=ws.id,
             kind="reference_metadata_waived" if new_state else "reference_metadata_waiver_cleared",
             actor_id=user.id,
-            payload={"reference_id": str(ref.id), "reason": ref.metadata_waiver_reason},
+            payload={
+                "reference_id": str(ref.id),
+                "waiver": new_state,
+                "reason": ref.metadata_waiver_reason,
+            },
         )
     )
     session.commit()
