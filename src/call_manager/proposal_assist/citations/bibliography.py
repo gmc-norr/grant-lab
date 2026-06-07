@@ -19,6 +19,7 @@ in a later task; this module is the formatting layer only.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from call_manager.db.models import Reference
@@ -28,6 +29,11 @@ from call_manager.proposal_assist.citations.ledger import find_by_citekey
 from call_manager.proposal_assist.citations.markers import MARKER_RE, find_markers
 
 _REFERENCES_HEADING = "# References\n\n"
+
+#: Visible citation token "[@citekey]" (the bracketed part of a marker, ignoring
+#: any trailing ev comment). Used to detect residual/bare markers after the
+#: full-marker substitution in compose_export — see the fail-closed scrub there.
+_BARE_MARKER_RE = re.compile(r"\[@([A-Za-z0-9_-]+)\]")
 
 #: The two v1 citation styles. Canonical source — the DB CHECK constraint
 #: (migration 0040 / models.Workspace), the settings route, and the MCP tool all
@@ -406,8 +412,9 @@ class BuildBibliographyBlocked(Exception):
 
     Carries ``blocked``: a list of ``{citekey, reference_id, metadata_status,
     reason}`` dicts (reasons: ``unresolved_citekey``, ``reference_missing``,
-    ``reference_tombstoned``, ``metadata_unapproved``). The build is fail-closed:
-    if ANY reference is blocked, NOTHING is rendered or written.
+    ``reference_tombstoned``, ``metadata_unapproved``; plus ``unresolved_marker``
+    raised by :func:`compose_export` for a bare/malformed marker). The build is
+    fail-closed: if ANY reference is blocked, NOTHING is rendered or written.
     """
 
     def __init__(self, blocked: list[dict]) -> None:
@@ -683,6 +690,25 @@ def compose_export(
         return f"[{number}]" if number is not None else ""
 
     composed = MARKER_RE.sub(_replace, proposal_text or "")
+
+    # Defense-in-depth: MARKER_RE only matches WELL-FORMED markers (with the ev
+    # comment). A hand-edited / malformed proposal could carry a bare "[@key]"
+    # that bypassed both resolution and substitution and would leak verbatim. The
+    # "[@key]" token is reserved for citations here, so any residual one is an
+    # unresolved citation — fail closed rather than emit a leaked marker.
+    residual = _BARE_MARKER_RE.findall(composed)
+    if residual:
+        raise BuildBibliographyBlocked(
+            [
+                {
+                    "citekey": ck,
+                    "reference_id": None,
+                    "metadata_status": None,
+                    "reason": "unresolved_marker",
+                }
+                for ck in dict.fromkeys(residual)  # unique, document order
+            ]
+        )
 
     if bibliography_text:
         composed = composed.rstrip("\n") + "\n\n" + bibliography_text

@@ -411,9 +411,28 @@ def test_export_composed_blocked_when_unapproved(monkeypatch, pg_url, pg_session
     finally:
         client.__exit__(None, None, None)
     assert resp.status_code == 409, resp.text
-    # The blocked citekey is surfaced; no half-transformed document served.
-    assert "smith2021" in resp.text
-    assert "[@" not in resp.text
+    # The blocked citekey + reason are surfaced as HTML; no half-doc served.
+    body = resp.text
+    assert "Export blocked" in body
+    assert "smith2021" in body
+    assert "metadata_unapproved" in body
+    assert "[@" not in body
+
+
+def test_export_composed_corrupt_ledger_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="exp-corrupt@ki.se")
+    repo = _repo_dir(tmp_path, wsid)
+    (repo / PROPOSAL_FILENAME).write_text("# P\n")
+    (repo / CITATIONS_FILENAME).write_text("{not valid json")
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/export-composed.md")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 409, resp.text
+    assert "could not be read" in resp.text
 
 
 def test_export_composed_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):

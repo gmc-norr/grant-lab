@@ -573,3 +573,44 @@ def test_compose_fail_closed_on_unapproved(pg_session_factory, tmp_path):
             workspace_id=wsid,
             style="vancouver",
         )
+
+
+def test_compose_fail_closed_on_bare_marker(pg_session_factory, tmp_path):
+    # A bare "[@orphan]" (no ev-comment) bypasses MARKER_RE — the defensive
+    # scrub must fail closed rather than leak it into the exported document.
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    proposal = (
+        f"# P\n\nWell-formed {build_marker('smith2021', 'ev-aaaaaaaaaaaa')} and "
+        "a bare [@orphan] one.\n"
+    )
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session, pytest.raises(BuildBibliographyBlocked) as exc:
+        compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+        )
+
+    reasons = {b["reason"] for b in exc.value.blocked}
+    assert "unresolved_marker" in reasons
+    assert any(b["citekey"] == "orphan" for b in exc.value.blocked)
+
+
+def test_compose_no_markers_returns_proposal_unchanged(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    proposal = "# P\n\nNo citations at all.\n"
+    with pg_session_factory() as session:
+        out = compose_export(
+            proposal_text=proposal,
+            ledger=_ledger([]),
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            bibliography_text=None,
+        )
+    assert out == proposal
+    assert "# References" not in out

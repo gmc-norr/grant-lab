@@ -493,3 +493,39 @@ def test_render_vancouver_numbering_intact_with_multiline_fields():
     assert len(body_lines) == 2
     assert body_lines[0].startswith("[1] ")
     assert body_lines[1].startswith("[2] ")
+
+
+# ---------------------------------------------------------------------------
+# In-text author-year citation (_inline_author_year)
+# ---------------------------------------------------------------------------
+
+from call_manager.proposal_assist.citations.bibliography import _inline_author_year  # noqa: E402
+
+
+def test_inline_author_year_single_author_year_suffix():
+    out = _inline_author_year(
+        {"author": [{"family": "Smith", "given": "Jane"}], "issued": {"date-parts": [[2021]]}},
+        "smith2021a",
+    )
+    assert out == "(Smith 2021a)"
+
+
+def test_inline_author_year_multiple_authors_et_al():
+    out = _inline_author_year(
+        {
+            "author": [{"family": "Smith"}, {"family": "Jones"}],
+            "issued": {"date-parts": [[2020]]},
+        },
+        "smith2020",
+    )
+    assert out == "(Smith et al. 2020)"
+
+
+def test_inline_author_year_no_author_falls_back_to_year():
+    out = _inline_author_year({"issued": {"date-parts": [[2019]]}}, "anon2019")
+    assert out == "(2019)"
+
+
+def test_inline_author_year_no_author_no_year_falls_back_to_citekey():
+    out = _inline_author_year({}, "mystery")
+    assert out == "(mystery)"
