@@ -224,6 +224,8 @@ class ClaudeAgentSDKAdapter:
                 "remove_citation",
                 "update_citation",
                 "rename_citekey",
+                # read-only citation discovery
+                "list_citations",
             ]
         return options_kwargs
 

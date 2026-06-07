@@ -468,10 +468,28 @@ def _collect_tools(ctx: ToolContext) -> list:
 
     from call_manager.proposal_assist.tools.citations import (
         insert_citation_impl,
+        list_citations_impl,
         remove_citation_impl,
         rename_citekey_impl,
         update_citation_impl,
     )
+
+    @tool(
+        "list_citations",
+        "List every existing citation in this proposal, read-only. Returns each "
+        "citation's `ev_id`, `citekey`, the cited reference/chunk "
+        "(reference_id, chunk_index, section_path), stance, confidence, the "
+        "claim text the marker attaches to, and the evidence quote. Call this to "
+        "discover the `ev-...` evidence id required by remove_citation and "
+        "update_citation, and the citekey required by rename_citekey. "
+        "Token-cheap — use it before mutating a citation.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def list_citations(args):
+        async def _impl(ctx):
+            return list_citations_impl(ctx)
+
+        return await _safe_tool("list_citations", ctx, _impl, ctx)
 
     @tool(
         "insert_citation",
@@ -525,8 +543,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         "remove_citation",
         "Remove one citation occurrence: its inline marker in proposal.md "
         "AND its row in the citation ledger, in one atomic commit. Pass the "
-        "`ev-...` evidence id of the occurrence to remove. Other markers/rows "
-        "that share the same citekey are left untouched.",
+        "`ev-...` evidence id of the occurrence to remove (call list_citations "
+        "to discover it). Other markers/rows that share the same citekey are "
+        "left untouched.",
         {
             "type": "object",
             "properties": {"evidence_id": {"type": "string"}},
@@ -545,7 +564,8 @@ def _collect_tools(ctx: ToolContext) -> list:
     @tool(
         "update_citation",
         "Update an existing citation's binding or metadata (identified by its "
-        "`ev-...` evidence id). When `chunk_index` or `evidence_quote` change, "
+        "`ev-...` evidence id, which list_citations surfaces). When "
+        "`chunk_index` or `evidence_quote` change, "
         "the new quote is re-verified against the chunk text and rejected if "
         "absent or ambiguous. Set `reaccept_claim=true` to re-snapshot the "
         "live claim sentence around the marker (use after editing the prose "
@@ -593,8 +613,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         "rename_citekey",
         "Rename a citekey across ALL of its inline markers in proposal.md and "
         "all of its rows in the citation ledger, in one atomic commit "
-        "(evidence ids preserved). Rejected if `new_citekey` is already in "
-        "use in this workspace.",
+        "(evidence ids preserved). The `old_citekey` can be obtained from "
+        "list_citations. Rejected if `new_citekey` is already in use in this "
+        "workspace.",
         {
             "type": "object",
             "properties": {
@@ -638,4 +659,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         remove_citation,
         update_citation,
         rename_citekey,
+        # read-only citation discovery
+        list_citations,
     ]

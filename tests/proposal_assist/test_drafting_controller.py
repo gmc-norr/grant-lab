@@ -12,7 +12,10 @@ from call_manager.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
 from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.locking import acquire_workspace_lock
+from call_manager.proposal_assist.drafting.locking import (
+    acquire_workspace_lock,
+    release_workspace_lock,
+)
 from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
 from tests.proposal_assist.conftest import make_workspace
 
@@ -33,6 +36,11 @@ async def test_controller_launch_returns_handle(pg_session_factory):
     handle = await controller.launch(wsid)
     assert handle.workspace_id == wsid
     assert adapter.launches[0].workspace_id == wsid
+
+    # Teardown: terminate releases the per-workspace advisory lock. Without it
+    # the registry's lock_session keeps a pooled connection checked out holding
+    # the lock, which can poison a later test that contends for the pool.
+    await controller.terminate(wsid)
 
 
 @pytest.mark.asyncio
@@ -64,6 +72,9 @@ async def test_controller_launch_runs_orphan_sweep(pg_session_factory):
         assert job.status == "failed"
         assert job.error == "orphaned"
 
+    # Teardown: release the advisory lock (see note above).
+    await controller.terminate(wsid)
+
 
 @pytest.mark.asyncio
 async def test_controller_launch_holds_advisory_lock_for_handle_lifetime(
@@ -93,6 +104,11 @@ async def test_controller_launch_holds_advisory_lock_for_handle_lifetime(
     await controller.terminate(wsid)
     with pg_session_factory() as s3:
         assert acquire_workspace_lock(s3, wsid) is True
+        # Release what we just acquired: pg_advisory_lock is session(connection)-
+        # scoped and the test engine pools connections, so a stranded lock would
+        # ride a pooled connection into a later test (surfacing as a spurious
+        # "workspace is busy" there). Unlock before s3 returns to the pool.
+        release_workspace_lock(s3, wsid)
 
 
 @pytest.mark.asyncio
@@ -114,6 +130,9 @@ async def test_controller_launch_returns_cached_handle_on_second_call(
     h1 = await controller.launch(wsid)
     h2 = await controller.launch(wsid)
     assert h1 is h2
+
+    # Teardown: release the advisory lock (see note above).
+    await controller.terminate(wsid)
 
 
 @pytest.mark.asyncio
@@ -379,6 +398,9 @@ async def test_concurrent_launch_same_workspace_returns_same_handle(
     )
     assert h1 is h2
     assert len(adapter.launches) == 1
+
+    # Teardown: release the advisory lock (see note above).
+    await controller.terminate(wsid)
 
 
 @pytest.mark.asyncio

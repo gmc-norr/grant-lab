@@ -86,6 +86,13 @@ def pg_session_factory(migrated_engine):
                     "('Vinnova', 'vinnova')"
                 )
             )
+    # Advisory-lock isolation: pg_advisory_lock is session(connection)-scoped and
+    # the engine pools connections. A test that strands a lock (e.g. launches a
+    # workspace handle without terminating it) leaves it on a pooled connection,
+    # which would later surface as a spurious "workspace is busy" in an unrelated
+    # test that contends for that connection. Disposing the pool at each test
+    # boundary closes those connections so their advisory locks are released.
+    migrated_engine.dispose()
 
 
 @pytest.fixture()

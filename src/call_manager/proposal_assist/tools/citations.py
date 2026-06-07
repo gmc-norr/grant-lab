@@ -215,9 +215,13 @@ def _resolve_free_citekey(
     Starts from ``base_candidate``. If it's already taken, strip any trailing
     single a-z suffix to get the stem and try stem+'a'..'z' (so a freshly
     generated "smith2021a" still searches the smith2021 family). If all 26
-    suffixes are taken (extraordinarily unlikely), fall back to a guaranteed
-    unique ``ref-<hex>``. This is why insert can never hard-error on a citekey
-    collision: it always resolves to a key free in BOTH the ledger and the DB.
+    suffixes are taken (extraordinarily unlikely), fall back to a ``ref-<hex>``
+    key that is free with overwhelming probability (a 12-hex random suffix). It
+    is NOT checked against ``taken``, so a collision there is best-effort, not
+    guaranteed-impossible; the partial unique index plus reconciliation repair
+    any colliding cache write. This is why insert can never hard-error on a
+    citekey collision: it always resolves to a key practically free in BOTH the
+    ledger and the DB.
     """
     if base_candidate not in taken:
         return base_candidate
@@ -229,6 +233,57 @@ def _resolve_free_citekey(
         if candidate not in taken:
             return candidate
     return f"ref-{uuid.uuid4().hex[:12]}"
+
+
+# --- list_citations (read-only discovery) ----------------------------------
+
+
+def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
+    """List every citation in the ledger so the agent can discover ev-ids/citekeys.
+
+    Read-only: reads ``citations.json`` directly (no proposal.md, no DB, no git,
+    no workspace lock). A single file read is atomic enough at this scale — the
+    only mutators write via an all-or-nothing git commit under the workspace
+    lock, so a concurrent write can't surface a half-written file here. An absent
+    ledger yields ``{"citations": []}``.
+
+    Each entry is a flat projection of an evidence row keyed for the agent:
+    ``ev_id`` (for remove_citation/update_citation), ``citekey`` (for
+    rename_citekey), plus the cited reference/chunk, stance, confidence, the
+    claim text, and the verbatim evidence quote. ``.get()`` is used throughout so
+    a hand-edited row can't crash the listing; a row with no ``id`` is skipped
+    (it cannot be acted on by ev-id anyway). Order = ledger/document order.
+    """
+    citations_path = ctx.repo_dir / CITATIONS_FILENAME
+    ledger_text = citations_path.read_text() if citations_path.exists() else None
+    try:
+        ledger = load_ledger(ledger_text)
+    except ValueError as exc:
+        return {"error": f"citations.json is invalid: {exc}"}
+
+    citations: list[dict[str, Any]] = []
+    for row in ledger["evidence"]:
+        ev_id = row.get("id")
+        if not ev_id:
+            # A hand-edited row with no id can't be targeted by ev-id — skip it.
+            continue
+        locator = row.get("locator") or {}
+        claim_context = row.get("claim_context") or {}
+        citations.append(
+            {
+                "ev_id": ev_id,
+                "citekey": row.get("citekey"),
+                "reference_id": row.get("reference_id"),
+                "chunk_index": locator.get("chunk_index"),
+                "section_path": locator.get("section_path"),
+                "stance": row.get("stance"),
+                "confidence": row.get("confidence"),
+                "claim": claim_context.get("text"),
+                "evidence_quote": row.get("evidence_quote"),
+                "citation_snapshot": row.get("citation_snapshot"),
+            }
+        )
+    return {"citations": citations}
 
 
 async def insert_citation_impl(

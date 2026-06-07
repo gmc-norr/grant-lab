@@ -51,11 +51,11 @@ def _make_ctx():
     )
 
 
-def test_collect_tools_returns_nineteen_named_tools():
-    """All nineteen tool names are present (8 from B5 + 6 from Slice 2
-    + 1 from Slice 3 + 4 citation tools from Slice 2 Task 9). Probes
-    _collect_tools directly instead of fighting the MCP Server's
-    decorator-based API."""
+def test_collect_tools_returns_twenty_named_tools():
+    """All twenty tool names are present (8 from B5 + 6 from Slice 2
+    + 1 from Slice 3 + 4 citation mutation tools from Slice 2 Task 9
+    + 1 read-only list_citations). Probes _collect_tools directly instead
+    of fighting the MCP Server's decorator-based API."""
     from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
@@ -84,8 +84,10 @@ def test_collect_tools_returns_nineteen_named_tools():
         "remove_citation",
         "update_citation",
         "rename_citekey",
+        # read-only citation discovery
+        "list_citations",
     }
-    assert len(tools) == 19
+    assert len(tools) == 20
 
 
 @pytest.mark.asyncio
@@ -213,3 +215,38 @@ async def test_insert_citation_non_integer_chunk_index_returns_envelope():
     assert result["content"][0]["type"] == "text"
     text = result["content"][0]["text"]
     assert "chunk_index" in text or "integer" in text
+
+
+@pytest.mark.asyncio
+async def test_list_citations_closure_returns_envelope():
+    """The registered list_citations closure returns the MCP envelope when
+    called with empty args. Against a repo with no citations.json the impl
+    returns {"citations": []}, which _wrap turns into a success envelope."""
+    import json
+    import subprocess
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from call_manager.proposal_assist.tools.registry import (
+        ToolContext,
+        _collect_tools,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        ctx = ToolContext(
+            workspace_id=uuid.uuid4(),
+            repo_dir=repo,
+            session_factory=None,  # type: ignore[arg-type]
+            settings=None,  # type: ignore[arg-type]
+        )
+        tools = _collect_tools(ctx)
+        lst = next(t for t in tools if t.name == "list_citations")
+        result = await lst.handler({})
+
+    assert result["is_error"] is False
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {"citations": []}

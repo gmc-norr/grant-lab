@@ -122,9 +122,10 @@ def reconcile_workspace_citekeys(
     A best-effort cache write inside insert/rename can fail after the atomic git
     commit lands, leaving references.citekey stale or NULL. This backfills it.
 
-    Forward-only, idempotent, and never destructive: it only sets a NULL/stale
-    cache value to the ledger's citekey, never the other way round, and never
-    deletes a row. It respects the partial unique index on
+    Forward-only, idempotent, and never destructive: it sets a NULL or
+    NON-MATCHING cache value to the ledger's citekey (the ledger is canonical,
+    so a cache value that disagrees is overwritten), never the other way round,
+    and never deletes a row. It respects the partial unique index on
     (workspace_id, citekey): if a DIFFERENT reference already holds the target
     citekey, that's a genuine conflict the index would reject, so we log and
     skip it (human / Slice-3 resolution) rather than crash. Never raises for

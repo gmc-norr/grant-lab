@@ -12,10 +12,11 @@ import uuid
 
 from call_manager.db.models import Reference
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.reconcile import reconcile_workspace_citekeys
+from call_manager.proposal_assist.reconcile import (
+    CITATIONS_FILENAME,
+    reconcile_workspace_citekeys,
+)
 from tests.proposal_assist.conftest import make_workspace
-
-CITATIONS_FILENAME = "citations.json"
 
 
 def _seed_ref(pg_session_factory, workspace_id, *, citekey=None) -> uuid.UUID:
