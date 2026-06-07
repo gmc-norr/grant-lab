@@ -414,3 +414,59 @@ def test_empty_no_markers(pg_session_factory, tmp_path):
     assert result["citekey_count"] == 0
     assert result["bibliography_md"] == ""
     assert result["commit_sha"] is None
+
+
+def test_empty_with_commit_writes_no_file(pg_session_factory, tmp_path):
+    # No markers + commit=True must NOT create or truncate bibliography.md.
+    wsid = _make_workspace(pg_session_factory)
+    proposal = "# Proposal\n\nNo citations here.\n"
+    repo_dir = tmp_path / "repo"
+    _init_repo(repo_dir, proposal)
+    head_before = _head(repo_dir)
+
+    with pg_session_factory() as session:
+        result = build_bibliography(
+            proposal_text=proposal,
+            ledger=_ledger([]),
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            repo_dir=repo_dir,
+            commit=True,
+        )
+
+    assert result["citekey_count"] == 0
+    assert result["bibliography_md"] == ""
+    assert result["commit_sha"] is None
+    assert not (repo_dir / BIBLIOGRAPHY_FILENAME).exists()
+    assert _head(repo_dir) == head_before  # no commit created
+
+
+def test_inconsistent_reference_ids_for_one_citekey_blocked(pg_session_factory, tmp_path):
+    # Two ledger rows for the same citekey disagreeing on reference_id is drift:
+    # fail closed (unresolved_citekey), do not silently trust the first row.
+    wsid = _make_workspace(pg_session_factory)
+    rid_a = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    rid_b = _seed_reference(pg_session_factory, wsid, citekey="smith2021b", csl_json=JONES_CSL)
+    proposal = _proposal(build_marker("smith2021", "ev-aaaaaaaaaaaa"))
+
+    with pg_session_factory() as session, pytest.raises(BuildBibliographyBlocked) as exc:
+        build_bibliography(
+            proposal_text=proposal,
+            ledger=_ledger(
+                [
+                    _ledger_row(citekey="smith2021", reference_id=rid_a, ev_id="ev-aaaaaaaaaaaa"),
+                    _ledger_row(citekey="smith2021", reference_id=rid_b, ev_id="ev-cccccccccccc"),
+                ]
+            ),
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            repo_dir=tmp_path,
+            commit=False,
+        )
+
+    blocked = exc.value.blocked
+    assert len(blocked) == 1
+    assert blocked[0]["citekey"] == "smith2021"
+    assert blocked[0]["reason"] == "unresolved_citekey"

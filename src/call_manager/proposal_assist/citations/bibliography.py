@@ -59,15 +59,26 @@ def _initials(given: str, *, dotted: bool) -> str:
     return "".join(letters)
 
 
+def _clean(value: object) -> str:
+    """Collapse ALL internal whitespace (incl. newlines/tabs) to single spaces.
+
+    The bibliography is a line-delimited markdown artifact: an embedded newline
+    in any field would split one entry across lines and desync Vancouver's
+    ``[n]`` numbering. ``csl_json`` is approved canonical, but approval does not
+    guarantee single-line fields, so every extracted string is normalized here.
+    """
+    return " ".join(str(value).split())
+
+
 def _one_author_vancouver(entry: dict) -> str | None:
     """Render a single author entry, Vancouver style ("Smith JM")."""
     literal = entry.get("literal")
     if isinstance(literal, str) and literal.strip():
-        return literal.strip()
+        return _clean(literal)
     family = entry.get("family")
     if not (isinstance(family, str) and family.strip()):
         return None
-    family = family.strip()
+    family = _clean(family)
     given = entry.get("given")
     inits = _initials(given, dotted=False) if isinstance(given, str) else ""
     return f"{family} {inits}" if inits else family
@@ -77,11 +88,11 @@ def _one_author_year(entry: dict) -> str | None:
     """Render a single author entry, author-year style ("Smith, J. M.")."""
     literal = entry.get("literal")
     if isinstance(literal, str) and literal.strip():
-        return literal.strip()
+        return _clean(literal)
     family = entry.get("family")
     if not (isinstance(family, str) and family.strip()):
         return None
-    family = family.strip()
+    family = _clean(family)
     given = entry.get("given")
     inits = _initials(given, dotted=True) if isinstance(given, str) else ""
     return f"{family}, {inits}" if inits else family
@@ -145,7 +156,9 @@ def _suffix_from_citekey(citekey: str, year: str | None) -> str:
 
     e.g. ("smith2021a", "2021") -> "a"; ("smith2021", "2021") -> "".
     Returns "" when there is no year, or the citekey does not end with the
-    year immediately followed by exactly one lowercase letter.
+    year immediately followed by exactly one lowercase letter. Disambiguation
+    suffixes are lowercase-only by convention (the citekey allocator emits
+    a/b/c), so an uppercase trailing letter is treated as not-a-suffix.
     """
     if not year or not isinstance(citekey, str):
         return ""
@@ -161,20 +174,19 @@ def _suffix_from_citekey(citekey: str, year: str | None) -> str:
 
 def _title_of(csl: dict) -> str:
     title = csl.get("title")
-    return title.strip() if isinstance(title, str) and title.strip() else ""
+    return _clean(title) if isinstance(title, str) and title.strip() else ""
 
 
 def _container_of(csl: dict) -> str:
     ct = csl.get("container-title")
-    return ct.strip() if isinstance(ct, str) and ct.strip() else ""
+    return _clean(ct) if isinstance(ct, str) and ct.strip() else ""
 
 
 def _str_field(csl: dict, key: str) -> str:
     val = csl.get(key)
     if val is None:
         return ""
-    s = str(val).strip()
-    return s
+    return _clean(val)
 
 
 def _doi_of(csl: dict) -> str:
@@ -192,6 +204,18 @@ def _volume_issue_page(csl: dict) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 # Per-entry formatting
 # ---------------------------------------------------------------------------
+
+
+def _assemble(pieces: list[str]) -> str:
+    """Join sentence pieces with ``". "`` and terminate with a single period.
+
+    Each piece may already end in its own period (an author-year initial like
+    "Smith, J." or a title written "Outcomes."). Stripping at most one trailing
+    period per piece before joining guarantees we never emit a doubled ".."
+    while preserving mid-string initials (the "J." in "Smith, J. T.").
+    """
+    cleaned = [p[:-1] if p.endswith(".") else p for p in pieces]
+    return ". ".join(cleaned) + "."
 
 
 def format_vancouver(csl: dict, number: int) -> str:
@@ -228,8 +252,7 @@ def format_vancouver(csl: dict, number: int) -> str:
     if locator:
         pieces.append(locator)
 
-    body = ". ".join(pieces)
-    out = f"[{number}] {body}."
+    out = f"[{number}] {_assemble(pieces)}"
 
     doi = _doi_of(csl)
     if doi:
@@ -293,7 +316,7 @@ def format_author_year(csl: dict, citekey: str) -> str:
     if not pieces:
         return "Untitled."
 
-    out = ". ".join(pieces) + "."
+    out = _assemble(pieces)
 
     doi = _doi_of(csl)
     if doi:
@@ -439,7 +462,12 @@ def build_bibliography(
             )
             continue
 
-        ref_id_raw = rows[0].get("reference_id") if isinstance(rows[0], dict) else None
+        # find_by_citekey returns every evidence row for this citekey (repeated
+        # cites). They must all bind to one reference_id; a disagreement is
+        # ledger drift, so fail closed rather than silently trusting the first.
+        ref_ids = {r.get("reference_id") for r in rows if isinstance(r, dict)}
+        ref_ids.discard(None)
+        ref_id_raw = next(iter(ref_ids)) if len(ref_ids) == 1 else None
         try:
             ref_uuid = uuid.UUID(str(ref_id_raw))
         except (ValueError, TypeError):
@@ -454,6 +482,9 @@ def build_bibliography(
             continue
 
         ref = session.get(Reference, ref_uuid)
+        # A row in another workspace is reported as "missing" too: from this
+        # workspace's standpoint the reference is absent, and the id came from
+        # this workspace's own ledger, so no cross-workspace detail is leaked.
         if ref is None or getattr(ref, "workspace_id", None) != workspace_id:
             blocked.append(
                 {
@@ -496,6 +527,12 @@ def build_bibliography(
     if blocked:
         # Fail-closed: NO render, NO partial write.
         raise BuildBibliographyBlocked(blocked)
+
+    if not ok_entries:
+        # No citations at all: nothing to render and nothing to commit. Returning
+        # without writing avoids creating/truncating bibliography.md to an empty
+        # file (render_bibliography returns "" precisely so callers can skip).
+        return {"bibliography_md": "", "citekey_count": 0, "commit_sha": None}
 
     bib_text = render_bibliography(ok_entries, style)
 

@@ -405,3 +405,91 @@ def test_render_never_raises_on_garbage_entries():
     # must not raise
     render_bibliography(entries, "vancouver")
     render_bibliography(entries, "author-year")
+
+
+# ---------------------------------------------------------------------------
+# Punctuation normalization (no doubled / dangling periods)
+# ---------------------------------------------------------------------------
+
+
+def test_author_year_no_year_no_double_period_after_initials():
+    # "Smith, J." + ". " join must not become "Smith, J.. T."
+    out = format_author_year(
+        {"author": [{"family": "Smith", "given": "Jane"}], "title": "T"}, "smith"
+    )
+    assert ".." not in out
+    assert out == "Smith, J. T."
+
+
+def test_vancouver_period_terminated_title_no_double_period():
+    out = format_vancouver({"author": [{"family": "X"}], "title": "Outcomes."}, 1)
+    assert ".." not in out
+    assert out == "[1] X. Outcomes."
+
+
+def test_author_year_period_terminated_title_no_double_period():
+    out = format_author_year(
+        {"author": [{"family": "X"}], "title": "Outcomes.", "issued": {"date-parts": [[2020]]}},
+        "x2020",
+    )
+    assert ".." not in out
+    assert out == "X (2020). Outcomes."
+
+
+def test_author_year_mid_string_initials_preserved():
+    # The "J." inside the head must survive; only a doubled terminal collapses.
+    out = format_author_year(
+        {
+            "author": [{"family": "Smith", "given": "Jane"}],
+            "title": "Study",
+            "issued": {"date-parts": [[2020]]},
+        },
+        "smith2020a",
+    )
+    assert out == "Smith, J. (2020a). Study."
+
+
+# ---------------------------------------------------------------------------
+# Whitespace / control-char collapsing (line-delimited artifact safety)
+# ---------------------------------------------------------------------------
+
+
+def test_vancouver_collapses_embedded_newline_in_title():
+    out = format_vancouver({"author": [{"family": "X"}], "title": "Line1\nLine2"}, 1)
+    assert "\n" not in out
+    assert out == "[1] X. Line1 Line2."
+
+
+def test_collapses_embedded_whitespace_in_container_and_fields():
+    out = format_author_year(
+        {
+            "author": [{"family": "Doe"}],
+            "container-title": "Nat\tMed",
+            "volume": "9",
+            "page": "1",
+            "issued": {"date-parts": [[2019]]},
+        },
+        "doe2019",
+    )
+    assert "\t" not in out
+    assert out == "Doe (2019). Nat Med, 9, 1."
+
+
+def test_collapses_newline_in_author_family():
+    out = format_vancouver({"author": [{"family": "Smith\nJones"}], "title": "T"}, 1)
+    assert "\n" not in out
+    assert out == "[1] Smith Jones. T."
+
+
+def test_render_vancouver_numbering_intact_with_multiline_fields():
+    # A field-embedded newline must not desync the [n] numbering: each entry
+    # stays on exactly one line.
+    entries = [
+        ("a", {"author": [{"family": "A"}], "title": "First\nstudy"}),
+        ("b", {"author": [{"family": "B"}], "title": "Second"}),
+    ]
+    out = render_bibliography(entries, "vancouver")
+    body_lines = [ln for ln in out.splitlines() if ln.strip() and not ln.startswith("#")]
+    assert len(body_lines) == 2
+    assert body_lines[0].startswith("[1] ")
+    assert body_lines[1].startswith("[2] ")
