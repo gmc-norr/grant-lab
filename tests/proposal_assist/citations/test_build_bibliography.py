@@ -58,6 +58,7 @@ def _seed_reference(
     *,
     citekey,
     csl_json,
+    csl_json_extracted=None,
     metadata_status="approved",
     metadata_waiver=False,
     tombstoned_at=None,
@@ -72,6 +73,7 @@ def _seed_reference(
             mime_type="application/pdf",
             citekey=citekey,
             csl_json=csl_json,
+            csl_json_extracted=csl_json_extracted,
             metadata_status=metadata_status,
             metadata_waiver=metadata_waiver,
             tombstoned_at=tombstoned_at,
@@ -614,3 +616,73 @@ def test_compose_no_markers_returns_proposal_unchanged(pg_session_factory, tmp_p
         )
     assert out == proposal
     assert "# References" not in out
+
+
+# --------------------------------------------------------------------------- #
+# C1 regression: verified_external + waived refs hold metadata in
+# csl_json_extracted (csl_json is NULL) — they must render real titles, not
+# "Untitled".
+# --------------------------------------------------------------------------- #
+
+
+def test_verified_external_renders_from_extracted_not_untitled(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    # Fetched-by-DOI shape: authoritative metadata in csl_json_extracted, NULL
+    # csl_json, status verified_external (passes the gate without approval).
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        citekey="smith2021",
+        csl_json=None,
+        csl_json_extracted=SMITH_CSL,
+        metadata_status="verified_external",
+    )
+    proposal = _proposal(build_marker("smith2021", "ev-aaaaaaaaaaaa"))
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session:
+        result = build_bibliography(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            repo_dir=tmp_path,
+            commit=False,
+        )
+
+    assert result["citekey_count"] == 1
+    assert "Smith" in result["bibliography_md"]
+    assert "Untitled" not in result["bibliography_md"]
+
+
+def test_waived_extracted_ref_renders_from_extracted(pg_session_factory, tmp_path):
+    wsid = _make_workspace(pg_session_factory)
+    # LLM-extracted (unapproved) but waived by the owner: metadata only in
+    # csl_json_extracted. The waiver opens the gate; render must use the metadata.
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        citekey="smith2021",
+        csl_json=None,
+        csl_json_extracted=SMITH_CSL,
+        metadata_status="extracted",
+        metadata_waiver=True,
+    )
+    proposal = _proposal(build_marker("smith2021", "ev-aaaaaaaaaaaa"))
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session:
+        result = build_bibliography(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            repo_dir=tmp_path,
+            commit=False,
+        )
+
+    assert result["citekey_count"] == 1
+    assert "Smith" in result["bibliography_md"]
+    assert "Untitled" not in result["bibliography_md"]

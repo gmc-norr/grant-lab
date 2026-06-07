@@ -449,8 +449,9 @@ def _resolve_cited_entries(
     :func:`build_bibliography` (the rendered artifact) and :func:`compose_export`
     (the inline-citation transform), so the export reflects exactly the same
     contract as the bibliography. Resolution goes via the LEDGER (canonical),
-    then the Reference DB row (workspace-scoped); only ``csl_json`` (the approved
-    canonical) is returned, never ``csl_json_extracted``.
+    then the Reference DB row (workspace-scoped). The returned CSL prefers the
+    approved canonical ``csl_json`` and falls back to ``csl_json_extracted``
+    (where ``verified_external`` and waived references hold their metadata).
     """
     ok_entries: list[tuple[str, dict]] = []
     blocked: list[dict] = []
@@ -527,8 +528,16 @@ def _resolve_cited_entries(
             )
             continue
 
-        # csl_json ONLY (approved canonical) — never csl_json_extracted.
-        ok_entries.append((citekey, ref.csl_json or {}))
+        # Prefer the human-approved canonical csl_json; fall back to the
+        # extracted/verified metadata. A "verified_external" reference (fetched
+        # by DOI/PMID/arXiv) stores its AUTHORITATIVE provider metadata in
+        # csl_json_extracted with csl_json still NULL, and a waived reference may
+        # likewise only have extracted metadata — without this fallback both
+        # would render as "Untitled". Mirrors insert_citation's citekey source
+        # (tools/citations.py). Never fabricates data: a reference with neither
+        # column still renders "Untitled".
+        csl = ref.csl_json or ref.csl_json_extracted or {}
+        ok_entries.append((citekey, csl))
 
     return ok_entries, blocked
 
@@ -548,8 +557,9 @@ def build_bibliography(
     Resolves each marker citekey via the LEDGER (canonical), then the Reference
     DB row (workspace-scoped). The fail-closed gate refuses to render if ANY
     cited reference's ``metadata_status`` is not approved AND has no waiver — no
-    partial write. Renders from ``csl_json`` ONLY (the approved canonical), never
-    ``csl_json_extracted``. Only marker-present citekeys are rendered. The result
+    partial write. Renders from ``csl_json`` (approved canonical), falling back
+    to ``csl_json_extracted`` for ``verified_external``/waived references whose
+    canonical column is still NULL. Only marker-present citekeys are rendered. The result
     is written to ``bibliography.md`` (a separate git artifact, NEVER merged into
     proposal.md) when ``commit`` is True.
 

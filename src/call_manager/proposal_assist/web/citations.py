@@ -238,7 +238,10 @@ def export_composed(
         )
         body = (
             "<h1>Export blocked</h1><p>Some cited references are not citable yet. "
-            "Approve their metadata (or have the owner waive it) and retry.</p>"
+            "Approve their metadata (or have the owner waive it) and retry. A reason "
+            "of <code>unresolved_marker</code> means the draft contains a bracketed "
+            "citation token that doesn't resolve to a real reference — edit it out of "
+            "the proposal text.</p>"
             f"<ul>{rows}</ul>"
         )
         return HTMLResponse(body, status_code=409)
