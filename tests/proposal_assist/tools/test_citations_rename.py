@@ -376,28 +376,41 @@ async def test_invalid_old_citekey_no_commit(pg_session_factory, _settings_env, 
 
 
 @pytest.mark.asyncio
-async def test_lock_busy_returns_error_no_commit(pg_session_factory, _settings_env, tmp_path):
+async def test_rename_succeeds_while_workspace_advisory_lock_held(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Regression: rename_citekey must NOT re-acquire the controller's
+    connection-scoped pg advisory lock. With that lock held by a separate
+    session (as during a real turn), rename now SUCCEEDS — it serializes on the
+    ToolContext asyncio.Lock instead of erroring as "busy"."""
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(
         pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)], citekey="lock2021"
     )
-    await insert_citation_impl(
+    r = await insert_citation_impl(
         ctx,
         reference_id=str(rid),
         anchor=ANCHOR_A,
         chunk_index=0,
         evidence_quote="reduces recurrence by 30%",
     )
-    before = _head(ctx.repo_dir)
+    assert "error" not in r, r
+    count_before = _commit_count(ctx.repo_dir)
 
     holder = pg_session_factory()
     try:
         assert acquire_workspace_lock(holder, wsid) is True
         result = await rename_citekey_impl(ctx, old_citekey="lock2021", new_citekey="lock2099")
-        assert "error" in result
-        err = result["error"].lower()
-        assert "busy" in err or "retry" in err
-        assert _head(ctx.repo_dir) == before
+        assert "error" not in result, result
+        assert result["new_citekey"] == "lock2099"
+
+        proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+        markers = find_markers(proposal_text)
+        assert markers and all(m["citekey"] == "lock2099" for m in markers)
+        ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+        assert find_by_citekey(ledger, "lock2099")
+        assert find_by_citekey(ledger, "lock2021") == []
+        assert _commit_count(ctx.repo_dir) == count_before + 1
         assert _tree_is_clean(ctx.repo_dir)
     finally:
         release_workspace_lock(holder, wsid)

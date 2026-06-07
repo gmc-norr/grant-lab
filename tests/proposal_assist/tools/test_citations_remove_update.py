@@ -280,22 +280,31 @@ async def test_remove_one_of_two_same_citekey(pg_session_factory, _settings_env,
 
 
 @pytest.mark.asyncio
-async def test_remove_lock_busy_no_commit(pg_session_factory, _settings_env, tmp_path):
+async def test_remove_succeeds_while_workspace_advisory_lock_held(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Regression: during a real turn the controller holds the per-workspace pg
+    advisory lock on a long-lived connection. remove_citation runs in-process
+    during that turn and must NOT re-acquire that connection-scoped lock (which
+    would always fail). With the lock held by a separate session, remove now
+    SUCCEEDS (it serializes on the ToolContext asyncio.Lock instead)."""
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(
         pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)], citekey="smith2021"
     )
     ins = await _insert_one(ctx, rid)
-    before = _head(ctx.repo_dir)
+    count_before = _commit_count(ctx.repo_dir)
 
     holder = pg_session_factory()
     try:
         assert acquire_workspace_lock(holder, wsid) is True
         result = await remove_citation_impl(ctx, evidence_id=ins["ev_id"])
-        assert "error" in result
-        err = result["error"].lower()
-        assert "busy" in err or "retry" in err
-        assert _head(ctx.repo_dir) == before
+        assert "error" not in result, result
+        assert result["ev_id"] == ins["ev_id"]
+
+        ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+        assert find_by_id(ledger, ins["ev_id"]) is None
+        assert _commit_count(ctx.repo_dir) == count_before + 1
         assert _tree_is_clean(ctx.repo_dir)
     finally:
         release_workspace_lock(holder, wsid)
@@ -539,22 +548,30 @@ async def test_update_invalid_evidence_id_format(pg_session_factory, _settings_e
 
 
 @pytest.mark.asyncio
-async def test_update_lock_busy_no_commit(pg_session_factory, _settings_env, tmp_path):
+async def test_update_succeeds_while_workspace_advisory_lock_held(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Regression: update_citation must NOT re-acquire the controller's
+    connection-scoped pg advisory lock. With that lock held by a separate
+    session (as during a real turn), update now SUCCEEDS — it serializes on the
+    ToolContext asyncio.Lock instead of erroring as "busy"."""
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(
         pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="smith2021"
     )
     ins = await _insert_one(ctx, rid)
-    before = _head(ctx.repo_dir)
+    count_before = _commit_count(ctx.repo_dir)
 
     holder = pg_session_factory()
     try:
         assert acquire_workspace_lock(holder, wsid) is True
         result = await update_citation_impl(ctx, evidence_id=ins["ev_id"], stance="background")
-        assert "error" in result
-        err = result["error"].lower()
-        assert "busy" in err or "retry" in err
-        assert _head(ctx.repo_dir) == before
+        assert "error" not in result, result
+        assert "stance" in result["updated_fields"]
+
+        ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+        assert find_by_id(ledger, ins["ev_id"])["stance"] == "background"
+        assert _commit_count(ctx.repo_dir) == count_before + 1
         assert _tree_is_clean(ctx.repo_dir)
     finally:
         release_workspace_lock(holder, wsid)

@@ -473,17 +473,40 @@ async def test_db_cache_update_failure_still_succeeds(
 
 
 @pytest.mark.asyncio
-async def test_lock_busy_returns_error_no_commit(pg_session_factory, _settings_env, tmp_path):
-    """If the per-workspace advisory lock is already held by another session,
-    insert_citation returns a busy/retry error, makes no commit, and leaves a
-    clean tree."""
-    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
-    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+async def test_insert_succeeds_while_workspace_advisory_lock_held(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Regression for the connection-scoped advisory-lock bug.
 
-    before = _head(ctx.repo_dir)
+    During a real drafting turn the controller holds the per-workspace Postgres
+    advisory lock on a long-lived connection for the WHOLE turn. The citation
+    mutation tools run in-process during that turn; if they re-acquire the same
+    advisory key on a fresh pool connection, pg_try_advisory_lock returns FALSE
+    (it is per-CONNECTION) and every mutation fails as "workspace busy".
+
+    We reproduce that condition: acquire the workspace advisory lock on a SEPARATE
+    holder session FIRST (held open for the duration), THEN call insert. The fix
+    makes insert serialize on the ToolContext asyncio.Lock + a plain session
+    instead of re-acquiring the pg lock, so it SUCCEEDS here. Before the fix this
+    returned {"error": "...busy..."} and made no commit — this test is the proof.
+    """
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT)],
+        csl_json={
+            "author": [{"family": "Smith"}],
+            "issued": {"date-parts": [[2021]]},
+        },
+    )
+
+    before_head = _head(ctx.repo_dir)
+    before_count = _commit_count(ctx.repo_dir)
 
     holder = pg_session_factory()
     try:
+        # The controller's long-lived lock_session — held OPEN across the insert.
         assert acquire_workspace_lock(holder, wsid) is True
 
         result = await insert_citation_impl(
@@ -493,14 +516,87 @@ async def test_lock_busy_returns_error_no_commit(pg_session_factory, _settings_e
             chunk_index=0,
             evidence_quote="reduces recurrence by 30%",
         )
-        assert "error" in result
-        err = result["error"].lower()
-        assert "busy" in err or "retry" in err
-        assert _head(ctx.repo_dir) == before
+
+        # The insert must SUCCEED despite the externally-held advisory lock.
+        assert "error" not in result, result
+        assert result["ev_id"].startswith("ev-")
+        assert result["citekey"] == "smith2021"
+        assert result["commit_sha"] and result["commit_sha"] != before_head
+
+        # Marker present in proposal.md, row present in citations.json, HEAD moved.
+        proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+        marker = f"[@smith2021]<!-- ev:{result['ev_id']} -->"
+        assert ANCHOR + marker in proposal_text
+        ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+        assert len(ledger["evidence"]) == 1
+        assert ledger["evidence"][0]["id"] == result["ev_id"]
+        assert _commit_count(ctx.repo_dir) == before_count + 1
         assert _tree_is_clean(ctx.repo_dir)
     finally:
         release_workspace_lock(holder, wsid)
         holder.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_inserts_serialize_no_corruption(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Two concurrent insert_citation_impl calls on ONE ctx must serialize on the
+    ToolContext asyncio.Lock and BOTH succeed without corrupting the
+    read-modify-write of proposal.md + citations.json.
+
+    Both markers end up in proposal.md, both rows in citations.json, and the git
+    history is consistent (two new commits, clean tree). gather ordering is
+    nondeterministic, so we assert set-membership rather than order.
+    """
+    import asyncio
+
+    anchor2 = "a second distinct claim sentence"
+    proposal = f"# Proposal\n\nWe argue that {ANCHOR} here.\n\nAlso {anchor2} too.\n"
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, proposal)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT)],
+        citekey="preset2020",
+    )
+
+    before_count = _commit_count(ctx.repo_dir)
+
+    r1, r2 = await asyncio.gather(
+        insert_citation_impl(
+            ctx,
+            reference_id=str(rid),
+            anchor=ANCHOR,
+            chunk_index=0,
+            evidence_quote="reduces recurrence by 30%",
+        ),
+        insert_citation_impl(
+            ctx,
+            reference_id=str(rid),
+            anchor=anchor2,
+            chunk_index=0,
+            evidence_quote="Secondary endpoints were not statistically significant",
+        ),
+    )
+
+    assert "error" not in r1, r1
+    assert "error" not in r2, r2
+    ev_ids = {r1["ev_id"], r2["ev_id"]}
+    assert len(ev_ids) == 2
+
+    # Both markers present in proposal.md (set-membership; order is nondeterministic).
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    markers = find_markers(proposal_text)
+    assert {m["ev_id"] for m in markers} == ev_ids
+
+    # Both rows present in citations.json.
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    assert {row["id"] for row in ledger["evidence"]} == ev_ids
+
+    # Two new commits, clean tree — the RMW was not corrupted by interleaving.
+    assert _commit_count(ctx.repo_dir) == before_count + 2
+    assert _tree_is_clean(ctx.repo_dir)
 
 
 @pytest.mark.asyncio

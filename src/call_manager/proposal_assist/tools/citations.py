@@ -6,8 +6,13 @@ the references.citekey cache. The git ledger is canonical; the DB citekey is a
 cache that reconciliation backfills (git-first, cache best-effort — mirrors
 proposal.py's contract).
 
-The whole operation runs under the per-workspace advisory lock so a concurrent
-edit can't interleave between the quote-verify / marker-build / commit steps.
+The whole operation runs under the ToolContext's per-context asyncio.Lock so a
+concurrent tool call WITHIN the same turn can't interleave between the
+quote-verify / marker-build / commit steps. Cross-process exclusivity (one
+turn/subprocess per workspace) is already provided by the controller's Postgres
+advisory lock + the turn_jobs running-unique index, so the mutation tools must
+NOT re-acquire that connection-scoped advisory lock here (the enclosing turn
+already holds it on a different connection, so a re-acquire would always fail).
 
 Tools return a plain dict; {"error": "..."} signals failure to the registry's
 _wrap, which the SDK turns into an MCP error envelope. The functions never
@@ -59,10 +64,6 @@ from call_manager.proposal_assist.citations.quotes import (
     QuoteNotFound,
     find_quote_offsets,
     normalize_for_quote_match,
-)
-from call_manager.proposal_assist.drafting.locking import (
-    LockNotAcquired,
-    workspace_lock_session,
 )
 from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
@@ -313,8 +314,13 @@ async def insert_citation_impl(
     except (ValueError, AttributeError, TypeError):
         return {"error": "invalid reference_id (not a uuid)"}
 
-    try:
-        with workspace_lock_session(ctx.session_factory, ctx.workspace_id) as session:
+    # The enclosing drafting turn already holds the per-workspace Postgres
+    # advisory lock (controller.launch) for cross-process exclusivity; this
+    # asyncio.Lock serializes concurrent tool calls WITHIN a single turn. Do NOT
+    # re-acquire the pg advisory lock here — it is connection-scoped and would
+    # always fail (the turn holds it on another connection).
+    async with ctx.write_lock:
+        with ctx.session_factory() as session:
             return _insert_citation_locked(
                 ctx,
                 session,
@@ -325,8 +331,6 @@ async def insert_citation_impl(
                 stance=stance,
                 confidence=confidence,
             )
-    except LockNotAcquired:
-        return {"error": "workspace is busy with another edit; retry"}
 
 
 def _insert_citation_locked(
@@ -537,7 +541,8 @@ async def remove_citation_impl(
 ) -> dict[str, Any]:
     """Remove one citation occurrence (its marker + ledger row) atomically.
 
-    Mirrors insert_citation: git-first, whole-op under the workspace lock.
+    Mirrors insert_citation: git-first, whole-op under the ToolContext's
+    per-turn asyncio.Lock (NOT the pg advisory lock — see insert_citation_impl).
     Returns {"ev_id", "commit_sha"} on success, or {"error": "..."} on any
     expected failure (leaving NO commit and a clean working tree). Removal is
     per-ev-id — other markers/rows sharing the same citekey are untouched, and
@@ -546,11 +551,13 @@ async def remove_citation_impl(
     """
     if not EVIDENCE_ID_RE.match(evidence_id or ""):
         return {"error": "invalid evidence_id"}
-    try:
-        with workspace_lock_session(ctx.session_factory, ctx.workspace_id):
-            return _remove_citation_locked(ctx, evidence_id=evidence_id)
-    except LockNotAcquired:
-        return {"error": "workspace is busy with another edit; retry"}
+    # The enclosing drafting turn already holds the per-workspace Postgres
+    # advisory lock (controller.launch) for cross-process exclusivity; this
+    # asyncio.Lock serializes concurrent tool calls WITHIN a single turn. Do NOT
+    # re-acquire the pg advisory lock here — it is connection-scoped and would
+    # always fail (the turn holds it on another connection).
+    async with ctx.write_lock:
+        return _remove_citation_locked(ctx, evidence_id=evidence_id)
 
 
 def _remove_citation_locked(ctx: ToolContext, *, evidence_id: str) -> dict[str, Any]:
@@ -616,8 +623,9 @@ async def update_citation_impl(
 ) -> dict[str, Any]:
     """Update one citation row atomically (re-pinning chunk/quote re-verifies).
 
-    Mirrors insert_citation: git-first, whole-op under the workspace lock. The
-    marker text in proposal.md is unchanged (the citekey never changes here), so
+    Mirrors insert_citation: git-first, whole-op under the ToolContext's
+    per-turn asyncio.Lock (NOT the pg advisory lock — see insert_citation_impl).
+    The marker text in proposal.md is unchanged (the citekey never changes here), so
     only citations.json is normally committed. Returns
     {"ev_id", "commit_sha", "updated_fields"} on success, or {"error": "..."}.
     A call that specifies no actual change returns {"error": "no changes
@@ -639,8 +647,13 @@ async def update_citation_impl(
     ):
         return {"error": "no changes specified"}
 
-    try:
-        with workspace_lock_session(ctx.session_factory, ctx.workspace_id) as session:
+    # The enclosing drafting turn already holds the per-workspace Postgres
+    # advisory lock (controller.launch) for cross-process exclusivity; this
+    # asyncio.Lock serializes concurrent tool calls WITHIN a single turn. Do NOT
+    # re-acquire the pg advisory lock here — it is connection-scoped and would
+    # always fail (the turn holds it on another connection).
+    async with ctx.write_lock:
+        with ctx.session_factory() as session:
             return _update_citation_locked(
                 ctx,
                 session,
@@ -651,8 +664,6 @@ async def update_citation_impl(
                 evidence_quote=evidence_quote,
                 reaccept_claim=reaccept_claim,
             )
-    except LockNotAcquired:
-        return {"error": "workspace is busy with another edit; retry"}
 
 
 def _update_citation_locked(
@@ -794,7 +805,8 @@ async def rename_citekey_impl(
 ) -> dict[str, Any]:
     """Rename a citekey across proposal markers + ledger rows atomically.
 
-    Mirrors insert_citation: git-first, whole-op under the workspace lock. Every
+    Mirrors insert_citation: git-first, whole-op under the ToolContext's
+    per-turn asyncio.Lock (NOT the pg advisory lock — see insert_citation_impl). Every
     ``[@old_citekey]`` marker in proposal.md is rewritten to ``[@new_citekey]``
     (ev ids preserved) and every ledger row with that citekey is updated, in ONE
     git commit; then references.citekey is refreshed best-effort. Returns
@@ -803,16 +815,19 @@ async def rename_citekey_impl(
     working tree). Rejects a new key already used (in the ledger OR
     references.citekey in this workspace).
     """
-    try:
-        with workspace_lock_session(ctx.session_factory, ctx.workspace_id) as session:
+    # The enclosing drafting turn already holds the per-workspace Postgres
+    # advisory lock (controller.launch) for cross-process exclusivity; this
+    # asyncio.Lock serializes concurrent tool calls WITHIN a single turn. Do NOT
+    # re-acquire the pg advisory lock here — it is connection-scoped and would
+    # always fail (the turn holds it on another connection).
+    async with ctx.write_lock:
+        with ctx.session_factory() as session:
             return _rename_citekey_locked(
                 ctx,
                 session,
                 old_citekey=old_citekey,
                 new_citekey=new_citekey,
             )
-    except LockNotAcquired:
-        return {"error": "workspace is busy with another edit; retry"}
 
 
 def _rename_citekey_locked(

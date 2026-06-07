@@ -18,6 +18,7 @@ unit-test-friendly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -48,6 +49,17 @@ class ToolContext:
     settings: Settings
     # Phase 3 metadata extraction; None disables LLM extraction gracefully.
     citation_service: CitationLLMService | None = field(default=None)
+    # Serializes the read-modify-write of proposal.md + citations.json across
+    # concurrent tool calls WITHIN a single drafting turn. The MCP server and all
+    # its tool closures are built once per workspace launch from one ToolContext,
+    # so this single lock covers every citation mutation in that turn. It does NOT
+    # provide cross-process exclusivity — the controller's Postgres advisory lock,
+    # the turn_jobs running-unique index, and begin_in_flight_exclusive already
+    # guarantee only one turn/subprocess per workspace runs at a time.
+    #
+    # default_factory=asyncio.Lock is safe to construct outside a running loop in
+    # Python 3.12: the Lock binds to the running loop lazily on first use.
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
