@@ -6,7 +6,10 @@ span [marker_start, marker_end) is computed by embedding a sentinel marker in
 the text so the offsets match what find_markers would report in real prose.
 """
 
-from call_manager.proposal_assist.citations.claims import claim_sentence_around
+from call_manager.proposal_assist.citations.claims import (
+    claim_sentence_around,
+    iter_proposal_sentences,
+)
 
 MARKER = "[@k]<!-- ev:ev-000000000000 -->"
 
@@ -68,3 +71,85 @@ def test_marker_with_no_following_text():
 
 def test_whole_text_is_single_sentence_no_terminator():
     assert _around("A single bare claim", "") == "A single bare claim"
+
+
+# --- iter_proposal_sentences ------------------------------------------------
+
+
+def _sentences(text: str) -> list[str]:
+    return [s for s, _ in iter_proposal_sentences(text)]
+
+
+def test_iter_skips_heading_lines():
+    text = "# Title\n## Section\nThe drug reduces recurrence."
+    assert _sentences(text) == ["The drug reduces recurrence"]
+
+
+def test_iter_skips_indented_heading():
+    text = "   # Indented heading\nReal claim here."
+    assert _sentences(text) == ["Real claim here"]
+
+
+def test_iter_skips_fenced_code_block():
+    text = "Before code.\n```\ncode line one.\ncode line two!\n```\nAfter code."
+    assert _sentences(text) == ["Before code", "After code"]
+
+
+def test_iter_skips_fenced_code_block_with_language():
+    text = "Intro.\n```python\nprint('not a sentence.')\n```\nOutro."
+    assert _sentences(text) == ["Intro", "Outro"]
+
+
+def test_iter_multi_sentence_paragraph_yields_each():
+    text = "First claim. Second claim! Third claim?"
+    assert _sentences(text) == ["First claim", "Second claim", "Third claim"]
+
+
+def test_iter_offsets_index_original_text():
+    text = "First claim. Second claim here."
+    results = list(iter_proposal_sentences(text))
+    for sentence, offset in results:
+        # The first word of the stripped sentence appears at the offset.
+        first_word = sentence.split(" ", 1)[0]
+        assert text[offset : offset + len(first_word)] == first_word
+
+
+def test_iter_offset_after_heading_points_into_original():
+    text = "# Heading\nThe claim begins here."
+    ((sentence, offset),) = iter_proposal_sentences(text)
+    assert sentence == "The claim begins here"
+    assert text[offset:].startswith("The claim begins here")
+
+
+def test_iter_strips_marker_from_sentence_text():
+    text = f"Recurrence is reduced{MARKER}. Next sentence."
+    sentences = _sentences(text)
+    assert sentences[0] == "Recurrence is reduced"
+    assert MARKER not in sentences[0]
+
+
+def test_iter_skips_marker_only_fragment():
+    # A fragment that is only a marker (between terminators) is dropped.
+    text = f"A real claim. {MARKER}. Another claim."
+    assert _sentences(text) == ["A real claim", "Another claim"]
+
+
+def test_iter_skips_whitespace_and_punctuation_only():
+    text = "Real one.   \n...\n!!!\nReal two."
+    assert _sentences(text) == ["Real one", "Real two"]
+
+
+def test_iter_empty_text_yields_nothing():
+    assert list(iter_proposal_sentences("")) == []
+
+
+def test_iter_boundary_agreement_with_claim_sentence_around():
+    # The sentence iter yields for a marker-bearing sentence must match what
+    # claim_sentence_around extracts for that same marker (shared _TERMINATORS).
+    prefix = "First sentence. We argue the effect is large"
+    suffix = ". Then more."
+    text = prefix + MARKER + suffix
+    via_around = claim_sentence_around(text, len(prefix), len(prefix) + len(MARKER))
+    iter_sentences = _sentences(text)
+    assert via_around in iter_sentences
+    assert via_around == "We argue the effect is large"

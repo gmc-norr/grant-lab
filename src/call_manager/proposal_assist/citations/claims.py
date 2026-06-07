@@ -8,7 +8,17 @@ the validator's re-extraction never diverge. Pure string function.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
+
+from call_manager.proposal_assist.citations.markers import MARKER_RE
+
 _TERMINATORS = ".!?\n"
+
+# A line is a markdown heading when, after optional leading spaces, it starts
+# with one or more '#'. A fence line opens/closes a fenced code block.
+_HEADING_RE = re.compile(r"^\s*#")
+_FENCE_RE = re.compile(r"^\s*```")
 
 
 def claim_sentence_around(text: str, marker_start: int, marker_end: int) -> str:
@@ -67,3 +77,92 @@ def claim_sentence_around(text: str, marker_start: int, marker_end: int) -> str:
 
     sentence = without[sent_start : last + 1]
     return " ".join(sentence.split())
+
+
+def iter_proposal_sentences(text: str) -> Iterator[tuple[str, int]]:
+    """Yield ``(sentence_text, char_offset)`` for each prose sentence in *text*.
+
+    Markdown structure is skipped: heading lines (``#``-prefixed after optional
+    leading spaces) and fenced code blocks (from an opening ```` ``` ```` fence
+    to its closing fence, inclusive) contribute no sentences. The remaining
+    prose is split on the same ``_TERMINATORS`` (``.!?\\n``) boundaries that
+    :func:`claim_sentence_around` uses, so a marker-bearing sentence extracted
+    by either function agrees.
+
+    ``sentence_text`` is whitespace-collapsed with any citation markers
+    (``[@key]<!-- ev:... -->``) stripped out — cleaner for a downstream
+    "is this a claim?" LLM prompt — while ``char_offset`` indexes into the
+    ORIGINAL *text* at the first non-whitespace character of the sentence, so
+    callers can correlate it with raw marker positions.
+
+    Fragments that are empty, whitespace-only, or — after stripping markers —
+    contain no word characters (marker-only or punctuation-only) are skipped.
+
+    Pure and deterministic: no DB / git / I/O.
+    """
+    in_fence = False
+    # Build the set of character indices that belong to prose (non-heading,
+    # non-code) lines, splitting each prose line into terminator-bounded
+    # fragments while tracking offsets in the ORIGINAL text.
+    line_start = 0
+    for line in text.splitlines(keepends=True):
+        stripped_line = line.rstrip("\n")
+        next_start = line_start + len(line)
+
+        if _FENCE_RE.match(stripped_line):
+            # Toggle: the opening AND closing fence lines are both excluded.
+            in_fence = not in_fence
+            line_start = next_start
+            continue
+        if in_fence or _HEADING_RE.match(stripped_line):
+            line_start = next_start
+            continue
+
+        # Prose line: split its content (without the trailing newline) on the
+        # in-line terminators .!? — the newline itself is a terminator too, so
+        # a fragment never spans lines.
+        yield from _split_fragment(stripped_line, line_start)
+        line_start = next_start
+
+
+def _split_fragment(line: str, base_offset: int) -> Iterator[tuple[str, int]]:
+    """Split one prose line into terminator-bounded sentences with offsets.
+
+    ``base_offset`` is the index of ``line[0]`` within the original document.
+    """
+    # Marker spans must not be split on: a marker contains ``<!--`` (a '!'),
+    # which would otherwise be treated as a sentence terminator.
+    marker_spans = [(m.start(), m.end()) for m in MARKER_RE.finditer(line)]
+
+    def _in_marker(idx: int) -> bool:
+        return any(ms <= idx < me for ms, me in marker_spans)
+
+    frag_start = 0
+    i = 0
+    n = len(line)
+    while i < n:
+        if line[i] in _TERMINATORS and not _in_marker(i):
+            yield from _emit(line[frag_start:i], base_offset + frag_start)
+            frag_start = i + 1
+        i += 1
+    # Trailing fragment with no terminator (the line's newline acted as the
+    # terminator, or the line was the last in the document).
+    if frag_start < n:
+        yield from _emit(line[frag_start:n], base_offset + frag_start)
+
+
+def _emit(fragment: str, frag_offset: int) -> Iterator[tuple[str, int]]:
+    """Yield a cleaned sentence for *fragment*, or nothing if it is not a claim.
+
+    Markers are stripped from the yielded text; the offset is advanced to the
+    first non-whitespace character of the original fragment so it points at the
+    sentence start in the document.
+    """
+    without_markers = MARKER_RE.sub("", fragment)
+    # Skip empties, whitespace-only, marker-only, and punctuation-only frags:
+    # require at least one word character once markers are gone.
+    if not re.search(r"\w", without_markers):
+        return
+    leading_ws = len(fragment) - len(fragment.lstrip())
+    sentence_text = " ".join(without_markers.split())
+    yield sentence_text, frag_offset + leading_ws
