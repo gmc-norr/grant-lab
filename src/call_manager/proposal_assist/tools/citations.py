@@ -32,13 +32,17 @@ from call_manager.proposal_assist.citations.ledger import (
     append_evidence,
     build_evidence_row,
     dump_ledger,
+    find_by_id,
     load_ledger,
     new_ev_id,
+    remove_evidence,
+    update_evidence,
 )
 from call_manager.proposal_assist.citations.markers import (
     AnchorError,
     find_markers,
     insert_marker,
+    remove_marker,
 )
 from call_manager.proposal_assist.citations.quotes import (
     QuoteAmbiguous,
@@ -362,3 +366,290 @@ def _insert_citation_locked(
 
     # 15. Success.
     return {"ev_id": ev_id, "citekey": citekey, "commit_sha": sha}
+
+
+# --- remove_citation -------------------------------------------------------
+
+
+async def remove_citation_impl(
+    ctx: ToolContext,
+    *,
+    evidence_id: str,
+) -> dict[str, Any]:
+    """Remove one citation occurrence (its marker + ledger row) atomically.
+
+    Mirrors insert_citation: git-first, whole-op under the workspace lock.
+    Returns {"ev_id", "commit_sha"} on success, or {"error": "..."} on any
+    expected failure (leaving NO commit and a clean working tree). Removal is
+    per-ev-id — other markers/rows sharing the same citekey are untouched, and
+    references.citekey is intentionally NOT changed here (other occurrences may
+    still use it; tombstoning is out of scope for remove).
+    """
+    try:
+        with workspace_lock_session(ctx.session_factory, ctx.workspace_id):
+            return _remove_citation_locked(ctx, evidence_id=evidence_id)
+    except LockNotAcquired:
+        return {"error": "workspace is busy with another edit; retry"}
+
+
+def _remove_citation_locked(ctx: ToolContext, *, evidence_id: str) -> dict[str, Any]:
+    # 1. Read proposal.md + the ledger.
+    proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
+    if not proposal_path.exists():
+        return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
+    proposal_text = proposal_path.read_text()
+
+    citations_path = ctx.repo_dir / CITATIONS_FILENAME
+    ledger_text = citations_path.read_text() if citations_path.exists() else None
+    try:
+        ledger = load_ledger(ledger_text)
+    except ValueError as exc:
+        return {"error": f"citations.json is invalid: {exc}"}
+
+    # 2. Locate the row (the ledger is canonical).
+    row = find_by_id(ledger, evidence_id)
+    if row is None:
+        return {"error": "citation not found"}
+
+    # 3. Drop the marker (per-ev-id) and the row.
+    new_proposal_text, removed_marker = remove_marker(proposal_text, evidence_id)
+    new_ledger, removed_row = remove_evidence(ledger, evidence_id)
+    if not removed_marker and not removed_row:
+        return {"error": "citation not found"}
+    if removed_row and not removed_marker:
+        logger.warning(
+            "remove_citation: ledger row %s had no matching marker in %s "
+            "(workspace %s) — dropping the row anyway; ledger is canonical",
+            evidence_id,
+            PROPOSAL_FILENAME,
+            ctx.workspace_id,
+        )
+
+    # 4. Atomic commit — proposal.md + citations.json in ONE commit (git first).
+    try:
+        sha = write_and_commit_files(
+            ctx.repo_dir,
+            {
+                PROPOSAL_FILENAME: new_proposal_text,
+                CITATIONS_FILENAME: dump_ledger(new_ledger),
+            },
+            f"cite: remove {row.get('citekey')} [{evidence_id}]",
+        )
+    except GitCommitError:
+        logger.exception(
+            "remove_citation: atomic commit failed for workspace %s (ev %s)",
+            ctx.workspace_id,
+            evidence_id,
+        )
+        return {"error": "failed to commit citation removal"}
+
+    # 5. Success.
+    return {"ev_id": evidence_id, "commit_sha": sha}
+
+
+# --- update_citation -------------------------------------------------------
+
+
+def _claim_sentence_around(text: str, marker_start: int, marker_end: int) -> str:
+    """Return the live claim text around a marker for reaccept_claim.
+
+    Snapshots the sentence containing the marker: from the previous sentence
+    terminator (. ! ? or newline) up to and including the next one, with the
+    marker span itself excised so the stored claim is the prose, not the marker.
+    Falls back to the marker's line, then to the whole text, if no boundary is
+    found. Result is whitespace-collapsed.
+    """
+    prose = text[:marker_start] + text[marker_end:]
+    # The marker is gone from `prose`; the claim now centres on marker_start.
+    pos = marker_start
+    terminators = ".!?\n"
+    start = 0
+    for i in range(pos - 1, -1, -1):
+        if prose[i] in terminators:
+            start = i + 1
+            break
+    end = len(prose)
+    for i in range(pos, len(prose)):
+        if prose[i] in terminators:
+            end = i + 1
+            break
+    sentence = prose[start:end]
+    return normalize_for_quote_match(sentence)
+
+
+async def update_citation_impl(
+    ctx: ToolContext,
+    *,
+    evidence_id: str,
+    chunk_index: int | None = None,
+    stance: str | None = None,
+    confidence: str | None = None,
+    evidence_quote: str | None = None,
+    reaccept_claim: bool = False,
+) -> dict[str, Any]:
+    """Update one citation row atomically (re-pinning chunk/quote re-verifies).
+
+    Mirrors insert_citation: git-first, whole-op under the workspace lock. The
+    marker text in proposal.md is unchanged (the citekey never changes here), so
+    only citations.json is normally committed. Returns
+    {"ev_id", "commit_sha", "updated_fields"} on success, or {"error": "..."}.
+    A call that specifies no actual change returns {"error": "no changes
+    specified"} BEFORE writing (no empty commits).
+    """
+    if stance is not None and stance not in ALLOWED_STANCES:
+        return {"error": f"invalid stance {stance!r}; allowed: {sorted(ALLOWED_STANCES)}"}
+    if confidence is not None and confidence not in ALLOWED_CONFIDENCE:
+        allowed = sorted(ALLOWED_CONFIDENCE)
+        return {"error": f"invalid confidence {confidence!r}; allowed: {allowed}"}
+
+    if (
+        chunk_index is None
+        and stance is None
+        and confidence is None
+        and evidence_quote is None
+        and not reaccept_claim
+    ):
+        return {"error": "no changes specified"}
+
+    try:
+        with workspace_lock_session(ctx.session_factory, ctx.workspace_id) as session:
+            return _update_citation_locked(
+                ctx,
+                session,
+                evidence_id=evidence_id,
+                chunk_index=chunk_index,
+                stance=stance,
+                confidence=confidence,
+                evidence_quote=evidence_quote,
+                reaccept_claim=reaccept_claim,
+            )
+    except LockNotAcquired:
+        return {"error": "workspace is busy with another edit; retry"}
+
+
+def _update_citation_locked(
+    ctx: ToolContext,
+    session: Session,
+    *,
+    evidence_id: str,
+    chunk_index: int | None,
+    stance: str | None,
+    confidence: str | None,
+    evidence_quote: str | None,
+    reaccept_claim: bool,
+) -> dict[str, Any]:
+    # 1. Read proposal.md + the ledger; locate the row.
+    proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
+    if not proposal_path.exists():
+        return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
+    proposal_text = proposal_path.read_text()
+
+    citations_path = ctx.repo_dir / CITATIONS_FILENAME
+    ledger_text = citations_path.read_text() if citations_path.exists() else None
+    try:
+        ledger = load_ledger(ledger_text)
+    except ValueError as exc:
+        return {"error": f"citations.json is invalid: {exc}"}
+
+    row = find_by_id(ledger, evidence_id)
+    if row is None:
+        return {"error": "citation not found"}
+
+    fields: dict[str, Any] = {}
+
+    # 2. Scalar field updates.
+    if stance is not None:
+        fields["stance"] = stance
+    if confidence is not None:
+        fields["confidence"] = confidence
+
+    # 3. Re-verify the evidence binding when chunk_index or quote changes.
+    if chunk_index is not None or evidence_quote is not None:
+        locator = row.get("locator") or {}
+        new_chunk_index = chunk_index if chunk_index is not None else locator.get("chunk_index")
+        new_quote = evidence_quote if evidence_quote is not None else row.get("evidence_quote")
+
+        try:
+            ref_uuid = uuid.UUID(str(row.get("reference_id")))
+        except (ValueError, AttributeError, TypeError):
+            return {"error": "invalid reference_id (not a uuid)"}
+
+        chunk = (
+            session.query(ReferenceChunk)
+            .filter(
+                ReferenceChunk.reference_id == ref_uuid,
+                ReferenceChunk.chunk_index == new_chunk_index,
+                ReferenceChunk.workspace_id == ctx.workspace_id,
+            )
+            .one_or_none()
+        )
+        if chunk is None:
+            return {"error": "chunk not found"}
+
+        try:
+            start, end = find_quote_offsets(chunk.text, new_quote)
+        except QuoteNotFound:
+            return {"error": "evidence quote not found in chunk"}
+        except QuoteAmbiguous:
+            return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk"}
+
+        fields["evidence_quote"] = new_quote
+        fields["evidence_quote_offsets"] = [start, end]
+        fields["chunk_content_hash"] = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+        fields["locator"] = {
+            "chunk_index": new_chunk_index,
+            "section_path": chunk.section_path,
+        }
+
+    # 4. reaccept_claim — re-snapshot the live claim around the marker.
+    if reaccept_claim:
+        marker = next((m for m in find_markers(proposal_text) if m["ev_id"] == evidence_id), None)
+        if marker is not None:
+            claim_text = _claim_sentence_around(proposal_text, marker["start"], marker["end"])
+        else:
+            # No live marker (e.g. orphaned row) — fall back to the stored claim
+            # text so we still refresh the hash deterministically.
+            claim_text = (row.get("claim_context") or {}).get("text", "")
+        fields["claim_context"] = {
+            "text": claim_text,
+            "hash": hashlib.sha256(
+                normalize_for_quote_match(claim_text).encode("utf-8")
+            ).hexdigest(),
+        }
+        # Clear any drift flag a validator may have set (out-of-scope field, but
+        # reaccept is the documented way to clear it — be defensive).
+        if "claim_drift" in row:
+            fields["claim_drift"] = None
+
+    # 5. Nothing actually changed (e.g. only invalid no-op combos slipped through).
+    if not fields:
+        return {"error": "no changes specified"}
+
+    # 6. Always refresh updated_at on a real change.
+    fields["updated_at"] = datetime.now(UTC).isoformat()
+
+    new_ledger, updated = update_evidence(ledger, evidence_id, **fields)
+    if not updated:
+        return {"error": "citation not found"}
+
+    # 7. Atomic commit — only citations.json changes (marker/citekey unchanged).
+    try:
+        sha = write_and_commit_files(
+            ctx.repo_dir,
+            {CITATIONS_FILENAME: dump_ledger(new_ledger)},
+            f"cite: update [{evidence_id}]",
+        )
+    except GitCommitError:
+        logger.exception(
+            "update_citation: atomic commit failed for workspace %s (ev %s)",
+            ctx.workspace_id,
+            evidence_id,
+        )
+        return {"error": "failed to commit citation update"}
+
+    # 8. Success.
+    return {
+        "ev_id": evidence_id,
+        "commit_sha": sha,
+        "updated_fields": sorted(fields.keys()),
+    }
