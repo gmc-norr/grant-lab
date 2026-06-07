@@ -136,7 +136,7 @@ async def test_lists_inserted_citations(pg_session_factory, _settings_env, tmp_p
     )
     assert "error" not in r2, r2
 
-    out = list_citations_impl(ctx)
+    out = await list_citations_impl(ctx)
     citations = out["citations"]
     assert len(citations) == 2
 
@@ -166,7 +166,7 @@ async def test_lists_inserted_citations(pg_session_factory, _settings_env, tmp_p
 async def test_empty_workspace_returns_empty_list(pg_session_factory, _settings_env, tmp_path):
     ctx, _wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     # No citations.json written at all.
-    assert list_citations_impl(ctx) == {"citations": []}
+    assert await list_citations_impl(ctx) == {"citations": []}
 
 
 @pytest.mark.asyncio
@@ -185,7 +185,7 @@ async def test_malformed_rows_do_not_crash(pg_session_factory, _settings_env, tm
     }
     (ctx.repo_dir / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
 
-    out = list_citations_impl(ctx)
+    out = await list_citations_impl(ctx)
     citations = out["citations"]
     assert len(citations) == 1
     row = citations[0]

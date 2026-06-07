@@ -238,14 +238,15 @@ def _resolve_free_citekey(
 # --- list_citations (read-only discovery) ----------------------------------
 
 
-def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
+async def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
     """List every citation in the ledger so the agent can discover ev-ids/citekeys.
 
     Read-only: reads ``citations.json`` directly (no proposal.md, no DB, no git,
-    no workspace lock). A single file read is atomic enough at this scale — the
-    only mutators write via an all-or-nothing git commit under the workspace
-    lock, so a concurrent write can't surface a half-written file here. An absent
-    ledger yields ``{"citations": []}``.
+    no workspace lock). Turn serialization (one in-flight turn per workspace via
+    ``begin_in_flight_exclusive``) means no mutator runs concurrently with this
+    read, so a half-written file can't surface; and even a torn read degrades
+    safely because ``load_ledger`` treats empty/blank content as an empty ledger.
+    An absent ledger yields ``{"citations": []}``.
 
     Each entry is a flat projection of an evidence row keyed for the agent:
     ``ev_id`` (for remove_citation/update_citation), ``citekey`` (for

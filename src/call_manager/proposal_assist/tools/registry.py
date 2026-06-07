@@ -486,10 +486,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def list_citations(args):
-        async def _impl(ctx):
-            return list_citations_impl(ctx)
-
-        return await _safe_tool("list_citations", ctx, _impl, ctx)
+        return await _safe_tool("list_citations", ctx, list_citations_impl, ctx)
 
     @tool(
         "insert_citation",
