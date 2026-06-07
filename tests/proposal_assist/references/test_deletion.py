@@ -156,6 +156,50 @@ def test_cross_workspace_reference_raises(pg_session_factory, tmp_path):
         )
 
 
+def test_unreadable_ledger_fails_closed_to_tombstone(pg_session_factory, tmp_path):
+    """An UNREADABLE citations.json (OSError — e.g. a directory in place of the
+    file) must be treated as CITED (fail-closed).
+
+    This mirrors the corrupt-ledger test: when we cannot read the ledger we
+    cannot confirm the reference is uncited, so we must NOT hard-delete it.
+    The reference must be tombstoned, with its row, chunk(s), and bytes all
+    retained.
+    """
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    byte_path = storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf")
+
+    # Place a DIRECTORY where citations.json would be so .exists() is True but
+    # read_text() raises IsADirectoryError (a subclass of OSError).
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "citations.json").mkdir()
+
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+
+    # Fail-closed: unreadable ledger is treated as cited → tombstone.
+    assert outcome == "tombstoned"
+
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        # Row must still exist with tombstoned_at set.
+        assert ref is not None
+        assert ref.tombstoned_at is not None
+        # Chunk(s) retained so existing citations keep resolving.
+        remaining = s.query(ReferenceChunk).filter(ReferenceChunk.reference_id == rid).count()
+        assert remaining == 1
+    # Stored bytes retained.
+    assert byte_path.exists()
+
+
 def test_corrupt_ledger_fails_closed_to_tombstone(pg_session_factory, tmp_path):
     """A MALFORMED citations.json must be treated as CITED (fail-closed).
 

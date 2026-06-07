@@ -21,18 +21,21 @@ validation. Each issue is a dict:
 
 Issue types emitted:
 
-- ``orphan_marker``      (error)   — inline marker has no backing ledger row
-- ``orphan_row``         (error)   — ledger row has no live inline marker
-- ``reference_missing``  (error)   — cited reference not found in this workspace
-- ``metadata_unapproved``(warning) — reference metadata status is not approved
-- ``chunk_missing``      (error)   — chunk index not found for the reference
-- ``source_replaced``    (error)   — reference source file changed since citing
-- ``index_drift``        (error)   — chunk text changed since the citation was created
-- ``quote_missing``      (error)   — evidence quote absent or unlocatable in chunk
-- ``claim_drift``        (error)   — claim sentence around the marker changed, or
-                                     ``claim_context.hash`` absent (cannot verify)
-- ``internal``           (error)   — unexpected exception during per-row processing;
-                                     the audit logs the traceback and continues
+- ``orphan_marker``        (error)   — inline marker has no backing ledger row
+- ``orphan_row``           (error)   — ledger row has no live inline marker
+- ``reference_missing``    (error)   — cited reference not found in this workspace
+- ``metadata_unapproved``  (warning) — reference metadata status is not approved
+- ``reference_tombstoned`` (warning) — cited reference was tombstoned after the
+                                       citation was created; citation still resolves
+                                       but the reference is no longer active
+- ``chunk_missing``        (error)   — chunk index not found for the reference
+- ``source_replaced``      (error)   — reference source file changed since citing
+- ``index_drift``          (error)   — chunk text changed since the citation was created
+- ``quote_missing``        (error)   — evidence quote absent or unlocatable in chunk
+- ``claim_drift``          (error)   — claim sentence around the marker changed, or
+                                       ``claim_context.hash`` absent (cannot verify)
+- ``internal``             (error)   — unexpected exception during per-row processing;
+                                       the audit logs the traceback and continues
 """
 
 from __future__ import annotations
@@ -279,6 +282,25 @@ def _check_live_row(
                 detail=(
                     "cited reference metadata is not approved "
                     f"(status={getattr(ref, 'metadata_status', None)!r})"
+                ),
+            )
+        )
+
+    # --- reference_tombstoned (warning) ---------------------------------- #
+    # A tombstoned reference still exists in the DB with retained chunks, so
+    # the citation continues to resolve. This is an ADDITIONAL warning, NOT
+    # a short-circuit — chunk/quote/hash checks still run below.
+    if getattr(ref, "tombstoned_at", None) is not None:
+        issues.append(
+            _issue(
+                "reference_tombstoned",
+                "warning",
+                citekey=citekey,
+                evidence_id=ev_id,
+                location=location,
+                detail=(
+                    "the cited reference was tombstoned (removed); the citation "
+                    "still resolves to retained data but the reference is no longer active"
                 ),
             )
         )

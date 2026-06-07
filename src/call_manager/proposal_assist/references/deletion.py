@@ -100,21 +100,24 @@ def delete_or_tombstone_reference(
 def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     """True if any evidence row in citations.json references this id.
 
-    - Missing or empty ledger → False (not cited; safe to delete).
+    - Missing file → False (not cited; safe to delete).
+    - Unreadable file (OSError, e.g. permission denied, directory in place of
+      file) → True (fail-closed): cannot confirm the reference is uncited, so
+      must NOT hard-delete on uncertainty.
+    - Ledger present but unparseable (ValueError from load_ledger) → True
+      (fail-closed): a corrupt ledger might reference this id; do not
+      hard-delete on uncertainty.
     - Ledger present and parseable, no row matches reference_id → False.
-    - Ledger present but PARSE FAILURE (ValueError) → True (fail-closed):
-      a corrupt ledger might reference this id; we must NOT hard-delete on
-      uncertainty.
     """
     citations_path = repo_dir / CITATIONS_FILENAME
     if not citations_path.exists():
         return False
-    text = citations_path.read_text(encoding="utf-8")
     try:
+        text = citations_path.read_text(encoding="utf-8")
         ledger = load_ledger(text)
-    except ValueError:
-        # Fail closed: a corrupt ledger might reference this id — do not
-        # hard-delete on uncertainty.
+    except (ValueError, OSError):
+        # Fail closed: an unreadable (OSError) or corrupt (ValueError) ledger
+        # might reference this id — do not hard-delete on uncertainty.
         return True
     target = str(reference_id)
     return any(row.get("reference_id") == target for row in ledger["evidence"])

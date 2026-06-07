@@ -13,6 +13,7 @@ proposal.md + chunks. No LLM. Each issue type is exercised independently:
 import hashlib
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -613,3 +614,60 @@ def test_evidence_quote_sha_is_normalized_and_bare_hex():
     assert len(a) == 64 and all(c in "0123456789abcdef" for c in a)
     # Same normalize+sha basis as the claim hash for identical input.
     assert evidence_quote_sha("a phrase") == claim_context_sha("a phrase")
+
+
+# --------------------------------------------------------------------------- #
+# reference_tombstoned
+# --------------------------------------------------------------------------- #
+def test_tombstoned_reference_emits_warning(pg_session_factory, _settings_env):
+    """A citation whose reference was tombstoned AFTER insertion must trigger a
+    reference_tombstoned WARNING, and the other checks (chunk/quote/hash) must
+    still run — the tombstone is an additional warning, not a short-circuit."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    claim_lead = "We argue that recurrence drops"
+    proposal_text = _proposal_with_marker(claim_lead)
+    live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
+    ledger = append_evidence(empty_ledger(), row)
+
+    # Tombstone the reference after the citation was created.
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        ref.tombstoned_at = datetime.now(UTC)
+        s.commit()
+
+    with pg_session_factory() as s:
+        issues = validate_citations_deterministic(
+            proposal_text=proposal_text, ledger=ledger, session=s, workspace_id=wsid
+        )
+
+    tombstoned = [i for i in issues if i["type"] == "reference_tombstoned"]
+    assert len(tombstoned) == 1, issues
+    assert tombstoned[0]["severity"] == "warning"
+    assert tombstoned[0]["citekey"] == "smith2021"
+    assert tombstoned[0]["evidence_id"] == "ev-aaaaaaaaaaaa"
+    assert "tombstoned" in tombstoned[0]["detail"]
+
+    # The citation is otherwise clean — no errors must be present.
+    assert _errors(issues) == [], issues
+
+
+def test_non_tombstoned_reference_no_tombstone_issue(pg_session_factory, _settings_env):
+    """A live (non-tombstoned) reference must NOT produce a reference_tombstoned
+    issue."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    claim_lead = "We argue that recurrence drops"
+    proposal_text = _proposal_with_marker(claim_lead)
+    live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
+    ledger = append_evidence(empty_ledger(), row)
+
+    with pg_session_factory() as s:
+        issues = validate_citations_deterministic(
+            proposal_text=proposal_text, ledger=ledger, session=s, workspace_id=wsid
+        )
+
+    assert "reference_tombstoned" not in _types(issues)
+    assert _errors(issues) == [], issues
