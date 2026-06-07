@@ -488,7 +488,10 @@ def _collect_tools(ctx: ToolContext) -> list:
     async def list_citations(args):
         return await _safe_tool("list_citations", ctx, list_citations_impl, ctx)
 
-    from call_manager.proposal_assist.tools.audit import validate_citations_impl
+    from call_manager.proposal_assist.tools.audit import (
+        list_unsupported_claims_impl,
+        validate_citations_impl,
+    )
 
     @tool(
         "validate_citations",
@@ -504,6 +507,19 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     async def validate_citations(args):
         return await _safe_tool("validate_citations", ctx, validate_citations_impl, ctx)
+
+    @tool(
+        "list_unsupported_claims",
+        "Heuristic list of factual/empirical claims in the proposal that lack a "
+        "citation, each with a suggested search_references query. Uses the audit "
+        "LLM to judge uncited sentences; not exhaustive. `semantic_available` is "
+        "false when the audit LLM is unavailable/capped (then candidates may be "
+        "empty/partial). Use search_references on a suggested query, then "
+        "insert_citation.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def list_unsupported_claims(args):
+        return await _safe_tool("list_unsupported_claims", ctx, list_unsupported_claims_impl, ctx)
 
     @tool(
         "insert_citation",
@@ -677,4 +693,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         list_citations,
         # Slice 3 Task 5 — citation audit
         validate_citations,
+        # Slice 3 Task 7 — uncited-claim discovery
+        list_unsupported_claims,
     ]

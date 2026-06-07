@@ -88,8 +88,10 @@ def test_collect_tools_returns_twenty_named_tools():
         "list_citations",
         # Slice 3 Task 5 — citation audit
         "validate_citations",
+        # Slice 3 Task 7 — uncited-claim discovery
+        "list_unsupported_claims",
     }
-    assert len(tools) == 21
+    assert len(tools) == 22
 
 
 @pytest.mark.asyncio

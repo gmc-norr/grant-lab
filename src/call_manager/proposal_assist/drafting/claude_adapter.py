@@ -228,6 +228,8 @@ class ClaudeAgentSDKAdapter:
                 "list_citations",
                 # Slice 3 Task 5 — citation audit
                 "validate_citations",
+                # Slice 3 Task 7 — uncited-claim discovery
+                "list_unsupported_claims",
             ]
         return options_kwargs
 

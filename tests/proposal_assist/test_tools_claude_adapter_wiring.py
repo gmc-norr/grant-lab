@@ -93,7 +93,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     assert not any(t.startswith("mcp__") for t in allowed)
     # Full allowlist coverage: 8 existing (B5) + 6 (Slice 2 — references)
     # + 1 (Slice 3 — agent-side fetch) + 4 (Slice 2 Task 9 — citation
-    # mutations) + 1 (read-only list_citations) + 1 (validate_citations) = 21.
+    # mutations) + 1 (read-only list_citations) + 1 (validate_citations)
+    # + 1 (list_unsupported_claims) = 22.
     expected_tools = {
         # existing eight from B5
         "read_proposal",
@@ -122,6 +123,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         "list_citations",
         # Slice 3 Task 5 — citation audit
         "validate_citations",
+        # Slice 3 Task 7 — uncited-claim discovery
+        "list_unsupported_claims",
     }
     assert set(allowed) == expected_tools
 

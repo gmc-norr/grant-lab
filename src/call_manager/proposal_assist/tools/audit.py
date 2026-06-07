@@ -23,16 +23,38 @@ registry's ``_safe_tool`` wrapper is the backstop.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from call_manager.proposal_assist.citations.audit import (
     validate_citations_deterministic,
     validate_citations_semantic,
 )
+from call_manager.proposal_assist.citations.claims import iter_proposal_sentences
+from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.tools.citations import _read_proposal_and_ledger
 
 if TYPE_CHECKING:
     from call_manager.proposal_assist.tools.registry import ToolContext
+
+logger = logging.getLogger(__name__)
+
+# System prompt for the uncited-claim judge. The user content is the proposal's
+# OWN sentence (first-party) — it is NOT wrapped in <untrusted-reference>, so no
+# untrusted-data safety framing is needed here. JSON-only, no prose, so the
+# structured client can parse it.
+_UNSUPPORTED_SYSTEM = (
+    "You audit a single sentence from a research grant proposal. Decide whether "
+    "the sentence makes a factual or empirical claim (a statistic, finding, "
+    "mechanism, prior result, or assertion about the world) that ought to be "
+    "backed by a literature citation. Generic motivation, the authors' own "
+    "planned work, aims, hypotheses, and definitions do NOT need a citation. "
+    "If a citation is warranted, propose a short literature search query (a few "
+    "keywords) that would find supporting references. Respond with a single JSON "
+    'object exactly of the form {"needs_citation": bool, "suggested_query": '
+    "str} and nothing else. When needs_citation is false, set suggested_query "
+    "to an empty string."
+)
 
 
 async def validate_citations_impl(ctx: ToolContext) -> dict[str, Any]:
@@ -74,3 +96,76 @@ async def validate_citations_impl(ctx: ToolContext) -> dict[str, Any]:
         "semantic_available": semantic_available,
         "checked": checked,
     }
+
+
+async def list_unsupported_claims_impl(ctx: ToolContext) -> dict[str, Any]:
+    """Heuristic list of factual/empirical proposal sentences lacking a citation.
+
+    Reads proposal.md (reusing ``_read_proposal_and_ledger`` and discarding the
+    ledger — the ledger isn't needed; only the live marker positions in the prose
+    matter). For every prose sentence that does NOT already carry a citation
+    marker, the audit LLM (``ctx.citation_service``) judges whether the sentence
+    makes a claim that needs a citation and, if so, proposes a search query.
+
+    A sentence is CITED (and skipped) when any marker's start offset falls within
+    its ``[offset, next_offset)`` span — markers conventionally trail the claim
+    they support, so the trailing marker lands inside the cited sentence's span.
+
+    Returns ``{"candidates": [...], "semantic_available": bool}`` (or an
+    ``{"error": ...}`` dict if proposal.md is missing). ``semantic_available`` is
+    False when no audit LLM is configured OR the daily cap was reached mid-run
+    (in which case ``candidates`` holds only what was gathered before the cap).
+    The deterministic heuristic alone is too noisy, so with no service the list
+    is empty rather than every uncited sentence. Never raises.
+    """
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, _ledger = read
+
+    # No audit LLM → return an empty, explicitly-unavailable result. The
+    # deterministic-only signal (every uncited sentence) is too noisy to surface.
+    if ctx.citation_service is None:
+        return {"candidates": [], "semantic_available": False}
+
+    marker_starts = [m["start"] for m in find_markers(proposal_text)]
+    sentences = list(iter_proposal_sentences(proposal_text))
+
+    candidates: list[dict[str, Any]] = []
+    for i, (sentence_text, offset) in enumerate(sentences):
+        # Span = [this offset, next sentence's offset) — last → end of text. A
+        # marker whose start falls in the span means this sentence is cited.
+        next_offset = sentences[i + 1][1] if i + 1 < len(sentences) else len(proposal_text)
+        if any(offset <= ms < next_offset for ms in marker_starts):
+            continue  # already cited — skip
+
+        try:
+            res = ctx.citation_service.complete_json(
+                workspace_id=ctx.workspace_id,
+                op="list_unsupported",
+                system=_UNSUPPORTED_SYSTEM,
+                user=sentence_text,
+            )
+        except Exception:  # noqa: BLE001 — never let one bad call fail the tool
+            logger.warning(
+                "list_unsupported_claims: judge call failed for workspace %s; skipping a sentence",
+                ctx.workspace_id,
+                exc_info=True,
+            )
+            continue
+
+        if res.cap_exceeded:
+            # Cap reached → stop and report partial results as unavailable.
+            return {"candidates": candidates, "semantic_available": False}
+
+        data = res.data or {}
+        if data.get("needs_citation") is True:
+            candidates.append(
+                {
+                    "location": f"char {offset}",
+                    "sentence": sentence_text,
+                    "suggested_query": data.get("suggested_query") or "",
+                }
+            )
+
+    return {"candidates": candidates, "semantic_available": True}
