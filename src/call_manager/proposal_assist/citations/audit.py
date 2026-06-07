@@ -75,6 +75,17 @@ def claim_context_sha(claim_text: str) -> str:
     return hashlib.sha256(normalize_for_quote_match(claim_text).encode("utf-8")).hexdigest()
 
 
+def evidence_quote_sha(quote: str) -> str:
+    """Bare 64-hex sha256 of the normalized evidence quote.
+
+    A verdict-cache key component (Task 4): changing the cited quote within an
+    unchanged chunk must invalidate the cached verdict (spec D19). Shares the
+    same normalize-then-sha256 basis as ``claim_context_sha`` so the three
+    normalized-hash components of the cache key cannot drift apart.
+    """
+    return hashlib.sha256(normalize_for_quote_match(quote).encode("utf-8")).hexdigest()
+
+
 def _issue(
     type_: str,
     severity: str,

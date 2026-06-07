@@ -22,6 +22,7 @@ from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations.audit import (
     chunk_content_sha,
     claim_context_sha,
+    evidence_quote_sha,
     validate_citations_deterministic,
 )
 from call_manager.proposal_assist.citations.claims import claim_sentence_around
@@ -601,3 +602,14 @@ def test_claim_drift_absent_snapshot(pg_session_factory, _settings_env):
     assert flagged[0]["severity"] == "error"
     detail = flagged[0]["detail"]
     assert "absent" in detail or "cannot verify" in detail, detail
+
+
+def test_evidence_quote_sha_is_normalized_and_bare_hex():
+    # Whitespace-tolerant (matches normalize_for_quote_match), bare 64-hex,
+    # and shares the same normalize-then-sha256 basis as claim_context_sha.
+    a = evidence_quote_sha("reduces  recurrence\nby 30%")
+    b = evidence_quote_sha("reduces recurrence by 30%")
+    assert a == b
+    assert len(a) == 64 and all(c in "0123456789abcdef" for c in a)
+    # Same normalize+sha basis as the claim hash for identical input.
+    assert evidence_quote_sha("a phrase") == claim_context_sha("a phrase")
