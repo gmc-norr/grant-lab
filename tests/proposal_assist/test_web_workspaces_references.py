@@ -786,6 +786,122 @@ def test_upload_degrades_gracefully_when_llm_raises(
     )
 
 
+# ---------------------------------------------------------------------------
+# Task 2 (citation-provenance) — metadata status badge + review link on panel
+# ---------------------------------------------------------------------------
+
+
+def _seed_reference_with_status(session, *, workspace_id, uploaded_by, metadata_status):
+    """Seed a minimal Reference row with the given metadata_status."""
+    ref = Reference(
+        workspace_id=workspace_id,
+        kind="paper",
+        source_type="uploaded",
+        filename="status_test.pdf",
+        storage_path="fake/path",
+        mime_type="application/pdf",
+        uploaded_by=uploaded_by,
+        metadata_status=metadata_status,
+    )
+    session.add(ref)
+    session.commit()
+    return ref.id
+
+
+def test_panel_owner_pending_shows_badge_and_review_link(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Owner viewing a reference with metadata_status='pending' sees:
+    - a 'metadata: pending' badge
+    - a 'Review metadata' link pointing to the correct metadata route."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="meta-pending-owner@ki.se")
+        ref_id = _seed_reference_with_status(
+            s, workspace_id=wsid, uploaded_by=uid, metadata_status="pending"
+        )
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/references")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    assert "metadata: pending" in resp.text, (
+        f"Expected 'metadata: pending' badge; got: {resp.text!r}"
+    )
+    expected_href = f"/workspaces/{wsid}/references/{ref_id}/metadata"
+    assert expected_href in resp.text, (
+        f"Expected 'Review metadata' link href {expected_href!r}; got: {resp.text!r}"
+    )
+    assert "Review metadata" in resp.text, (
+        f"Expected 'Review metadata' link text; got: {resp.text!r}"
+    )
+
+
+def test_panel_owner_approved_shows_ok_badge_no_review_link(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Owner viewing an approved reference sees 'metadata ✓' badge and NO review link."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="meta-approved-owner@ki.se")
+        ref_id = _seed_reference_with_status(
+            s, workspace_id=wsid, uploaded_by=uid, metadata_status="approved"
+        )
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/references")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    assert "metadata ✓" in resp.text, (
+        f"Expected 'metadata ✓' badge for approved; got: {resp.text!r}"
+    )
+    expected_href = f"/workspaces/{wsid}/references/{ref_id}/metadata"
+    assert expected_href not in resp.text, (
+        f"'Review metadata' link must NOT appear for approved references; got: {resp.text!r}"
+    )
+
+
+def test_panel_viewer_non_approved_shows_badge_no_review_link(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """A viewer (non-owner) viewing a non-approved reference sees the badge
+    but no 'Review metadata' link (is_owner is False)."""
+    from call_manager.db.models import WorkspaceViewer
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner_id, wsid = _seed_owner_and_workspace(s, email="meta-viewer-owner@ki.se")
+        ref_id = _seed_reference_with_status(
+            s, workspace_id=wsid, uploaded_by=owner_id, metadata_status="extracted"
+        )
+        viewer = User(email="meta-viewer@ki.se")
+        s.add(viewer)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
+        s.commit()
+        viewer_id = viewer.id
+    client = _authed(app, user_id=viewer_id)
+    try:
+        resp = client.get(f"/workspaces/{wsid}/references")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200
+    # Badge should be present.
+    assert "metadata: extracted" in resp.text, (
+        f"Expected metadata status badge for viewer; got: {resp.text!r}"
+    )
+    # Review link must NOT appear for viewers.
+    expected_href = f"/workspaces/{wsid}/references/{ref_id}/metadata"
+    assert expected_href not in resp.text, (
+        f"Viewer must NOT see 'Review metadata' link; got: {resp.text!r}"
+    )
+    assert "Review metadata" not in resp.text, (
+        f"Viewer must NOT see 'Review metadata' text; got: {resp.text!r}"
+    )
+
+
 def test_metadata_author_family_only_round_trips(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Structured family-only authors must survive the textarea round-trip.
 
