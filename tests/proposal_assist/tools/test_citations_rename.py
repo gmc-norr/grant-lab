@@ -354,6 +354,28 @@ async def test_invalid_new_citekey_no_commit(pg_session_factory, _settings_env, 
 
 
 @pytest.mark.asyncio
+async def test_invalid_old_citekey_no_commit(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)], citekey="valid2021"
+    )
+    await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR_A,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    before = _head(ctx.repo_dir)
+
+    result = await rename_citekey_impl(ctx, old_citekey="bad]key", new_citekey="valid2099")
+
+    assert result["error"] == "invalid old citekey"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
 async def test_lock_busy_returns_error_no_commit(pg_session_factory, _settings_env, tmp_path):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(

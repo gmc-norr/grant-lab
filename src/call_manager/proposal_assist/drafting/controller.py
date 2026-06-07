@@ -35,7 +35,10 @@ from call_manager.proposal_assist.drafting.orphan_sweep import (
     sweep_orphaned_turn_jobs,
 )
 from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.reconcile import reconcile_workspace_git_drift
+from call_manager.proposal_assist.reconcile import (
+    reconcile_workspace_citekeys,
+    reconcile_workspace_git_drift,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,14 @@ class WorkspaceController:
             try:
                 repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
                 reconcile_workspace_git_drift(
+                    self._session_factory,
+                    workspace_id,
+                    repo_dir,
+                )
+                # Also repair the references.citekey cache from the canonical
+                # ledger (a prior best-effort cache write may have failed). Same
+                # contract: forward-only, idempotent, never blocks launch.
+                reconcile_workspace_citekeys(
                     self._session_factory,
                     workspace_id,
                     repo_dir,

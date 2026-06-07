@@ -25,11 +25,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from call_manager.db.models import ArtifactVersion, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, Reference, WorkspaceEvent
+from call_manager.proposal_assist.citations.ledger import load_ledger
 
 logger = logging.getLogger(__name__)
+
+CITATIONS_FILENAME = "citations.json"
 
 
 def reconcile_workspace_git_drift(
@@ -104,3 +108,122 @@ def reconcile_workspace_git_drift(
             )
         s.commit()
     return backfilled
+
+
+def reconcile_workspace_citekeys(
+    session_factory: sessionmaker,
+    workspace_id: uuid.UUID,
+    repo_dir: Path,
+) -> int:
+    """Repair the references.citekey DB cache from the citations.json ledger.
+
+    Spec contract (mirrors reconcile_workspace_git_drift): the git ledger is
+    canonical and the references.citekey column is a DERIVED best-effort cache.
+    A best-effort cache write inside insert/rename can fail after the atomic git
+    commit lands, leaving references.citekey stale or NULL. This backfills it.
+
+    Forward-only, idempotent, and never destructive: it only sets a NULL/stale
+    cache value to the ledger's citekey, never the other way round, and never
+    deletes a row. It respects the partial unique index on
+    (workspace_id, citekey): if a DIFFERENT reference already holds the target
+    citekey, that's a genuine conflict the index would reject, so we log and
+    skip it (human / Slice-3 resolution) rather than crash. Never raises for
+    expected failure modes — logs and continues. Returns the number of
+    references.citekey values repaired.
+    """
+    citations_path = repo_dir / CITATIONS_FILENAME
+    if not citations_path.exists():
+        return 0
+    try:
+        ledger = load_ledger(citations_path.read_text())
+    except (ValueError, OSError) as exc:
+        logger.warning(
+            "reconcile_workspace_citekeys: could not load %s for %s: %s",
+            CITATIONS_FILENAME,
+            workspace_id,
+            exc,
+        )
+        return 0
+
+    # Build reference_id -> citekey from the ledger. A reference may appear in
+    # many rows; they must all share one citekey. A reference_id mapping to
+    # MULTIPLE distinct citekeys is corruption — skip it (don't guess).
+    desired: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for row in ledger["evidence"]:
+        if not isinstance(row, dict):
+            continue
+        ref_id = row.get("reference_id")
+        citekey = row.get("citekey")
+        if not ref_id or not citekey:
+            continue
+        prev = desired.get(ref_id)
+        if prev is not None and prev != citekey:
+            conflicting.add(ref_id)
+        else:
+            desired[ref_id] = citekey
+    for ref_id in conflicting:
+        logger.warning(
+            "reconcile_workspace_citekeys: reference %s maps to multiple distinct "
+            "citekeys in the ledger for workspace %s — skipping (corruption)",
+            ref_id,
+            workspace_id,
+        )
+        desired.pop(ref_id, None)
+
+    if not desired:
+        return 0
+
+    repaired = 0
+    with session_factory() as s:
+        for ref_id_str, ledger_citekey in desired.items():
+            try:
+                ref_uuid = uuid.UUID(str(ref_id_str))
+            except (ValueError, AttributeError, TypeError):
+                continue
+            ref = s.get(Reference, ref_uuid)
+            if ref is None or ref.workspace_id != workspace_id:
+                continue
+            if ref.citekey == ledger_citekey:
+                continue
+            # Respect the partial unique index: if another reference in this
+            # workspace already holds the target citekey, the write would be
+            # rejected. Skip — a genuine conflict needs human/Slice-3 resolution.
+            holder = s.scalar(
+                select(Reference.id).where(
+                    Reference.workspace_id == workspace_id,
+                    Reference.citekey == ledger_citekey,
+                    Reference.id != ref_uuid,
+                )
+            )
+            if holder is not None:
+                logger.warning(
+                    "reconcile_workspace_citekeys: citekey %r already held by "
+                    "reference %s in workspace %s — skipping repair of reference %s",
+                    ledger_citekey,
+                    holder,
+                    workspace_id,
+                    ref_uuid,
+                )
+                continue
+            try:
+                # Flush per-row inside a savepoint so a surprise IntegrityError
+                # (e.g. a concurrent write racing the check above) rolls back
+                # only this one change, not the whole batch. The savepoint's
+                # context manager auto-rolls-back to the savepoint on raise, so
+                # earlier repairs in the batch survive.
+                with s.begin_nested():
+                    ref.citekey = ledger_citekey
+                    s.flush()
+                repaired += 1
+            except IntegrityError:
+                logger.warning(
+                    "reconcile_workspace_citekeys: integrity error repairing "
+                    "reference %s -> %r in workspace %s — skipping",
+                    ref_uuid,
+                    ledger_citekey,
+                    workspace_id,
+                    exc_info=True,
+                )
+        s.commit()
+    return repaired

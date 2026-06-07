@@ -230,9 +230,22 @@ async def test_remove_not_found_no_commit(pg_session_factory, _settings_env, tmp
     await _insert_one(ctx, rid)
     before = _head(ctx.repo_dir)
 
-    result = await remove_citation_impl(ctx, evidence_id="ev-doesnotexist0")
+    # Well-formed (ev-<hex>) but absent id → "citation not found" (not a format error).
+    result = await remove_citation_impl(ctx, evidence_id="ev-deadbeef0000")
 
     assert result["error"] == "citation not found"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_remove_invalid_evidence_id_format(pg_session_factory, _settings_env, tmp_path):
+    """A malformed evidence_id is rejected up front with a clear message, before
+    any ledger scan."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    before = _head(ctx.repo_dir)
+    result = await remove_citation_impl(ctx, evidence_id="ev-doesnotexist0")
+    assert result["error"] == "invalid evidence_id"
     assert _head(ctx.repo_dir) == before
     assert _tree_is_clean(ctx.repo_dir)
 
@@ -507,8 +520,20 @@ async def test_update_not_found(pg_session_factory, _settings_env, tmp_path):
     await _insert_one(ctx, rid)
     before = _head(ctx.repo_dir)
 
-    result = await update_citation_impl(ctx, evidence_id="ev-nope00000000", stance="background")
+    # Well-formed (ev-<hex>) but absent id → "citation not found" (not a format error).
+    result = await update_citation_impl(ctx, evidence_id="ev-deadbeef0000", stance="background")
     assert result["error"] == "citation not found"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_update_invalid_evidence_id_format(pg_session_factory, _settings_env, tmp_path):
+    """A malformed evidence_id is rejected up front with a clear message."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    before = _head(ctx.repo_dir)
+    result = await update_citation_impl(ctx, evidence_id="ev-nope00000000", stance="background")
+    assert result["error"] == "invalid evidence_id"
     assert _head(ctx.repo_dir) == before
     assert _tree_is_clean(ctx.repo_dir)
 

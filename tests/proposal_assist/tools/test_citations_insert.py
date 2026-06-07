@@ -657,6 +657,62 @@ async def test_whitespace_tolerant_quote_stores_raw_offsets(
 
 
 @pytest.mark.asyncio
+async def test_insert_self_heals_on_ledger_citekey_collision(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """A prior best-effort cache write failure can leave R1's DB citekey NULL
+    while the ledger already binds 'smith2021' to R1. Inserting a citation for a
+    DIFFERENT same-author reference R2 must NOT hard-error; it self-heals by
+    bumping the suffix to a key free in BOTH the ledger and the DB (smith2021a).
+    """
+    anchor2 = "a second distinct claim sentence"
+    proposal = f"# Proposal\n\nWe argue that {ANCHOR} here.\n\nAlso {anchor2} too.\n"
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, proposal)
+
+    smith_csl = {
+        "author": [{"family": "Smith"}],
+        "issued": {"date-parts": [[2021]]},
+    }
+    # R1: same-author/year, DB citekey NULL (simulating a stranded cache).
+    rid1 = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], csl_json=smith_csl
+    )
+    # R2: same author/year → generate_citekey would yield "smith2021" too.
+    rid2 = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], csl_json=smith_csl
+    )
+
+    # Pre-seed the ledger so a row binds "smith2021" to R1 (DB cache NULL).
+    from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+
+    ledger = {
+        **empty_ledger(),
+        "evidence": [
+            {"id": "ev-preexisting", "citekey": "smith2021", "reference_id": str(rid1)},
+        ],
+    }
+    (ctx.repo_dir / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
+    subprocess.run(["git", "add", CITATIONS_FILENAME], cwd=ctx.repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed ledger"], cwd=ctx.repo_dir, check=True)
+
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid2),
+        anchor=anchor2,
+        chunk_index=0,
+        evidence_quote="Secondary endpoints were not statistically significant",
+    )
+
+    assert "error" not in result, result
+    assert result["citekey"] == "smith2021a", result
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    assert f"[@smith2021a]<!-- ev:{result['ev_id']} -->" in proposal_text
+
+    with pg_session_factory() as s:
+        assert s.get(Reference, rid2).citekey == "smith2021a"
+
+
+@pytest.mark.asyncio
 async def test_unknown_stance_rejected(pg_session_factory, _settings_env, tmp_path):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])

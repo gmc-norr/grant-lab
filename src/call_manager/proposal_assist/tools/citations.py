@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import string
 import subprocess
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import select
 
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations import claims
@@ -71,6 +75,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CITATIONS_FILENAME = "citations.json"
+
+# Evidence-row ids are minted as ev-<lowercase-hex> (see ledger.new_ev_id).
+EVIDENCE_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
 
 # Spec line 121: stance ∈ {supports, contradicts, background}.
 ALLOWED_STANCES = frozenset({"supports", "contradicts", "background"})
@@ -198,6 +205,32 @@ def _find_idempotent_row(
     return None
 
 
+def _resolve_free_citekey(
+    base_candidate: str,
+    *,
+    taken: set[str],
+) -> str:
+    """Return a citekey not present in ``taken``, self-healing on collision.
+
+    Starts from ``base_candidate``. If it's already taken, strip any trailing
+    single a-z suffix to get the stem and try stem+'a'..'z' (so a freshly
+    generated "smith2021a" still searches the smith2021 family). If all 26
+    suffixes are taken (extraordinarily unlikely), fall back to a guaranteed
+    unique ``ref-<hex>``. This is why insert can never hard-error on a citekey
+    collision: it always resolves to a key free in BOTH the ledger and the DB.
+    """
+    if base_candidate not in taken:
+        return base_candidate
+    stem = base_candidate
+    if len(base_candidate) >= 2 and base_candidate[-1] in string.ascii_lowercase:
+        stem = base_candidate[:-1]
+    for suffix in string.ascii_lowercase:
+        candidate = stem + suffix
+        if candidate not in taken:
+            return candidate
+    return f"ref-{uuid.uuid4().hex[:12]}"
+
+
 async def insert_citation_impl(
     ctx: ToolContext,
     *,
@@ -289,6 +322,9 @@ def _insert_citation_locked(
         return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk"}
 
     # 5. Idempotency — identical (ref, chunk, quote) with a live marker → no-op.
+    # The idempotency key is (reference_id, chunk_index, evidence_quote) BY
+    # DESIGN: re-inserting a superseded quote after an update legitimately
+    # creates a new citation (the old quote no longer matches any live row).
     existing = _find_idempotent_row(
         ledger,
         reference_id=str(ref_uuid),
@@ -308,18 +344,37 @@ def _insert_citation_locked(
             "idempotent": True,
         }
 
-    # 6. Citekey — reuse the ref's if set, else generate; guard against ledger lag.
+    # 6. Citekey — reuse the ref's if set; else generate and self-heal against
+    # any collision. The DB citekey cache is derived (a best-effort write that
+    # may have failed), so a generated key can collide with a DIFFERENT
+    # reference in the ledger and/or DB. Rather than hard-error (which could
+    # strand THIS insert behind another reference's stale cache), bump the
+    # suffix to a key free in BOTH the ledger and the DB. A key reused from THIS
+    # reference (ref.citekey already set) is left exactly as-is.
     if ref.citekey:
         citekey = ref.citekey
     else:
-        citekey = generate_citekey(
+        base_candidate = generate_citekey(
             ref.csl_json or ref.csl_json_extracted or {},
             ctx.workspace_id,
             session,
         )
-    for row in ledger["evidence"]:
-        if row.get("citekey") == citekey and row.get("reference_id") != str(ref_uuid):
-            return {"error": "citekey collision detected; ledger/DB out of sync — reconcile"}
+        # "taken" = citekeys used in the ledger by ANOTHER reference ∪ citekeys
+        # held by a DIFFERENT Reference in this workspace in the DB.
+        taken = {
+            row.get("citekey")
+            for row in ledger["evidence"]
+            if row.get("citekey") and row.get("reference_id") != str(ref_uuid)
+        }
+        db_citekeys = session.scalars(
+            select(Reference.citekey).where(
+                Reference.workspace_id == ctx.workspace_id,
+                Reference.citekey.is_not(None),
+                Reference.id != ref_uuid,
+            )
+        )
+        taken.update(k for k in db_citekeys if k)
+        citekey = _resolve_free_citekey(base_candidate, taken=taken)
 
     # 7. Build the new proposal text (validates anchor uniqueness; nothing written yet).
     ev_id = new_ev_id()
@@ -433,6 +488,8 @@ async def remove_citation_impl(
     references.citekey is intentionally NOT changed here (other occurrences may
     still use it; tombstoning is out of scope for remove).
     """
+    if not EVIDENCE_ID_RE.match(evidence_id or ""):
+        return {"error": "invalid evidence_id"}
     try:
         with workspace_lock_session(ctx.session_factory, ctx.workspace_id):
             return _remove_citation_locked(ctx, evidence_id=evidence_id)
@@ -510,6 +567,9 @@ async def update_citation_impl(
     A call that specifies no actual change returns {"error": "no changes
     specified"} BEFORE writing (no empty commits).
     """
+    if not EVIDENCE_ID_RE.match(evidence_id or ""):
+        return {"error": "invalid evidence_id"}
+
     err = _validate_stance_confidence(stance, confidence)
     if err is not None:
         return err
@@ -706,13 +766,16 @@ def _rename_citekey_locked(
     old_citekey: str,
     new_citekey: str,
 ) -> dict[str, Any]:
-    # 1. No-op rename → reject (don't write an empty commit).
-    if old_citekey == new_citekey:
-        return {"error": "old and new citekey are the same"}
-
-    # 2. Pre-validate the new key for a clean message (markers would otherwise raise).
+    # 1. Validate both keys up front (markers/queries would otherwise raise or
+    # silently no-op on a malformed key).
+    if not CITEKEY_RE.match(old_citekey):
+        return {"error": "invalid old citekey"}
     if not CITEKEY_RE.match(new_citekey):
         return {"error": "invalid new citekey"}
+
+    # 2. No-op rename → reject (don't write an empty commit).
+    if old_citekey == new_citekey:
+        return {"error": "old and new citekey are the same"}
 
     # 3. Read proposal.md + the (possibly absent) ledger.
     read = _read_proposal_and_ledger(ctx)
