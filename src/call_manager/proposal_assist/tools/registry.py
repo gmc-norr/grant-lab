@@ -504,6 +504,10 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def insert_citation(args):
+        try:
+            chunk_index = int(args["chunk_index"])
+        except (TypeError, ValueError, KeyError):
+            return _mcp_error("chunk_index must be an integer")
         return await _safe_tool(
             "insert_citation",
             ctx,
@@ -511,7 +515,7 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             reference_id=args["reference_id"],
             anchor=args["anchor"],
-            chunk_index=int(args["chunk_index"]),
+            chunk_index=chunk_index,
             evidence_quote=args["evidence_quote"],
             stance=args.get("stance", "supports"),
             confidence=args.get("confidence"),
@@ -566,17 +570,22 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def update_citation(args):
-        chunk_index = args.get("chunk_index")
+        raw = args.get("chunk_index")
+        if raw is not None:
+            try:
+                raw = int(raw)
+            except (TypeError, ValueError):
+                return _mcp_error("chunk_index must be an integer")
         return await _safe_tool(
             "update_citation",
             ctx,
             update_citation_impl,
             ctx,
             evidence_id=args["evidence_id"],
-            chunk_index=int(chunk_index) if chunk_index is not None else None,
+            chunk_index=raw,
+            evidence_quote=args.get("evidence_quote"),
             stance=args.get("stance"),
             confidence=args.get("confidence"),
-            evidence_quote=args.get("evidence_quote"),
             reaccept_claim=bool(args.get("reaccept_claim", False)),
         )
 

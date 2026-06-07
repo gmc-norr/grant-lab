@@ -188,3 +188,28 @@ async def test_citation_tool_closure_returns_error_envelope_for_bad_ref():
     )
     assert result["is_error"] is True
     assert result["content"][0]["type"] == "text"
+    assert "reference_id" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_insert_citation_non_integer_chunk_index_returns_envelope():
+    """insert_citation with a non-integer chunk_index must return an MCP error
+    envelope (is_error=True, content type text, message mentions chunk_index /
+    integer) and must NOT raise."""
+    from call_manager.proposal_assist.tools.registry import _collect_tools
+
+    tools = _collect_tools(_make_ctx())
+    insert = next(t for t in tools if t.name == "insert_citation")
+    result = await insert.handler(
+        {
+            "reference_id": "some-ref",
+            "anchor": "somewhere",
+            "chunk_index": "not-an-int",
+            "evidence_quote": "some quote",
+        }
+    )
+    assert result["is_error"] is True
+    assert isinstance(result["content"], list)
+    assert result["content"][0]["type"] == "text"
+    text = result["content"][0]["text"]
+    assert "chunk_index" in text or "integer" in text
