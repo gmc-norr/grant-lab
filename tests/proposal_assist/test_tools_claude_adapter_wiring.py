@@ -92,7 +92,7 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     # NO mcp__ prefix — confirm we're using the bare form.
     assert not any(t.startswith("mcp__") for t in allowed)
     # Full allowlist coverage: 8 existing (B5) + 6 (Slice 2 — references)
-    # + 1 (Slice 3 — agent-side fetch) = 15.
+    # + 1 (Slice 3 — agent-side fetch) + 4 (Slice 2 Task 9 — citations) = 19.
     expected_tools = {
         # existing eight from B5
         "read_proposal",
@@ -112,6 +112,11 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         "summarize_data",
         # Slice 3 — agent-side fetch
         "fetch_reference",
+        # four citation mutation tools (Slice 2 Task 9)
+        "insert_citation",
+        "remove_citation",
+        "update_citation",
+        "rename_citekey",
     }
     assert set(allowed) == expected_tools
 

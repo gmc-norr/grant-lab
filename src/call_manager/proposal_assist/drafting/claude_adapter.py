@@ -219,6 +219,11 @@ class ClaudeAgentSDKAdapter:
                 "summarize_data",
                 # Slice 3 — agent-side fetch
                 "fetch_reference",
+                # Slice 2 Task 9 — citation mutation tools
+                "insert_citation",
+                "remove_citation",
+                "update_citation",
+                "rename_citekey",
             ]
         return options_kwargs
 

@@ -19,7 +19,9 @@ unit-test-friendly.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +34,8 @@ if TYPE_CHECKING:
 
     from call_manager.config import Settings
     from call_manager.proposal_assist.citations import CitationLLMService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,6 +87,34 @@ def _wrap(impl_result: dict[str, Any]) -> dict[str, Any]:
     return _mcp_ok(impl_result)
 
 
+async def _safe_tool(
+    tool_name: str,
+    ctx: ToolContext,
+    impl: Callable[..., Awaitable[dict[str, Any]]],
+    *args: Any,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Run an *_impl and wrap its result, catching UNEXPECTED exceptions.
+
+    Defense in depth (Slice 2 Task 9, Part C): the *_impl functions are
+    contracted to return {"error": ...} for every EXPECTED failure mode and
+    never raise to the caller. If one nevertheless raises an unmapped
+    exception, it would otherwise propagate out of the MCP handler. We catch
+    it here, log it (type + tool + workspace, with a stack trace via
+    logger.exception), and return a GENERIC error envelope so no secret /
+    quote / reference text reaches the user-facing message.
+    """
+    try:
+        return _wrap(await impl(*args, **kwargs))
+    except Exception:  # noqa: BLE001 — catch-all is the whole point here
+        logger.exception(
+            "tool %s raised an unexpected exception for workspace %s",
+            tool_name,
+            ctx.workspace_id,
+        )
+        return _mcp_error("internal error")
+
+
 def _collect_tools(ctx: ToolContext) -> list:
     """Gather every tool's @tool-decorated handler.
 
@@ -111,7 +143,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def read_proposal(args):
-        return _wrap(await read_proposal_impl(ctx))
+        return await _safe_tool("read_proposal", ctx, read_proposal_impl, ctx)
 
     @tool(
         "edit_proposal",
@@ -141,12 +173,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         from uuid import UUID
 
         ttid = args.get("triggering_turn_id") or None
-        return _wrap(
-            await edit_proposal_impl(
-                ctx,
-                edits=args["edits"],
-                triggering_turn_id=UUID(ttid) if ttid else None,
-            )
+        return await _safe_tool(
+            "edit_proposal",
+            ctx,
+            edit_proposal_impl,
+            ctx,
+            edits=args["edits"],
+            triggering_turn_id=UUID(ttid) if ttid else None,
         )
 
     @tool(
@@ -165,12 +198,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         from uuid import UUID
 
         ttid = args.get("triggering_turn_id") or None
-        return _wrap(
-            await replace_proposal_impl(
-                ctx,
-                content=args["content"],
-                triggering_turn_id=UUID(ttid) if ttid else None,
-            )
+        return await _safe_tool(
+            "replace_proposal",
+            ctx,
+            replace_proposal_impl,
+            ctx,
+            content=args["content"],
+            triggering_turn_id=UUID(ttid) if ttid else None,
         )
 
     @tool(
@@ -185,7 +219,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def get_artifact_history(args):
-        return _wrap(await get_artifact_history_impl(ctx, limit=int(args.get("limit", 20))))
+        return await _safe_tool(
+            "get_artifact_history",
+            ctx,
+            get_artifact_history_impl,
+            ctx,
+            limit=int(args.get("limit", 20)),
+        )
 
     @tool(
         "read_artifact_at",
@@ -197,7 +237,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def read_artifact_at(args):
-        return _wrap(await read_artifact_at_impl(ctx, commit_sha=args["commit_sha"]))
+        return await _safe_tool(
+            "read_artifact_at",
+            ctx,
+            read_artifact_at_impl,
+            ctx,
+            commit_sha=args["commit_sha"],
+        )
 
     @tool(
         "diff_artifact",
@@ -212,8 +258,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def diff_artifact(args):
-        return _wrap(
-            await diff_artifact_impl(ctx, commit_a=args["commit_a"], commit_b=args["commit_b"])
+        return await _safe_tool(
+            "diff_artifact",
+            ctx,
+            diff_artifact_impl,
+            ctx,
+            commit_a=args["commit_a"],
+            commit_b=args["commit_b"],
         )
 
     @tool(
@@ -224,7 +275,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def get_call_details(args):
-        return _wrap(await get_call_details_impl(ctx))
+        return await _safe_tool("get_call_details", ctx, get_call_details_impl, ctx)
 
     @tool(
         "get_profile",
@@ -234,7 +285,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def get_profile(args):
-        return _wrap(await get_profile_impl(ctx))
+        return await _safe_tool("get_profile", ctx, get_profile_impl, ctx)
 
     from call_manager.proposal_assist.tools.references import (
         fetch_reference_impl,
@@ -263,13 +314,14 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def list_references(args):
-        return _wrap(
-            await list_references_impl(
-                ctx,
-                kind=args.get("kind"),
-                q=args.get("q"),
-                limit=int(args.get("limit", 50)),
-            )
+        return await _safe_tool(
+            "list_references",
+            ctx,
+            list_references_impl,
+            ctx,
+            kind=args.get("kind"),
+            q=args.get("q"),
+            limit=int(args.get("limit", 50)),
         )
 
     @tool(
@@ -289,13 +341,14 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def search_references(args):
-        return _wrap(
-            await search_references_impl(
-                ctx,
-                query=args["query"],
-                top_k=int(args.get("top_k", 8)),
-                kind=args.get("kind"),
-            )
+        return await _safe_tool(
+            "search_references",
+            ctx,
+            search_references_impl,
+            ctx,
+            query=args["query"],
+            top_k=int(args.get("top_k", 8)),
+            kind=args.get("kind"),
         )
 
     @tool(
@@ -310,7 +363,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def navigate_reference(args):
-        return _wrap(await navigate_reference_impl(ctx, reference_id=args["reference_id"]))
+        return await _safe_tool(
+            "navigate_reference",
+            ctx,
+            navigate_reference_impl,
+            ctx,
+            reference_id=args["reference_id"],
+        )
 
     @tool(
         "read_reference",
@@ -328,12 +387,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def read_reference(args):
-        return _wrap(
-            await read_reference_impl(
-                ctx,
-                reference_id=args["reference_id"],
-                max_chars=int(args.get("max_chars", 20000)),
-            )
+        return await _safe_tool(
+            "read_reference",
+            ctx,
+            read_reference_impl,
+            ctx,
+            reference_id=args["reference_id"],
+            max_chars=int(args.get("max_chars", 20000)),
         )
 
     @tool(
@@ -351,12 +411,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def read_reference_section(args):
-        return _wrap(
-            await read_reference_section_impl(
-                ctx,
-                reference_id=args["reference_id"],
-                section_path=args["section_path"],
-            )
+        return await _safe_tool(
+            "read_reference_section",
+            ctx,
+            read_reference_section_impl,
+            ctx,
+            reference_id=args["reference_id"],
+            section_path=args["section_path"],
         )
 
     @tool(
@@ -371,7 +432,13 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def summarize_data(args):
-        return _wrap(await summarize_data_impl(ctx, reference_id=args["reference_id"]))
+        return await _safe_tool(
+            "summarize_data",
+            ctx,
+            summarize_data_impl,
+            ctx,
+            reference_id=args["reference_id"],
+        )
 
     @tool(
         "fetch_reference",
@@ -390,12 +457,152 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def fetch_reference(args):
-        return _wrap(
-            await fetch_reference_impl(
-                ctx,
-                input=args["input"],
-                kind=args.get("kind", "paper"),
-            )
+        return await _safe_tool(
+            "fetch_reference",
+            ctx,
+            fetch_reference_impl,
+            ctx,
+            input=args["input"],
+            kind=args.get("kind", "paper"),
+        )
+
+    from call_manager.proposal_assist.tools.citations import (
+        insert_citation_impl,
+        remove_citation_impl,
+        rename_citekey_impl,
+        update_citation_impl,
+    )
+
+    @tool(
+        "insert_citation",
+        "Insert an inline citation marker into proposal.md right after "
+        "`anchor` and record the supporting evidence in the citation ledger, "
+        "in one atomic commit. You MUST pass an exact `chunk_index` and a "
+        "VERBATIM `evidence_quote` copied from that chunk — search_references "
+        "and read_reference_section surface the chunk_index to use. The quote "
+        "is verified against the chunk text; a quote that is absent or "
+        "ambiguous in the chunk is rejected with no commit. `anchor` is a "
+        "unique substring of proposal.md after which the marker is placed.",
+        {
+            "type": "object",
+            "properties": {
+                "reference_id": {"type": "string"},
+                "anchor": {"type": "string"},
+                "chunk_index": {"type": "integer"},
+                "evidence_quote": {"type": "string"},
+                "stance": {
+                    "type": "string",
+                    "enum": ["supports", "contradicts", "background"],
+                    "default": "supports",
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                },
+            },
+            "required": ["reference_id", "anchor", "chunk_index", "evidence_quote"],
+        },
+    )
+    async def insert_citation(args):
+        return await _safe_tool(
+            "insert_citation",
+            ctx,
+            insert_citation_impl,
+            ctx,
+            reference_id=args["reference_id"],
+            anchor=args["anchor"],
+            chunk_index=int(args["chunk_index"]),
+            evidence_quote=args["evidence_quote"],
+            stance=args.get("stance", "supports"),
+            confidence=args.get("confidence"),
+        )
+
+    @tool(
+        "remove_citation",
+        "Remove one citation occurrence: its inline marker in proposal.md "
+        "AND its row in the citation ledger, in one atomic commit. Pass the "
+        "`ev-...` evidence id of the occurrence to remove. Other markers/rows "
+        "that share the same citekey are left untouched.",
+        {
+            "type": "object",
+            "properties": {"evidence_id": {"type": "string"}},
+            "required": ["evidence_id"],
+        },
+    )
+    async def remove_citation(args):
+        return await _safe_tool(
+            "remove_citation",
+            ctx,
+            remove_citation_impl,
+            ctx,
+            evidence_id=args["evidence_id"],
+        )
+
+    @tool(
+        "update_citation",
+        "Update an existing citation's binding or metadata (identified by its "
+        "`ev-...` evidence id). When `chunk_index` or `evidence_quote` change, "
+        "the new quote is re-verified against the chunk text and rejected if "
+        "absent or ambiguous. Set `reaccept_claim=true` to re-snapshot the "
+        "live claim sentence around the marker (use after editing the prose "
+        "near a citation). Specify at least one field to change.",
+        {
+            "type": "object",
+            "properties": {
+                "evidence_id": {"type": "string"},
+                "chunk_index": {"type": "integer"},
+                "evidence_quote": {"type": "string"},
+                "stance": {
+                    "type": "string",
+                    "enum": ["supports", "contradicts", "background"],
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                },
+                "reaccept_claim": {"type": "boolean", "default": False},
+            },
+            "required": ["evidence_id"],
+        },
+    )
+    async def update_citation(args):
+        chunk_index = args.get("chunk_index")
+        return await _safe_tool(
+            "update_citation",
+            ctx,
+            update_citation_impl,
+            ctx,
+            evidence_id=args["evidence_id"],
+            chunk_index=int(chunk_index) if chunk_index is not None else None,
+            stance=args.get("stance"),
+            confidence=args.get("confidence"),
+            evidence_quote=args.get("evidence_quote"),
+            reaccept_claim=bool(args.get("reaccept_claim", False)),
+        )
+
+    @tool(
+        "rename_citekey",
+        "Rename a citekey across ALL of its inline markers in proposal.md and "
+        "all of its rows in the citation ledger, in one atomic commit "
+        "(evidence ids preserved). Rejected if `new_citekey` is already in "
+        "use in this workspace.",
+        {
+            "type": "object",
+            "properties": {
+                "old_citekey": {"type": "string"},
+                "new_citekey": {"type": "string"},
+            },
+            "required": ["old_citekey", "new_citekey"],
+        },
+    )
+    async def rename_citekey(args):
+        return await _safe_tool(
+            "rename_citekey",
+            ctx,
+            rename_citekey_impl,
+            ctx,
+            old_citekey=args["old_citekey"],
+            new_citekey=args["new_citekey"],
         )
 
     return [
@@ -417,4 +624,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         summarize_data,
         # Slice 3 — agent-side fetch
         fetch_reference,
+        # Slice 2 Task 9 — citation mutation tools
+        insert_citation,
+        remove_citation,
+        update_citation,
+        rename_citekey,
     ]

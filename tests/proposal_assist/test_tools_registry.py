@@ -51,10 +51,11 @@ def _make_ctx():
     )
 
 
-def test_collect_tools_returns_fifteen_named_tools():
-    """All fifteen tool names are present (8 from B5 + 6 from Slice 2
-    + 1 from Slice 3). Probes _collect_tools directly instead of
-    fighting the MCP Server's decorator-based API."""
+def test_collect_tools_returns_nineteen_named_tools():
+    """All nineteen tool names are present (8 from B5 + 6 from Slice 2
+    + 1 from Slice 3 + 4 citation tools from Slice 2 Task 9). Probes
+    _collect_tools directly instead of fighting the MCP Server's
+    decorator-based API."""
     from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
@@ -78,8 +79,13 @@ def test_collect_tools_returns_fifteen_named_tools():
         "summarize_data",
         # Slice 3 — agent-side fetch
         "fetch_reference",
+        # four citation mutation tools (Slice 2 Task 9)
+        "insert_citation",
+        "remove_citation",
+        "update_citation",
+        "rename_citekey",
     }
-    assert len(tools) == 15
+    assert len(tools) == 19
 
 
 @pytest.mark.asyncio
@@ -140,3 +146,45 @@ async def test_tool_handler_envelope_success_path():
     assert result["is_error"] is False
     payload = json.loads(result["content"][0]["text"])
     assert payload["content"] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_converts_unexpected_exception_to_envelope():
+    """The catch-all wrapper turns an impl that raises an UNEXPECTED
+    exception into an MCP error envelope instead of propagating it, and
+    does not leak the exception message to the user-facing text."""
+    from call_manager.proposal_assist.tools.registry import _safe_tool
+
+    async def _boom(ctx):
+        raise RuntimeError("super-secret quote text that must not leak")
+
+    ctx = _make_ctx()
+    result = await _safe_tool("explode", ctx, _boom, ctx)
+
+    assert result["is_error"] is True
+    assert isinstance(result["content"], list)
+    assert result["content"][0]["type"] == "text"
+    text = result["content"][0]["text"]
+    assert "super-secret" not in text
+    assert "quote" not in text
+
+
+@pytest.mark.asyncio
+async def test_citation_tool_closure_returns_error_envelope_for_bad_ref():
+    """A citation tool invoked through its registered MCP closure returns
+    the MCP envelope (not a raised exception) for a simple error case —
+    here, a reference_id that is not a valid uuid."""
+    from call_manager.proposal_assist.tools.registry import _collect_tools
+
+    tools = _collect_tools(_make_ctx())
+    insert = next(t for t in tools if t.name == "insert_citation")
+    result = await insert.handler(
+        {
+            "reference_id": "not-a-uuid",
+            "anchor": "somewhere",
+            "chunk_index": 0,
+            "evidence_quote": "x",
+        }
+    )
+    assert result["is_error"] is True
+    assert result["content"][0]["type"] == "text"
