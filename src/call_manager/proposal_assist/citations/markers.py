@@ -23,7 +23,9 @@ class AnchorError(ValueError):
 MARKER_RE = re.compile(r"\[@(?P<citekey>[A-Za-z0-9_-]+)\]<!-- ev:(?P<ev_id>ev-[0-9a-f]{6,}) -->")
 
 # Anchored validators so callers can't create un-removable markers.
-_CITEKEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# CITEKEY_RE is the single canonical citekey alphabet — exported so other modules
+# (e.g. the rename tool) validate against the SAME compiled pattern.
+CITEKEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _EV_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
 
 
@@ -33,7 +35,7 @@ def build_marker(citekey: str, ev_id: str) -> str:
     Raises :class:`ValueError` if ``citekey`` or ``ev_id`` do not match their
     respective allowed patterns.
     """
-    if not _CITEKEY_RE.match(citekey):
+    if not CITEKEY_RE.match(citekey):
         raise ValueError(f"invalid citekey {citekey!r}")
     if not _EV_ID_RE.match(ev_id):
         raise ValueError(f"invalid ev_id {ev_id!r}")
@@ -115,7 +117,7 @@ def rename_marker_citekey(text: str, old_citekey: str, new_citekey: str) -> tupl
     Raises :class:`ValueError` if ``new_citekey`` does not match the allowed
     citekey pattern (prevents creating un-removable markers).
     """
-    if not _CITEKEY_RE.match(new_citekey):
+    if not CITEKEY_RE.match(new_citekey):
         raise ValueError(f"invalid citekey {new_citekey!r}")
     count = 0
 

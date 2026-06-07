@@ -93,6 +93,24 @@ def update_evidence(ledger: dict, ev_id: str, **fields) -> tuple[dict, bool]:
     return {"version": ledger.get("version", LEDGER_VERSION), "evidence": out}, updated
 
 
+def rename_citekey(
+    ledger: dict, old_citekey: str, new_citekey: str, updated_at: str
+) -> tuple[dict, int]:
+    """Return (new_ledger, count) with every row whose citekey == old_citekey
+    rewritten to new_citekey (and updated_at refreshed). Non-matching rows are
+    untouched and order is preserved. id and all other fields are preserved.
+    Pure — does not mutate the input."""
+    count = 0
+    out = []
+    for row in ledger["evidence"]:
+        if row.get("citekey") == old_citekey:
+            out.append({**row, "citekey": new_citekey, "updated_at": updated_at})
+            count += 1
+        else:
+            out.append(row)
+    return {"version": ledger.get("version", LEDGER_VERSION), "evidence": out}, count
+
+
 def build_evidence_row(
     *,
     ev_id: str,

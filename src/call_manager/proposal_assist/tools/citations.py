@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import subprocess
 import uuid
 from datetime import UTC, datetime
@@ -31,7 +30,6 @@ from call_manager.proposal_assist.citations.gitio import (
     write_and_commit_files,
 )
 from call_manager.proposal_assist.citations.ledger import (
-    LEDGER_VERSION,
     append_evidence,
     build_evidence_row,
     citekeys_in_use,
@@ -41,9 +39,11 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
     new_ev_id,
     remove_evidence,
+    rename_citekey,
     update_evidence,
 )
 from call_manager.proposal_assist.citations.markers import (
+    CITEKEY_RE,
     AnchorError,
     find_markers,
     insert_marker,
@@ -71,10 +71,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CITATIONS_FILENAME = "citations.json"
-
-# Mirrors markers._CITEKEY_RE so rename can reject a bad new key with a clean
-# message BEFORE rename_marker_citekey would raise ValueError.
-_CITEKEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Spec line 121: stance ∈ {supports, contradicts, background}.
 ALLOWED_STANCES = frozenset({"supports", "contradicts", "background"})
@@ -710,7 +706,7 @@ def _rename_citekey_locked(
         return {"error": "old and new citekey are the same"}
 
     # 2. Pre-validate the new key for a clean message (markers would otherwise raise).
-    if not _CITEKEY_RE.match(new_citekey):
+    if not CITEKEY_RE.match(new_citekey):
         return {"error": "invalid new citekey"}
 
     # 3. Read proposal.md + the (possibly absent) ledger.
@@ -754,13 +750,7 @@ def _rename_citekey_locked(
 
     # 7. Rewrite every ledger row with the old key (ids + all other fields untouched).
     now = datetime.now(UTC).isoformat()
-    new_evidence = []
-    for row in ledger["evidence"]:
-        if row.get("citekey") == old_citekey:
-            new_evidence.append({**row, "citekey": new_citekey, "updated_at": now})
-        else:
-            new_evidence.append(row)
-    new_ledger = {"version": ledger.get("version", LEDGER_VERSION), "evidence": new_evidence}
+    new_ledger, ledger_rows_renamed = rename_citekey(ledger, old_citekey, new_citekey, now)
 
     # 8. Atomic commit — proposal.md + citations.json in ONE commit (git first).
     try:
@@ -810,5 +800,6 @@ def _rename_citekey_locked(
         "old_citekey": old_citekey,
         "new_citekey": new_citekey,
         "markers_renamed": count,
+        "ledger_rows_renamed": ledger_rows_renamed,
         "commit_sha": sha,
     }

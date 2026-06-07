@@ -186,6 +186,7 @@ async def test_happy_path_renames_both_markers_and_rows(
     assert result["old_citekey"] == "oldkey2021"
     assert result["new_citekey"] == "newkey2022"
     assert result["markers_renamed"] == 2
+    assert result["ledger_rows_renamed"] == 2
     assert result["commit_sha"] and result["commit_sha"] != before_head
 
     # Both markers in proposal.md now carry the new key (ev ids preserved).
@@ -267,6 +268,40 @@ async def test_new_citekey_already_in_use_no_commit(pg_session_factory, _setting
     before_count = _commit_count(ctx.repo_dir)
 
     result = await rename_citekey_impl(ctx, old_citekey="alpha2021", new_citekey="beta2022")
+
+    assert result["error"] == "new citekey already in use"
+    assert _head(ctx.repo_dir) == before
+    assert _commit_count(ctx.repo_dir) == before_count
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_new_citekey_in_db_but_not_ledger_collision(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """The new key is free in the ledger but already taken by a references.citekey
+    in this workspace (no ledger row for it) → rejected via the DB-side collision
+    branch; no commit, clean tree."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    # A reference whose citekey is taken in the DB but is NOT cited (no ledger row).
+    _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)], citekey="taken2020")
+    # A separate reference that IS cited under a different citekey.
+    rid_other = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)], citekey="other2021"
+    )
+    r = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid_other),
+        anchor=ANCHOR_A,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert "error" not in r, r
+
+    before = _head(ctx.repo_dir)
+    before_count = _commit_count(ctx.repo_dir)
+
+    result = await rename_citekey_impl(ctx, old_citekey="other2021", new_citekey="taken2020")
 
     assert result["error"] == "new citekey already in use"
     assert _head(ctx.repo_dir) == before
