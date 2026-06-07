@@ -30,12 +30,21 @@ def load_ledger(text: str | None) -> dict:
     evidence = data.get("evidence", [])
     if not isinstance(evidence, list):
         raise ValueError("citations.json 'evidence' must be a list")
+    for i, row in enumerate(evidence):
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"citations.json evidence[{i}] must be a dict, got {type(row).__name__}"
+            )
     return {"version": LEDGER_VERSION, "evidence": evidence}
 
 
 def dump_ledger(ledger: dict) -> str:
-    """Serialize to stable, human-diffable JSON (sorted keys, 2-space indent, trailing newline)."""
-    return json.dumps(ledger, indent=2, sort_keys=True) + "\n"
+    """Serialize to stable, human-diffable JSON (sorted keys, 2-space indent, trailing newline).
+
+    ``ensure_ascii=False`` keeps non-ASCII characters (e.g. accented letters in
+    evidence quotes) readable in git diffs while the output remains deterministic.
+    """
+    return json.dumps(ledger, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def new_ev_id() -> str:
@@ -82,3 +91,46 @@ def update_evidence(ledger: dict, ev_id: str, **fields) -> tuple[dict, bool]:
         else:
             out.append(e)
     return {"version": ledger.get("version", LEDGER_VERSION), "evidence": out}, updated
+
+
+def build_evidence_row(
+    *,
+    ev_id: str,
+    citekey: str,
+    reference_id: str,
+    chunk_index: int,
+    section_path: str | None,
+    source_content_hash: str | None,
+    chunk_content_hash: str,
+    evidence_quote: str,
+    evidence_quote_offsets: list[int],
+    stance: str,
+    confidence: str | None,
+    claim_context_text: str,
+    claim_context_hash: str,
+    citation_snapshot: str,
+    created_at: str,
+    updated_at: str,
+) -> dict:
+    """Construct a spec-exact v2 evidence row.
+
+    All timestamps and IDs are passed in by the caller — this function contains
+    NO datetime or random calls. This is the single authoritative constructor so
+    all mutation tools (T5/T6/T7) produce identical schema shapes.
+    """
+    return {
+        "id": ev_id,
+        "citekey": citekey,
+        "reference_id": reference_id,
+        "locator": {"chunk_index": chunk_index, "section_path": section_path},
+        "source_content_hash": source_content_hash,
+        "chunk_content_hash": chunk_content_hash,
+        "evidence_quote": evidence_quote,
+        "evidence_quote_offsets": evidence_quote_offsets,
+        "stance": stance,
+        "confidence": confidence,
+        "claim_context": {"text": claim_context_text, "hash": claim_context_hash},
+        "citation_snapshot": citation_snapshot,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }

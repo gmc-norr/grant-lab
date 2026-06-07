@@ -62,8 +62,12 @@ def write_and_commit_files(
             raise TypeError(f"file content must be str, got {type(v)} for {rel!r}")
 
     # FIX 3: Path-traversal guard — every path must stay inside repo_dir.
+    # Option-injection guard: reject any path key beginning with '-' before the
+    # traversal check so they can never reach 'git add'.
     repo_root = Path(repo_dir).resolve()
     for rel in paths:
+        if rel.startswith("-"):
+            raise ValueError(f"path key must not begin with '-': {rel!r}")
         resolved = (repo_root / rel).resolve()
         if not resolved.is_relative_to(repo_root):
             raise ValueError(f"path escapes repo_dir: {rel!r}")
@@ -81,7 +85,7 @@ def write_and_commit_files(
 
         # Stage all files.
         subprocess.run(
-            ["git", "add", *paths],
+            ["git", "add", "--", *paths],
             cwd=repo_dir,
             check=True,
             capture_output=True,

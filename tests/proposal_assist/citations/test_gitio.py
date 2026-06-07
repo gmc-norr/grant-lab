@@ -290,3 +290,23 @@ def test_traversal_path_raises_value_error(repo: Path) -> None:
     """A relative path that escapes repo_dir raises ValueError."""
     with pytest.raises(ValueError, match="path escapes repo_dir"):
         write_and_commit_files(repo, {"../escape.md": "x"}, message="should not run")
+
+
+# ---------------------------------------------------------------------------
+# Test 7: option-injection guard — path keys beginning with '-' are rejected
+# ---------------------------------------------------------------------------
+
+
+def test_dash_path_key_raises_value_error(repo: Path) -> None:
+    """A path key beginning with '-' raises ValueError before any git call."""
+    with pytest.raises(ValueError, match="must not begin with '-'"):
+        write_and_commit_files(repo, {"-f": "evil content"}, message="should not run")
+
+    # No file was written.
+    assert not (repo / "-f").exists()
+
+
+def test_double_dash_option_path_key_raises_value_error(repo: Path) -> None:
+    """A path key like '--chmod=+x' (looks like a git flag) raises ValueError."""
+    with pytest.raises(ValueError, match="must not begin with '-'"):
+        write_and_commit_files(repo, {"--chmod=+x": "x"}, message="should not run")

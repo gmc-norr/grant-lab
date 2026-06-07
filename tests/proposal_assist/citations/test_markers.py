@@ -18,7 +18,57 @@ from call_manager.proposal_assist.citations.markers import (
 )
 
 # ---------------------------------------------------------------------------
-# build_marker
+# build_marker — validation guards
+# ---------------------------------------------------------------------------
+
+
+def test_build_marker_invalid_citekey_raises() -> None:
+    """A citekey containing ']' (or any disallowed char) raises ValueError."""
+    with pytest.raises(ValueError, match="invalid citekey"):
+        build_marker("abc]def", "ev-000000000001")
+
+
+def test_build_marker_invalid_ev_id_raises() -> None:
+    """An ev_id that does not match ev-<6+hex> raises ValueError."""
+    with pytest.raises(ValueError, match="invalid ev_id"):
+        build_marker("ok2021", "nope")
+
+
+def test_build_marker_ev_id_too_short_raises() -> None:
+    """An ev_id with fewer than 6 hex chars after 'ev-' raises ValueError."""
+    with pytest.raises(ValueError, match="invalid ev_id"):
+        build_marker("ok2021", "ev-1234")
+
+
+# ---------------------------------------------------------------------------
+# insert_marker — validation propagates from build_marker
+# ---------------------------------------------------------------------------
+
+
+def test_insert_marker_invalid_citekey_raises_no_mutation() -> None:
+    """insert_marker propagates ValueError from build_marker; document is not mutated."""
+    text = "Some claim text."
+    with pytest.raises(ValueError, match="invalid citekey"):
+        insert_marker(text, "claim text", "bad]key", "ev-000000000001")
+
+
+# ---------------------------------------------------------------------------
+# rename_marker_citekey — new_citekey validation
+# ---------------------------------------------------------------------------
+
+
+def test_rename_marker_citekey_invalid_new_raises() -> None:
+    """A new_citekey containing ']' raises ValueError before any substitution."""
+    text = "Claim [@old]<!-- ev:ev-aaaaaaaaaaaa -->."
+    with pytest.raises(ValueError, match="invalid citekey"):
+        rename_marker_citekey(text, "old", "bad]new")
+
+    # Document unchanged: original marker still present.
+    assert "[@old]<!-- ev:ev-aaaaaaaaaaaa -->" in text
+
+
+# ---------------------------------------------------------------------------
+# build_marker — valid cases (existing tests continue to pass)
 # ---------------------------------------------------------------------------
 
 
