@@ -160,3 +160,152 @@ def test_citations_panel_corrupt_ledger_shows_error_not_500(
     assert resp.status_code == 200, resp.text
     # An error notice must be shown rather than a 500.
     assert "status-failed" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Task 4: POST /workspaces/{id}/citations/validate — deterministic audit panel
+# ---------------------------------------------------------------------------
+
+
+def test_validate_citations_clean_ledger_no_issues(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Owner POST with empty ledger (no citations) → 200 fragment saying no issues."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="val-clean@ki.se")
+    # Empty ledger (no citations.json written at all)
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/citations/validate")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    # Must be a fragment — no full HTML page wrapper
+    assert "<html" not in body
+    assert "<body" not in body
+    # Should report no issues
+    assert "No issues found" in body or "0 issue" in body
+
+
+def test_validate_citations_fragment_has_semantic_note(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Fragment must contain the note about semantic checks being agent-driven."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="val-note@ki.se")
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/citations/validate")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    # Fragment must contain the semantic-audit note
+    assert "Semantic" in resp.text or "semantic" in resp.text
+
+
+def test_validate_citations_orphan_row_issue(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Ledger row referencing a non-existent reference_id → deterministic emits
+    orphan_row (no inline marker in proposal.md) and/or reference_missing issues.
+    Either way the fragment must surface the issue type and severity."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="val-orphan@ki.se")
+
+    # Write a ledger with a row that has no matching marker in proposal.md
+    # (proposal.md doesn't exist → treat as empty text → all rows are orphan_row).
+    row = build_evidence_row(
+        ev_id="ev-orphan000001",
+        citekey="ghost2024",
+        reference_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        chunk_index=0,
+        section_path=None,
+        source_content_hash=None,
+        chunk_content_hash="deadbeef00",
+        evidence_quote="Some text.",
+        evidence_quote_offsets=[0, 9],
+        stance="supports",
+        confidence="high",
+        claim_context_text="We claim something.",
+        claim_context_hash="00cafef00d",
+        citation_snapshot="Ghost 2024",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    ledger = append_evidence(empty_ledger(), row)
+    repo = _repo_dir(tmp_path, wsid)
+    (repo / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
+    # No proposal.md → empty proposal text → orphan_row for the ledger row
+
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/citations/validate")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "<html" not in body
+    # The issue type and/or severity must appear in the fragment
+    assert "orphan_row" in body
+    assert "error" in body
+
+
+def test_validate_citations_corrupt_ledger_returns_error_fragment_not_500(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Corrupt citations.json → 200 error fragment (not 500)."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        uid, wsid = _seed_owner_and_workspace(s, email="val-corr@ki.se")
+    repo = _repo_dir(tmp_path, wsid)
+    (repo / CITATIONS_FILENAME).write_text("{this is not valid json at all")
+    client = _authed(app, user_id=uid)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/citations/validate")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "<html" not in body
+    # Must show an error message rather than crashing
+    assert "error" in body.lower() or "could not" in body.lower()
+
+
+def test_validate_citations_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Non-member POST → 403."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        _, wsid = _seed_owner_and_workspace(s, email="val-403-owner@ki.se")
+        other = User(email="val-403-other@ki.se")
+        s.add(other)
+        s.commit()
+        other_id = other.id
+    client = _authed(app, user_id=other_id)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/citations/validate")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 403
+
+
+def test_validate_citations_viewer_allowed(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Viewer POST → 200 (read-only validation is allowed for viewers)."""
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        _, wsid = _seed_owner_and_workspace(s, email="val-viewer-owner@ki.se")
+        viewer = User(email="val-viewer@ki.se")
+        s.add(viewer)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
+        s.commit()
+        viewer_id = viewer.id
+    client = _authed(app, user_id=viewer_id)
+    try:
+        resp = client.post(f"/workspaces/{wsid}/citations/validate")
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "<html" not in body

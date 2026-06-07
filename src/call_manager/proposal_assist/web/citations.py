@@ -1,10 +1,10 @@
-"""Web routes for citations — Task 3 (human-facing evidence-ledger view).
-
-Read-only panel that surfaces what the drafting agent has cited so the
-workspace owner OR a viewer can SEE the evidence ledger (citations.json).
+"""Web routes for citations — Task 3 (human-facing evidence-ledger view) and
+Task 4 (deterministic validation panel).
 
 Permission policy:
 - GET  /workspaces/<id>/citations                     owner OR viewer
+- POST /workspaces/<id>/citations/validate            owner OR viewer
+  (validation is read-only / non-mutating so viewers may run it)
 
 The git ledger (citations.json) is canonical; this view never writes. A
 corrupt/unparseable ledger degrades to an error notice rather than a 500.
@@ -21,8 +21,10 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
+from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
+from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
 # Reuse the exact auth + session deps from references.py so the policy stays
 # identical (owner-or-viewer read access; non-member → 403).
@@ -89,5 +91,68 @@ def citations_panel(
             "is_owner": is_owner,
             "citations": rows,
             "ledger_error": ledger_error,
+        },
+    )
+
+
+@router.post("/{workspace_id}/citations/validate", response_class=HTMLResponse)
+def run_validation(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Run the deterministic citation audit and return an HTMX fragment.
+
+    Deterministic only — NO LLM / citation_service call. The semantic judge
+    runs automatically inside the drafting agent's validate_citations tool.
+
+    Auth: owner OR viewer (validation is read-only / non-mutating).
+    Corrupt ledger → error fragment (not 500).
+    Missing proposal.md → treat as empty text (orphan_row for all rows — correct).
+    """
+    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
+
+    repo_dir = Path(request.app.state.settings.workspaces_dir) / str(workspace_id) / "repo"
+    proposals_path = repo_dir / PROPOSAL_FILENAME
+    citations_path = repo_dir / CITATIONS_FILENAME
+
+    # Read proposal text — absent file is treated as empty string so orphan_row
+    # issues are correctly emitted for any ledger rows (no live markers).
+    proposal_text = proposals_path.read_text() if proposals_path.exists() else ""
+
+    # Load the ledger — corrupt JSON degrades to an error fragment, not 500.
+    try:
+        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
+    except ValueError as exc:
+        error_msg = f"citations.json could not be read: {exc}"
+        return request.app.state.templates.TemplateResponse(
+            request,
+            "proposal_assist/partials/citation_audit_results.html",
+            {
+                "workspace": ws,
+                "issues": [],
+                "ledger_error": error_msg,
+            },
+        )
+
+    # Open a fresh session for the audit DB reads (chunk/reference lookups).
+    # We use the injected `session` directly — it is a plain SQLAlchemy Session
+    # provided by the _session_dep generator, scoped to this request, which is
+    # sufficient for the read-only queries in validate_citations_deterministic.
+    issues = validate_citations_deterministic(
+        proposal_text=proposal_text,
+        ledger=ledger,
+        session=session,
+        workspace_id=workspace_id,
+    )
+
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/citation_audit_results.html",
+        {
+            "workspace": ws,
+            "issues": issues,
+            "ledger_error": None,
         },
     )

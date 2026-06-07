@@ -47,5 +47,11 @@
 <p><em>No citations yet. The drafting agent adds citations with the insert_citation tool as it writes.</em></p>
 {% endif %}
 
-<div id="audit-results"></div>
+<section>
+  <h2>Deterministic validation</h2>
+  <button hx-post="/workspaces/{{ workspace.id }}/citations/validate"
+          hx-target="#audit-results"
+          hx-swap="innerHTML">Run validation (deterministic)</button>
+  <div id="audit-results"></div>
+</section>
 {% endblock %}
