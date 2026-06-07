@@ -446,9 +446,11 @@ def _build_audit_user(*, claim: str, evidence_quote: str, chunk_text: str, stanc
     """Build the per-row judge prompt. The chunk (external content) is wrapped as
     untrusted; the CLAIM and EVIDENCE_QUOTE are first-party framing."""
     if stance == "background":
-        verdict_instruction = "respond with verdict in {relevant, irrelevant}"
+        verdict_instruction = "Respond with exactly one verdict: relevant OR irrelevant."
     else:
-        verdict_instruction = "respond with verdict in {supports, contradicts, unsupported}"
+        verdict_instruction = (
+            "Respond with exactly one verdict: supports, contradicts, OR unsupported."
+        )
     return (
         f"CLAIM: {claim}\n\n"
         f"EVIDENCE_QUOTE: {evidence_quote}\n\n"
@@ -541,6 +543,9 @@ def validate_citations_semantic(
             proposal_text or "", marker.get("start", 0), marker.get("end", 0)
         )
         evidence_quote = row.get("evidence_quote") or ""
+        # Empty quote can't be meaningfully judged; deterministic owns quote_missing.
+        if not evidence_quote.strip():
+            continue
         location = f"citekey {citekey} ({ev_id}) at char {marker.get('start')}"
 
         key = build_cache_key(
@@ -618,7 +623,9 @@ def validate_citations_semantic(
             data = res.data or {}
             verdict = data.get("verdict")
             rationale = data.get("rationale")
-            if res.data is None or verdict not in allowed:
+            # res.data None → verdict None → not in allowed
+            # (covers both empty data and unknown verdict)
+            if verdict not in allowed:
                 issues.append(
                     _issue(
                         "audit_unavailable",

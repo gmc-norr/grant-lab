@@ -392,6 +392,11 @@ def test_claim_drift_bypasses_cache(pg_session_factory, _settings_env):
         )
     assert len(stub.calls) == 1, "claim_drift must re-judge despite a cached verdict"
     assert any(i["type"] == "semantic_contradicts" for i in issues)
+    # The freshly-computed verdict must be stored under the live cache key.
+    with pg_session_factory() as s:
+        stored = get_verdict(s, workspace_id=wsid, cache_key=key)
+    assert stored is not None, "re-judged verdict must be written to the cache"
+    assert stored.verdict == "contradicts"
 
 
 # --------------------------------------------------------------------------- #
@@ -427,6 +432,61 @@ def test_cap_exceeded_stops(pg_session_factory, _settings_env):
     assert "semantic_contradicts" not in {i["type"] for i in issues}
     # stopped after first cap: only one call attempted
     assert len(stub.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# cap_exceeded after a prior cache-hit row retains the earlier issue
+# --------------------------------------------------------------------------- #
+def test_cap_exceeded_retains_prior_results(pg_session_factory, _settings_env):
+    """Row 1 is a cache hit → semantic_contradicts; row 2 triggers cap_exceeded.
+    The returned issues must contain BOTH the contradicts issue and one
+    audit_unavailable, and the LLM must have been called exactly once (for row 2
+    only — row 1 was served from cache)."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    rid2 = _seed_reference(pg_session_factory, wsid, citekey="jones2020")
+    proposal_text = (
+        "# Proposal\n\n"
+        f"Adjuvant therapy cuts recurrence{build_marker(CITEKEY, EV_ID)}. "
+        f"More evidence here{build_marker('jones2020', 'ev-bbbbbbbbbbbb')}.\n"
+    )
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _row(rid, stance="supports"))
+    ledger = append_evidence(
+        ledger, _row(rid2, ev_id="ev-bbbbbbbbbbbb", citekey="jones2020", stance="supports")
+    )
+
+    # Pre-store a contradicts verdict for row 1 so it is a cache hit.
+    key1 = _cache_key_for(
+        proposal_text, chunk_text=CHUNK_TEXT, evidence_quote=EVIDENCE_QUOTE, stance="supports"
+    )
+    store_verdict(
+        pg_session_factory,
+        workspace_id=wsid,
+        cache_key=key1,
+        verdict="contradicts",
+        rationale="pre-cached",
+        validator_version=VALIDATOR_VERSION,
+    )
+
+    # The stub returns cap_exceeded for any LLM call (only row 2 will reach it).
+    stub = _StubCitationService(_verdict_result(None, cap_exceeded=True, cap_scope="workspace"))
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+
+    types = [i["type"] for i in issues]
+    assert "semantic_contradicts" in types, "row-1 cache-hit issue must be retained"
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1, "exactly one audit_unavailable from the cap"
+    # Only row 2 triggers an LLM call; row 1 was served from cache.
+    assert len(stub.calls) == 1, "LLM called exactly once (only for the capped row)"
 
 
 # --------------------------------------------------------------------------- #
