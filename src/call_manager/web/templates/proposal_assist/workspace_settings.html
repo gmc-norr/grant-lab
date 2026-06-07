@@ -25,6 +25,14 @@
              value="{{ workspace.deadline.strftime('%Y-%m-%d') if workspace.deadline else '' }}">
     </label>
   </p>
+  <p>
+    <label>Citation style:
+      <select name="citation_style">
+        <option value="vancouver" {% if workspace.citation_style == "vancouver" %}selected{% endif %}>Vancouver (numbered)</option>
+        <option value="author-year" {% if workspace.citation_style == "author-year" %}selected{% endif %}>Author–year</option>
+      </select>
+    </label>
+  </p>
   <button type="submit">Save</button>
 </form>
 

@@ -1,5 +1,134 @@
 import pytest
 
+# ---------------------------------------------------------------------------
+# citation_style setting (Slice 4 Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_get_settings_shows_vancouver_selected_by_default(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """A fresh workspace defaults to vancouver; GET settings shows it selected."""
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.get(f"/workspaces/{wsid}/settings")
+    assert response.status_code == 200
+    # The vancouver option must carry the `selected` attribute.
+    assert b'value="vancouver"' in response.content
+    assert b'value="author-year"' in response.content
+    # Confirm the page contains the citation_style select by name.
+    assert b'name="citation_style"' in response.content
+
+
+def test_post_settings_persists_citation_style_author_year(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """Owner can POST author-year; it is persisted and the subsequent GET
+    shows author-year selected."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import Workspace
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/settings",
+        data={
+            "title": "My workspace",
+            "status": "drafting",
+            "citation_style": "author-year",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code in (302, 303)
+    assert response.headers["location"] == f"/workspaces/{wsid}"
+
+    with pg_session_factory() as s:
+        ws = s.scalar(select(Workspace).where(Workspace.id == wsid))
+    assert ws.citation_style == "author-year"
+
+    # GET settings should show author-year selected.
+    get_resp = client_authed_owner.get(f"/workspaces/{wsid}/settings")
+    assert get_resp.status_code == 200
+    # The author-year option must carry the `selected` attribute.
+    content = get_resp.text
+    assert 'value="author-year"' in content
+    # Quick structural check: selected appears on the author-year option.
+    idx_ay = content.index('value="author-year"')
+    assert "selected" in content[idx_ay : idx_ay + 80]
+
+
+def test_post_settings_rejects_invalid_citation_style(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """An out-of-allowlist citation_style returns 400 (same as invalid status).
+    The workspace's citation_style is unchanged."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import Workspace
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/settings",
+        data={"title": "ok", "status": "drafting", "citation_style": "bogus"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+
+    # Workspace is unchanged — still at the default.
+    with pg_session_factory() as s:
+        ws = s.scalar(select(Workspace).where(Workspace.id == wsid))
+    assert ws.citation_style == "vancouver"
+
+
+def test_post_settings_non_owner_cannot_change_citation_style(
+    client_authed_user,
+    pg_session_factory,
+    current_user,
+):
+    """A viewer (non-owner) cannot POST settings, including citation_style."""
+    from call_manager.db.models import WorkspaceViewer
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="owner2@ki.se")
+        ws = make_workspace(s, owner=owner)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_user.post(
+        f"/workspaces/{wsid}/settings",
+        data={"title": "x", "status": "drafting", "citation_style": "author-year"},
+    )
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Original settings tests
+# ---------------------------------------------------------------------------
+
 
 def test_get_settings_renders_for_owner(
     client_authed_owner,

@@ -74,6 +74,8 @@ from call_manager.workspaces import create_workspace as _create_workspace
 # Valid Workspace.status values (mirrors the ck_workspaces_status CHECK
 # constraint in db/models.py). Used to allowlist the ?status filter.
 _WORKSPACE_STATUSES = frozenset({"drafting", "submitted", "awarded", "rejected", "abandoned"})
+# Valid Workspace.citation_style values (mirrors ck_workspaces_citation_style).
+_CITATION_STYLES = frozenset({"vancouver", "author-year"})
 # Upper bound on a workspace title — bounds the form field so a multi-MB
 # title can't be buffered into the DB. Generous for human-entered titles.
 _MAX_WORKSPACE_TITLE_LEN = 500
@@ -1136,6 +1138,7 @@ def post_settings(
     title: str = Form(...),
     status: str = Form(...),
     deadline: str | None = Form(None),
+    citation_style: str = Form("vancouver"),
 ):
     ws = _require_owner(
         workspace_id=workspace_id,
@@ -1147,12 +1150,16 @@ def post_settings(
     # global handler as a 500 — validate up front for a clean 400 instead.
     if status not in _WORKSPACE_STATUSES:
         raise HTTPException(status_code=400, detail="invalid status")
+    # Same pattern: allowlist citation_style before assignment.
+    if citation_style not in _CITATION_STYLES:
+        raise HTTPException(status_code=400, detail="invalid citation_style")
     title = title.strip()
     if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
         raise HTTPException(status_code=400, detail="invalid title")
     ws.title = title
     ws.status = status
     ws.deadline = _parse_deadline_form(deadline)
+    ws.citation_style = citation_style
     session.commit()
     return RedirectResponse(url=f"/workspaces/{ws.id}", status_code=303)
 
