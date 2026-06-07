@@ -26,9 +26,15 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from call_manager.db.models import Workspace
 from call_manager.proposal_assist.citations.audit import (
     validate_citations_deterministic,
     validate_citations_semantic,
+)
+from call_manager.proposal_assist.citations.bibliography import (
+    CITATION_STYLES,
+    BuildBibliographyBlocked,
+    build_bibliography,
 )
 from call_manager.proposal_assist.citations.claims import iter_proposal_sentences
 from call_manager.proposal_assist.citations.markers import find_markers
@@ -169,3 +175,50 @@ async def list_unsupported_claims_impl(ctx: ToolContext) -> dict[str, Any]:
             )
 
     return {"candidates": candidates, "semantic_available": True}
+
+
+async def build_bibliography_impl(ctx: ToolContext, *, style: str | None = None) -> dict[str, Any]:
+    """Render the proposal's cited references into ``bibliography.md`` (fail-closed).
+
+    Resolves the effective style from ``style`` (when given) or the workspace's
+    ``citation_style`` setting. Reads proposal.md + the ledger, then calls the
+    fail-closed :func:`build_bibliography` engine, which writes ``bibliography.md``
+    (a SEPARATE git artifact — never merged into proposal.md). Because it writes,
+    it is serialized under the same ``ctx.write_lock`` the mutation tools use
+    (the enclosing turn already holds the cross-process pg advisory lock).
+
+    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}`` on success, or
+    ``{"error": ..., "blocked": [...]}`` when any cited reference is unapproved /
+    unresolved / tombstoned (no partial write), or ``{"error": ...}`` for a bad
+    style or a missing proposal.md.
+    """
+    if style is not None and style not in CITATION_STYLES:
+        return {"error": f"invalid style {style!r} (allowed: vancouver, author-year)"}
+
+    async with ctx.write_lock:
+        read = _read_proposal_and_ledger(ctx)
+        if isinstance(read, dict):
+            return read
+        proposal_text, ledger = read
+
+        with ctx.session_factory() as session:
+            effective_style = style
+            if effective_style is None:
+                ws = session.get(Workspace, ctx.workspace_id)
+                effective_style = getattr(ws, "citation_style", None) or "vancouver"
+
+            try:
+                return build_bibliography(
+                    proposal_text=proposal_text,
+                    ledger=ledger,
+                    session=session,
+                    workspace_id=ctx.workspace_id,
+                    style=effective_style,
+                    repo_dir=ctx.repo_dir,
+                    commit=True,
+                )
+            except BuildBibliographyBlocked as exc:
+                return {
+                    "error": "bibliography blocked: unapproved/unresolved references",
+                    "blocked": exc.blocked,
+                }

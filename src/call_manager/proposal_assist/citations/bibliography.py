@@ -29,6 +29,12 @@ from call_manager.proposal_assist.citations.markers import find_markers
 
 _REFERENCES_HEADING = "# References\n\n"
 
+#: The two v1 citation styles. Canonical source — the DB CHECK constraint
+#: (migration 0040 / models.Workspace), the settings route, and the MCP tool all
+#: validate against this set. ``render_bibliography`` treats anything other than
+#: "author-year" as "vancouver", but callers should reject unknown styles first.
+CITATION_STYLES = frozenset({"vancouver", "author-year"})
+
 #: Filename of the rendered bibliography git artifact. This is a SEPARATE file
 #: from proposal.md and is NEVER merged into it (spec D13).
 BIBLIOGRAPHY_FILENAME = "bibliography.md"

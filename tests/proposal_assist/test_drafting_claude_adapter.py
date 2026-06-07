@@ -475,6 +475,7 @@ def test_build_options_appends_citation_instruction():
     append = sp["append"]
     assert "insert_citation" in append
     assert "validate_citations" in append
+    assert "build_bibliography" in append
     assert "evidence_quote" in append or "verbatim" in append
     # Tool-accuracy: insert_citation takes reference_id + anchor (it assigns/reuses
     # the citekey itself). The instruction must name those real params.

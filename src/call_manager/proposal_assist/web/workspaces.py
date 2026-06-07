@@ -47,6 +47,7 @@ from call_manager.db.models import (
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
+from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
@@ -75,7 +76,7 @@ from call_manager.workspaces import create_workspace as _create_workspace
 # constraint in db/models.py). Used to allowlist the ?status filter.
 _WORKSPACE_STATUSES = frozenset({"drafting", "submitted", "awarded", "rejected", "abandoned"})
 # Valid Workspace.citation_style values (mirrors ck_workspaces_citation_style).
-_CITATION_STYLES = frozenset({"vancouver", "author-year"})
+_CITATION_STYLES = CITATION_STYLES
 # Upper bound on a workspace title — bounds the form field so a multi-MB
 # title can't be buffered into the DB. Generous for human-entered titles.
 _MAX_WORKSPACE_TITLE_LEN = 500

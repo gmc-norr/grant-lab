@@ -501,6 +501,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         return await _safe_tool("list_citations", ctx, list_citations_impl, ctx)
 
     from call_manager.proposal_assist.tools.audit import (
+        build_bibliography_impl,
         list_unsupported_claims_impl,
         validate_citations_impl,
     )
@@ -532,6 +533,33 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     async def list_unsupported_claims(args):
         return await _safe_tool("list_unsupported_claims", ctx, list_unsupported_claims_impl, ctx)
+
+    @tool(
+        "build_bibliography",
+        "Render the proposal's cited references into a formatted bibliography.md "
+        "(a separate file — never merged into proposal.md). Fail-closed: if any "
+        "cited reference's metadata is unapproved (and unwaived), unresolved, or "
+        "tombstoned, nothing is written and the response is "
+        "`{error, blocked:[{citekey, reference_id, metadata_status, reason}]}` — "
+        "approve the listed references (or have the owner waive them) and retry. "
+        "`style` is optional and defaults to the workspace's citation_style. Call "
+        "this once the draft's citations are settled.",
+        {
+            "type": "object",
+            "properties": {
+                "style": {"type": "string", "enum": ["vancouver", "author-year"]},
+            },
+            "required": [],
+        },
+    )
+    async def build_bibliography(args):
+        return await _safe_tool(
+            "build_bibliography",
+            ctx,
+            build_bibliography_impl,
+            ctx,
+            style=args.get("style"),
+        )
 
     @tool(
         "insert_citation",
@@ -707,4 +735,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         validate_citations,
         # Slice 3 Task 7 — uncited-claim discovery
         list_unsupported_claims,
+        # Slice 4 Task 5 — bibliography rendering
+        build_bibliography,
     ]

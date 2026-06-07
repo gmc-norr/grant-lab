@@ -123,7 +123,8 @@ _CITATION_INSTRUCTION = (
     "rename_citekey, call list_citations first to see existing citations and "
     "their ev ids. After substantial drafting, call validate_citations and "
     "resolve any issues it reports; then call list_unsupported_claims to find "
-    "factual claims that still lack a citation."
+    "factual claims that still lack a citation. When the draft's citations are "
+    "settled, call build_bibliography to render the formatted reference list."
 )
 
 
@@ -249,6 +250,8 @@ class ClaudeAgentSDKAdapter:
                 "validate_citations",
                 # Slice 3 Task 7 — uncited-claim discovery
                 "list_unsupported_claims",
+                # Slice 4 Task 5 — bibliography rendering
+                "build_bibliography",
             ]
         return options_kwargs
 
