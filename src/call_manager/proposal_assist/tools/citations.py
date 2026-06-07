@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.citations import claims
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     write_and_commit_files,
@@ -70,6 +71,41 @@ CITATIONS_FILENAME = "citations.json"
 ALLOWED_STANCES = frozenset({"supports", "contradicts", "background"})
 # Spec line 122: confidence ∈ {high, medium, low} (agent self-assessment).
 ALLOWED_CONFIDENCE = frozenset({"high", "medium", "low"})
+
+
+def _validate_stance_confidence(stance: str | None, confidence: str | None) -> dict | None:
+    """Return an {"error": ...} dict for an unknown stance/confidence, else None.
+
+    Shared by insert + update so the validation (and the exact error strings)
+    stay identical. A value of None means "not specified" and is accepted.
+    """
+    if stance is not None and stance not in ALLOWED_STANCES:
+        return {"error": f"invalid stance {stance!r}; allowed: {sorted(ALLOWED_STANCES)}"}
+    if confidence is not None and confidence not in ALLOWED_CONFIDENCE:
+        allowed = sorted(ALLOWED_CONFIDENCE)
+        return {"error": f"invalid confidence {confidence!r}; allowed: {allowed}"}
+    return None
+
+
+def _read_proposal_and_ledger(ctx: ToolContext) -> tuple[str, dict] | dict:
+    """Read proposal.md + the (possibly absent) citations ledger.
+
+    Returns (proposal_text, ledger) on success, or an {"error": ...} dict if
+    proposal.md is missing or the ledger fails to parse. Shared by all three
+    locked citation functions so the read+error behaviour stays identical.
+    """
+    proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
+    if not proposal_path.exists():
+        return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
+    proposal_text = proposal_path.read_text()
+
+    citations_path = ctx.repo_dir / CITATIONS_FILENAME
+    ledger_text = citations_path.read_text() if citations_path.exists() else None
+    try:
+        ledger = load_ledger(ledger_text)
+    except ValueError as exc:
+        return {"error": f"citations.json is invalid: {exc}"}
+    return proposal_text, ledger
 
 
 def _current_head(repo_dir) -> str:
@@ -174,11 +210,9 @@ async def insert_citation_impl(
     a duplicate insert was a no-op), or {"error": "..."} on any expected
     failure (leaving NO commit and a clean working tree).
     """
-    if stance not in ALLOWED_STANCES:
-        return {"error": f"invalid stance {stance!r}; allowed: {sorted(ALLOWED_STANCES)}"}
-    if confidence is not None and confidence not in ALLOWED_CONFIDENCE:
-        allowed = sorted(ALLOWED_CONFIDENCE)
-        return {"error": f"invalid confidence {confidence!r}; allowed: {allowed}"}
+    err = _validate_stance_confidence(stance, confidence)
+    if err is not None:
+        return err
 
     try:
         ref_uuid = uuid.UUID(str(reference_id))
@@ -231,17 +265,10 @@ def _insert_citation_locked(
         return {"error": "chunk not found"}
 
     # 3. Read proposal.md + the (possibly absent) ledger.
-    proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
-    if not proposal_path.exists():
-        return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
-    proposal_text = proposal_path.read_text()
-
-    citations_path = ctx.repo_dir / CITATIONS_FILENAME
-    ledger_text = citations_path.read_text() if citations_path.exists() else None
-    try:
-        ledger = load_ledger(ledger_text)
-    except ValueError as exc:
-        return {"error": f"citations.json is invalid: {exc}"}
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, ledger = read
 
     # 4. Quote-verify against the raw chunk text.
     try:
@@ -297,10 +324,21 @@ def _insert_citation_locked(
     chunk_content_hash = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
     source_content_hash = ref.original_sha256  # may be None
 
-    # 9. Claim context — the anchor sentence snapshot + normalized hash.
-    claim_context_text = anchor
+    # 9. Claim context — the LIVE claim sentence around the just-inserted marker,
+    # via the canonical extractor (so a fresh insert and a later reaccept_claim
+    # share ONE contract and an insert never immediately looks "drifted"). Fall
+    # back to the bare anchor only if extraction degenerates to "".
+    inserted = next((m for m in find_markers(new_proposal_text) if m["ev_id"] == ev_id), None)
+    if inserted is not None:
+        claim_context_text = claims.claim_sentence_around(
+            new_proposal_text, inserted["start"], inserted["end"]
+        )
+    else:
+        claim_context_text = ""
+    if not claim_context_text:
+        claim_context_text = anchor
     claim_context_hash = hashlib.sha256(
-        normalize_for_quote_match(anchor).encode("utf-8")
+        normalize_for_quote_match(claim_context_text).encode("utf-8")
     ).hexdigest()
 
     # 10. Citation snapshot (deterministic, no network).
@@ -394,17 +432,10 @@ async def remove_citation_impl(
 
 def _remove_citation_locked(ctx: ToolContext, *, evidence_id: str) -> dict[str, Any]:
     # 1. Read proposal.md + the ledger.
-    proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
-    if not proposal_path.exists():
-        return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
-    proposal_text = proposal_path.read_text()
-
-    citations_path = ctx.repo_dir / CITATIONS_FILENAME
-    ledger_text = citations_path.read_text() if citations_path.exists() else None
-    try:
-        ledger = load_ledger(ledger_text)
-    except ValueError as exc:
-        return {"error": f"citations.json is invalid: {exc}"}
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, ledger = read
 
     # 2. Locate the row (the ledger is canonical).
     row = find_by_id(ledger, evidence_id)
@@ -450,33 +481,6 @@ def _remove_citation_locked(ctx: ToolContext, *, evidence_id: str) -> dict[str, 
 # --- update_citation -------------------------------------------------------
 
 
-def _claim_sentence_around(text: str, marker_start: int, marker_end: int) -> str:
-    """Return the live claim text around a marker for reaccept_claim.
-
-    Snapshots the sentence containing the marker: from the previous sentence
-    terminator (. ! ? or newline) up to and including the next one, with the
-    marker span itself excised so the stored claim is the prose, not the marker.
-    Falls back to the marker's line, then to the whole text, if no boundary is
-    found. Result is whitespace-collapsed.
-    """
-    prose = text[:marker_start] + text[marker_end:]
-    # The marker is gone from `prose`; the claim now centres on marker_start.
-    pos = marker_start
-    terminators = ".!?\n"
-    start = 0
-    for i in range(pos - 1, -1, -1):
-        if prose[i] in terminators:
-            start = i + 1
-            break
-    end = len(prose)
-    for i in range(pos, len(prose)):
-        if prose[i] in terminators:
-            end = i + 1
-            break
-    sentence = prose[start:end]
-    return normalize_for_quote_match(sentence)
-
-
 async def update_citation_impl(
     ctx: ToolContext,
     *,
@@ -496,11 +500,9 @@ async def update_citation_impl(
     A call that specifies no actual change returns {"error": "no changes
     specified"} BEFORE writing (no empty commits).
     """
-    if stance is not None and stance not in ALLOWED_STANCES:
-        return {"error": f"invalid stance {stance!r}; allowed: {sorted(ALLOWED_STANCES)}"}
-    if confidence is not None and confidence not in ALLOWED_CONFIDENCE:
-        allowed = sorted(ALLOWED_CONFIDENCE)
-        return {"error": f"invalid confidence {confidence!r}; allowed: {allowed}"}
+    err = _validate_stance_confidence(stance, confidence)
+    if err is not None:
+        return err
 
     if (
         chunk_index is None
@@ -539,17 +541,10 @@ def _update_citation_locked(
     reaccept_claim: bool,
 ) -> dict[str, Any]:
     # 1. Read proposal.md + the ledger; locate the row.
-    proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
-    if not proposal_path.exists():
-        return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
-    proposal_text = proposal_path.read_text()
-
-    citations_path = ctx.repo_dir / CITATIONS_FILENAME
-    ledger_text = citations_path.read_text() if citations_path.exists() else None
-    try:
-        ledger = load_ledger(ledger_text)
-    except ValueError as exc:
-        return {"error": f"citations.json is invalid: {exc}"}
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, ledger = read
 
     row = find_by_id(ledger, evidence_id)
     if row is None:
@@ -601,25 +596,32 @@ def _update_citation_locked(
             "section_path": chunk.section_path,
         }
 
-    # 4. reaccept_claim — re-snapshot the live claim around the marker.
+    # 4. reaccept_claim — re-snapshot the live claim around the marker using the
+    # canonical extractor (the SAME one insert_citation uses, so reaccept never
+    # disagrees with the freshly-stored claim).
     if reaccept_claim:
+        stored_claim = (row.get("claim_context") or {}).get("text", "")
         marker = next((m for m in find_markers(proposal_text) if m["ev_id"] == evidence_id), None)
         if marker is not None:
-            claim_text = _claim_sentence_around(proposal_text, marker["start"], marker["end"])
+            claim_text = claims.claim_sentence_around(proposal_text, marker["start"], marker["end"])
+            # M3: a live marker that yields an empty extraction (degenerate prose)
+            # must NOT overwrite a good stored claim with "" — keep the stored one.
+            if not claim_text:
+                claim_text = stored_claim
         else:
             # No live marker (e.g. orphaned row) — fall back to the stored claim
             # text so we still refresh the hash deterministically.
-            claim_text = (row.get("claim_context") or {}).get("text", "")
+            claim_text = stored_claim
         fields["claim_context"] = {
             "text": claim_text,
             "hash": hashlib.sha256(
                 normalize_for_quote_match(claim_text).encode("utf-8")
             ).hexdigest(),
         }
-        # Clear any drift flag a validator may have set (out-of-scope field, but
-        # reaccept is the documented way to clear it — be defensive).
-        if "claim_drift" in row:
-            fields["claim_drift"] = None
+        # M4: claim_drift is a Slice-3 field that does not exist yet. Do NOT write
+        # claim_drift = None (that would introduce a null field). update_evidence
+        # is a shallow merge with no key-removal path, so we simply omit any
+        # claim_drift handling here; Slice 3 will own clearing it when it lands.
 
     # 5. Nothing actually changed (e.g. only invalid no-op combos slipped through).
     if not fields:

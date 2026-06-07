@@ -15,8 +15,12 @@ import pytest
 
 from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
-from call_manager.proposal_assist.citations.markers import find_markers
+from call_manager.proposal_assist.citations.ledger import (
+    dump_ledger,
+    find_by_id,
+    load_ledger,
+)
+from call_manager.proposal_assist.citations.markers import find_markers, remove_marker
 from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
 from call_manager.proposal_assist.drafting.locking import (
     acquire_workspace_lock,
@@ -76,6 +80,15 @@ def _tree_is_clean(repo_dir: Path) -> bool:
         text=True,
     )
     return out.stdout.strip() == ""
+
+
+def _commit_files(repo_dir: Path, files: dict[str, str], message: str) -> None:
+    """Hand-write + commit files in the test repo (simulates an out-of-band edit
+    the agent's tools must tolerate)."""
+    for name, content in files.items():
+        (repo_dir / name).write_text(content)
+    subprocess.run(["git", "add", *files.keys()], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo_dir, check=True)
 
 
 def _seed_reference(
@@ -457,9 +470,11 @@ async def test_update_reaccept_claim(pg_session_factory, _settings_env, tmp_path
     ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
     row = find_by_id(ledger, ev_id)
     new_claim = row["claim_context"]
-    # claim text is re-snapshotted from the live sentence around the marker, so it
-    # should now be the full sentence (longer than the original bare anchor).
-    assert new_claim["text"] != old_claim["text"]
+    # insert and reaccept now share ONE extractor, so re-accepting an UNCHANGED
+    # proposal re-snapshots the SAME live sentence — a fresh insert must not look
+    # "drifted". The claim is the full sentence around the marker, not the anchor.
+    assert new_claim["text"] == old_claim["text"]
+    assert new_claim["text"] == "We argue that recurrence is reduced substantially"
     assert ANCHOR in new_claim["text"]
     assert (
         new_claim["hash"]
@@ -519,3 +534,145 @@ async def test_update_lock_busy_no_commit(pg_session_factory, _settings_env, tmp
     finally:
         release_workspace_lock(holder, wsid)
         holder.close()
+
+
+# ---------------------------------------------------------------------------
+# Edge cases flagged in review (FIX 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reaccept_marker_after_period_uses_preceding_sentence(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """I1 boundary: a marker that sits AFTER a sentence-ending period must
+    re-snapshot the PRECEDING sentence (the one the marker trails), not the
+    following one."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="smith2021"
+    )
+    ins = await _insert_one(ctx, rid)
+    ev_id = ins["ev_id"]
+
+    # Hand-edit proposal.md so the marker lands AFTER the period. The inserted
+    # marker text is stable; we move it from "...substantially[M] in our..." to
+    # "...substantially.[M] Next sentence here."
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    marker = next(m for m in find_markers(proposal_text) if m["ev_id"] == ev_id)
+    marker_str = proposal_text[marker["start"] : marker["end"]]
+    edited = f"# Proposal\n\nWe argue that {ANCHOR}.{marker_str} Next sentence here.\n"
+    _commit_files(ctx.repo_dir, {PROPOSAL_FILENAME: edited}, "move marker after period")
+
+    result = await update_citation_impl(ctx, evidence_id=ev_id, reaccept_claim=True)
+    assert "error" not in result, result
+
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    row = find_by_id(ledger, ev_id)
+    claim_text = row["claim_context"]["text"]
+    assert claim_text == f"We argue that {ANCHOR}"
+    assert "Next sentence here" not in claim_text
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_reaccept_orphaned_row_falls_back_to_stored_claim(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """An orphaned ledger row (its marker hand-removed from proposal.md) must
+    fall back to the stored claim text and still refresh the hash — never
+    overwrite the claim with empty."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="smith2021"
+    )
+    ins = await _insert_one(ctx, rid)
+    ev_id = ins["ev_id"]
+
+    ledger0 = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    stored = find_by_id(ledger0, ev_id)["claim_context"]
+
+    # Hand-remove the marker from proposal.md (row stays in the ledger -> orphan).
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    stripped, removed = remove_marker(proposal_text, ev_id)
+    assert removed
+    _commit_files(ctx.repo_dir, {PROPOSAL_FILENAME: stripped}, "hand-remove marker")
+    assert find_markers((ctx.repo_dir / PROPOSAL_FILENAME).read_text()) == []
+
+    result = await update_citation_impl(ctx, evidence_id=ev_id, reaccept_claim=True)
+    assert "error" not in result, result
+
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    row = find_by_id(ledger, ev_id)
+    # Stored claim text preserved (not blanked); hash recomputed from it.
+    assert row["claim_context"]["text"] == stored["text"]
+    assert (
+        row["claim_context"]["hash"]
+        == hashlib.sha256(normalize_for_quote_match(stored["text"]).encode("utf-8")).hexdigest()
+    )
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_remove_row_whose_marker_was_hand_removed(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """The warn-and-drop branch: removing a citation whose marker is already gone
+    from proposal.md still drops the ledger row, commits, and leaves a clean
+    tree (the ledger is canonical)."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="smith2021"
+    )
+    ins = await _insert_one(ctx, rid)
+    ev_id = ins["ev_id"]
+
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    stripped, removed = remove_marker(proposal_text, ev_id)
+    assert removed
+    _commit_files(ctx.repo_dir, {PROPOSAL_FILENAME: stripped}, "hand-remove marker")
+    count_before = _commit_count(ctx.repo_dir)
+
+    result = await remove_citation_impl(ctx, evidence_id=ev_id)
+    assert "error" not in result, result
+    assert result["ev_id"] == ev_id
+
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    assert find_by_id(ledger, ev_id) is None
+    assert ledger["evidence"] == []
+    # A new commit was made and the tree is clean.
+    assert _commit_count(ctx.repo_dir) == count_before + 1
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_update_stance_with_malformed_locator_missing_chunk_index(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """A pre-existing row with a malformed locator (no chunk_index) must still be
+    updatable for fields that don't touch the binding (e.g. stance), thanks to
+    the .get() guards — not crash."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="smith2021"
+    )
+    ins = await _insert_one(ctx, rid, stance="supports")
+    ev_id = ins["ev_id"]
+
+    # Corrupt the locator: drop chunk_index, keep section_path.
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    for row in ledger["evidence"]:
+        if row["id"] == ev_id:
+            row["locator"] = {"section_path": "Results"}  # no chunk_index
+    _commit_files(ctx.repo_dir, {CITATIONS_FILENAME: dump_ledger(ledger)}, "corrupt locator")
+
+    # Changing only stance must NOT touch the binding (so .get() guards suffice).
+    result = await update_citation_impl(ctx, evidence_id=ev_id, stance="background")
+    assert "error" not in result, result
+    assert "stance" in result["updated_fields"]
+
+    refreshed = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    row = find_by_id(refreshed, ev_id)
+    assert row["stance"] == "background"
+    assert "chunk_index" not in row["locator"]  # untouched
+    assert _tree_is_clean(ctx.repo_dir)

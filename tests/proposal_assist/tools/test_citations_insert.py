@@ -207,6 +207,22 @@ async def test_happy_path_inserts_marker_and_ledger_row(
     # chunk_content_hash == sha256(chunk.text) bare hex.
     assert row["chunk_content_hash"] == hashlib.sha256(CHUNK_TEXT.encode("utf-8")).hexdigest()
 
+    # claim_context is the LIVE claim sentence around the inserted marker (the
+    # canonical extractor — NOT the bare anchor), so a fresh insert agrees with a
+    # later reaccept_claim and never immediately looks "drifted". The anchor is a
+    # substring of that sentence; the trailing period/newline are stripped.
+    claim_text = row["claim_context"]["text"]
+    # The marker trails the claim, so extraction walks from the sentence start to
+    # the marker position (text AFTER the marker, " in our population.", is not
+    # part of the claim the marker attaches to).
+    assert claim_text == "We argue that recurrence is reduced substantially"
+    assert ANCHOR in claim_text
+    assert claim_text != ANCHOR  # leading "We argue that " included, not bare anchor
+    assert (
+        row["claim_context"]["hash"]
+        == hashlib.sha256(normalize_for_quote_match(claim_text).encode("utf-8")).hexdigest()
+    )
+
     # Exactly one new commit, clean tree.
     assert _commit_count(ctx.repo_dir) == before_count + 1
     assert _tree_is_clean(ctx.repo_dir)
