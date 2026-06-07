@@ -1321,3 +1321,38 @@ class CitationLlmUsage(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class CitationAuditVerdict(Base):
+    """Cache of semantic-verdict results from the citation audit validator.
+    Keyed by a content hash (cache_key) including the relied-on quote, so
+    re-running validate_citations over an unchanged draft is free. Bump
+    validator_version to invalidate the whole cache. See the spec."""
+
+    __tablename__ = "citation_audit_verdicts"
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('supports','contradicts','unsupported','relevant','irrelevant')",
+            name="ck_citation_audit_verdicts_verdict",
+        ),
+        Index("ix_citation_audit_verdicts_ws_cache", "workspace_id", "cache_key"),
+        Index("ix_citation_audit_verdicts_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "workspaces.id",
+            ondelete="CASCADE",
+            name="fk_citation_audit_verdicts_workspace_id",
+        ),
+        nullable=False,
+    )
+    cache_key: Mapped[str] = mapped_column(Text, nullable=False)
+    verdict: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validator_version: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
