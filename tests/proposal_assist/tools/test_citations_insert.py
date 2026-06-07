@@ -234,6 +234,36 @@ async def test_happy_path_inserts_marker_and_ledger_row(
 
 
 @pytest.mark.asyncio
+async def test_tombstoned_reference_rejected_no_commit(pg_session_factory, _settings_env, tmp_path):
+    """A tombstoned reference cannot be cited: insert returns an error BEFORE
+    any write (no commit, clean tree)."""
+    from datetime import UTC, datetime
+
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        ref.tombstoned_at = datetime.now(UTC)
+        s.commit()
+
+    before_head = _head(ctx.repo_dir)
+    before_count = _commit_count(ctx.repo_dir)
+
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert "error" in result
+    assert "tombstoned" in result["error"]
+    assert _head(ctx.repo_dir) == before_head
+    assert _commit_count(ctx.repo_dir) == before_count
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
 async def test_anchor_not_found_no_commit(pg_session_factory, _settings_env, tmp_path):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])

@@ -54,7 +54,12 @@ async def list_references_impl(
     with ctx.session_factory() as s:
         stmt = (
             select(Reference)
-            .where(Reference.workspace_id == ctx.workspace_id)
+            .where(
+                Reference.workspace_id == ctx.workspace_id,
+                # Tombstoned refs are filtered out of discovery (retained only
+                # so existing citations keep resolving).
+                Reference.tombstoned_at.is_(None),
+            )
             .order_by(Reference.created_at.desc())
             .limit(limit)
         )
@@ -137,6 +142,8 @@ async def search_references_impl(
                 ReferenceChunk.workspace_id == ctx.workspace_id,
                 ReferenceChunk.embedding_model == embedder.model,
                 Reference.text_status == "done",
+                # Tombstoned refs are excluded from discovery.
+                Reference.tombstoned_at.is_(None),
             )
             .order_by("distance")
             .limit(top_k)
@@ -317,11 +324,17 @@ async def read_reference_impl(
         return {"error": "extracted text missing on disk"}
     full = text_path.read_text(encoding="utf-8")
     truncated = len(full) > max_chars
-    return {
+    out: dict[str, Any] = {
         "text": full[:max_chars],
         "truncated": truncated,
         "total_chars": len(full),
     }
+    # A tombstoned ref is hidden from discovery (list/search) but its content is
+    # retained so an EXISTING citation can still be inspected by id. Flag it so
+    # the agent knows it can't cite it afresh.
+    if ref.tombstoned_at is not None:
+        out["tombstoned"] = True
+    return out
 
 
 async def read_reference_section_impl(

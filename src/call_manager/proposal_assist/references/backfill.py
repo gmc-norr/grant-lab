@@ -18,12 +18,23 @@ import hashlib
 import logging
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import column, table, update
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import Reference
-
 log = logging.getLogger(__name__)
+
+# Build a lightweight Core table reference instead of importing the ORM
+# `Reference` model. This data migration runs from Alembic 0037 (before later
+# migrations have added newer columns); selecting the full ORM entity would
+# emit `SELECT <every model column>` and fail with "column does not exist" the
+# moment the model grows ahead of this migration (e.g. 0038's tombstoned_at).
+# Naming only the columns this backfill touches keeps it immune to model drift.
+_references = table(
+    "references",
+    column("id"),
+    column("storage_path"),
+    column("original_sha256"),
+)
 
 
 def backfill_original_sha256(session: Session, references_root: Path | str) -> int:
@@ -43,19 +54,25 @@ def backfill_original_sha256(session: Session, references_root: Path | str) -> i
     """
     root = Path(references_root)
     root_resolved = root.resolve()
-    stmt = select(Reference).where(Reference.original_sha256.is_(None))
+    # Core-level SELECT of only the columns we need — see module note on why we
+    # avoid the ORM entity here.
+    stmt = (
+        _references.select()
+        .with_only_columns(_references.c.id, _references.c.storage_path)
+        .where(_references.c.original_sha256.is_(None))
+    )
     # Materialises all NULL rows at once — acceptable for a one-time backfill.
     # Switch to yield_per/pagination if this is ever promoted to a recurring
     # job on a large corpus.
-    rows = session.scalars(stmt).all()
+    rows = session.execute(stmt).all()
 
     count = 0
-    for ref in rows:
-        abs_path = (root_resolved / ref.storage_path).resolve()
+    for ref_id, storage_path in rows:
+        abs_path = (root_resolved / storage_path).resolve()
         if not abs_path.is_relative_to(root_resolved):
             log.warning(
                 "backfill: skipping reference %s: storage_path escapes references_root",
-                ref.id,
+                ref_id,
             )
             continue
         path = abs_path
@@ -67,10 +84,12 @@ def backfill_original_sha256(session: Session, references_root: Path | str) -> i
             log.warning(
                 "backfill: could not read %s for reference %s — skipping",
                 path,
-                ref.id,
+                ref_id,
             )
             continue
-        ref.original_sha256 = digest
+        session.execute(
+            update(_references).where(_references.c.id == ref_id).values(original_sha256=digest)
+        )
         count += 1
 
     return count

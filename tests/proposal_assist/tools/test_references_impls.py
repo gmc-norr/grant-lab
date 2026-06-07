@@ -701,6 +701,59 @@ Results body.
     assert set(out.keys()) >= {"section_path", "text", "chunk_count"}
 
 
+def _tombstone(pg_session_factory, reference_id):
+    """Mark a reference tombstoned (mirrors delete_or_tombstone_reference's
+    cited path)."""
+    from datetime import UTC, datetime
+
+    with pg_session_factory() as s:
+        ref = s.get(_Reference, reference_id)
+        ref.tombstoned_at = datetime.now(UTC)
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_list_references_excludes_tombstoned(pg_session_factory, tmp_path):
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    _tombstone(pg_session_factory, rids[0])
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await list_references_impl(ctx)
+    ids = {r["id"] for r in result["references"]}
+    assert str(rids[0]) not in ids
+    assert len(result["references"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_references_excludes_tombstoned(pg_session_factory, tmp_path):
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    _tombstone(pg_session_factory, rids[0])
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await search_references_impl(ctx, query="anything", top_k=50, embedder=FakeEmbedder())
+    hit_ids = {h["reference_id"] for h in result["results"]}
+    assert str(rids[0]) not in hit_ids
+
+
+@pytest.mark.asyncio
+async def test_read_reference_of_tombstoned_returns_content_with_flag(pg_session_factory, tmp_path):
+    """A tombstoned ref retains content so an EXISTING citation can still be
+    inspected — read_reference returns its text plus tombstoned: true."""
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    _tombstone(pg_session_factory, rids[0])
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await read_reference_impl(ctx, reference_id=str(rids[0]))
+    assert "text" in result
+    assert "Notes on therapy" in result["text"]
+    assert result["tombstoned"] is True
+
+
+@pytest.mark.asyncio
+async def test_read_reference_non_tombstoned_omits_flag(pg_session_factory, tmp_path):
+    wsid, rids = _seed_three_refs(pg_session_factory, tmp_path)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    result = await read_reference_impl(ctx, reference_id=str(rids[0]))
+    assert result.get("tombstoned") is not True
+
+
 @pytest.mark.asyncio
 async def test_read_reference_data_kind_steers_to_summarize(pg_session_factory, tmp_path):
     """Residuals fix: read_reference on kind='data' should steer the

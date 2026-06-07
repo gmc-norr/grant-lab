@@ -256,6 +256,11 @@ def _insert_citation_locked(
     if ref is None or ref.workspace_id != ctx.workspace_id:
         return {"error": "reference not found"}
 
+    # 1a. A tombstoned reference (soft-deleted) cannot be newly cited — reject
+    # BEFORE any write so the working tree stays clean.
+    if ref.tombstoned_at is not None:
+        return {"error": "reference is tombstoned and cannot be cited"}
+
     # 2. Load the ReferenceChunk (reference + index), workspace-scoped.
     chunk = (
         session.query(ReferenceChunk)
