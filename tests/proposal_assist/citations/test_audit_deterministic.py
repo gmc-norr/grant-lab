@@ -20,6 +20,8 @@ import pytest
 from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations.audit import (
+    chunk_content_sha,
+    claim_context_sha,
     validate_citations_deterministic,
 )
 from call_manager.proposal_assist.citations.claims import claim_sentence_around
@@ -30,7 +32,6 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
 )
 from call_manager.proposal_assist.citations.markers import build_marker, find_markers
-from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
 from call_manager.proposal_assist.tools.citations import (
     CITATIONS_FILENAME,
     insert_citation_impl,
@@ -108,14 +109,6 @@ def _make_workspace(pg_session_factory):
         return ws.id
 
 
-def _chunk_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _claim_hash(text: str) -> str:
-    return hashlib.sha256(normalize_for_quote_match(text).encode("utf-8")).hexdigest()
-
-
 def _row(
     *,
     rid,
@@ -143,7 +136,7 @@ def _row(
         stance=stance,
         confidence=None,
         claim_context_text=claim_text,
-        claim_context_hash=_claim_hash(claim_text),
+        claim_context_hash=claim_context_sha(claim_text),
         citation_snapshot="Smith 2021",
         created_at="2026-01-01T00:00:00+00:00",
         updated_at="2026-01-01T00:00:00+00:00",
@@ -236,7 +229,7 @@ def test_orphan_marker(pg_session_factory, _settings_env):
 def test_orphan_row(pg_session_factory, _settings_env):
     wsid = _make_workspace(pg_session_factory)
     rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
-    row = _row(rid=rid, chunk_content_hash=_chunk_hash(CHUNK_TEXT), claim_text="anything")
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text="anything")
     ledger = append_evidence(empty_ledger(), row)
     # No marker in proposal.
     proposal_text = "# Proposal\n\nNothing cited here.\n"
@@ -262,7 +255,9 @@ def test_reference_missing_nonexistent(pg_session_factory, _settings_env):
     proposal_text = _proposal_with_marker(claim_lead)
     live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
     bogus_rid = uuid.uuid4()
-    row = _row(rid=bogus_rid, chunk_content_hash=_chunk_hash(CHUNK_TEXT), claim_text=live_claim)
+    row = _row(
+        rid=bogus_rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim
+    )
     ledger = append_evidence(empty_ledger(), row)
     with pg_session_factory() as s:
         issues = validate_citations_deterministic(
@@ -287,7 +282,7 @@ def test_reference_in_other_workspace_missing(pg_session_factory, _settings_env)
     rid = _seed_reference(pg_session_factory, other_wsid, chunks=[(0, "Results", CHUNK_TEXT)])
     proposal_text = _proposal_with_marker("We argue that recurrence drops")
     live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
-    row = _row(rid=rid, chunk_content_hash=_chunk_hash(CHUNK_TEXT), claim_text=live_claim)
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
     ledger = append_evidence(empty_ledger(), row)
     with pg_session_factory() as s:
         issues = validate_citations_deterministic(
@@ -307,7 +302,7 @@ def test_chunk_missing(pg_session_factory, _settings_env):
     row = _row(
         rid=rid,
         chunk_index=99,
-        chunk_content_hash=_chunk_hash(CHUNK_TEXT),
+        chunk_content_hash=chunk_content_sha(CHUNK_TEXT),
         claim_text=live_claim,
     )
     ledger = append_evidence(empty_ledger(), row)
@@ -340,7 +335,7 @@ def test_source_replaced_flagged_when_both_present_and_differ(pg_session_factory
     row = _row(
         rid=rid,
         source_content_hash=hashlib.sha256(b"old source bytes").hexdigest(),
-        chunk_content_hash=_chunk_hash(CHUNK_TEXT),
+        chunk_content_hash=chunk_content_sha(CHUNK_TEXT),
         claim_text=live_claim,
     )
     ledger = append_evidence(empty_ledger(), row)
@@ -366,7 +361,7 @@ def test_source_replaced_not_flagged_when_ref_sha_none(pg_session_factory, _sett
     row = _row(
         rid=rid,
         source_content_hash=hashlib.sha256(b"some hash").hexdigest(),
-        chunk_content_hash=_chunk_hash(CHUNK_TEXT),
+        chunk_content_hash=chunk_content_sha(CHUNK_TEXT),
         claim_text=live_claim,
     )
     ledger = append_evidence(empty_ledger(), row)
@@ -386,7 +381,7 @@ def test_index_drift_when_chunk_text_mutated(pg_session_factory, _settings_env):
     proposal_text = _proposal_with_marker("We argue that recurrence drops")
     live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
     # Row records the ORIGINAL chunk hash...
-    row = _row(rid=rid, chunk_content_hash=_chunk_hash(CHUNK_TEXT), claim_text=live_claim)
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
     ledger = append_evidence(empty_ledger(), row)
     # ... but the chunk text in the DB is changed afterward.
     with pg_session_factory() as s:
@@ -420,7 +415,7 @@ def test_quote_missing(pg_session_factory, _settings_env):
     live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
     row = _row(
         rid=rid,
-        chunk_content_hash=_chunk_hash(CHUNK_TEXT),
+        chunk_content_hash=chunk_content_sha(CHUNK_TEXT),
         evidence_quote="this exact phrase is absent from the chunk",
         claim_text=live_claim,
     )
@@ -443,7 +438,7 @@ def test_claim_drift_when_prose_changes(pg_session_factory, _settings_env):
     # Row records the claim "We argue that recurrence drops".
     row = _row(
         rid=rid,
-        chunk_content_hash=_chunk_hash(CHUNK_TEXT),
+        chunk_content_hash=chunk_content_sha(CHUNK_TEXT),
         claim_text="We argue that recurrence drops",
     )
     ledger = append_evidence(empty_ledger(), row)
@@ -464,7 +459,7 @@ def test_no_claim_drift_when_prose_matches(pg_session_factory, _settings_env):
     claim_lead = "We argue that recurrence drops"
     proposal_text = _proposal_with_marker(claim_lead)
     live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
-    row = _row(rid=rid, chunk_content_hash=_chunk_hash(CHUNK_TEXT), claim_text=live_claim)
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
     ledger = append_evidence(empty_ledger(), row)
     with pg_session_factory() as s:
         issues = validate_citations_deterministic(
@@ -487,7 +482,7 @@ def test_metadata_unapproved_warning(pg_session_factory, _settings_env):
     claim_lead = "We argue that recurrence drops"
     proposal_text = _proposal_with_marker(claim_lead)
     live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
-    row = _row(rid=rid, chunk_content_hash=_chunk_hash(CHUNK_TEXT), claim_text=live_claim)
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
     ledger = append_evidence(empty_ledger(), row)
     with pg_session_factory() as s:
         issues = validate_citations_deterministic(
@@ -545,3 +540,64 @@ def test_empty_inputs_no_issues(pg_session_factory, _settings_env):
             workspace_id=wsid,
         )
     assert issues == []
+
+
+# --------------------------------------------------------------------------- #
+# quote_missing — QuoteAmbiguous branch
+# --------------------------------------------------------------------------- #
+def test_quote_ambiguous(pg_session_factory, _settings_env):
+    """A chunk containing the evidence_quote TWICE triggers a quote_missing error
+    whose detail distinguishes ambiguity from a genuinely absent quote."""
+    wsid = _make_workspace(pg_session_factory)
+    # Repeat the target phrase so find_quote_offsets raises QuoteAmbiguous.
+    repeated_phrase = "reduces recurrence by 30%"
+    ambiguous_chunk_text = (
+        f"First mention: {repeated_phrase} in arm A. Second mention: {repeated_phrase} in arm B."
+    )
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", ambiguous_chunk_text)])
+    proposal_text = _proposal_with_marker("We argue that recurrence drops")
+    live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
+    row = _row(
+        rid=rid,
+        chunk_content_hash=chunk_content_sha(ambiguous_chunk_text),
+        evidence_quote=repeated_phrase,
+        claim_text=live_claim,
+    )
+    ledger = append_evidence(empty_ledger(), row)
+    with pg_session_factory() as s:
+        issues = validate_citations_deterministic(
+            proposal_text=proposal_text, ledger=ledger, session=s, workspace_id=wsid
+        )
+    flagged = [i for i in issues if i["type"] == "quote_missing"]
+    assert len(flagged) == 1
+    assert flagged[0]["severity"] == "error"
+    # Detail must signal ambiguity, not just "not found".
+    detail = flagged[0]["detail"]
+    assert "multiple" in detail or "ambiguous" in detail, detail
+
+
+# --------------------------------------------------------------------------- #
+# claim_drift — absent claim_context.hash (missing snapshot)
+# --------------------------------------------------------------------------- #
+def test_claim_drift_absent_snapshot(pg_session_factory, _settings_env):
+    """A LIVE-marker row whose claim_context has no hash emits claim_drift with a
+    detail that mentions the absent snapshot, and does NOT raise."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    proposal_text = _proposal_with_marker("We argue that recurrence drops")
+    live_claim = _live_claim_for(proposal_text, "ev-aaaaaaaaaaaa")
+    # Build a row with a valid claim_text, then strip out the hash to simulate a
+    # legacy/malformed row that has no claim_context.hash.
+    row = _row(rid=rid, chunk_content_hash=chunk_content_sha(CHUNK_TEXT), claim_text=live_claim)
+    row["claim_context"] = None  # missing snapshot — no hash present
+    ledger = append_evidence(empty_ledger(), row)
+    with pg_session_factory() as s:
+        # Must not raise.
+        issues = validate_citations_deterministic(
+            proposal_text=proposal_text, ledger=ledger, session=s, workspace_id=wsid
+        )
+    flagged = [i for i in issues if i["type"] == "claim_drift"]
+    assert len(flagged) == 1
+    assert flagged[0]["severity"] == "error"
+    detail = flagged[0]["detail"]
+    assert "absent" in detail or "cannot verify" in detail, detail

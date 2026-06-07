@@ -18,6 +18,21 @@ validation. Each issue is a dict:
      "evidence_id": str | None,
      "location": str | None,
      "detail": str}
+
+Issue types emitted:
+
+- ``orphan_marker``      (error)   — inline marker has no backing ledger row
+- ``orphan_row``         (error)   — ledger row has no live inline marker
+- ``reference_missing``  (error)   — cited reference not found in this workspace
+- ``metadata_unapproved``(warning) — reference metadata status is not approved
+- ``chunk_missing``      (error)   — chunk index not found for the reference
+- ``source_replaced``    (error)   — reference source file changed since citing
+- ``index_drift``        (error)   — chunk text changed since the citation was created
+- ``quote_missing``      (error)   — evidence quote absent or unlocatable in chunk
+- ``claim_drift``        (error)   — claim sentence around the marker changed, or
+                                     ``claim_context.hash`` absent (cannot verify)
+- ``internal``           (error)   — unexpected exception during per-row processing;
+                                     the audit logs the traceback and continues
 """
 
 from __future__ import annotations
@@ -327,7 +342,7 @@ def _check_live_row(
     # --- claim_drift (prose around the marker changed) ------------------- #
     live_claim = claim_sentence_around(proposal_text, marker.get("start", 0), marker.get("end", 0))
     stored_hash = (row.get("claim_context") or {}).get("hash")
-    if claim_context_sha(live_claim) != stored_hash:
+    if stored_hash is None:
         issues.append(
             _issue(
                 "claim_drift",
@@ -335,7 +350,18 @@ def _check_live_row(
                 citekey=citekey,
                 evidence_id=ev_id,
                 location=location,
-                detail="claim sentence around the marker changed since citing",
+                detail="claim_context.hash absent; cannot verify the claim snapshot",
+            )
+        )
+    elif claim_context_sha(live_claim) != stored_hash:
+        issues.append(
+            _issue(
+                "claim_drift",
+                "error",
+                citekey=citekey,
+                evidence_id=ev_id,
+                location=location,
+                detail="the claim sentence around the marker changed since citing",
             )
         )
 
