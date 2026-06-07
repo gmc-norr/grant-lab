@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import subprocess
 import uuid
 from datetime import UTC, datetime
@@ -30,9 +31,12 @@ from call_manager.proposal_assist.citations.gitio import (
     write_and_commit_files,
 )
 from call_manager.proposal_assist.citations.ledger import (
+    LEDGER_VERSION,
     append_evidence,
     build_evidence_row,
+    citekeys_in_use,
     dump_ledger,
+    find_by_citekey,
     find_by_id,
     load_ledger,
     new_ev_id,
@@ -44,6 +48,7 @@ from call_manager.proposal_assist.citations.markers import (
     find_markers,
     insert_marker,
     remove_marker,
+    rename_marker_citekey,
 )
 from call_manager.proposal_assist.citations.quotes import (
     QuoteAmbiguous,
@@ -66,6 +71,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CITATIONS_FILENAME = "citations.json"
+
+# Mirrors markers._CITEKEY_RE so rename can reject a bad new key with a clean
+# message BEFORE rename_marker_citekey would raise ValueError.
+_CITEKEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Spec line 121: stance ∈ {supports, contradicts, background}.
 ALLOWED_STANCES = frozenset({"supports", "contradicts", "background"})
@@ -654,4 +663,152 @@ def _update_citation_locked(
         "ev_id": evidence_id,
         "commit_sha": sha,
         "updated_fields": sorted(fields.keys()),
+    }
+
+
+# --- rename_citekey --------------------------------------------------------
+
+
+async def rename_citekey_impl(
+    ctx: ToolContext,
+    *,
+    old_citekey: str,
+    new_citekey: str,
+) -> dict[str, Any]:
+    """Rename a citekey across proposal markers + ledger rows atomically.
+
+    Mirrors insert_citation: git-first, whole-op under the workspace lock. Every
+    ``[@old_citekey]`` marker in proposal.md is rewritten to ``[@new_citekey]``
+    (ev ids preserved) and every ledger row with that citekey is updated, in ONE
+    git commit; then references.citekey is refreshed best-effort. Returns
+    {"old_citekey", "new_citekey", "markers_renamed", "commit_sha"} on success,
+    or {"error": "..."} on any expected failure (leaving NO commit and a clean
+    working tree). Rejects a new key already used (in the ledger OR
+    references.citekey in this workspace).
+    """
+    try:
+        with workspace_lock_session(ctx.session_factory, ctx.workspace_id) as session:
+            return _rename_citekey_locked(
+                ctx,
+                session,
+                old_citekey=old_citekey,
+                new_citekey=new_citekey,
+            )
+    except LockNotAcquired:
+        return {"error": "workspace is busy with another edit; retry"}
+
+
+def _rename_citekey_locked(
+    ctx: ToolContext,
+    session: Session,
+    *,
+    old_citekey: str,
+    new_citekey: str,
+) -> dict[str, Any]:
+    # 1. No-op rename → reject (don't write an empty commit).
+    if old_citekey == new_citekey:
+        return {"error": "old and new citekey are the same"}
+
+    # 2. Pre-validate the new key for a clean message (markers would otherwise raise).
+    if not _CITEKEY_RE.match(new_citekey):
+        return {"error": "invalid new citekey"}
+
+    # 3. Read proposal.md + the (possibly absent) ledger.
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, ledger = read
+
+    # 4. The old key must exist in the ledger (canonical).
+    existing = find_by_citekey(ledger, old_citekey)
+    if not existing:
+        return {"error": "citekey not found"}
+
+    # 5. The new key must be free — check BOTH the ledger and the DB cache
+    # (belt-and-suspenders against ledger/DB lag).
+    if new_citekey in citekeys_in_use(ledger):
+        return {"error": "new citekey already in use"}
+    clash = (
+        session.query(Reference)
+        .filter(
+            Reference.workspace_id == ctx.workspace_id,
+            Reference.citekey == new_citekey,
+        )
+        .one_or_none()
+    )
+    if clash is not None:
+        return {"error": "new citekey already in use"}
+
+    # 6. Rewrite the proposal markers (ev ids preserved).
+    new_proposal_text, count = rename_marker_citekey(proposal_text, old_citekey, new_citekey)
+    if count == 0:
+        # Ledger is canonical, so proceed; but a missing marker is worth a warning.
+        logger.warning(
+            "rename_citekey: ledger has %d row(s) for %r but no matching marker in %s "
+            "(workspace %s) — renaming the ledger anyway; ledger is canonical",
+            len(existing),
+            old_citekey,
+            PROPOSAL_FILENAME,
+            ctx.workspace_id,
+        )
+
+    # 7. Rewrite every ledger row with the old key (ids + all other fields untouched).
+    now = datetime.now(UTC).isoformat()
+    new_evidence = []
+    for row in ledger["evidence"]:
+        if row.get("citekey") == old_citekey:
+            new_evidence.append({**row, "citekey": new_citekey, "updated_at": now})
+        else:
+            new_evidence.append(row)
+    new_ledger = {"version": ledger.get("version", LEDGER_VERSION), "evidence": new_evidence}
+
+    # 8. Atomic commit — proposal.md + citations.json in ONE commit (git first).
+    try:
+        sha = write_and_commit_files(
+            ctx.repo_dir,
+            {
+                PROPOSAL_FILENAME: new_proposal_text,
+                CITATIONS_FILENAME: dump_ledger(new_ledger),
+            },
+            f"cite: rename {old_citekey} -> {new_citekey}",
+        )
+    except GitCommitError:
+        logger.exception(
+            "rename_citekey: atomic commit failed for workspace %s (%s -> %s)",
+            ctx.workspace_id,
+            old_citekey,
+            new_citekey,
+        )
+        return {"error": "failed to commit citekey rename"}
+
+    # 9. DB cache (AFTER git) — best-effort; git ledger is canonical.
+    try:
+        ref = (
+            session.query(Reference)
+            .filter(
+                Reference.workspace_id == ctx.workspace_id,
+                Reference.citekey == old_citekey,
+            )
+            .one_or_none()
+        )
+        if ref is not None:
+            ref.citekey = new_citekey
+            session.commit()
+    except Exception:  # noqa: BLE001 — cache write must never fail the tool
+        session.rollback()
+        logger.warning(
+            "rename_citekey: references.citekey cache update failed for "
+            "workspace %s (%s -> %s) — reconciliation will backfill",
+            ctx.workspace_id,
+            old_citekey,
+            new_citekey,
+            exc_info=True,
+        )
+
+    # 10. Success.
+    return {
+        "old_citekey": old_citekey,
+        "new_citekey": new_citekey,
+        "markers_renamed": count,
+        "commit_sha": sha,
     }
