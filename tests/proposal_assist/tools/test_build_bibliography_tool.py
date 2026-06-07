@@ -52,6 +52,16 @@ def _init_repo(repo_dir: Path, proposal: str, citations: dict | None) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_dir, check=True)
 
 
+def _head(repo_dir: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _ledger(rows: list[dict]) -> dict:
     return {"version": 2, "evidence": rows}
 
@@ -107,7 +117,7 @@ def _ctx(pg_session_factory, repo_dir: Path, wsid):
 
 
 @pytest.mark.asyncio
-async def test_happy_path_writes_bibliography(pg_session_factory, tmp_path):
+async def test_happy_path_returns_rendered_text_without_persisting(pg_session_factory, tmp_path):
     wsid = _make_workspace(pg_session_factory)
     rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
     proposal = f"# P\n\nWe argue {build_marker('smith2021', 'ev-aaaaaaaaaaaa')} here.\n"
@@ -117,14 +127,17 @@ async def test_happy_path_writes_bibliography(pg_session_factory, tmp_path):
         proposal,
         _ledger([_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")]),
     )
+    head_before = _head(repo)
 
     result = await build_bibliography_impl(_ctx(pg_session_factory, repo, wsid))
 
     assert "error" not in result
     assert result["citekey_count"] == 1
     assert "Smith" in result["bibliography_md"]
-    assert result["commit_sha"]
-    assert (repo / BIBLIOGRAPHY_FILENAME).exists()
+    # Derived artifact: returned to the caller, never persisted/committed.
+    assert "commit_sha" not in result
+    assert not (repo / BIBLIOGRAPHY_FILENAME).exists()
+    assert _head(repo) == head_before
 
 
 @pytest.mark.asyncio
@@ -215,8 +228,8 @@ async def test_missing_proposal_returns_error(pg_session_factory, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_empty_bibliography_success_no_commit(pg_session_factory, tmp_path):
-    # No markers → success envelope with empty body and no commit; nothing written.
+async def test_empty_bibliography_success(pg_session_factory, tmp_path):
+    # No markers → success with empty body; nothing written.
     wsid = _make_workspace(pg_session_factory)
     repo = tmp_path / "repo"
     _init_repo(repo, "# P\n\nNo citations here.\n", _ledger([]))
@@ -226,7 +239,7 @@ async def test_empty_bibliography_success_no_commit(pg_session_factory, tmp_path
     assert "error" not in result
     assert result["citekey_count"] == 0
     assert result["bibliography_md"] == ""
-    assert result["commit_sha"] is None
+    assert "commit_sha" not in result
     assert not (repo / BIBLIOGRAPHY_FILENAME).exists()
 
 

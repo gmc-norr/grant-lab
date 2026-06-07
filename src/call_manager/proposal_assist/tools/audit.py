@@ -178,50 +178,55 @@ async def list_unsupported_claims_impl(ctx: ToolContext) -> dict[str, Any]:
 
 
 async def build_bibliography_impl(ctx: ToolContext, *, style: str | None = None) -> dict[str, Any]:
-    """Render the proposal's cited references into ``bibliography.md`` (fail-closed).
+    """Render the proposal's cited references into a formatted bibliography (fail-closed).
 
     Resolves the effective style from ``style`` (when given) or the workspace's
-    ``citation_style`` setting. Reads proposal.md + the ledger, then calls the
-    fail-closed :func:`build_bibliography` engine, which writes ``bibliography.md``
-    (a SEPARATE git artifact — never merged into proposal.md). Because it writes,
-    it is serialized under the same ``ctx.write_lock`` the mutation tools use
-    (the enclosing turn already holds the cross-process pg advisory lock).
+    ``citation_style`` setting, then calls the fail-closed :func:`build_bibliography`
+    engine with ``commit=False`` and RETURNS the rendered text. The bibliography is
+    a DERIVED artifact (reconstructable from proposal.md + the ledger + reference
+    rows), so it is not persisted — the human-facing ``/export-composed.md`` rebuilds
+    it fresh on demand, and a committed snapshot would only drift from its sources.
+    Read-only, so (like ``validate_citations``) it holds NO write lock.
 
-    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}`` on success, or
+    Returns ``{"bibliography_md", "citekey_count"}`` on success, or
     ``{"error": ..., "blocked": [...]}`` when any cited reference is unapproved /
-    unresolved / tombstoned (no partial write), or ``{"error": ...}`` for a bad
-    style or a missing proposal.md.
+    unresolved / tombstoned, or ``{"error": ...}`` for a bad style or a missing
+    proposal.md.
     """
     if style is not None and style not in CITATION_STYLES:
         allowed = ", ".join(sorted(CITATION_STYLES))
         return {"error": f"invalid style {style!r} (allowed: {allowed})"}
 
-    async with ctx.write_lock:
-        read = _read_proposal_and_ledger(ctx)
-        if isinstance(read, dict):
-            return read
-        proposal_text, ledger = read
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, ledger = read
 
-        with ctx.session_factory() as session:
-            effective_style = style
-            if effective_style is None:
-                # citation_style is non-nullable, so a loaded row always has a
-                # real value; the only fallback is a workspace deleted mid-turn.
-                ws = session.get(Workspace, ctx.workspace_id)
-                effective_style = ws.citation_style if ws is not None else "vancouver"
+    with ctx.session_factory() as session:
+        effective_style = style
+        if effective_style is None:
+            # citation_style is non-nullable, so a loaded row always has a real
+            # value; the only fallback is a workspace deleted mid-turn.
+            ws = session.get(Workspace, ctx.workspace_id)
+            effective_style = ws.citation_style if ws is not None else "vancouver"
 
-            try:
-                return build_bibliography(
-                    proposal_text=proposal_text,
-                    ledger=ledger,
-                    session=session,
-                    workspace_id=ctx.workspace_id,
-                    style=effective_style,
-                    repo_dir=ctx.repo_dir,
-                    commit=True,
-                )
-            except BuildBibliographyBlocked as exc:
-                return {
-                    "error": "bibliography blocked: unapproved/unresolved references",
-                    "blocked": exc.blocked,
-                }
+        try:
+            result = build_bibliography(
+                proposal_text=proposal_text,
+                ledger=ledger,
+                session=session,
+                workspace_id=ctx.workspace_id,
+                style=effective_style,
+                repo_dir=ctx.repo_dir,
+                commit=False,
+            )
+        except BuildBibliographyBlocked as exc:
+            return {
+                "error": "bibliography blocked: unapproved/unresolved references",
+                "blocked": exc.blocked,
+            }
+
+    return {
+        "bibliography_md": result["bibliography_md"],
+        "citekey_count": result["citekey_count"],
+    }
