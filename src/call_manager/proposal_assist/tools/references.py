@@ -370,7 +370,7 @@ async def read_reference_section_impl(
         chunks = list(s.scalars(stmt))
     if not chunks:
         return {"error": f"no chunks found for section_path {section_path!r}"}
-    return {
+    out: dict[str, Any] = {
         "section_path": section_path,
         "text": "\n\n".join(c.text for c in chunks),
         "chunk_count": len(chunks),
@@ -378,6 +378,12 @@ async def read_reference_section_impl(
         # invariant explicit so a future query refactor can't silently break it.
         "chunk_indexes": sorted(c.chunk_index for c in chunks),
     }
+    # Mirror read_reference_impl: a tombstoned ref is hidden from discovery but
+    # its content is retained for existing citations. Flag it so the agent knows
+    # it cannot newly cite this reference.
+    if ref.tombstoned_at is not None:
+        out["tombstoned"] = True
+    return out
 
 
 async def summarize_data_impl(

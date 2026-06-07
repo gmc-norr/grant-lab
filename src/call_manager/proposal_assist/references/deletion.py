@@ -78,6 +78,10 @@ def delete_or_tombstone_reference(
         return "tombstoned"
 
     # Uncited → hard-delete: chunks first (FK), then the row, then bytes.
+    # NOTE: ReferenceChunk.reference_id is ondelete="CASCADE", so the DB would
+    # also cascade the chunk deletes when the Reference row is deleted. The
+    # explicit delete here keeps the ORM identity map consistent and makes the
+    # FK ordering self-documenting.
     session.query(ReferenceChunk).filter(
         ReferenceChunk.reference_id == rid,
         ReferenceChunk.workspace_id == workspace_id,
@@ -96,13 +100,11 @@ def delete_or_tombstone_reference(
 def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     """True if any evidence row in citations.json references this id.
 
-    Absent/empty/invalid ledger → treated as uncited (False). We never raise on
-    a malformed ledger here: failing closed (treating a parse error as cited)
-    would be safer for data retention, but the ledger is validated/written by
-    the citation tools, so a parse error implies external corruption — we log
-    nothing and conservatively allow deletion only when we can positively
-    confirm there are no rows. To avoid silently hard-deleting a reference whose
-    ledger merely failed to parse, a parse failure is treated as CITED.
+    - Missing or empty ledger → False (not cited; safe to delete).
+    - Ledger present and parseable, no row matches reference_id → False.
+    - Ledger present but PARSE FAILURE (ValueError) → True (fail-closed):
+      a corrupt ledger might reference this id; we must NOT hard-delete on
+      uncertainty.
     """
     citations_path = repo_dir / CITATIONS_FILENAME
     if not citations_path.exists():

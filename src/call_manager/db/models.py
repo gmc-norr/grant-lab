@@ -1255,10 +1255,12 @@ class Reference(Base):
     metadata_status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
     metadata_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     original_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Soft-delete (tombstone). A cited reference is tombstoned rather than
-    # hard-deleted so existing citations keep resolving; tombstoned refs are
+    # Soft-delete timestamp (tombstone). A cited reference is tombstoned rather
+    # than hard-deleted so existing citations keep resolving; tombstoned refs are
     # filtered out of discovery (list/search) and cannot be newly cited.
-    # Mirrors Workspace.soft_deleted_at.
+    # No partial index is added here (deliberately — per-workspace row counts are
+    # small and workspace_id is already indexed, so the added complexity of a
+    # partial index is not warranted).
     tombstoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

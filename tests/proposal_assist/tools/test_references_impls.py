@@ -755,6 +755,100 @@ async def test_read_reference_non_tombstoned_omits_flag(pg_session_factory, tmp_
 
 
 @pytest.mark.asyncio
+async def test_read_reference_section_tombstoned_includes_flag(pg_session_factory, tmp_path):
+    """A tombstoned ref's section read must include tombstoned: True, mirroring
+    read_reference_impl's convention — content is retained for existing
+    citations but the agent is flagged that it cannot newly cite the reference."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    md = b"""# Doc
+
+## Methods
+
+Methods body.
+"""
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="tombstone_section.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    _tombstone(pg_session_factory, rid)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await read_reference_section_impl(
+        ctx, reference_id=str(rid), section_path="Doc > Methods"
+    )
+    assert "text" in out
+    assert "Methods body" in out["text"]
+    assert out.get("tombstoned") is True
+
+
+@pytest.mark.asyncio
+async def test_read_reference_section_non_tombstoned_omits_flag(pg_session_factory, tmp_path):
+    """A live (non-tombstoned) section read must NOT include tombstoned: True,
+    matching read_reference_impl's convention."""
+    storage = ReferenceStorage(root=tmp_path)
+    embedder = FakeEmbedder()
+    with pg_session_factory() as s:
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        s.commit()
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid, uid = ws.id, user.id
+
+    md = b"""# Doc
+
+## Results
+
+Results body.
+"""
+    with pg_session_factory() as s:
+        result = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=embedder,
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="live_section.md",
+            mime_type="text/markdown",
+            data=md,
+            uploaded_by=uid,
+        )
+        s.commit()
+        rid = result.reference_id
+
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    out = await read_reference_section_impl(
+        ctx, reference_id=str(rid), section_path="Doc > Results"
+    )
+    assert "text" in out
+    # tombstoned key must be absent or falsy — not set True for a live ref.
+    assert out.get("tombstoned") is not True
+
+
+@pytest.mark.asyncio
 async def test_read_reference_data_kind_steers_to_summarize(pg_session_factory, tmp_path):
     """Residuals fix: read_reference on kind='data' should steer the
     agent to summarize_data instead of returning the schema+sample."""
