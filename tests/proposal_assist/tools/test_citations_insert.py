@@ -6,17 +6,25 @@ git repo in tmp_path (_init_repo) plus the pgvector testcontainer
 """
 
 import hashlib
+import re
 import subprocess
 import uuid
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session as SASession
 
 from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.citations import gitio
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
+from call_manager.proposal_assist.drafting.locking import (
+    acquire_workspace_lock,
+    release_workspace_lock,
+)
+from call_manager.proposal_assist.tools import citations as citations_mod
 from call_manager.proposal_assist.tools.citations import (
     CITATIONS_FILENAME,
     insert_citation_impl,
@@ -338,6 +346,160 @@ async def test_bad_uuid_returns_error(pg_session_factory, _settings_env, tmp_pat
     )
     assert "error" in result
     assert _head(ctx.repo_dir) == before
+
+
+@pytest.mark.asyncio
+async def test_db_cache_update_failure_still_succeeds(
+    pg_session_factory, _settings_env, tmp_path, monkeypatch
+):
+    """The spec's headline recovery guarantee: a DB-cache (references.citekey)
+    write failure AFTER the atomic git commit must NOT fail the tool or corrupt
+    git. Git is canonical; reconciliation backfills the cache.
+
+    We force the failure by wrapping the citations module's write_and_commit_files
+    so that the moment the real git commit returns, Session.commit is patched to
+    raise. Step 14 (ref.citekey = ...; session.commit()) then blows up. Reads
+    (session.get/query) and the advisory-lock acquire (session.execute) never call
+    commit, so they are unaffected — only the post-git cache write raises.
+    """
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    # No citekey on the ref → step 14 will attempt ref.citekey = ...; commit().
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT)],
+        csl_json={
+            "author": [{"family": "Smith"}],
+            "issued": {"date-parts": [[2021]]},
+        },
+    )
+
+    real_commit = SASession.commit
+    real_write_and_commit = gitio.write_and_commit_files
+
+    def boom_commit(self, *a, **kw):
+        raise RuntimeError("simulated DB cache write failure")
+
+    def wrapped_write_and_commit(*args, **kwargs):
+        sha = real_write_and_commit(*args, **kwargs)
+        # Arm the failure only AFTER git has committed.
+        monkeypatch.setattr(SASession, "commit", boom_commit)
+        return sha
+
+    monkeypatch.setattr(citations_mod, "write_and_commit_files", wrapped_write_and_commit)
+
+    before_count = _commit_count(ctx.repo_dir)
+
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+
+    # Restore so teardown / later DB reads work normally.
+    monkeypatch.setattr(SASession, "commit", real_commit)
+
+    # (a) Tool succeeded: ev_id/citekey/commit_sha present, no error.
+    assert "error" not in result, result
+    assert result["ev_id"].startswith("ev-")
+    assert result["citekey"] == "smith2021"
+    assert result["commit_sha"]
+
+    # (b) Git commit persisted: HEAD advanced by 1, marker + ledger row present.
+    assert _commit_count(ctx.repo_dir) == before_count + 1
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    marker = f"[@smith2021]<!-- ev:{result['ev_id']} -->"
+    assert ANCHOR + marker in proposal_text
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    assert len(ledger["evidence"]) == 1
+    assert ledger["evidence"][0]["id"] == result["ev_id"]
+
+    # (c) Working tree clean.
+    assert _tree_is_clean(ctx.repo_dir)
+
+    # The cache write was rolled back: references.citekey stays NULL (the
+    # ledger remains canonical; reconciliation will backfill).
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref.citekey is None
+
+
+@pytest.mark.asyncio
+async def test_lock_busy_returns_error_no_commit(pg_session_factory, _settings_env, tmp_path):
+    """If the per-workspace advisory lock is already held by another session,
+    insert_citation returns a busy/retry error, makes no commit, and leaves a
+    clean tree."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+
+    before = _head(ctx.repo_dir)
+
+    holder = pg_session_factory()
+    try:
+        assert acquire_workspace_lock(holder, wsid) is True
+
+        result = await insert_citation_impl(
+            ctx,
+            reference_id=str(rid),
+            anchor=ANCHOR,
+            chunk_index=0,
+            evidence_quote="reduces recurrence by 30%",
+        )
+        assert "error" in result
+        err = result["error"].lower()
+        assert "busy" in err or "retry" in err
+        assert _head(ctx.repo_dir) == before
+        assert _tree_is_clean(ctx.repo_dir)
+    finally:
+        release_workspace_lock(holder, wsid)
+        holder.close()
+
+
+@pytest.mark.asyncio
+async def test_insert_with_fallback_citekey_when_csl_thin(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """When CSL is too thin for an author+year key, generate_citekey returns a
+    'ref-<12hex>' fallback. That fallback must satisfy the marker validators and
+    round-trip through find_markers, and references.citekey must be set in the DB.
+    """
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT)],
+        csl_json={},  # thin: no author / no year → ref-<hex> fallback
+    )
+
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+
+    assert "error" not in result, result
+    citekey = result["citekey"]
+    assert re.fullmatch(r"ref-[0-9a-f]{12}", citekey), citekey
+
+    # Marker with the fallback key is present in proposal.md ...
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    marker = f"[@{citekey}]<!-- ev:{result['ev_id']} -->"
+    assert ANCHOR + marker in proposal_text
+
+    # ... and round-trips through the marker validators.
+    markers = find_markers(proposal_text)
+    assert len(markers) == 1
+    assert markers[0]["citekey"] == citekey
+    assert markers[0]["ev_id"] == result["ev_id"]
+
+    # references.citekey set in the DB.
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref.citekey == citekey
 
 
 @pytest.mark.asyncio

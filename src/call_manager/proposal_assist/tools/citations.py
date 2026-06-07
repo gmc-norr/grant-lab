@@ -139,11 +139,15 @@ def _find_idempotent_row(
     evidence_quote) whose marker is still present in proposal.md, else None."""
     live_ev_ids = {m["ev_id"] for m in find_markers(proposal_text)}
     for row in ledger["evidence"]:
+        # A hand-edited ledger row may be missing 'id'; require a present, truthy
+        # id so the return site can subscript it safely (no KeyError on bad rows).
+        row_id = row.get("id")
         if (
-            row.get("reference_id") == reference_id
+            row_id
+            and row.get("reference_id") == reference_id
             and (row.get("locator") or {}).get("chunk_index") == chunk_index
             and row.get("evidence_quote") == evidence_quote
-            and row.get("id") in live_ev_ids
+            and row_id in live_ev_ids
         ):
             return row
     return None
@@ -252,6 +256,10 @@ def _insert_citation_locked(
         proposal_text=proposal_text,
     )
     if existing is not None:
+        # commit_sha on the idempotent path is the current HEAD (informational —
+        # no new commit was made) and may be "" if HEAD resolution fails.
+        # existing["id"] is safe: _find_idempotent_row only matches rows with a
+        # present, truthy id.
         return {
             "ev_id": existing["id"],
             "citekey": existing.get("citekey"),
