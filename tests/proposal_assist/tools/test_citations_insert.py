@@ -1,0 +1,466 @@
+"""Tests for the atomic insert_citation tool (Slice 2 Task 5).
+
+Exercises the *_impl directly (plain dicts, no MCP envelope). Uses a real
+git repo in tmp_path (_init_repo) plus the pgvector testcontainer
+(pg_session_factory) to seed References + ReferenceChunks.
+"""
+
+import hashlib
+import subprocess
+import uuid
+from pathlib import Path
+
+import pytest
+
+from call_manager.config import Settings
+from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.citations.markers import find_markers
+from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
+from call_manager.proposal_assist.tools.citations import (
+    CITATIONS_FILENAME,
+    insert_citation_impl,
+)
+from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from call_manager.proposal_assist.tools.registry import ToolContext
+from tests.proposal_assist.conftest import make_workspace
+
+EMBED_DIM = 1024
+
+
+def _init_repo(repo_dir: Path, initial_content: str) -> None:
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "agent@test"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test Agent"], cwd=repo_dir, check=True)
+    (repo_dir / PROPOSAL_FILENAME).write_text(initial_content)
+    subprocess.run(["git", "add", PROPOSAL_FILENAME], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_dir, check=True)
+
+
+def _head(repo_dir: Path) -> str:
+    out = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
+def _commit_count(repo_dir: Path) -> int:
+    out = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(out.stdout.strip())
+
+
+def _tree_is_clean(repo_dir: Path) -> bool:
+    out = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() == ""
+
+
+def _seed_reference(
+    pg_session_factory,
+    workspace_id,
+    *,
+    chunks: list[tuple[int, str | None, str]],
+    citekey: str | None = None,
+    csl_json: dict | None = None,
+    original_sha256: str | None = None,
+) -> uuid.UUID:
+    """Seed a Reference + its ReferenceChunks. chunks is a list of
+    (chunk_index, section_path, text). Returns the reference id."""
+    with pg_session_factory() as s:
+        ref = Reference(
+            workspace_id=workspace_id,
+            kind="paper",
+            source_type="uploaded",
+            filename="seed.pdf",
+            storage_path="seed/seed.pdf",
+            mime_type="application/pdf",
+            citekey=citekey,
+            csl_json=csl_json,
+            original_sha256=original_sha256,
+            metadata_status="approved",
+        )
+        s.add(ref)
+        s.flush()
+        rid = ref.id
+        for idx, section_path, text in chunks:
+            s.add(
+                ReferenceChunk(
+                    reference_id=rid,
+                    workspace_id=workspace_id,
+                    chunk_index=idx,
+                    section_path=section_path,
+                    text=text,
+                    embedding=[0.0] * EMBED_DIM,
+                    embedding_model="fake-embedder",
+                )
+            )
+        s.commit()
+    return rid
+
+
+def _build_ctx(pg_session_factory, tmp_path, initial_proposal):
+    settings = Settings()
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+    repo_dir = tmp_path / "repo"
+    _init_repo(repo_dir, initial_proposal)
+    ctx = ToolContext(
+        workspace_id=wsid,
+        repo_dir=repo_dir,
+        session_factory=pg_session_factory,
+        settings=settings,
+    )
+    return ctx, wsid
+
+
+CHUNK_TEXT = (
+    "Adjuvant therapy reduces recurrence by 30% in the treated cohort. "
+    "Secondary endpoints were not statistically significant."
+)
+ANCHOR = "recurrence is reduced substantially"
+PROPOSAL = f"# Proposal\n\nWe argue that {ANCHOR} in our population.\n"
+
+
+@pytest.mark.asyncio
+async def test_happy_path_inserts_marker_and_ledger_row(
+    pg_session_factory, _settings_env, tmp_path
+):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    src_sha = hashlib.sha256(b"original bytes").hexdigest()
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT)],
+        csl_json={
+            "author": [{"family": "Smith"}],
+            "issued": {"date-parts": [[2021]]},
+        },
+        original_sha256=src_sha,
+    )
+
+    before_head = _head(ctx.repo_dir)
+    before_count = _commit_count(ctx.repo_dir)
+
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+    )
+
+    assert "error" not in result, result
+    assert result["ev_id"].startswith("ev-")
+    assert result["citekey"] == "smith2021"
+    assert result["commit_sha"] and result["commit_sha"] != before_head
+
+    # Marker is in proposal.md right after the anchor.
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    marker = f"[@smith2021]<!-- ev:{result['ev_id']} -->"
+    assert ANCHOR + marker in proposal_text
+
+    # Ledger has exactly one row with the right fields.
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    assert len(ledger["evidence"]) == 1
+    row = ledger["evidence"][0]
+    assert row["id"] == result["ev_id"]
+    assert row["citekey"] == "smith2021"
+    assert row["reference_id"] == str(rid)
+    assert row["locator"]["chunk_index"] == 0
+    assert row["locator"]["section_path"] == "Results"
+    assert row["evidence_quote"] == "reduces recurrence by 30%"
+    assert row["stance"] == "supports"
+    assert row["source_content_hash"] == src_sha
+
+    # Offsets round-trip via normalize.
+    start, end = row["evidence_quote_offsets"]
+    assert normalize_for_quote_match(CHUNK_TEXT[start:end]) == normalize_for_quote_match(
+        "reduces recurrence by 30%"
+    )
+    # chunk_content_hash == sha256(chunk.text) bare hex.
+    assert row["chunk_content_hash"] == hashlib.sha256(CHUNK_TEXT.encode("utf-8")).hexdigest()
+
+    # Exactly one new commit, clean tree.
+    assert _commit_count(ctx.repo_dir) == before_count + 1
+    assert _tree_is_clean(ctx.repo_dir)
+
+    # references.citekey now set in DB.
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref.citekey == "smith2021"
+
+
+@pytest.mark.asyncio
+async def test_anchor_not_found_no_commit(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor="this anchor does not exist",
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert result["error"] == "anchor not found"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_anchor_ambiguous_no_commit(pg_session_factory, _settings_env, tmp_path):
+    dup = "the shared phrase"
+    proposal = f"# P\n\nFirst {dup} here. Second {dup} there.\n"
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, proposal)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=dup,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert result["error"] == "anchor is ambiguous"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_quote_not_found_no_commit(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="this quote is not in the chunk at all",
+    )
+    assert result["error"] == "evidence quote not found in chunk"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_quote_ambiguous_no_commit(pg_session_factory, _settings_env, tmp_path):
+    chunk = "alpha beta gamma. alpha beta gamma again."
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, chunk)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="alpha beta gamma",
+    )
+    assert result["error"] == "evidence quote is ambiguous (occurs multiple times) in chunk"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_reference_in_another_workspace_not_found(
+    pg_session_factory, _settings_env, tmp_path
+):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    # Seed the reference under a DIFFERENT workspace.
+    from tests.proposal_assist.conftest import make_user
+
+    with pg_session_factory() as s:
+        other_owner = make_user(s, email=f"other-{uuid.uuid4()}@ki.se")
+        s.commit()
+        other_ws = make_workspace(s, owner=other_owner)
+        s.commit()
+        other_wsid = other_ws.id
+    rid = _seed_reference(pg_session_factory, other_wsid, chunks=[(0, None, CHUNK_TEXT)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert result["error"] == "reference not found"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_chunk_index_missing_no_commit(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=99,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert result["error"] == "chunk not found"
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
+
+
+@pytest.mark.asyncio
+async def test_bad_uuid_returns_error(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id="not-a-uuid",
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert "error" in result
+    assert _head(ctx.repo_dir) == before
+
+
+@pytest.mark.asyncio
+async def test_citekey_reuse_when_already_set(pg_session_factory, _settings_env, tmp_path):
+    anchor2 = "a second distinct claim sentence"
+    proposal = f"# Proposal\n\nWe argue that {ANCHOR} here.\n\nAlso {anchor2} too.\n"
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, proposal)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, None, CHUNK_TEXT)],
+        citekey="preset2020",
+    )
+
+    r1 = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert r1["citekey"] == "preset2020"
+
+    r2 = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=anchor2,
+        chunk_index=0,
+        evidence_quote="Secondary endpoints were not statistically significant",
+    )
+    assert r2["citekey"] == "preset2020"
+    assert r2["ev_id"] != r1["ev_id"]
+
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    markers = find_markers(proposal_text)
+    assert len(markers) == 2
+    assert all(m["citekey"] == "preset2020" for m in markers)
+    assert {m["ev_id"] for m in markers} == {r1["ev_id"], r2["ev_id"]}
+
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    assert len(ledger["evidence"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_idempotency_same_args_no_duplicate(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, None, CHUNK_TEXT)],
+        citekey="dup2019",
+    )
+    r1 = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert "error" not in r1
+    count_after_first = _commit_count(ctx.repo_dir)
+
+    r2 = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert "error" not in r2
+    assert r2["ev_id"] == r1["ev_id"]
+    assert r2.get("idempotent") is True
+
+    # No new commit, single marker, single row.
+    assert _commit_count(ctx.repo_dir) == count_after_first
+    proposal_text = (ctx.repo_dir / PROPOSAL_FILENAME).read_text()
+    assert len(find_markers(proposal_text)) == 1
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    assert len(ledger["evidence"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_whitespace_tolerant_quote_stores_raw_offsets(
+    pg_session_factory, _settings_env, tmp_path
+):
+    # Chunk has a newline inside the quoted span.
+    chunk = "Adjuvant therapy reduces recurrence\nby 30% in the treated cohort."
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, None, chunk)],
+        citekey="ws2022",
+    )
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+    )
+    assert "error" not in result, result
+    ledger = load_ledger((ctx.repo_dir / CITATIONS_FILENAME).read_text())
+    row = ledger["evidence"][0]
+    start, end = row["evidence_quote_offsets"]
+    raw_span = chunk[start:end]
+    assert "\n" in raw_span  # raw offsets span the newline
+    assert normalize_for_quote_match(raw_span) == "reduces recurrence by 30%"
+
+
+@pytest.mark.asyncio
+async def test_unknown_stance_rejected(pg_session_factory, _settings_env, tmp_path):
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, None, CHUNK_TEXT)])
+    before = _head(ctx.repo_dir)
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="bogus",
+    )
+    assert "error" in result
+    assert _head(ctx.repo_dir) == before
+    assert _tree_is_clean(ctx.repo_dir)
