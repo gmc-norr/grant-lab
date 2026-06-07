@@ -163,6 +163,16 @@ def _emit(fragment: str, frag_offset: int) -> Iterator[tuple[str, int]]:
     # require at least one word character once markers are gone.
     if not re.search(r"\w", without_markers):
         return
-    leading_ws = len(fragment) - len(fragment.lstrip())
+    # Advance the offset past leading whitespace AND any leading citation
+    # marker(s), so the offset points at the first PROSE character — not at a
+    # marker's "[" — even when a marker precedes the prose (non-trailing marker).
+    # This keeps the offset usable for T7's sentence<->marker correlation.
+    lead = len(fragment) - len(fragment.lstrip())
+    while True:
+        m = MARKER_RE.match(fragment, lead)
+        if not m:
+            break
+        lead = m.end()
+        lead += len(fragment[lead:]) - len(fragment[lead:].lstrip())
     sentence_text = " ".join(without_markers.split())
-    yield sentence_text, frag_offset + leading_ws
+    yield sentence_text, frag_offset + lead

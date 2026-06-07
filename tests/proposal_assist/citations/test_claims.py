@@ -153,3 +153,17 @@ def test_iter_boundary_agreement_with_claim_sentence_around():
     iter_sentences = _sentences(text)
     assert via_around in iter_sentences
     assert via_around == "We argue the effect is large"
+
+
+def test_iter_offset_skips_leading_marker_to_prose():
+    # A non-trailing marker preceding the prose: the offset must point at the
+    # first prose char ('P'), not the marker's '['.
+    from call_manager.proposal_assist.citations.markers import build_marker
+
+    marker = build_marker("k", "ev-000000000000")
+    text = f"First sentence. {marker} Prose after marker is here."
+    out = list(iter_proposal_sentences(text))
+    # Find the prose sentence.
+    prose = next((s, off) for s, off in out if s.startswith("Prose after marker"))
+    sentence_text, offset = prose
+    assert text[offset:].startswith("Prose after marker"), (offset, text[offset : offset + 10])
