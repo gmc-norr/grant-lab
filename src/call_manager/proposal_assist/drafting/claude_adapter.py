@@ -115,13 +115,15 @@ _CITATION_INSTRUCTION = (
     "reference supports, attach a citation immediately: use search_references "
     "or read_reference_section to locate the supporting chunk, copy a verbatim "
     "span from that chunk as the evidence_quote (it must appear word-for-word "
-    "in the chunk), then call insert_citation with the citekey, chunk_index, "
-    "and evidence_quote. The citation appears in the draft as a [@citekey] "
-    "marker placed right after the claim. Before calling update_citation, "
-    "remove_citation, or rename_citekey, call list_citations first to see "
-    "existing citations and their ev ids. After substantial drafting, call "
-    "validate_citations and resolve any issues it reports; then call "
-    "list_unsupported_claims to find factual claims that still lack a citation."
+    "in the chunk), then call insert_citation with the reference_id, the anchor "
+    "(a unique snippet of your draft text the citation should follow), the "
+    "chunk_index, and the evidence_quote. insert_citation assigns or reuses the "
+    "reference's citekey and inserts a [@citekey] marker right after the anchor "
+    "in the draft. Before calling update_citation, remove_citation, or "
+    "rename_citekey, call list_citations first to see existing citations and "
+    "their ev ids. After substantial drafting, call validate_citations and "
+    "resolve any issues it reports; then call list_unsupported_claims to find "
+    "factual claims that still lack a citation."
 )
 
 

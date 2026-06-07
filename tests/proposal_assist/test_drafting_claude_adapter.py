@@ -476,6 +476,10 @@ def test_build_options_appends_citation_instruction():
     assert "insert_citation" in append
     assert "validate_citations" in append
     assert "evidence_quote" in append or "verbatim" in append
+    # Tool-accuracy: insert_citation takes reference_id + anchor (it assigns/reuses
+    # the citekey itself). The instruction must name those real params.
+    assert "reference_id" in append
+    assert "anchor" in append
     # The citation instruction must be non-empty and distinct from the safety one.
     assert ca._CITATION_INSTRUCTION
     assert ca._CITATION_INSTRUCTION != ca._REFERENCE_SAFETY_INSTRUCTION
