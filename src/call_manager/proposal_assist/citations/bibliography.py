@@ -19,7 +19,19 @@ in a later task; this module is the formatting layer only.
 
 from __future__ import annotations
 
+import uuid
+
+from call_manager.db.models import Reference
+from call_manager.proposal_assist.citations.audit import _APPROVED_METADATA
+from call_manager.proposal_assist.citations.gitio import write_and_commit_files
+from call_manager.proposal_assist.citations.ledger import find_by_citekey
+from call_manager.proposal_assist.citations.markers import find_markers
+
 _REFERENCES_HEADING = "# References\n\n"
+
+#: Filename of the rendered bibliography git artifact. This is a SEPARATE file
+#: from proposal.md and is NEVER merged into it (spec D13).
+BIBLIOGRAPHY_FILENAME = "bibliography.md"
 
 # Vancouver: list author cap before " et al." truncation.
 _VANCOUVER_AUTHOR_CAP = 6
@@ -353,3 +365,150 @@ def _unpack(item: object) -> tuple[str, dict]:
     if not isinstance(citekey, str):
         citekey = ""
     return citekey, csl
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed build orchestration
+# ---------------------------------------------------------------------------
+
+
+class BuildBibliographyBlocked(Exception):
+    """Raised when one or more cited references are not citable.
+
+    Carries ``blocked``: a list of ``{citekey, reference_id, metadata_status,
+    reason}`` dicts (reasons: ``unresolved_citekey``, ``reference_missing``,
+    ``reference_tombstoned``, ``metadata_unapproved``). The build is fail-closed:
+    if ANY reference is blocked, NOTHING is rendered or written.
+    """
+
+    def __init__(self, blocked: list[dict]) -> None:
+        super().__init__(f"bibliography blocked: {len(blocked)} reference(s) not citable")
+        self.blocked = blocked
+
+
+def _ordered_unique_citekeys(proposal_text: str) -> list[str]:
+    """Unique citekeys in first-occurrence (document) order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for m in find_markers(proposal_text or ""):
+        ck = m.get("citekey")
+        if ck and ck not in seen:
+            seen.add(ck)
+            ordered.append(ck)
+    return ordered
+
+
+def build_bibliography(
+    *,
+    proposal_text: str,
+    ledger: dict,
+    session,
+    workspace_id,
+    style: str,
+    repo_dir,
+    commit: bool = True,
+) -> dict:
+    """Render the cited references into a formatted bibliography (fail-closed).
+
+    Resolves each marker citekey via the LEDGER (canonical), then the Reference
+    DB row (workspace-scoped). The fail-closed gate refuses to render if ANY
+    cited reference's ``metadata_status`` is not approved AND has no waiver — no
+    partial write. Renders from ``csl_json`` ONLY (the approved canonical), never
+    ``csl_json_extracted``. Only marker-present citekeys are rendered. The result
+    is written to ``bibliography.md`` (a separate git artifact, NEVER merged into
+    proposal.md) when ``commit`` is True.
+
+    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}``.
+    Raises :class:`BuildBibliographyBlocked` if any reference is blocked.
+    """
+    citekeys = _ordered_unique_citekeys(proposal_text)
+
+    ok_entries: list[tuple[str, dict]] = []
+    blocked: list[dict] = []
+
+    for citekey in citekeys:
+        rows = find_by_citekey(ledger, citekey)
+        if not rows:
+            blocked.append(
+                {
+                    "citekey": citekey,
+                    "reference_id": None,
+                    "metadata_status": None,
+                    "reason": "unresolved_citekey",
+                }
+            )
+            continue
+
+        ref_id_raw = rows[0].get("reference_id") if isinstance(rows[0], dict) else None
+        try:
+            ref_uuid = uuid.UUID(str(ref_id_raw))
+        except (ValueError, TypeError):
+            blocked.append(
+                {
+                    "citekey": citekey,
+                    "reference_id": None,
+                    "metadata_status": None,
+                    "reason": "unresolved_citekey",
+                }
+            )
+            continue
+
+        ref = session.get(Reference, ref_uuid)
+        if ref is None or getattr(ref, "workspace_id", None) != workspace_id:
+            blocked.append(
+                {
+                    "citekey": citekey,
+                    "reference_id": str(ref_uuid),
+                    "metadata_status": None,
+                    "reason": "reference_missing",
+                }
+            )
+            continue
+
+        if getattr(ref, "tombstoned_at", None) is not None:
+            blocked.append(
+                {
+                    "citekey": citekey,
+                    "reference_id": str(ref_uuid),
+                    "metadata_status": getattr(ref, "metadata_status", None),
+                    "reason": "reference_tombstoned",
+                }
+            )
+            continue
+
+        # Fail-closed gate: render only from verified canonical metadata.
+        if getattr(ref, "metadata_status", None) not in _APPROVED_METADATA and not getattr(
+            ref, "metadata_waiver", False
+        ):
+            blocked.append(
+                {
+                    "citekey": citekey,
+                    "reference_id": str(ref_uuid),
+                    "metadata_status": getattr(ref, "metadata_status", None),
+                    "reason": "metadata_unapproved",
+                }
+            )
+            continue
+
+        # csl_json ONLY (approved canonical) — never csl_json_extracted.
+        ok_entries.append((citekey, ref.csl_json or {}))
+
+    if blocked:
+        # Fail-closed: NO render, NO partial write.
+        raise BuildBibliographyBlocked(blocked)
+
+    bib_text = render_bibliography(ok_entries, style)
+
+    sha = None
+    if commit:
+        sha = write_and_commit_files(
+            repo_dir,
+            {BIBLIOGRAPHY_FILENAME: bib_text},
+            "cite: build bibliography",
+        )
+
+    return {
+        "bibliography_md": bib_text,
+        "citekey_count": len(ok_entries),
+        "commit_sha": sha,
+    }
