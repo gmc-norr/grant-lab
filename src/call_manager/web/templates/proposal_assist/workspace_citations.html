@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Citations — {{ workspace.title or workspace.id }}{% endblock %}
+{% block content %}
+<hgroup>
+  <h1>Citations — {{ workspace.title or workspace.id }}</h1>
+  <p>
+    <a href="/workspaces/{{ workspace.id }}/files">Files</a>
+    | <a href="/workspaces/{{ workspace.id }}/references">References</a>
+    | <strong>Citations</strong>
+    | <a href="/workspaces/{{ workspace.id }}/settings">Settings</a>
+    | <a href="/workspaces">All workspaces</a>
+  </p>
+</hgroup>
+
+{% if ledger_error %}
+<p class="status status-failed">{{ ledger_error|e }}</p>
+{% endif %}
+
+{% if citations %}
+<table>
+  <thead>
+    <tr>
+      <th>Citekey</th>
+      <th>Claim</th>
+      <th>Evidence quote</th>
+      <th>Stance</th>
+      <th>Confidence</th>
+      <th>Reference</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in citations %}
+    <tr>
+      <td><code>{{ (c.citekey or "")|e }}</code></td>
+      <td>{{ (c.claim or "")|e }}</td>
+      <td>{{ (c.evidence_quote or "")|e }}</td>
+      <td>{{ (c.stance or "")|e }}</td>
+      <td>{{ (c.confidence or "")|e }}</td>
+      <td>
+        <a href="/workspaces/{{ workspace.id }}/references">{{ (c.section_path or c.reference_id or "")|e }}</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% elif not ledger_error %}
+<p><em>No citations yet. The drafting agent adds citations with the insert_citation tool as it writes.</em></p>
+{% endif %}
+
+<div id="audit-results"></div>
+{% endblock %}
