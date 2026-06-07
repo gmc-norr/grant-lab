@@ -559,11 +559,18 @@ def build_bibliography(
     cited reference's ``metadata_status`` is not approved AND has no waiver — no
     partial write. Renders from ``csl_json`` (approved canonical), falling back
     to ``csl_json_extracted`` for ``verified_external``/waived references whose
-    canonical column is still NULL. Only marker-present citekeys are rendered. The result
-    is written to ``bibliography.md`` (a separate git artifact, NEVER merged into
-    proposal.md) when ``commit`` is True.
+    canonical column is still NULL. Only marker-present citekeys are rendered.
 
-    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}``.
+    ``commit`` optionally writes the result to ``bibliography.md`` (a separate git
+    artifact, NEVER merged into proposal.md). NOTE: no production caller currently
+    passes ``commit=True`` — the bibliography is a DERIVED artifact, so the MCP
+    tool and the composed-export route both render with ``commit=False`` and
+    consume the returned text (a persisted snapshot would only drift). The write
+    path is retained + unit-tested for optional reuse.
+
+    Returns ``{"bibliography_md", "citekey_count", "commit_sha"}`` — ``commit_sha``
+    is the new commit's SHA when ``commit`` is True, else None. (The MCP tool
+    wrapper strips ``commit_sha`` from its own result since it never persists.)
     Raises :class:`BuildBibliographyBlocked` if any reference is blocked.
     """
     ok_entries, blocked = _resolve_cited_entries(
