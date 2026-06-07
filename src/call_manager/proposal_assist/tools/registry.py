@@ -488,6 +488,23 @@ def _collect_tools(ctx: ToolContext) -> list:
     async def list_citations(args):
         return await _safe_tool("list_citations", ctx, list_citations_impl, ctx)
 
+    from call_manager.proposal_assist.tools.audit import validate_citations_impl
+
+    @tool(
+        "validate_citations",
+        "Validate every citation in the proposal. Runs deterministic checks "
+        "(drift, missing references/chunks, broken quotes, orphaned markers) "
+        "and, when available, an LLM semantic judge (does the evidence support "
+        "the claim?). Returns a list of issues with "
+        "type/severity/citekey/evidence_id/location/detail; fix them with "
+        "update_citation / remove_citation. `semantic_available` is false when "
+        "the audit LLM is unavailable or capped (deterministic results still "
+        "returned).",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def validate_citations(args):
+        return await _safe_tool("validate_citations", ctx, validate_citations_impl, ctx)
+
     @tool(
         "insert_citation",
         "Insert an inline citation marker into proposal.md right after "
@@ -658,4 +675,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         rename_citekey,
         # read-only citation discovery
         list_citations,
+        # Slice 3 Task 5 — citation audit
+        validate_citations,
     ]

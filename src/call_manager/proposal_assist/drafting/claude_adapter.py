@@ -226,6 +226,8 @@ class ClaudeAgentSDKAdapter:
                 "rename_citekey",
                 # read-only citation discovery
                 "list_citations",
+                # Slice 3 Task 5 — citation audit
+                "validate_citations",
             ]
         return options_kwargs
 

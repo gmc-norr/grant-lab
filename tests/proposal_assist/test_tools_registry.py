@@ -86,8 +86,10 @@ def test_collect_tools_returns_twenty_named_tools():
         "rename_citekey",
         # read-only citation discovery
         "list_citations",
+        # Slice 3 Task 5 — citation audit
+        "validate_citations",
     }
-    assert len(tools) == 20
+    assert len(tools) == 21
 
 
 @pytest.mark.asyncio
