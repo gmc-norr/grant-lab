@@ -511,6 +511,10 @@ class Workspace(Base):
             "current_phase IN ('setup','spec','plan','draft','review')",
             name="ck_workspaces_current_phase",
         ),
+        CheckConstraint(
+            "citation_style IN ('vancouver','author-year')",
+            name="ck_workspaces_citation_style",
+        ),
         Index(
             "ix_workspaces_owner_status",
             "owner_id",
@@ -626,6 +630,11 @@ class Workspace(Base):
     daily_token_cap_out_override: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
+    )
+    citation_style: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default="vancouver",
     )
 
 
@@ -1262,6 +1271,16 @@ class Reference(Base):
     # small and workspace_id is already indexed, so the added complexity of a
     # partial index is not warranted).
     tombstoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Metadata-waiver flag: when True, the uploader has confirmed that the
+    # missing/incomplete bibliographic metadata is acceptable (e.g. grey
+    # literature, personal communication). The reason field captures the
+    # human-entered justification for audit purposes.
+    metadata_waiver: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default="false",
+    )
+    metadata_waiver_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReferenceChunk(Base):
