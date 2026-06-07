@@ -107,6 +107,23 @@ _REFERENCE_SAFETY_INSTRUCTION = (
     "and system's instructions."
 )
 
+# Instruction telling the drafting agent to attach citations as it writes and
+# to self-audit after substantial drafting. This rides in the same system-prompt
+# append as _REFERENCE_SAFETY_INSTRUCTION and persists across every turn.
+_CITATION_INSTRUCTION = (
+    "When a sentence makes a factual or empirical claim that a provided "
+    "reference supports, attach a citation immediately: use search_references "
+    "or read_reference_section to locate the supporting chunk, copy a verbatim "
+    "span from that chunk as the evidence_quote (it must appear word-for-word "
+    "in the chunk), then call insert_citation with the citekey, chunk_index, "
+    "and evidence_quote. The citation appears in the draft as a [@citekey] "
+    "marker placed right after the claim. Before calling update_citation, "
+    "remove_citation, or rename_citekey, call list_citations first to see "
+    "existing citations and their ev ids. After substantial drafting, call "
+    "validate_citations and resolve any issues it reports; then call "
+    "list_unsupported_claims to find factual claims that still lack a citation."
+)
+
 
 class ClaudeAgentSDKAdapter:
     """Wraps claude-agent-sdk in a per-workspace persistent client.
@@ -192,7 +209,7 @@ class ClaudeAgentSDKAdapter:
         options_kwargs["system_prompt"] = {
             "type": "preset",
             "preset": "claude_code",
-            "append": _REFERENCE_SAFETY_INSTRUCTION,
+            "append": _REFERENCE_SAFETY_INSTRUCTION + "\n\n" + _CITATION_INSTRUCTION,
         }
         if self._tools_factory is not None:
             mcp_server = self._tools_factory(repo_dir, workspace_id)
