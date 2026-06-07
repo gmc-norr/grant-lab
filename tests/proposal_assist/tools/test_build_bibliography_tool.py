@@ -215,6 +215,37 @@ async def test_missing_proposal_returns_error(pg_session_factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_empty_bibliography_success_no_commit(pg_session_factory, tmp_path):
+    # No markers → success envelope with empty body and no commit; nothing written.
+    wsid = _make_workspace(pg_session_factory)
+    repo = tmp_path / "repo"
+    _init_repo(repo, "# P\n\nNo citations here.\n", _ledger([]))
+
+    result = await build_bibliography_impl(_ctx(pg_session_factory, repo, wsid))
+
+    assert "error" not in result
+    assert result["citekey_count"] == 0
+    assert result["bibliography_md"] == ""
+    assert result["commit_sha"] is None
+    assert not (repo / BIBLIOGRAPHY_FILENAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_workspace_row_falls_back_to_vancouver(pg_session_factory, tmp_path):
+    # Workspace row absent (e.g. deleted mid-turn): style resolution must fall
+    # back to vancouver rather than crash. Use an empty proposal so no references
+    # are needed and the success path is reached.
+    wsid = uuid.uuid4()  # never inserted
+    repo = tmp_path / "repo"
+    _init_repo(repo, "# P\n\nNothing cited.\n", _ledger([]))
+
+    result = await build_bibliography_impl(_ctx(pg_session_factory, repo, wsid))
+
+    assert "error" not in result
+    assert result["citekey_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_registered_closure_returns_mcp_envelope(pg_session_factory, tmp_path):
     wsid = _make_workspace(pg_session_factory)
     rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)

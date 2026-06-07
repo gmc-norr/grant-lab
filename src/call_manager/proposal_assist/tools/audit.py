@@ -193,7 +193,8 @@ async def build_bibliography_impl(ctx: ToolContext, *, style: str | None = None)
     style or a missing proposal.md.
     """
     if style is not None and style not in CITATION_STYLES:
-        return {"error": f"invalid style {style!r} (allowed: vancouver, author-year)"}
+        allowed = ", ".join(sorted(CITATION_STYLES))
+        return {"error": f"invalid style {style!r} (allowed: {allowed})"}
 
     async with ctx.write_lock:
         read = _read_proposal_and_ledger(ctx)
@@ -204,8 +205,10 @@ async def build_bibliography_impl(ctx: ToolContext, *, style: str | None = None)
         with ctx.session_factory() as session:
             effective_style = style
             if effective_style is None:
+                # citation_style is non-nullable, so a loaded row always has a
+                # real value; the only fallback is a workspace deleted mid-turn.
                 ws = session.get(Workspace, ctx.workspace_id)
-                effective_style = getattr(ws, "citation_style", None) or "vancouver"
+                effective_style = ws.citation_style if ws is not None else "vancouver"
 
             try:
                 return build_bibliography(
