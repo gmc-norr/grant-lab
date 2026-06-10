@@ -1,0 +1,25 @@
+{# One ##-section of proposal.md, rendered. `s` is a dict
+   {index, heading, sha, rendered} — built either by the sections router
+   (_view_fragment) or by get_workspace_main's artifact_sections loop.
+   `s.rendered` is bleach-cleaned by _render_proposal_markdown before it
+   reaches this template, so `| safe` is trusted output.
+   `issues` is only passed by the POST-save render; the artifact-pane
+   include leaves it undefined, hence the `is defined` guard. #}
+<div id="section-{{ s.index }}" class="proposal-section">
+  {{ s.rendered | safe }}
+  {% if is_owner %}
+  <button hx-get="/workspaces/{{ workspace.id }}/sections/{{ s.index }}/edit"
+          hx-target="#section-{{ s.index }}" hx-swap="outerHTML"
+          class="section-edit-btn">Edit</button>
+  {% endif %}
+  {% if issues is defined and issues %}
+  <ul class="tier1-issues">
+    {% for i in issues %}<li class="issue-{{ i.severity }}">{{ i.type }}: {{ i.detail }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if annotations_enabled is defined and annotations_enabled %}
+  <div id="annotations-{{ s.index }}"
+       hx-get="/workspaces/{{ workspace.id }}/sections/{{ s.index }}/annotations?sha={{ s.sha }}"
+       hx-trigger="load" hx-swap="innerHTML"></div>
+  {% endif %}
+</div>

@@ -27,6 +27,9 @@ from call_manager.proposal_assist.web.references import (
 from call_manager.proposal_assist.web.rubric_review import (
     router as rubric_review_router,
 )
+from call_manager.proposal_assist.web.sections import (
+    router as sections_router,
+)
 from call_manager.proposal_assist.web.workspaces import (
     router as workspaces_router,
 )
@@ -352,6 +355,7 @@ def create_app() -> FastAPI:
     app.include_router(profiles.router)
     app.include_router(rubric_review_router)
     app.include_router(workspaces_router)
+    app.include_router(sections_router)
     app.include_router(files_router)
     app.include_router(references_router)
     app.include_router(citations_router)

@@ -61,6 +61,24 @@ class SaveResult:
     changed: bool = True
 
 
+def _turn_in_flight(session: Session, workspace_id) -> bool:
+    """True if an agent turn is queued or running for this workspace.
+
+    Shared by save_section (hard guard under the commit mutex) and the
+    section-edit web route (soft pre-check so the edit form isn't even
+    offered while a turn owns the repo).
+    """
+    return (
+        session.query(TurnJob.id)
+        .filter(
+            TurnJob.workspace_id == workspace_id,
+            TurnJob.status.in_(_TURN_IN_FLIGHT_STATUSES),
+        )
+        .first()
+        is not None
+    )
+
+
 def _tier1_issues(*, doc: str, repo_dir: Path, session: Session, workspace_id) -> list[dict]:
     """Deterministic (Tier-1) validation of *doc*: citation audit against the
     repo's citations.json (absent file → empty ledger, matching the other
@@ -138,15 +156,7 @@ def save_section(
     acquire_commit_mutex(session, workspace.id)
 
     # 2. Turn-lock: an agent turn in flight owns the repo.
-    in_flight = (
-        session.query(TurnJob.id)
-        .filter(
-            TurnJob.workspace_id == workspace.id,
-            TurnJob.status.in_(_TURN_IN_FLIGHT_STATUSES),
-        )
-        .first()
-    )
-    if in_flight is not None:
+    if _turn_in_flight(session, workspace.id):
         raise TurnInFlightError(
             f"an agent turn is in flight for workspace {workspace.id}; retry after it finishes"
         )

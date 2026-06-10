@@ -48,6 +48,7 @@ from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
 from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
+from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
@@ -582,6 +583,23 @@ def get_workspace_main(
     else:
         raw, rendered = "", "<em>(no proposal.md yet)</em>"
 
+    # Section-editing slice: the artifact pane renders per-##-section
+    # fragments (section_view.html) so each one can be swapped for an
+    # edit form independently. Empty sections (e.g. a zero-byte preamble)
+    # are skipped — nothing to render or edit. Dicts (not Section objects)
+    # so the template context matches what web/sections.py passes for a
+    # single-fragment render.
+    artifact_sections = [
+        {
+            "index": s.index,
+            "heading": s.heading,
+            "sha": s.sha,
+            "rendered": _render_proposal_markdown(s.text),
+        }
+        for s in split_sections(raw)
+        if s.text
+    ]
+
     is_owner = ws.owner_id == user.id
     templates = request.app.state.templates
     return templates.TemplateResponse(
@@ -594,6 +612,8 @@ def get_workspace_main(
             "chat_turns": chat_turns,
             "artifact_rendered": rendered,
             "artifact_raw": raw,
+            "artifact_sections": artifact_sections,
+            "annotations_enabled": False,
             "needs_disclosure": needs_disclosure,
             "workspace_attachments": workspace_attachments,
             "workspace_references": workspace_references,

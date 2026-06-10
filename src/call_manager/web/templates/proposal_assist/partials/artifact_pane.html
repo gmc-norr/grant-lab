@@ -5,8 +5,19 @@
   | <a href="/workspaces/{{ workspace.id }}/export.md">Export markdown</a>
   | <a href="/workspaces/{{ workspace.id }}/export-composed.md">Export with citations</a>
 </p>
-{# artifact_rendered is already bleached in the route handler (rev2 / H2),
-   so the `| safe` here is trusted output, not raw markdown injection. #}
+{# Sectioned body: each ##-section is its own swappable fragment
+   (section_view.html). The loop var `s` plus the outer context
+   (workspace, is_owner, annotations_enabled) flow into the include via
+   Jinja's default include scoping; `issues` is intentionally undefined
+   here — section_view guards it with `is defined`. Per-section
+   `rendered` HTML is bleach-cleaned in the route handler (rev2 / H2),
+   so the partial's `| safe` is trusted output. Fallback: an empty /
+   missing proposal.md yields no sections — show the legacy
+   artifact_rendered placeholder ("(no proposal.md yet)"). #}
 <div id="artifact-rendered" style="border: 1px solid #ddd; padding: 0.5em; max-height: 70vh; overflow-y: auto;">
-  {{ artifact_rendered | safe }}
+  {% for s in artifact_sections %}
+    {% include "proposal_assist/partials/section_view.html" %}
+  {% else %}
+    {{ artifact_rendered | safe }}
+  {% endfor %}
 </div>
