@@ -155,7 +155,7 @@ def login_submit(request: Request, email: str = Form(...)):
     try:
         email_sender.send(
             to=email_normalized,
-            subject="Your Call Monitor login link",
+            subject="Your Call Manager login link",
             text_body=f"Click to sign in (valid 15 min):\n\n{link}\n",
         )
     except EmailSendFailed:

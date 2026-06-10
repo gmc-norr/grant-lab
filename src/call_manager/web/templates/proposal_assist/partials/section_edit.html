@@ -6,7 +6,7 @@
 <div id="section-{{ s.index }}" class="proposal-section editing">
   <form hx-post="/workspaces/{{ workspace.id }}/sections/{{ s.index }}"
         hx-target="#section-{{ s.index }}" hx-swap="outerHTML">
-    <textarea name="content" rows="14" style="width:100%">{{ s.raw }}</textarea>
+    <textarea name="content" rows="14">{{ s.raw }}</textarea>
     <input type="hidden" name="base_commit_sha" value="{{ base_commit_sha }}">
     <input type="hidden" name="base_section_sha" value="{{ s.sha }}">
     <button type="submit">Save</button>

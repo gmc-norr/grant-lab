@@ -31,13 +31,13 @@ assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
 # at import — env-var override only takes effect on (re-)import. Tests
 # override this constant via monkeypatch.setattr rather than the env var.
 #
-# Anchored to an absolute path: when CALL_MONITOR_DATA_DIR is unset the
+# Anchored to an absolute path: when CALL_MANAGER_DATA_DIR is unset the
 # default "data" is relative to CWD, so the scheduler (writer) and web admin
 # (reader) — which may launch from different working directories — would
 # otherwise resolve it to different files and silently disagree on the last
 # report. resolve() pins it to one absolute location regardless of CWD.
 _REPORT_PATH = (
-    Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")).resolve() / "golden_set_last.json"
+    Path(os.environ.get("CALL_MANAGER_DATA_DIR", "data")).resolve() / "golden_set_last.json"
 )
 
 

@@ -1,9 +1,11 @@
 {% extends "base.html" %}
-{% block title %}{{ status_code }} — Call Monitor{% endblock %}
+{% block title %}{{ status_code }} — Call Manager{% endblock %}
 {% block content %}
-<hgroup>
-  <h1>{{ status_code }}</h1>
-  <p>{{ message }}</p>
-</hgroup>
-<p><a href="/">Back to dashboard</a></p>
+<div class="narrow">
+  <div class="empty-state">
+    <p class="error-code">{{ status_code }}</p>
+    <h1>{{ message }}</h1>
+    <p><a href="/" role="button" class="secondary outline">Back to dashboard</a></p>
+  </div>
+</div>
 {% endblock %}

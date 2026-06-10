@@ -28,7 +28,9 @@ def test_security_headers_present_on_response(migrated_engine, pg_url, monkeypat
         r = client.get("/healthz")
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers["x-frame-options"] == "DENY"
-    assert r.headers["referrer-policy"] == "no-referrer"
+    # same-origin (not no-referrer): no-referrer would null the Origin
+    # header on browser form POSTs and trip the CSRF middleware.
+    assert r.headers["referrer-policy"] == "same-origin"
     csp = r.headers["content-security-policy"]
     assert "script-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp

@@ -46,9 +46,9 @@ def test_default_report_path_is_absolute(monkeypatch, tmp_path):
     import os
     from pathlib import Path
 
-    monkeypatch.delenv("CALL_MONITOR_DATA_DIR", raising=False)
+    monkeypatch.delenv("CALL_MANAGER_DATA_DIR", raising=False)
     default = (
-        Path(os.environ.get("CALL_MONITOR_DATA_DIR", "data")).resolve() / "golden_set_last.json"
+        Path(os.environ.get("CALL_MANAGER_DATA_DIR", "data")).resolve() / "golden_set_last.json"
     )
     assert default.is_absolute()
     assert default.name == "golden_set_last.json"

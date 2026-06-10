@@ -1,12 +1,14 @@
 {% extends "base.html" %}
-{% block title %}Profiles — Call Monitor{% endblock %}
+{% block title %}Profiles — Call Manager{% endblock %}
 {% block content %}
-<header style="display:flex;justify-content:space-between;align-items:start;gap:1rem">
+<header class="page-header">
   <hgroup>
     <h1>Ranking profiles</h1>
     <p>Each profile defines who you are and what you fund-hunt for. The LLM ranks calls against the description and rubric.</p>
   </hgroup>
-  <a href="/profiles/new" role="button">+ New profile</a>
+  <div class="actions">
+    <a href="/profiles/new" role="button">+ New profile</a>
+  </div>
 </header>
 
 {% if not profiles %}
@@ -28,9 +30,9 @@
           {% if p.budget_currency %}· {{ p.budget_currency }}{% endif %}
         </div>
         {% if p.description %}
-          <p style="font-size:0.95em">{{ p.description[:160] }}{% if p.description|length > 160 %}…{% endif %}</p>
+          <p class="description">{{ p.description[:160] }}{% if p.description|length > 160 %}…{% endif %}</p>
         {% endif %}
-        <div>
+        <div class="links">
           <a href="/?profile={{ p.id }}">Ranked feed →</a>
           · <a href="/profiles/{{ p.id }}/edit">Edit</a>
         </div>

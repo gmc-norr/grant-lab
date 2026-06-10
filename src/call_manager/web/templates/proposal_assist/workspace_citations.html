@@ -1,16 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Citations — {{ workspace.title or workspace.id }}{% endblock %}
 {% block content %}
+<a href="/workspaces/{{ workspace.id }}" class="backlink">&larr; Back to workspace</a>
 <hgroup>
   <h1>Citations — {{ workspace.title or workspace.id }}</h1>
-  <p>
-    <a href="/workspaces/{{ workspace.id }}/files">Files</a>
-    | <a href="/workspaces/{{ workspace.id }}/references">References</a>
-    | <strong>Citations</strong>
-    | <a href="/workspaces/{{ workspace.id }}/settings">Settings</a>
-    | <a href="/workspaces">All workspaces</a>
-  </p>
+  <p>Evidence ledger: every claim the drafting agent has cited, with its supporting quote.</p>
 </hgroup>
+<nav class="subnav" aria-label="Workspace sections">
+  <a href="/workspaces/{{ workspace.id }}">Workspace</a>
+  <a href="/workspaces/{{ workspace.id }}/files">Files</a>
+  <a href="/workspaces/{{ workspace.id }}/references">References</a>
+  <span class="current">Citations</span>
+  {% if is_owner %}<a href="/workspaces/{{ workspace.id }}/settings">Settings</a>{% endif %}
+  <a href="/workspaces">All workspaces</a>
+</nav>
 
 {% if ledger_error %}
 <p class="status status-failed">{{ ledger_error|e }}</p>

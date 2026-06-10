@@ -1,7 +1,7 @@
 [project]
 name = "call-manager"
 version = "0.1.0"
-description = "Internal hospital funding-call monitor"
+description = "Internal hospital funding-call manager"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

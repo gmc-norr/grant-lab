@@ -4,35 +4,42 @@
 {% if needs_disclosure %}
   {% include "proposal_assist/partials/disclosure_modal.html" %}
 {% endif %}
-<h1>{{ workspace.title }}</h1>
-<p>
-  <strong>Phase:</strong> {{ workspace.current_phase }}
-  | <a href="/workspaces/{{ workspace.id }}/files">Files</a>
-  | <a href="/workspaces/{{ workspace.id }}/references">References</a>
-  | <a href="/workspaces/{{ workspace.id }}/citations">Citations</a>
-  | <a href="/workspaces/{{ workspace.id }}/settings">Settings</a>
-  | <a href="/workspaces">All workspaces</a>
-</p>
+<header class="page-header">
+  <hgroup>
+    <h1>{{ workspace.title }}</h1>
+    <p class="workspace-meta">
+      <span class="phase-chip">{{ workspace.current_phase }}</span>
+    </p>
+  </hgroup>
+</header>
+<nav class="subnav" aria-label="Workspace sections">
+  <span class="current">Workspace</span>
+  <a href="/workspaces/{{ workspace.id }}/files">Files</a>
+  <a href="/workspaces/{{ workspace.id }}/references">References</a>
+  <a href="/workspaces/{{ workspace.id }}/citations">Citations</a>
+  {% if is_owner %}<a href="/workspaces/{{ workspace.id }}/settings">Settings</a>{% endif %}
+  <a href="/workspaces">All workspaces</a>
+</nav>
 
-<div style="display: flex; gap: 1em;">
+<div class="workspace-layout">
   {# LEFT: chat #}
-  <div style="flex: 1; min-width: 0;">
+  <div class="workspace-pane">
     <h2>Chat</h2>
-    <div id="chat-history" style="max-height: 60vh; overflow-y: auto; border: 1px solid #ddd; padding: 0.5em;">
+    <div id="chat-history" class="chat-history">
       {% for turn in chat_turns %}
         {% include "proposal_assist/partials/chat_turn.html" %}
       {% endfor %}
     </div>
     {% include "proposal_assist/partials/cloud_banner.html" %}
     {% if is_owner %}
-    <form id="composer" method="post" enctype="multipart/form-data"
+    <form id="composer" class="composer" method="post" enctype="multipart/form-data"
           action="/workspaces/{{ workspace.id }}/turns"
           hx-post="/workspaces/{{ workspace.id }}/turns"
           hx-target="#chat-history"
           hx-swap="beforeend"
           hx-encoding="multipart/form-data"
           hx-on::after-request="this.reset()">
-      <textarea name="content" rows="3" required></textarea>
+      <textarea name="content" rows="3" required placeholder="Write to the drafting assistant…"></textarea>
 
       <details>
         <summary>Attach images ({{ workspace_attachments|length }} in workspace)</summary>
@@ -47,11 +54,10 @@
         <fieldset>
           <legend>Or pick from this workspace:</legend>
           {% for att in workspace_attachments %}
-          <label class="att-pick" style="display: inline-block; margin: 0.25em;">
+          <label class="att-pick">
             <input type="checkbox" name="attachment_ids" value="{{ att.id }}">
             <img src="/workspaces/{{ att.workspace_id }}/files/{{ att.id }}"
-                 alt="{{ att.filename|e }}"
-                 style="max-width: 80px; max-height: 80px; vertical-align: middle;">
+                 alt="{{ att.filename|e }}">
             <span>{{ att.filename|e }}</span>
           </label>
           {% endfor %}
@@ -66,7 +72,7 @@
         <fieldset>
           <legend>Pick from this workspace:</legend>
           {% for ref in workspace_references %}
-          <label class="ref-pick" style="display: block; margin: 0.25em 0;">
+          <label class="ref-pick">
             <input type="checkbox" name="reference_ids" value="{{ ref.id }}">
             <strong>{{ ref.title or ref.filename }}</strong>
             <small>[{{ ref.kind }}]</small>
@@ -81,12 +87,12 @@
       <button type="submit">Send</button>
     </form>
     {% else %}
-    <p><em>(read-only — only the workspace owner can send turns)</em></p>
+    <p class="muted"><em>(read-only — only the workspace owner can send turns)</em></p>
     {% endif %}
   </div>
 
   {# RIGHT: artifact #}
-  <div style="flex: 1; min-width: 0;">
+  <div class="workspace-pane">
     {% include "proposal_assist/partials/artifact_pane.html" %}
   </div>
 </div>

@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}{{ call.title }} — Call Monitor{% endblock %}
+{% block title %}{{ call.title }} — Call Manager{% endblock %}
 {% block content %}
-<p><a href="/">&larr; All calls</a></p>
+<a href="/" class="backlink">&larr; All calls</a>
 
-<header>
+<header class="page-header">
   <hgroup>
     <h1>{{ call.title }}</h1>
     <p>
@@ -12,21 +12,22 @@
       {% if call.external_id %}· <code>{{ call.external_id }}</code>{% endif %}
     </p>
   </hgroup>
+  {# B6: Start a workspace pre-filled with this call. profile_id is
+     omitted from the link when no ranking exists for any of the user's
+     profiles — the form still lets the user pick. #}
+  <div class="actions">
+    <a href="/workspaces/new?call_id={{ call.id }}{% if best_profile_id %}&profile_id={{ best_profile_id }}{% endif %}"
+       role="button">Start drafting workspace</a>
+  </div>
 </header>
-
-{# B6: Start a workspace pre-filled with this call. profile_id is
-   omitted from the link when no ranking exists for any of the user's
-   profiles — the form still lets the user pick. #}
-<p>
-  <a href="/workspaces/new?call_id={{ call.id }}{% if best_profile_id %}&profile_id={{ best_profile_id }}{% endif %}"
-     class="button">Start drafting workspace</a>
-</p>
 
 {% if ranking %}
 <section aria-label="Ranking">
-  <article style="display:flex;gap:1.2rem;align-items:center;">
-    <div style="font-size:3rem;font-weight:700;line-height:1;">{{ ranking.aggregate_score }}</div>
-    <div style="flex:1">
+  <article class="score-hero">
+    <div class="figure {% if ranking.aggregate_score >= 70 %}strong{% elif ranking.aggregate_score > 0 %}mid{% endif %}">
+      {{ ranking.aggregate_score }}
+    </div>
+    <div class="body">
       <strong>Aggregate score</strong>
       {% if ranking.aggregate_reason %}
         <span class="gate-tag">{{ ranking.aggregate_reason | criterion_label }}</span>
@@ -41,10 +42,10 @@
          Level"). Show it only for the LLM-evaluated rankings where it
          carries the per-criterion ratings the badge can't convey. #}
       {% if ranking.rationale and not ranking.aggregate_reason %}
-        <div style="margin-top:0.3em">{{ ranking.rationale }}</div>
+        <div class="rationale">{{ ranking.rationale }}</div>
       {% endif %}
       {% if ranking.embed_similarity is not none %}
-        <div class="muted" style="font-size:0.85em;margin-top:0.3em">
+        <div class="muted similarity">
           Cosine similarity: {{ '%.3f' % ranking.embed_similarity }}
         </div>
       {% endif %}
@@ -79,33 +80,33 @@
 
 <section aria-label="Call details">
   <h2>Details</h2>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem">
+  <div class="detail-grid">
     <div>
-      <small class="muted">Published</small><br>
-      <strong>{{ call.published_at | display_date or '—' }}</strong>
+      <span class="k">Published</span>
+      <span class="v">{{ call.published_at | display_date or '—' }}</span>
     </div>
     <div>
-      <small class="muted">Deadline</small><br>
-      <strong>{{ call.deadline | display_dt or '—' }}</strong>
+      <span class="k">Deadline</span>
+      <span class="v">{{ call.deadline | display_dt or '—' }}</span>
     </div>
     <div>
-      <small class="muted">Budget</small><br>
-      <strong>
+      <span class="k">Budget</span>
+      <span class="v">
         {% if call.budget_min or call.budget_max %}
           {{ '{:,}'.format(call.budget_min) if call.budget_min else '—' }} –
           {{ '{:,}'.format(call.budget_max) if call.budget_max else '—' }} {{ call.currency or '' }}
         {% else %}—{% endif %}
-      </strong>
+      </span>
     </div>
     <div>
-      <small class="muted">External link</small><br>
-      <a href="{{ call.url }}" target="_blank" rel="noopener">Open at source &rarr;</a>
+      <span class="k">External link</span>
+      <span class="v"><a href="{{ call.url }}" target="_blank" rel="noopener">Open at source &rarr;</a></span>
     </div>
   </div>
 
   {% if call.keywords %}
-    <p style="margin-top:1rem"><small class="muted">Keywords:</small>
-      {% for kw in call.keywords %}<code style="margin-right:0.3em">{{ kw }}</code>{% endfor %}
+    <p class="keyword-list"><small class="muted">Keywords:</small>
+      {% for kw in call.keywords %}<span class="chip">{{ kw }}</span>{% endfor %}
     </p>
   {% endif %}
 </section>
@@ -158,10 +159,10 @@
   </section>
 {% endif %}
 
-<section style="margin-top:2rem">
+<section class="hide-call">
   <form method="post" action="/calls/{{ call.id }}/hide">
-    <button type="submit" class="secondary outline">Hide this call</button>
-    <small class="muted" style="margin-left:0.6em">Removes it from your feed permanently. Other users are unaffected.</small>
+    <button type="submit" class="secondary outline compact">Hide this call</button>
+    <small class="muted">Removes it from your feed permanently. Other users are unaffected.</small>
   </form>
 </section>
 {% endblock %}

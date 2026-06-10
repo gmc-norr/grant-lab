@@ -24,7 +24,7 @@
        crashes the chat view.
 #}
 <div class="chat-turn" data-role="{{ turn.role }}">
-  <strong>{{ turn.role }}:</strong>
+  <strong>{{ turn.role }}</strong>
   {%- set c = turn.content -%}
   {%- if c is string -%}
     <p>{{ c }}</p>
@@ -41,12 +41,11 @@
       {%- elif b is mapping and b.get("type") == "image" -%}
         <img src="/workspaces/{{ turn.workspace_id }}/files/{{ b.get("attachment_id", "") }}"
              alt="attached image"
-             class="chat-image"
-             style="max-width: 300px; max-height: 300px;">
+             class="chat-image">
       {%- elif b is mapping and b.get("type") == "reference" -%}
         {%- set ref_id = b.get("reference_id") -%}
         {%- set ref = chat_reference_map.get(ref_id) if chat_reference_map else None -%}
-        <div class="ref-chip" style="display: inline-block; padding: 0.2em 0.5em; margin: 0.25em 0; border: 1px solid #ccc; border-radius: 4px; background: #f6f6f6;">
+        <div class="ref-chip">
           <small>ref:</small>
           {%- if ref -%}
             <strong>{{ ref.title or ref.filename }}</strong>

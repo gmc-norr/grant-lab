@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Funding calls — Call Monitor{% endblock %}
+{% block title %}Funding calls — Call Manager{% endblock %}
 
 {# Helper macros: keep score + deadline rendering DRY across the row list. #}
 {% macro score_badge(r) -%}
@@ -91,7 +91,7 @@
        <code>uv run python scripts/seed_dev_data.py</code>.</p>
   </div>
 {% else %}
-  <div role="list">
+  <div role="list" class="call-list">
     {% for c, r in calls_with_rankings %}
       <div class="call-row" role="listitem">
         <div>{{ score_badge(r) }}</div>

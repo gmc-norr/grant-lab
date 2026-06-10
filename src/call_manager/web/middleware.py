@@ -56,7 +56,13 @@ class SecurityHeadersMiddleware:
         headers: list[tuple[bytes, bytes]] = [
             (b"x-content-type-options", b"nosniff"),
             (b"x-frame-options", b"DENY"),
-            (b"referrer-policy", b"no-referrer"),
+            # `same-origin`, NOT `no-referrer`: per the Fetch spec, a
+            # no-referrer policy makes browsers serialize the Origin header
+            # as `null` on form POSTs, which OriginCSRFMiddleware then 403s
+            # — every browser form submission in the app would fail. With
+            # `same-origin`, nothing leaks to external sites and Origin is
+            # sent normally, keeping the CSRF check effective.
+            (b"referrer-policy", b"same-origin"),
             (b"content-security-policy", csp.encode("latin-1")),
         ]
         if hsts:

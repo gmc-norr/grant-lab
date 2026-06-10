@@ -3,40 +3,37 @@
 {% block title %}Review metadata — {{ ref.filename|e }}{% endblock %}
 
 {% block content %}
+<a href="/workspaces/{{ workspace.id }}/references" class="backlink">&larr; Back to references</a>
 <hgroup>
   <h1>Review metadata — {{ ref.filename|e }}</h1>
-  <p>
-    <a href="/workspaces/{{ workspace.id }}/references">← back to references</a>
-  </p>
+  <p>Status: <span class="status status-pending">{{ ref.metadata_status }}</span></p>
 </hgroup>
-
-<p>Status: <strong>{{ ref.metadata_status }}</strong></p>
 
 <form method="post"
       action="/workspaces/{{ workspace.id }}/references/{{ ref.id }}/metadata">
   <label>
     Title
-    <input type="text" name="title" value="{{ title }}" style="width: 100%;">
+    <input type="text" name="title" value="{{ title }}">
   </label>
 
   <label>
     Authors (one per line — "Family, Given" or free text)
-    <textarea name="authors" rows="5" style="width: 100%;">{{ authors_text }}</textarea>
+    <textarea name="authors" rows="5">{{ authors_text }}</textarea>
   </label>
 
   <label>
     Year
-    <input type="text" name="year" value="{{ year }}" style="width: 8em;">
+    <input type="text" name="year" value="{{ year }}" class="input-short">
   </label>
 
   <label>
     Venue (journal / conference)
-    <input type="text" name="venue" value="{{ venue }}" style="width: 100%;">
+    <input type="text" name="venue" value="{{ venue }}">
   </label>
 
   <label>
     DOI
-    <input type="text" name="doi" value="{{ doi }}" style="width: 100%;">
+    <input type="text" name="doi" value="{{ doi }}">
   </label>
 
   <button type="submit">Approve metadata</button>

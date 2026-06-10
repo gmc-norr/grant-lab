@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}{{ profile.name }} — Call Monitor{% endblock %}
+{% block title %}{{ profile.name }} — Call Manager{% endblock %}
 {% block content %}
-<p><a href="/profiles">&larr; All profiles</a></p>
+<a href="/profiles" class="backlink">&larr; All profiles</a>
 
-<header style="display:flex;justify-content:space-between;align-items:start;gap:1rem;flex-wrap:wrap">
+<header class="page-header">
   <hgroup>
     <h1>
       {{ profile.name }}
@@ -31,7 +31,7 @@
     <dt>Areas</dt>
     <dd>
       {% if profile.structured.areas %}
-        {% for a in profile.structured.areas %}<code style="margin-right:0.3em">{{ a }}</code>{% endfor %}
+        {% for a in profile.structured.areas %}<span class="chip">{{ a }}</span>{% endfor %}
       {% else %}—{% endif %}
     </dd>
     {# Defensive: profile.structured may omit keys entirely (Undefined),
@@ -57,13 +57,13 @@
     <dt>Must include</dt>
     <dd>
       {% if profile.structured.must_include %}
-        {% for k in profile.structured.must_include %}<code style="margin-right:0.3em">{{ k }}</code>{% endfor %}
+        {% for k in profile.structured.must_include %}<span class="chip">{{ k }}</span>{% endfor %}
       {% else %}—{% endif %}
     </dd>
     <dt>Hard exclusions</dt>
     <dd>
       {% if profile.structured.hard_exclusions %}
-        {% for k in profile.structured.hard_exclusions %}<code style="margin-right:0.3em">{{ k }}</code>{% endfor %}
+        {% for k in profile.structured.hard_exclusions %}<span class="chip">{{ k }}</span>{% endfor %}
       {% else %}—{% endif %}
     </dd>
   </dl>
@@ -88,11 +88,11 @@
     {% endif %}
     {% if org.get('capabilities') %}
       <dt>Capabilities</dt>
-      <dd>{% for c in org.get('capabilities') %}<code style="margin-right:0.3em">{{ c }}</code>{% endfor %}</dd>
+      <dd>{% for c in org.get('capabilities') %}<span class="chip">{{ c }}</span>{% endfor %}</dd>
     {% endif %}
     {% if org.get('patient_populations') %}
       <dt>Patient populations</dt>
-      <dd>{% for p in org.get('patient_populations') %}<code style="margin-right:0.3em">{{ p }}</code>{% endfor %}</dd>
+      <dd>{% for p in org.get('patient_populations') %}<span class="chip">{{ p }}</span>{% endfor %}</dd>
     {% endif %}
     {% if org.get('scale') %}
       <dt>Scale</dt><dd>{{ org.get('scale') }}</dd>
@@ -108,15 +108,15 @@
     {% endif %}
     {% if elig.get('applicant_types') %}
       <dt>Applicant types</dt>
-      <dd>{% for a in elig.get('applicant_types') %}<code style="margin-right:0.3em">{{ a }}</code>{% endfor %}</dd>
+      <dd>{% for a in elig.get('applicant_types') %}<span class="chip">{{ a }}</span>{% endfor %}</dd>
     {% endif %}
     {% if funding.get('instruments') %}
       <dt>Funding instruments</dt>
-      <dd>{% for i in funding.get('instruments') %}<code style="margin-right:0.3em">{{ i }}</code>{% endfor %}</dd>
+      <dd>{% for i in funding.get('instruments') %}<span class="chip">{{ i }}</span>{% endfor %}</dd>
     {% endif %}
     {% if funding.get('funder_exclusions') %}
       <dt>Funder exclusions</dt>
-      <dd>{% for f in funding.get('funder_exclusions') %}<code style="margin-right:0.3em">{{ f }}</code>{% endfor %}</dd>
+      <dd>{% for f in funding.get('funder_exclusions') %}<span class="chip">{{ f }}</span>{% endfor %}</dd>
     {% endif %}
     {% if geo.get('host_institution') %}
       <dt>Host institution</dt><dd>{{ geo.get('host_institution') }}</dd>

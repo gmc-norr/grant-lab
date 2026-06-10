@@ -1,14 +1,25 @@
 {% extends "base.html" %}
 {% block title %}Workspaces{% endblock %}
 {% block content %}
-<h1>Workspaces</h1>
-<p>
-  <a href="/workspaces/new">+ New workspace</a> |
-  <a href="/workspaces">All</a>
-  | <a href="/workspaces?status=drafting">In progress</a>
-  | <a href="/workspaces?status=submitted">Submitted</a>
-  | <a href="/workspaces?status=awarded">Awarded</a>
-</p>
+<header class="page-header">
+  <hgroup>
+    <h1>Workspaces</h1>
+    <p>Proposal workspaces, linked to calls and profiles.</p>
+  </hgroup>
+  <div class="actions">
+    <a href="/workspaces/new" role="button">+ New workspace</a>
+  </div>
+</header>
+
+{% set status = request.query_params.get('status') if request is defined else None %}
+<nav class="subnav" aria-label="Status filter">
+  {% if not status %}<span class="current">All</span>{% else %}<a href="/workspaces">All</a>{% endif %}
+  {% if status == 'drafting' %}<span class="current">In progress</span>{% else %}<a href="/workspaces?status=drafting">In progress</a>{% endif %}
+  {% if status == 'submitted' %}<span class="current">Submitted</span>{% else %}<a href="/workspaces?status=submitted">Submitted</a>{% endif %}
+  {% if status == 'awarded' %}<span class="current">Awarded</span>{% else %}<a href="/workspaces?status=awarded">Awarded</a>{% endif %}
+</nav>
+
+{% if workspaces %}
 <table>
   <thead>
     <tr>
@@ -25,7 +36,7 @@
     <tr>
       <td><a href="/workspaces/{{ ws.id }}">{{ ws.title }}</a></td>
       <td>{{ ws.call_id or "—" }}</td>
-      <td>{{ ws.status }}</td>
+      <td><span class="status status-skipped">{{ ws.status }}</span></td>
       <td>{{ ws.deadline.strftime("%Y-%m-%d") if ws.deadline else "—" }}</td>
       <td>{{ ws.updated_at.strftime("%Y-%m-%d %H:%M") }}</td>
       <td>{{ ws.owner_id }}</td>
@@ -33,7 +44,10 @@
     {% endfor %}
   </tbody>
 </table>
-{% if not workspaces %}
-<p>No workspaces match.</p>
+{% else %}
+<div class="empty-state">
+  <h3>No workspaces match.</h3>
+  <p><a href="/workspaces/new" role="button" class="secondary outline">Create a workspace</a></p>
+</div>
 {% endif %}
 {% endblock %}

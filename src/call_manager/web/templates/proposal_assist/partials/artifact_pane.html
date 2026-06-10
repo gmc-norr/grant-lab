@@ -1,9 +1,9 @@
 <h2>Proposal</h2>
-<p>
+<p class="artifact-links">
   <a href="/workspaces/{{ workspace.id }}/artifact/raw">View raw</a>
-  | <a href="/workspaces/{{ workspace.id }}/artifact/history">History</a>
-  | <a href="/workspaces/{{ workspace.id }}/export.md">Export markdown</a>
-  | <a href="/workspaces/{{ workspace.id }}/export-composed.md">Export with citations</a>
+  <a href="/workspaces/{{ workspace.id }}/artifact/history">History</a>
+  <a href="/workspaces/{{ workspace.id }}/export.md">Export markdown</a>
+  <a href="/workspaces/{{ workspace.id }}/export-composed.md">Export with citations</a>
 </p>
 {# Sectioned body: each ##-section is its own swappable fragment
    (section_view.html). The loop var `s` plus the outer context
@@ -14,7 +14,7 @@
    so the partial's `| safe` is trusted output. Fallback: an empty /
    missing proposal.md yields no sections — show the legacy
    artifact_rendered placeholder ("(no proposal.md yet)"). #}
-<div id="artifact-rendered" style="border: 1px solid #ddd; padding: 0.5em; max-height: 70vh; overflow-y: auto;">
+<div id="artifact-rendered">
   {% if artifact_sections %}
     {% include "proposal_assist/partials/artifact_sections.html" %}
   {% else %}

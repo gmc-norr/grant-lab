@@ -1,59 +1,66 @@
 {% extends "base.html" %}
 {% block title %}References — {{ workspace.title }}{% endblock %}
 {% block content %}
+<a href="/workspaces/{{ workspace.id }}" class="backlink">&larr; Back to workspace</a>
 <hgroup>
   <h1>References — {{ workspace.title|e }}</h1>
-  <p>
-    <a href="/workspaces/{{ workspace.id }}">← back to workspace</a>
-    | <a href="/workspaces/{{ workspace.id }}/files">Files</a>
-    | <a href="/workspaces/{{ workspace.id }}/citations">Citations</a>
-  </p>
+  <p>Papers, prior proposals, and data the drafting agent can cite.</p>
 </hgroup>
+<nav class="subnav" aria-label="Workspace sections">
+  <a href="/workspaces/{{ workspace.id }}">Workspace</a>
+  <a href="/workspaces/{{ workspace.id }}/files">Files</a>
+  <span class="current">References</span>
+  <a href="/workspaces/{{ workspace.id }}/citations">Citations</a>
+  {% if is_owner %}<a href="/workspaces/{{ workspace.id }}/settings">Settings</a>{% endif %}
+  <a href="/workspaces">All workspaces</a>
+</nav>
 
 {% if is_owner %}
-<form method="post" enctype="multipart/form-data"
-      action="/workspaces/{{ workspace.id }}/references"
-      hx-post="/workspaces/{{ workspace.id }}/references"
-      hx-target="#reference-list"
-      hx-swap="afterbegin"
-      hx-encoding="multipart/form-data"
-      hx-on::after-request="this.reset()">
-  <label>
-    Kind:
+<article>
+  <header><strong>Add references</strong></header>
+  <form method="post" enctype="multipart/form-data" class="reference-upload"
+        action="/workspaces/{{ workspace.id }}/references"
+        hx-post="/workspaces/{{ workspace.id }}/references"
+        hx-target="#reference-list"
+        hx-swap="afterbegin"
+        hx-encoding="multipart/form-data"
+        hx-on::after-request="this.reset()">
+    <label>
+      Kind:
+      <select name="kind">
+        <option value="paper">paper</option>
+        <option value="prior_proposal">prior_proposal</option>
+        <option value="analysis">analysis</option>
+        <option value="data">data</option>
+      </select>
+    </label>
+    <input type="file" name="file" required
+           accept=".pdf,.md,.txt,.docx,.rtf,.csv,.xls,.xlsx,.ipynb">
+    <button type="submit">Upload</button>
+  </form>
+
+  <form method="post" class="reference-fetch"
+        action="/workspaces/{{ workspace.id }}/references/fetch"
+        hx-post="/workspaces/{{ workspace.id }}/references/fetch"
+        hx-target="#reference-list"
+        hx-swap="afterbegin"
+        hx-on::after-request="this.reset()">
+    <label>
+      Fetch by:
+      <input type="text" name="input" required
+             placeholder="DOI, PMID, arXiv ID, or URL">
+    </label>
     <select name="kind">
       <option value="paper">paper</option>
       <option value="prior_proposal">prior_proposal</option>
       <option value="analysis">analysis</option>
       <option value="data">data</option>
     </select>
-  </label>
-  <input type="file" name="file" required
-         accept=".pdf,.md,.txt,.docx,.rtf,.csv,.xls,.xlsx,.ipynb">
-  <button type="submit">Upload</button>
-</form>
-
-<form method="post"
-      action="/workspaces/{{ workspace.id }}/references/fetch"
-      hx-post="/workspaces/{{ workspace.id }}/references/fetch"
-      hx-target="#reference-list"
-      hx-swap="afterbegin"
-      hx-on::after-request="this.reset()">
-  <label>
-    Fetch by:
-    <input type="text" name="input" required
-           placeholder="DOI, PMID, arXiv ID, or URL"
-           style="min-width: 320px;">
-  </label>
-  <select name="kind">
-    <option value="paper">paper</option>
-    <option value="prior_proposal">prior_proposal</option>
-    <option value="analysis">analysis</option>
-    <option value="data">data</option>
-  </select>
-  <button type="submit">Fetch</button>
-</form>
+    <button type="submit">Fetch</button>
+  </form>
+</article>
 {% else %}
-<p><em>(read-only — only the workspace owner can upload references)</em></p>
+<p class="muted"><em>(read-only — only the workspace owner can upload references)</em></p>
 {% endif %}
 
 <div id="reference-list">

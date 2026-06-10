@@ -1,10 +1,14 @@
 {% extends "base.html" %}
-{% block title %}Drafting admin panel — Call Monitor{% endblock %}
+{% block title %}Drafting admin panel — Call Manager{% endblock %}
 {% block content %}
 <hgroup>
   <h1>Drafting (B7/B8) admin panel</h1>
   <p>Read-only view of kill-switch state, global cap usage, per-workspace usage, and recent failures.</p>
 </hgroup>
+<nav class="subnav" aria-label="Admin sections">
+  <a href="/admin">Operational health</a>
+  <span class="current">Drafting (B7/B8) panel</span>
+</nav>
 
 <article>
   <header><strong>Kill switch</strong></header>

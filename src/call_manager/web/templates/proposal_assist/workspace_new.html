@@ -1,26 +1,24 @@
 {% extends "base.html" %}
 {% block title %}New workspace{% endblock %}
 {% block content %}
-<h1>New workspace</h1>
+<a href="/workspaces" class="backlink">&larr; All workspaces</a>
+<hgroup>
+  <h1>New workspace</h1>
+  <p>Start a drafting workspace, optionally linked to a call and profile.</p>
+</hgroup>
 <form method="post" action="/workspaces/new">
-  <p>
-    <label>Title (required): <input name="title" required></label>
-  </p>
-  <p>
-    <label>Linked call ID (optional):
-      <input name="call_id" type="number" value="{{ prefill_call_id or '' }}">
-    </label>
-  </p>
-  <p>
-    <label>Profile ID (optional):
-      <input name="profile_id" type="number" value="{{ prefill_profile_id or '' }}">
-    </label>
-  </p>
-  <p>
-    <label>Deadline (optional, YYYY-MM-DD):
-      <input name="deadline" type="date">
-    </label>
-  </p>
+  <label>Title (required)
+    <input name="title" required>
+  </label>
+  <label>Linked call ID (optional)
+    <input name="call_id" type="number" value="{{ prefill_call_id or '' }}">
+  </label>
+  <label>Profile ID (optional)
+    <input name="profile_id" type="number" value="{{ prefill_profile_id or '' }}">
+  </label>
+  <label>Deadline (optional)
+    <input name="deadline" type="date">
+  </label>
   <button type="submit">Create</button>
 </form>
 {% endblock %}

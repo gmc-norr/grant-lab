@@ -1,70 +1,77 @@
 {% extends "base.html" %}
 {% block title %}Settings — {{ workspace.title }}{% endblock %}
 {% block content %}
-<h1>Settings — {{ workspace.title }}</h1>
-<p><a href="/workspaces/{{ workspace.id }}">← Back to workspace</a></p>
+<a href="/workspaces/{{ workspace.id }}" class="backlink">&larr; Back to workspace</a>
+<hgroup>
+  <h1>Settings — {{ workspace.title }}</h1>
+  <p>Workspace metadata, citation style, sharing, and deletion.</p>
+</hgroup>
+<nav class="subnav" aria-label="Workspace sections">
+  <a href="/workspaces/{{ workspace.id }}">Workspace</a>
+  <a href="/workspaces/{{ workspace.id }}/files">Files</a>
+  <a href="/workspaces/{{ workspace.id }}/references">References</a>
+  <a href="/workspaces/{{ workspace.id }}/citations">Citations</a>
+  <span class="current">Settings</span>
+  <a href="/workspaces">All workspaces</a>
+</nav>
 
 <form method="post" action="/workspaces/{{ workspace.id }}/settings">
-  <p>
-    <label>Title: <input name="title" value="{{ workspace.title }}" required></label>
-  </p>
-  <p>
-    <label>Status:
-      <select name="status">
-        <option value="drafting" {% if workspace.status == "drafting" %}selected{% endif %}>Drafting</option>
-        <option value="submitted" {% if workspace.status == "submitted" %}selected{% endif %}>Submitted</option>
-        <option value="awarded" {% if workspace.status == "awarded" %}selected{% endif %}>Awarded</option>
-        <option value="rejected" {% if workspace.status == "rejected" %}selected{% endif %}>Rejected</option>
-        <option value="abandoned" {% if workspace.status == "abandoned" %}selected{% endif %}>Abandoned</option>
-      </select>
-    </label>
-  </p>
-  <p>
-    <label>Deadline:
-      <input name="deadline" type="date"
-             value="{{ workspace.deadline.strftime('%Y-%m-%d') if workspace.deadline else '' }}">
-    </label>
-  </p>
-  <p>
-    <label>Citation style:
-      <select name="citation_style">
-        <option value="vancouver" {% if workspace.citation_style == "vancouver" %}selected{% endif %}>Vancouver (numbered)</option>
-        <option value="author-year" {% if workspace.citation_style == "author-year" %}selected{% endif %}>Author–year</option>
-      </select>
-    </label>
-  </p>
+  <label>Title
+    <input name="title" value="{{ workspace.title }}" required>
+  </label>
+  <label>Status
+    <select name="status">
+      <option value="drafting" {% if workspace.status == "drafting" %}selected{% endif %}>Drafting</option>
+      <option value="submitted" {% if workspace.status == "submitted" %}selected{% endif %}>Submitted</option>
+      <option value="awarded" {% if workspace.status == "awarded" %}selected{% endif %}>Awarded</option>
+      <option value="rejected" {% if workspace.status == "rejected" %}selected{% endif %}>Rejected</option>
+      <option value="abandoned" {% if workspace.status == "abandoned" %}selected{% endif %}>Abandoned</option>
+    </select>
+  </label>
+  <label>Deadline
+    <input name="deadline" type="date"
+           value="{{ workspace.deadline.strftime('%Y-%m-%d') if workspace.deadline else '' }}">
+  </label>
+  <label>Citation style
+    <select name="citation_style">
+      <option value="vancouver" {% if workspace.citation_style == "vancouver" %}selected{% endif %}>Vancouver (numbered)</option>
+      <option value="author-year" {% if workspace.citation_style == "author-year" %}selected{% endif %}>Author–year</option>
+    </select>
+  </label>
   <button type="submit">Save</button>
 </form>
 
-<h2 style="margin-top: 2em; color: #c00;">Danger zone</h2>
-<form method="post" action="/workspaces/{{ workspace.id }}/delete"
-      data-confirm="Soft-delete this workspace? It will be hidden from the list but can be recovered by an admin.">
-  <button type="submit" style="background: #c00; color: white;">Soft delete</button>
-</form>
+<section>
+  <h2>Viewers</h2>
+  {% if viewers %}
+  <ul>
+    {% for viewer, user_row in viewers %}
+    <li>
+      {{ user_row.email }}
+      <form method="post" action="/workspaces/{{ workspace.id }}/viewers/{{ user_row.id }}/remove"
+            class="inline-form">
+        <button type="submit" class="secondary outline compact">Remove</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No viewers yet.</p>
+  {% endif %}
 
-<h2 style="margin-top: 2em;">Viewers</h2>
-{% if viewers %}
-<ul>
-  {% for viewer, user_row in viewers %}
-  <li>
-    {{ user_row.email }}
-    <form method="post" action="/workspaces/{{ workspace.id }}/viewers/{{ user_row.id }}/remove"
-          style="display: inline;">
-      <button type="submit" style="font-size: 0.85em;">Remove</button>
-    </form>
-  </li>
-  {% endfor %}
-</ul>
-{% else %}
-<p>No viewers yet.</p>
-{% endif %}
-
-<form method="post" action="/workspaces/{{ workspace.id }}/viewers">
-  <p>
-    <label>Add viewer by email:
+  <form method="post" action="/workspaces/{{ workspace.id }}/viewers">
+    <label>Add viewer by email
       <input name="email" type="email" required>
     </label>
     <button type="submit">Add</button>
-  </p>
-</form>
+  </form>
+</section>
+
+<section class="danger-zone">
+  <h2>Danger zone</h2>
+  <form method="post" action="/workspaces/{{ workspace.id }}/delete"
+        data-confirm="Soft-delete this workspace? It will be hidden from the list but can be recovered by an admin.">
+    <button type="submit">Soft delete</button>
+  </form>
+</section>
 {% endblock %}
