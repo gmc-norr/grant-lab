@@ -1,7 +1,7 @@
 # User editing + claim analysis of user-added text — design
 
-**Date:** 2026-06-10 (rev 2 — incorporates Codex review findings, all verified against code)
-**Status:** Approved (brainstorm with owner); rev 2 pending owner re-review
+**Date:** 2026-06-10 (rev 3 — incorporates two Codex review rounds, all findings verified against code)
+**Status:** Approved (brainstorm with owner); rev 3 pending owner re-review
 **Builds on:** `2026-04-18-call-manager-proposal-assist-design.md` (workspaces, turn queue, git-backed artifact), the citations system (slices 1–4: markers, evidence ledger, deterministic validation, semantic audit, bibliography).
 
 ## Problem
@@ -67,17 +67,33 @@ Two layers, with distinct jobs:
    mutex: re-read HEAD, apply preconditions, write, commit. Commits can no
    longer interleave; preconditions are evaluated against a HEAD that cannot
    move underneath them.
-2. **Turn lock (policy, best-effort).** User save/insert routes, after
+2. **Turn lock (policy, made sound).** User save/insert routes, after
    acquiring the commit mutex, reject with 409 if any TurnJob for the
    workspace is queued or running ("assistant is working — try again when the
-   turn finishes"). This keeps the *product* promise of choice 5. A turn that
-   is enqueued a millisecond after the check is tolerable: the user's commit
-   is already serialized by the mutex, and the agent reads HEAD per tool call,
-   so it sees the user's text.
+   turn finishes"). For this check to be authoritative rather than
+   check-then-act, **turn enqueue participates in the mutex**:
+   `submit_user_turn` acquires the same per-workspace commit mutex for its
+   (already short) enqueue transaction. Either the enqueue lands first and
+   the user save sees the queued turn (409), or the save lands first and the
+   turn starts strictly after the user's commit.
+3. **`replace_proposal` read precondition (enforced).** Verified:
+   `replace_proposal_impl` writes model-supplied content with no read of
+   HEAD — an in-flight replace generated before a user save would silently
+   drop the user's text from HEAD (recoverable in history, but a lost
+   update). The tool gains a precondition: the handle tracks the agent's
+   *view of HEAD* — updated by `read_proposal` AND by each of its own
+   successful mutations (the tools already return the new commit SHA), so
+   multi-edit turns keep working without re-reads. `replace_proposal` (and
+   `edit_proposal`, for uniformity) fails with "proposal changed since you
+   read it — re-read" unless that SHA equals current HEAD inside the mutex.
+   A blind replace becomes a tool error, not a lost update. The agent can still rewrite
+   user prose *after reading it* — that remains the best-effort policy of
+   §5 — but it can never overwrite text it has not seen.
 
 **Race tests are required** (see §7): concurrent user-save vs agent-tool-write
-must produce two clean sequential commits, never a corrupted repo or a lost
-write.
+must produce two clean sequential commits; concurrent user-save vs turn
+enqueue must end in exactly one of the two serialized orders; a replace
+generated against a stale read must fail, never drop a user commit from HEAD.
 
 ### Routes
 
@@ -174,17 +190,24 @@ unrelated section after `##` boundaries shift):
    `section_sha` by the supersession check); extract sentences with the
    existing `claims.py` sentence iterator, keeping each sentence's ordinal
    and character offset within the section.
-2. SHA each sentence. Look up the **classification cache** (below); skip
-   sentences with a cached result for the current prompt version — **only new
-   or changed sentences cost tokens.**
-3. For each remaining sentence:
-   - **Has canonical marker(s):** run the existing semantic audit
-     (claim vs reference chunks → supported/unsupported verdict). Reuses the
-     existing verdict cache.
-   - **No marker:** one LLM classification — "does this sentence assert a
-     checkable factual claim that needs support?" (definitions, signposting,
-     and the proposal's own aims/plans are *not* claims). Cache the result
-     either way. If yes:
+2. **Determine citation state per occurrence first.** Verified: the sentence
+   iterator strips canonical markers from `sentence_text`, so a cited and an
+   uncited occurrence of the same prose share a claim_sha — branching on the
+   cache before checking markers would let a cached "uncited" outcome
+   suppress the audit of a cited occurrence. So: markers are detected from
+   the sentence's span in the *original* text, and the branch below is
+   chosen before any cache lookup.
+3. For each sentence occurrence:
+   - **Cited (has canonical marker(s)):** always the evidence-ledger audit
+     path — the existing semantic audit (claim vs the cited reference's
+     chunks → supported/unsupported verdict per evidence id). Caching is the
+     existing per-verdict cache; `claim_classifications` is never consulted
+     for cited occurrences.
+   - **Uncited:** look up the **classification cache** (below) by claim_sha +
+     prompt_version — a hit costs zero tokens. On miss, one LLM
+     classification — "does this sentence assert a checkable factual claim
+     that needs support?" (definitions, signposting, and the proposal's own
+     aims/plans are *not* claims). Cache the result either way. If a claim:
      - **Candidate retrieval:** embedding similarity between the claim
        sentence and the workspace's `ReferenceChunk` embeddings (top-k, k=3)
        — this **reuses the existing chunk embeddings and semantic-search
@@ -215,28 +238,52 @@ evidence_quote, verdict_json) or no_match. Re-analysis of an unchanged
 sentence is a cache hit — zero LLM calls. Rows are invalidated by
 prompt_version bumps.
 
-**Library-change invalidation:** when a reference's text ingest completes or
-a reference is tombstoned, mark `no_match` classification rows for that
-workspace stale (a `stale_at` timestamp) and enqueue analysis jobs for the
-sections at HEAD containing open `uncited_no_match` annotations. Re-runs are
-retrieval + verdict only (classification is still cached), so the cost is
-proportional to previously-unmatched claims — this is what makes "upload the
-missing PDF" actually resolve the flag.
+**Library-change invalidation (both directions):**
+
+- *Library grew* — a reference's text ingest completes: mark `no_match`
+  retrieval outcomes for the workspace stale and enqueue analysis jobs for
+  the sections at HEAD containing open `uncited_no_match` annotations.
+  Re-runs are retrieval + verdict only (classification is still cached), so
+  the cost is proportional to previously-unmatched claims — this is what
+  makes "upload the missing PDF" actually resolve the flag.
+- *Library shrank or changed* — a reference is tombstoned/deleted, its
+  chunks are re-ingested, or chunk embeddings are refreshed under a new
+  model: mark `supported` retrieval outcomes that point at the affected
+  reference stale, mark open `uncited_supported` annotations citing it
+  stale, and enqueue jobs for their sections. Otherwise the strip would
+  keep offering Insert for evidence that no longer exists. (The `is_claim`
+  classification itself is never invalidated by library changes — only the
+  retrieval/verdict outcome attached to it.)
 
 **`user_claim_annotations` (occurrence-addressed, user-facing).** One row per
 *occurrence* of a finding:
 
 - id, workspace_id, section_sha (snapshot the annotation was computed
-  against), section_heading (display), sentence_ordinal, char_offset,
-  claim_sha, claim_text, kind (`uncited_supported` / `uncited_no_match` /
-  `cited_unsupported`), reference_id (nullable), evidence_quote (nullable),
+  against), **section_occurrence** (0-based ordinal among sections sharing
+  this section_sha at analysis time — byte-identical duplicate sections get
+  separate rows; the job is content-keyed, so its processor fans out one
+  annotation set per duplicate at HEAD), section_heading (display),
+  sentence_ordinal, char_offset, claim_sha, claim_text, kind
+  (`uncited_supported` / `uncited_no_match` / `cited_unsupported`),
+  **evidence_id** (nullable; set — and required — for `cited_unsupported`,
+  so a sentence carrying several bad citations gets one row per bad
+  evidence marker), reference_id (nullable), evidence_quote (nullable),
   chunk_index (nullable), status (`open` / `inserted` / `dismissed` /
   `stale`), dismissed_reason, resolved_by_user_id, created_at, resolved_at.
-- Unique on (workspace_id, section_sha, sentence_ordinal, kind). A new
+- Unique on (workspace_id, section_sha, section_occurrence,
+  sentence_ordinal, kind, evidence_id) — with evidence_id taking a sentinel
+  empty value for uncited kinds so the composite stays enforceable. A new
   analysis of a *changed* section produces fresh rows against the new
   section_sha; rows for section SHAs no longer present at HEAD are marked
   `stale` (kept for audit, hidden from the strip). Dismissals are
   occurrence-scoped by construction.
+
+**Reconcile tick (self-healing).** A periodic job (mirroring the ranking
+reconciliation pattern): for each drafting-enabled workspace, split HEAD and
+enqueue a job for any section whose section_sha has no job row in
+queued/running/done. This heals enqueues lost to the DB-failure window in §6
+and any supersession edge cases — analysis coverage converges to HEAD without
+manual intervention.
 
 ## 4. Suggestions UI
 
@@ -280,8 +327,16 @@ through the same code path as the agent's `insert_citation` tool:
 4. Commit proposal.md + citations.json atomically (existing
    `write_and_commit_files` multi-file commit), `ArtifactVersion`
    `created_by="user"`, audit event, annotation → `inserted`.
-5. Idempotent: if an evidence row for this (annotation, reference, quote)
-   already exists with a live marker at HEAD, just resolve the row.
+5. **Occurrence-aware idempotency (explicit refactor).** Verified: the
+   existing insertion path's `_find_idempotent_row` treats *any* live
+   citation with the same (reference, chunk, quote) as already-inserted,
+   anywhere in the document. That is wrong for occurrences: citing the same
+   evidence for the same sentence appearing twice must produce two markers.
+   The shared insertion core is refactored to accept an occurrence binding:
+   the user path is idempotent only if *this annotation* already has its own
+   ev_id live at HEAD (annotation row already `inserted` → no-op). The agent
+   tool keeps its current document-level semantics — no behavior change on
+   that surface.
 
 Insert/dismiss require owner (same as section saves).
 
@@ -308,6 +363,15 @@ Insert/dismiss require owner (same as section saves).
 
 - **Git commit failure on save/insert:** existing `write_and_commit_files`
   rollback; user sees an error banner; nothing half-written.
+- **DB failure *after* a successful git commit:** the save's DB writes
+  (ArtifactVersion, WorkspaceEvent, job enqueue) happen in one transaction
+  after the commit; if it fails, the user gets a 500 banner ("saved, but
+  bookkeeping failed — reload"), and the text is safe at HEAD. Recovery is
+  defined, not hoped for: the existing `reconcile_workspace_git_drift`
+  backfills the missing ArtifactVersion (as `created_by='reconciled'` —
+  provenance degraded, logged loudly), and the claim-analysis **reconcile
+  tick** (§3) re-enqueues the missed analysis job. The WorkspaceEvent is the
+  one accepted loss (audit gap, logged).
 - **LLM failure / cap exceeded:** job → failed with last_error; strip shows
   reason + Retry. Cap-exceeded messaging matches the chat-turn cap UX.
 - **Ledger write failure after a successful LLM call:** logged loudly, not
@@ -328,21 +392,40 @@ no browser tests.
   admin non-owner → 403); CSRF.
 - **Write serialization:** concurrent user save + agent tool write under the
   commit mutex → two sequential commits, both contents present in history,
-  no lost write, no git corruption. Mutex covers all agent mutation tools.
+  no git corruption; mutex covers all agent mutation tools. User save vs
+  turn enqueue → exactly one serialized order (409 or turn-after-commit).
+  `replace_proposal` against a stale read → tool error, user commit still at
+  HEAD; after re-read it succeeds.
 - Queue: content-keyed enqueue dedup; supersession (job whose section_sha is
   gone at HEAD → superseded, never analyzed); index shift from a user adding
-  a `##` mid-edit does not retarget any job.
+  a `##` mid-edit does not retarget any job; reconcile tick enqueues for a
+  HEAD section with no job row.
 - Diff-scoping: unchanged sentences produce zero LLM calls (assert on fake
   client call count); "not a claim" results are cached and not reclassified
   on the next save; prompt_version bump invalidates.
+- **Cited vs cache:** the same prose cited in one place and uncited in
+  another → the cited occurrence gets a semantic-audit verdict even when the
+  uncited occurrence has a cached classification (cache never short-circuits
+  the audit path).
 - Library-change reanalysis: open `uncited_no_match` + new reference text
   ingested → job enqueued, retrieval re-runs, annotation resolves or stays
-  flagged.
+  flagged. Tombstoning a suggested reference → its `uncited_supported`
+  annotations and cached outcomes go stale; re-analysis no longer offers it.
 - Occurrence addressing: identical sentence in two sections → two
-  annotations; dismissing one leaves the other open.
+  annotations; dismissing one leaves the other open. **Byte-identical
+  duplicate sections** → one content-keyed job, annotation sets fanned out
+  per section_occurrence; dismiss in one duplicate leaves the other open.
+  A sentence with two failing citations → two `cited_unsupported` rows
+  (per evidence_id).
 - Insert: canonical marker + evidence row committed atomically; bare-marker
   scan in Tier-1 catches hand-typed `[@key]`; ambiguous anchor → clean
-  failure, no write; idempotency; Tier-1 revalidation runs post-insert.
+  failure, no write; occurrence-aware idempotency (same evidence live
+  elsewhere does NOT no-op this occurrence; this annotation already
+  inserted DOES); agent-tool idempotency semantics unchanged; Tier-1
+  revalidation runs post-insert.
+- DB-failure-after-commit recovery: simulated DB error post-commit →
+  reconciliation backfills ArtifactVersion, reconcile tick re-enqueues
+  analysis.
 - Caps: analysis blocked at cap with correct failure surface.
 - Migrations: new tables round-trip per existing alembic test pattern.
 
