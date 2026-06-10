@@ -18,18 +18,22 @@ deleter; UI/route wiring is expected to call it.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.analysis.invalidation import on_reference_unavailable
 from call_manager.proposal_assist.citations.ledger import load_ledger
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from call_manager.proposal_assist.references.storage import ReferenceStorage
+
+logger = logging.getLogger(__name__)
 
 CITATIONS_FILENAME = "citations.json"
 
@@ -68,14 +72,47 @@ def delete_or_tombstone_reference(
         # Unknown id OR cross-workspace attempt — treat both as not-found.
         raise ValueError(f"reference {rid} not found in workspace {workspace_id}")
 
+    # Workspaces root for the claim-analysis invalidation hook: storage.root IS
+    # the workspaces_dir when storage is provided; otherwise invert the
+    # production layout <workspaces_dir>/<workspace_id>/repo (paths.
+    # workspace_repo_dir). A wrong derivation only suppresses the re-enqueue
+    # (no proposal.md found) — the DB staleing inside the hook is unaffected.
+    workspaces_dir = storage.root if storage is not None else Path(repo_dir).parent.parent
+
     if _is_cited(repo_dir, rid):
         # Cited → tombstone: retain bytes/chunks/metadata so existing citations
         # keep resolving. Idempotent: re-tombstoning just refreshes nothing
         # material (we leave an existing timestamp untouched).
         if ref.tombstoned_at is None:
             ref.tombstoned_at = datetime.now(UTC)
+        # Library shrank (spec 2026-06-10 §3): stale supported findings that
+        # point at this reference and re-enqueue their sections. Same
+        # transaction as the tombstone — one commit covers both.
+        try:
+            on_reference_unavailable(
+                session,
+                workspace_id=workspace_id,
+                reference_id=rid,
+                workspaces_dir=workspaces_dir,
+            )
+        except Exception:  # noqa: BLE001 — invalidation is best-effort
+            logger.exception("claim-analysis invalidation failed (tombstone)")
         session.commit()
         return "tombstoned"
+
+    # Library shrank (spec 2026-06-10 §3) — MUST run BEFORE session.delete(ref):
+    # the FKs on ClaimClassification.reference_id / UserClaimAnnotation
+    # .reference_id are SET NULL on delete, so a hook running after the delete
+    # would match zero rows. Same transaction as the delete below.
+    try:
+        on_reference_unavailable(
+            session,
+            workspace_id=workspace_id,
+            reference_id=rid,
+            workspaces_dir=workspaces_dir,
+        )
+    except Exception:  # noqa: BLE001 — invalidation is best-effort
+        logger.exception("claim-analysis invalidation failed (hard-delete)")
 
     # Uncited → hard-delete: chunks first (FK), then the row, then bytes.
     # NOTE: ReferenceChunk.reference_id is ondelete="CASCADE", so the DB would

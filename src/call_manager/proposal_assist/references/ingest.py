@@ -34,6 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.analysis.invalidation import on_reference_text_ingested
 from call_manager.proposal_assist.references.chunker import chunk_sections
 from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.references.embed import Embedder
@@ -212,6 +213,22 @@ def ingest_bytes(
         ingest_result = IngestResult(
             reference_id=reference_id, text_status="failed", text_error=msg
         )
+
+    if ingest_result.text_status == "done":
+        # Library grew (spec 2026-06-10 §3): right after text_status flips to
+        # 'done' this reference's chunks become searchable, so stale cached
+        # no_match outcomes and re-enqueue sections with open no-match
+        # findings. Fresh session, own commit — the Phase-2 'done' commit is
+        # already durable. storage.root IS the workspaces_dir (ReferenceStorage
+        # layout: <workspaces_dir>/<workspace_id>/references/...).
+        try:
+            with session_factory() as s2:
+                on_reference_text_ingested(
+                    s2, workspace_id=workspace_id, workspaces_dir=storage.root
+                )
+                s2.commit()
+        except Exception:  # noqa: BLE001 — invalidation is best-effort
+            logger.exception("claim-analysis invalidation failed (ingest)")
 
     # Phase 3: extract bibliographic metadata + assign citekey.
     # Skip entirely when there is nothing to extract from (preserves prior
