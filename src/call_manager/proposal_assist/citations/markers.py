@@ -130,3 +130,16 @@ def rename_marker_citekey(text: str, old_citekey: str, new_citekey: str) -> tupl
 
     new_text = MARKER_RE.sub(_sub, text)
     return new_text, count
+
+
+# A visible citekey marker NOT followed by the canonical ev-comment. Users
+# hand-typing [@key] in the section editor produce these; they are invisible
+# to find_markers (and so to deterministic validation) and block composed
+# export. Detected at Tier-1 save validation.
+_BARE_RE = re.compile(r"\[@(?P<citekey>[A-Za-z0-9_-]+)\](?!<!-- ev:)")
+
+
+def find_bare_markers(text: str) -> list[dict]:
+    """Return [{citekey, start}] for each bare ``[@key]`` lacking the
+    ``<!-- ev:... -->`` evidence comment, in document order."""
+    return [{"citekey": m.group("citekey"), "start": m.start()} for m in _BARE_RE.finditer(text)]
