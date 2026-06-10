@@ -15,6 +15,9 @@ from call_manager.db.session import make_engine, make_session_factory
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
+from call_manager.proposal_assist.web.annotations import (
+    router as annotations_router,
+)
 from call_manager.proposal_assist.web.citations import (
     router as citations_router,
 )
@@ -356,6 +359,7 @@ def create_app() -> FastAPI:
     app.include_router(rubric_review_router)
     app.include_router(workspaces_router)
     app.include_router(sections_router)
+    app.include_router(annotations_router)
     app.include_router(files_router)
     app.include_router(references_router)
     app.include_router(citations_router)

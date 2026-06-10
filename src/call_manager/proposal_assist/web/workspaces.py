@@ -614,7 +614,7 @@ def get_workspace_main(
             "artifact_rendered": rendered,
             "artifact_raw": raw,
             "artifact_sections": artifact_sections,
-            "annotations_enabled": False,
+            "annotations_enabled": True,
             "needs_disclosure": needs_disclosure,
             "workspace_attachments": workspace_attachments,
             "workspace_references": workspace_references,

@@ -245,6 +245,50 @@ def _resolve_free_citekey(
     return f"ref-{uuid.uuid4().hex[:12]}"
 
 
+def _resolve_citekey_for_ref(
+    session: Session,
+    *,
+    ledger: dict,
+    ref: Reference,
+    workspace_id: uuid.UUID,
+) -> str:
+    """Resolve the citekey to use when citing *ref* — the SINGLE citekey
+    resolution shared by the agent insert tool (_insert_citation_locked) and
+    the user annotation-insert service (analysis/insert.py).
+
+    Reuse the ref's cached citekey if set; else generate one and self-heal
+    against any collision. The DB citekey cache is derived (a best-effort
+    write that may have failed), so a generated key can collide with a
+    DIFFERENT reference in the ledger and/or DB. Rather than hard-error
+    (which could strand THIS insert behind another reference's stale cache),
+    bump the suffix to a key free in BOTH the ledger and the DB. A key reused
+    from THIS reference (ref.citekey already set) is left exactly as-is.
+    """
+    if ref.citekey:
+        return ref.citekey
+    base_candidate = generate_citekey(
+        ref.csl_json or ref.csl_json_extracted or {},
+        workspace_id,
+        session,
+    )
+    # "taken" = citekeys used in the ledger by ANOTHER reference ∪ citekeys
+    # held by a DIFFERENT Reference in this workspace in the DB.
+    taken = {
+        row.get("citekey")
+        for row in ledger["evidence"]
+        if row.get("citekey") and row.get("reference_id") != str(ref.id)
+    }
+    db_citekeys = session.scalars(
+        select(Reference.citekey).where(
+            Reference.workspace_id == workspace_id,
+            Reference.citekey.is_not(None),
+            Reference.id != ref.id,
+        )
+    )
+    taken.update(k for k in db_citekeys if k)
+    return _resolve_free_citekey(base_candidate, taken=taken)
+
+
 # --- list_citations (read-only discovery) ----------------------------------
 
 
@@ -424,37 +468,11 @@ def _insert_citation_locked(
             "idempotent": True,
         }
 
-    # 6. Citekey — reuse the ref's if set; else generate and self-heal against
-    # any collision. The DB citekey cache is derived (a best-effort write that
-    # may have failed), so a generated key can collide with a DIFFERENT
-    # reference in the ledger and/or DB. Rather than hard-error (which could
-    # strand THIS insert behind another reference's stale cache), bump the
-    # suffix to a key free in BOTH the ledger and the DB. A key reused from THIS
-    # reference (ref.citekey already set) is left exactly as-is.
-    if ref.citekey:
-        citekey = ref.citekey
-    else:
-        base_candidate = generate_citekey(
-            ref.csl_json or ref.csl_json_extracted or {},
-            ctx.workspace_id,
-            session,
-        )
-        # "taken" = citekeys used in the ledger by ANOTHER reference ∪ citekeys
-        # held by a DIFFERENT Reference in this workspace in the DB.
-        taken = {
-            row.get("citekey")
-            for row in ledger["evidence"]
-            if row.get("citekey") and row.get("reference_id") != str(ref_uuid)
-        }
-        db_citekeys = session.scalars(
-            select(Reference.citekey).where(
-                Reference.workspace_id == ctx.workspace_id,
-                Reference.citekey.is_not(None),
-                Reference.id != ref_uuid,
-            )
-        )
-        taken.update(k for k in db_citekeys if k)
-        citekey = _resolve_free_citekey(base_candidate, taken=taken)
+    # 6. Citekey — the shared resolver: reuse the ref's if set; else generate
+    # and self-heal against any ledger/DB collision (see _resolve_citekey_for_ref).
+    citekey = _resolve_citekey_for_ref(
+        session, ledger=ledger, ref=ref, workspace_id=ctx.workspace_id
+    )
 
     # 7. Build the new proposal text (validates anchor uniqueness; nothing written yet).
     ev_id = new_ev_id()

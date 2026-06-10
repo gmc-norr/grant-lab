@@ -110,9 +110,9 @@ def _view_fragment(
             "s": _section_ctx(section),
             "is_owner": is_owner,
             "issues": issues or [],
-            # Flipped on in the annotations slice (Task 11); until then the
-            # view partial's guard keeps the lazy-load div out of the DOM.
-            "annotations_enabled": False,
+            # Task 11: the view partial lazy-loads the annotation strip for
+            # this section's CURRENT sha (a fresh save → job_pending poll).
+            "annotations_enabled": True,
         },
     )
 
@@ -267,7 +267,7 @@ def post_section_save(
             {
                 "workspace": ws,
                 "is_owner": True,
-                "annotations_enabled": False,
+                "annotations_enabled": True,
                 "artifact_sections": artifact_sections,
                 "save_issues_for_index": n,
                 "save_issues": result.issues,

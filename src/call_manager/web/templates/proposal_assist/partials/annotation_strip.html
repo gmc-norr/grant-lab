@@ -1,0 +1,41 @@
+{# Annotation strip for one section snapshot — rendered into the
+   #annotations-{{ n }} container that section_view.html lazy-loads.
+   Context (web/annotations.py:_strip_response): workspace, n, is_owner,
+   annotations [{id, kind, claim_text, evidence_quote, ref_label}],
+   job_pending, job_failed, job_error, poll_url.
+   All POST responses re-render this WHOLE strip, so every button targets the
+   enclosing #annotations-{{ n }} container (innerHTML), not its own div. #}
+{% if job_pending %}
+<p class="strip-pending" hx-get="{{ poll_url }}" hx-trigger="load delay:5s"
+   hx-target="#annotations-{{ n }}" hx-swap="innerHTML">Checking claims…</p>
+{% elif job_failed %}
+<p class="strip-failed">Analysis failed: {{ job_error }}
+  {% if is_owner %}
+  <button hx-post="/workspaces/{{ workspace.id }}/sections/{{ n }}/reanalyze"
+          hx-target="#annotations-{{ n }}" hx-swap="innerHTML">Retry</button>
+  {% endif %}</p>
+{% endif %}
+{% for a in annotations %}
+<div class="annotation annotation-{{ a.kind }}">
+  <blockquote>{{ a.claim_text }}</blockquote>
+  {% if a.kind == "uncited_supported" %}
+    <p>Supported by <strong>{{ a.ref_label }}</strong>: "{{ a.evidence_quote }}"</p>
+    {% if is_owner %}
+    <button hx-post="/workspaces/{{ workspace.id }}/annotations/{{ a.id }}/insert?n={{ n }}"
+            hx-target="#annotations-{{ n }}" hx-swap="innerHTML">Insert citation</button>
+    {% endif %}
+  {% elif a.kind == "uncited_no_match" %}
+    <p>Nothing in your library supports this.</p>
+    {% if is_owner %}
+    <form hx-post="/workspaces/{{ workspace.id }}/annotations/{{ a.id }}/dismiss?n={{ n }}"
+          hx-target="#annotations-{{ n }}" hx-swap="innerHTML">
+      <input name="reason" placeholder="why is this OK? (required)" required>
+      <button type="submit">Dismiss</button>
+    </form>
+    {% endif %}
+  {% else %}
+    <p>A citation on this sentence may not support it —
+       <a href="/workspaces/{{ workspace.id }}/citations">review in the evidence ledger</a>.</p>
+  {% endif %}
+</div>
+{% endfor %}
