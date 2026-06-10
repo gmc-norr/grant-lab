@@ -237,6 +237,16 @@ class Settings(BaseSettings):
         alias="COMPACTION_TICK_SECONDS",
         description="How often the compaction tick scans for workspaces over threshold.",
     )
+    analysis_tick_seconds: int = Field(
+        default=20,
+        alias="ANALYSIS_TICK_SECONDS",
+        description="Claim-analysis queue drain interval (seconds).",
+    )
+    analysis_reconcile_tick_seconds: int = Field(
+        default=900,
+        alias="ANALYSIS_RECONCILE_TICK_SECONDS",
+        description="Claim-analysis coverage reconcile interval (seconds).",
+    )
     turn_drain_tick_seconds: int = Field(
         default=5,
         alias="TURN_DRAIN_TICK_SECONDS",

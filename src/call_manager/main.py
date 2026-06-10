@@ -133,6 +133,15 @@ async def lifespan(app: FastAPI):
     )
     app.state.workspace_controller = workspace_controller
 
+    # Claim-analysis embedder: the same construction reference ingest uses
+    # (web/references.py wraps the shared embed_client per request). Always
+    # constructible — embed_client is built unconditionally in create_app()
+    # and only fails at call time if Ollama is unreachable, which the drain
+    # tick surfaces as per-job failures (retry → dead-letter), not a crash.
+    from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
+
+    analysis_embedder = OllamaEmbedderAdapter(app.state.embed_client)
+
     import asyncio as _asyncio
 
     app.state.scheduler = build_scheduler(
@@ -153,6 +162,10 @@ async def lifespan(app: FastAPI):
         digest_settings=settings,
         limiters=[app.state.email_limiter, app.state.ip_limiter],
         workspace_controller=workspace_controller,
+        # Never None here: build_citation_service raises in create_app() on
+        # misconfig, so a started app always has a real service.
+        citation_service=app.state.citation_service,
+        analysis_embedder=analysis_embedder,
         app_loop=_asyncio.get_running_loop(),
         start=True,
     )

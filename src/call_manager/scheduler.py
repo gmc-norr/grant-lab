@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC
 from datetime import datetime as _dt
+from pathlib import Path
 from typing import Protocol
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -19,6 +20,8 @@ from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.embeddings.refresh import refresh_missing_embeddings_tick
 from call_manager.ingestion.alerts import ConsecutiveFailureTracker
 from call_manager.ingestion.orchestrator import run_ingestion
+from call_manager.proposal_assist.analysis.pipeline import drain_analysis_queue
+from call_manager.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
 from call_manager.proposal_assist.phases.setup import run_phase0_tick
 from call_manager.ranking.anthropic_client import AnthropicClient
@@ -69,6 +72,8 @@ def build_scheduler(
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     limiters: list[SlidingWindowLimiter] | None = None,
     workspace_controller: WorkspaceController,
+    citation_service=None,  # CitationLLMService | None — gates the analysis ticks
+    analysis_embedder=None,  # references.embed.Embedder | None — gates the analysis ticks
     app_loop=None,  # asyncio.AbstractEventLoop | None
     start: bool = True,
 ) -> BackgroundScheduler:
@@ -523,6 +528,62 @@ def build_scheduler(
         max_instances=1,
         coalesce=True,
     )
+
+    # Claim-analysis ticks (spec 2026-06-10 §3). Pure sync DB + LLM-HTTP work,
+    # so they run directly in APScheduler's threadpool — no app_loop dispatch.
+    def _analysis_drain_tick() -> None:
+        try:
+            out = drain_analysis_queue(
+                session_factory=session_factory,
+                citation_service=citation_service,
+                embedder=analysis_embedder,
+                workspaces_dir=Path(settings.workspaces_dir),
+            )
+            if any(out.values()):
+                _logger.info("analysis drain: %s", out)
+        except Exception:
+            _logger.exception("analysis drain tick failed")
+
+    def _analysis_reconcile_tick() -> None:
+        try:
+            n = reconcile_analysis_coverage(
+                session_factory=session_factory,
+                workspaces_dir=Path(settings.workspaces_dir),
+            )
+            if n:
+                _logger.info("analysis reconcile enqueued %d", n)
+        except Exception:
+            _logger.exception("analysis reconcile tick failed")
+
+    # Gate on citation-service + embedder AVAILABILITY, not ANTHROPIC_API_KEY:
+    # the citation LLM defaults to local Ollama (CITATION_LLM_PROVIDER=ollama),
+    # so an Anthropic key is irrelevant here. main.py always passes both in
+    # production (build_citation_service raises at create_app() on misconfig;
+    # the embedder wraps the always-constructed embed_client) — None means a
+    # caller (tests, future config) deliberately left analysis unwired.
+    if settings.drafting_enabled and citation_service is not None and analysis_embedder is not None:
+        sched.add_job(
+            _analysis_drain_tick,
+            trigger=IntervalTrigger(seconds=settings.analysis_tick_seconds),
+            id="claim_analysis_drain",
+            max_instances=1,
+            coalesce=True,
+        )
+        sched.add_job(
+            _analysis_reconcile_tick,
+            trigger=IntervalTrigger(seconds=settings.analysis_reconcile_tick_seconds),
+            id="claim_analysis_reconcile",
+            max_instances=1,
+            coalesce=True,
+        )
+    else:
+        _logger.info(
+            "claim-analysis ticks skipped (drafting_enabled=%s, "
+            "citation_service=%s, analysis_embedder=%s)",
+            settings.drafting_enabled,
+            citation_service is not None,
+            analysis_embedder is not None,
+        )
 
     if start:
         sched.start()

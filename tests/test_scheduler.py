@@ -204,6 +204,77 @@ def test_build_scheduler_includes_turn_reaper_job(_settings_env):
     sched.shutdown(wait=False)
 
 
+_ANALYSIS_JOB_IDS = ("claim_analysis_drain", "claim_analysis_reconcile")
+
+
+def _build_with_analysis_deps(settings, **kw):
+    """Shared builder for the claim-analysis conditional-registration tests —
+    same arguments as the smoke tests above, plus the analysis kwargs."""
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+
+    def session_factory():
+        return None
+
+    workspace_controller = build_workspace_controller(
+        settings=settings,
+        session_factory=session_factory,
+    )
+    return build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=workspace_controller,
+        start=False,
+        **kw,
+    )
+
+
+def test_build_scheduler_includes_analysis_ticks_when_service_and_embedder_given(_settings_env):
+    """Both analysis ticks register when a citation service AND an embedder
+    are provided and drafting is enabled (the default). Gated on availability,
+    NOT on ANTHROPIC_API_KEY — the citation LLM defaults to local Ollama."""
+    sched = _build_with_analysis_deps(
+        Settings(), citation_service=object(), analysis_embedder=object()
+    )
+    job_ids = {j.id for j in sched.get_jobs()}
+    for jid in _ANALYSIS_JOB_IDS:
+        assert jid in job_ids, jid
+    sched.shutdown(wait=False)
+
+
+def test_build_scheduler_omits_analysis_ticks_without_citation_service(_settings_env):
+    sched = _build_with_analysis_deps(Settings(), citation_service=None, analysis_embedder=object())
+    job_ids = {j.id for j in sched.get_jobs()}
+    for jid in _ANALYSIS_JOB_IDS:
+        assert jid not in job_ids, jid
+    sched.shutdown(wait=False)
+
+
+def test_build_scheduler_omits_analysis_ticks_without_embedder(_settings_env):
+    sched = _build_with_analysis_deps(Settings(), citation_service=object(), analysis_embedder=None)
+    job_ids = {j.id for j in sched.get_jobs()}
+    for jid in _ANALYSIS_JOB_IDS:
+        assert jid not in job_ids, jid
+    sched.shutdown(wait=False)
+
+
+def test_build_scheduler_omits_analysis_ticks_when_drafting_disabled(_settings_env, monkeypatch):
+    monkeypatch.setenv("DRAFTING_ENABLED", "false")
+    sched = _build_with_analysis_deps(
+        Settings(), citation_service=object(), analysis_embedder=object()
+    )
+    job_ids = {j.id for j in sched.get_jobs()}
+    for jid in _ANALYSIS_JOB_IDS:
+        assert jid not in job_ids, jid
+    sched.shutdown(wait=False)
+
+
 def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
     """Daily crons must set an explicit misfire_grace_time well above the
     1-second APScheduler default so a restart at the fire instant doesn't
