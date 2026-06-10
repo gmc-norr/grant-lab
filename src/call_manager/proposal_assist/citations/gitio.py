@@ -166,12 +166,15 @@ def write_and_commit_files(
 def current_head(repo_dir: Path) -> str:
     """Return the current HEAD commit SHA of *repo_dir*. Raises GitCommitError
     on failure (no repo / no commits)."""
-    proc = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=Path(repo_dir),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(repo_dir),
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise GitCommitError(f"rev-parse HEAD failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse HEAD failed: {proc.stderr.strip()}")
     return proc.stdout.strip()

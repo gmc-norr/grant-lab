@@ -11,6 +11,15 @@ We use the try-variant (`pg_try_advisory_lock`) so a second attempt
 returns False rather than blocking. The registry (registry.py) treats
 False as "another process is already handling this workspace — back
 off".
+
+This module houses TWO lock families: (a) the original session-scoped,
+non-blocking, subprocess-lifetime workspace lock acquired via
+``pg_try_advisory_lock`` and held until the subprocess exits or the
+connection closes; and (b) the transaction-scoped, blocking commit mutex
+acquired via ``pg_advisory_xact_lock`` that serializes every git mutation
+of the workspace repo (user section saves, citation inserts, agent tool
+calls, turn enqueue) — this lock is released automatically at COMMIT or
+ROLLBACK without any explicit unlock call.
 """
 
 from __future__ import annotations
@@ -24,6 +33,14 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 
+def _advisory_lock_key(namespace: str, workspace_id: uuid.UUID) -> int:
+    digest = hashlib.sha256(f"{namespace}:{workspace_id}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 2**63:
+        return unsigned - 2**64
+    return unsigned
+
+
 def workspace_lock_key(workspace_id: uuid.UUID) -> int:
     """Stable 64-bit signed integer derived from the workspace UUID.
 
@@ -32,13 +49,7 @@ def workspace_lock_key(workspace_id: uuid.UUID) -> int:
     not deterministic across Postgres versions). Use a Python-side
     sha256 truncated to 64 bits, then map into the signed-int range.
     """
-    digest = hashlib.sha256(
-        f"workspace:{workspace_id}".encode(),
-    ).digest()
-    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
-    if unsigned >= 2**63:
-        return unsigned - 2**64
-    return unsigned
+    return _advisory_lock_key("workspace", workspace_id)
 
 
 def acquire_workspace_lock(session: Session, workspace_id: uuid.UUID) -> bool:
@@ -115,11 +126,7 @@ def commit_mutex_key(workspace_id: uuid.UUID) -> int:
     Distinct namespace from workspace_lock_key (the session-scoped subprocess
     lifetime lock) so holding one never implies the other.
     """
-    digest = hashlib.sha256(f"commit:{workspace_id}".encode()).digest()
-    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
-    if unsigned >= 2**63:
-        return unsigned - 2**64
-    return unsigned
+    return _advisory_lock_key("commit", workspace_id)
 
 
 def acquire_commit_mutex(session: Session, workspace_id: uuid.UUID) -> None:

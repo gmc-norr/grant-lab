@@ -2,13 +2,16 @@ import threading
 import time
 import uuid
 
+import pytest
 from sqlalchemy import text
 
+from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.drafting.locking import (
     acquire_commit_mutex,
     commit_mutex_key,
     workspace_lock_key,
 )
+from call_manager.proposal_assist.paths import workspace_repo_dir
 
 
 def test_commit_mutex_key_differs_from_subprocess_lock_key():
@@ -53,6 +56,10 @@ def test_mutex_released_on_rollback(pg_session_factory):
 
 
 def test_workspace_repo_dir_layout(tmp_path):
-    from call_manager.proposal_assist.paths import workspace_repo_dir
     ws = uuid.uuid4()
     assert workspace_repo_dir(tmp_path, ws) == tmp_path / str(ws) / "repo"
+
+
+def test_current_head_missing_dir_raises_git_error(tmp_path):
+    with pytest.raises(GitCommitError):
+        current_head(tmp_path / "does-not-exist")
