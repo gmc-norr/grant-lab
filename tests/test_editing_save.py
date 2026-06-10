@@ -1,0 +1,215 @@
+"""save_section — the single write path for user edits of proposal.md.
+
+Uses the production repo layout: <workspaces_dir>/<workspace_id>/repo.
+"""
+
+import subprocess
+
+import pytest
+
+from call_manager.db.models import (
+    ArtifactVersion,
+    ClaimAnalysisJob,
+    TurnJob,
+    User,
+    Workspace,
+    WorkspaceEvent,
+)
+from call_manager.proposal_assist.citations.gitio import _git_env, current_head
+from call_manager.proposal_assist.editing.save import (
+    SaveResult,
+    StaleSectionError,
+    TurnInFlightError,
+    save_section,
+)
+from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
+
+DOC = "# T\nintro\n## Background\nold body [@x9]\n## Aims\naims\n"
+
+
+def _init_repo(tmp_path, ws_id, doc=DOC):
+    """Create <tmp_path>/<ws_id>/repo with proposal.md committed (production layout)."""
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    repo.mkdir(parents=True)
+    (repo / "proposal.md").write_text(doc)
+    env = _git_env()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
+    return repo
+
+
+def _ws(session):
+    user = User(email="owner@example.org", is_admin=False)
+    session.add(user)
+    session.flush()
+    ws = Workspace(owner_id=user.id, title="t")
+    session.add(ws)
+    session.flush()
+    return ws, user
+
+
+def _section_sha(repo, i):
+    return split_sections((repo / "proposal.md").read_text())[i].sha
+
+
+def test_happy_path_save(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        head = current_head(repo)
+        res = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background\nnew body\n",
+            base_commit_sha=head,
+            base_section_sha=_section_sha(repo, 1),
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+        assert isinstance(res, SaveResult)
+        assert res.changed is True
+        assert res.commit_sha == current_head(repo) != head
+        expected = "# T\nintro\n## Background\nnew body\n## Aims\naims\n"
+        assert (repo / "proposal.md").read_text() == expected
+
+        av = s.query(ArtifactVersion).one()
+        assert av.created_by == "user"
+        assert av.commit_sha == res.commit_sha
+
+        ev = s.query(WorkspaceEvent).one()
+        assert ev.kind == "user_edit"
+        assert ev.actor_id == user.id
+        assert ev.payload["section_index"] == 1
+        assert ev.payload["commit_sha"] == res.commit_sha
+
+        job = s.query(ClaimAnalysisJob).one()
+        assert job.status == "queued"
+        assert job.section_index == 1
+        assert job.section_sha == split_sections(expected)[1].sha
+        assert job.commit_sha == res.commit_sha
+        assert res.job_enqueued is True
+
+
+def test_turn_in_flight_rejected(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        head = current_head(repo)
+        s.add(TurnJob(workspace_id=ws.id, status="queued"))
+        s.flush()
+        with pytest.raises(TurnInFlightError):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=user.id,
+                section_index=1,
+                new_text="## Background\nx\n",
+                base_commit_sha=head,
+                base_section_sha=_section_sha(repo, 1),
+                workspaces_dir=tmp_path,
+            )
+        s.rollback()
+        assert (repo / "proposal.md").read_text() == DOC
+
+
+def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        old_head = current_head(repo)
+        old_s1 = _section_sha(repo, 1)
+        old_s2 = _section_sha(repo, 2)
+
+        # Simulate an agent commit that changes section 2 only.
+        env = _git_env()
+        (repo / "proposal.md").write_text(DOC.replace("aims\n", "agent-updated aims\n"))
+        subprocess.run(["git", "commit", "-aqm", "agent edit"], cwd=repo, check=True, env=env)
+
+        # HEAD moved, but section 1 is byte-identical → save proceeds.
+        res = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background\nnew body\n",
+            base_commit_sha=old_head,
+            base_section_sha=old_s1,
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+        assert res.changed is True
+        assert "new body" in (repo / "proposal.md").read_text()
+
+        # HEAD moved AND section 2 changed underneath → stale.
+        with pytest.raises(StaleSectionError):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=user.id,
+                section_index=2,
+                new_text="## Aims\nuser aims\n",
+                base_commit_sha=old_head,
+                base_section_sha=old_s2,
+                workspaces_dir=tmp_path,
+            )
+        s.rollback()
+
+
+def test_tier1_flags_bare_marker_and_missing_newline_glue(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        head = current_head(repo)
+        res = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background\nclaim [@hand2024]",  # no trailing newline
+            base_commit_sha=head,
+            base_section_sha=_section_sha(repo, 1),
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+        bare = [i for i in res.issues if i["type"] == "bare_marker"]
+        assert any(i["citekey"] == "hand2024" for i in bare)
+        assert all(i["severity"] == "error" for i in bare)
+
+        # Newline glue: the next heading must still start on its own line.
+        text_now = (repo / "proposal.md").read_text()
+        assert "claim [@hand2024]\n## Aims\naims\n" in text_now
+
+
+def test_no_change_save_short_circuits(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        head = current_head(repo)
+        live = split_sections(DOC)[1]
+        res = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text=live.text,
+            base_commit_sha=head,
+            base_section_sha=live.sha,
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+        assert res.changed is False
+        assert res.commit_sha == head == current_head(repo)
+        assert res.job_enqueued is False
+        # Tier-1 still ran on the current doc (DOC contains the bare [@x9]).
+        assert any(i["type"] == "bare_marker" for i in res.issues)
+        assert s.query(ArtifactVersion).count() == 0
+        assert s.query(WorkspaceEvent).count() == 0
+        assert s.query(ClaimAnalysisJob).count() == 0
+        assert (repo / "proposal.md").read_text() == DOC
