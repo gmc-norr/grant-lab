@@ -161,3 +161,17 @@ def write_and_commit_files(
         if restore_exc is not None:
             msg += f"; additionally, rollback encountered a restore error: {restore_exc}"
         raise GitCommitError(msg) from e
+
+
+def current_head(repo_dir: Path) -> str:
+    """Return the current HEAD commit SHA of *repo_dir*. Raises GitCommitError
+    on failure (no repo / no commits)."""
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(repo_dir),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise GitCommitError(f"rev-parse HEAD failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()

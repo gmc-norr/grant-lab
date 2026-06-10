@@ -105,3 +105,30 @@ def workspace_lock_session(
             release_workspace_lock(session, workspace_id)
     finally:
         session.close()
+
+
+def commit_mutex_key(workspace_id: uuid.UUID) -> int:
+    """Key for the per-workspace COMMIT MUTEX — a transaction-scoped advisory
+    lock serializing every git mutation of the workspace repo (user section
+    saves, user citation inserts, agent mutation tools, turn enqueue).
+
+    Distinct namespace from workspace_lock_key (the session-scoped subprocess
+    lifetime lock) so holding one never implies the other.
+    """
+    digest = hashlib.sha256(f"commit:{workspace_id}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 2**63:
+        return unsigned - 2**64
+    return unsigned
+
+
+def acquire_commit_mutex(session: Session, workspace_id: uuid.UUID) -> None:
+    """Blocking acquire of the commit mutex on *session*'s current
+    transaction. Released automatically at COMMIT or ROLLBACK — there is no
+    explicit release. Callers: acquire, do guards + git write + DB rows,
+    commit. Critical sections are short (one git commit), so blocking (not
+    try-) semantics are right."""
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": commit_mutex_key(workspace_id)},
+    )
