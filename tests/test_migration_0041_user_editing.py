@@ -1,4 +1,6 @@
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import (
     ClaimAnalysisJob,
@@ -89,6 +91,32 @@ def test_annotation_uniqueness_includes_occurrence_and_evidence(pg_session_facto
         )
         s.commit()
         assert s.query(UserClaimAnnotation).count() == 4
+
+
+def test_annotation_exact_duplicate_rejected(pg_session_factory):
+    """Negative case: an EXACT duplicate occurrence (same workspace,
+    section_sha, section_occurrence, sentence_ordinal, kind, evidence_id)
+    violates uq_user_claim_annotations_occurrence."""
+    with pg_session_factory() as s:
+        ws = _mk_workspace(s)
+        row = dict(
+            workspace_id=ws.id,
+            section_sha="a" * 64,
+            section_occurrence=0,
+            section_heading="A",
+            sentence_ordinal=0,
+            char_offset=0,
+            claim_sha="b" * 64,
+            claim_text="x",
+            kind="cited_unsupported",
+            evidence_id="ev-aaaaaa111111",
+        )
+        s.add(UserClaimAnnotation(**row))
+        s.commit()
+        s.add(UserClaimAnnotation(**row))
+        with pytest.raises(IntegrityError):
+            s.commit()
+        s.rollback()
 
 
 def test_classification_unique_per_prompt_version(pg_session_factory):

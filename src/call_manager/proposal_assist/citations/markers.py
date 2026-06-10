@@ -136,7 +136,12 @@ def rename_marker_citekey(text: str, old_citekey: str, new_citekey: str) -> tupl
 # hand-typing [@key] in the section editor produce these; they are invisible
 # to find_markers (and so to deterministic validation) and block composed
 # export. Detected at Tier-1 save validation.
-_BARE_RE = re.compile(r"\[@(?P<citekey>[A-Za-z0-9_-]+)\](?!<!-- ev:)")
+# The lookahead must require a FULLY canonical comment (same ev-id pattern as
+# MARKER_RE) — a weaker `(?!<!-- ev:)` would let near-canonical garbage like
+# `[@k]<!-- ev:123 -->` or uppercase hex escape BOTH find_markers and this scan.
+# Pandoc-style multi/prefixed citations (`[@a; @b]`, `[see @k]`) are out of
+# scope for this scan.
+_BARE_RE = re.compile(r"\[@(?P<citekey>[A-Za-z0-9_-]+)\](?!<!-- ev:ev-[0-9a-f]{6,} -->)")
 
 
 def find_bare_markers(text: str) -> list[dict]:

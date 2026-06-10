@@ -30,6 +30,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -129,13 +130,48 @@ def commit_mutex_key(workspace_id: uuid.UUID) -> int:
     return _advisory_lock_key("commit", workspace_id)
 
 
-def acquire_commit_mutex(session: Session, workspace_id: uuid.UUID) -> None:
+class CommitMutexTimeout(RuntimeError):
+    """The per-workspace commit mutex could not be acquired within the
+    timeout — another writer is wedged or unusually slow. Web routes map
+    this to 503 'workspace is busy'."""
+
+
+def acquire_commit_mutex(
+    session: Session, workspace_id: uuid.UUID, *, timeout_seconds: int = 10
+) -> None:
     """Blocking acquire of the commit mutex on *session*'s current
     transaction. Released automatically at COMMIT or ROLLBACK — there is no
     explicit release. Callers: acquire, do guards + git write + DB rows,
     commit. Critical sections are short (one git commit), so blocking (not
-    try-) semantics are right."""
-    session.execute(
-        text("SELECT pg_advisory_xact_lock(:k)"),
-        {"k": commit_mutex_key(workspace_id)},
-    )
+    try-) semantics are right — but bounded: raises :class:`CommitMutexTimeout`
+    after *timeout_seconds* so a wedged holder can't pin FastAPI workers
+    indefinitely.
+
+    Requires a non-AUTOCOMMIT session: an AUTOCOMMIT connection would release
+    the xact lock immediately and silently provide no exclusion.
+    """
+    # SET LOCAL cannot take a bind parameter in Postgres — validate and
+    # inline the integer instead. SET LOCAL scopes to the current
+    # transaction, so a rollback/commit clears it regardless.
+    timeout_ms = int(timeout_seconds) * 1000
+    if timeout_ms <= 0:
+        raise ValueError(f"timeout_seconds must be a positive int, got {timeout_seconds!r}")
+    session.execute(text(f"SET LOCAL lock_timeout = '{timeout_ms}ms'"))
+    try:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": commit_mutex_key(workspace_id)},
+        )
+    except OperationalError as exc:
+        # 55P03 = lock_not_available (lock_timeout fired). Anything else is a
+        # real connection/server problem — re-raise unchanged. No SET LOCAL
+        # restore here: the transaction is already aborted; the caller's
+        # rollback discards the LOCAL setting along with everything else.
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        if sqlstate == "55P03":
+            raise CommitMutexTimeout(str(workspace_id)) from exc
+        raise
+    # Restore the default for the rest of the transaction's statements (only
+    # reachable on success — after a timeout the txn is aborted and this
+    # statement would itself fail).
+    session.execute(text("SET LOCAL lock_timeout = DEFAULT"))

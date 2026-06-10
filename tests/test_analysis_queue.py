@@ -8,6 +8,7 @@ from call_manager.proposal_assist.analysis.queue import (
     mark_failed,
     mark_superseded,
     requeue_stuck_running,
+    touch_running_job,
 )
 
 
@@ -236,8 +237,8 @@ def test_mark_failed_truncates_error(pg_session_factory):
 def test_claim_respects_limit_and_order(pg_session_factory):
     with pg_session_factory() as s:
         ws = _ws(s)
-        # Insert jobs with distinct queued_at values to guarantee stable order.
-        base = datetime.now(UTC)
+        # Same-transaction enqueues share queued_at (transaction now()); the
+        # id tiebreaker keeps claim order == insertion order deterministically.
         for i, sha in enumerate(("a" * 64, "b" * 64, "c" * 64)):
             enqueue_section_job(
                 s,
@@ -247,12 +248,79 @@ def test_claim_respects_limit_and_order(pg_session_factory):
                 section_sha=sha,
                 commit_sha="c",
             )
-            s.flush()
-            # Back-date each row so queued_at order matches insertion order.
-            job = s.query(ClaimAnalysisJob).filter_by(section_sha=sha).one()
-            job.queued_at = base + timedelta(seconds=i)
         s.commit()
         first = claim_queued_jobs(s, limit=2)
         assert len(first) == 2
         assert [j.section_sha for j in first] == ["a" * 64, "b" * 64]
         s.commit()
+
+
+def test_mark_failed_dead_letters_at_max_attempts(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        enqueue_section_job(
+            s,
+            workspace_id=ws.id,
+            section_index=0,
+            section_heading="",
+            section_sha="a" * 64,
+            commit_sha="c",
+        )
+        s.commit()
+        (job,) = claim_queued_jobs(s, limit=1)
+        job.attempts = 3
+        mark_failed(s, job, error="boom")
+        s.commit()
+        assert s.get(ClaimAnalysisJob, job.id).status == "failed"
+
+
+def test_reenqueue_allowed_after_done(pg_session_factory):
+    """Invalidation/reconcile depend on enqueueing content that already has a
+    done row — the partial index must not block it."""
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        enqueue_section_job(
+            s,
+            workspace_id=ws.id,
+            section_index=0,
+            section_heading="",
+            section_sha="a" * 64,
+            commit_sha="c",
+        )
+        s.commit()
+        (job,) = claim_queued_jobs(s, limit=1)
+        mark_done(s, job)
+        s.commit()
+        assert (
+            enqueue_section_job(
+                s,
+                workspace_id=ws.id,
+                section_index=0,
+                section_heading="",
+                section_sha="a" * 64,
+                commit_sha="c2",
+            )
+            is True
+        )
+        s.commit()
+
+
+def test_touch_running_job_refreshes_updated_at(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        enqueue_section_job(
+            s,
+            workspace_id=ws.id,
+            section_index=0,
+            section_heading="",
+            section_sha="a" * 64,
+            commit_sha="c",
+        )
+        s.commit()
+        (job,) = claim_queued_jobs(s, limit=1)
+        job.updated_at = datetime.now(UTC) - timedelta(minutes=20)
+        s.commit()
+        touch_running_job(s, job.id)
+        s.commit()
+        assert requeue_stuck_running(s, older_than_minutes=15) == 0
+        assert s.get(ClaimAnalysisJob, job.id).status == "running"

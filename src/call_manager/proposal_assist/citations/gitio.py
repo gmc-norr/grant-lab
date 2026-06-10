@@ -165,15 +165,24 @@ def write_and_commit_files(
 
 def current_head(repo_dir: Path) -> str:
     """Return the current HEAD commit SHA of *repo_dir*. Raises GitCommitError
-    on failure (no repo / no commits)."""
+    on failure (no repo / no commits).
+
+    GIT_CEILING_DIRECTORIES pins repo discovery: if *repo_dir* exists but is
+    not itself a git repo, git must NOT walk up and silently report an
+    enclosing repo's HEAD (e.g. the project repo in dev layouts). Ceiling
+    dirs don't apply when cwd IS the repo root — the legitimate case — so
+    real workspace repos are unaffected.
+    """
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(repo_dir).resolve().parent))
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=Path(repo_dir),
             capture_output=True,
             text=True,
+            env=env,
         )
-    except (FileNotFoundError, NotADirectoryError) as exc:
+    except OSError as exc:  # FileNotFoundError, NotADirectoryError, PermissionError
         raise GitCommitError(f"rev-parse HEAD failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse HEAD failed: {proc.stderr.strip()}")

@@ -1,9 +1,10 @@
 """claim_analysis_jobs queue helpers. Follows the same patterns as
 ranking/queue.py — ON CONFLICT dedup, FOR UPDATE SKIP LOCKED batch claim,
 stuck-job reaping with attempt bumping and dead-lettering — but with
-different attempt arithmetic: attempts are bumped both at claim AND at reap
-here (MAX_ATTEMPTS=3), unlike ranking which bumps only in mark_failed
-(MAX_ATTEMPTS=5). Spec 2026-06-10 §3."""
+different attempt arithmetic: both queues bump attempts on reaper requeue;
+the difference is that here attempts are bumped at CLAIM (MAX_ATTEMPTS=3),
+whereas ranking bumps at FAILURE, in mark_failed (MAX_ATTEMPTS=5).
+Spec 2026-06-10 §3."""
 
 from __future__ import annotations
 
@@ -63,11 +64,20 @@ def enqueue_section_job(
 
 def claim_queued_jobs(session: Session, *, limit: int = 5) -> list[ClaimAnalysisJob]:
     """Atomically transition up to `limit` queued jobs to running and return
-    them. Uses SELECT FOR UPDATE SKIP LOCKED for safe concurrent worker use."""
+    them. Uses SELECT FOR UPDATE SKIP LOCKED for safe concurrent worker use.
+
+    Heartbeat obligation: workers running long LLM loops MUST call
+    touch_running_job between LLM calls, or the 15-minute stuck-job reaper
+    may requeue a job that is still live and double-run it.
+
+    Ordering: queued_at with id as tiebreaker — same-transaction enqueues all
+    share queued_at (transaction-scoped now()), so id keeps the order
+    deterministic.
+    """
     rows = (
         session.query(ClaimAnalysisJob)
         .filter(ClaimAnalysisJob.status == "queued")
-        .order_by(ClaimAnalysisJob.queued_at)
+        .order_by(ClaimAnalysisJob.queued_at, ClaimAnalysisJob.id)
         .limit(limit)
         .with_for_update(skip_locked=True)
         .all()
@@ -80,8 +90,22 @@ def claim_queued_jobs(session: Session, *, limit: int = 5) -> list[ClaimAnalysis
     return rows
 
 
+def touch_running_job(session: Session, job_id: int) -> None:
+    """Heartbeat: refresh updated_at on a RUNNING job so the stuck-job reaper
+    does not requeue live work. Workers must call this between long LLM calls
+    (executes immediately on the caller's session — call inside the worker's
+    per-job session; the caller's commit persists it). No-op if the job is no
+    longer RUNNING."""
+    session.query(ClaimAnalysisJob).filter_by(id=job_id, status="running").update(
+        {"updated_at": datetime.now(UTC)}, synchronize_session=False
+    )
+
+
 def mark_done(session: Session, job: ClaimAnalysisJob) -> None:
     job.status = "done"
+    # Clear any error left over from earlier failed attempts — stale errors
+    # mislead admin views.
+    job.last_error = None
     job.updated_at = datetime.now(UTC)
 
 
@@ -129,11 +153,15 @@ def mark_superseded(session: Session, job: ClaimAnalysisJob) -> None:
 def requeue_stuck_running(session: Session, *, older_than_minutes: int = 15) -> int:
     """Reap stuck RUNNING jobs. Follows the same patterns as ranking/queue.py
     (SKIP LOCKED, attempt bumping, dead-lettering) but with different attempt
-    arithmetic: attempts are bumped at claim AND here (MAX_ATTEMPTS=3), unlike
-    ranking which bumps only in mark_failed (MAX_ATTEMPTS=5). Exhausted jobs
+    arithmetic: both queues bump attempts here on requeue; the difference is
+    that this queue also bumps at claim (MAX_ATTEMPTS=3), whereas ranking
+    bumps at failure in mark_failed (MAX_ATTEMPTS=5). Exhausted jobs
     dead-letter to FAILED. A job whose content already has another QUEUED row
     (e.g. from invalidation re-enqueue) is marked superseded instead of queued,
-    which would otherwise violate the partial unique index."""
+    which would otherwise violate the partial unique index.
+
+    Returns the number of jobs REQUEUED only — dead-lettered and superseded
+    jobs are not counted."""
     cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
     rows = (
         session.query(ClaimAnalysisJob)
@@ -152,10 +180,10 @@ def requeue_stuck_running(session: Session, *, older_than_minutes: int = 15) -> 
             j.status = "failed"
             j.last_error = (j.last_error or "") + " [reaped: attempts exhausted]"
             continue
-        # READ COMMITTED snapshot: a concurrent enqueue can commit between this
-        # check and our COMMIT, raising IntegrityError and rolling back the
-        # caller's transaction. Recovery: job stays running; the next reaper
-        # tick picks it up. Callers should commit per-job, not per-batch.
+        # READ COMMITTED snapshot: a concurrent enqueue between this check and
+        # the caller's COMMIT aborts the whole reap batch via the unique
+        # index; self-healing on the next tick (the jobs stay running and are
+        # reaped again).
         # Note: this query relies on session autoflush to see earlier same-batch
         # transitions — do not wrap the reaper loop in no_autoflush.
         duplicate_queued = (
