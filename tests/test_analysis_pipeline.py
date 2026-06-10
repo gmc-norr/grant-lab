@@ -5,9 +5,11 @@ real claim_analysis_jobs queue. The citation LLM + embedder are faked.
 """
 
 import subprocess
+from datetime import UTC, datetime
 
 from call_manager.db.models import (
     ClaimAnalysisJob,
+    ClaimClassification,
     Reference,
     ReferenceChunk,
     User,
@@ -391,6 +393,76 @@ def test_stale_annotation_reopened_not_duplicated(pg_session_factory, tmp_path):
         anns = s.query(UserClaimAnnotation).filter_by(workspace_id=ws_id).all()
         assert len(anns) == 1  # reopened, not duplicated
         assert anns[0].status == "open"
+
+
+def test_stale_supported_cache_refreshes_to_no_match(pg_session_factory, tmp_path):
+    """A stale ClaimClassification row with outcome='supported' is refreshed
+    when the verdict path fails verification.  The refreshed row must have
+    outcome='no_match' with all evidence fields cleared, and the fan-out must
+    produce an open uncited_no_match annotation."""
+    doc = "# T\nintro\n## Body\nThis is a factual claim.\n"
+    claim_sentence = "This is a factual claim"
+    with pg_session_factory() as s:
+        ws, _ = _ws(s)
+        repo = _init_repo(tmp_path, ws.id, doc)
+        ref_id = _seed_reference(s, ws.id, "Background. verified words appear here. End.")
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+        ws_id = ws.id
+
+    # Seed a stale ClaimClassification row for the claim sentence with
+    # outcome='supported' and evidence fields populated.
+    claim_sha = pipeline._claim_sha(claim_sentence)
+    with pg_session_factory() as s:
+        from call_manager.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
+
+        s.add(
+            ClaimClassification(
+                workspace_id=ws_id,
+                claim_sha=claim_sha,
+                prompt_version=ANALYSIS_PROMPT_VERSION,
+                is_claim=True,
+                outcome="supported",
+                reference_id=ref_id,
+                chunk_index=0,
+                evidence_quote="verified words",
+                verdict_json={
+                    "verdict": "supports",
+                    "evidence_quote": "verified words",
+                    "rationale": "r",
+                },
+                stale_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+
+    # The FakeCitationService returns a quote that is NOT present in the chunk
+    # text → quote verification fails → outcome must downgrade to no_match.
+    svc = FakeCitationService(quote="words that are not in the chunk")
+    counts = _drain(pg_session_factory, tmp_path, svc)
+    assert counts["done"] == 1
+
+    with pg_session_factory() as s:
+        from call_manager.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
+
+        cc = (
+            s.query(ClaimClassification)
+            .filter_by(
+                workspace_id=ws_id,
+                claim_sha=claim_sha,
+                prompt_version=ANALYSIS_PROMPT_VERSION,
+            )
+            .one()
+        )
+        assert cc.outcome == "no_match"
+        assert cc.stale_at is None
+        assert cc.reference_id is None
+        assert cc.chunk_index is None
+        assert cc.evidence_quote is None
+
+        ann = s.query(UserClaimAnnotation).filter_by(workspace_id=ws_id).one()
+        assert ann.kind == "uncited_no_match"
+        assert ann.status == "open"
 
 
 def test_marker_before_first_sentence_offset(pg_session_factory, tmp_path, monkeypatch):

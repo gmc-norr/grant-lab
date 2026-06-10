@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -125,7 +126,12 @@ def _classify(citation_service, workspace_id, sentence: str) -> bool:
 
 
 def _retrieve_and_judge(
-    session, citation_service, embedder, workspace_id, claim: str
+    session,
+    citation_service,
+    embedder,
+    workspace_id,
+    claim: str,
+    heartbeat: Callable[[], None] | None = None,
 ) -> dict | None:
     """Embed the claim, judge the top-K chunks, and return the first chunk whose
     'supports' verdict carries a quote that verifies against the chunk text.
@@ -133,6 +139,10 @@ def _retrieve_and_judge(
     Returns ``{"reference_id", "chunk_index", "evidence_quote", "verdict_json"}``
     or ``None`` if nothing survives. Fails closed: a quote that cannot be located
     (or is ambiguous) in the chunk is discarded.
+
+    ``heartbeat`` is called before EACH per-candidate verdict LLM call so the
+    stuck-job reaper does not mistake an active multi-candidate loop for a stale
+    job (queue contract: heartbeats BETWEEN LLM calls).
     """
     query_vec = embedder.embed(claim)
     stmt = (
@@ -153,6 +163,8 @@ def _retrieve_and_judge(
     )
     rows = session.execute(stmt).all()
     for row in rows:
+        if heartbeat is not None:
+            heartbeat()
         res = citation_service.complete_json(
             workspace_id=workspace_id,
             op="user_claim_verdict",
@@ -262,7 +274,17 @@ def analyze_job(
             **ledger,
             "evidence": [r for r in ledger.get("evidence", []) if r.get("id") in cited_evs],
         }
-        touch_running_job(session, job.id)  # heartbeat before a long LLM call
+        # Heartbeat before the semantic audit. validate_citations_semantic makes
+        # one LLM call per uncached cited row; we cannot thread a per-call
+        # callback without changing its signature. The practical protection is:
+        # touch_running_job's UPDATE takes a row lock on the job row that is
+        # HELD for the whole per-job transaction, and requeue_stuck_running uses
+        # FOR UPDATE SKIP LOCKED, so an in-process reaper skips live jobs.
+        # The timestamp update itself is uncommitted until job end and matters
+        # primarily across process restarts. If the single-instance constraint
+        # is ever relaxed, thread a heartbeat callback into
+        # validate_citations_semantic.
+        touch_running_job(session, job.id)
         semantic_issues = validate_citations_semantic(
             proposal_text=doc,
             ledger=scoped_ledger,
@@ -309,13 +331,19 @@ def analyze_job(
             }
             continue
 
-        # Miss or stale → recompute.
+        # Miss or stale → recompute. Heartbeat before EACH classify so the
+        # reaper does not mistake a long uncited loop for a stuck job.
         touch_running_job(session, job.id)
         is_claim = _classify(citation_service, job.workspace_id, occ.text)
         found = None
         if is_claim:
             found = _retrieve_and_judge(
-                session, citation_service, embedder, job.workspace_id, occ.text
+                session,
+                citation_service,
+                embedder,
+                job.workspace_id,
+                occ.text,
+                heartbeat=lambda: touch_running_job(session, job.id),
             )
         if not is_claim:
             outcome = "not_claim"
@@ -333,6 +361,9 @@ def analyze_job(
             existing.verdict_json = found["verdict_json"] if found else None
             existing.stale_at = None
         else:
+            # Concurrent insert of the same (workspace, claim_sha,
+            # prompt_version) would raise a unique violation → job retry;
+            # unreachable under the single-instance constraint.
             session.add(
                 ClaimClassification(
                     workspace_id=job.workspace_id,

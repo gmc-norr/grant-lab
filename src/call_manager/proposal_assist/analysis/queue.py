@@ -95,7 +95,14 @@ def touch_running_job(session: Session, job_id: int) -> None:
     does not requeue live work. Workers must call this between long LLM calls
     (executes immediately on the caller's session — call inside the worker's
     per-job session; the caller's commit persists it). No-op if the job is no
-    longer RUNNING."""
+    longer RUNNING.
+
+    Row-lock note: this UPDATE takes a row lock on the job row that is HELD
+    for the duration of the per-job transaction. requeue_stuck_running uses
+    FOR UPDATE SKIP LOCKED, so an in-process reaper will skip a job whose
+    row is already locked by an active per-job session. The timestamp
+    update itself is uncommitted until job end and matters primarily across
+    process restarts (not within the same process)."""
     session.query(ClaimAnalysisJob).filter_by(id=job_id, status="running").update(
         {"updated_at": datetime.now(UTC)}, synchronize_session=False
     )
