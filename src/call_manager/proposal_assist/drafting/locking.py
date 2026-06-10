@@ -136,6 +136,11 @@ class CommitMutexTimeout(RuntimeError):
     this to 503 'workspace is busy'."""
 
 
+# Shared 503 detail string — imported by the tool modules and web routes so
+# the message the agent sees and the message the browser sees are byte-identical.
+BUSY_ERROR_MESSAGE = "workspace is busy — try again in a moment"
+
+
 def acquire_commit_mutex(
     session: Session, workspace_id: uuid.UUID, *, timeout_seconds: int = 10
 ) -> None:

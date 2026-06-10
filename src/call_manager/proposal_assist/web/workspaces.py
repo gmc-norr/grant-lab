@@ -48,7 +48,7 @@ from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
 from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.history import (
@@ -857,7 +857,7 @@ async def post_turn(
         _rollback_created_uploads()
         raise HTTPException(
             status_code=503,
-            detail="workspace is busy — try again in a moment",
+            detail=BUSY_ERROR_MESSAGE,
         ) from e
     except GlobalTokenCapExceeded as e:
         session.rollback()

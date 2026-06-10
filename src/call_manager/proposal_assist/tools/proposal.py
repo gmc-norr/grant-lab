@@ -36,6 +36,7 @@ from typing import Any
 from call_manager.db.models import ArtifactVersion
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
@@ -49,7 +50,7 @@ PROPOSAL_FILENAME = "proposal.md"
 # pre-check / authoritative mutex check return byte-identical messages.
 _NOT_READ_ERROR = "you haven't read the proposal yet — call read_proposal first"
 _STALE_ERROR = "proposal changed since you read it — call read_proposal and retry"
-_BUSY_ERROR = "workspace is busy — try again in a moment"
+_BUSY_ERROR = BUSY_ERROR_MESSAGE  # canonical string lives in locking.py
 
 
 async def read_proposal_impl(ctx: ToolContext) -> dict[str, Any]:
@@ -64,11 +65,18 @@ async def read_proposal_impl(ctx: ToolContext) -> dict[str, Any]:
     path = ctx.repo_dir / PROPOSAL_FILENAME
     if not path.exists():
         return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
-    content = path.read_text()
+    # ORDERING INVARIANT: resolve HEAD *before* reading the file content.
+    # If these two operations were swapped a user commit that lands between
+    # read_text and current_head would leave agent_view_head=H2 with
+    # content=H1.  A subsequent edit/replace would then pass its stale-HEAD
+    # check (view==H2==HEAD) and silently overwrite the user's edit.
+    # With HEAD resolved first, that same race yields view=H1/content=H2 —
+    # the next mutation sees HEAD!=view and correctly fails stale.  Fail-safe.
     try:
         ctx.agent_view_head = current_head(ctx.repo_dir)
     except GitCommitError:
         ctx.agent_view_head = None
+    content = path.read_text()
     return {"content": content}
 
 

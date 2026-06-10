@@ -20,6 +20,7 @@ import pytest
 
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations.gitio import current_head
+from call_manager.proposal_assist.tools import proposal as _proposal_mod
 from call_manager.proposal_assist.tools.citations import insert_citation_impl
 from call_manager.proposal_assist.tools.proposal import (
     PROPOSAL_FILENAME,
@@ -211,6 +212,47 @@ def _seed_reference(pg_session_factory, workspace_id, *, chunk_text: str) -> uui
         )
         s.commit()
     return rid
+
+
+@pytest.mark.asyncio
+async def test_read_proposal_resolves_head_before_reading_content(
+    pg_session_factory, _settings_env, tmp_path, monkeypatch
+):
+    """Fix 1 regression — HEAD must be resolved BEFORE the file is read.
+
+    Without the fix, a user commit between read_text and current_head leaves
+    agent_view_head=H2 with content=H1; a subsequent replace then passes its
+    stale-HEAD check and silently drops the user's edit (TOCTOU).
+
+    We pin the ORDER deterministically: monkeypatch current_head and
+    Path.read_text to record "head" / "read" on each call, then assert
+    the recorded order is ["head", "read"].  No real race needed.
+    """
+    ctx, _ = _build_ctx(pg_session_factory, tmp_path)
+    order: list[str] = []
+
+    real_current_head = _proposal_mod.current_head
+
+    def recording_current_head(repo_dir):
+        order.append("head")
+        return real_current_head(repo_dir)
+
+    real_read_text = Path.read_text
+
+    def recording_read_text(self, *args, **kwargs):
+        order.append("read")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(_proposal_mod, "current_head", recording_current_head)
+    monkeypatch.setattr(Path, "read_text", recording_read_text)
+
+    result = await read_proposal_impl(ctx)
+    assert "error" not in result, result
+    # The critical invariant: HEAD resolved first, content read second.
+    assert order == ["head", "read"], (
+        f"expected ['head', 'read'] but got {order!r} — "
+        "current_head must be called before Path.read_text in read_proposal_impl"
+    )
 
 
 @pytest.mark.asyncio

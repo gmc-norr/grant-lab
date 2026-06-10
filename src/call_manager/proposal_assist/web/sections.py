@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
     SectionStructureError,
@@ -234,7 +234,7 @@ def post_section_save(
         session.rollback()
         raise HTTPException(
             status_code=503,
-            detail="workspace is busy — try again in a moment",
+            detail=BUSY_ERROR_MESSAGE,
         ) from e
     except GitCommitError as e:
         session.rollback()

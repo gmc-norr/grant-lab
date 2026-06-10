@@ -66,6 +66,7 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
@@ -83,7 +84,7 @@ CITATIONS_FILENAME = "citations.json"
 
 # Spec 2026-06-10 §1 — every git mutation serializes on the per-workspace
 # commit mutex; a wedged holder surfaces as this error (web maps it to 503).
-_BUSY_ERROR = "workspace is busy — try again in a moment"
+_BUSY_ERROR = BUSY_ERROR_MESSAGE  # canonical string lives in locking.py
 
 # Evidence-row ids are minted as ev-<lowercase-hex> (see ledger.new_ev_id).
 EVIDENCE_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
@@ -532,6 +533,12 @@ def _insert_citation_locked(
 
     # Advance the agent's view of HEAD so a following edit/replace in the same
     # turn doesn't spuriously fail its precondition (spec 2026-06-10 §1).
+    # RESIDUAL RISK: advancing the view here re-arms edit/replace preconditions
+    # without a proposal re-read.  Safe for these anchor/ev-validated citation
+    # tools (the marker text in proposal.md is what we just committed), but it
+    # means a replace_proposal immediately after a citation mutation can
+    # overwrite changes the agent never saw — accepted residual risk in this
+    # slice, mitigated by the system-prompt read-before-replace rule.
     ctx.agent_view_head = sha
 
     # 14. DB cache (AFTER git) — best-effort; git ledger is canonical.
