@@ -4,6 +4,10 @@ Invariant: ``"".join(s.text for s in split_sections(doc)) == doc`` —
 byte-identical. Section 0 is the preamble (possibly empty). A boundary is a
 line starting with exactly ``##`` (not ``###``) outside fenced code blocks.
 No I/O, no DB.
+
+The ``##`` boundary rule is an approximation of CommonMark (backtick fences
+only, no tilde fences; ``##NoSpace`` accepted; indented headings not
+recognized) — exact enough for proposal.md content this app writes.
 """
 
 from __future__ import annotations

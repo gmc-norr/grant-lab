@@ -68,3 +68,10 @@ def test_sha_changes_with_content():
     a = split_sections("## A\nx\n")[1]
     b = split_sections("## A\ny\n")[1]
     assert a.sha != b.sha and len(a.sha) == 64
+
+
+def test_crlf_round_trip():
+    doc = "# T\r\nintro\r\n## A\r\nbody\r\n"
+    sections = split_sections(doc)
+    assert _join(sections) == doc
+    assert [s.heading for s in sections] == ["", "A"]
