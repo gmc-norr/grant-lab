@@ -44,6 +44,9 @@ from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_
 from call_manager.proposal_assist.analysis.queue import enqueue_section_job
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
+from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
+from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.tools.citations import _citation_snapshot
 from call_manager.proposal_assist.web.sections import _read_sections, _section_or_404
 from call_manager.proposal_assist.web.workspaces import (
@@ -60,6 +63,48 @@ _STRIP_PARTIAL = "proposal_assist/partials/annotation_strip.html"
 
 # ClaimAnalysisJob statuses that mean "analysis is still coming".
 _JOB_PENDING_STATUSES = ("queued", "running")
+
+
+def _enqueue_containing_section(
+    session: Session,
+    *,
+    ws_id: uuid.UUID,
+    workspaces_dir: str,
+    commit_sha: str,
+    ev_id: str,
+) -> None:
+    """After a successful citation insert, enqueue a claim-analysis job for
+    the section that now contains the new ev_id marker.
+
+    Re-splits the HEAD document, locates the first section whose text
+    contains the new marker, and calls enqueue_section_job in the SAME
+    session (content-keyed ON CONFLICT DO NOTHING makes this idempotent).
+    The reconciliation tick would self-heal eventually; this is immediacy.
+
+    Errors are logged and swallowed — a failed re-enqueue must not roll back
+    the committed insert.
+    """
+    marker_fragment = f"ev:{ev_id}"
+    try:
+        repo = workspace_repo_dir(workspaces_dir, ws_id)
+        proposal = repo / PROPOSAL_FILENAME
+        if not proposal.exists():
+            return
+        sections = split_sections(proposal.read_text())
+        for sec in sections:
+            if marker_fragment in sec.text:
+                enqueue_section_job(
+                    session,
+                    workspace_id=ws_id,
+                    section_index=sec.index,
+                    section_heading=sec.heading,
+                    section_sha=sec.sha,
+                    commit_sha=commit_sha,
+                )
+                session.commit()
+                return
+    except Exception:
+        logger.exception("post-insert re-enqueue failed for workspace %s ev %s", ws_id, ev_id)
 
 
 def _ref_labels(session: Session, workspace: Workspace, annotations) -> dict[uuid.UUID, str]:
@@ -157,6 +202,10 @@ def get_section_annotations(
     """
     ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
     _, sections = _read_sections(request, workspace_id)  # 404 if no proposal.md
+    # Mirror _section_or_404: reject out-of-range n so callers get a clean 404
+    # rather than a silent empty strip from an off-by-one index.
+    if n < 0 or n >= len(sections):
+        raise HTTPException(status_code=404, detail="no such section")
     occurrence = sum(1 for s in sections[:n] if s.sha == sha)
     return _strip_response(
         request,
@@ -198,7 +247,7 @@ def post_annotation_insert(
     # this strip shows.
     sha, occurrence = ann.section_sha, ann.section_occurrence
     try:
-        insert_from_annotation(
+        result = insert_from_annotation(
             session=session,
             workspace=ws,
             user_id=user.id,
@@ -220,6 +269,22 @@ def post_annotation_insert(
             annotation_id,
         )
         raise HTTPException(status_code=500, detail="insert failed — nothing was written") from e
+
+    # Fix 5 — post-insert re-analysis enqueue: immediately enqueue a claim
+    # analysis job for the section that now contains the new marker. The
+    # reconciliation tick would self-heal anyway; this is immediacy only.
+    # Content-keyed dedup (ON CONFLICT DO NOTHING) makes the enqueue free if
+    # the job already exists for this sha. Only enqueue on a genuine insert
+    # (not idempotent) and only when we can locate the section.
+    if "idempotent" not in result:
+        _enqueue_containing_section(
+            session,
+            ws_id=workspace_id,
+            workspaces_dir=settings.workspaces_dir,
+            commit_sha=result["commit_sha"],
+            ev_id=result["ev_id"],
+        )
+
     return _strip_response(request, session, ws, n=n, sha=sha, occurrence=occurrence, is_owner=True)
 
 
@@ -239,12 +304,31 @@ def post_annotation_dismiss(
     reason = reason.strip()
     if not reason:
         raise HTTPException(status_code=422, detail="a reason is required")
-    if ann.status != "open":
+    # Guarded UPDATE: serializes against a concurrent insert that may have
+    # already flipped status to "inserted" without taking the commit mutex.
+    # The WHERE status='open' predicate means updated==0 if the row raced.
+    updated = (
+        session.query(UserClaimAnnotation)
+        .filter(
+            UserClaimAnnotation.id == ann.id,
+            UserClaimAnnotation.status == "open",
+        )
+        .update(
+            {
+                "status": "dismissed",
+                "dismissed_reason": reason,
+                "resolved_by_user_id": user.id,
+                "resolved_at": datetime.now(UTC),
+            },
+            synchronize_session=False,
+        )
+    )
+    if not updated:
+        session.rollback()
         raise HTTPException(status_code=409, detail="annotation is no longer actionable")
-    ann.status = "dismissed"
-    ann.dismissed_reason = reason
-    ann.resolved_by_user_id = user.id
-    ann.resolved_at = datetime.now(UTC)
+    # Capture strip address from the pre-update snapshot (still valid — the
+    # section_sha/section_occurrence are immutable after creation).
+    sha, occurrence = ann.section_sha, ann.section_occurrence
     session.add(
         WorkspaceEvent(
             workspace_id=ws.id,
@@ -253,7 +337,6 @@ def post_annotation_dismiss(
             payload={"annotation_id": ann.id, "reason": reason},
         )
     )
-    sha, occurrence = ann.section_sha, ann.section_occurrence
     session.commit()
     return _strip_response(request, session, ws, n=n, sha=sha, occurrence=occurrence, is_owner=True)
 

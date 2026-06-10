@@ -95,6 +95,14 @@ def insert_from_annotation(
     # CommitMutexTimeout propagates — the web layer maps it to 503.
     acquire_commit_mutex(session, workspace.id)
 
+    # Expire annotation immediately after acquiring the mutex: SQLAlchemy's
+    # identity map still holds the pre-block snapshot. A concurrent insert
+    # that committed while we were blocked would have flipped annotation.status
+    # to "inserted", but the ORM would not see it without re-SELECTing. Under
+    # READ COMMITTED the next attribute access re-issues a SELECT, so the
+    # idempotency check below is authoritative inside the mutex.
+    session.expire(annotation)
+
     # 2. Turn-lock: an agent turn in flight owns the repo.
     if _turn_in_flight(session, workspace.id):
         raise InsertConflict("assistant is working — try again shortly")
@@ -166,7 +174,12 @@ def insert_from_annotation(
     ext = start
     tries = 0
     while doc.count(anchor) != 1 and tries < _MAX_ANCHOR_TRIES:
-        ext = max(0, ext - _ANCHOR_EXTEND_STEP)
+        new_ext = max(0, ext - _ANCHOR_EXTEND_STEP)
+        if new_ext == ext:
+            # Already at the leftmost boundary — further iterations would
+            # produce an identical anchor, so break immediately.
+            break
+        ext = new_ext
         anchor = target.text[ext:end].rstrip("\n")
         tries += 1
     if doc.count(anchor) != 1:
@@ -177,13 +190,21 @@ def insert_from_annotation(
     try:
         ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
     except ValueError as exc:
+        logger.error("corrupt citations.json in workspace %s: %s", workspace.id, exc)
         raise InsertConflict(f"citations.json is invalid: {exc}") from exc
     ev_id = new_ev_id()
     citekey = _resolve_citekey_for_ref(session, ledger=ledger, ref=ref, workspace_id=workspace.id)
     try:
         new_doc = insert_marker(doc, anchor, citekey, ev_id)
     except AnchorError as exc:
-        raise InsertConflict(str(exc)) from exc
+        # The pre-check (doc.count(anchor) == 1) already passed, so the only
+        # way insert_marker raises AnchorError here is an existing marker
+        # overlapping the anchor (e.g. the anchor runs through a citekey
+        # substring). Both ambiguity and not-found map to the same friendly
+        # message because the user cannot distinguish the underlying cause.
+        raise InsertConflict(
+            "repeated text — cite it via chat or edit the sentence to be unique"
+        ) from exc
 
     # 8. Evidence row via the single authoritative constructor — identical
     # schema shape to the agent insert (_insert_citation_locked step 12).

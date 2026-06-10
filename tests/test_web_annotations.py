@@ -161,6 +161,11 @@ def test_insert_post_writes_marker(client_owner, ws_setup, pg_session_factory):
     with pg_session_factory() as s:
         ann = s.get(UserClaimAnnotation, ann_id)
         assert ann.status == "inserted"
+        # Fix 5: a ClaimAnalysisJob must be enqueued for the section that now
+        # contains the new marker. The section sha changes after insert (the
+        # marker text is new), so just assert a queued job exists for the ws.
+        job = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id, status="queued").first()
+        assert job is not None, "expected a queued ClaimAnalysisJob after insert"
 
 
 def test_viewer_insert_post_403(client_viewer, ws_setup):
@@ -247,3 +252,32 @@ def test_strip_shows_failed_job_with_retry(
     assert r.status_code == 200
     assert "Analysis failed" in r.text
     assert "Retry" not in r.text
+
+
+def test_strip_out_of_range_n_returns_404(client_owner, ws_setup):
+    """Fix 4: GET strip with n out of bounds returns 404 (mirrors _section_or_404)."""
+    ws_id, sha = ws_setup["ws_id"], ws_setup["sha"]
+    r = client_owner.get(f"/workspaces/{ws_id}/sections/99/annotations?sha={sha}")
+    assert r.status_code == 404
+
+
+def test_dismiss_races_insert_guarded(client_owner, ws_setup, pg_session_factory):
+    """Fix 2: guarded dismiss rejects a concurrent insert.
+
+    Deterministic simulation: flip the annotation's status to 'inserted'
+    directly in the DB (as a concurrent insert would), then POST dismiss.
+    The guarded UPDATE sees status != 'open' and must return 409.
+    """
+    ws_id, ann_id = ws_setup["ws_id"], ws_setup["supported_id"]
+    # Simulate a concurrent insert that committed before dismiss.
+    with pg_session_factory() as s:
+        s.query(UserClaimAnnotation).filter_by(id=ann_id).update(
+            {"status": "inserted"}, synchronize_session=False
+        )
+        s.commit()
+    r = client_owner.post(
+        f"/workspaces/{ws_id}/annotations/{ann_id}/dismiss?n=1",
+        data={"reason": "not needed"},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"] == "annotation is no longer actionable"
