@@ -64,6 +64,10 @@ from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import (
     estimate_image_tokens_from_bytes,
 )
+from call_manager.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,  # noqa: F401 — re-exported so callers can catch it
+    acquire_commit_mutex,
+)
 from call_manager.proposal_assist.turns.caps import (
     GlobalTokenCapExceeded,
     TokenCapExceeded,
@@ -229,6 +233,12 @@ def submit_user_turn(
     submit time, the lock now genuinely prevents two submits from
     both passing a cap they should not both pass.
     """
+    # Spec 2026-06-10 §1: turn enqueue participates in the per-workspace commit
+    # mutex so a user save's "no queued/running turn" check is authoritative —
+    # either this enqueue lands first (save sees it → 409) or the save's
+    # transaction commits first (turn starts strictly after the user's commit).
+    acquire_commit_mutex(session, workspace_id)
+
     # Lock the workspace row for the duration of this transaction.
     # If the workspace doesn't exist, raise — the caller (web layer)
     # will have already 404'd before reaching this code, so a missing
