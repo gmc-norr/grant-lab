@@ -19,6 +19,7 @@
 | `src/call_manager/proposal_assist/editing/__init__.py` | new package |
 | `src/call_manager/proposal_assist/editing/sectionizer.py` | pure split/join of proposal.md on `##` headings |
 | `src/call_manager/proposal_assist/editing/save.py` | save-section service: mutex, guards, commit, provenance, Tier-1, enqueue |
+| `src/call_manager/proposal_assist/paths.py` | single source of truth: repo dir = `<workspaces_dir>/<id>/repo` |
 | `src/call_manager/proposal_assist/drafting/locking.py` | + commit-mutex helpers (xact-scoped advisory lock) |
 | `src/call_manager/proposal_assist/citations/markers.py` | + `find_bare_markers()` |
 | `src/call_manager/proposal_assist/citations/gitio.py` | + `current_head()` |
@@ -203,12 +204,38 @@ git commit -m "feat(editing): sectionizer with byte-round-trip guarantee"
 
 ---
 
-### Task 2: Commit mutex + `current_head`
+### Task 2: Commit mutex + `current_head` + repo-path helper
 
 **Files:**
 - Modify: `src/call_manager/proposal_assist/drafting/locking.py` (append)
 - Modify: `src/call_manager/proposal_assist/citations/gitio.py` (append)
+- Create: `src/call_manager/proposal_assist/paths.py`
 - Test: `tests/test_editing_commit_mutex.py`
+
+**CRITICAL — production repo layout.** Workspace git repos live at
+`<workspaces_dir>/<workspace_id>/repo/` — NOT `<workspaces_dir>/<workspace_id>/`
+(see `drafting/controller.py:136`, `phases/setup.py:224`,
+`web/workspaces.py:577`). Every new module in this plan resolves the repo via
+the helper below, and every test fixture creates the `repo/` subdirectory.
+Create `src/call_manager/proposal_assist/paths.py`:
+
+```python
+"""Single source of truth for workspace filesystem layout."""
+
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+
+def workspace_repo_dir(workspaces_dir: Path | str, workspace_id: uuid.UUID) -> Path:
+    """The workspace's git repo: <workspaces_dir>/<workspace_id>/repo
+    (matches drafting/controller.py and phases/setup.py)."""
+    return Path(workspaces_dir) / str(workspace_id) / "repo"
+```
+
+Wherever later tasks say `workspace_repo_dir(...)`, import it from
+`call_manager.proposal_assist.paths`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -702,7 +729,7 @@ def test_claim_marks_running_and_terminal_states(pg_session_factory):
         assert statuses == ["done", "superseded"]
 
 
-def test_requeue_stuck_running(pg_session_factory):
+def test_requeue_stuck_running_bumps_attempts(pg_session_factory):
     with pg_session_factory() as s:
         ws = _ws(s)
         enqueue_section_job(s, workspace_id=ws.id, section_index=0,
@@ -715,7 +742,43 @@ def test_requeue_stuck_running(pg_session_factory):
         n = requeue_stuck_running(s, older_than_minutes=15)
         s.commit()
         assert n == 1
-        assert s.get(ClaimAnalysisJob, job.id).status == "queued"
+        refreshed = s.get(ClaimAnalysisJob, job.id)
+        assert refreshed.status == "queued"
+        assert refreshed.attempts == 2  # 1 from claim + 1 from reap
+
+
+def test_reaper_dead_letters_exhausted_job(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        enqueue_section_job(s, workspace_id=ws.id, section_index=0,
+                            section_heading="", section_sha="a" * 64, commit_sha="c")
+        s.commit()
+        (job,) = claim_queued_jobs(s, limit=1)
+        job.attempts = 2  # next reap bump reaches MAX_ATTEMPTS=3
+        job.updated_at = datetime.now(UTC) - timedelta(minutes=20)
+        s.commit()
+        assert requeue_stuck_running(s, older_than_minutes=15) == 0
+        s.commit()
+        assert s.get(ClaimAnalysisJob, job.id).status == "failed"
+
+
+def test_reaper_supersedes_when_content_requeued(pg_session_factory):
+    """A queued row for the same content already exists (invalidation
+    re-enqueued) → reaping must not violate the partial unique index."""
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        enqueue_section_job(s, workspace_id=ws.id, section_index=0,
+                            section_heading="", section_sha="a" * 64, commit_sha="c")
+        s.commit()
+        (job,) = claim_queued_jobs(s, limit=1)
+        job.updated_at = datetime.now(UTC) - timedelta(minutes=20)
+        # same content re-enqueued while the original was (stuck) running
+        enqueue_section_job(s, workspace_id=ws.id, section_index=0,
+                            section_heading="", section_sha="a" * 64, commit_sha="c2")
+        s.commit()
+        assert requeue_stuck_running(s, older_than_minutes=15) == 0
+        s.commit()
+        assert s.get(ClaimAnalysisJob, job.id).status == "superseded"
 ```
 
 - [ ] **Step 2: Run to verify failure** — ImportError.
@@ -803,6 +866,12 @@ def mark_superseded(session: Session, job: ClaimAnalysisJob) -> None:
 
 
 def requeue_stuck_running(session: Session, *, older_than_minutes: int = 15) -> int:
+    """Reap stuck RUNNING jobs. Mirrors ranking/queue.py:186 semantics:
+    attempts are BUMPED on every requeue and exhausted jobs dead-letter to
+    FAILED — otherwise a job that crashes the worker mid-flight crash-loops
+    forever. A job whose content already has another QUEUED row (e.g. from
+    invalidation re-enqueue) is marked superseded instead of queued, which
+    would otherwise violate the partial unique index."""
     cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
     rows = (
         session.query(ClaimAnalysisJob)
@@ -811,10 +880,28 @@ def requeue_stuck_running(session: Session, *, older_than_minutes: int = 15) -> 
         .with_for_update(skip_locked=True)
         .all()
     )
+    n = 0
     for j in rows:
-        j.status = "queued"
+        j.attempts += 1
         j.updated_at = datetime.now(UTC)
-    return len(rows)
+        if j.attempts >= MAX_ATTEMPTS:
+            j.status = "failed"
+            j.last_error = (j.last_error or "") + " [reaped: attempts exhausted]"
+            continue
+        duplicate_queued = (
+            session.query(ClaimAnalysisJob.id)
+            .filter(ClaimAnalysisJob.workspace_id == j.workspace_id,
+                    ClaimAnalysisJob.section_sha == j.section_sha,
+                    ClaimAnalysisJob.status == "queued",
+                    ClaimAnalysisJob.id != j.id)
+            .first()
+        )
+        if duplicate_queued is not None:
+            j.status = "superseded"
+        else:
+            j.status = "queued"
+            n += 1
+    return n
 ```
 
 NOTE: the `mark_failed` retry semantics mean the test's `mark_failed` call (attempts=1 < 3) sets status back to `"queued"` — the test above expects `superseded` after the subsequent `mark_superseded`, which is consistent. Re-read the test once after implementing; if you changed semantics, fix the TEST comment, not the retry logic.
@@ -869,7 +956,7 @@ _GIT_ENV = {
 
 
 def _init_repo(tmp_path: Path, ws_id: uuid.UUID, doc: str = DOC) -> Path:
-    repo = tmp_path / str(ws_id)
+    repo = tmp_path / str(ws_id) / "repo"  # production layout (paths.py)
     repo.mkdir(parents=True)
     (repo / "proposal.md").write_text(doc)
     for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
@@ -1005,6 +1092,7 @@ from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.markers import find_bare_markers
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
 
@@ -1056,7 +1144,7 @@ def save_section(
     if _turn_in_flight(session, workspace.id):
         raise TurnInFlightError(str(workspace.id))
 
-    repo_dir = Path(workspaces_dir) / str(workspace.id)
+    repo_dir = workspace_repo_dir(workspaces_dir, workspace.id)
     head = current_head(repo_dir)
     doc = (repo_dir / PROPOSAL_FILENAME).read_text()
     sections = split_sections(doc)
@@ -1163,10 +1251,11 @@ from call_manager.proposal_assist.editing.save import (
     save_section,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.web.workspaces import (
-    _load_workspace_or_404,
     _render_proposal_markdown,
     _require_owner,
+    _require_owner_or_viewer,
     _session_dep,
 )
 
@@ -1175,7 +1264,7 @@ router = APIRouter(prefix="/workspaces")
 
 
 def _read_sections(request: Request, workspace_id: uuid.UUID):
-    repo = Path(request.app.state.settings.workspaces_dir) / str(workspace_id)
+    repo = workspace_repo_dir(request.app.state.settings.workspaces_dir, workspace_id)
     path = repo / "proposal.md"
     if not path.exists():
         raise HTTPException(status_code=404, detail="proposal.md not found")
@@ -1205,7 +1294,11 @@ def _view_fragment(request: Request, ws, section, *, is_owner: bool,
 def get_section_view(workspace_id: uuid.UUID, n: int, request: Request,
                      user=Depends(get_current_user),  # noqa: B008
                      session: Session = Depends(_session_dep)):  # noqa: B008
-    ws = _load_workspace_or_404(workspace_id, session)
+    # Owner-or-viewer, NOT _load_workspace_or_404: that helper does no
+    # authorization, and a bare load would let any authenticated user read
+    # proposal text by guessing workspace UUIDs (IDOR).
+    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user,
+                                  session=session)
     _, sections = _read_sections(request, workspace_id)
     return _view_fragment(request, ws, _section_or_404(sections, n),
                           is_owner=ws.owner_id == user.id)
@@ -1367,7 +1460,17 @@ def test_save_during_turn_409(client_owner, ws_with_repo_and_queued_turn):
                                 "base_commit_sha": "0" * 40,
                                 "base_section_sha": "0" * 64})
     assert r.status_code == 409
+
+
+def test_outsider_cannot_read_sections(client_outsider, ws_with_repo):
+    """IDOR regression: an authenticated non-member (neither owner nor
+    viewer) must not read proposal text via the section-view route."""
+    r = client_outsider.get(f"/workspaces/{ws_with_repo.id}/sections/1")
+    assert r.status_code == 403
 ```
+
+(`client_outsider` = a logged-in user with no relation to the workspace —
+same fixture machinery as `client_viewer` minus the WorkspaceViewer row.)
 
 (Define `client_owner`, `client_viewer`, `ws_with_repo`, `ws_with_repo_and_queued_turn` as local fixtures in this file following the existing web-test pattern.)
 
@@ -1529,6 +1632,27 @@ async def test_multi_edit_turn_keeps_working(tool_ctx, repo):
         tool_ctx, edits=[{"old_string": "aims", "new_string": "aims v2"}],
         triggering_turn_id=None)
     assert "commit_sha" in out2
+
+
+async def test_concurrent_edits_serialized_no_lost_update(tool_ctx, repo):
+    """Two concurrent edit calls must both land (write_lock serializes
+    compute-then-commit); the document ends with BOTH changes."""
+    import asyncio
+    from call_manager.proposal_assist.tools.proposal import (
+        edit_proposal_impl, read_proposal_impl,
+    )
+    await read_proposal_impl(tool_ctx)
+    r1, r2 = await asyncio.gather(
+        edit_proposal_impl(tool_ctx,
+                           edits=[{"old_string": "intro", "new_string": "intro A"}],
+                           triggering_turn_id=None),
+        edit_proposal_impl(tool_ctx,
+                           edits=[{"old_string": "aims", "new_string": "aims B"}],
+                           triggering_turn_id=None),
+    )
+    assert "commit_sha" in r1 and "commit_sha" in r2
+    final = (repo / "proposal.md").read_text()
+    assert "intro A" in final and "aims B" in final  # neither edit lost
 ```
 
 - [ ] **Step 3: Run to verify failure**, then implement in `tools/proposal.py`:
@@ -1543,26 +1667,49 @@ In `read_proposal_impl`, after reading the file:
     return {"content": path.read_text()}
 ```
 
-Add a guard helper and call it from BOTH `edit_proposal_impl` and `replace_proposal_impl` (before computing/writing content), and acquire the commit mutex around `_write_and_commit`'s git+DB work:
+**The precondition must compare an IMMUTABLE captured SHA, not the shared
+`ctx.agent_view_head` field.** Failure mode if you check the shared field
+inside the mutex: two concurrent tool calls both compute new content from old
+HEAD; call A commits and advances `ctx.agent_view_head`; call B's check then
+compares the *advanced* shared value against the *new* HEAD — passes — and
+writes content computed from the stale document, silently dropping A's edit.
+So:
+
+1. Wrap the whole body of `edit_proposal_impl` AND `replace_proposal_impl` in
+   `async with ctx.write_lock:` (exactly like `insert_citation_impl` in
+   `tools/citations.py:323` — the same in-turn serialization the citation
+   tools already use).
+2. At the top of each impl (inside the write lock, BEFORE reading the file or
+   computing content), capture the immutable precondition value:
 
 ```python
-def _check_view_of_head(ctx: ToolContext) -> dict[str, Any] | None:
-    """Spec 2026-06-10 §1 precondition. Returns an error dict or None."""
+    expected_head = ctx.agent_view_head
+    if expected_head is None:
+        return {"error": ("you haven't read the proposal yet — call "
+                          "read_proposal first")}
     try:
-        head = current_head(ctx.repo_dir)
+        if current_head(ctx.repo_dir) != expected_head:
+            return {"error": ("proposal changed since you read it — call "
+                              "read_proposal and retry")}
     except GitCommitError as exc:
         return {"error": f"cannot resolve HEAD: {exc}"}
-    if ctx.agent_view_head != head:
-        return {
-            "error": (
-                "proposal changed since you read it (or you haven't read it "
-                "yet) — call read_proposal and retry"
-            )
-        }
-    return None
 ```
 
-In `_write_and_commit`: open a session from `ctx.session_factory`, `acquire_commit_mutex(session, ctx.workspace_id)`, re-run `_check_view_of_head` INSIDE the mutex (the authoritative check), then do the existing git write + ArtifactVersion insert on that session, commit, and on success set `ctx.agent_view_head = new_sha`. Preserve the existing rollback-on-failure file-restore behavior exactly — read the current `_write_and_commit` body first and thread the mutex/session around it rather than rewriting it.
+3. Pass `expected_head` into `_write_and_commit(ctx, ..., expected_head=expected_head)`.
+   Inside `_write_and_commit`: open a session from `ctx.session_factory`,
+   `acquire_commit_mutex(session, ctx.workspace_id)`, then the authoritative
+   check INSIDE the mutex — `current_head(ctx.repo_dir) == expected_head`,
+   returning the same "proposal changed" error dict on mismatch — then the
+   existing git write + ArtifactVersion insert on that session, commit, and
+   on success `ctx.agent_view_head = new_sha`. Preserve the existing
+   rollback-on-failure file-restore behavior exactly — read the current
+   `_write_and_commit` body first and thread the mutex/session/precondition
+   around it rather than rewriting it.
+
+(With `ctx.write_lock` held, two in-turn tool calls can no longer interleave
+compute-then-commit at all; the captured `expected_head` additionally protects
+against cross-process writers — user saves — between the agent's read and its
+mutation.)
 
 In `tools/citations.py`: in `_insert_citation_locked` (and the equivalents for `remove_citation`/`update_citation`/`rename_citekey` — find them with `grep -n "write_and_commit_files" src/call_manager/proposal_assist/tools/citations.py`), the function already receives a `session` — add `acquire_commit_mutex(session, ctx.workspace_id)` as its first statement, and after each successful `write_and_commit_files(...)` call set `ctx.agent_view_head = <returned sha>`. Citation tools do NOT need the view-of-HEAD *precondition* (they're anchor-validated like edit_proposal), but they must keep the view current so a following replace doesn't spuriously fail.
 
@@ -1734,10 +1881,35 @@ def _retrieve_and_judge(session, citation_service, embedder, workspace_id,
 
 
 def _upsert_annotation(session: Session, **kw) -> None:
+    """Insert a fresh finding, or REOPEN/refresh a previously-staled row for
+    the same occurrence. Resolved rows stay resolved: dismissed/inserted are
+    never reopened by re-analysis (spec §3) — only 'stale' rows (set at the
+    start of fan-out) flip back to 'open'. This is what prevents the
+    contradictory strip where an old open uncited_no_match coexists with a
+    fresh uncited_supported for the same sentence after a library change."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
-    stmt = pg_insert(UserClaimAnnotation).values(**kw).on_conflict_do_nothing(
-        constraint="uq_user_claim_annotations_occurrence")
+    stmt = pg_insert(UserClaimAnnotation).values(**kw)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_user_claim_annotations_occurrence",
+        set_={
+            "status": "open",
+            "reference_id": stmt.excluded.reference_id,
+            "chunk_index": stmt.excluded.chunk_index,
+            "evidence_quote": stmt.excluded.evidence_quote,
+        },
+        where=(UserClaimAnnotation.status == "stale"),
+    )
     session.execute(stmt)
+
+
+def _stale_open_annotations_for_section(session: Session, *, workspace_id,
+                                        section_sha: str) -> None:
+    """Mark every OPEN annotation for this section content stale before
+    fan-out; current findings reopen/replace them, superseded ones stay
+    hidden. Dismissed/inserted rows are untouched."""
+    session.query(UserClaimAnnotation).filter_by(
+        workspace_id=workspace_id, section_sha=section_sha, status="open",
+    ).update({"status": "stale"}, synchronize_session=False)
 
 
 def analyze_job(
@@ -1751,8 +1923,9 @@ def analyze_job(
 ) -> None:
     """Analyze one job. Raises on transient failure (caller marks failed)."""
     from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from call_manager.proposal_assist.paths import workspace_repo_dir
 
-    repo = Path(workspaces_dir) / str(job.workspace_id)
+    repo = workspace_repo_dir(workspaces_dir, job.workspace_id)
     doc = (repo / "proposal.md").read_text()
     sections = split_sections(doc)
     occurrences = [s for s in sections if s.sha == job.section_sha]
@@ -1766,16 +1939,32 @@ def analyze_job(
     sentences = _sentences_with_citation_state(section.text)
 
     # ---- cited occurrences: evidence-ledger audit (existing machinery) ----
+    # Diff-scope by filtering the LEDGER to this section's evidence rows:
+    # validate_citations_semantic judges every row of the ledger it is given,
+    # so passing the full ledger would re-audit the whole document per job.
     cited_evs = {ev for s in sentences for ev in s.ev_ids}
     semantic_issues: list[dict] = []
     if cited_evs:
+        scoped_ledger = {**ledger, "evidence": [
+            r for r in (ledger.get("evidence") or [])
+            if isinstance(r, dict) and r.get("id") in cited_evs]}
         semantic_issues = validate_citations_semantic(
-            proposal_text=doc, ledger=ledger, session=session,
+            proposal_text=doc, ledger=scoped_ledger, session=session,
             session_factory=session_factory, workspace_id=job.workspace_id,
             citation_service=citation_service, deterministic_issues=[])
+    # validate_citations_semantic NEVER raises: cap-exceeded and transient
+    # LLM errors surface as 'audit_unavailable' issues. Treat those as a
+    # transient job failure so the job retries instead of being marked done
+    # with silently-missing findings.
+    if any(i.get("type") == "audit_unavailable" for i in semantic_issues):
+        raise RuntimeError("citation audit unavailable (cap or LLM error)")
+    # Real issue types from audit.py:489-491 — semantic_contradicts (error),
+    # semantic_unsupported (warning). semantic_irrelevant is excluded: an
+    # irrelevant *background* cite is not a wrong claim-support.
     bad_by_ev = {i["evidence_id"]: i for i in semantic_issues
                  if i.get("evidence_id") in cited_evs
-                 and i.get("type") in ("unsupported", "contradicted")}
+                 and i.get("type") in ("semantic_unsupported",
+                                       "semantic_contradicts")}
 
     # ---- uncited occurrences: classify (cached) → retrieve → judge ----
     results: dict[str, ClaimClassification] = {}
@@ -1816,6 +2005,8 @@ def analyze_job(
         results[sha] = cached
 
     # ---- fan out occurrence annotations (per duplicate section) ----
+    _stale_open_annotations_for_section(session, workspace_id=job.workspace_id,
+                                        section_sha=job.section_sha)
     for occ_idx in range(len(occurrences)):
         for occ in sentences:
             common = dict(
@@ -1907,10 +2098,12 @@ Test scenarios (each builds a workspace + git repo as in Task 6, plus a `Referen
 1. `test_uncited_claim_gets_supported_annotation` — section with "This is a factual claim." → one `uncited_supported` annotation with the reference and quote.
 2. `test_unverifiable_quote_discarded_then_no_match` — chunk text WITHOUT "verified words" → quote verification fails → `uncited_no_match`.
 3. `test_not_claim_sentences_cached_zero_llm_on_rerun` — run drain twice on the same content (delete the done job and re-enqueue the same `section_sha` between runs); assert `FakeCitationService.calls` count does not grow on the second run for classification.
-4. `test_cited_occurrence_audited_even_when_uncited_cached` — same prose cited in one sentence (manufacture a ledger row + canonical marker) and uncited in another; assert the audit path ran (a `cited_unsupported` annotation appears when the fake verdict says unsupported — use a second FakeCitationService whose audit verdict is "unsupported"; note `validate_citations_semantic` consumes the service, so scripting may key off `op`).
+4. `test_cited_occurrence_audited_even_when_uncited_cached` — same prose cited in one sentence (manufacture a ledger row + canonical marker) and uncited in another; monkeypatch `pipeline.validate_citations_semantic` to return `[{"type": "semantic_unsupported", "evidence_id": "<the ev id>", ...}]` and assert (a) it was CALLED with a ledger scoped to only this section's evidence rows, and (b) a `cited_unsupported` annotation with that evidence_id appears.
 5. `test_superseded_when_content_gone` — enqueue, then rewrite proposal.md to remove the section before draining → job `superseded`, zero annotations.
 6. `test_duplicate_sections_fan_out` — document with two byte-identical `## Dup` sections → annotations for `section_occurrence` 0 AND 1.
 7. `test_cap_exceeded_fails_job` — fake returns `cap_exceeded=True` → job failed with "token cap" in `last_error` (after MAX_ATTEMPTS re-queues; assert status queued + attempts incremented on first failure).
+8. `test_audit_unavailable_retries_job` — monkeypatch `pipeline.validate_citations_semantic` to return `[{"type": "audit_unavailable", "evidence_id": "..."}]` for a cited section → `analyze_job` raises, drain marks the job queued (retry), NOT done.
+9. `test_reanalysis_supersedes_stale_open_annotations` — first run produces an open `uncited_no_match`; add a matching reference + chunk, delete the done job row, re-enqueue the same content, drain again → the old `uncited_no_match` row is `stale` and a fresh open `uncited_supported` exists for the same occurrence (no contradictory strip); a `dismissed` row in the same position stays `dismissed`.
 
 (Scenario 4 is the trickiest — if scripting `validate_citations_semantic`'s internals proves brittle, monkeypatch `pipeline.validate_citations_semantic` to return a canned issue list and assert it was CALLED for the cited sentence; the unit contract is "cited → audit path invoked", not the audit's internals, which have their own tests.)
 
@@ -1964,6 +2157,7 @@ from call_manager.proposal_assist.citations.markers import AnchorError, insert_m
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.save import _turn_in_flight
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
 
@@ -2031,7 +2225,7 @@ def insert_from_annotation(
     if chunk is None:
         raise InsertConflict("the supporting excerpt is no longer available")
 
-    repo = Path(workspaces_dir) / str(workspace.id)
+    repo = workspace_repo_dir(workspaces_dir, workspace.id)
     doc = (repo / "proposal.md").read_text()
     sections = split_sections(doc)
     matches = [s for s in sections if s.sha == annotation.section_sha]
@@ -2170,31 +2364,22 @@ from call_manager.proposal_assist.analysis.queue import enqueue_section_job
 logger = logging.getLogger(__name__)
 
 
-def _reenqueue_open_sections(session: Session, workspace_id: uuid.UUID,
-                             kinds: tuple[str, ...],
-                             workspaces_dir: Path) -> int:
-    """Enqueue jobs for HEAD sections that contain open annotations of *kinds*
-    (matched by section_sha still live at HEAD)."""
+def _enqueue_for_shas(session: Session, workspace_id: uuid.UUID,
+                      target_shas: set[str], workspaces_dir: Path) -> int:
+    """Enqueue jobs for the subset of *target_shas* still live at HEAD."""
+    from call_manager.proposal_assist.citations.gitio import current_head
     from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from call_manager.proposal_assist.paths import workspace_repo_dir
 
-    repo = Path(workspaces_dir) / str(workspace_id)
+    repo = workspace_repo_dir(workspaces_dir, workspace_id)
     path = repo / "proposal.md"
     if not path.exists():
         return 0
-    from call_manager.proposal_assist.citations.gitio import current_head
     head = current_head(repo)
-    sections = split_sections(path.read_text())
-    live_shas = {s.sha: s for s in sections}
-    open_shas = {
-        sha for (sha,) in session.query(UserClaimAnnotation.section_sha)
-        .filter(UserClaimAnnotation.workspace_id == workspace_id,
-                UserClaimAnnotation.status == "open",
-                UserClaimAnnotation.kind.in_(kinds))
-        .distinct()
-    }
+    live = {s.sha: s for s in split_sections(path.read_text())}
     n = 0
-    for sha in open_shas & set(live_shas):
-        s = live_shas[sha]
+    for sha in target_shas & set(live):
+        s = live[sha]
         if enqueue_section_job(session, workspace_id=workspace_id,
                                section_index=s.index, section_heading=s.heading,
                                section_sha=s.sha, commit_sha=head):
@@ -2202,32 +2387,51 @@ def _reenqueue_open_sections(session: Session, workspace_id: uuid.UUID,
     return n
 
 
+def _open_annotation_shas(session: Session, workspace_id: uuid.UUID,
+                          kinds: tuple[str, ...],
+                          reference_id: uuid.UUID | None = None) -> set[str]:
+    q = (session.query(UserClaimAnnotation.section_sha)
+         .filter(UserClaimAnnotation.workspace_id == workspace_id,
+                 UserClaimAnnotation.status == "open",
+                 UserClaimAnnotation.kind.in_(kinds)))
+    if reference_id is not None:
+        q = q.filter(UserClaimAnnotation.reference_id == reference_id)
+    return {sha for (sha,) in q.distinct()}
+
+
 def on_reference_text_ingested(session: Session, *, workspace_id: uuid.UUID,
                                workspaces_dir: Path) -> int:
-    """Library grew: stale no_match classifications; re-enqueue their sections."""
+    """Library grew: stale no_match classifications; re-enqueue sections with
+    open uncited_no_match annotations. (The pipeline's fan-out stales open
+    annotations for a re-analyzed section before writing fresh findings, so
+    a now-supported claim REPLACES its old no_match row — no contradictory
+    strip.)"""
     session.query(ClaimClassification).filter_by(
         workspace_id=workspace_id, outcome="no_match",
-    ).update({"stale_at": datetime.now(UTC)})
-    return _reenqueue_open_sections(session, workspace_id,
-                                    ("uncited_no_match",), workspaces_dir)
+    ).update({"stale_at": datetime.now(UTC)}, synchronize_session=False)
+    shas = _open_annotation_shas(session, workspace_id, ("uncited_no_match",))
+    return _enqueue_for_shas(session, workspace_id, shas, workspaces_dir)
 
 
 def on_reference_unavailable(session: Session, *, workspace_id: uuid.UUID,
                              reference_id: uuid.UUID,
                              workspaces_dir: Path) -> int:
-    """Library shrank/changed: stale supported outcomes pointing at the
-    reference; stale their open annotations; re-enqueue their sections."""
+    """Library shrank/changed (tombstone, hard delete, re-chunk/re-embed).
+    ORDER MATTERS: collect the affected sections BEFORE flipping the open
+    annotations to stale — the collection query filters on status='open',
+    so staleing first would always find zero sections to re-enqueue."""
+    shas = _open_annotation_shas(session, workspace_id, ("uncited_supported",),
+                                 reference_id=reference_id)
     session.query(ClaimClassification).filter_by(
         workspace_id=workspace_id, reference_id=reference_id,
-    ).update({"stale_at": datetime.now(UTC)})
+    ).update({"stale_at": datetime.now(UTC)}, synchronize_session=False)
     session.query(UserClaimAnnotation).filter_by(
         workspace_id=workspace_id, reference_id=reference_id, status="open",
-    ).update({"status": "stale"})
-    return _reenqueue_open_sections(session, workspace_id,
-                                    ("uncited_supported",), workspaces_dir)
+    ).update({"status": "stale"}, synchronize_session=False)
+    return _enqueue_for_shas(session, workspace_id, shas, workspaces_dir)
 ```
 
-- [ ] **Step 2: Call sites.** In `references/ingest.py` immediately after `ref2.text_status = "done"` (~line 194), call `on_reference_text_ingested(...)` on the same session (workspaces_dir comes from the settings already available in that function — check its parameters; if not present, thread it through from the caller, which is the reference-text drain tick). In `references/deletion.py` after `ref.tombstoned_at = datetime.now(UTC)` (~line 76), call `on_reference_unavailable(...)`. Both wrapped in try/except-log (invalidation must never break ingest/deletion):
+- [ ] **Step 2: Call sites — BOTH deletion branches.** `references/deletion.py` has two outcomes (read it first): the *tombstone* branch (`ref.tombstoned_at = datetime.now(UTC)`, ~line 76) AND the *hard-delete* branch for uncited references (`session.delete(ref)`, ~line 90). Hook `on_reference_unavailable(...)` into both. In the hard-delete branch, call it **BEFORE** `session.delete(ref)` — the FK on `ClaimClassification.reference_id`/`UserClaimAnnotation.reference_id` is `SET NULL` on delete, so calling after the delete would match zero rows. In `references/ingest.py` immediately after `ref2.text_status = "done"` (~line 194), call `on_reference_text_ingested(...)` on the same session (workspaces_dir comes from the settings already available in that function — check its parameters; if not present, thread it through from the caller, which is the reference-text drain tick). All hooks wrapped in try/except-log (invalidation must never break ingest/deletion):
 
 ```python
 try:
@@ -2237,7 +2441,7 @@ except Exception:  # noqa: BLE001 — invalidation is best-effort
     logger.exception("claim-analysis invalidation failed (ingest)")
 ```
 
-- [ ] **Step 3: Tests** — `tests/test_analysis_invalidation.py`: (1) ingest hook stales `no_match` rows and enqueues the section containing an open `uncited_no_match`; (2) tombstone hook stales `supported` classification + flips open `uncited_supported` annotations to `stale` and enqueues; (3) hooks are no-ops (return 0, no raise) when proposal.md doesn't exist.
+- [ ] **Step 3: Tests** — `tests/test_analysis_invalidation.py`: (1) ingest hook stales `no_match` rows and enqueues the section containing an open `uncited_no_match`; (2) tombstone hook stales `supported` classification + flips open `uncited_supported` annotations to `stale` AND **enqueues the section** (regression for the collect-before-stale ordering — assert return value ≥ 1); (3) hard-delete of an uncited-but-suggested reference triggers the same invalidation (call `delete_reference` end-to-end and assert annotations went stale + job enqueued); (4) hooks are no-ops (return 0, no raise) when proposal.md doesn't exist.
 
 - [ ] **Step 4: Run** — `uv run pytest tests/test_analysis_invalidation.py tests/ -q -k "reference"` → all pass.
 - [ ] **Step 5: Commit**
@@ -2276,6 +2480,7 @@ from call_manager.db.models import ClaimAnalysisJob, Workspace
 from call_manager.proposal_assist.analysis.queue import enqueue_section_job
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
 
@@ -2289,7 +2494,7 @@ def reconcile_analysis_coverage(*, session_factory: sessionmaker,
         ws_ids = [w.id for w in session.query(Workspace)
                   .filter(Workspace.soft_deleted_at.is_(None))]
         for ws_id in ws_ids:
-            repo = Path(workspaces_dir) / str(ws_id)
+            repo = workspace_repo_dir(workspaces_dir, ws_id)
             path = repo / "proposal.md"
             if not path.exists():
                 continue
