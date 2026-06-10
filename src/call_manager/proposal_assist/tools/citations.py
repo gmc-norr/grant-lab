@@ -65,6 +65,10 @@ from call_manager.proposal_assist.citations.quotes import (
     find_quote_offsets,
     normalize_for_quote_match,
 )
+from call_manager.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,
+    acquire_commit_mutex,
+)
 from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
@@ -76,6 +80,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CITATIONS_FILENAME = "citations.json"
+
+# Spec 2026-06-10 §1 — every git mutation serializes on the per-workspace
+# commit mutex; a wedged holder surfaces as this error (web maps it to 503).
+_BUSY_ERROR = "workspace is busy — try again in a moment"
 
 # Evidence-row ids are minted as ev-<lowercase-hex> (see ledger.new_ev_id).
 EVIDENCE_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
@@ -344,6 +352,14 @@ def _insert_citation_locked(
     stance: str,
     confidence: str | None,
 ) -> dict[str, Any]:
+    # 0. Serialize against every other git mutation of this workspace (spec
+    # 2026-06-10 §1). Transaction-scoped: released by this session's
+    # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
+    try:
+        acquire_commit_mutex(session, ctx.workspace_id)
+    except CommitMutexTimeout:
+        return {"error": _BUSY_ERROR}
+
     # 1. Load + workspace-scope the Reference.
     ref = session.get(Reference, ref_uuid)
     if ref is None or ref.workspace_id != ctx.workspace_id:
@@ -397,10 +413,13 @@ def _insert_citation_locked(
         # no new commit was made) and may be "" if HEAD resolution fails.
         # existing["id"] is safe: _find_idempotent_row only matches rows with a
         # present, truthy id.
+        head = _current_head(ctx.repo_dir)
+        if head:
+            ctx.agent_view_head = head
         return {
             "ev_id": existing["id"],
             "citekey": existing.get("citekey"),
-            "commit_sha": _current_head(ctx.repo_dir),
+            "commit_sha": head,
             "idempotent": True,
         }
 
@@ -511,6 +530,10 @@ def _insert_citation_locked(
         )
         return {"error": "failed to commit citation"}
 
+    # Advance the agent's view of HEAD so a following edit/replace in the same
+    # turn doesn't spuriously fail its precondition (spec 2026-06-10 §1).
+    ctx.agent_view_head = sha
+
     # 14. DB cache (AFTER git) — best-effort; git ledger is canonical.
     if ref.citekey != citekey:
         try:
@@ -557,10 +580,21 @@ async def remove_citation_impl(
     # re-acquire the pg advisory lock here — it is connection-scoped and would
     # always fail (the turn holds it on another connection).
     async with ctx.write_lock:
-        return _remove_citation_locked(ctx, evidence_id=evidence_id)
+        with ctx.session_factory() as session:
+            return _remove_citation_locked(ctx, session, evidence_id=evidence_id)
 
 
-def _remove_citation_locked(ctx: ToolContext, *, evidence_id: str) -> dict[str, Any]:
+def _remove_citation_locked(
+    ctx: ToolContext, session: Session, *, evidence_id: str
+) -> dict[str, Any]:
+    # 0. Serialize against every other git mutation of this workspace (spec
+    # 2026-06-10 §1). Transaction-scoped: released by this session's
+    # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
+    try:
+        acquire_commit_mutex(session, ctx.workspace_id)
+    except CommitMutexTimeout:
+        return {"error": _BUSY_ERROR}
+
     # 1. Read proposal.md + the ledger.
     read = _read_proposal_and_ledger(ctx)
     if isinstance(read, dict):
@@ -603,6 +637,9 @@ def _remove_citation_locked(ctx: ToolContext, *, evidence_id: str) -> dict[str, 
             evidence_id,
         )
         return {"error": "failed to commit citation removal"}
+
+    # Advance the agent's view of HEAD (spec 2026-06-10 §1).
+    ctx.agent_view_head = sha
 
     # 5. Success.
     return {"ev_id": evidence_id, "commit_sha": sha}
@@ -677,6 +714,14 @@ def _update_citation_locked(
     evidence_quote: str | None,
     reaccept_claim: bool,
 ) -> dict[str, Any]:
+    # 0. Serialize against every other git mutation of this workspace (spec
+    # 2026-06-10 §1). Transaction-scoped: released by this session's
+    # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
+    try:
+        acquire_commit_mutex(session, ctx.workspace_id)
+    except CommitMutexTimeout:
+        return {"error": _BUSY_ERROR}
+
     # 1. Read proposal.md + the ledger; locate the row.
     read = _read_proposal_and_ledger(ctx)
     if isinstance(read, dict):
@@ -786,6 +831,9 @@ def _update_citation_locked(
         )
         return {"error": "failed to commit citation update"}
 
+    # Advance the agent's view of HEAD (spec 2026-06-10 §1).
+    ctx.agent_view_head = sha
+
     # 8. Success.
     return {
         "ev_id": evidence_id,
@@ -837,6 +885,14 @@ def _rename_citekey_locked(
     old_citekey: str,
     new_citekey: str,
 ) -> dict[str, Any]:
+    # 0. Serialize against every other git mutation of this workspace (spec
+    # 2026-06-10 §1). Transaction-scoped: released by this session's
+    # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
+    try:
+        acquire_commit_mutex(session, ctx.workspace_id)
+    except CommitMutexTimeout:
+        return {"error": _BUSY_ERROR}
+
     # 1. Validate both keys up front (markers/queries would otherwise raise or
     # silently no-op on a malformed key).
     if not CITEKEY_RE.match(old_citekey):
@@ -909,6 +965,9 @@ def _rename_citekey_locked(
             new_citekey,
         )
         return {"error": "failed to commit citekey rename"}
+
+    # Advance the agent's view of HEAD (spec 2026-06-10 §1).
+    ctx.agent_view_head = sha
 
     # 9. DB cache (AFTER git) — best-effort; git ledger is canonical.
     try:

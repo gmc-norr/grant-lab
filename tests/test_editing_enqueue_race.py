@@ -81,7 +81,7 @@ def test_submit_blocks_while_commit_mutex_held(pg_session_factory, _settings_env
             s2.commit()
             order.append("enqueued")
 
-    t = threading.Thread(target=enqueue)
+    t = threading.Thread(target=enqueue, daemon=True)
     t.start()
     started.wait(timeout=5)
     time.sleep(0.3)

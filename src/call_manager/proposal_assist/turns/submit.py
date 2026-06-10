@@ -64,10 +64,7 @@ from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import (
     estimate_image_tokens_from_bytes,
 )
-from call_manager.proposal_assist.drafting.locking import (
-    CommitMutexTimeout,  # noqa: F401 — re-exported so callers can catch it
-    acquire_commit_mutex,
-)
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.turns.caps import (
     GlobalTokenCapExceeded,
     TokenCapExceeded,

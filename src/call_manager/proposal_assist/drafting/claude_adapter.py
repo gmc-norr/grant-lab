@@ -124,7 +124,10 @@ _CITATION_INSTRUCTION = (
     "their ev ids. After substantial drafting, call validate_citations and "
     "resolve any issues it reports; then call list_unsupported_claims to find "
     "factual claims that still lack a citation. When the draft's citations are "
-    "settled, call build_bibliography to render the formatted reference list."
+    "settled, call build_bibliography to render the formatted reference list. "
+    "Never rewrite or delete passages from commits whose message starts with "
+    "'user edit:' unless the user's message asks for it; read the proposal "
+    "before any replace."
 )
 
 

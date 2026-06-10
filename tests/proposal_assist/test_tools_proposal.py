@@ -63,6 +63,7 @@ async def test_edit_proposal_applies_string_replace_and_commits(
     tmp_path,
 ):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
+    await read_proposal_impl(ctx)
     result = await edit_proposal_impl(
         ctx,
         edits=[{"old_string": "Initial.", "new_string": "Revised content."}],
@@ -85,6 +86,7 @@ async def test_edit_proposal_rejects_when_old_string_not_found(
     tmp_path,
 ):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
+    await read_proposal_impl(ctx)
     result = await edit_proposal_impl(
         ctx,
         edits=[{"old_string": "NOPE", "new_string": "X"}],
@@ -108,6 +110,7 @@ async def test_edit_proposal_rejects_when_old_string_appears_multiple_times(
     subprocess.run(["git", "add", "proposal.md"], cwd=ctx.repo_dir, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "setup"], cwd=ctx.repo_dir, check=True)
 
+    await read_proposal_impl(ctx)
     result = await edit_proposal_impl(
         ctx,
         edits=[{"old_string": "foo", "new_string": "baz"}],
@@ -123,6 +126,7 @@ async def test_replace_proposal_overwrites_and_commits(
     tmp_path,
 ):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
+    await read_proposal_impl(ctx)
     new_content = "# Brand new\n\nFresh start.\n"
     result = await replace_proposal_impl(
         ctx,
@@ -145,6 +149,7 @@ async def test_edit_proposal_no_op_when_edits_empty(
     tmp_path,
 ):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path)
+    await read_proposal_impl(ctx)
     result = await edit_proposal_impl(
         ctx,
         edits=[],
@@ -182,6 +187,7 @@ async def test_write_and_commit_rolls_back_working_tree_on_commit_failure(
             )
         return real_run(cmd, *args, **kwargs)
 
+    await read_proposal_impl(ctx)
     monkeypatch.setattr(_proposal_mod.subprocess, "run", fake_run)
 
     result = await edit_proposal_impl(
@@ -217,6 +223,8 @@ async def test_write_and_commit_rollback_leaves_unrelated_dirty_files_alone(
     _sp.run(["git", "add", "sidecar.txt"], cwd=ctx.repo_dir, check=True)
     _sp.run(["git", "commit", "-q", "-m", "add sidecar"], cwd=ctx.repo_dir, check=True)
     sidecar.write_text("DIRTY uncommitted edits an admin left")
+
+    await read_proposal_impl(ctx)
 
     from call_manager.proposal_assist.tools import proposal as _proposal_mod
 
@@ -261,6 +269,7 @@ async def test_edit_proposal_links_triggering_turn(
         s.add(turn)
         s.commit()
         turn_id = turn.id
+    await read_proposal_impl(ctx)
     await edit_proposal_impl(
         ctx,
         edits=[{"old_string": "Initial.", "new_string": "Revised."}],

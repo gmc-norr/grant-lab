@@ -61,6 +61,13 @@ class ToolContext:
     # Python 3.12: the Lock binds to the running loop lazily on first use.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    # Spec 2026-06-10 §1: the agent's view of HEAD. Updated by read_proposal
+    # and by each successful mutation (tools return the new commit SHA).
+    # edit/replace refuse to write when the captured expected head differs
+    # from actual HEAD inside the commit mutex — a blind overwrite of text
+    # the agent never saw becomes a tool error instead of a lost update.
+    agent_view_head: str | None = field(default=None)
+
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap a plain-dict tool result in the MCP content-block envelope.
