@@ -1,16 +1,18 @@
 """User section save: the single write path for owner edits.
 
 Order inside the per-workspace commit mutex (spec §1):
-turn-lock check → stale-form check → no-change short-circuit → git commit →
-ArtifactVersion('user') → WorkspaceEvent('user_edit') → Tier-1 deterministic
-validation → Tier-2 job enqueue. The mutex is transaction-scoped; the
-caller's session.commit() releases it. A DB failure AFTER the git commit is
-recovered by reconcile_workspace_git_drift + the analysis reconcile tick
-(spec §6). CommitMutexTimeout propagates to the caller (web maps it to 503).
+turn-lock check → stale-form check → structure guard → no-change
+short-circuit → git commit → ArtifactVersion('user') →
+WorkspaceEvent('user_edit') → Tier-1 deterministic validation → Tier-2
+job enqueue. The mutex is transaction-scoped; the caller's session.commit()
+releases it. A DB failure AFTER the git commit is recovered by
+reconcile_workspace_git_drift + the analysis reconcile tick (spec §6).
+CommitMutexTimeout propagates to the caller (web maps it to 503).
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,8 +25,10 @@ from call_manager.proposal_assist.citations.gitio import current_head, write_and
 from call_manager.proposal_assist.citations.ledger import empty_ledger, load_ledger
 from call_manager.proposal_assist.citations.markers import find_bare_markers
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+
+logger = logging.getLogger(__name__)
 
 PROPOSAL_FILENAME = "proposal.md"
 CITATIONS_FILENAME = "citations.json"
@@ -41,6 +45,12 @@ class TurnInFlightError(RuntimeError):
 class StaleSectionError(RuntimeError):
     """HEAD moved since the edit form was rendered AND the edited section's
     bytes changed underneath the user — saving would silently clobber."""
+
+
+class SectionStructureError(RuntimeError):
+    """The edit removed or invalidated the section's structural boundary
+    (its ## heading), which would silently merge it into a neighbor.
+    Removing/merging/reordering sections is chat-only in this slice."""
 
 
 @dataclass
@@ -62,6 +72,7 @@ def _tier1_issues(*, doc: str, repo_dir: Path, session: Session, workspace_id) -
     try:
         ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
     except ValueError as exc:
+        logger.error("corrupt citations.json in workspace %s: %s", workspace_id, exc)
         ledger = empty_ledger()
         issues.append(
             {
@@ -87,6 +98,7 @@ def _tier1_issues(*, doc: str, repo_dir: Path, session: Session, workspace_id) -
                 "type": "bare_marker",
                 "severity": "error",
                 "citekey": bm["citekey"],
+                "evidence_id": None,
                 "location": f"char {bm['start']}",
                 "detail": (
                     "hand-typed citation has no evidence link — "
@@ -112,8 +124,15 @@ def save_section(
 
     Caller owns the transaction: rows are added but NOT committed here, and
     the commit mutex is released by the caller's COMMIT/ROLLBACK. Raises
-    CommitMutexTimeout, TurnInFlightError, StaleSectionError, IndexError
+    CommitMutexTimeout, TurnInFlightError, StaleSectionError,
+    SectionStructureError (pre-commit — no git side-effect), IndexError
     (section_index out of range), GitCommitError.
+
+    SectionStructureError is raised when the first line of ``new_text`` is
+    not an H2 heading for a non-preamble section, or IS an H2 heading for
+    the preamble (section_index == 0). Adding EXTRA ``##`` headings anywhere
+    inside a section is allowed — save_section splits the result and enqueues
+    the first resulting chunk; the reconcile tick covers any remainder.
     """
     # 1. Serialize against every other git mutation of this workspace.
     acquire_commit_mutex(session, workspace.id)
@@ -155,6 +174,26 @@ def save_section(
     if section_index < len(sections) - 1 and not new_text.endswith("\n"):
         new_text += "\n"
 
+    # 5b. Structure guard: enforce the section boundary before any git I/O.
+    #     For non-preamble sections the first line must be an H2 heading
+    #     (rename allowed; deleting it would silently merge into a neighbor).
+    #     For the preamble (index 0) the first line must NOT be an H2 heading
+    #     (a preamble beginning with "## " ceases to be the preamble).
+    #     Empty preamble text is allowed.
+    first_line = new_text.split("\n", 1)[0] if new_text else ""
+    if section_index > 0:
+        if not is_h2_heading_line(first_line):
+            raise SectionStructureError(
+                f"section {section_index} edit must start with an H2 heading (## …); "
+                "got: " + repr(first_line)
+            )
+    else:
+        if new_text and is_h2_heading_line(first_line):
+            raise SectionStructureError(
+                "preamble (section 0) edit must not start with an H2 heading; "
+                "got: " + repr(first_line)
+            )
+
     # 6. No-change short-circuit: write_and_commit_files would no-op anyway;
     #    skip provenance rows + enqueue but still report Tier-1 issues.
     if new_text == live.text:
@@ -192,7 +231,7 @@ def save_section(
                 "section_index": section_index,
                 "heading": heading,
                 "commit_sha": commit_sha,
-                "byte_delta": len(new_doc) - len(doc),
+                "byte_delta": len(new_doc.encode()) - len(doc.encode()),
             },
         )
     )

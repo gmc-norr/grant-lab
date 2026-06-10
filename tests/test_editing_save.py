@@ -18,6 +18,7 @@ from call_manager.db.models import (
 from call_manager.proposal_assist.citations.gitio import _git_env, current_head
 from call_manager.proposal_assist.editing.save import (
     SaveResult,
+    SectionStructureError,
     StaleSectionError,
     TurnInFlightError,
     save_section,
@@ -213,3 +214,82 @@ def test_no_change_save_short_circuits(pg_session_factory, tmp_path):
         assert s.query(WorkspaceEvent).count() == 0
         assert s.query(ClaimAnalysisJob).count() == 0
         assert (repo / "proposal.md").read_text() == DOC
+
+
+def test_heading_deletion_rejected_middle_section(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        head = current_head(repo)
+        with pytest.raises(SectionStructureError):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=user.id,
+                section_index=1,
+                new_text="no heading anymore\n",
+                base_commit_sha=head,
+                base_section_sha=_section_sha(repo, 1),
+                workspaces_dir=tmp_path,
+            )
+        # nothing committed, nothing enqueued
+        assert current_head(repo) == head
+        s.rollback()
+        assert s.query(ClaimAnalysisJob).count() == 0
+
+
+def test_preamble_gaining_heading_rejected(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        head = current_head(repo)
+        with pytest.raises(SectionStructureError):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=user.id,
+                section_index=0,
+                new_text="## Sneaky\nx\n",
+                base_commit_sha=head,
+                base_section_sha=_section_sha(repo, 0),
+                workspaces_dir=tmp_path,
+            )
+
+
+def test_heading_rename_allowed(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        result = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background & Significance\nbody\n",
+            base_commit_sha=current_head(repo),
+            base_section_sha=_section_sha(repo, 1),
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+        assert result.changed is True
+        assert "## Background & Significance" in (repo / "proposal.md").read_text()
+
+
+def test_extra_heading_split_allowed(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        result = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background\nb1\n## New Sub\nb2\n",
+            base_commit_sha=current_head(repo),
+            base_section_sha=_section_sha(repo, 1),
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+        assert result.changed is True and result.job_enqueued is True
+        job = s.query(ClaimAnalysisJob).one()
+        assert job.section_heading == "Background"  # first chunk enqueued

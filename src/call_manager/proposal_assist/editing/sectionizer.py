@@ -31,6 +31,15 @@ class Section:
         return hashlib.sha256(self.text.encode()).hexdigest()
 
 
+def is_h2_heading_line(line: str) -> bool:
+    """Return True if *line* is an H2 boundary (``## …``, not ``###``).
+
+    Thin public wrapper around ``_H2_RE`` for callers that need the check
+    outside the fence-tracking context of :func:`split_sections`.
+    """
+    return bool(_H2_RE.match(line.rstrip("\n")))
+
+
 def split_sections(text: str) -> list[Section]:
     chunks: list[tuple[str, list[str]]] = [("", [])]  # (heading, lines)
     in_fence = False
