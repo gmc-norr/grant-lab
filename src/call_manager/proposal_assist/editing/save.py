@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 PROPOSAL_FILENAME = "proposal.md"
 CITATIONS_FILENAME = "citations.json"
 
+# User-facing message for the turn-in-flight 409 (shared with insert.py and
+# sections.py so all three raise the identical string).
+TURN_IN_FLIGHT_MESSAGE = "assistant is working — try again when the turn finishes"
+
 # Statuses meaning an agent turn owns (or is about to own) the repo.
 _TURN_IN_FLIGHT_STATUSES = ("queued", "running")
 

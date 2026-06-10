@@ -2614,7 +2614,7 @@ git commit -m "test(editing): end-to-end save → analyze → insert flow"
 | §1 turn lock + stale form + routes | 6, 7 |
 | §1 replace/edit view-of-HEAD precondition | 9 |
 | §1 ArtifactVersion('user') provenance | 6, 11 |
-| §1 turn-lock UX (disable hints) | 7 (templates; composer hook is the existing `done` SSE event) |
+| §1 turn-lock UX (disable hints) | landed post-review in `app.js` (this commit): `htmx:beforeRequest` on `#composer` disables `.section-edit-btn`; `htmx:beforeCleanupElement` on `sse-mount-*` re-enables. Server-side 409s are authority. |
 | §2 Tier-1 deterministic + bare markers | 3, 6 |
 | §3 job queue, content dedup, supersession | 5, 10 |
 | §3 cited-first pipeline, classification cache, retrieval, verified quotes | 10 |

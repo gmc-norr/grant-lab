@@ -55,6 +55,33 @@
   });
 })();
 
+// Best-effort §1 turn-lock hint: disable section Edit buttons while a
+// drafting turn is in flight. Server-side 409s remain the authority.
+// On page load: no server plumbing exposes a pending-turn hint in this
+// template context, so load-time disabling is skipped intentionally.
+document.body.addEventListener("htmx:beforeRequest", function (evt) {
+  var elt = evt.detail.elt;
+  if (elt && elt.id === "composer") {
+    document.querySelectorAll(".section-edit-btn").forEach(function (b) {
+      b.disabled = true;
+    });
+  }
+});
+// Re-enable when the SSE connector div is cleaned up (sse-close='done'
+// causes the htmx-sse extension to remove the element, triggering this
+// event — that is the reliable signal that the turn finished).
+document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
+  var id = evt.detail.elt && evt.detail.elt.id;
+  if (id && id.startsWith("sse-mount-")) {
+    reenable();
+  }
+});
+function reenable() {
+  document.querySelectorAll(".section-edit-btn").forEach(function (b) {
+    b.disabled = false;
+  });
+}
+
 // Surface htmx error responses (4xx/5xx) as an inline notice near the
 // triggering element. FastAPI errors are JSON {"detail": "..."}; HTML error
 // fragments are inserted as text, not markup, to avoid injection.

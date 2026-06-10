@@ -465,6 +465,103 @@ def test_stale_supported_cache_refreshes_to_no_match(pg_session_factory, tmp_pat
         assert ann.status == "open"
 
 
+def test_dual_occurrence_cited_and_uncited(pg_session_factory, tmp_path, monkeypatch):
+    """Section with byte-identical duplicates (same sha, two occurrences).
+    The section body has a cited sentence AND an uncited claim sentence.
+    The semantic audit MUST run (cited path) and the uncited sentence MUST be
+    classified (uncited path) — neither path should suppress the other."""
+    ev = "ev-bb22cc33dd44"
+    # Single section body: one cited sentence + one uncited claim sentence.
+    # The section appears twice so occurrences == 2 (same sha).
+    section_body = f"## S\nCited sentence here[@k]<!-- ev:{ev} -->.\nThis is a factual claim.\n"
+    doc = f"# T\nintro\n{section_body}{section_body}"
+    citations = (
+        f'{{"version": 2, "evidence": [{{"id": "{ev}", "citekey": "k", "stance": "supports"}}]}}'
+    )
+
+    audit_calls = []
+
+    def fake_validate(**kwargs):
+        audit_calls.append(kwargs)
+        return []  # audit ran, citation fine — no bad cited issues
+
+    monkeypatch.setattr(pipeline, "validate_citations_semantic", fake_validate)
+
+    with pg_session_factory() as s:
+        ws, _ = _ws(s)
+        repo = _init_repo(tmp_path, ws.id, doc, citations_json=citations)
+        _seed_reference(s, ws.id, "Background. verified words appear here. End.")
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+        ws_id = ws.id
+
+    svc = FakeCitationService()
+    counts = _drain(pg_session_factory, tmp_path, svc)
+    assert counts["done"] == 1
+
+    # Audit was called (cited path ran).
+    assert len(audit_calls) >= 1
+
+    # Classification was called (uncited claim sentence took the uncited path).
+    assert "user_claim_classify" in svc.calls
+
+    with pg_session_factory() as s:
+        anns = s.query(UserClaimAnnotation).filter_by(workspace_id=ws_id).all()
+        # Fan-out covers both occurrences; the uncited claim must produce an
+        # annotation for each occurrence (0 and 1).
+        assert len(anns) >= 2
+        occ_values = {a.section_occurrence for a in anns}
+        assert {0, 1} <= occ_values
+
+
+def test_two_bad_citations_one_sentence(pg_session_factory, tmp_path, monkeypatch):
+    """A single sentence carries TWO canonical markers; the semantic audit
+    returns semantic_unsupported for BOTH evidence ids.  Two distinct
+    cited_unsupported annotations must be created for the same
+    sentence_ordinal."""
+    ev1 = "ev-1111aaaa1111"
+    ev2 = "ev-2222bbbb2222"
+    doc = f"# T\nintro\n## S\nCited sentence here[@k1]<!-- ev:{ev1} -->[@k2]<!-- ev:{ev2} -->.\n"
+    citations = (
+        '{"version": 2, "evidence": ['
+        f'{{"id": "{ev1}", "citekey": "k1", "stance": "supports"}}, '
+        f'{{"id": "{ev2}", "citekey": "k2", "stance": "supports"}}'
+        "]}"
+    )
+
+    def fake_validate(**kwargs):
+        return [
+            {"type": "semantic_unsupported", "evidence_id": ev1, "severity": "warning"},
+            {"type": "semantic_unsupported", "evidence_id": ev2, "severity": "warning"},
+        ]
+
+    monkeypatch.setattr(pipeline, "validate_citations_semantic", fake_validate)
+
+    with pg_session_factory() as s:
+        ws, _ = _ws(s)
+        repo = _init_repo(tmp_path, ws.id, doc, citations_json=citations)
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+        ws_id = ws.id
+
+    counts = _drain(pg_session_factory, tmp_path, FakeCitationService())
+    assert counts["done"] == 1
+
+    with pg_session_factory() as s:
+        anns = (
+            s.query(UserClaimAnnotation)
+            .filter_by(workspace_id=ws_id)
+            .order_by(UserClaimAnnotation.evidence_id)
+            .all()
+        )
+        assert len(anns) == 2
+        assert all(a.kind == "cited_unsupported" for a in anns)
+        assert all(a.status == "open" for a in anns)
+        assert all(a.sentence_ordinal == 0 for a in anns)
+        # Distinct evidence ids.
+        assert {a.evidence_id for a in anns} == {ev1, ev2}
+
+
 def test_marker_before_first_sentence_offset(pg_session_factory, tmp_path, monkeypatch):
     """A marker-only first body line must attach its evidence to sentence 0
     (no silent drop of the cited set)."""

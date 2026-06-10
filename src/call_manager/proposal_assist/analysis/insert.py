@@ -41,7 +41,11 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
-from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME, _turn_in_flight
+from call_manager.proposal_assist.editing.save import (
+    PROPOSAL_FILENAME,
+    TURN_IN_FLIGHT_MESSAGE,
+    _turn_in_flight,
+)
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
@@ -105,7 +109,7 @@ def insert_from_annotation(
 
     # 2. Turn-lock: an agent turn in flight owns the repo.
     if _turn_in_flight(session, workspace.id):
-        raise InsertConflict("assistant is working — try again shortly")
+        raise InsertConflict(TURN_IN_FLIGHT_MESSAGE)
 
     # 3. Occurrence-aware idempotency (spec rev-3 finding 4): only THIS
     # annotation being inserted is a no-op. The same (ref, chunk, quote)

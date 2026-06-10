@@ -35,6 +35,7 @@ from call_manager.proposal_assist.citations.gitio import GitCommitError, current
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
+    TURN_IN_FLIGHT_MESSAGE,
     SectionStructureError,
     StaleSectionError,
     TurnInFlightError,
@@ -158,7 +159,7 @@ def get_section_edit(
     if _turn_in_flight(session, ws.id):
         raise HTTPException(
             status_code=409,
-            detail="assistant is working — try again when the turn finishes",
+            detail=TURN_IN_FLIGHT_MESSAGE,
         )
     head, sections = _read_sections(request, workspace_id)
     section = _section_or_404(sections, n)
@@ -214,7 +215,7 @@ def post_section_save(
         session.rollback()
         raise HTTPException(
             status_code=409,
-            detail="assistant is working — try again when the turn finishes",
+            detail=TURN_IN_FLIGHT_MESSAGE,
         ) from e
     except StaleSectionError as e:
         session.rollback()
