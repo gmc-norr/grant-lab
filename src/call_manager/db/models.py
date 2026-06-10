@@ -1375,3 +1375,141 @@ class CitationAuditVerdict(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class ClaimAnalysisJob(Base):
+    """Tier-2 claim-analysis job for one section snapshot. Append-only and
+    content-addressed: a row is never retargeted; supersession at drain time
+    skips jobs whose section_sha no longer exists at HEAD. Spec 2026-06-10 §3."""
+
+    __tablename__ = "claim_analysis_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','done','failed','superseded')",
+            name="ck_claim_analysis_jobs_status",
+        ),
+        # Content-keyed enqueue dedup: at most one QUEUED job per section content.
+        Index(
+            "uq_claim_analysis_jobs_ws_sha_queued",
+            "workspace_id",
+            "section_sha",
+            unique=True,
+            postgresql_where=text("status = 'queued'"),
+        ),
+        Index("ix_claim_analysis_jobs_status_queued_at", "status", "queued_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    section_index: Mapped[int] = mapped_column(Integer, nullable=False)  # display hint only
+    section_heading: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    section_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ClaimClassification(Base):
+    """Reusable content-level cache: is this sentence a claim, and what did
+    retrieval find for it? Keyed by claim content, NOT occurrence. Spec §3."""
+
+    __tablename__ = "claim_classifications"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('not_claim','supported','no_match')",
+            name="ck_claim_classifications_outcome",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "claim_sha",
+            "prompt_version",
+            name="uq_claim_classifications_ws_sha_pv",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    claim_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_claim: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    reference_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("references.id", ondelete="SET NULL"), nullable=True
+    )
+    chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verdict_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class UserClaimAnnotation(Base):
+    """Occurrence-addressed, user-facing analysis finding. One row per
+    occurrence: section snapshot + duplicate-section ordinal + sentence
+    ordinal (+ evidence id for cited kinds). Spec §3."""
+
+    __tablename__ = "user_claim_annotations"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('uncited_supported','uncited_no_match','cited_unsupported')",
+            name="ck_user_claim_annotations_kind",
+        ),
+        CheckConstraint(
+            "status IN ('open','inserted','dismissed','stale')",
+            name="ck_user_claim_annotations_status",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "section_sha",
+            "section_occurrence",
+            "sentence_ordinal",
+            "kind",
+            "evidence_id",
+            name="uq_user_claim_annotations_occurrence",
+        ),
+        Index("ix_user_claim_annotations_ws_status", "workspace_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    section_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    section_occurrence: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    section_heading: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    sentence_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_offset: Mapped[int] = mapped_column(Integer, nullable=False)
+    claim_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    # "" sentinel for uncited kinds; ev-id for cited_unsupported (keeps the
+    # composite unique constraint enforceable — Postgres treats NULLs as
+    # distinct).
+    evidence_id: Mapped[str] = mapped_column(String(32), nullable=False, server_default="")
+    reference_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("references.id", ondelete="SET NULL"), nullable=True
+    )
+    chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
+    dismissed_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
