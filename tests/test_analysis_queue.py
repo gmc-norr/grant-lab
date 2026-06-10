@@ -213,3 +213,46 @@ def test_reaper_supersedes_when_content_requeued(pg_session_factory):
         assert requeue_stuck_running(s, older_than_minutes=15) == 0
         s.commit()
         assert s.get(ClaimAnalysisJob, job.id).status == "superseded"
+
+
+def test_mark_failed_truncates_error(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        enqueue_section_job(
+            s,
+            workspace_id=ws.id,
+            section_index=0,
+            section_heading="",
+            section_sha="a" * 64,
+            commit_sha="c",
+        )
+        s.commit()
+        (job,) = claim_queued_jobs(s, limit=1)
+        mark_failed(s, job, error="x" * 5000)
+        s.commit()
+        assert len(s.get(ClaimAnalysisJob, job.id).last_error) == 2000
+
+
+def test_claim_respects_limit_and_order(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        # Insert jobs with distinct queued_at values to guarantee stable order.
+        base = datetime.now(UTC)
+        for i, sha in enumerate(("a" * 64, "b" * 64, "c" * 64)):
+            enqueue_section_job(
+                s,
+                workspace_id=ws.id,
+                section_index=i,
+                section_heading=str(i),
+                section_sha=sha,
+                commit_sha="c",
+            )
+            s.flush()
+            # Back-date each row so queued_at order matches insertion order.
+            job = s.query(ClaimAnalysisJob).filter_by(section_sha=sha).one()
+            job.queued_at = base + timedelta(seconds=i)
+        s.commit()
+        first = claim_queued_jobs(s, limit=2)
+        assert len(first) == 2
+        assert [j.section_sha for j in first] == ["a" * 64, "b" * 64]
+        s.commit()

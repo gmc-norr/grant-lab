@@ -1,7 +1,9 @@
-"""claim_analysis_jobs queue helpers. Mirrors ranking/queue.py house pattern:
-idempotent enqueue via ON CONFLICT on a partial unique index, batch claim
-with FOR UPDATE SKIP LOCKED, stuck-job reaping with attempt bumping and
-dead-lettering. Spec 2026-06-10 §3."""
+"""claim_analysis_jobs queue helpers. Follows the same patterns as
+ranking/queue.py — ON CONFLICT dedup, FOR UPDATE SKIP LOCKED batch claim,
+stuck-job reaping with attempt bumping and dead-lettering — but with
+different attempt arithmetic: attempts are bumped both at claim AND at reap
+here (MAX_ATTEMPTS=3), unlike ranking which bumps only in mark_failed
+(MAX_ATTEMPTS=5). Spec 2026-06-10 §3."""
 
 from __future__ import annotations
 
@@ -34,9 +36,11 @@ def enqueue_section_job(
     WHERE status = 'queued'. The index_where predicate must match the
     migration's predicate verbatim so Postgres routes the conflict correctly.
 
-    With psycopg3, INSERT ... ON CONFLICT DO NOTHING sets rowcount to -1
-    when there is no RETURNING clause. We use inserted_primary_key instead:
-    it is a non-None tuple on insert, None on conflict-skip.
+    With psycopg3, rowcount is -1 because SQLAlchemy adds an implicit
+    RETURNING for the server-generated PK — the driver treats the statement
+    as a query rather than DML regardless of the ON CONFLICT outcome. Use
+    inserted_primary_key instead: a non-None tuple on insert, None on
+    conflict-skip. House precedent: ranking/queue.py lines 73-76.
     """
     stmt = (
         pg_insert(ClaimAnalysisJob)
@@ -96,6 +100,11 @@ def mark_failed(session: Session, job: ClaimAnalysisJob, *, error: str) -> None:
     if job.attempts >= MAX_ATTEMPTS:
         job.status = "failed"
         return
+    # READ COMMITTED snapshot: a concurrent enqueue can commit between this
+    # check and our COMMIT, in which case the partial unique index raises
+    # IntegrityError and rolls back the caller's transaction. Recovery: the
+    # job stays running; the reaper picks it up later. Callers should commit
+    # per-job, not per-batch.
     duplicate_queued = (
         session.query(ClaimAnalysisJob.id)
         .filter(
@@ -118,12 +127,13 @@ def mark_superseded(session: Session, job: ClaimAnalysisJob) -> None:
 
 
 def requeue_stuck_running(session: Session, *, older_than_minutes: int = 15) -> int:
-    """Reap stuck RUNNING jobs. Mirrors ranking/queue.py semantics:
-    attempts are BUMPED on every requeue and exhausted jobs dead-letter to
-    FAILED — otherwise a job that crashes the worker mid-flight crash-loops
-    forever. A job whose content already has another QUEUED row (e.g. from
-    invalidation re-enqueue) is marked superseded instead of queued, which
-    would otherwise violate the partial unique index."""
+    """Reap stuck RUNNING jobs. Follows the same patterns as ranking/queue.py
+    (SKIP LOCKED, attempt bumping, dead-lettering) but with different attempt
+    arithmetic: attempts are bumped at claim AND here (MAX_ATTEMPTS=3), unlike
+    ranking which bumps only in mark_failed (MAX_ATTEMPTS=5). Exhausted jobs
+    dead-letter to FAILED. A job whose content already has another QUEUED row
+    (e.g. from invalidation re-enqueue) is marked superseded instead of queued,
+    which would otherwise violate the partial unique index."""
     cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
     rows = (
         session.query(ClaimAnalysisJob)
@@ -142,6 +152,12 @@ def requeue_stuck_running(session: Session, *, older_than_minutes: int = 15) -> 
             j.status = "failed"
             j.last_error = (j.last_error or "") + " [reaped: attempts exhausted]"
             continue
+        # READ COMMITTED snapshot: a concurrent enqueue can commit between this
+        # check and our COMMIT, raising IntegrityError and rolling back the
+        # caller's transaction. Recovery: job stays running; the next reaper
+        # tick picks it up. Callers should commit per-job, not per-batch.
+        # Note: this query relies on session autoflush to see earlier same-batch
+        # transitions — do not wrap the reaper loop in no_autoflush.
         duplicate_queued = (
             session.query(ClaimAnalysisJob.id)
             .filter(

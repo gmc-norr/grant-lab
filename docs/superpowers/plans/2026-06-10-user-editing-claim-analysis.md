@@ -670,6 +670,8 @@ git commit -m "feat(analysis): claim_analysis_jobs, claim_classifications, user_
 - Create: `src/call_manager/proposal_assist/analysis/queue.py`
 - Test: `tests/test_analysis_queue.py`
 
+**Implementation deviation (verified):** `enqueue_section_job` must use `result.inserted_primary_key is not None` rather than `bool(result.rowcount)` — psycopg3 reports rowcount -1 due to the implicit RETURNING for the server-generated PK (house precedent: ranking/queue.py lines 73-76); and `mark_failed` carries the same duplicate-queued supersede guard as the reaper.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```python
