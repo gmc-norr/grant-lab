@@ -54,3 +54,24 @@
     }
   });
 })();
+
+// Surface htmx error responses (4xx/5xx) as an inline notice near the
+// triggering element. FastAPI errors are JSON {"detail": "..."}; HTML error
+// fragments are inserted as text, not markup, to avoid injection.
+document.body.addEventListener("htmx:responseError", function (evt) {
+  var xhr = evt.detail.xhr;
+  var msg = "request failed (" + xhr.status + ")";
+  try {
+    var body = JSON.parse(xhr.responseText);
+    if (body && typeof body.detail === "string") msg = body.detail;
+  } catch (e) { /* non-JSON body: keep generic message */ }
+  var target = evt.detail.target || evt.detail.elt;
+  var notice = document.createElement("p");
+  notice.className = "htmx-error-notice";
+  notice.setAttribute("role", "alert");
+  notice.textContent = msg;
+  // replace a previous notice for the same target rather than stacking
+  var prev = target.parentNode.querySelector(":scope > .htmx-error-notice");
+  if (prev) prev.remove();
+  target.parentNode.insertBefore(notice, target);
+});

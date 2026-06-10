@@ -169,9 +169,11 @@ def test_save_during_turn_409(client_owner, ws_with_repo, pg_session_factory):
         },
     )
     assert r.status_code == 409
-    # The edit fragment also refuses while the turn is in flight.
+    # The edit GET also refuses while the turn is in flight — now returns JSON
+    # detail (Fix 1: HTTPException → same JSON+listener path as POST errors).
     r = client_owner.get(f"/workspaces/{ws_with_repo}/sections/1/edit")
     assert r.status_code == 409
+    assert r.json()["detail"] == "assistant is working — try again when the turn finishes"
 
 
 def test_stale_save_409(client_owner, ws_with_repo):
@@ -206,3 +208,54 @@ def test_workspace_main_renders_sections(client_owner, ws_with_repo):
     assert r.status_code == 200
     assert 'id="section-1"' in r.text
     assert "section-edit-btn" in r.text
+
+
+def test_textarea_escapes_section_content(app, users, pg_session_factory, tmp_path):
+    """XSS regression: </textarea><script> in section body must not appear
+    unescaped in the edit fragment (Jinja auto-escaping inside <textarea>)."""
+    from tests.test_editing_save import DOC, _init_repo
+
+    malicious_body = "## Background\n</textarea><script>alert(1)</script>\n"
+    doc = DOC.replace("## Background\nold body [@x9]\n", malicious_body)
+    with pg_session_factory() as s:
+        from call_manager.db.models import Workspace, WorkspaceViewer
+
+        ws = Workspace(owner_id=users["owner"], title="xss-ws")
+        s.add(ws)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=users["viewer"]))
+        s.commit()
+        wsid = ws.id
+    _init_repo(tmp_path, wsid, doc=doc)
+    a = app
+    a.state.settings.workspaces_dir = str(tmp_path)
+    client = _client_for(a, users["owner"])
+    r = client.get(f"/workspaces/{wsid}/sections/1/edit")
+    assert r.status_code == 200
+    assert "<script>" not in r.text
+    assert "&lt;/textarea&gt;" in r.text
+
+
+def test_split_save_rerenders_full_pane(client_owner, ws_with_repo):
+    """Saving a section that adds a new ## heading must re-render all section
+    divs and set HX-Retarget/#artifact-rendered so htmx replaces the pane."""
+    edit = client_owner.get(f"/workspaces/{ws_with_repo}/sections/1/edit")
+    assert edit.status_code == 200
+    base_commit_sha = _extract_hidden(edit.text, "base_commit_sha")
+    base_section_sha = _extract_hidden(edit.text, "base_section_sha")
+
+    r = client_owner.post(
+        f"/workspaces/{ws_with_repo}/sections/1",
+        data={
+            "content": "## Background\nold body\n## New Sub\nmore text\n",
+            "base_commit_sha": base_commit_sha,
+            "base_section_sha": base_section_sha,
+        },
+    )
+    assert r.status_code == 200
+    # Both existing sections and the new split section must appear.
+    assert 'id="section-1"' in r.text
+    assert 'id="section-2"' in r.text
+    # htmx 1.9 honors these response headers to retarget the swap.
+    assert r.headers.get("HX-Retarget") == "#artifact-rendered"
+    assert r.headers.get("HX-Reswap") == "innerHTML"

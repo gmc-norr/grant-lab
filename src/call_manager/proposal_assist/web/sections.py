@@ -71,6 +71,7 @@ def _read_sections(request: Request, workspace_id: uuid.UUID) -> tuple[str, list
     try:
         head = current_head(repo_dir)
     except GitCommitError as e:
+        logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
         raise HTTPException(status_code=404, detail="no proposal.md yet") from e
     return head, split_sections(proposal.read_text())
 
@@ -155,9 +156,9 @@ def get_section_edit(
         session=session,
     )
     if _turn_in_flight(session, ws.id):
-        return HTMLResponse(
-            "<div class='notice'>assistant is working — try again when the turn finishes</div>",
+        raise HTTPException(
             status_code=409,
+            detail="assistant is working — try again when the turn finishes",
         )
     head, sections = _read_sections(request, workspace_id)
     section = _section_or_404(sections, n)
@@ -192,6 +193,9 @@ def post_section_save(
         session=session,
     )
     settings = request.app.state.settings
+    # Capture pre-save section count so we can detect splits/merges later.
+    _, sections_before = _read_sections(request, workspace_id)
+    n_before = len(sections_before)
     try:
         result = save_section(
             session=session,
@@ -204,6 +208,8 @@ def post_section_save(
             workspaces_dir=settings.workspaces_dir,
         )
         session.commit()
+        # Any failure beyond this point must not be reported as a failed save
+        # — the save is committed.
     except TurnInFlightError as e:
         session.rollback()
         raise HTTPException(
@@ -247,6 +253,30 @@ def post_section_save(
 
     # Re-read the committed document so the fragment reflects exactly what
     # was saved (newline glue, extra-heading splits).
-    _, sections = _read_sections(request, workspace_id)
-    section = _section_or_404(sections, n)
+    _, sections_after = _read_sections(request, workspace_id)
+    n_after = len(sections_after)
+
+    if n_after != n_before:
+        # Section count changed (e.g. a new ## heading was added): re-render
+        # the entire artifact pane so all section divs are in sync.
+        artifact_sections = [_section_ctx(s) for s in sections_after if s.text]
+        templates = request.app.state.templates
+        resp = templates.TemplateResponse(
+            request,
+            "proposal_assist/partials/artifact_sections.html",
+            {
+                "workspace": ws,
+                "is_owner": True,
+                "annotations_enabled": False,
+                "artifact_sections": artifact_sections,
+                "save_issues_for_index": n,
+                "save_issues": result.issues,
+            },
+        )
+        resp.headers["HX-Retarget"] = "#artifact-rendered"
+        resp.headers["HX-Reswap"] = "innerHTML"
+        return resp
+
+    # Fast path: count unchanged — return only the saved section's fragment.
+    section = _section_or_404(sections_after, n)
     return _view_fragment(request, ws, section, is_owner=True, issues=result.issues)
