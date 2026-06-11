@@ -13,7 +13,7 @@ from call_manager.ranking.prompt import (
 
 def test_prompt_version_bumped_to_v4():
     """The prompt's input shape changed — bump PROMPT_VERSION for audit/A-B."""
-    assert PROMPT_VERSION == "v4.1"
+    assert PROMPT_VERSION == "v5.0"
 
 
 def test_build_messages_includes_profile_and_call_blocks():
@@ -667,4 +667,4 @@ def test_funder_exclusions_routed_to_eligibility_not_topic_exclusions(make_call)
 
 
 def test_prompt_version_bumped():
-    assert PROMPT_VERSION == "v4.1"
+    assert PROMPT_VERSION == "v5.0"

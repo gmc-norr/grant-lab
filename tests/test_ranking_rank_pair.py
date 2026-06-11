@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -41,8 +42,12 @@ class _Call:
     raw: dict = None
 
 
-def _ollama_mock(*, content: dict, logprobs: list[dict] | None = None):
-    """Build a fake Ollama returning the given content + logprobs."""
+def _ollama_mock(*, content: dict, logprobs: list[dict] | dict | None = None):
+    """Build a fake Ollama returning the given content + logprobs.
+
+    `logprobs` is either a bare token list (wrapped into the OpenAI-shaped
+    `{"content": [...]}`) or a pre-shaped dict placed at
+    `choices[0].logprobs` verbatim."""
     body = {
         "model": "gemma4:e4b-it-q4_K_M",
         "choices": [
@@ -53,7 +58,9 @@ def _ollama_mock(*, content: dict, logprobs: list[dict] | None = None):
         ],
     }
     if logprobs is not None:
-        body["choices"][0]["logprobs"] = {"content": logprobs}
+        body["choices"][0]["logprobs"] = (
+            logprobs if isinstance(logprobs, dict) else {"content": logprobs}
+        )
 
     def handler(request):
         return httpx.Response(200, json=body)
@@ -658,3 +665,57 @@ def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     from call_manager.config import Settings
 
     assert Settings().embedding_pregate_threshold == 0.42
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Task 17 — G-Eval expected value wired through rank_pair
+# ---------------------------------------------------------------------------
+
+
+def _logprobs_for(content: str, *, rating_char: str, top: list[dict]):
+    """Char-tokenize content into an Ollama-shaped logprobs.content list,
+    attaching `top` at the structural rating digit."""
+    marker = '"rating":'
+    pos = content.index(marker) + len(marker)
+    while content[pos] == " ":
+        pos += 1
+    out = []
+    for i, ch in enumerate(content):
+        tok = {
+            "token": ch,
+            "bytes": list(ch.encode()),
+            "logprob": -0.01,
+            "top_logprobs": [{"token": ch, "logprob": -0.01, "bytes": list(ch.encode())}],
+        }
+        if i == pos and ch == rating_char:
+            tok["top_logprobs"] = top
+        out.append(tok)
+    return {"content": out}
+
+
+def test_rank_pair_populates_expected_value_from_logprobs():
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    # The _logprobs_for offsets are computed against this exact literal;
+    # _ollama_mock re-serializes via json.dumps, whose default ", " / ": "
+    # separators reproduce it byte-for-byte.
+    content = (
+        '{"topic_fit": {"rating": 4, "rationale": "x"}, '
+        '"eligibility": {"rating": "pass"}, "exclusions": {"rating": "pass"}}'
+    )
+    assert json.dumps(json.loads(content)) == content
+    top = [
+        {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    client = _ollama_mock(
+        content=json.loads(content),
+        logprobs=_logprobs_for(content, rating_char="4", top=top),
+    )
+    r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
+    # EV = 4*0.6 + 3*0.4 = 3.6 → round(3.6*20) = 72 (NOT the argmax 80)
+    assert r.topic_fit_expected is not None
+    assert abs(r.topic_fit_expected - 3.6) < 1e-6
+    assert r.score == 72
+    # raw_response must NOT carry the full logprobs block.
+    assert "logprobs" not in r.raw_response.get("choices", [{}])[0]

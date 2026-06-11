@@ -10,6 +10,7 @@ from call_manager.ranking.aggregate import (
     aggregate,
 )
 from call_manager.ranking.criteria import Gates, GateStatus, evaluate_gates
+from call_manager.ranking.ev import extract_topic_expected
 from call_manager.ranking.ollama_client import OllamaClient
 from call_manager.ranking.prompt import (
     PROMPT_VERSION,
@@ -42,6 +43,9 @@ class RankResult:
     # bypass) for downstream analysis. Default None so existing
     # constructors don't break.
     embed_similarity: float | None = None
+    # G-Eval expected value of topic_fit (Phase 3). None on argmax fallback,
+    # gate short-circuit, or remote (Anthropic exposes no logprobs).
+    topic_fit_expected: float | None = None
     # Optional applicant-facing analysis. Populated only when the Sonnet
     # path ran with enable_analysis=True. Gemma + gate-fail paths leave
     # both fields None and the worker writes NULL to the DB columns,
@@ -148,17 +152,36 @@ def rank_pair(
         call=call,
         enable_analysis=routed_to_remote,
     )
-    envelope = selected_client.chat(
-        messages=messages,
-        response_format={"type": "json_object"},
-    )
+    # Logprobs are requested on the LOCAL path only: AnthropicClient.chat()
+    # doesn't accept the kwargs (the API exposes no logprobs), so the remote
+    # path always falls back to argmax (topic_expected None).
+    local_path = selected_client is client
+    if local_path:
+        envelope = selected_client.chat(
+            messages=messages,
+            response_format={"type": "json_object"},
+            logprobs=True,
+            top_logprobs=10,
+        )
+    else:
+        envelope = selected_client.chat(
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
     content = envelope["choices"][0]["message"]["content"]
     parsed = parse_response(content, verification_text=_build_verification_text(call))
+
+    # EV extraction must run BEFORE the strip — it reads the logprobs block.
+    topic_expected = (
+        extract_topic_expected(envelope, parsed.topic_fit_rating) if local_path else None
+    )
+    envelope = _strip_logprobs(envelope)
 
     llm = LLMResult(
         topic_argmax=parsed.topic_fit_rating,
         eligibility=parsed.eligibility_rating,
         exclusions=parsed.exclusions_rating,
+        topic_expected=topic_expected,
     )
     agg: AggregateResult = aggregate(gates, llm, must_include_override=must_include_match)
     # Record which model actually scored this pair so the UI can show
@@ -175,9 +198,27 @@ def rank_pair(
         prompt_version=PROMPT_VERSION,
         raw_response=envelope,
         embed_similarity=embed_sim,
+        topic_fit_expected=topic_expected,
         summary=parsed.summary,
         applicant_notes=parsed.applicant_notes,
     )
+
+
+def _strip_logprobs(envelope: dict) -> dict:
+    """Remove the bulky per-token logprobs block from the envelope before it
+    is persisted to call_rankings.raw_response (tens of KB at top_logprobs=10).
+    Keep nothing of it — the expected value is already extracted and stored in
+    its own column. Returns a shallow-copied envelope; the original is left
+    intact for the EV extraction that ran just before."""
+    choices = envelope.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return envelope
+    new_choices = []
+    for ch in choices:
+        if isinstance(ch, dict) and "logprobs" in ch:
+            ch = {k: v for k, v in ch.items() if k != "logprobs"}
+        new_choices.append(ch)
+    return {**envelope, "choices": new_choices}
 
 
 def _gate_fail_result(
