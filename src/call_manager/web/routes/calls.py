@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -15,6 +15,8 @@ from call_manager.db.models import (
     CallRanking,
     CallRankingCriterion,
     Profile,
+    RankingJob,
+    RankingJobStatus,
     Source,
     User,
     UserCallDismissal,
@@ -204,6 +206,59 @@ def calls_index(
             "now": _now,
             "user": user,
         },
+    )
+
+
+def _ranking_counts(session, profile_id: int) -> tuple[int, int]:
+    pending = (
+        session.scalar(
+            select(func.count())
+            .select_from(RankingJob)
+            .where(
+                RankingJob.profile_id == profile_id,
+                RankingJob.status.in_((RankingJobStatus.PENDING, RankingJobStatus.RUNNING)),
+            )
+        )
+        or 0
+    )
+    # Unresolved failures only: a FAILED job with no CallRanking yet for that pair.
+    scored = select(CallRanking.call_id).where(
+        CallRanking.profile_id == profile_id, CallRanking.call_id == RankingJob.call_id
+    )
+    failed = (
+        session.scalar(
+            select(func.count())
+            .select_from(RankingJob)
+            .where(
+                RankingJob.profile_id == profile_id,
+                RankingJob.status == RankingJobStatus.FAILED,
+                ~scored.exists(),
+            )
+        )
+        or 0
+    )
+    return pending, failed
+
+
+# NOTE: must be declared before /calls/{call_id} — FastAPI matches routes in
+# declaration order, so "ranking-status" would otherwise be captured as call_id.
+@router.get("/calls/ranking-status", response_class=HTMLResponse)
+def ranking_status(
+    request: Request,
+    profile: int = Query(...),
+    poll: int = Query(default=0),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        pending, failed = _ranking_counts(session, profile)
+    if pending == 0 and poll == 1:
+        # Drained while polling → reload the feed so the new scores show.
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="partials/ranking_status_strip.html",
+        context={"pending": pending, "failed": failed, "profile_id": profile},
     )
 
 
