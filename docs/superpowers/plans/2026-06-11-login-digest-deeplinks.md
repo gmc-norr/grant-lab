@@ -189,7 +189,7 @@ This is the core scanner-proofing change. The GET handler renders a confirm form
 **Files:**
 - Modify: `src/call_manager/web/routes/auth.py` (imports; replace `login_verify`)
 - Create: `src/call_manager/web/templates/login_confirm.html`
-- Test: `tests/test_web_auth.py` (migrate 5 tests; add 6 new)
+- Test: `tests/test_web_auth.py` (migrate 5 tests; add new), `tests/test_login_flow.py` (migrate the end-to-end flow)
 
 - [ ] **Step 1: Add the new-behavior failing tests**
 
@@ -291,7 +291,7 @@ def test_post_verify_succeeds_under_origin_csrf_check(
     assert r.status_code == 303
 ```
 
-- [ ] **Step 2: Migrate the five existing GET-verify tests to POST**
+- [ ] **Step 2: Migrate the existing GET-verify tests to POST**
 
 In `tests/test_web_auth.py`, replace these existing tests in place:
 
@@ -368,20 +368,71 @@ def test_post_verify_is_rate_limited_by_ip(monkeypatch, pg_url, pg_session_facto
     assert r.status_code == 429
 ```
 
+Then migrate the end-to-end flow in `tests/test_login_flow.py` — replace the whole `test_full_login_flow` body. The old step 2 GETs the emailed link expecting `303`+cookie; under the new flow the GET renders the interstitial (consuming nothing), the **token is read out of the rendered form**, the human's **POST** confirms, and replay is a POST:
+
+```python
+def test_full_login_flow(monkeypatch, pg_url, pg_session_factory):
+    import html
+    import re
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+
+    app = create_app()
+    sender = InMemoryEmailSender()
+    app.state.email_sender = sender
+    app.state.email_limiter = SlidingWindowLimiter(max_requests=10, window_seconds=60)
+    app.state.ip_limiter = SlidingWindowLimiter(max_requests=100, window_seconds=60)
+
+    with TestClient(app) as client:
+        # 1. Request magic link
+        r = client.post("/login", data={"email": "alice@ki.se"})
+        assert r.status_code == 200
+        assert len(sender.sent) == 1
+        body = sender.sent[0].text_body
+        link = [line for line in body.splitlines() if "login/verify" in line][0].strip()
+        path = link[link.index("/login/verify") :]
+
+        # 2. Click the emailed link → scanner-proof interstitial (GET consumes
+        #    nothing). Read the token out of the rendered confirm form.
+        interstitial = client.get(path, follow_redirects=False)
+        assert interstitial.status_code == 200
+        assert "confirm sign-in" in interstitial.text.lower()
+        token = html.unescape(
+            re.search(r'name="token"[^>]*value="([^"]*)"', interstitial.text).group(1)
+        )
+
+        # 3. Confirm sign-in (the human's POST) → redirected, cookie set
+        r = client.post("/login/verify", data={"token": token}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "session" in client.cookies
+
+        # 4. /me works
+        r = client.get("/me")
+        assert r.status_code == 200
+        assert "alice@ki.se" in r.text
+
+        # 5. Replay of the same token is rejected (single-use), HTTP 400
+        r = client.post("/login/verify", data={"token": token}, follow_redirects=False)
+        assert r.status_code == 400
+```
+
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `uv run pytest tests/test_web_auth.py -q`
-Expected: FAIL — the new GET test gets a 303 (old consuming GET) not a 200 interstitial; the POST tests 405 (no POST route yet).
+Run: `uv run pytest tests/test_web_auth.py tests/test_login_flow.py -q`
+Expected: FAIL — the new GET test gets a 303 (old consuming GET) not a 200 interstitial; the POST tests 405 (no POST route yet); `test_full_login_flow` step 2 finds no `confirm sign-in` in the 303 body.
 
 - [ ] **Step 4: Add imports and the interstitial template**
 
 In `src/call_manager/web/routes/auth.py`, add to the imports near the top (after the existing `from datetime import ...`):
 
 ```python
-from urllib.parse import urlencode
-
 from call_manager.auth.redirects import safe_next
 ```
+
+(The `urllib.parse.urlencode` import is added in Task 4, the first task that uses it — adding it here would trip Ruff F401 at this task's lint step.)
 
 Create `src/call_manager/web/templates/login_confirm.html`:
 
@@ -504,7 +555,7 @@ def login_verify_consume(
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `uv run pytest tests/test_web_auth.py -q`
+Run: `uv run pytest tests/test_web_auth.py tests/test_login_flow.py -q`
 Expected: PASS (migrated + new tests green).
 
 - [ ] **Step 7: Lint and commit**
@@ -513,7 +564,7 @@ Expected: PASS (migrated + new tests green).
 uv run ruff check src/call_manager/web/routes/auth.py
 git add src/call_manager/web/routes/auth.py \
         src/call_manager/web/templates/login_confirm.html \
-        tests/test_web_auth.py
+        tests/test_web_auth.py tests/test_login_flow.py
 git commit -m "feat(auth): scanner-proof verify — GET interstitial + POST consume, strict-origin"
 ```
 
@@ -639,24 +690,49 @@ Add to `tests/test_web_auth.py`:
 def test_next_threaded_end_to_end_with_nested_query(
     monkeypatch, pg_url, pg_session_factory
 ):
-    """A nested-query next survives /login?next=… → emailed magic-link →
-    POST verify → final redirect, with BOTH query params intact."""
+    """Full digest journey, exercising BOTH browser handoffs that carry
+    next: GET /login?next renders the hidden field; the user submits the
+    value FROM that form; the emailed magic-link GET renders the hidden
+    token+next on the interstitial; the user POSTs the values FROM that
+    form; the final redirect lands on the deep link with both query params
+    intact. Reading from the rendered forms (not hand-passing next) means a
+    dropped hidden field FAILS the test rather than passing silently."""
+    import html
     import re
-    from urllib.parse import parse_qs, urlparse
 
     app, sender = _mk_app(monkeypatch, pg_url)
     nxt = "/calls/5?profile=3&source=x"
+
+    def hidden(text, name):
+        # Pull a hidden input's value, tolerating HTML-escaping (& -> &amp;).
+        m = re.search(rf'name="{name}"[^>]*value="([^"]*)"', text)
+        return html.unescape(m.group(1)) if m else None
+
     with TestClient(app) as client:
+        # 1. Browser hits /login?next — the hidden next field must render.
         g = client.get("/login", params={"next": nxt})
-        assert g.status_code == 200  # renders the hidden next field
-        client.post("/login", data={"email": "alice@ki.se", "next": nxt})
-        body = sender.sent[-1].text_body
-        verify_path = re.search(r"(/login/verify\?\S+)", body).group(1)
-        q = parse_qs(urlparse(verify_path).query)
-        assert q["next"] == [nxt]  # encode→email→decode round-trip intact
+        assert g.status_code == 200
+        assert hidden(g.text, "next") == nxt
+
+        # 2. Submit the email WITH the next value read from the rendered form.
+        client.post("/login", data={"email": "alice@ki.se", "next": hidden(g.text, "next")})
+        verify_url = re.search(
+            r"(/login/verify\?\S+)", sender.sent[-1].text_body
+        ).group(1)
+
+        # 3. Browser GETs the emailed link → interstitial renders hidden
+        #    token + next (no consume).
+        gi = client.get(verify_url, follow_redirects=False)
+        assert gi.status_code == 200
+        token = hidden(gi.text, "token")
+        next_field = hidden(gi.text, "next")
+        assert token is not None
+        assert next_field == nxt  # encode→email→decode→render round-trip intact
+
+        # 4. Confirm — POST the values extracted FROM the rendered form.
         r = client.post(
             "/login/verify",
-            data={"token": q["token"][0], "next": q["next"][0]},
+            data={"token": token, "next": next_field},
             follow_redirects=False,
         )
     assert r.status_code == 303
@@ -692,12 +768,19 @@ def test_login_enumeration_resistant_with_next(monkeypatch, pg_url, pg_session_f
 
 
 def test_login_form_shows_configured_domain(monkeypatch, pg_url):
-    """The login page renders the allowlisted domain, not a hardcoded one."""
-    app, _ = _mk_app(monkeypatch, pg_url)  # ALLOWED_EMAIL_DOMAINS=ki.se
+    """The login page derives its domain hint from config — not a hardcoded
+    value. Configure a NON-default domain and assert the old hardcoded
+    `you@ki.se` is gone (so the test can't pass before implementation)."""
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "example.org")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    app = create_app()
     with TestClient(app) as client:
         r = client.get("/login")
     assert r.status_code == 200
-    assert "you@ki.se" in r.text  # placeholder now derived from config
+    assert "you@example.org" in r.text  # placeholder derived from config
+    assert "you@ki.se" not in r.text  # the old hardcoded value is gone
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -707,7 +790,13 @@ Expected: FAIL — `login_form` rejects the unexpected `next` kwarg / no hidden 
 
 - [ ] **Step 3: Update `login_form` and `login_submit`**
 
-In `src/call_manager/web/routes/auth.py`, replace `login_form` (lines ~75-79) with:
+In `src/call_manager/web/routes/auth.py`, add the `urlencode` import (this is the first task that uses it — group it with the other `urllib`/stdlib imports at the top):
+
+```python
+from urllib.parse import urlencode
+```
+
+Then replace `login_form` (lines ~75-79) with:
 
 ```python
 @router.get("/login", response_class=HTMLResponse)
@@ -794,10 +883,10 @@ In `src/call_manager/web/templates/login_sent.html`, replace the back-link line 
 Run: `uv run pytest tests/test_web_auth.py -k "next or configured_domain or enumeration" -q`
 Expected: PASS.
 
-- [ ] **Step 6: Run the whole auth test file (catch regressions)**
+- [ ] **Step 6: Run the auth test files (catch regressions)**
 
-Run: `uv run pytest tests/test_web_auth.py -q`
-Expected: PASS (the existing enumeration/rate-limit/send tests still green — `next` defaulting to None preserves old behavior).
+Run: `uv run pytest tests/test_web_auth.py tests/test_login_flow.py -q`
+Expected: PASS (the existing enumeration/rate-limit/send tests still green — `next` defaulting to None preserves old behavior; the migrated flow's magic-link still parses).
 
 - [ ] **Step 7: Lint and commit**
 
@@ -979,7 +1068,7 @@ git commit -m "feat(auth): expired-link recovery page + spam/latency guidance"
 
 - [ ] **Run the full auth + redirect suite**
 
-Run: `uv run pytest tests/test_auth_redirects.py tests/test_web_auth.py tests/test_security_headers.py tests/test_auth_csrf.py -q`
+Run: `uv run pytest tests/test_auth_redirects.py tests/test_web_auth.py tests/test_login_flow.py tests/test_security_headers.py tests/test_auth_csrf.py -q`
 Expected: PASS. (`test_security_headers.py` confirms non-verify routes still emit `referrer-policy: same-origin`; the interstitial's `strict-origin` is a per-response override and does not change the middleware default.)
 
 - [ ] **Run the whole suite**
