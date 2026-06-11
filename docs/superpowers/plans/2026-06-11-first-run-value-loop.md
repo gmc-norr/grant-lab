@@ -10,7 +10,7 @@
 
 **Spec:** [docs/superpowers/specs/2026-06-11-first-run-value-loop-design.md](../specs/2026-06-11-first-run-value-loop-design.md) (revised through R2).
 
-**MIGRATION NUMBERING (Codex R2 #1):** the ranking-v2.1 plan reserves `0042–0045`, which are **not yet merged** (current head is `0041`). This plan's migration is an explicit Alembic **branch off `0041`**: file `0046_first_run_value_loop.py` with `down_revision = "0041"`. This leaves `0042–0045` for the ranking work. On this branch in isolation there is a single head (`alembic upgrade head` works, tests pass). **At integration with ranking-v2.1, run `alembic merge` to reconcile heads `0045` and `0046`.** Do **not** "renumber to head+1" — that collides with the ranking band.
+**MIGRATION NUMBERING:** ranking-v2.1 has now **merged to master** (commit `7951e36`); the current Alembic head is `0045`. This plan's migration is therefore a clean **linear** revision: file `0046_first_run_value_loop.py` with `down_revision = "0045"`. Single head, no `alembic merge` needed. (The earlier Codex-R2 branch-off-`0041` workaround is obsolete now that `0042–0045` exist on disk.)
 
 **Test commands:** `uv run pytest <path> -v`. Lint/format: `uv run ruff check . && uv run ruff format .`.
 
@@ -147,11 +147,10 @@ class ProfileBootstrapJob(Base):
 """First-run value loop: profile_bootstrap_jobs + users.default_profile_id.
 
 Revision ID: 0046
-Revises: 0041
+Revises: 0045
 Create Date: 2026-06-11
 
-Branch off 0041 (Codex R2 #1): the ranking-v2.1 band 0042-0045 is reserved but
-unmerged. Reconcile heads 0045 and 0046 with `alembic merge` at integration.
+Linear revision after ranking-v2.1 (0045) merged to master.
 See docs/superpowers/plans/2026-06-11-first-run-value-loop.md Task 1.
 """
 
@@ -163,7 +162,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "0046"
-down_revision = "0041"
+down_revision = "0045"
 branch_labels = None
 depends_on = None
 
@@ -201,7 +200,7 @@ def downgrade() -> None:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_migration_0046_first_run_value_loop.py -v`
-Expected: PASS. (If it fails on `alembic upgrade head` with "Can't locate revision 0041", confirm `0041` is the head: `uv run alembic heads`.)
+Expected: PASS. (If it fails on `alembic upgrade head` with "Can't locate revision 0045", confirm the head: `uv run alembic heads` should show `0045`.)
 
 - [ ] **Step 6: Lint + commit**
 
@@ -1604,4 +1603,4 @@ Create a profile → immediate redirect to a disabled edit form with the "Drafti
 
 **Type consistency:** `ProfileBootstrapJob` fields; `DraftProfile(..., llm_succeeded, pubmed_status)`; `merge_bootstrap_into_profile(profile, draft)`; `create_profile_with_bootstrap(*, session, owner_id, name, kind, level, structured, seed_payload)`; `run_profile_bootstrap_tick(*, session_factory, pubmed, ollama, embed_client)`; `requeue_stuck_bootstrap_jobs(session)`; `_ranking_counts(session, profile_id)`; `RankingJobStatus` enum members — all used identically across defining and calling tasks.
 
-**Cross-plan dependency:** migration `0046`/`down_revision="0041"` is an Alembic branch; reconcile with ranking's `0045` via `alembic merge` at integration (header + Task 1).
+**Cross-plan dependency:** resolved — ranking-v2.1 (`0045`) is merged to master, so migration `0046` chains linearly off `0045` (header + Task 1). No `alembic merge` needed.
