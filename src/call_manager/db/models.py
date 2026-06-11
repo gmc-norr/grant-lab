@@ -330,6 +330,9 @@ class CallRanking(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     embed_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # G-Eval expected value of topic_fit over the rating-token logprobs
+    # (Phase 3). NULL ⇒ argmax fallback was used, or a pre-v5.0 / remote row.
+    topic_fit_expected: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Populated only when the high-cosine pair was scored by the remote
     # (Sonnet) backend with enable_analysis=True. NULL for Gemma rows
     # and for gate-short-circuited rows (no LLM ran). See
