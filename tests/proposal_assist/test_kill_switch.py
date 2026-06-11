@@ -39,6 +39,7 @@ def test_post_turn_returns_503_when_kill_switch_off(monkeypatch, pg_url, pg_sess
         uid, wsid = owner.id, ws.id
 
     client = _authed_client(app, user_id=uid)
+    client.post(f"/workspaces/{wsid}/disclosure")  # clear disclosure gate
     try:
         resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"})
     finally:
@@ -67,6 +68,7 @@ def test_post_turn_works_when_kill_switch_on(monkeypatch, pg_url, pg_session_fac
         uid, wsid = owner.id, ws.id
 
     client = _authed_client(app, user_id=uid)
+    client.post(f"/workspaces/{wsid}/disclosure")  # clear disclosure gate
     try:
         resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"})
     finally:
@@ -106,7 +108,7 @@ async def test_drain_tick_noops_when_kill_switch_off(
     with pg_session_factory() as s:
         user = make_user(s)
         s.commit()
-        ws = make_workspace(s, owner=user)
+        ws = make_workspace(s, owner=user, ack_disclosure=True)
         s.commit()
         user_turn = ChatTurn(workspace_id=ws.id, role="user", content="hi")
         s.add(user_turn)
@@ -230,7 +232,7 @@ async def test_re_enable_drains_queued_backlog(pg_session_factory, _settings_env
     with pg_session_factory() as s:
         user = make_user(s)
         s.commit()
-        ws = make_workspace(s, owner=user)
+        ws = make_workspace(s, owner=user, ack_disclosure=True)
         s.commit()
         user_turn = ChatTurn(workspace_id=ws.id, role="user", content="hi")
         s.add(user_turn)

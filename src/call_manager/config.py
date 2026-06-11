@@ -223,6 +223,14 @@ class Settings(BaseSettings):
     global_citation_llm_daily_token_cap_output: int = Field(
         default=500_000, alias="GLOBAL_CITATION_LLM_DAILY_TOKEN_CAP_OUTPUT"
     )
+    reference_extract_timeout_seconds: float = Field(
+        default=30.0,
+        alias="REFERENCE_EXTRACT_TIMEOUT_SECONDS",
+        description="Hard wall-clock bound on untrusted file text-extraction. "
+        "Extraction runs in a separate process that is terminated on timeout; "
+        "the reference is then marked text_status='failed'. Guards the single "
+        "app process against a pathological upload pinning the CPU.",
+    )
     compaction_turn_threshold: int = Field(
         default=100,
         alias="COMPACTION_TURN_THRESHOLD",

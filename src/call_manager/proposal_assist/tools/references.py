@@ -546,6 +546,7 @@ async def fetch_reference_impl(
                 uploaded_by=None,  # agent-initiated, no actor_id
                 source_meta=source_meta,
                 citation_service=ctx.citation_service,
+                extract_timeout_seconds=ctx.settings.reference_extract_timeout_seconds,
             )
             s.commit()
         except Exception as e:

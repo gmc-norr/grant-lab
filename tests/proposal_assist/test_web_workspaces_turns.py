@@ -35,7 +35,7 @@ def test_post_turn_creates_turn_job(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -61,7 +61,7 @@ def test_post_turn_response_includes_user_turn_and_sse_connector(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -91,7 +91,7 @@ def test_post_turn_escapes_html_in_user_content(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -143,7 +143,7 @@ def test_post_turn_returns_429_on_cap_exceeded(
     from tests.proposal_assist.conftest import make_chat_turn, make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         make_chat_turn(
             s, ws, role="assistant", content={"type": "text", "text": "x"}, tokens_in=200
         )
@@ -181,7 +181,7 @@ def test_post_turn_with_new_file_upload(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -232,7 +232,7 @@ def test_post_turn_with_attachment_ids_form_field(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -277,7 +277,7 @@ def test_post_turn_with_cross_workspace_attachment_id_returns_400(
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     with pg_session_factory() as s:
-        my_ws = make_workspace(s, owner=current_user)
+        my_ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         other_owner = make_user(s, email="other-ws-attach@ki.se")
         other_ws = make_workspace(s, owner=other_owner)
         att = Attachment(
@@ -329,7 +329,7 @@ def test_post_turn_with_over_5_attachments_returns_400(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -372,7 +372,7 @@ def test_post_turn_with_bad_mime_rolls_back_prior_upload(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
 
@@ -546,7 +546,7 @@ def test_chat_history_view_renders_image_thumbnail(
 
     aid = uuid.uuid4()
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         make_chat_turn(
             s,
             ws,
@@ -599,6 +599,7 @@ def test_post_turn_error_html_is_escaped(monkeypatch, pg_url, pg_session_factory
     try:
         signer: SessionSigner = app.state.session_signer
         client.cookies.set("session", signer.make(user_id=uid))
+        client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
         attack = "image/png<script>alert(1)</script>"
         resp = client.post(
             f"/workspaces/{wsid}/turns",
@@ -657,6 +658,7 @@ def test_post_turn_with_reference_ids_form_field(monkeypatch, pg_url, pg_session
     client.__enter__()
     signer: SessionSigner = app.state.session_signer
     client.cookies.set("session", signer.make(user_id=uid))
+    client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
     try:
         resp = client.post(
             f"/workspaces/{wsid}/turns",
@@ -735,6 +737,7 @@ def test_post_turn_with_reference_ids_only_echoes_reference_chip(
     client.__enter__()
     signer: SessionSigner = app.state.session_signer
     client.cookies.set("session", signer.make(user_id=uid))
+    client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
     try:
         resp = client.post(
             f"/workspaces/{wsid}/turns",
@@ -799,6 +802,7 @@ def test_post_turn_with_reference_ids_returns_400_for_pending_reference(
     client.__enter__()
     signer: SessionSigner = app.state.session_signer
     client.cookies.set("session", signer.make(user_id=uid))
+    client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
     try:
         resp = client.post(
             f"/workspaces/{wsid}/turns",
@@ -871,6 +875,7 @@ def test_workspace_main_context_includes_workspace_references(
     client.__enter__()
     signer: SessionSigner = app.state.session_signer
     client.cookies.set("session", signer.make(user_id=uid))
+    client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
     try:
         resp = client.get(f"/workspaces/{wsid}")
     finally:

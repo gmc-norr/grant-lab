@@ -40,8 +40,8 @@ from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.references.embed import Embedder
 from call_manager.proposal_assist.references.extract import (
     ExtractError,
-    extract_text,
 )
+from call_manager.proposal_assist.references.extract_sandbox import extract_text_bounded
 from call_manager.proposal_assist.references.metadata import extract_reference_metadata
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 
@@ -91,6 +91,7 @@ def ingest_bytes(
     uploaded_by: int | None,
     source_meta: dict | None = None,
     citation_service=None,
+    extract_timeout_seconds: float = 30.0,
 ) -> IngestResult:
     """Run all phases. Caller is responsible for committing the session
     after Phase 1 (we commit Phase 2 and Phase 3 internally on fresh sessions).
@@ -163,7 +164,9 @@ def ingest_bytes(
         s2.commit()
 
     try:
-        sections = extract_text(mime=mime_type, data=data)
+        sections = extract_text_bounded(
+            mime=mime_type, data=data, timeout_seconds=extract_timeout_seconds
+        )
         chunks = chunk_sections(sections)
         if not chunks:
             raise ExtractError("no chunks produced from extracted text")
