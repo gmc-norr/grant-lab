@@ -424,3 +424,4 @@ def test_json_401_unaffected_by_next(monkeypatch, pg_url):
     with TestClient(app) as client:
         r = client.get("/calls/5?profile=3", follow_redirects=False)
     assert r.status_code == 401
+    assert r.headers["content-type"].startswith("application/json")
