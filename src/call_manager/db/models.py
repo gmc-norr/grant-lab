@@ -64,6 +64,11 @@ class User(Base):
     session_epoch: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # Set during first-run value loop: the profile the user most recently
+    # bootstrapped or selected as their default. SET NULL on profile delete.
+    default_profile_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
+    )
 
     magic_link_tokens: Mapped[list[MagicLinkToken]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -1129,6 +1134,34 @@ class WorkspaceSetupJob(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+
+class ProfileBootstrapJob(Base):
+    __tablename__ = "profile_bootstrap_jobs"
+    __table_args__ = (
+        UniqueConstraint("profile_id", name="uq_profile_bootstrap_jobs_profile"),
+        CheckConstraint(
+            "status IN ('queued','running','done','failed')",
+            name="ck_profile_bootstrap_jobs_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    profile_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CLEARED on terminal completion
+    seed: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    pubmed_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publications_fetched: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ReviewRun(Base):
