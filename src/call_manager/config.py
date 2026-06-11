@@ -77,12 +77,11 @@ class Settings(BaseSettings):
     embedding_hard_fail_threshold: float = Field(
         default=0.20, alias="EMBEDDING_HARD_FAIL_THRESHOLD"
     )
-    # Remote-rank escalation: pairs with cosine >= threshold go to a
-    # hosted model (Anthropic) for a deeper analysis instead of the local
-    # Gemma. Leave anthropic_api_key unset (None or "") to disable —
+    # Remote-rank escalation: pairs whose local aggregate score reaches
+    # ranking_escalation_min_score are re-ranked by the hosted model
+    # (Anthropic). Leave anthropic_api_key unset (None or "") to disable —
     # rank_pair then routes every pair to the local client and the
-    # threshold + model fields are ignored. The threshold defaults to
-    # 0.50; tune up to skip more, down to send more pairs to Sonnet.
+    # escalation settings are ignored.
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     drafting_enabled: bool = Field(
         default=True,
@@ -271,7 +270,19 @@ class Settings(BaseSettings):
         ),
     )
     remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")
-    remote_rank_cosine_threshold: float = Field(default=0.50, alias="REMOTE_RANK_COSINE_THRESHOLD")
+    ranking_escalation_min_score: int = Field(
+        default=45,
+        alias="RANKING_ESCALATION_MIN_SCORE",
+        description="Local aggregate score at/above which a pair re-runs on the "
+        "remote model. Mirrors DIGEST_BORDERLINE_LOWER so every digest-worthy "
+        "call gets the Sonnet second opinion + analysis.",
+    )
+    ranking_remote_daily_cap: int = Field(
+        default=100,
+        alias="RANKING_REMOTE_DAILY_CAP",
+        description="Max remote escalation attempts per Europe/Stockholm day "
+        "(counted from ranking_remote_attempts). Guardrail for backfill spikes.",
+    )
     email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")

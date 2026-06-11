@@ -66,10 +66,8 @@ def build_scheduler(
     embedding_hard_fail_threshold: float | None = None,
     anthropic_api_key: str | None = None,
     remote_rank_model: str = "claude-sonnet-4-6",
-    # Dead since drain_queue dropped its cosine-router param (Task 24) —
-    # accepted-but-unused so main.py's call keeps working until Task 25
-    # rewires config to the escalation_min_score / remote_daily_cap settings.
-    remote_rank_cosine_threshold: float = 0.50,
+    ranking_escalation_min_score: int = 45,
+    ranking_remote_daily_cap: int = 100,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
@@ -127,9 +125,9 @@ def build_scheduler(
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
     # Build the remote rank client once if an API key is configured.
-    # None ⇒ rank_pair never escalates regardless of cosine — the safe
+    # None ⇒ rank_pair never escalates regardless of score — the safe
     # default for environments without billing or network access to
-    # Anthropic. See ranking/anthropic_client.py for the routing
+    # Anthropic. See ranking/anthropic_client.py for the escalation
     # semantics inside rank_pair.
     anthropic_client: AnthropicClient | None = None
     if anthropic_api_key:
@@ -142,6 +140,8 @@ def build_scheduler(
             embedding_threshold=embedding_pregate_threshold,
             embedding_hard_fail_threshold=embedding_hard_fail_threshold,
             remote_client=anthropic_client,
+            escalation_min_score=ranking_escalation_min_score,
+            remote_daily_cap=ranking_remote_daily_cap,
             batch_size=ranking_queue_batch,
         )
 
