@@ -198,9 +198,16 @@ def make_workspace(
     title: str = "Test workspace",
     call_id: int | None = None,
     profile_id: int | None = None,
+    ack_disclosure: bool = False,
 ) -> "Workspace":  # noqa: F821
-    """Build a Workspace row. If `owner` not provided, creates a fresh User."""
-    from call_manager.db.models import Workspace
+    """Build a Workspace row. If `owner` not provided, creates a fresh User.
+
+    `ack_disclosure=True` records a `disclosure_acknowledged` event for the
+    owner so a subsequent POST /turns clears the server-side disclosure gate
+    (spec 2026-06-10 §9). Default False preserves the un-acknowledged state the
+    disclosure-modal tests rely on.
+    """
+    from call_manager.db.models import Workspace, WorkspaceEvent
 
     if owner is None:
         owner = make_user(session)
@@ -212,6 +219,16 @@ def make_workspace(
     )
     session.add(ws)
     session.flush()
+    if ack_disclosure:
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="disclosure_acknowledged",
+                actor_id=owner.id,
+                payload={},
+            )
+        )
+        session.flush()
     return ws
 
 

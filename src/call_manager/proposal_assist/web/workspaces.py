@@ -706,6 +706,28 @@ async def post_turn(
             "<p>Drafting is currently disabled by an administrator. Please try again later.</p>",
             status_code=503,
         )
+
+    # Spec 2026-06-10 §9: enforce the cloud-LLM data-disclosure acknowledgement
+    # server-side, not just via the UI modal. A direct POST (curl / replayed
+    # HTMX) that skips the modal must NOT reach the cloud LLM. Per-actor: the
+    # acting user must have a prior `disclosure_acknowledged` event on this
+    # workspace. Mirrors the GET-page `needs_disclosure` flag, but as a hard gate.
+    prior_ack = session.scalar(
+        select(WorkspaceEvent.id)
+        .where(
+            WorkspaceEvent.workspace_id == ws.id,
+            WorkspaceEvent.kind == "disclosure_acknowledged",
+            WorkspaceEvent.actor_id == user.id,
+        )
+        .limit(1)
+    )
+    if prior_ack is None:
+        return HTMLResponse(
+            "<p>Please acknowledge the data-disclosure notice before "
+            "sending a message to the drafting assistant.</p>",
+            status_code=403,
+        )
+
     storage = AttachmentStorage(root=Path(settings.workspaces_dir))
 
     # Track (workspace_id, attachment_id, suffix) for any files we

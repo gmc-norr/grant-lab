@@ -77,7 +77,7 @@ async def test_e2e_upload_submit_drain_adapter_sees_resolved_image(
     # Step 1: create workspace                                             #
     # ------------------------------------------------------------------ #
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
         s.commit()
         wsid = ws.id
         owner_id = current_user.id

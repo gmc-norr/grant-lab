@@ -26,8 +26,8 @@ def test_check_global_cap_sums_across_workspaces(pg_session_factory, _settings_e
     with pg_session_factory() as s:
         owner = make_user(s)
         s.commit()
-        ws_a = make_workspace(s, owner=owner, title="A")
-        ws_b = make_workspace(s, owner=owner, title="B")
+        ws_a = make_workspace(s, owner=owner, title="A", ack_disclosure=True)
+        ws_b = make_workspace(s, owner=owner, title="B", ack_disclosure=True)
         s.commit()
         s.add_all(
             [
@@ -66,8 +66,8 @@ def test_submit_raises_global_cap_exceeded(pg_session_factory, _settings_env, mo
     with pg_session_factory() as s:
         owner = make_user(s)
         s.commit()
-        ws_a = make_workspace(s, owner=owner, title="A")
-        ws_b = make_workspace(s, owner=owner, title="B")
+        ws_a = make_workspace(s, owner=owner, title="A", ack_disclosure=True)
+        ws_b = make_workspace(s, owner=owner, title="B", ack_disclosure=True)
         s.commit()
         # Seed: ws_a already used 500 input today via a completed turn.
         s.add(
@@ -135,6 +135,7 @@ def test_post_turn_returns_429_with_global_header(monkeypatch, pg_url, pg_sessio
     try:
         signer: SessionSigner = app.state.session_signer
         client.cookies.set("session", signer.make(user_id=uid))
+        client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
         resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"})
     finally:
         client.__exit__(None, None, None)
@@ -187,6 +188,7 @@ def test_global_cap_wins_when_per_workspace_also_exceeded(monkeypatch, pg_url, p
     try:
         signer: SessionSigner = app.state.session_signer
         client.cookies.set("session", signer.make(user_id=uid))
+        client.post(f"/workspaces/{wsid}/disclosure")  # clear server-side disclosure gate
         resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"})
     finally:
         client.__exit__(None, None, None)
