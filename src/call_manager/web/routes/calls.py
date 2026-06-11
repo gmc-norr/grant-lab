@@ -67,8 +67,8 @@ def calls_index(
     page: int = Query(default=1, ge=1),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    profile_id = _parse_optional_profile_id(profile)
-    profile = profile_id  # type: ignore[assignment]  # rest of handler uses int
+    raw_profile = profile  # None = absent; "" = explicit "no profile"
+    requested_id = _parse_optional_profile_id(profile)
     _now = datetime.now(UTC)
     _soon_cutoff = _now + timedelta(days=30)
     offset = (page - 1) * limit
@@ -82,11 +82,44 @@ def calls_index(
             source_id = session.scalar(select(Source.id).where(Source.slug == source))
             if source_id is None:
                 source = None
-        # Validate the requested profile is real AND active before
-        # showing the ranked view. Spec (design spec, "Profile deletion
-        # is soft") requires inactive profiles to be absent from feeds.
-        # Unknown or inactive ?profile=<id> degrades to the unranked
-        # list so a stale bookmark doesn't error or leak audit data.
+
+        # Three-way sticky-default resolution:
+        # - absent (None): use user's stored default if still active, else unranked.
+        # - explicit empty (""): unranked, and CLEAR the stored default.
+        # - an id was given: validate BEFORE persisting; invalid/inactive → unranked,
+        #   stored default untouched.
+        if raw_profile is None:
+            # Bare / or return visit — honour stored default if still active.
+            stored = session.scalar(select(User.default_profile_id).where(User.id == user.id))
+            if stored is not None:
+                profile_id: int | None = session.scalar(
+                    select(Profile.id).where(Profile.id == stored, Profile.is_active.is_(True))
+                )
+            else:
+                profile_id = None
+        elif raw_profile == "":
+            # Explicit "— No profile —": clear stored default.
+            u = session.get(User, user.id)
+            if u is not None and u.default_profile_id is not None:
+                u.default_profile_id = None
+                session.commit()
+            profile_id = None
+        else:
+            # An id was requested — validate BEFORE persisting.
+            profile_id = session.scalar(
+                select(Profile.id).where(Profile.id == requested_id, Profile.is_active.is_(True))
+            )
+            if profile_id is not None:
+                u = session.get(User, user.id)
+                if u is not None and u.default_profile_id != profile_id:
+                    u.default_profile_id = profile_id
+                    session.commit()
+            # Invalid/inactive request → profile_id stays None; stored default untouched.
+
+        profile = profile_id  # type: ignore[assignment]  # rest of handler uses int
+
+        # Load the profile object when we have a valid id (for ranked view and
+        # downstream metric queries). Already validated active above.
         profile_obj: Profile | None = None
         if profile is not None:
             profile_obj = session.execute(
