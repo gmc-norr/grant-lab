@@ -526,3 +526,49 @@ def test_login_form_shows_configured_domain(monkeypatch, pg_url):
     assert r.status_code == 200
     assert "you@example.org" in r.text  # placeholder derived from config
     assert "you@ki.se" not in r.text  # the old hardcoded value is gone
+
+
+def test_expired_link_post_renders_recovery_page(monkeypatch, pg_url, pg_session_factory):
+    """A human clicking a stale interstitial (bad/used token) gets the
+    dedicated recovery page at 400, with an inline new-link form that
+    forwards the original next."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.post(
+            "/login/verify",
+            data={"token": "already-used-or-bogus", "next": "/calls/5?profile=3"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+    text = r.text.lower()
+    assert "expired" in text or "already used" in text
+    assert 'action="/login"' in r.text  # inline new-link form
+    assert 'value="/calls/5?profile=3"' in r.text  # next forwarded
+
+
+def test_login_sent_shows_spam_guidance(monkeypatch, pg_url, pg_session_factory):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.post("/login", data={"email": "alice@ki.se"})
+    assert r.status_code == 200
+    assert "spam" in r.text.lower()
+
+
+def test_replay_renders_recovery_page(monkeypatch, pg_url, pg_session_factory):
+    """The single-use replay (Task 2 asserted status 400) now lands on the
+    recovery page — still 400, but the dedicated body."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+    with TestClient(app) as client:
+        assert (
+            client.post("/login/verify", data={"token": raw}, follow_redirects=False).status_code
+            == 303
+        )
+        r = client.post("/login/verify", data={"token": raw}, follow_redirects=False)
+    assert r.status_code == 400
+    assert "expired" in r.text.lower() or "already used" in r.text.lower()

@@ -254,10 +254,19 @@ def login_verify_consume(
     with session_factory() as session:
         try:
             user_id = consume_token(session, token)
-        except InvalidToken as e:
-            # Token invalid/expired — plain 400 until the recovery-page
-            # template is wired.
-            raise HTTPException(status_code=400, detail="invalid or expired link") from e
+        except InvalidToken:
+            # A human clicked a stale/used interstitial. Show a dedicated
+            # recovery page (HTTP 400, preserving the status semantics)
+            # with an inline new-link form that carries `next` forward.
+            return request.app.state.templates.TemplateResponse(
+                request=request,
+                name="login_link_expired.html",
+                context={
+                    "next_path": safe_next(next),
+                    "allowed_domains": settings.allowed_email_domains,
+                },
+                status_code=400,
+            )
         session.commit()
 
     with session_factory() as session:
