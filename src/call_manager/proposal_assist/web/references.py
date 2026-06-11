@@ -233,6 +233,7 @@ async def upload_reference(
             data=data,
             uploaded_by=user.id,
             citation_service=request.app.state.citation_service,
+            extract_timeout_seconds=request.app.state.settings.reference_extract_timeout_seconds,
         )
     except OSError as e:
         logger.warning(
@@ -328,6 +329,7 @@ def fetch_reference_route(
             uploaded_by=user.id,
             source_meta=source_meta,
             citation_service=request.app.state.citation_service,
+            extract_timeout_seconds=request.app.state.settings.reference_extract_timeout_seconds,
         )
         session.commit()
     except OSError as e:
