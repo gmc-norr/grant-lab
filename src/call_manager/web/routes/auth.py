@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Cookie, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -74,23 +75,42 @@ def _client_ip(request: Request) -> str:
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_form(request: Request):
+def login_form(request: Request, next: str | None = None):
+    settings = request.app.state.settings
     return request.app.state.templates.TemplateResponse(
-        request=request, name="login.html", context={}
+        request=request,
+        name="login.html",
+        context={
+            "next_path": safe_next(next),
+            "allowed_domains": settings.allowed_email_domains,
+        },
     )
 
 
 @router.post("/login", response_class=HTMLResponse)
-def login_submit(request: Request, email: str = Form(...)):
+def login_submit(
+    request: Request,
+    email: str = Form(...),
+    next: str | None = Form(default=None),
+):
     settings = request.app.state.settings
     email_limiter = request.app.state.email_limiter
     ip_limiter = request.app.state.ip_limiter
     email_sender = request.app.state.email_sender
     session_factory = request.app.state.session_factory
 
+    # Validate `next` once. It rides into the magic-link URL and the
+    # "Back to sign in" link on the check-your-email page. It NEVER
+    # influences any allow/deny/rate-limit branch below, so the response
+    # stays byte-identical across branches (enumeration-resistance intact).
+    safe = safe_next(next)
+    back_href = "/login"
+    if safe:
+        back_href = "/login?" + urlencode({"next": safe})
+
     # Always show the same page. Never leak rate-limit/allowlist/shape state.
     response = request.app.state.templates.TemplateResponse(
-        request=request, name="login_sent.html", context={}
+        request=request, name="login_sent.html", context={"back_href": back_href}
     )
 
     # 1. Length cap BEFORE anything that keys off the email. Prevents an
@@ -152,7 +172,10 @@ def login_submit(request: Request, email: str = Form(...)):
         raw = issue_token(session, user_id=user.id, ttl_minutes=15)
         session.commit()
 
-    link = f"{settings.app_base_url.rstrip('/')}/login/verify?token={raw}"
+    params = {"token": raw}
+    if safe:
+        params["next"] = safe
+    link = f"{settings.app_base_url.rstrip('/')}/login/verify?{urlencode(params)}"
     try:
         email_sender.send(
             to=email_normalized,

@@ -425,3 +425,99 @@ def test_json_401_unaffected_by_next(monkeypatch, pg_url):
         r = client.get("/calls/5?profile=3", follow_redirects=False)
     assert r.status_code == 401
     assert r.headers["content-type"].startswith("application/json")
+
+
+def test_next_threaded_end_to_end_with_nested_query(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Full digest journey, exercising BOTH browser handoffs that carry
+    next: GET /login?next renders the hidden field; the user submits the
+    value FROM that form; the emailed magic-link GET renders the hidden
+    token+next on the interstitial; the user POSTs the values FROM that
+    form; the final redirect lands on the deep link with both query params
+    intact. Reading from the rendered forms (not hand-passing next) means a
+    dropped hidden field FAILS the test rather than passing silently."""
+    import html
+    import re
+
+    app, sender = _mk_app(monkeypatch, pg_url)
+    nxt = "/calls/5?profile=3&source=x"
+
+    def hidden(text, name):
+        # Pull a hidden input's value, tolerating HTML-escaping (& -> &amp;).
+        m = re.search(rf'name="{name}"[^>]*value="([^"]*)"', text)
+        return html.unescape(m.group(1)) if m else None
+
+    with TestClient(app) as client:
+        # 1. Browser hits /login?next — the hidden next field must render.
+        g = client.get("/login", params={"next": nxt})
+        assert g.status_code == 200
+        assert hidden(g.text, "next") == nxt
+
+        # 2. Submit the email WITH the next value read from the rendered form.
+        client.post("/login", data={"email": "alice@ki.se", "next": hidden(g.text, "next")})
+        verify_url = re.search(
+            r"(/login/verify\?\S+)", sender.sent[-1].text_body
+        ).group(1)
+
+        # 3. Browser GETs the emailed link → interstitial renders hidden
+        #    token + next (no consume).
+        gi = client.get(verify_url, follow_redirects=False)
+        assert gi.status_code == 200
+        token = hidden(gi.text, "token")
+        next_field = hidden(gi.text, "next")
+        assert token is not None
+        assert next_field == nxt  # encode→email→decode→render round-trip intact
+
+        # 4. Confirm — POST the values extracted FROM the rendered form.
+        r = client.post(
+            "/login/verify",
+            data={"token": token, "next": next_field},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/calls/5?profile=3&source=x"
+
+
+def test_login_sent_preserves_next_in_back_link(monkeypatch, pg_url, pg_session_factory):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.post("/login", data={"email": "alice@ki.se", "next": "/calls/5?profile=3"})
+    assert r.status_code == 200
+    assert 'href="/login?next=%2Fcalls%2F5%3Fprofile%3D3"' in r.text
+
+
+def test_login_post_drops_unsafe_next(monkeypatch, pg_url, pg_session_factory):
+    """An open-redirect next must never reach the magic-link URL."""
+    app, sender = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        client.post("/login", data={"email": "alice@ki.se", "next": "https://evil.com"})
+    body = sender.sent[-1].text_body
+    assert "evil.com" not in body
+    assert "next=" not in body
+
+
+def test_login_enumeration_resistant_with_next(monkeypatch, pg_url, pg_session_factory):
+    """next must not change the response across allow/deny branches."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        allowed = client.post("/login", data={"email": "alice@ki.se", "next": "/calls/5"})
+        denied = client.post("/login", data={"email": "x@evil.com", "next": "/calls/5"})
+    assert allowed.status_code == denied.status_code == 200
+    assert allowed.text == denied.text  # byte-identical
+
+
+def test_login_form_shows_configured_domain(monkeypatch, pg_url):
+    """The login page derives its domain hint from config — not a hardcoded
+    value. Configure a NON-default domain and assert the old hardcoded
+    `you@ki.se` is gone (so the test can't pass before implementation)."""
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "example.org")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    app = create_app()
+    with TestClient(app) as client:
+        r = client.get("/login")
+    assert r.status_code == 200
+    assert "you@example.org" in r.text  # placeholder derived from config
+    assert "you@ki.se" not in r.text  # the old hardcoded value is gone
