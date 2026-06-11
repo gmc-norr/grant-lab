@@ -52,3 +52,7 @@ class DraftProfile:
     structured: dict  # matches Profile.structured shape
     publications_fetched: int
     publications_skipped: int  # members whose PubMed search returned zero
+
+    # Explicit outcomes (bootstrap never raises). Worker branches on these.
+    llm_succeeded: bool = True
+    pubmed_status: str = "ok"  # 'ok' | 'empty' | 'unavailable' | 'not_queried'

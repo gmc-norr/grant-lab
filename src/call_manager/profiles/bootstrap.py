@@ -31,13 +31,18 @@ def bootstrap_profile(
     # 1. PubMed (best-effort).
     publications = []
     publications_skipped = 0
-    try:
-        publications = pubmed.fetch_publications(seed.members)
-    except PubMedError as e:
-        _logger.warning(
-            "profiles.bootstrap.pubmed_failed",
-            extra={"event": "bootstrap_pubmed_failed", "error": str(e)},
-        )
+    if not seed.members:
+        pubmed_status = "not_queried"
+    else:
+        try:
+            publications = pubmed.fetch_publications(seed.members)
+            pubmed_status = "ok" if publications else "empty"
+        except PubMedError as e:
+            pubmed_status = "unavailable"
+            _logger.warning(
+                "profiles.bootstrap.pubmed_failed",
+                extra={"event": "bootstrap_pubmed_failed", "error": str(e)},
+            )
     # Count members whose query would have returned zero — this is a
     # rough "how complete is the draft" signal shown on the edit page.
     # With the current batched impl we can't distinguish per-member
@@ -49,14 +54,6 @@ def bootstrap_profile(
         publications_skipped = len(seed.members)
 
     # 2. LLM draft.
-    messages = build_bootstrap_messages(
-        profile_name=seed.name,
-        kind=seed.kind,
-        level=seed.level,
-        publications=publications,
-        pasted_grants=seed.pasted_grants,
-        mission_text=seed.mission_text,
-    )
     description = ""
     structured: dict = {
         "areas": [],
@@ -67,13 +64,23 @@ def bootstrap_profile(
         "must_include": [],
         "hard_exclusions": [],
     }
+    llm_succeeded = False
     try:
+        messages = build_bootstrap_messages(
+            profile_name=seed.name,
+            kind=seed.kind,
+            level=seed.level,
+            publications=publications,
+            pasted_grants=seed.pasted_grants,
+            mission_text=seed.mission_text,
+        )
         envelope = ollama.chat(messages=messages)
         content = envelope["choices"][0]["message"].get("content")
         if content:
             draft = parse_bootstrap_response(content)
             description = draft.description
             structured = draft.structured
+            llm_succeeded = bool(description and description.strip())
     except (LLMError, BootstrapParseError, KeyError, IndexError, TypeError, AttributeError) as e:
         _logger.warning(
             "profiles.bootstrap.llm_failed",
@@ -85,4 +92,6 @@ def bootstrap_profile(
         structured=structured,
         publications_fetched=len(publications),
         publications_skipped=publications_skipped,
+        llm_succeeded=llm_succeeded,
+        pubmed_status=pubmed_status,
     )
