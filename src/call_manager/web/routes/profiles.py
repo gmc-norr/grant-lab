@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
 from call_manager.embeddings.refresh import refresh_profile_embedding
+from call_manager.embeddings.similarity import build_profile_text
 from call_manager.profiles.bootstrap import bootstrap_profile
 from call_manager.profiles.fields import (
     MAX_LIST_ENTRIES,
@@ -306,7 +307,7 @@ def profile_edit_submit(
             detail=f"unknown currency: {budget_currency!r}",
         )
     session_factory = request.app.state.session_factory
-    description_changed = False
+    embed_text_changed = False
     with session_factory() as session:
         p = session.get(Profile, profile_id)
         # Archived profiles are not editable by direct POST either — match the
@@ -320,16 +321,15 @@ def profile_edit_submit(
         # legitimate user who mis-types a URL.
         if p.created_by != user.id and not user.is_admin:
             raise HTTPException(status_code=403, detail="not authorized")
-        # Capture pre-mutation value for the change-detection below. Compare
-        # on stripped form so whitespace-only edits don't trigger a needless
-        # re-embed (build_profile_text strips anyway).
-        old_description = p.description or ""
+        # Capture the pre-mutation embedding text for the change-detection
+        # below. The re-embed trigger is computed from build_profile_text
+        # before/after — not just `description` — because `areas` and the org
+        # fields (capabilities/patient_populations) also feed the embedding
+        # text (Task 28). A description-unchanged edit that alters those still
+        # needs a fresh vector; the old description-only check left it stale
+        # (Codex R6).
+        old_embed_text = build_profile_text(p)
         p.description = description
-        # Capture the change-detection flag at the moment of mutation so
-        # intent isn't load-bearing on commit ordering — a future contributor
-        # adding work between this assignment and the commit (or moving the
-        # commit earlier) won't accidentally invalidate the comparison.
-        description_changed = old_description.strip() != description.strip()
         # Level is editable for organizational units (migrated org rows start
         # NULL, and the spec promises owners can fill it in here). Ignored for
         # individuals.
@@ -376,6 +376,13 @@ def profile_edit_submit(
         new_ns.pop("areas", None)
         p.structured = {**base, **new_ns}
         p.budget_currency = normalized_currency or None
+        # Recompute the embedding text now that every mutation that feeds it
+        # (description / areas / org fields) has been applied to `p`. Compare
+        # on stripped form so a whitespace-only edit doesn't trigger a needless
+        # re-embed (build_profile_text strips anyway). Capture the flag before
+        # the commit so intent isn't load-bearing on commit ordering.
+        new_embed_text = build_profile_text(p)
+        embed_text_changed = old_embed_text.strip() != new_embed_text.strip()
         session.commit()
 
     # Re-embed + backfill run in a background task so the user gets a snappy
@@ -385,14 +392,14 @@ def profile_edit_submit(
     # both so order is preserved — Codex H1 requires the embedding refresh
     # to complete BEFORE backfill enqueues ranking jobs (otherwise the
     # jobs see the stale pre-edit vector). Skip embedding refresh when the
-    # rubric changed but the description didn't.
+    # edit left the build_profile_text output unchanged.
     embed_client = request.app.state.embed_client
     background.add_task(
         _refresh_and_backfill_in_background,
         session_factory=session_factory,
         embed_client=embed_client,
         profile_id=profile_id,
-        refresh_embedding=description_changed,
+        refresh_embedding=embed_text_changed,
     )
 
     return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)
