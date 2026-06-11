@@ -98,34 +98,14 @@ def test_profile_new_form_renders(monkeypatch, pg_url, pg_session_factory):
 
 
 def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_session_factory):
-    """POST creates a Profile synchronously (bootstrap is mocked via
-    app.state override) and redirects to /profiles/<id>/edit."""
-    from unittest.mock import patch
-
-    from call_manager.db.models import Profile
-    from call_manager.profiles.seed import DraftProfile
+    """POST creates a Profile atomically (empty description + queued bootstrap job)
+    and redirects to /profiles/<id>/edit. No inline LLM call happens."""
+    from call_manager.db.models import Profile, ProfileBootstrapJob
 
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
 
-    fake_draft = DraftProfile(
-        description="fake draft description",
-        structured={
-            "areas": ["digital pathology"],
-            "budget_min": None,
-            "budget_max": None,
-            "trl_min": None,
-            "trl_max": None,
-            "must_include": [],
-            "hard_exclusions": [],
-        },
-        publications_fetched=0,
-        publications_skipped=0,
-    )
-    with (
-        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
-        client,
-    ):
+    with client:
         r = client.post(
             "/profiles/new",
             data={
@@ -146,9 +126,12 @@ def test_profile_new_post_creates_profile_and_redirects(monkeypatch, pg_url, pg_
     assert r.headers["location"].endswith("/edit")
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Pathology AI")).scalar_one()
-    assert p.description == "fake draft description"
-    assert p.structured["areas"] == ["digital pathology"]
-    # User-entered structured namespaces are persisted (not just the redirect).
+    # New async path: description is empty until the worker runs.
+    assert p.description == ""
+    # Bootstrap job is queued — the worker (not the request) does the LLM call.
+    with pg_session_factory() as s:
+        assert s.query(ProfileBootstrapJob).filter_by(profile_id=p.id, status="queued").count() == 1
+    # User-entered structured namespaces are persisted immediately.
     assert "institution" in p.structured["eligibility"]["applicant_types"]
     assert p.structured["org"]["org_type"] == "university_hospital"
     assert p.structured["geo"]["country"] == "Sweden"
@@ -430,30 +413,9 @@ def test_profile_new_coerces_invalid_kind_to_organizational_unit(
     monkeypatch, pg_url, pg_session_factory
 ):
     """Unknown kind value silently coerces to 'organizational_unit'."""
-    from unittest.mock import patch
-
-    from call_manager.profiles.seed import DraftProfile
-
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
-    fake_draft = DraftProfile(
-        description="x",
-        structured={
-            "areas": [],
-            "budget_min": None,
-            "budget_max": None,
-            "trl_min": None,
-            "trl_max": None,
-            "must_include": [],
-            "hard_exclusions": [],
-        },
-        publications_fetched=0,
-        publications_skipped=0,
-    )
-    with (
-        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
-        client,
-    ):
+    with client:
         r = client.post(
             "/profiles/new",
             data={
@@ -474,30 +436,9 @@ def test_profile_new_coerces_invalid_kind_to_organizational_unit(
 
 
 def test_profile_new_kind_organizational_unit(monkeypatch, pg_url, pg_session_factory):
-    from unittest.mock import patch
-
-    from call_manager.profiles.seed import DraftProfile
-
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
-    fake_draft = DraftProfile(
-        description="x",
-        structured={
-            "areas": [],
-            "budget_min": None,
-            "budget_max": None,
-            "trl_min": None,
-            "trl_max": None,
-            "must_include": [],
-            "hard_exclusions": [],
-        },
-        publications_fetched=0,
-        publications_skipped=0,
-    )
-    with (
-        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
-        client,
-    ):
+    with client:
         r = client.post(
             "/profiles/new",
             data={
@@ -820,35 +761,16 @@ def test_profile_create_triggers_embedding_refresh(
     pg_url,
     pg_session_factory,
 ):
-    """Creating a new profile triggers a sync embedding compute. After the
-    POST, profile.embedding is the vector returned by the stub client."""
-    from unittest.mock import patch
-
-    from call_manager.db.models import Profile
-    from call_manager.profiles.seed import DraftProfile
+    """Creating a new profile enqueues a bootstrap job but does NOT trigger an
+    inline embedding compute. The worker (next task) handles embedding.
+    After the POST, profile.embedding is None."""
+    from call_manager.db.models import Profile, ProfileBootstrapJob
 
     app = _setup(monkeypatch, pg_url)
     app.state.embed_client = _stub_embed_client(vec=[0.5] * 1024)
     client = _logged_in(app, pg_session_factory)
 
-    fake_draft = DraftProfile(
-        description="cancer immunotherapy + digital pathology",
-        structured={
-            "areas": ["digital pathology"],
-            "budget_min": None,
-            "budget_max": None,
-            "trl_min": None,
-            "trl_max": None,
-            "must_include": [],
-            "hard_exclusions": [],
-        },
-        publications_fetched=0,
-        publications_skipped=0,
-    )
-    with (
-        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
-        client,
-    ):
+    with client:
         r = client.post(
             "/profiles/new",
             data={
@@ -865,10 +787,10 @@ def test_profile_create_triggers_embedding_refresh(
 
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Embed on create")).scalar_one()
-    # pgvector returns numpy ndarray; cast via list() for length + value check
-    assert p.embedding is not None
-    assert list(p.embedding) == [0.5] * 1024
-    assert p.embedding_model == "bge-m3"
+    # Async path: embedding is computed by the worker, not the request.
+    assert p.embedding is None
+    with pg_session_factory() as s:
+        assert s.query(ProfileBootstrapJob).filter_by(profile_id=p.id, status="queued").count() == 1
 
 
 def test_profile_edit_changing_description_triggers_embedding_refresh(
@@ -1092,36 +1014,15 @@ def test_profile_create_embed_failure_does_not_500(
     pg_url,
     pg_session_factory,
 ):
-    """Same robustness contract on the create path: an embed failure on a
-    brand-new profile must not block the redirect."""
-    from unittest.mock import patch
-
-    from call_manager.db.models import Profile
-    from call_manager.profiles.seed import DraftProfile
-    from call_manager.ranking.ollama_client import LLMError
+    """The create path no longer triggers an inline embedding compute, so there
+    is no embed step in the request that could fail. The profile is created with
+    an empty description and a queued bootstrap job."""
+    from call_manager.db.models import Profile, ProfileBootstrapJob
 
     app = _setup(monkeypatch, pg_url)
-    app.state.embed_client = _stub_embed_client(raises=LLMError("ollama down"))
     client = _logged_in(app, pg_session_factory)
 
-    fake_draft = DraftProfile(
-        description="new description",
-        structured={
-            "areas": [],
-            "budget_min": None,
-            "budget_max": None,
-            "trl_min": None,
-            "trl_max": None,
-            "must_include": [],
-            "hard_exclusions": [],
-        },
-        publications_fetched=0,
-        publications_skipped=0,
-    )
-    with (
-        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
-        client,
-    ):
+    with client:
         r = client.post(
             "/profiles/new",
             data={
@@ -1137,12 +1038,16 @@ def test_profile_create_embed_failure_does_not_500(
     assert r.status_code == 303
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Create-embed-fails")).scalar_one()
-    assert p.embedding is None  # embed failed, but profile exists
+    assert p.embedding is None  # worker hasn't run yet
+    assert p.description == ""  # async: description filled by worker
+    with pg_session_factory() as s:
+        assert s.query(ProfileBootstrapJob).filter_by(profile_id=p.id, status="queued").count() == 1
 
 
 def test_create_individual_persists_eligibility(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)  # existing helper in this test module
-    _patch_bootstrap(monkeypatch)  # existing helper that fakes pubmed+ollama draft
+    """User-entered structured fields are persisted immediately even though
+    the LLM bootstrap is now async (queued job)."""
+    app = _app(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
     with client:
         r = client.post(
@@ -1173,24 +1078,13 @@ def test_create_individual_persists_eligibility(monkeypatch, pg_url, pg_session_
 def test_create_individual_drops_raw_llm_org_namespace_and_caps_areas(
     monkeypatch, pg_url, pg_session_factory
 ):
-    """Regression: the bootstrap draft's RAW structured carried an `org`
-    namespace (invalid for an individual) and an over-length `areas` item.
-    sanitize_structured drops `org` for kind=individual, so it must not survive
-    into the DB; the raw `areas` fallback must respect the count/length caps."""
-    from call_manager.profiles.fields import MAX_TAG_LEN
+    """The async create path persists only user-entered structured values
+    (validated by parse_structured). An `org` namespace is kind-inappropriate
+    for an individual and parse_structured never produces one, so it can never
+    reach the DB. The profile is created with empty description and a queued
+    bootstrap job."""
+    from call_manager.db.models import Profile, ProfileBootstrapJob
 
-    overlong = "x" * (MAX_TAG_LEN + 5)
-    _patch_bootstrap(
-        monkeypatch,
-        structured={
-            "areas": ["valid area", overlong],
-            # An individual has no `org` namespace; the LLM emitted one anyway.
-            "org": {
-                "org_type": "EVIL_UNVALIDATED",
-                "capabilities": ["a" * 999],
-            },
-        },
-    )
     app = _app(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
     with client:
@@ -1205,21 +1099,21 @@ def test_create_individual_drops_raw_llm_org_namespace_and_caps_areas(
         )
     assert r.status_code == 303
 
-    from call_manager.db.models import Profile
-
     with pg_session_factory() as s:
         p = s.execute(select(Profile).where(Profile.name == "Dr Org")).scalar_one()
         assert p.kind == "individual"
-        # The raw, unsanitized org namespace must NOT have reached the DB.
+        # parse_structured never produces an org namespace for an individual.
         assert not p.structured.get("org")
-        # Raw draft areas respect the caps: over-length item dropped.
-        assert p.structured["areas"] == ["valid area"]
-        assert all(len(a) <= MAX_TAG_LEN for a in p.structured["areas"])
+        # No LLM yet: description is empty, bootstrap job is queued.
+        assert p.description == ""
+    with pg_session_factory() as s:
+        assert s.query(ProfileBootstrapJob).filter_by(profile_id=p.id, status="queued").count() == 1
 
 
 def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_factory):
+    """Structured input validation (parse_structured) runs before bootstrap
+    enqueuing, so an unknown career_stage is still rejected with 400."""
     app = _app(monkeypatch, pg_url)
-    _patch_bootstrap(monkeypatch)
     client = _logged_in(app, pg_session_factory)
     with client:
         r = client.post(

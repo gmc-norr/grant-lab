@@ -1,0 +1,6 @@
+<div class="ranking-status-strip"
+     {% if pending > 0 %}hx-get="/calls/ranking-status?profile={{ profile_id }}&poll=1"
+     hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+  {% if pending > 0 %}Ranking {{ pending }} call{{ "s" if pending != 1 else "" }} for this profile…{% endif %}
+  {% if failed > 0 %}<span class="ranking-status-failed">{{ failed }} call{{ "s" if failed != 1 else "" }} couldn't be scored automatically.</span>{% endif %}
+</div>

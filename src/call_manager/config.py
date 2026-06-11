@@ -119,6 +119,14 @@ class Settings(BaseSettings):
         "between workspace creation and rubric-review prompt; "
         "raising it reduces idle DB churn when the queue is empty.",
     )
+    profile_bootstrap_tick_seconds: int = Field(
+        default=30,
+        alias="PROFILE_BOOTSTRAP_TICK_SECONDS",
+        description="How often the in-process profile bootstrap worker drains "
+        "profile_bootstrap_jobs. Lowering this shortens the gap "
+        "between profile creation and LLM draft completion; "
+        "raising it reduces idle DB churn when the queue is empty.",
+    )
     workspaces_dir: str = Field(
         default="var/workspaces",
         alias="WORKSPACES_DIR",

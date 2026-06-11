@@ -84,6 +84,10 @@
   {% endif %}
 </form>
 
+{% if selected_profile_id %}
+<div hx-get="/calls/ranking-status?profile={{ selected_profile_id }}" hx-trigger="load" hx-swap="outerHTML"></div>
+{% endif %}
+
 {% if not calls_with_rankings %}
   <div class="empty-state">
     <h3>No calls match these filters yet.</h3>

@@ -375,6 +375,33 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # Profile bootstrap worker: drains profile_bootstrap_jobs.
+    def _profile_bootstrap_tick() -> None:
+        from call_manager.profiles.bootstrap_worker import run_profile_bootstrap_tick
+        from call_manager.profiles.pubmed import PubMedClient
+        from call_manager.ranking.ollama_client import OllamaClient
+
+        try:
+            run_profile_bootstrap_tick(
+                session_factory=session_factory,
+                pubmed=PubMedClient(),
+                ollama=OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model),
+                embed_client=embed_client,
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.warning(
+                "profile_bootstrap.tick_failed",
+                extra={"event": "profile_bootstrap_tick_failed", "error": str(e)},
+            )
+
+    sched.add_job(
+        _profile_bootstrap_tick,
+        trigger=IntervalTrigger(seconds=settings.profile_bootstrap_tick_seconds),
+        id="profile_bootstrap_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Drafting subprocess idle sweep.
     def _drafting_idle_sweep() -> None:
         """Closure: APScheduler calls this with no args. We capture the
