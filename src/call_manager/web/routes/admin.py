@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import require_admin
@@ -58,7 +58,22 @@ def _embedding_coverage_context(session, *, current_model: str) -> dict:
     ignore the badge.
     """
     non_blank_call = func.length(func.trim(Call.title)) > 0
-    non_blank_profile = func.length(func.trim(Profile.description)) > 0
+    # "Embeddable" mirrors build_profile_text: description non-blank, OR areas
+    # non-empty, OR org capabilities/patient_populations non-empty. MUST stay in
+    # lockstep with embeddings/similarity.build_profile_text (see Phase 5).
+    non_blank_profile = or_(
+        func.length(func.trim(func.coalesce(Profile.description, ""))) > 0,
+        func.jsonb_array_length(func.coalesce(Profile.structured["areas"], text("'[]'::jsonb")))
+        > 0,
+        func.jsonb_array_length(
+            func.coalesce(Profile.structured["org"]["capabilities"], text("'[]'::jsonb"))
+        )
+        > 0,
+        func.jsonb_array_length(
+            func.coalesce(Profile.structured["org"]["patient_populations"], text("'[]'::jsonb"))
+        )
+        > 0,
+    )
     call_stale = session.execute(
         select(func.count(Call.id)).where(
             non_blank_call,
