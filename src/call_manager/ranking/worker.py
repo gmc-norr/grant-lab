@@ -40,6 +40,9 @@ def drain_queue(
     embedding_threshold: float,
     embedding_hard_fail_threshold: float | None = None,
     remote_client=None,  # AnthropicClient | None
+    # Dead since the outcome-based escalation replaced the cosine router in
+    # rank_pair (no longer forwarded). Kept so scheduler.py's call stays
+    # valid until Task 24 removes it and wires escalation_min_score instead.
     remote_cosine_threshold: float | None = None,
     batch_size: int = 10,
 ) -> int:
@@ -124,7 +127,6 @@ def drain_queue(
                         embedding_threshold=embedding_threshold,
                         embedding_hard_fail_threshold=embedding_hard_fail_threshold,
                         remote_client=remote_client,
-                        remote_cosine_threshold=remote_cosine_threshold,
                     )
                 except (LLMError, ParseError) as e:
                     terminal = (attempts + 1) >= MAX_ATTEMPTS
