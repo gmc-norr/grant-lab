@@ -6,6 +6,9 @@ from call_manager.main import create_app
 
 
 def test_full_login_flow(monkeypatch, pg_url, pg_session_factory):
+    import html
+    import re
+
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
@@ -24,19 +27,27 @@ def test_full_login_flow(monkeypatch, pg_url, pg_session_factory):
         assert len(sender.sent) == 1
         body = sender.sent[0].text_body
         link = [line for line in body.splitlines() if "login/verify" in line][0].strip()
-        # Strip host so TestClient can use it
         path = link[link.index("/login/verify") :]
 
-        # 2. Click link → redirected, cookie set
-        r = client.get(path, follow_redirects=False)
+        # 2. Click the emailed link → scanner-proof interstitial (GET consumes
+        #    nothing). Read the token out of the rendered confirm form.
+        interstitial = client.get(path, follow_redirects=False)
+        assert interstitial.status_code == 200
+        assert "confirm sign-in" in interstitial.text.lower()
+        token = html.unescape(
+            re.search(r'name="token"[^>]*value="([^"]*)"', interstitial.text).group(1)
+        )
+
+        # 3. Confirm sign-in (the human's POST) → redirected, cookie set
+        r = client.post("/login/verify", data={"token": token}, follow_redirects=False)
         assert r.status_code == 303
         assert "session" in client.cookies
 
-        # 3. /me works
+        # 4. /me works
         r = client.get("/me")
         assert r.status_code == 200
         assert "alice@ki.se" in r.text
 
-        # 4. Replay of the same link is rejected
-        r = client.get(path, follow_redirects=False)
+        # 5. Replay of the same token is rejected (single-use), HTTP 400
+        r = client.post("/login/verify", data={"token": token}, follow_redirects=False)
         assert r.status_code == 400
