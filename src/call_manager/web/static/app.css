@@ -392,6 +392,7 @@ dd { margin-bottom: 0.6rem; }
   margin-right: 0.35em;
   vertical-align: 0.08em;
 }
+.deadline-closed { color: var(--cm-muted); white-space: nowrap; }
 
 /* Status chips (references, citations, audit results) */
 .status {

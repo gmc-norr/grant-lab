@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -65,12 +65,17 @@ def calls_index(
     profile: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     page: int = Query(default=1, ge=1),
+    show_closed: bool = Query(default=False),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     raw_profile = profile  # None = absent; "" = explicit "no profile"
     requested_id = _parse_optional_profile_id(profile)
     _now = datetime.now(UTC)
     _soon_cutoff = _now + timedelta(days=30)
+    # "Closed" is derived from the deadline — no status column. A call with no
+    # deadline (rolling) is open. Same comparison used in filter, sort, badges.
+    closed_expr = and_(Call.deadline.isnot(None), Call.deadline <= _now)
+    open_expr = or_(Call.deadline.is_(None), Call.deadline > _now)
     offset = (page - 1) * limit
     session_factory = request.app.state.session_factory
     with session_factory() as session:
@@ -140,6 +145,7 @@ def calls_index(
                     (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile),
                 )
                 .order_by(
+                    closed_expr.asc(),  # open (False=0) before closed (True=1)
                     CallRanking.aggregate_score.desc().nullslast(),
                     CallRanking.embed_similarity.desc().nullslast(),
                     Call.published_at.desc().nullslast(),
@@ -152,7 +158,7 @@ def calls_index(
             stmt = (
                 select(Call, None)
                 .options(joinedload(Call.source))
-                .order_by(*_order_for(sort))
+                .order_by(closed_expr.asc(), *_order_for(sort))
                 .limit(limit)
                 .offset(offset)
             )
@@ -166,7 +172,11 @@ def calls_index(
         base_filters = [Call.id.notin_(dismissed_subq)]
         if source_id is not None:
             base_filters.append(Call.source_id == source_id)
-        stmt = stmt.where(*base_filters)
+        # The list (and its pagination total) hide closed calls by default.
+        list_filters = list(base_filters)
+        if not show_closed:
+            list_filters.append(open_expr)
+        stmt = stmt.where(*list_filters)
         rows = session.execute(stmt).unique().all()
         # Normalize to (Call, CallRanking|None) shape regardless of branch
         calls_with_rankings: list[tuple[Call, CallRanking | None]] = [
@@ -176,7 +186,18 @@ def calls_index(
         # Summary metrics computed with aggregates over the full filtered set
         # (independent of limit/offset), so a corpus larger than one page can't
         # undercount the badges.
-        total = session.scalar(select(func.count()).select_from(Call).where(*base_filters)) or 0
+
+        # Pagination total tracks the visible (toggled) set.
+        list_total = (
+            session.scalar(select(func.count()).select_from(Call).where(*list_filters)) or 0
+        )
+        # "Open calls" badge is always the genuine open count, toggle or not.
+        open_count = (
+            session.scalar(
+                select(func.count()).select_from(Call).where(*base_filters, open_expr)
+            )
+            or 0
+        )
         soon_deadline = (
             session.scalar(
                 select(func.count())
@@ -199,6 +220,7 @@ def calls_index(
                     .join(Call, Call.id == CallRanking.call_id)
                     .where(
                         *base_filters,
+                        open_expr,  # a closed call is never a "top match"
                         CallRanking.profile_id == profile,
                         CallRanking.aggregate_score >= 70,
                     )
@@ -216,12 +238,12 @@ def calls_index(
         )
         session.expunge_all()
 
-    summary = {"total": total, "high_score": high_score, "soon_deadline": soon_deadline}
+    summary = {"open_count": open_count, "high_score": high_score, "soon_deadline": soon_deadline}
     pagination = {
         "page": page,
         "limit": limit,
         "has_prev": page > 1,
-        "has_next": offset + len(calls_with_rankings) < total,
+        "has_next": offset + len(calls_with_rankings) < list_total,
     }
 
     return request.app.state.templates.TemplateResponse(
@@ -234,6 +256,7 @@ def calls_index(
             "selected_source": source,
             "selected_sort": sort,
             "selected_profile_id": profile,
+            "show_closed": show_closed,
             "summary": summary,
             "pagination": pagination,
             "now": _now,

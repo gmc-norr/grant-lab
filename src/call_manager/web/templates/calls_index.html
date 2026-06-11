@@ -17,6 +17,8 @@
 {% macro deadline_label(deadline) -%}
   {%- if deadline is none -%}
     —
+  {%- elif now and deadline <= now -%}
+    <span class="deadline-closed">Closed · {{ deadline | display_date }}</span>
   {%- else -%}
     {%- set days = (deadline - now).days if now else None -%}
     {%- if days is not none and days <= 14 -%}
@@ -40,7 +42,7 @@
 <section class="summary-cards" aria-label="Summary">
   <div class="summary-card">
     <div class="label">Open calls</div>
-    <div class="value">{{ summary.total }}</div>
+    <div class="value">{{ summary.open_count }}</div>
   </div>
   <div class="summary-card">
     <div class="label">Top matches{% if not selected_profile_id %} (pick a profile){% endif %}</div>
@@ -82,6 +84,11 @@
       </select>
     </label>
   {% endif %}
+  <label class="checkbox-inline">
+    <input type="checkbox" name="show_closed" value="1" data-autosubmit
+           {% if show_closed %}checked{% endif %}>
+    Show closed calls
+  </label>
 </form>
 
 {% if selected_profile_id %}
@@ -123,7 +130,7 @@
     {% endfor %}
   </div>
   {% if pagination and (pagination.has_prev or pagination.has_next) %}
-    {% set qs %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if selected_profile_id %}&profile={{ selected_profile_id }}{% endif %}{% if not selected_profile_id %}&sort={{ selected_sort }}{% endif %}&limit={{ pagination.limit }}{% endset %}
+    {% set qs %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if selected_profile_id %}&profile={{ selected_profile_id }}{% endif %}{% if not selected_profile_id %}&sort={{ selected_sort }}{% endif %}{% if show_closed %}&show_closed=1{% endif %}&limit={{ pagination.limit }}{% endset %}
     <nav class="pagination" aria-label="Pagination">
       {% if pagination.has_prev %}
         <a role="button" class="secondary" href="/?page={{ pagination.page - 1 }}{{ qs }}">← Previous</a>
