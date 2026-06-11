@@ -136,3 +136,33 @@ def test_build_profile_text_tolerates_none_structured():
     from older rows — treat as empty rubric."""
     profile = SimpleNamespace(description="X", structured=None)
     assert build_profile_text(profile).strip() == "X"
+
+
+def test_build_profile_text_includes_org_capabilities_and_populations():
+    """Org-level capabilities and patient_populations are semantic signals —
+    include them so a call targeting e.g. 'cirrhosis patients' cosine-matches
+    a group that lists that population explicitly."""
+    profile = SimpleNamespace(
+        description="Hepatology group",
+        structured={
+            "areas": ["liver cancer"],
+            "org": {
+                "capabilities": ["NGS sequencing"],
+                "patient_populations": ["cirrhosis patients"],
+            },
+        },
+    )
+    text = build_profile_text(profile)
+    assert "liver cancer" in text
+    assert "NGS sequencing" in text
+    assert "cirrhosis patients" in text
+
+
+def test_build_profile_text_omits_org_when_absent():
+    """When no org key is present the output must be byte-for-byte identical
+    to the pre-Task-28 format: description + areas joined by double newline."""
+    profile = SimpleNamespace(description="Solo PI", structured={"areas": ["genomics"]})
+    text = build_profile_text(profile)
+    assert "genomics" in text
+    # No org namespace → no trailing blank segments / KeyError.
+    assert text.strip() == "Solo PI\n\ngenomics"
