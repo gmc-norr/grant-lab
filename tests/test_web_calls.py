@@ -72,6 +72,30 @@ def _seed_calls(pg_session_factory):
         s.commit()
 
 
+def _add_closed_call(
+    pg_session_factory, *, title="Closed call", external_id="C-1", published_at=None
+):
+    """Insert one call whose deadline is in the past (closed). `published_at`
+    defaults to a date older than the open seed calls; pass a newer one to
+    test that closed calls still sort last under the default 'newest' sort."""
+    now = datetime.now(UTC)
+    if published_at is None:
+        published_at = datetime(2026, 4, 2, tzinfo=UTC)
+    with pg_session_factory() as s:
+        eu = s.execute(select(Source).where(Source.slug == "eu_portal")).scalar_one()
+        s.add(
+            Call(
+                source_id=eu.id,
+                external_id=external_id,
+                url="uc",
+                title=title,
+                published_at=published_at,
+                deadline=now - timedelta(days=5),
+            )
+        )
+        s.commit()
+
+
 def test_root_requires_auth(monkeypatch, pg_url, pg_session_factory):
     # pg_session_factory pulls in migrated_engine, so the shared testcontainer
     # is migrated before the app's startup scheduler runs — otherwise this
@@ -198,3 +222,96 @@ def test_call_detail_404_for_unknown_id(monkeypatch, pg_url, pg_session_factory)
     with client:
         r = client.get("/calls/99999")
     assert r.status_code == 404
+
+
+def test_default_feed_hides_closed_calls(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # 3 open
+    _add_closed_call(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/")
+    assert r.status_code == 200
+    assert "Closed call" not in r.text
+    assert "Vin one" in r.text  # open calls still shown
+
+
+def test_show_closed_reveals_closed_calls(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    _add_closed_call(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?show_closed=1")
+    assert r.status_code == 200
+    assert "Closed call" in r.text
+    assert "Vin one" in r.text
+
+
+def test_closed_calls_sort_last_unranked(monkeypatch, pg_url, pg_session_factory):
+    """Even with sort=deadline (which would pull a past deadline to the top),
+    a shown closed call must appear AFTER every open call."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    _add_closed_call(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?show_closed=1&sort=deadline")
+    body = r.text
+    assert body.index("Closed call") > body.index("Vin one")
+    assert body.index("Closed call") > body.index("EU two")
+    assert body.index("Closed call") > body.index("EU one")
+
+
+def test_closed_calls_sort_last_under_newest(monkeypatch, pg_url, pg_session_factory):
+    """Under the DEFAULT 'newest' sort, a recently-published closed call must
+    still sort AFTER older open calls (guards the closed-last key in the
+    unranked branch, not just the deadline sort)."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # open calls published Mar–Apr 2026
+    # Closed but published more recently than any open call → would sort FIRST
+    # under newest-desc without the closed-last key.
+    _add_closed_call(
+        pg_session_factory, external_id="C-NEW", published_at=datetime(2026, 6, 1, tzinfo=UTC)
+    )
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?show_closed=1")  # default sort=newest
+    body = r.text
+    assert body.index("Closed call") > body.index("Vin one")
+    assert body.index("Closed call") > body.index("EU one")
+    assert body.index("Closed call") > body.index("EU two")
+
+
+def test_pagination_total_tracks_toggle(monkeypatch, pg_url, pg_session_factory):
+    """With 3 open + 1 closed and limit=3, the default view's pagination total
+    must count only the 3 open rows (no Next page); show_closed=1 counts all 4
+    and offers page 2. Guards against `total` counting closed rows while the
+    list hides them — which would link to an empty Next page."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # 3 open
+    _add_closed_call(pg_session_factory)  # 1 closed
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        default = client.get("/?limit=3")
+        shown = client.get("/?show_closed=1&limit=3")
+    assert "page=2" not in default.text  # 3 open rows, total=3, no Next
+    assert "page=2" in shown.text  # 4 rows, total=4, Next offered
+
+
+def test_open_calls_badge_excludes_closed_regardless_of_toggle(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """The 'Open calls' badge counts only open calls (3), whether or not the
+    closed call is being shown."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # 3 open
+    _add_closed_call(pg_session_factory)  # 1 closed
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        default = client.get("/")
+        shown = client.get("/?show_closed=1")
+    # Open count is 3 in both; the 4-row total is never shown as a badge.
+    assert ">3</div>" in default.text
+    assert ">3</div>" in shown.text
+    assert ">4</div>" not in shown.text

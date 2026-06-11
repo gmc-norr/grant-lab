@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -132,6 +132,76 @@ def test_root_unknown_profile_degrades_to_unranked(
     # Score column HEADER must NOT be present — this is the unranked view.
     assert "<th>Score</th>" not in r.text
     assert "Visible call" in r.text
+
+
+def test_profile_view_closed_call_never_outranks_open(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """A high-scored CLOSED call is hidden by default; even when shown it
+    sorts BELOW a lower-scored open call (structural closed-last sort)."""
+    profile_id, _ = profile_factory()
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        closed = Call(
+            source_id=src.id, external_id="CL", url="https://x/cl", title="Closed high",
+            published_at=datetime(2026, 4, 1, tzinfo=UTC), deadline=now - timedelta(days=5),
+        )
+        openc = Call(
+            source_id=src.id, external_id="OP", url="https://x/op", title="Open low",
+            published_at=datetime(2026, 4, 2, tzinfo=UTC), deadline=now + timedelta(days=20),
+        )
+        s.add_all([closed, openc])
+        s.flush()
+        s.add(CallRanking(call_id=closed.id, profile_id=profile_id, aggregate_score=95,
+                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.add(CallRanking(call_id=openc.id, profile_id=profile_id, aggregate_score=20,
+                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.commit()
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        default = client.get(f"/?profile={profile_id}")
+        shown = client.get(f"/?profile={profile_id}&show_closed=1")
+    assert "Closed high" not in default.text  # hidden despite score 95
+    assert "Open low" in default.text
+    assert "Closed high" in shown.text and "Open low" in shown.text
+    assert shown.text.index("Open low") < shown.text.index("Closed high")
+
+
+def test_top_matches_badge_excludes_closed_high_scorer(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """A closed call scoring >=70 must not be counted as a 'Top match'."""
+    profile_id, _ = profile_factory()
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        closed = Call(
+            source_id=src.id, external_id="CH", url="https://x/ch", title="Closed top",
+            published_at=datetime(2026, 4, 1, tzinfo=UTC), deadline=now - timedelta(days=3),
+        )
+        openc = Call(
+            source_id=src.id, external_id="OH", url="https://x/oh", title="Open top",
+            published_at=datetime(2026, 4, 2, tzinfo=UTC), deadline=now + timedelta(days=20),
+        )
+        s.add_all([closed, openc])
+        s.flush()
+        s.add(CallRanking(call_id=closed.id, profile_id=profile_id, aggregate_score=95,
+                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.add(CallRanking(call_id=openc.id, profile_id=profile_id, aggregate_score=75,
+                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.commit()
+    app = _setup(monkeypatch, pg_url)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        default = client.get(f"/?profile={profile_id}")
+        shown = client.get(f"/?profile={profile_id}&show_closed=1")
+    # Top matches = 1 (the open 75), not 2, in BOTH views. An impl that counted
+    # high_score over the toggled list_filters would exclude the closed 95 by
+    # default but wrongly count it when show_closed=1 → a badge value of 2.
+    assert ">2</div>" not in default.text
+    assert ">2</div>" not in shown.text
 
 
 def test_root_inactive_profile_degrades_to_unranked(
