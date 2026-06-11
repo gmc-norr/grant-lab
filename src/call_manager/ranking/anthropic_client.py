@@ -112,6 +112,13 @@ class AnthropicClient:
             raise LLMError(f"anthropic {e.status_code} (request_id={req_id}): {e.message}") from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"anthropic connection error: {e}") from e
+        except anthropic.APIError as e:
+            # Catch-all for APIError subclasses not covered above — e.g.
+            # APIResponseValidationError derives directly from APIError and
+            # would otherwise escape the LLMError wrap, breaking rank_pair's
+            # keep-local escalation contract (remote failures must never
+            # propagate) and failing the whole worker job.
+            raise LLMError(f"anthropic API error ({type(e).__name__}): {e}") from e
 
         # max_tokens truncation: the model hit the output cap mid-generation,
         # so `content` is a partial (almost always invalid) JSON fragment.

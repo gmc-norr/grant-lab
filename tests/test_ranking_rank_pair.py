@@ -245,6 +245,90 @@ def test_rank_pair_escalates_on_eligibility_fail_high_topic():
     assert r.escalated_from_score == 0
 
 
+def test_rank_pair_escalates_at_exact_threshold():
+    """Local score exactly EQUAL to escalation_min_score escalates — pins the
+    `>=` (not `>`) boundary semantics. Rating 4 → argmax score 80; threshold 80."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=80,
+    )
+    assert remote.chat.call_count == 1
+    assert r.escalated is True
+    assert r.escalated_from_score == 80
+
+
+def test_rank_pair_remote_parse_error_keeps_local():
+    """Sonnet answers but with unparseable content ⇒ ParseError is swallowed,
+    local result survives with escalation_outcome='parse_error'."""
+    from unittest.mock import MagicMock
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = MagicMock()
+    remote.model = "claude-sonnet-4-6"
+    remote.chat.return_value = {"choices": [{"message": {"content": "not json"}}]}
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert r.escalated is False
+    assert r.score == 80  # local survived
+    assert r.escalation_attempted is True
+    assert r.escalation_outcome == "parse_error"
+
+
+def test_rank_pair_no_escalation_on_eligibility_fail_low_topic():
+    """eligibility=fail with topic argmax 2 (<3) does NOT trigger the Codex R3
+    escalation path — score 0 (<45) and the topic condition misses too."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 2, "rationale": "weak topic"},
+            "eligibility": {"rating": "fail", "rationale": "company-only"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert remote.chat.call_count == 0
+    assert r.escalated is False
+    assert r.escalation_attempted is False
+    assert r.score == 0
+
+
 def test_rank_pair_no_escalation_when_remote_disabled():
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))

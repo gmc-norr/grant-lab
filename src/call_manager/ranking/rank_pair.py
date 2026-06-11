@@ -202,12 +202,15 @@ def rank_pair(
         remote_parsed = parse_response(
             remote_content, verification_text=_build_verification_text(call)
         )
-    except LLMError:
+    except (LLMError, ParseError) as e:
+        outcome = "llm_error" if isinstance(e, LLMError) else "parse_error"
+        # NB: never use "message" as an extra key — reserved LogRecord attribute.
         _logger.warning(
             "ranking.escalation_failed",
             extra={
                 "event": "ranking_escalation_failed",
-                "error_class": "LLMError",
+                "error_class": type(e).__name__,
+                "error": str(e),
                 "profile_id": getattr(profile, "id", None),
                 "call_id": getattr(call, "id", None),
             },
@@ -221,28 +224,7 @@ def rank_pair(
             local_envelope,
             embed_sim,
             topic_expected,
-            outcome="llm_error",
-        )
-    except ParseError:
-        _logger.warning(
-            "ranking.escalation_failed",
-            extra={
-                "event": "ranking_escalation_failed",
-                "error_class": "ParseError",
-                "profile_id": getattr(profile, "id", None),
-                "call_id": getattr(call, "id", None),
-            },
-        )
-        return _local_with_failed_escalation(
-            local_agg,
-            gates,
-            local_parsed,
-            must_include_match,
-            client.model,
-            local_envelope,
-            embed_sim,
-            topic_expected,
-            outcome="parse_error",
+            outcome=outcome,
         )
 
     remote_llm = LLMResult(
