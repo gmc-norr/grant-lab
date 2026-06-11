@@ -33,7 +33,7 @@ def safe_next(path: str | None) -> str | None:
         return None
     if "\\" in path:
         return None
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in path):
         return None
     parsed = urlparse(path)
     if parsed.scheme or parsed.netloc:

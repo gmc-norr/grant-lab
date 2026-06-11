@@ -18,6 +18,8 @@ from call_manager.auth.redirects import MAX_NEXT_BYTES, safe_next
         "/has\nnewline",
         "/has\rcarriage",
         "/has\x7fdel",
+        "/has\x85nel",   # U+0085 NEXT LINE — C1 control
+        "/has\x9ffoo",   # U+009F — last C1 control
         "/" + "a" * (MAX_NEXT_BYTES + 1),
     ],
 )
