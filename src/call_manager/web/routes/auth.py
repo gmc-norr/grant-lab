@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from call_manager.auth.domain import domain_allowed
 from call_manager.auth.email import EmailSendFailed
+from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import InvalidSession
 from call_manager.auth.tokens import InvalidToken, consume_token, issue_token
 from call_manager.db.models import User
@@ -176,17 +177,46 @@ def login_submit(request: Request, email: str = Form(...)):
     return response
 
 
-@router.get("/login/verify")
-def login_verify(request: Request, token: str):
+@router.get("/login/verify", response_class=HTMLResponse)
+def login_verify_confirm(request: Request, token: str, next: str | None = None):
+    """Render the scanner-proof 'Confirm sign-in' interstitial.
+
+    NO side effects: this does not consume the token. Hospital mail
+    gateways (Safe Links / Proofpoint / Mimecast) pre-fetch URLs with a
+    GET to scan them, so leaving the token untouched here means the human's
+    later POST still works.
+
+    The response OVERRIDES the app-wide `Referrer-Policy: same-origin`
+    (set by SecurityHeadersMiddleware, which leaves a handler's own header
+    alone). The page extends base.html, which loads same-origin /static
+    assets (pico/app CSS+JS, favicon, htmx); under `same-origin` those
+    sub-requests would carry the full verify URL — INCLUDING ?token= — in
+    their Referer. `strict-origin` sends only scheme+host (no path/query),
+    so the token never leaks, while still giving the CSRF check the
+    non-null Origin/Referer it needs for the confirm POST. (`no-referrer`
+    is forbidden: it nulls Origin on form POSTs → 403.)
+    """
+    response = request.app.state.templates.TemplateResponse(
+        request=request,
+        name="login_confirm.html",
+        context={"token": token, "next_path": safe_next(next)},
+    )
+    response.headers["Referrer-Policy"] = "strict-origin"
+    return response
+
+
+@router.post("/login/verify")
+def login_verify_consume(
+    request: Request,
+    token: str = Form(...),
+    next: str | None = Form(default=None),
+):
     session_factory = request.app.state.session_factory
     session_signer = request.app.state.session_signer
     ip_limiter = request.app.state.ip_limiter
     settings = request.app.state.settings
 
-    # Rate-limit by IP: the token is 32-byte secrets.token_urlsafe so an
-    # online guess is computationally infeasible, but this is a cheap
-    # brake against future regressions and straightforward DDoS (each
-    # attempt is one DB UPDATE).
+    # The IP rate-limit lives on the verb that actually consumes the token.
     client_ip = _client_ip(request)
     if not ip_limiter.allow(client_ip):
         _logger.info(
@@ -202,6 +232,8 @@ def login_verify(request: Request, token: str):
         try:
             user_id = consume_token(session, token)
         except InvalidToken as e:
+            # A human clicked a stale/used interstitial. Surfaced as a plain
+            # 400 here; Task 5 swaps it for a dedicated recovery page.
             raise HTTPException(status_code=400, detail="invalid or expired link") from e
         session.commit()
 
@@ -214,7 +246,8 @@ def login_verify(request: Request, token: str):
         session.commit()
 
     cookie_value = session_signer.make(user_id=user_id, session_epoch=session_epoch)
-    response = RedirectResponse(url="/", status_code=303)
+    target = safe_next(next) or "/"
+    response = RedirectResponse(url=target, status_code=303)
     response.set_cookie(
         "session",
         cookie_value,
@@ -223,9 +256,10 @@ def login_verify(request: Request, token: str):
         secure=settings.cookie_secure,  # True when APP_BASE_URL is https://
         samesite="lax",
     )
-    # The verify URL carries the single-use token in its query string. Suppress
-    # the Referer header so the post-login page (and anything it loads) can't
-    # leak the token to third parties.
+    # The POST body carried the single-use token; suppress Referer so the
+    # post-login page can't leak anything to third parties. Safe on this
+    # redirect (the next request is a GET — no CSRF check — so no Origin:
+    # null regression).
     response.headers["Referrer-Policy"] = "no-referrer"
     _logger.info("verify success", extra={"event": "verify_success"})
     return response

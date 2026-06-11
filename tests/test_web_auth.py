@@ -83,7 +83,7 @@ def test_verify_sets_session_cookie_and_redirects(monkeypatch, pg_url, pg_sessio
         s.commit()
 
     with TestClient(app) as client:
-        r = client.get(f"/login/verify?token={raw}", follow_redirects=False)
+        r = client.post("/login/verify", data={"token": raw}, follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/"
     assert "session" in r.cookies
@@ -92,7 +92,7 @@ def test_verify_sets_session_cookie_and_redirects(monkeypatch, pg_url, pg_sessio
 def test_verify_rejects_unknown_token(monkeypatch, pg_url):
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
-        r = client.get("/login/verify?token=nope", follow_redirects=False)
+        r = client.post("/login/verify", data={"token": "nope"}, follow_redirects=False)
     assert r.status_code == 400
 
 
@@ -106,8 +106,11 @@ def test_verify_rejects_replay(monkeypatch, pg_url, pg_session_factory):
         s.commit()
 
     with TestClient(app) as client:
-        assert client.get(f"/login/verify?token={raw}", follow_redirects=False).status_code == 303
-        r = client.get(f"/login/verify?token={raw}", follow_redirects=False)
+        assert (
+            client.post("/login/verify", data={"token": raw}, follow_redirects=False).status_code
+            == 303
+        )
+        r = client.post("/login/verify", data={"token": raw}, follow_redirects=False)
     assert r.status_code == 400
 
 
@@ -143,7 +146,7 @@ def test_verify_survives_post_consumption_failure(monkeypatch, pg_url, pg_sessio
     monkeypatch.setattr(auth_module, "datetime", BoomDateTime)
 
     with TestClient(app) as client, contextlib.suppress(RuntimeError):
-        client.get(f"/login/verify?token={raw}", follow_redirects=False)
+        client.post("/login/verify", data={"token": raw}, follow_redirects=False)
 
     # Critical invariant: the consumption committed even though the handler
     # threw afterward. Replay must fail.
@@ -192,20 +195,16 @@ def test_login_swallows_email_send_failure(monkeypatch, pg_url, pg_session_facto
     assert any(getattr(rec, "event", None) == "login_email_send_failed" for rec in caplog.records)
 
 
-def test_login_verify_is_rate_limited_by_ip(monkeypatch, pg_url, pg_session_factory):
-    """/login/verify must share the IP limiter so an attacker can't brute
-    the token endpoint faster than /login itself.
-    """
+def test_post_verify_is_rate_limited_by_ip(monkeypatch, pg_url, pg_session_factory):
+    """The IP limiter moved to the verb that consumes — POST /login/verify."""
     app, _ = _mk_app(monkeypatch, pg_url)
     app.state.ip_limiter = SlidingWindowLimiter(max_requests=3, window_seconds=60)
 
     with TestClient(app) as client:
-        # First 3 requests reach the 400 path.
         for _ in range(3):
-            r = client.get("/login/verify?token=nope", follow_redirects=False)
+            r = client.post("/login/verify", data={"token": "nope"}, follow_redirects=False)
             assert r.status_code == 400
-        # 4th: rate-limited.
-        r = client.get("/login/verify?token=nope", follow_redirects=False)
+        r = client.post("/login/verify", data={"token": "nope"}, follow_redirects=False)
     assert r.status_code == 429
 
 
@@ -284,3 +283,98 @@ def test_untrusted_proxy_ignores_x_forwarded_for(monkeypatch, pg_url, pg_session
         )
 
     assert "9.9.9.9" not in app.state.ip_limiter._events
+
+
+def test_get_verify_renders_interstitial_without_consuming(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """GET /login/verify renders the confirm page and does NOT consume the
+    token — a mail-scanner pre-fetch must leave it valid for the human."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+
+    with TestClient(app) as client:
+        r = client.get(f"/login/verify?token={raw}", follow_redirects=False)
+        assert r.status_code == 200
+        assert "confirm sign-in" in r.text.lower()
+        # Token must NOT leak to the same-origin /static assets the page loads.
+        assert r.headers["referrer-policy"] == "strict-origin"
+        # Token still valid: the human's subsequent POST succeeds.
+        p = client.post("/login/verify", data={"token": raw}, follow_redirects=False)
+    assert p.status_code == 303
+    assert "session" in p.cookies
+
+
+def test_post_verify_consumes_and_redirects_to_next(
+    monkeypatch, pg_url, pg_session_factory
+):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/login/verify",
+            data={"token": raw, "next": "/calls/5?profile=3"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/calls/5?profile=3"
+    assert "session" in r.cookies
+
+
+def test_post_verify_unsafe_next_falls_back_to_root(
+    monkeypatch, pg_url, pg_session_factory
+):
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/login/verify",
+            data={"token": raw, "next": "https://evil.com"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+
+
+def test_post_verify_succeeds_under_origin_csrf_check(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """The real interstitial POST carries same-origin Origin/Referer; the
+    CSRF middleware must allow it. Regression guard against reintroducing
+    no-referrer / Origin: null on the verify response."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="alice@ki.se")
+        s.add(u)
+        s.flush()
+        raw = issue_token(s, user_id=u.id, ttl_minutes=15)
+        s.commit()
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/login/verify",
+            data={"token": raw},
+            headers={
+                "Origin": "http://testserver",
+                "Referer": "http://testserver/login/verify",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
