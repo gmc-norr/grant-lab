@@ -359,7 +359,7 @@ def test_closed_deadline_renders_closed_label(monkeypatch, pg_url, pg_session_fa
         r = client.get("/?show_closed=1")
     body = r.text
     assert "deadline-closed" in body
-    assert "Closed" in body
+    assert "Closed ·" in body  # the rendered label prefix, not the call title
     # The closed row must NOT be styled as the urgent (red) deadline.
     assert "deadline-soon" not in body
 
