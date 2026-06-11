@@ -159,6 +159,11 @@ def drain_queue(
                 # Ledger first (same transaction as the ranking write):
                 # one row per attempt rank_pair actually made, success or
                 # failure — the daily cap counts billed calls honestly.
+                # Trade-off: the ledger row commits atomically with the
+                # ranking merge, so a persistence failure after a successful
+                # remote call rolls the row back and that attempt goes
+                # uncounted (billed-but-uncounted is rare and bounded by
+                # MAX_ATTEMPTS).
                 if result.escalation_attempted and result.escalation_outcome is not None:
                     record_attempt(
                         session,

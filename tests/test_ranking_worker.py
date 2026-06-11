@@ -790,12 +790,20 @@ def test_worker_writes_ledger_row_on_escalation_success(pg_session_factory, monk
     class _Remote:
         model = "claude-sonnet-4-6"
 
-    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_k: stub)
+    seen = {}
+
+    def _capture(**kwargs):
+        seen["remote_client"] = kwargs.get("remote_client")
+        seen["escalation_min_score"] = kwargs.get("escalation_min_score")
+        return stub
+
+    remote_instance = _Remote()
+    monkeypatch.setattr(worker_mod, "rank_pair", _capture)
     # Provide a non-None remote_client so the worker's cap gate path runs.
     drain_queue(
         session_factory=pg_session_factory,
         client=None,
-        remote_client=_Remote(),
+        remote_client=remote_instance,
         batch_size=10,
     )
     with pg_session_factory() as s:
@@ -806,6 +814,10 @@ def test_worker_writes_ledger_row_on_escalation_success(pg_session_factory, monk
     assert r.escalated is True
     assert r.escalated_from_score == 80
     assert r.analysis_model == "claude-sonnet-4-6"
+    # Prove cap-gate pass-through: remote_client was forwarded (not nulled)
+    # and the default escalation_min_score reached rank_pair unchanged.
+    assert seen["remote_client"] is remote_instance
+    assert seen["escalation_min_score"] == 45
 
 
 def test_worker_cap_disables_remote_when_exhausted(pg_session_factory, monkeypatch):
@@ -869,3 +881,67 @@ def test_worker_cap_disables_remote_when_exhausted(pg_session_factory, monkeypat
         batch_size=10,
     )
     assert seen["remote_client"] is None  # cap reached → escalation disabled
+
+
+def test_worker_cap_boundary_allows_attempt_below_cap(pg_session_factory, monkeypatch):
+    """At count == cap-1 the gate condition (>= cap) is FALSE, so the worker
+    passes the real remote_client through to rank_pair. Pins >= semantics."""
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+    from call_manager.ranking.remote_attempts import record_attempt
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        # Pre-fill ledger to cap-1 (count == 1, cap == 2).
+        record_attempt(s, call_id=cid, profile_id=pid, model="m", outcome="success")
+        s.commit()
+
+    seen = {}
+    parsed = Parsed(
+        topic_fit_rating=3,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=60,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="m",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.5,
+    )
+
+    def _capture(**kwargs):
+        seen["remote_client"] = kwargs.get("remote_client")
+        return stub
+
+    class _Remote:
+        model = "claude-sonnet-4-6"
+
+    remote_instance = _Remote()
+    monkeypatch.setattr(worker_mod, "rank_pair", _capture)
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        remote_client=remote_instance,
+        remote_daily_cap=2,
+        batch_size=10,
+    )
+    # count(1) < cap(2) → gate does NOT fire → remote forwarded as-is
+    assert seen["remote_client"] is remote_instance
