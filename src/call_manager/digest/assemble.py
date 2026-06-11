@@ -49,6 +49,7 @@ class DigestCallEntry:
     url: str
     bucket: str  # "must_include" | "top" | "borderline"
     also_in_profiles: list[str] = field(default_factory=list)
+    embed_similarity: float | None = None
 
 
 @dataclass
@@ -197,7 +198,10 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
-            .order_by(CallRanking.aggregate_score.desc())
+            .order_by(
+                CallRanking.aggregate_score.desc(),
+                CallRanking.embed_similarity.desc().nullslast(),
+            )
             .limit(50)  # over-fetch; dedup may drop some
         )
         for c, rk in session.execute(top_q).all():
@@ -215,7 +219,10 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 Call.id.notin_(excluded) if excluded else True,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
-            .order_by(CallRanking.aggregate_score.desc())
+            .order_by(
+                CallRanking.aggregate_score.desc(),
+                CallRanking.embed_similarity.desc().nullslast(),
+            )
             .limit(50)
         )
         for c, rk in session.execute(border_q).all():
@@ -234,7 +241,8 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         def _key(item):
             prof, bucket, rk = item
             score = rk.aggregate_score if rk else -1
-            return (_BUCKET_PRIORITY[bucket], -score, prof.id)
+            cos = rk.embed_similarity if (rk and rk.embed_similarity is not None) else -1.0
+            return (_BUCKET_PRIORITY[bucket], -score, -cos, prof.id)
 
         candidates_sorted = sorted(candidates, key=_key)
         primary = candidates_sorted[0]
@@ -260,6 +268,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
             url=c.url,
             bucket=bucket,
             also_in_profiles=secondary_profile_names[cid],
+            embed_similarity=rk.embed_similarity if rk else None,
         )
         grouped[profile.id][bucket].append(entry)
 
@@ -269,7 +278,13 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     for pid in sorted(grouped, key=lambda p: profiles_by_id[p].name):
         buckets = grouped[pid]
         for bucket_name in ("top", "borderline"):
-            buckets[bucket_name].sort(key=lambda e: e.score or 0, reverse=True)
+            buckets[bucket_name].sort(
+                key=lambda e: (
+                    e.score or 0,
+                    e.embed_similarity if e.embed_similarity is not None else -1.0,
+                ),
+                reverse=True,
+            )
             buckets[bucket_name] = buckets[bucket_name][:DIGEST_BUCKET_SIZE]
         # must_include is the user's escape hatch so it gets a larger cap than
         # the score buckets, but it is still bounded (see DIGEST_MUST_INCLUDE_CAP)
