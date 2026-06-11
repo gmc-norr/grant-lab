@@ -459,6 +459,39 @@ class CallRankingCriterion(Base):
     )
 
 
+class GoldenSetTriple(Base):
+    """Curated (call, profile) → expected_score rows the weekly eval scores
+    Kendall's tau against. DB-backed so admins can add/remove from the UI;
+    the JSON fixture (tests/fixtures/golden_set.json) survives only for unit
+    tests of the tau math."""
+
+    __tablename__ = "golden_set_triples"
+    __table_args__ = (
+        UniqueConstraint("call_id", "profile_id", name="uq_golden_set_triples_pair"),
+        CheckConstraint(
+            "expected_score BETWEEN 0 AND 100",
+            name="ck_golden_set_triples_score_range",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    call_id: Mapped[int] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    expected_score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class CallSectionExtract(Base):
     __tablename__ = "call_section_extracts"
     __table_args__ = (
