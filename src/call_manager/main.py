@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -9,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from call_manager.auth.csrf import OriginCSRFMiddleware
 from call_manager.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
 from call_manager.auth.rate_limit import SlidingWindowLimiter
+from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.config import Settings
 from call_manager.db.session import make_engine, make_session_factory
@@ -295,9 +297,19 @@ def create_app() -> FastAPI:
         wants_html = "text/html" in request.headers.get("accept", "")
         if exc.status_code == 401 and wants_html:
             # Preserve the originally-requested path so the user lands back
-            # there post-login. /login itself doesn't read this yet — but
-            # encoding it now means the next-URL feature is a one-line
-            # change in the login_verify handler.
+            # there after sign-in. Only for safe methods: threading a POST
+            # path would produce a final `303 GET` to a POST-only route and
+            # a 405. `safe_next` rejects anything non-local or oversized.
+            if request.method in ("GET", "HEAD"):
+                raw_next = request.url.path
+                if request.url.query:
+                    raw_next = f"{raw_next}?{request.url.query}"
+                target = safe_next(raw_next)
+                if target:
+                    return RedirectResponse(
+                        url=f"/login?{urlencode({'next': target})}",
+                        status_code=303,
+                    )
             return RedirectResponse(url="/login", status_code=303)
         if wants_html and exc.status_code in _HTML_ERROR_STATUSES:
             # A browser hitting a 403/404/etc. should see a styled page, not

@@ -388,3 +388,39 @@ def test_post_verify_succeeds_under_origin_csrf_check(
         )
     assert r.status_code == 303
     assert "session" in r.cookies
+
+
+def test_html_401_get_threads_next(monkeypatch, pg_url):
+    """An unauthenticated browser GET on a protected path redirects to
+    /login carrying the urlencoded relative path (path + query)."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get(
+            "/calls/5?profile=3",
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=%2Fcalls%2F5%3Fprofile%3D3"
+
+
+def test_html_401_post_does_not_thread_next(monkeypatch, pg_url):
+    """A POST that 401s must redirect to bare /login (no next) — threading
+    a POST path would 303-GET into a POST-only route and 405."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.post(
+            "/calls/5/hide",
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+
+
+def test_json_401_unaffected_by_next(monkeypatch, pg_url):
+    """A non-HTML caller still gets the raw JSON 401, no redirect."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get("/calls/5?profile=3", follow_redirects=False)
+    assert r.status_code == 401
