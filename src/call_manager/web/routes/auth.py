@@ -232,8 +232,8 @@ def login_verify_consume(
         try:
             user_id = consume_token(session, token)
         except InvalidToken as e:
-            # A human clicked a stale/used interstitial. Surfaced as a plain
-            # 400 here; Task 5 swaps it for a dedicated recovery page.
+            # Token invalid/expired — plain 400 until the recovery-page
+            # template is wired.
             raise HTTPException(status_code=400, detail="invalid or expired link") from e
         session.commit()
 

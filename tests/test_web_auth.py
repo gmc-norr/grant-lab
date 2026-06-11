@@ -310,6 +310,15 @@ def test_get_verify_renders_interstitial_without_consuming(
     assert "session" in p.cookies
 
 
+def test_get_verify_renders_with_unknown_token(monkeypatch, pg_url):
+    """The interstitial renders even for a bogus token — no DB lookup on GET."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get("/login/verify?token=garbage-token", follow_redirects=False)
+    assert r.status_code == 200
+    assert "confirm sign-in" in r.text.lower()
+
+
 def test_post_verify_consumes_and_redirects_to_next(
     monkeypatch, pg_url, pg_session_factory
 ):
@@ -378,3 +387,4 @@ def test_post_verify_succeeds_under_origin_csrf_check(
             follow_redirects=False,
         )
     assert r.status_code == 303
+    assert "session" in r.cookies
