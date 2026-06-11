@@ -1,6 +1,8 @@
 # tests/test_ranking_ev.py
 import math
 
+import pytest
+
 from call_manager.ranking.ev import extract_topic_expected
 
 
@@ -62,10 +64,8 @@ def test_none_for_degenerate_single_digit_top_logprobs():
 
 
 def test_does_not_bind_to_rating_digit_in_rationale_prose():
-    """The rationale string contains '4/5' BEFORE no — wait, rating is first.
-    Here we put a misleading '4' in the rationale that FOLLOWS rating; the
-    scanner must still bind to the structural rating literal, and its
-    top_logprobs (the real distribution) is what's used."""
+    """A decoy '4' in the rationale prose must not steal the binding — the
+    scanner binds to the structural rating literal and uses its top_logprobs."""
     content = '{"topic_fit": {"rating": 4, "rationale": "scored 4/5 overall"}}'
     top = [
         {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
@@ -77,7 +77,7 @@ def test_does_not_bind_to_rating_digit_in_rationale_prose():
     assert abs(ev - (4 * 0.6 + 5 * 0.4)) < 1e-6  # 4.4 — used the structural token
 
 
-def test_none_when_rating_literal_inside_a_rationale_string():
+def test_binds_to_structural_rating_despite_decoy_in_rationale_string():
     """A rationale string literally containing `"rating": 2` must not fool the
     scanner — the structural topic_fit.rating is 4. Build an envelope whose
     structural rating (4) has a real 2-digit distribution; if the scanner
@@ -104,3 +104,125 @@ def test_ev_always_in_range_and_never_raises():
         {"choices": [{"logprobs": {"content": "nope"}}]},
     ]:
         assert extract_topic_expected(env, 3) is None
+
+
+def _malformed_envelope(case: str) -> tuple[dict, int]:
+    """Envelopes that historically raised despite the never-raises contract."""
+    content = '{"topic_fit": {"rating": 4, "rationale": "x"}}'
+    if case == "overflow_logprob":
+        # math.exp(1000.0) overflows for a finite float — the rating token's
+        # top list carries the absurd logprob so the weight loop reaches it.
+        env = _char_tokens(
+            content,
+            rating_top_logprobs=[
+                {"token": "4", "logprob": 1000.0, "bytes": [52]},
+                {"token": "3", "logprob": -0.5, "bytes": [51]},
+            ],
+            rating_char="4",
+        )
+        return env, 4
+    if case == "unhashable_token":
+        # `["x"] in _DIGITS` raises TypeError (unhashable) in the weight loop.
+        env = _char_tokens(
+            content,
+            rating_top_logprobs=[
+                {"token": ["x"], "logprob": -0.1},
+                {"token": "4", "logprob": -0.2, "bytes": [52]},
+            ],
+            rating_char="4",
+        )
+        return env, 4
+    if case == "non_str_token_without_bytes":
+        # A token dict with no usable bytes and a non-string token, placed
+        # before the rating offset: len(5) raises TypeError in the walk.
+        env = _char_tokens(
+            content,
+            rating_top_logprobs=[
+                {"token": "4", "logprob": math.log(0.7), "bytes": [52]},
+                {"token": "3", "logprob": math.log(0.3), "bytes": [51]},
+            ],
+            rating_char="4",
+        )
+        env["choices"][0]["logprobs"]["content"][0] = {"token": 5}
+        return env, 4
+    if case == "int_content":
+        # Truthy non-string content: len(5) raises TypeError in the scanner.
+        env = {"choices": [{"message": {"content": 5}, "logprobs": {"content": []}}]}
+        return env, 5
+    raise AssertionError(f"unknown case {case!r}")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "overflow_logprob",
+        "unhashable_token",
+        "non_str_token_without_bytes",
+        "int_content",
+    ],
+)
+def test_never_raises_on_malformed_envelopes(case):
+    env, parsed_rating = _malformed_envelope(case)
+    assert extract_topic_expected(env, parsed_rating) is None
+
+
+def test_tolerates_space_prefixed_tokens():
+    """SentencePiece-style tokenizers often merge the preceding space into the
+    digit token (' 4'). EV extraction must still bind and weight by digit."""
+    content = '{"topic_fit": {"rating": 4, "rationale": "good"}}'
+    marker = '"rating":'
+    space_pos = content.index(marker) + len(marker)
+    assert content[space_pos : space_pos + 2] == " 4"
+    top = [
+        {"token": " 4", "logprob": math.log(0.7), "bytes": [32, 52]},
+        {"token": " 3", "logprob": math.log(0.3), "bytes": [32, 51]},
+    ]
+    content_tokens = []
+    i = 0
+    while i < len(content):
+        if i == space_pos:
+            content_tokens.append(
+                {
+                    "token": " 4",
+                    "bytes": [32, 52],
+                    "logprob": math.log(0.7),
+                    "top_logprobs": top,
+                }
+            )
+            i += 2
+        else:
+            ch = content[i]
+            content_tokens.append(
+                {
+                    "token": ch,
+                    "bytes": list(ch.encode("utf-8")),
+                    "logprob": -0.01,
+                    "top_logprobs": [
+                        {"token": ch, "logprob": -0.01, "bytes": list(ch.encode("utf-8"))}
+                    ],
+                }
+            )
+            i += 1
+    env = {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "logprobs": {"content": content_tokens},
+            }
+        ]
+    }
+    ev = extract_topic_expected(env, 4)
+    assert ev is not None
+    assert abs(ev - (4 * 0.7 + 3 * 0.3)) < 1e-6  # 3.7
+
+
+def test_none_when_parsed_rating_mismatches_covering_token():
+    # Structural rating is 4 but the caller parsed 3 — sanity check must bail.
+    content = '{"topic_fit": {"rating": 4, "rationale": "good"}}'
+    top = [
+        {"token": "4", "logprob": math.log(0.7), "bytes": [52]},
+        {"token": "3", "logprob": math.log(0.3), "bytes": [51]},
+    ]
+    env = _char_tokens(content, rating_top_logprobs=top, rating_char="4")
+    assert extract_topic_expected(env, 3) is None

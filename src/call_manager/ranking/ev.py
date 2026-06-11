@@ -25,7 +25,15 @@ def extract_topic_expected(envelope: dict, parsed_rating: int) -> float | None:
         return None
     if not isinstance(tokens, list) or not content:
         return None
+    # Safety net for the never-raises contract: arbitrarily malformed envelopes
+    # (non-string content, absurd logprobs, junk token dicts) degrade to None.
+    try:
+        return _expected_value(content, tokens, parsed_rating)
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return None
 
+
+def _expected_value(content: str, tokens: list, parsed_rating: int) -> float | None:
     rating_offset = _locate_rating_literal_offset(content)
     if rating_offset is None:
         return None
@@ -33,8 +41,9 @@ def extract_topic_expected(envelope: dict, parsed_rating: int) -> float | None:
     covering = _token_covering_offset(tokens, rating_offset)
     if covering is None:
         return None
-    # Sanity: the covering token must be exactly the parsed rating digit.
-    if covering.get("token") != str(parsed_rating):
+    # Sanity: the covering token must be the parsed rating digit, tolerating
+    # tokenizer whitespace (SentencePiece often emits " 4" rather than "4").
+    if _digit_of(covering.get("token")) != parsed_rating:
         return None
 
     top = covering.get("top_logprobs")
@@ -44,8 +53,9 @@ def extract_topic_expected(envelope: dict, parsed_rating: int) -> float | None:
     for entry in top:
         tok = entry.get("token") if isinstance(entry, dict) else None
         lp = entry.get("logprob") if isinstance(entry, dict) else None
-        if tok in _DIGITS and isinstance(lp, (int, float)):
-            weights[int(tok)] = weights.get(int(tok), 0.0) + math.exp(lp)
+        digit = _digit_of(tok)
+        if digit is not None and isinstance(lp, (int, float)):
+            weights[digit] = weights.get(digit, 0.0) + math.exp(lp)
     if len(weights) < 2:
         return None  # degenerate — EV == argmax, not worth recording
     total = sum(weights.values())
@@ -55,6 +65,14 @@ def extract_topic_expected(envelope: dict, parsed_rating: int) -> float | None:
     if not math.isfinite(ev) or not 0.0 <= ev <= 5.0:
         return None
     return ev
+
+
+def _digit_of(tok: object) -> int | None:
+    """Rating digit of a token string, tolerating surrounding whitespace
+    ("4", " 4", "4\\n"). None for anything else, including non-strings."""
+    if isinstance(tok, str) and tok.strip() in _DIGITS:
+        return int(tok.strip())
+    return None
 
 
 def _token_covering_offset(tokens: list, target: int) -> dict | None:
