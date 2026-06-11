@@ -9,6 +9,7 @@ from call_manager.ranking.golden_set import (
     add_triple,
     candidates_cosine_disagreement,
     candidates_dismissed_high_score,
+    candidates_escalation_disagreement,
     delete_triple,
     list_triples,
 )
@@ -24,8 +25,10 @@ def golden_set_page(
     session_factory = request.app.state.session_factory
     with session_factory() as session:
         triples = list_triples(session)
-        candidates = candidates_dismissed_high_score(session) + candidates_cosine_disagreement(
-            session
+        candidates = (
+            candidates_dismissed_high_score(session)
+            + candidates_cosine_disagreement(session)
+            + candidates_escalation_disagreement(session)
         )
     return request.app.state.templates.TemplateResponse(
         request=request,

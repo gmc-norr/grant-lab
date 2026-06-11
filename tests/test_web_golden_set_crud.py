@@ -6,6 +6,7 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import (
     Call,
+    CallRanking,
     GoldenSetTriple,
     Profile,
     ProfileKind,
@@ -110,3 +111,48 @@ def test_golden_set_page_requires_admin(monkeypatch, pg_url, pg_session_factory)
     with client:
         r = client.get("/admin/golden-set")
     assert r.status_code in (403, 401)
+
+
+def test_escalation_disagreement_candidate_appears(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    client, uid = _admin(app, pg_session_factory)
+    with pg_session_factory() as s:
+        p = Profile(
+            name="P",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
+            description="d",
+            structured={},
+            created_by=uid,
+        )
+        s.add(p)
+        s.flush()
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id,
+            external_id="esc",
+            url="https://x/e",
+            title="EscCall",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=p.id,
+                aggregate_score=20,
+                aggregate_reason="eligibility",
+                rationale="r",
+                model="claude-sonnet-4-6",
+                prompt_version="v5.0",
+                raw_response={},
+                ranked_at=datetime.now(UTC),
+                escalated=True,
+                escalated_from_score=80,  # |80-20|=60 >= 40
+            )
+        )
+        s.commit()
+    with client:
+        page = client.get("/admin/golden-set")
+    assert "EscCall" in page.text
+    assert "escalation_disagreement" in page.text

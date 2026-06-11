@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 
 from call_manager.db.models import (
     Call,
@@ -157,11 +157,29 @@ def candidates_cosine_disagreement(session) -> list[CandidateRow]:
 
 
 def candidates_escalation_disagreement(session) -> list[CandidateRow]:
-    """escalated rows where Sonnet moved the score >= 40 points from Gemma's.
-
-    Phase 2 stub: the escalated / escalated_from_score columns it needs do not
-    exist until Phase 4 (Task 21). Returns [] here so this module imports and
-    tests cleanly now; Task 26 replaces this body with the real query and the
-    route wires it in. The session arg is accepted for signature stability.
-    """
-    return []
+    """escalated rows where Sonnet moved the score >= 40 points from Gemma's."""
+    q = (
+        select(CallRanking, Call.title, Profile.name)
+        .join(Call, Call.id == CallRanking.call_id)
+        .join(Profile, Profile.id == CallRanking.profile_id)
+        .where(
+            CallRanking.escalated.is_(True),
+            CallRanking.escalated_from_score.is_not(None),
+            func.abs(CallRanking.escalated_from_score - CallRanking.aggregate_score) >= 40,
+            _not_already_a_triple(),
+        )
+        .order_by(func.abs(CallRanking.escalated_from_score - CallRanking.aggregate_score).desc())
+        .limit(_CANDIDATE_LIMIT)
+    )
+    return [
+        CandidateRow(
+            call_id=r.call_id,
+            profile_id=r.profile_id,
+            call_title=title,
+            profile_name=name,
+            aggregate_score=r.aggregate_score,
+            embed_similarity=r.embed_similarity,
+            reason="escalation_disagreement",
+        )
+        for r, title, name in session.execute(q).all()
+    ]

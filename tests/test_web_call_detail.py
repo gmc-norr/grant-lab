@@ -189,3 +189,48 @@ def test_call_detail_omits_cosine_line_when_embed_similarity_is_none(
         r = client.get(f"/calls/{cid}?profile={pid}")
     assert r.status_code == 200
     assert "Cosine similarity" not in r.text
+
+
+def test_call_detail_shows_escalated_from(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    app = _setup(monkeypatch, pg_url)
+    pid, _ = profile_factory(name="EscDetail")
+    with pg_session_factory() as s:
+        admin = User(email="adm-cd@ki.se", is_admin=True)
+        s.add(admin)
+        s.flush()
+        admin_id = admin.id
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id,
+            external_id="ESC1",
+            url="https://x",
+            title="EscDetailCall",
+            published_at=datetime.now(UTC),
+        )
+        s.add(c)
+        s.flush()
+        s.add(
+            CallRanking(
+                call_id=c.id,
+                profile_id=pid,
+                aggregate_score=100,
+                aggregate_reason=None,
+                rationale="r",
+                model="claude-sonnet-4-6",
+                prompt_version="v5.0",
+                raw_response={},
+                ranked_at=datetime.now(UTC),
+                escalated=True,
+                escalated_from_score=72,
+                analysis_model="claude-sonnet-4-6",
+            )
+        )
+        s.commit()
+        cid = c.id
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=admin_id))
+    with client:
+        r = client.get(f"/calls/{cid}?profile={pid}")
+    assert r.status_code == 200
+    assert "Escalated from 72" in r.text
