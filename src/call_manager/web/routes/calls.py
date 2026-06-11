@@ -258,8 +258,8 @@ def call_detail(
                 Profile.created_by == user.id,
             )
             .order_by(
-                CallRanking.aggregate_score.desc().nulls_last(),
-                CallRanking.embed_similarity.desc().nulls_last(),
+                CallRanking.aggregate_score.desc().nullslast(),
+                CallRanking.embed_similarity.desc().nullslast(),
             )
             .limit(1)
         )
