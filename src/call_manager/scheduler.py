@@ -66,6 +66,9 @@ def build_scheduler(
     embedding_hard_fail_threshold: float | None = None,
     anthropic_api_key: str | None = None,
     remote_rank_model: str = "claude-sonnet-4-6",
+    # Dead since drain_queue dropped its cosine-router param (Task 24) —
+    # accepted-but-unused so main.py's call keeps working until Task 25
+    # rewires config to the escalation_min_score / remote_daily_cap settings.
     remote_rank_cosine_threshold: float = 0.50,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
@@ -139,7 +142,6 @@ def build_scheduler(
             embedding_threshold=embedding_pregate_threshold,
             embedding_hard_fail_threshold=embedding_hard_fail_threshold,
             remote_client=anthropic_client,
-            remote_cosine_threshold=remote_rank_cosine_threshold,
             batch_size=ranking_queue_batch,
         )
 

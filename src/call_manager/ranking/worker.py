@@ -17,6 +17,7 @@ from call_manager.ranking.queue import (
     touch_running_job,
 )
 from call_manager.ranking.rank_pair import RankResult, rank_pair
+from call_manager.ranking.remote_attempts import count_today, record_attempt
 
 _logger = logging.getLogger(__name__)
 
@@ -40,10 +41,8 @@ def drain_queue(
     embedding_threshold: float,
     embedding_hard_fail_threshold: float | None = None,
     remote_client=None,  # AnthropicClient | None
-    # Dead since the outcome-based escalation replaced the cosine router in
-    # rank_pair (no longer forwarded). Kept so scheduler.py's call stays
-    # valid until Task 24 removes it and wires escalation_min_score instead.
-    remote_cosine_threshold: float | None = None,
+    escalation_min_score: int = 45,
+    remote_daily_cap: int = 100,
     batch_size: int = 10,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
@@ -61,6 +60,15 @@ def drain_queue(
     finding #1. When None the gate collapses to single-cut legacy
     behaviour; in production this is always threaded from
     Settings.embedding_hard_fail_threshold.
+
+    `escalation_min_score` is the local-score floor at which rank_pair
+    escalates to the remote (Sonnet) client — forwarded verbatim.
+
+    `remote_daily_cap` bounds remote spend: when today's ledger row count
+    (ranking_remote_attempts, Europe/Stockholm day) has reached the cap,
+    the job runs with `remote_client=None` — pure local, no escalation.
+    Every attempt rank_pair actually makes (any outcome, success or
+    failure — both billed) is recorded as one ledger row.
     """
     # First: requeue any RUNNING jobs that have been stuck past the
     # threshold (a previous worker crashed mid-tick and never reached
@@ -118,6 +126,14 @@ def drain_queue(
                         },
                     )
                     continue
+                # Daily-cap gate: once today's ledger has `remote_daily_cap`
+                # attempts, disable escalation for the rest of the day by
+                # passing remote_client=None — rank_pair then never consults
+                # the remote backend. Counted per attempt (not per success)
+                # because failures are billed too (Codex R1).
+                effective_remote = remote_client
+                if remote_client is not None and count_today(session) >= remote_daily_cap:
+                    effective_remote = None
                 try:
                     result = rank_pair(
                         client=client,
@@ -126,7 +142,8 @@ def drain_queue(
                         now=datetime.now(UTC),
                         embedding_threshold=embedding_threshold,
                         embedding_hard_fail_threshold=embedding_hard_fail_threshold,
-                        remote_client=remote_client,
+                        remote_client=effective_remote,
+                        escalation_min_score=escalation_min_score,
                     )
                 except (LLMError, ParseError) as e:
                     terminal = (attempts + 1) >= MAX_ATTEMPTS
@@ -139,20 +156,23 @@ def drain_queue(
                     session.commit()
                     continue
 
-                # Preserve a previously-recorded embed_similarity when
-                # this run produced None (e.g. degraded re-rank: the
-                # embedding model was swapped, profile/call vectors
-                # disagree, _safe_cosine returns None → UNKNOWN gate
-                # → LLM still ran). session.merge writes all
-                # attributes unconditionally, so without this the
-                # historical diagnostic value would be silently
-                # clobbered, leaving operators no signal to tune the
-                # cosine threshold against.
+                # Ledger first (same transaction as the ranking write):
+                # one row per attempt rank_pair actually made, success or
+                # failure — the daily cap counts billed calls honestly.
+                if result.escalation_attempted and result.escalation_outcome is not None:
+                    record_attempt(
+                        session,
+                        call_id=call_id,
+                        profile_id=profile_id,
+                        model=getattr(remote_client, "model", "") or result.model,
+                        outcome=result.escalation_outcome,
+                    )
+
+                # Cosine is written verbatim — a None current value
+                # OVERWRITES any stale prior one (Codex R4: once cosine
+                # affects ordering, preserving a model-mismatch-era value
+                # would silently rank on a meaningless number).
                 new_sim = result.embed_similarity
-                if new_sim is None:
-                    existing = session.get(CallRanking, (call_id, profile_id))
-                    if existing is not None:
-                        new_sim = existing.embed_similarity
 
                 # Preserve a previously-recorded analysis when this run
                 # produced None (e.g. a re-rank under Gemma after a
@@ -160,10 +180,11 @@ def drain_queue(
                 # LLM never ran). Without this, dropping below the
                 # cosine threshold or short-circuiting on a new gate
                 # would silently clobber the richer Sonnet analysis with
-                # NULLs. Same defensive pattern as the embed_similarity
-                # preserve above.
+                # NULLs. analysis_model travels with the preserved text
+                # so attribution can never point at the wrong backend.
                 new_summary = result.summary
                 new_notes = result.applicant_notes
+                new_analysis_model = result.analysis_model
                 if new_summary is None or new_notes is None:
                     existing = session.get(CallRanking, (call_id, profile_id))
                     if existing is not None:
@@ -171,6 +192,8 @@ def drain_queue(
                             new_summary = existing.summary
                         if new_notes is None:
                             new_notes = existing.applicant_notes
+                        if new_analysis_model is None:
+                            new_analysis_model = existing.analysis_model
 
                 session.merge(
                     CallRanking(
@@ -186,6 +209,9 @@ def drain_queue(
                         topic_fit_expected=result.topic_fit_expected,
                         summary=new_summary,
                         applicant_notes=new_notes,
+                        analysis_model=new_analysis_model,
+                        escalated=result.escalated,
+                        escalated_from_score=result.escalated_from_score,
                         ranked_at=datetime.now(UTC),
                     )
                 )
