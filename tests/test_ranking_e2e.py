@@ -129,10 +129,11 @@ def test_e2e_pipeline(pg_session_factory):
         ranking = s.execute(select(CallRanking)).scalar_one()
         criteria = s.execute(select(CallRankingCriterion)).scalars().all()
 
-    # Topic 5 (logprob expected ~5.0) × 20 = 100, no penalty.
+    # The fixture's single-token logprobs block can't offset-bind to the
+    # structural rating literal, so EV falls back to argmax: 5 × 20 = 100.
     assert ranking.aggregate_score >= 99
     assert ranking.aggregate_reason is None
-    assert ranking.prompt_version == "v4.1"
+    assert ranking.prompt_version == "v5.0"
 
     by_name = {c.criterion: c for c in criteria}
     assert set(by_name.keys()) >= {"topic_fit", "eligibility", "exclusions", "timeline"}

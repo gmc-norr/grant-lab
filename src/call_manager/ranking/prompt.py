@@ -7,7 +7,7 @@ from dataclasses import dataclass
 # Bump only when the prompt structure changes in a way that warrants
 # re-ranking. Stored on every CallRanking row so historical scores stay
 # attributable to the regime that produced them.
-PROMPT_VERSION = "v4.1"
+PROMPT_VERSION = "v5.0"
 CALL_TEXT_LIMIT = 16000
 
 

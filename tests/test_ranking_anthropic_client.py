@@ -152,6 +152,27 @@ def test_chat_wraps_connection_error_in_llm_error():
         _call_chat(client)
 
 
+def test_chat_wraps_api_response_validation_error_in_llm_error():
+    """APIResponseValidationError derives directly from anthropic.APIError —
+    it is neither an APIStatusError nor an APIConnectionError, so without a
+    final `except anthropic.APIError` fallback it escapes the LLMError wrap
+    and fails the whole worker job, breaking rank_pair's keep-local contract
+    (remote failures must NEVER propagate)."""
+    import anthropic
+
+    client = AnthropicClient(api_key="sk-test")
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    err = anthropic.APIResponseValidationError(response=fake_resp, body=None)
+    with (
+        patch.object(client._client.messages, "create", side_effect=err),
+        pytest.raises(LLMError) as exc_info,
+    ):
+        _call_chat(client)
+    # The exception class name is carried in the message for triage.
+    assert "APIResponseValidationError" in str(exc_info.value)
+
+
 def test_chat_raises_llm_error_on_no_text_blocks():
     """Anthropic responses without a text block would silently produce
     `envelope['choices'][0]['message']['content']` = '' and confuse the

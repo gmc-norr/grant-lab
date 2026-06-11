@@ -921,19 +921,73 @@ def test_profile_edit_changing_description_triggers_embedding_refresh(
     assert app.state.embed_client.embed.call_count == 1
 
 
-def test_profile_edit_not_changing_description_skips_embedding_refresh(
+def test_profile_edit_changing_areas_triggers_embedding_refresh(
     monkeypatch,
     pg_url,
     pg_session_factory,
     profile_factory,
 ):
-    """Editing rubric only (areas/must_include) does NOT re-embed —
-    only description goes into the embedding."""
+    """Editing `areas` (description unchanged) DOES re-embed: `areas` feeds
+    build_profile_text, so a changed area surface yields a stale vector unless
+    re-embedded (Codex R6 — trigger off build_profile_text, not description)."""
+    from call_manager.db.models import Profile
+
+    pid, _ = profile_factory(
+        name="Edit areas only",
+        description="stable description",
+        structured={"areas": ["old area"]},
+    )
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        p.embedding = [0.7] * 1024
+        p.embedding_model = "bge-m3"
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    new_vec = [0.99] * 1024
+    app.state.embed_client = _stub_embed_client(vec=new_vec)
+    client = _logged_in(app, pg_session_factory)
+
+    with client:
+        r = client.post(
+            f"/profiles/{pid}/edit",
+            data={
+                "description": "stable description",  # SAME as before
+                "areas": "digital pathology\nfederated learning",  # areas changed
+                "budget_min": "",
+                "budget_max": "",
+                "budget_currency": "",
+                "trl_min": "",
+                "trl_max": "",
+                "must_include": "pathology",
+                "hard_exclusions": "",
+            },
+            follow_redirects=False,
+        )
+    assert r.status_code == 303
+
+    # Embed WAS invoked and the pre-seeded vector was overwritten.
+    assert app.state.embed_client.embed.call_count == 1
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+    assert list(p.embedding) == new_vec
+
+
+def test_profile_edit_no_embed_text_change_skips_embedding_refresh(
+    monkeypatch,
+    pg_url,
+    pg_session_factory,
+    profile_factory,
+):
+    """A no-op edit (description AND areas identical) leaves build_profile_text
+    unchanged, so it does NOT re-embed — only rubric-only fields that don't
+    feed the embedding text changed."""
     from call_manager.db.models import Profile
 
     pid, _ = profile_factory(
         name="Edit rubric only",
         description="stable description",
+        structured={"areas": ["digital pathology"]},
     )
     with pg_session_factory() as s:
         p = s.get(Profile, pid)
@@ -950,13 +1004,13 @@ def test_profile_edit_not_changing_description_skips_embedding_refresh(
             f"/profiles/{pid}/edit",
             data={
                 "description": "stable description",  # SAME as before
-                "areas": "digital pathology\nfederated learning",  # rubric changed
+                "areas": "digital pathology",  # SAME as before
                 "budget_min": "",
                 "budget_max": "",
                 "budget_currency": "",
                 "trl_min": "",
                 "trl_max": "",
-                "must_include": "pathology",
+                "must_include": "pathology",  # rubric-only field, not embedded
                 "hard_exclusions": "",
             },
             follow_redirects=False,

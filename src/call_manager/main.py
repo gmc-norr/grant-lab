@@ -48,7 +48,7 @@ from call_manager.web.middleware import (
     SecurityHeadersMiddleware,
     build_csp,
 )
-from call_manager.web.routes import admin, auth, calls, health, me, profiles
+from call_manager.web.routes import admin, auth, calls, golden_set, health, me, profiles
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -156,7 +156,8 @@ async def lifespan(app: FastAPI):
         embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
         anthropic_api_key=settings.anthropic_api_key,
         remote_rank_model=settings.remote_rank_model,
-        remote_rank_cosine_threshold=settings.remote_rank_cosine_threshold,
+        ranking_escalation_min_score=settings.ranking_escalation_min_score,
+        ranking_remote_daily_cap=settings.ranking_remote_daily_cap,
         embed_client=app.state.embed_client,
         digest_email_client=digest_email_client,
         digest_settings=settings,
@@ -318,6 +319,26 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
+
+    from call_manager.embeddings.calibration import check_threshold_calibration
+
+    calibration_warning = check_threshold_calibration(
+        model=settings.embedding_model,
+        pregate=settings.embedding_pregate_threshold,
+        hard_fail=settings.embedding_hard_fail_threshold,
+    )
+    app.state.embedding_calibration_warning = calibration_warning
+    if calibration_warning:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "embedding.threshold_calibration_mismatch",
+            extra={
+                "event": "embedding_threshold_calibration_mismatch",
+                "model": settings.embedding_model,
+                "detail": calibration_warning,
+            },
+        )
     # Phase 3 metadata extraction service. build_citation_service constructs a
     # StructuredLLM but does NOT open any connection at this point — the LLM
     # client is lazy/per-call, so this is safe at startup. Routes pass this
@@ -368,6 +389,7 @@ def create_app() -> FastAPI:
     app.include_router(me.router)
     app.include_router(calls.router)
     app.include_router(admin.router)
+    app.include_router(golden_set.router)
     app.include_router(profiles.router)
     app.include_router(rubric_review_router)
     app.include_router(workspaces_router)

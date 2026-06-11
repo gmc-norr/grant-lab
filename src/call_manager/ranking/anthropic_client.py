@@ -1,15 +1,15 @@
 """Anthropic-hosted ranking client — drop-in replacement for OllamaClient.
 
-When the embedding pre-gate scores a (call, profile) pair above
-`Settings.remote_rank_cosine_threshold`, the worker routes the LLM step
-here instead of to the local Gemma. This buys richer rationale + tighter
-adherence to the JSON output schema on the calls that are most likely
-to actually surface to a user in the digest — the cases where a slightly
-better explanation is worth a few cents per pair.
+When the local Gemma result clears the escalation bar (score ≥
+RANKING_ESCALATION_MIN_SCORE, or an eligibility-fail on a high-topic call),
+rank_pair re-runs the LLM step here and the remote result replaces the local
+one. This buys a stronger eligibility read + applicant-facing analysis on the
+calls most likely to surface to a user.
 
-API surface mirrors OllamaClient.chat() byte-for-byte, including the
-returned envelope shape (`{"choices": [{"message": {"content": ...}}]}`),
-so rank_pair's downstream parsing is reused without changes.
+API surface mirrors OllamaClient.chat()'s envelope shape
+(`{"choices": [{"message": {"content": ...}}]}`), so rank_pair's downstream
+parsing is reused without changes. The logprobs kwargs are Ollama-only and are
+not present here.
 
 Prompt caching: the system prompt carries the criteria + profile rubric
 (stable across every (call, profile) pair scored against the same
@@ -112,6 +112,13 @@ class AnthropicClient:
             raise LLMError(f"anthropic {e.status_code} (request_id={req_id}): {e.message}") from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"anthropic connection error: {e}") from e
+        except anthropic.APIError as e:
+            # Catch-all for APIError subclasses not covered above — e.g.
+            # APIResponseValidationError derives directly from APIError and
+            # would otherwise escape the LLMError wrap, breaking rank_pair's
+            # keep-local escalation contract (remote failures must never
+            # propagate) and failing the whole worker job.
+            raise LLMError(f"anthropic API error ({type(e).__name__}): {e}") from e
 
         # max_tokens truncation: the model hit the output cap mid-generation,
         # so `content` is a partial (almost always invalid) JSON fragment.

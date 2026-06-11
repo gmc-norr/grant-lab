@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -41,8 +42,12 @@ class _Call:
     raw: dict = None
 
 
-def _ollama_mock(*, content: dict, logprobs: list[dict] | None = None):
-    """Build a fake Ollama returning the given content + logprobs."""
+def _ollama_mock(*, content: dict, logprobs: list[dict] | dict | None = None):
+    """Build a fake Ollama returning the given content + logprobs.
+
+    `logprobs` is either a bare token list (wrapped into the OpenAI-shaped
+    `{"content": [...]}`) or a pre-shaped dict placed at
+    `choices[0].logprobs` verbatim."""
     body = {
         "model": "gemma4:e4b-it-q4_K_M",
         "choices": [
@@ -53,7 +58,9 @@ def _ollama_mock(*, content: dict, logprobs: list[dict] | None = None):
         ],
     }
     if logprobs is not None:
-        body["choices"][0]["logprobs"] = {"content": logprobs}
+        body["choices"][0]["logprobs"] = (
+            logprobs if isinstance(logprobs, dict) else {"content": logprobs}
+        )
 
     def handler(request):
         return httpx.Response(200, json=body)
@@ -134,8 +141,8 @@ def test_rank_pair_eligibility_fail_zeros_score():
 
 def _remote_mock(*, model: str = "claude-sonnet-4-6", content: dict | None = None):
     """Stand-in for AnthropicClient — exposes .chat() + .model, records calls.
-    Used so router-routing tests don't depend on the real Anthropic SDK
-    being installed or reachable (they assert routing behaviour only)."""
+    Used so escalation tests don't depend on the real Anthropic SDK being
+    installed or reachable (they assert escalation behaviour only)."""
     from unittest.mock import MagicMock
 
     payload = json.dumps(
@@ -155,113 +162,44 @@ def _remote_mock(*, model: str = "claude-sonnet-4-6", content: dict | None = Non
     return client
 
 
-def _profile_with_vector(*, sim_with_call: float):
-    """Build a profile + matching call whose stored vectors produce the
-    requested cosine. Uses a 4-D vector to keep arithmetic mental — the
-    embedding gate doesn't care about dimension, only matching across
-    profile + call."""
-    import math
-
-    # Profile vector along x-axis, call vector at angle whose cos = target.
-    theta = math.acos(max(min(sim_with_call, 1.0), -1.0))
-    p_vec = [1.0, 0.0, 0.0, 0.0]
-    c_vec = [math.cos(theta), math.sin(theta), 0.0, 0.0]
+def test_rank_pair_escalates_when_local_score_at_or_above_threshold():
+    """Local Gemma scores 80 (≥45) ⇒ escalate; Sonnet's result replaces it."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
-    profile.embedding = p_vec
-    profile.embedding_model = "test-model"
     call = _Call(deadline=_NOW.replace(year=2099))
-    call.embedding = c_vec
-    call.embedding_model = "test-model"
-    return profile, call
-
-
-def test_rank_pair_routes_to_remote_when_cosine_above_threshold():
-    """High cosine ⇒ Sonnet path. The local client must NOT be called;
-    the result's .model must report the remote model so the UI badge
-    and audit trail attribute the score to the right backend."""
-    profile, call = _profile_with_vector(sim_with_call=0.85)
     local = _ollama_mock(
-        content={  # would-fail asserts if called
-            "topic_fit": {"rating": 1, "rationale": "wrong client"},
-            "eligibility": {"rating": "fail", "rationale": "wrong client"},
-            "exclusions": {"rating": "fail", "rationale": "wrong client"},
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
         }
     )
-    local.chat = lambda *a, **kw: (_ for _ in ()).throw(
-        AssertionError("local client must not be called when cosine ≥ threshold")
-    )
-    local.model = "gemma4-stub"
-    remote = _remote_mock()
-
+    remote = _remote_mock()  # returns rating 5 → 100
     r = rank_pair(
         client=local,
         profile=profile,
         call=call,
         now=_NOW,
         remote_client=remote,
-        remote_cosine_threshold=0.50,
+        escalation_min_score=45,
     )
     assert remote.chat.call_count == 1
+    assert "logprobs" not in remote.chat.call_args.kwargs  # remote client takes no logprobs kwargs
+    assert r.escalated is True
+    assert r.escalated_from_score == 80
+    assert r.score == 100
     assert r.model == "claude-sonnet-4-6"
-    assert r.score == 100  # 5 × 20
+    assert r.analysis_model == "claude-sonnet-4-6"
+    assert r.escalation_attempted is True
+    assert r.escalation_outcome == "success"
 
 
-def test_rank_pair_stays_local_when_cosine_below_threshold():
-    """Pairs below the escalation cutoff use the local Gemma — saves
-    the API call entirely."""
-    profile, call = _profile_with_vector(sim_with_call=0.35)
-    local = _ollama_mock(
-        content={
-            "topic_fit": {"rating": 3, "rationale": "ok"},
-            "eligibility": {"rating": "pass"},
-            "exclusions": {"rating": "pass"},
-        }
-    )
-    remote = _remote_mock()
-    r = rank_pair(
-        client=local,
-        profile=profile,
-        call=call,
-        now=_NOW,
-        remote_client=remote,
-        remote_cosine_threshold=0.50,
-    )
-    assert remote.chat.call_count == 0
-    assert r.model.startswith("gemma4")
-
-
-def test_rank_pair_stays_local_when_remote_disabled():
-    """No remote_client (anthropic_api_key unset) ⇒ never escalate,
-    even on a 0.9 cosine. This is the prod-safe default for dev/CI."""
-    profile, call = _profile_with_vector(sim_with_call=0.90)
-    local = _ollama_mock(
-        content={
-            "topic_fit": {"rating": 3, "rationale": "ok"},
-            "eligibility": {"rating": "pass"},
-            "exclusions": {"rating": "pass"},
-        }
-    )
-    r = rank_pair(
-        client=local,
-        profile=profile,
-        call=call,
-        now=_NOW,
-        remote_client=None,
-        remote_cosine_threshold=0.50,
-    )
-    assert r.model.startswith("gemma4")
-
-
-def test_rank_pair_stays_local_when_cosine_missing():
-    """No embedding (NULL profile or call vector) ⇒ no router decision
-    possible ⇒ stay local. Avoids wasting a Sonnet call on a pair we
-    couldn't even semantically pre-filter."""
+def test_rank_pair_does_not_escalate_below_threshold_clean_eligibility():
+    """Local score 40 (<45), eligibility pass ⇒ stay local."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
-    # Neither has a vector ⇒ cosine = None ⇒ embedding gate UNKNOWN
     local = _ollama_mock(
         content={
-            "topic_fit": {"rating": 3, "rationale": "ok"},
+            "topic_fit": {"rating": 2, "rationale": "ok"},
             "eligibility": {"rating": "pass"},
             "exclusions": {"rating": "pass"},
         }
@@ -273,10 +211,168 @@ def test_rank_pair_stays_local_when_cosine_missing():
         call=call,
         now=_NOW,
         remote_client=remote,
-        remote_cosine_threshold=0.50,
+        escalation_min_score=45,
     )
     assert remote.chat.call_count == 0
-    assert r.embed_similarity is None
+    assert r.escalated is False
+    assert r.escalation_attempted is False
+    assert r.model.startswith("gemma4")
+
+
+def test_rank_pair_escalates_on_eligibility_fail_high_topic():
+    """eligibility=fail aggregates to 0 (<45) but topic argmax 4 ≥ 3 ⇒ escalate
+    anyway (Codex R3 — the legalese failure mode)."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "strong topic"},
+            "eligibility": {"rating": "fail", "rationale": "maybe wrong"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert remote.chat.call_count == 1
+    assert r.escalated is True
+    assert r.escalated_from_score == 0
+
+
+def test_rank_pair_escalates_at_exact_threshold():
+    """Local score exactly EQUAL to escalation_min_score escalates — pins the
+    `>=` (not `>`) boundary semantics. Rating 4 → argmax score 80; threshold 80."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=80,
+    )
+    assert remote.chat.call_count == 1
+    assert r.escalated is True
+    assert r.escalated_from_score == 80
+
+
+def test_rank_pair_remote_parse_error_keeps_local():
+    """Sonnet answers but with unparseable content ⇒ ParseError is swallowed,
+    local result survives with escalation_outcome='parse_error'."""
+    from unittest.mock import MagicMock
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = MagicMock()
+    remote.model = "claude-sonnet-4-6"
+    remote.chat.return_value = {"choices": [{"message": {"content": "not json"}}]}
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert r.escalated is False
+    assert r.score == 80  # local survived
+    assert r.escalation_attempted is True
+    assert r.escalation_outcome == "parse_error"
+
+
+def test_rank_pair_no_escalation_on_eligibility_fail_low_topic():
+    """eligibility=fail with topic argmax 2 (<3) does NOT trigger the Codex R3
+    escalation path — score 0 (<45) and the topic condition misses too."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 2, "rationale": "weak topic"},
+            "eligibility": {"rating": "fail", "rationale": "company-only"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = _remote_mock()
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert remote.chat.call_count == 0
+    assert r.escalated is False
+    assert r.escalation_attempted is False
+    assert r.score == 0
+
+
+def test_rank_pair_no_escalation_when_remote_disabled():
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 5, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    r = rank_pair(client=local, profile=profile, call=call, now=_NOW, remote_client=None)
+    assert r.escalated is False
+    assert r.model.startswith("gemma4")
+
+
+def test_rank_pair_remote_failure_keeps_local_records_attempt():
+    """Sonnet raises LLMError ⇒ keep the local result, escalated=False,
+    escalation_attempted=True, outcome='llm_error'. Job still succeeds."""
+    from call_manager.ranking.ollama_client import LLMError
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    remote = _remote_mock()
+    remote.chat = lambda *a, **kw: (_ for _ in ()).throw(LLMError("boom"))
+    r = rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert r.escalated is False
+    assert r.score == 80  # local survived
+    assert r.model.startswith("gemma4")
+    assert r.escalation_attempted is True
+    assert r.escalation_outcome == "llm_error"
 
 
 def test_rank_pair_uses_argmax_times_20():
@@ -658,3 +754,57 @@ def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     from call_manager.config import Settings
 
     assert Settings().embedding_pregate_threshold == 0.42
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Task 17 — G-Eval expected value wired through rank_pair
+# ---------------------------------------------------------------------------
+
+
+def _logprobs_for(content: str, *, rating_char: str, top: list[dict]):
+    """Char-tokenize content into an Ollama-shaped logprobs.content list,
+    attaching `top` at the structural rating digit."""
+    marker = '"rating":'
+    pos = content.index(marker) + len(marker)
+    while content[pos] == " ":
+        pos += 1
+    out = []
+    for i, ch in enumerate(content):
+        tok = {
+            "token": ch,
+            "bytes": list(ch.encode()),
+            "logprob": -0.01,
+            "top_logprobs": [{"token": ch, "logprob": -0.01, "bytes": list(ch.encode())}],
+        }
+        if i == pos and ch == rating_char:
+            tok["top_logprobs"] = top
+        out.append(tok)
+    return {"content": out}
+
+
+def test_rank_pair_populates_expected_value_from_logprobs():
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    # The _logprobs_for offsets are computed against this exact literal;
+    # _ollama_mock re-serializes via json.dumps, whose default ", " / ": "
+    # separators reproduce it byte-for-byte.
+    content = (
+        '{"topic_fit": {"rating": 4, "rationale": "x"}, '
+        '"eligibility": {"rating": "pass"}, "exclusions": {"rating": "pass"}}'
+    )
+    assert json.dumps(json.loads(content)) == content
+    top = [
+        {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    client = _ollama_mock(
+        content=json.loads(content),
+        logprobs=_logprobs_for(content, rating_char="4", top=top),
+    )
+    r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
+    # EV = 4*0.6 + 3*0.4 = 3.6 → round(3.6*20) = 72 (NOT the argmax 80)
+    assert r.topic_fit_expected is not None
+    assert abs(r.topic_fit_expected - 3.6) < 1e-6
+    assert r.score == 72
+    # raw_response must NOT carry the full logprobs block.
+    assert "logprobs" not in r.raw_response.get("choices", [{}])[0]

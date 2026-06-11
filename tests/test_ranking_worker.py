@@ -125,10 +125,11 @@ def test_worker_writes_call_ranking_with_aggregate_and_reason(pg_session_factory
 
     with pg_session_factory() as s:
         r = s.execute(select(CallRanking)).scalar_one()
-    # Topic 4 (logprob expected ≈ 4.0 with strong probability) × 20 ≈ 80
+    # The fixture's degenerate single-token logprobs block can't offset-bind
+    # to the structural rating literal, so EV falls back to argmax: 4 × 20 = 80.
     assert 75 <= r.aggregate_score <= 85
     assert r.aggregate_reason is None
-    assert r.prompt_version == "v4.1"
+    assert r.prompt_version == "v5.0"
 
 
 def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):
@@ -630,17 +631,12 @@ def test_worker_criteria_terminal_fail_row_matches_aggregate_reason(
     assert by_name["budget"].rationale == "currency_mismatch"
 
 
-def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
+def test_worker_writes_current_cosine_verbatim_not_preserved(
     pg_session_factory,
     monkeypatch,
 ):
-    """Codex regression: a degraded re-rank (e.g., embedding model swap →
-    profile/call vectors disagree → _safe_cosine returns None → UNKNOWN gate
-    → LLM still runs) yields RankResult with embed_similarity=None.
-
-    The worker must NOT clobber the previously-recorded value with NULL —
-    operators tuning the cosine pre-gate threshold rely on the historical
-    diagnostic signal."""
+    """R4: once cosine affects ordering, a None current cosine must OVERWRITE
+    a stale prior value (model-mismatch case), not preserve it."""
     from call_manager.ranking import worker as worker_mod
     from call_manager.ranking.criteria import GateResult, Gates, GateStatus
     from call_manager.ranking.prompt import Parsed
@@ -648,17 +644,15 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
-        # Pre-seed a CallRanking row with embed_similarity=0.83 — the value
-        # we want to verify is preserved across the degraded re-rank.
         s.add(
             CallRanking(
                 call_id=cid,
                 profile_id=pid,
                 aggregate_score=72,
                 aggregate_reason=None,
-                rationale="prior run",
+                rationale="prior",
                 model="m",
-                prompt_version="v2.0",
+                prompt_version="v4.1",
                 raw_response={},
                 embed_similarity=0.83,
                 ranked_at=datetime.now(UTC),
@@ -677,10 +671,7 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
         exclusions_rationale="ok",
         exclusions_quoted=None,
     )
-    # Simulate degraded re-rank: embedding gate UNKNOWN (cosine returned
-    # None due to model mismatch), LLM ran, non-zero score, but
-    # embed_similarity=None on the new result.
-    stub_result = RankResult(
+    stub = RankResult(
         score=80,
         reason=None,
         gates=Gates(
@@ -692,21 +683,265 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
         parsed=parsed,
         must_include_override=False,
         model="m",
-        prompt_version="v3.0",
+        prompt_version="v5.0",
         raw_response={},
         embed_similarity=None,
     )
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_k: stub)
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+    with pg_session_factory() as s:
+        r = s.execute(select(CallRanking)).scalar_one()
+    assert r.embed_similarity is None  # NOT 0.83 — current run wins
+    assert r.aggregate_score == 80
 
-    def _stub_rank_pair(**_kwargs):
-        return stub_result
 
-    monkeypatch.setattr(worker_mod, "rank_pair", _stub_rank_pair)
+def test_worker_persists_topic_fit_expected(pg_session_factory, monkeypatch):
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
 
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        s.commit()
+
+    parsed = Parsed(
+        topic_fit_rating=4,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=72,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="m",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.5,
+        topic_fit_expected=3.6,
+    )
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_k: stub)
     drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
 
     with pg_session_factory() as s:
         r = s.execute(select(CallRanking)).scalar_one()
-    # The prior diagnostic value MUST be preserved. The new score, model,
-    # rationale etc. all updated normally (verified by the score change).
-    assert r.embed_similarity == 0.83
-    assert r.aggregate_score == 80
+    assert r.topic_fit_expected == 3.6
+    assert r.aggregate_score == 72
+
+
+def test_worker_writes_ledger_row_on_escalation_success(pg_session_factory, monkeypatch):
+    from call_manager.db.models import RankingRemoteAttempt
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        s.commit()
+    parsed = Parsed(
+        topic_fit_rating=5,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=100,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="claude-sonnet-4-6",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.7,
+        summary="an analysis",
+        applicant_notes=[{"category": "deadline", "text": "soon"}],
+        analysis_model="claude-sonnet-4-6",
+        escalated=True,
+        escalated_from_score=80,
+        escalation_attempted=True,
+        escalation_outcome="success",
+    )
+
+    class _Remote:
+        model = "claude-sonnet-4-6"
+
+    seen = {}
+
+    def _capture(**kwargs):
+        seen["remote_client"] = kwargs.get("remote_client")
+        seen["escalation_min_score"] = kwargs.get("escalation_min_score")
+        return stub
+
+    remote_instance = _Remote()
+    monkeypatch.setattr(worker_mod, "rank_pair", _capture)
+    # Provide a non-None remote_client so the worker's cap gate path runs.
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        remote_client=remote_instance,
+        batch_size=10,
+    )
+    with pg_session_factory() as s:
+        led = s.execute(select(RankingRemoteAttempt)).scalars().all()
+        r = s.execute(select(CallRanking)).scalar_one()
+    assert len(led) == 1
+    assert led[0].outcome == "success"
+    assert r.escalated is True
+    assert r.escalated_from_score == 80
+    assert r.analysis_model == "claude-sonnet-4-6"
+    # Prove cap-gate pass-through: remote_client was forwarded (not nulled)
+    # and the default escalation_min_score reached rank_pair unchanged.
+    assert seen["remote_client"] is remote_instance
+    assert seen["escalation_min_score"] == 45
+
+
+def test_worker_cap_disables_remote_when_exhausted(pg_session_factory, monkeypatch):
+    """When today's ledger count >= cap, the worker passes remote_client=None
+    into rank_pair (asserted by capturing the kwarg)."""
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+    from call_manager.ranking.remote_attempts import record_attempt
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        # Pre-fill the ledger to the cap.
+        for _ in range(2):
+            record_attempt(s, call_id=cid, profile_id=pid, model="m", outcome="success")
+        s.commit()
+
+    seen = {}
+    parsed = Parsed(
+        topic_fit_rating=3,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=60,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="m",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.5,
+    )
+
+    def _capture(**kwargs):
+        seen["remote_client"] = kwargs.get("remote_client")
+        return stub
+
+    class _Remote:
+        model = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(worker_mod, "rank_pair", _capture)
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        remote_client=_Remote(),
+        remote_daily_cap=2,
+        batch_size=10,
+    )
+    assert seen["remote_client"] is None  # cap reached → escalation disabled
+
+
+def test_worker_cap_boundary_allows_attempt_below_cap(pg_session_factory, monkeypatch):
+    """At count == cap-1 the gate condition (>= cap) is FALSE, so the worker
+    passes the real remote_client through to rank_pair. Pins >= semantics."""
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+    from call_manager.ranking.remote_attempts import record_attempt
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        # Pre-fill ledger to cap-1 (count == 1, cap == 2).
+        record_attempt(s, call_id=cid, profile_id=pid, model="m", outcome="success")
+        s.commit()
+
+    seen = {}
+    parsed = Parsed(
+        topic_fit_rating=3,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=60,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="m",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.5,
+    )
+
+    def _capture(**kwargs):
+        seen["remote_client"] = kwargs.get("remote_client")
+        return stub
+
+    class _Remote:
+        model = "claude-sonnet-4-6"
+
+    remote_instance = _Remote()
+    monkeypatch.setattr(worker_mod, "rank_pair", _capture)
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        remote_client=remote_instance,
+        remote_daily_cap=2,
+        batch_size=10,
+    )
+    # count(1) < cap(2) → gate does NOT fire → remote forwarded as-is
+    assert seen["remote_client"] is remote_instance

@@ -19,14 +19,6 @@ from call_manager.db.models import CallRanking
 
 _logger = logging.getLogger(__name__)
 
-# From src/call_manager/ranking/eval.py: parents[0] is `ranking/`, [1] is
-# `call_manager/`, [2] is `src/`, [3] is the repo root. Fixture lives at
-# <repo>/tests/fixtures/golden_set.json — so parents[3], not [2].
-_DEFAULT_FIXTURE = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "golden_set.json"
-# Sanity check the parents[3] math — fail loudly at import time if the
-# repo layout shifts and this constant points somewhere unexpected.
-assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
-
 # Path the weekly eval job writes to and /admin reads from. Computed once
 # at import — env-var override only takes effect on (re-)import. Tests
 # override this constant via monkeypatch.setattr rather than the env var.
@@ -38,6 +30,9 @@ assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
 # report. resolve() pins it to one absolute location regardless of CWD.
 _REPORT_PATH = (
     Path(os.environ.get("CALL_MANAGER_DATA_DIR", "data")).resolve() / "golden_set_last.json"
+)
+_HISTORY_PATH = (
+    Path(os.environ.get("CALL_MANAGER_DATA_DIR", "data")).resolve() / "golden_set_history.jsonl"
 )
 
 
@@ -99,38 +94,48 @@ def run_golden_set_eval(
     Fixture schema is trusted: each triple must have integer call_id,
     profile_id, and numeric expected_score. No defensive validation —
     curated by hospital admins."""
-    path = Path(fixture_path) if fixture_path else _DEFAULT_FIXTURE
-    if not path.exists():
-        _logger.warning(
-            "ranking.golden_eval.fixture_missing",
-            extra={"event": "golden_fixture_missing", "path": str(path)},
-        )
-        return GoldenSetReport(n_fixture=0, n_compared=0, tau=None)
-
-    triples_raw = json.loads(path.read_text())
-    # Dedup on (call_id, profile_id) — keep first occurrence. A duplicated
-    # triple would otherwise double-weight that pair in tau, biasing the
-    # result. Log a warning so a curator notices fixture errors.
-    seen: set[tuple[int, int]] = set()
-    triples: list[dict] = []
-    for t in triples_raw:
-        key = (t["call_id"], t["profile_id"])
-        if key in seen:
+    if fixture_path is not None:
+        path = Path(fixture_path)
+        if not path.exists():
             _logger.warning(
-                "ranking.golden_eval.duplicate_triple",
-                extra={
-                    "event": "golden_duplicate_triple",
-                    "call_id": t["call_id"],
-                    "profile_id": t["profile_id"],
-                },
+                "ranking.golden_eval.fixture_missing",
+                extra={"event": "golden_fixture_missing", "path": str(path)},
             )
-            continue
-        seen.add(key)
-        triples.append(t)
+            return GoldenSetReport(n_fixture=0, n_compared=0, tau=None)
+        triples_raw = json.loads(path.read_text())
+        seen: set[tuple[int, int]] = set()
+        triples: list[dict] = []
+        for t in triples_raw:
+            key = (t["call_id"], t["profile_id"])
+            if key in seen:
+                _logger.warning(
+                    "ranking.golden_eval.duplicate_triple",
+                    extra={
+                        "event": "golden_duplicate_triple",
+                        "call_id": t["call_id"],
+                        "profile_id": t["profile_id"],
+                    },
+                )
+                continue
+            seen.add(key)
+            triples.append(t)
+    else:
+        from call_manager.db.models import GoldenSetTriple
+
+        with session_factory() as session:
+            triples = [
+                {
+                    "call_id": t.call_id,
+                    "profile_id": t.profile_id,
+                    "expected_score": t.expected_score,
+                }
+                for t in session.execute(select(GoldenSetTriple)).scalars().all()
+            ]
     n_fixture = len(triples)
 
     actual: list[float] = []
     expected: list[float] = []
+    version_counts: dict[str, int] = {}
     with session_factory() as session:
         for t in triples:
             row = session.execute(
@@ -143,6 +148,7 @@ def run_golden_set_eval(
                 continue
             actual.append(float(row.aggregate_score))
             expected.append(float(t["expected_score"]))
+            version_counts[row.prompt_version] = version_counts.get(row.prompt_version, 0) + 1
 
     tau = kendalls_tau(actual, expected) if len(actual) >= 2 else None
 
@@ -161,6 +167,7 @@ def run_golden_set_eval(
         },
     )
     _persist_report(report)
+    _append_history(report, version_counts)
     return report
 
 
@@ -179,6 +186,31 @@ def _persist_report(report: GoldenSetReport) -> None:
             }
         )
     )
+
+
+def _append_history(report: GoldenSetReport, version_counts: dict[str, int]) -> None:
+    """Append one JSONL line per run so P3/P4 before/after tau stays readable.
+    Best-effort: a write failure must never fail the eval tick."""
+    from datetime import UTC, datetime
+
+    line = json.dumps(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "n_fixture": report.n_fixture,
+            "n_compared": report.n_compared,
+            "tau": report.tau,
+            "prompt_version_counts": version_counts,
+        }
+    )
+    try:
+        _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _HISTORY_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as e:
+        _logger.warning(
+            "ranking.golden_eval.history_write_failed",
+            extra={"event": "golden_history_write_failed", "error": str(e)},
+        )
 
 
 def load_last_report() -> GoldenSetReport | None:

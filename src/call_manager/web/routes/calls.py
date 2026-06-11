@@ -106,6 +106,7 @@ def calls_index(
                 )
                 .order_by(
                     CallRanking.aggregate_score.desc().nullslast(),
+                    CallRanking.embed_similarity.desc().nullslast(),
                     Call.published_at.desc().nullslast(),
                     Call.id.desc(),
                 )
@@ -256,7 +257,10 @@ def call_detail(
                 CallRanking.call_id == call_id,
                 Profile.created_by == user.id,
             )
-            .order_by(CallRanking.aggregate_score.desc().nulls_last())
+            .order_by(
+                CallRanking.aggregate_score.desc().nullslast(),
+                CallRanking.embed_similarity.desc().nullslast(),
+            )
             .limit(1)
         )
 

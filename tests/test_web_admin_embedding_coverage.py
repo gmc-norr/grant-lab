@@ -195,3 +195,31 @@ def test_admin_embedding_coverage_excludes_blank_description_profiles(
     assert "1/3 embedded" not in r.text
     # 0 stale (the only counted profile is current-model)
     assert "(0 stale, model" in r.text
+
+
+def test_blank_description_profile_with_areas_is_counted(monkeypatch, pg_url, pg_session_factory):
+    """After Phase 5, an areas-only (blank description) profile IS embeddable
+    and must appear in coverage totals."""
+    app = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        owner = User(email="areas@ki.se")
+        s.add(owner)
+        s.flush()
+        s.add(
+            Profile(
+                name="AreasOnly",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="",
+                structured={"areas": ["genomics"]},
+                created_by=owner.id,
+                embedding=None,
+                embedding_model=None,
+            )
+        )
+        s.commit()
+    client = _logged_in(app, pg_session_factory, is_admin=True)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    # 1 profile total, 1 stale (NULL embedding) — it is counted, not filtered out.
+    assert "0/1 embedded" in r.text

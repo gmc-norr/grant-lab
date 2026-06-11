@@ -68,7 +68,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["workspace_id"], ["workspaces.id"], ondelete="CASCADE",
+            ["workspace_id"],
+            ["workspaces.id"],
+            ondelete="CASCADE",
             name="fk_citation_llm_usage_workspace_id",
         ),
         sa.CheckConstraint(

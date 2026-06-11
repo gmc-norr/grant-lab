@@ -330,6 +330,9 @@ class CallRanking(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     embed_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # G-Eval expected value of topic_fit over the rating-token logprobs
+    # (Phase 3). NULL ⇒ argmax fallback was used, or a pre-v5.0 / remote row.
+    topic_fit_expected: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Populated only when the high-cosine pair was scored by the remote
     # (Sonnet) backend with enable_analysis=True. NULL for Gemma rows
     # and for gate-short-circuited rows (no LLM ran). See
@@ -339,6 +342,15 @@ class CallRanking(Base):
         JSONB,
         nullable=True,
     )
+
+    # Outcome-based escalation (Phase 4). escalated=True ⇒ a remote (Sonnet)
+    # result replaced the local one; escalated_from_score keeps the local
+    # score for disagreement mining. analysis_model attributes the *displayed*
+    # analysis (summary/applicant_notes), which can differ from `model` after a
+    # failed/capped escalation preserved older Sonnet prose.
+    escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    escalated_from_score: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    analysis_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class RankingJob(Base):
@@ -456,6 +468,65 @@ class CallRankingCriterion(Base):
     quoted_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     ranked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RankingRemoteAttempt(Base):
+    """Append-only ledger of remote (Sonnet) escalation attempts. The daily
+    cap counts rows here, not call_rankings.escalated, so repeated reranks and
+    failed-but-billed calls are counted honestly (Codex R1)."""
+
+    __tablename__ = "ranking_remote_attempts"
+    __table_args__ = (
+        Index("ix_ranking_remote_attempts_created_at", "created_at"),
+        CheckConstraint(
+            "outcome IN ('success','llm_error','parse_error')",
+            name="ck_ranking_remote_attempts_outcome",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    call_id: Mapped[int] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class GoldenSetTriple(Base):
+    """Curated (call, profile) → expected_score rows the weekly eval scores
+    Kendall's tau against. DB-backed so admins can add/remove from the UI;
+    the JSON fixture (tests/fixtures/golden_set.json) survives only for unit
+    tests of the tau math."""
+
+    __tablename__ = "golden_set_triples"
+    __table_args__ = (
+        UniqueConstraint("call_id", "profile_id", name="uq_golden_set_triples_pair"),
+        CheckConstraint(
+            "expected_score BETWEEN 0 AND 100",
+            name="ck_golden_set_triples_score_range",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    call_id: Mapped[int] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    expected_score: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 

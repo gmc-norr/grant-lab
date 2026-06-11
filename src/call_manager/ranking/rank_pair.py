@@ -10,10 +10,12 @@ from call_manager.ranking.aggregate import (
     aggregate,
 )
 from call_manager.ranking.criteria import Gates, GateStatus, evaluate_gates
-from call_manager.ranking.ollama_client import OllamaClient
+from call_manager.ranking.ev import extract_topic_expected
+from call_manager.ranking.ollama_client import LLMError, OllamaClient
 from call_manager.ranking.prompt import (
     PROMPT_VERSION,
     Parsed,
+    ParseError,
     build_messages,
     parse_response,
 )
@@ -42,12 +44,24 @@ class RankResult:
     # bypass) for downstream analysis. Default None so existing
     # constructors don't break.
     embed_similarity: float | None = None
+    # G-Eval expected value of topic_fit (Phase 3). None on argmax fallback,
+    # gate short-circuit, or remote (Anthropic exposes no logprobs).
+    topic_fit_expected: float | None = None
     # Optional applicant-facing analysis. Populated only when the Sonnet
     # path ran with enable_analysis=True. Gemma + gate-fail paths leave
     # both fields None and the worker writes NULL to the DB columns,
     # which the UI uses to decide whether to show the analysis section.
     summary: str | None = None
     applicant_notes: list[dict] | None = None
+    # Outcome-based escalation (Phase 4). `escalated` is True only when the
+    # remote (Sonnet) result actually replaced the local one; on a remote
+    # failure the local result survives with escalation_attempted=True and
+    # the failure class in escalation_outcome.
+    escalated: bool = False
+    escalated_from_score: int | None = None
+    escalation_attempted: bool = False
+    escalation_outcome: str | None = None  # 'success'|'llm_error'|'parse_error'
+    analysis_model: str | None = None
 
 
 def rank_pair(
@@ -59,10 +73,10 @@ def rank_pair(
     embedding_threshold: float,
     embedding_hard_fail_threshold: float | None = None,
     remote_client=None,  # AnthropicClient | None
-    remote_cosine_threshold: float | None = None,  # escalate above this cosine
+    escalation_min_score: int = 45,
 ) -> RankResult:
-    """Run gates → LLM → parse → verify quotes → aggregate. Returns a
-    structured RankResult.
+    """Run gates → local LLM → parse → verify quotes → aggregate →
+    (maybe) escalate to the remote LLM. Returns a structured RankResult.
 
     Rule-based-gate handling:
       - Budget FAIL or TRL FAIL → short-circuit, no LLM call.
@@ -73,19 +87,22 @@ def rank_pair(
         result so the worker's criteria-row writer doesn't bail at the
         timeline-fail row either.
 
-    Cosine-based escalation router:
-      When `remote_client` is non-None and the pair's cosine similarity
-      is at or above `remote_cosine_threshold`, the LLM step routes to
-      the remote client (Anthropic Sonnet) instead of the local Ollama
-      one. Pairs without an embedding (cosine None — embedding gate
-      UNKNOWN), or below the threshold, stay on local. This is a pure
-      router decision — the gate logic, prompt, parser, aggregator,
-      and result shape are all identical regardless of which LLM ran.
-      `CallRanking.model` records which one was used; the UI displays
-      that for transparency.
+    Outcome-based escalation (Phase 4):
+      Local Gemma ALWAYS runs first (logprobs on, enable_analysis=False).
+      Then, when `remote_client` is non-None AND the local outcome warrants
+      it — local score ≥ `escalation_min_score`, OR eligibility=='fail'
+      with topic argmax ≥ 3 (Codex R3: legalese eligibility false-fails on
+      topically strong calls) — the pair re-runs on the remote client
+      (Anthropic Sonnet, enable_analysis=True) and the remote result
+      REPLACES the local one (score, criteria, summary/notes, model).
+      On remote failure (LLMError/ParseError) the local result is kept
+      and the attempt is recorded via escalation_attempted/_outcome.
+      `CallRanking.model` records which backend produced the final score;
+      the UI displays that for transparency.
 
-    On LLM parse failure, raises ParseError (caller decides retry /
-    dead-letter). On LLM API failure (either backend), raises LLMError.
+    On LOCAL LLM parse failure, raises ParseError (caller decides retry /
+    dead-letter). On LOCAL LLM API failure, raises LLMError. Remote
+    failures never propagate — the local result survives them.
     """
     # Embedding pre-gate input: cosine of the two stored vectors. Returns
     # None (→ UNKNOWN gate → LLM runs) when either vector is missing OR
@@ -118,66 +135,180 @@ def rank_pair(
     if gates.embedding.status == GateStatus.FAIL and not must_include_match:
         return _gate_fail_result(gates, "embedding", must_include_match, embed_similarity=embed_sim)
 
-    # Cosine-based router. `remote_client is None` (no API key) or
-    # `embed_sim is None` (no embedding to compare) both keep us local.
-    # `remote_cosine_threshold is None` is the same as remote disabled.
-    selected_client = client
-    routed_to_remote = False
-    if (
-        remote_client is not None
-        and remote_cosine_threshold is not None
-        and embed_sim is not None
-        and embed_sim >= remote_cosine_threshold
-    ):
-        selected_client = remote_client
-        routed_to_remote = True
-        _logger.info(
-            "ranking.routed_to_remote",
+    # Local Gemma always runs first (logprobs on — Phase 3). enable_analysis
+    # stays False on the local path: Gemma's smaller capacity produces
+    # lower-quality prose; cheaper to leave it as rating-only.
+    local_envelope = client.chat(
+        messages=build_messages(profile=profile, call=call, enable_analysis=False),
+        response_format={"type": "json_object"},
+        logprobs=True,
+        top_logprobs=10,
+    )
+    local_content = local_envelope["choices"][0]["message"]["content"]
+    local_parsed = parse_response(local_content, verification_text=_build_verification_text(call))
+
+    # EV extraction must run BEFORE the strip — it reads the logprobs block.
+    topic_expected = extract_topic_expected(local_envelope, local_parsed.topic_fit_rating)
+    local_envelope = _strip_logprobs(local_envelope)
+
+    local_llm = LLMResult(
+        topic_argmax=local_parsed.topic_fit_rating,
+        eligibility=local_parsed.eligibility_rating,
+        exclusions=local_parsed.exclusions_rating,
+        topic_expected=topic_expected,
+    )
+    local_agg: AggregateResult = aggregate(
+        gates, local_llm, must_include_override=must_include_match
+    )
+
+    # Escalate on OUTCOME, not cosine: a promising local score, or the
+    # eligibility-fail-but-strong-topic combination (Codex R3 — Gemma
+    # misreads eligibility legalese; Sonnet adjudicates).
+    should_escalate = remote_client is not None and (
+        local_agg.score >= escalation_min_score
+        or (local_parsed.eligibility_rating == "fail" and local_parsed.topic_fit_rating >= 3)
+    )
+
+    if not should_escalate:
+        return RankResult(
+            score=local_agg.score,
+            reason=local_agg.reason,
+            gates=gates,
+            parsed=local_parsed,
+            must_include_override=must_include_match,
+            model=client.model,
+            prompt_version=PROMPT_VERSION,
+            raw_response=local_envelope,
+            embed_similarity=embed_sim,
+            topic_fit_expected=topic_expected,
+            summary=None,
+            applicant_notes=None,
+            analysis_model=None,
+            escalated=False,
+            escalated_from_score=None,
+            escalation_attempted=False,
+            escalation_outcome=None,
+        )
+
+    # Escalate: re-run on the remote client with analysis enabled. No
+    # logprobs kwargs — AnthropicClient.chat() rejects them (the API
+    # exposes no logprobs), so the remote topic score is argmax-only.
+    try:
+        remote_envelope = remote_client.chat(
+            messages=build_messages(profile=profile, call=call, enable_analysis=True),
+            response_format={"type": "json_object"},
+        )
+        remote_content = remote_envelope["choices"][0]["message"]["content"]
+        remote_parsed = parse_response(
+            remote_content, verification_text=_build_verification_text(call)
+        )
+    except (LLMError, ParseError) as e:
+        outcome = "llm_error" if isinstance(e, LLMError) else "parse_error"
+        # NB: never use "message" as an extra key — reserved LogRecord attribute.
+        _logger.warning(
+            "ranking.escalation_failed",
             extra={
-                "event": "ranking_routed_to_remote",
-                "cosine": round(embed_sim, 4),
-                "threshold": remote_cosine_threshold,
-                "remote_model": getattr(remote_client, "model", "?"),
+                "event": "ranking_escalation_failed",
+                "error_class": type(e).__name__,
+                "error": str(e),
+                "profile_id": getattr(profile, "id", None),
+                "call_id": getattr(call, "id", None),
             },
         )
-    # enable_analysis is the remote-only signal that asks the prompt to
-    # produce summary + applicant_notes. Gemma's smaller capacity
-    # produces lower-quality prose; cheaper to leave it as rating-only.
-    messages = build_messages(
-        profile=profile,
-        call=call,
-        enable_analysis=routed_to_remote,
-    )
-    envelope = selected_client.chat(
-        messages=messages,
-        response_format={"type": "json_object"},
-    )
-    content = envelope["choices"][0]["message"]["content"]
-    parsed = parse_response(content, verification_text=_build_verification_text(call))
+        return _local_with_failed_escalation(
+            local_agg,
+            gates,
+            local_parsed,
+            must_include_match,
+            client.model,
+            local_envelope,
+            embed_sim,
+            topic_expected,
+            outcome=outcome,
+        )
 
-    llm = LLMResult(
-        topic_argmax=parsed.topic_fit_rating,
-        eligibility=parsed.eligibility_rating,
-        exclusions=parsed.exclusions_rating,
+    remote_llm = LLMResult(
+        topic_argmax=remote_parsed.topic_fit_rating,
+        eligibility=remote_parsed.eligibility_rating,
+        exclusions=remote_parsed.exclusions_rating,
     )
-    agg: AggregateResult = aggregate(gates, llm, must_include_override=must_include_match)
-    # Record which model actually scored this pair so the UI can show
-    # "Analyzed by Sonnet 4.6" / "Analyzed by Gemma 4 E4B" alongside the
-    # score, and downstream audits can split evals by backend.
-    model_used = getattr(selected_client, "model", "")
+    remote_agg = aggregate(gates, remote_llm, must_include_override=must_include_match)
+    # The remote result REPLACES the local one. `model` records which
+    # backend produced the final score so the UI can show "Analyzed by
+    # Sonnet 4.6" and downstream audits can split evals by backend;
+    # escalated_from_score keeps the local score for calibration.
+    remote_model = getattr(remote_client, "model", "") or client.model
     return RankResult(
-        score=agg.score,
-        reason=agg.reason,
+        score=remote_agg.score,
+        reason=remote_agg.reason,
+        gates=gates,
+        parsed=remote_parsed,
+        must_include_override=must_include_match,
+        model=remote_model,
+        prompt_version=PROMPT_VERSION,
+        raw_response=remote_envelope,
+        embed_similarity=embed_sim,
+        topic_fit_expected=None,  # remote: no logprobs
+        summary=remote_parsed.summary,
+        applicant_notes=remote_parsed.applicant_notes,
+        analysis_model=remote_model,
+        escalated=True,
+        escalated_from_score=local_agg.score,
+        escalation_attempted=True,
+        escalation_outcome="success",
+    )
+
+
+def _local_with_failed_escalation(
+    local_agg: AggregateResult,
+    gates: Gates,
+    parsed: Parsed,
+    must_include_match: bool,
+    model: str,
+    envelope: dict,
+    embed_sim: float | None,
+    topic_expected: float | None,
+    *,
+    outcome: str,
+) -> RankResult:
+    """Local result surviving a failed remote escalation: identical to the
+    no-escalation local return except attempted=True + the failure class."""
+    return RankResult(
+        score=local_agg.score,
+        reason=local_agg.reason,
         gates=gates,
         parsed=parsed,
         must_include_override=must_include_match,
-        model=model_used or client.model,
+        model=model,
         prompt_version=PROMPT_VERSION,
         raw_response=envelope,
         embed_similarity=embed_sim,
-        summary=parsed.summary,
-        applicant_notes=parsed.applicant_notes,
+        topic_fit_expected=topic_expected,
+        summary=None,
+        applicant_notes=None,
+        analysis_model=None,
+        escalated=False,
+        escalated_from_score=None,
+        escalation_attempted=True,
+        escalation_outcome=outcome,
     )
+
+
+def _strip_logprobs(envelope: dict) -> dict:
+    """Remove the bulky per-token logprobs block from the envelope before it
+    is persisted to call_rankings.raw_response (tens of KB at top_logprobs=10).
+    Keep nothing of it — the expected value is already extracted and stored in
+    its own column. Returns a shallow-copied envelope; the original is left
+    intact for the EV extraction that ran just before."""
+    choices = envelope.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return envelope
+    new_choices = []
+    for ch in choices:
+        if isinstance(ch, dict) and "logprobs" in ch:
+            ch = {k: v for k, v in ch.items() if k != "logprobs"}
+        new_choices.append(ch)
+    return {**envelope, "choices": new_choices}
 
 
 def _gate_fail_result(
