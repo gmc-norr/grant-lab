@@ -8,7 +8,10 @@
   <p>Description feeds the semantic similarity gate. Areas, budgets, Technology Readiness Level, must-include and exclusions feed the deterministic rubric gates. Saving kicks off a backfill of the last 90 days against this profile.</p>
 </hgroup>
 
+{% include "partials/bootstrap_banner.html" %}
+
 <form method="post" action="/profiles/{{ profile.id }}/edit">
+<fieldset {% if not editable|default(true) %}disabled{% endif %}>
   <label>
     Description
     <textarea name="description" rows="6">{{ profile.description }}</textarea>
@@ -149,5 +152,6 @@
     <button type="submit">Save and re-rank</button>
     <a href="/profiles/{{ profile.id }}" role="button" class="secondary outline">Cancel</a>
   </div>
+</fieldset>
 </form>
 {% endblock %}

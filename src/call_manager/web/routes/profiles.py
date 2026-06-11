@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -198,12 +198,37 @@ def profile_edit_form(
         # Same archived-is-hidden contract as profile_detail.
         if p is None or p.is_active is False:
             raise HTTPException(status_code=404, detail="profile not found")
-        session.expunge(p)
+        job = session.execute(
+            select(ProfileBootstrapJob).where(ProfileBootstrapJob.profile_id == profile_id)
+        ).scalar_one_or_none()
+        editable = job is None or job.status in ("done", "failed")
+        session.expunge_all()
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="profile_edit.html",
-        context={"profile": p, "user": user},
+        context={"profile": p, "user": user, "job": job, "editable": editable},
     )
+
+
+@router.get("/profiles/{profile_id}/bootstrap-status")
+def profile_bootstrap_status(
+    request: Request,
+    profile_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        p = session.get(Profile, profile_id)
+        if p is None or p.is_active is False:
+            raise HTTPException(status_code=404, detail="profile not found")
+        if p.created_by != user.id and not user.is_admin:
+            raise HTTPException(status_code=403, detail="not authorized")
+        status = session.scalar(
+            select(ProfileBootstrapJob.status).where(ProfileBootstrapJob.profile_id == profile_id)
+        )
+    if status in (None, "done", "failed"):
+        return Response(status_code=200, headers={"HX-Refresh": "true"})
+    return Response(status_code=200)  # still drafting — keep polling, no swap
 
 
 @router.post("/profiles/{profile_id}/edit")
