@@ -78,3 +78,24 @@ def test_0044_adds_columns_ledger_and_backfills_analysis_model(pg_url):
     finally:
         engine.dispose()
     command.upgrade(cfg, "head")
+
+    # Migration tests bypass the pg_session_factory teardown, so they must
+    # clean their own residue (order-independence of the suite).
+    engine = make_engine(pg_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "TRUNCATE TABLE ranking_remote_attempts, call_rankings, calls, "
+                    "profiles, users, sources RESTART IDENTITY CASCADE"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO sources (name, slug) VALUES "
+                    "('EU Funding & Tenders Portal', 'eu_portal'), "
+                    "('Vinnova', 'vinnova')"
+                )
+            )
+    finally:
+        engine.dispose()
