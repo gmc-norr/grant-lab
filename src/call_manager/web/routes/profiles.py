@@ -12,18 +12,13 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
 from call_manager.embeddings.refresh import refresh_profile_embedding
 from call_manager.embeddings.similarity import build_profile_text
-from call_manager.profiles.bootstrap import bootstrap_profile
+from call_manager.profiles.create import create_profile_with_bootstrap
 from call_manager.profiles.fields import (
-    MAX_LIST_ENTRIES,
-    MAX_TAG_LEN,
     FieldValidationError,
     parse_structured,
-    sanitize_structured,
 )
-from call_manager.profiles.pubmed import PubMedClient
-from call_manager.profiles.seed import Member, SeedInput
+from call_manager.profiles.seed import Member
 from call_manager.ranking.backfill import backfill_profile
-from call_manager.ranking.ollama_client import OllamaClient
 
 router = APIRouter()
 
@@ -68,7 +63,6 @@ def profile_new_form(
 @router.post("/profiles/new")
 def profile_new_submit(
     request: Request,
-    background: BackgroundTasks,
     name: str = Form(...),
     kind: str = Form("organizational_unit"),
     level: str = Form(""),
@@ -96,6 +90,8 @@ def profile_new_submit(
         raise HTTPException(status_code=400, detail="name too long (max 200 chars)")
     if len(pasted_grants) > 100_000:
         raise HTTPException(status_code=413, detail="pasted grants too large (max 100 KB)")
+    if len(mission_text) > 10_240:
+        raise HTTPException(status_code=413, detail="mission text too large (max 10 KB)")
     if kind not in {k.value for k in ProfileKind}:
         kind = ProfileKind.ORGANIZATIONAL_UNIT.value
     level_val: str | None = None
@@ -138,79 +134,33 @@ def profile_new_submit(
         ).scalar_one_or_none()
         if existing is not None:
             raise HTTPException(status_code=409, detail="profile name already exists")
-    members = _parse_members(orcids, names_affiliations)
-    seed = SeedInput(
-        name=name,
-        kind=kind,
-        level=level_val,
-        members=members,
-        pasted_grants=pasted_grants,
-        mission_text=mission_text,
-    )
-
-    settings = request.app.state.settings
-    pubmed = PubMedClient()
-    ollama = OllamaClient(base_url=settings.ollama_url, model=settings.gemma_model)
-    draft = bootstrap_profile(seed=seed, pubmed=pubmed, ollama=ollama)
-
-    # Merge: bootstrap draft is the base, but its LLM-suggested namespaces are
-    # SANITIZED before they are ever persisted (parse_structured guards user
-    # input; sanitize_structured guards machine input). User-entered values then
-    # win over the sanitized suggestions.
-    draft_clean = sanitize_structured(kind=kind, structured=draft.structured)
-    merged = dict(draft.structured)
-    # Drop the four LLM namespaces seeded from the RAW draft. They are
-    # reintroduced below from the SANITIZED base + validated user input only —
-    # a raw namespace that sanitize_structured drops for this kind (e.g. an
-    # `org` block on an individual) must never reach the DB. See code review of
-    # Task 7: without this, an unvalidated namespace the loop can't overwrite
-    # (empty base, no user input) survived verbatim.
-    for ns in ("eligibility", "org", "funding", "geo"):
-        merged.pop(ns, None)
-    # The draft-areas fallback is raw LLM output, so apply the same count/length
-    # caps parse_structured enforces on user input before persisting it.
-    draft_areas = [x for x in draft.structured.get("areas", []) if len(str(x)) <= MAX_TAG_LEN][
-        :MAX_LIST_ENTRIES
-    ]
-    merged["areas"] = user_structured["areas"] or draft_areas
-    for ns in ("eligibility", "org", "funding", "geo"):
-        base_ns = draft_clean.get(ns, {})
-        user_ns = {k: v for k, v in user_structured.get(ns, {}).items() if v not in (None, [], "")}
-        if base_ns or user_ns:
-            merged[ns] = {**base_ns, **user_ns}
-
+    members = _parse_members_strict(orcids, names_affiliations)
+    seed_payload = {
+        "name": name,
+        "kind": kind,
+        "level": level_val,
+        "members": [
+            {"orcid": m.orcid, "name": m.name, "affiliation": m.affiliation} for m in members
+        ],
+        "pasted_grants": pasted_grants,
+        "mission_text": mission_text,
+    }
     try:
         with session_factory() as session:
-            profile = Profile(
+            profile = create_profile_with_bootstrap(
+                session=session,
+                owner_id=user.id,
                 name=name,
                 kind=kind,
                 level=level_val,
-                description=draft.description,
-                structured=merged,
-                created_by=user.id,
+                structured={**user_structured},
+                seed_payload=seed_payload,
             )
-            session.add(profile)
             session.commit()
             session.refresh(profile)
             new_id = profile.id
     except IntegrityError as e:
-        # Lost the race with a concurrent submit of the same name. The
-        # partial unique index rejected us; surface the same 409 the
-        # pre-check would have.
         raise HTTPException(status_code=409, detail="profile name already exists") from e
-
-    # Embed the new profile in a background task so the user gets a snappy
-    # redirect instead of a 30s+ wait on Ollama. Best-effort: on failure
-    # we log and the daily refresh-missing tick re-tries. This used to run
-    # synchronously; an Ollama cold-start can take close to the reverse-proxy
-    # timeout and was leaving the user on a hung submit.
-    embed_client = request.app.state.embed_client
-    background.add_task(
-        _refresh_embedding_in_background,
-        session_factory=session_factory,
-        embed_client=embed_client,
-        profile_id=new_id,
-    )
 
     return RedirectResponse(url=f"/profiles/{new_id}/edit", status_code=303)
 
@@ -450,6 +400,8 @@ def _refresh_and_backfill_in_background(
         )
 
 
+_MAX_MEMBERS = 50
+_MAX_SEED_LINE = 500
 _MAX_LIST_ENTRIES = 100
 _ALLOWED_CURRENCIES = {"", "SEK", "EUR", "USD", "NOK", "DKK"}
 # Sanity bounds on rubric inputs. Budget is in major units (SEK/EUR/etc.);
@@ -486,6 +438,20 @@ def _bounded_int(raw: str, *, field: str, low: int, high: int) -> int | None:
             detail=f"{field} out of range ({low}..{high}): {v}",
         )
     return v
+
+
+def _parse_members_strict(orcids: str, names_affiliations: str) -> list[Member]:
+    raw_lines = [
+        ln.strip() for ln in (orcids.splitlines() + names_affiliations.splitlines()) if ln.strip()
+    ]
+    if len(raw_lines) > _MAX_MEMBERS:
+        raise HTTPException(status_code=400, detail=f"too many members (max {_MAX_MEMBERS})")
+    if any(len(ln) > _MAX_SEED_LINE for ln in raw_lines):
+        raise HTTPException(
+            status_code=400,
+            detail=f"member line too long (max {_MAX_SEED_LINE} chars)",
+        )
+    return _parse_members(orcids, names_affiliations)
 
 
 def _parse_members(orcids: str, names_affiliations: str) -> list[Member]:

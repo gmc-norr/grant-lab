@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from call_manager.db.models import Profile, ProfileBootstrapJob, Subscription, User
 from call_manager.profiles.fields import MAX_LIST_ENTRIES, MAX_TAG_LEN, sanitize_structured
 from call_manager.profiles.seed import DraftProfile
 
@@ -48,3 +49,35 @@ def merge_bootstrap_into_profile(profile, draft: DraftProfile) -> None:
         if base_ns or user_ns:
             current[ns] = {**base_ns, **user_ns}  # user values win
     profile.structured = current
+
+
+def create_profile_with_bootstrap(
+    *,
+    session,
+    owner_id: int,
+    name: str,
+    kind: str,
+    level: str | None,
+    structured: dict,
+    seed_payload: dict,
+) -> Profile:
+    """Atomic: insert the profile (empty description), enqueue its bootstrap
+    job, subscribe the creator, and seed their default profile if unset.
+    Mirrors create_workspace — the CALLER commits, so any failure rolls all of
+    it back (no orphan profile)."""
+    p = Profile(
+        name=name,
+        kind=kind,
+        level=level,
+        description="",
+        structured=structured,
+        created_by=owner_id,
+    )
+    session.add(p)
+    session.flush()  # populate p.id
+    session.add(ProfileBootstrapJob(profile_id=p.id, status="queued", seed=seed_payload))
+    session.add(Subscription(user_id=owner_id, profile_id=p.id, digest_enabled=True))
+    u = session.get(User, owner_id)
+    if u is not None and u.default_profile_id is None:
+        u.default_profile_id = p.id
+    return p
