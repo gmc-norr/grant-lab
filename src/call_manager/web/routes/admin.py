@@ -209,6 +209,9 @@ def admin_index(
         from call_manager.ranking.eval import load_last_report
 
         context["golden_set_report"] = load_last_report()
+        context["embedding_calibration_warning"] = getattr(
+            request.app.state, "embedding_calibration_warning", None
+        )
 
     return request.app.state.templates.TemplateResponse(
         request=request,

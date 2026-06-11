@@ -46,6 +46,13 @@
   </form>
 </article>
 
+{% if embedding_calibration_warning %}
+<div class="banner banner-warn" role="alert">
+  <strong>Embedding thresholds uncalibrated.</strong>
+  {{ embedding_calibration_warning }}
+</div>
+{% endif %}
+
 <article>
   <header><strong>Embedding coverage</strong></header>
   <dl>

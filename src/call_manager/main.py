@@ -318,6 +318,26 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
+
+    from call_manager.embeddings.calibration import check_threshold_calibration
+
+    calibration_warning = check_threshold_calibration(
+        model=settings.embedding_model,
+        pregate=settings.embedding_pregate_threshold,
+        hard_fail=settings.embedding_hard_fail_threshold,
+    )
+    app.state.embedding_calibration_warning = calibration_warning
+    if calibration_warning:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "embedding.threshold_calibration_mismatch",
+            extra={
+                "event": "embedding_threshold_calibration_mismatch",
+                "model": settings.embedding_model,
+                "detail": calibration_warning,
+            },
+        )
     # Phase 3 metadata extraction service. build_citation_service constructs a
     # StructuredLLM but does NOT open any connection at this point — the LLM
     # client is lazy/per-call, so this is safe at startup. Routes pass this
