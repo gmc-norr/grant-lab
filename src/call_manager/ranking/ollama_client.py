@@ -65,6 +65,8 @@ class OllamaClient:
         *,
         messages: list[dict],
         response_format: dict | None = None,
+        logprobs: bool = False,
+        top_logprobs: int | None = None,
     ) -> dict:
         payload = {
             "model": self.model,
@@ -80,6 +82,10 @@ class OllamaClient:
             # on its OpenAI-compatible endpoint.
             "options": {"num_predict": self._num_predict},
         }
+        if logprobs:
+            payload["logprobs"] = True
+            if top_logprobs is not None:
+                payload["top_logprobs"] = top_logprobs
         try:
             with httpx.Client(
                 base_url=self._base_url,
