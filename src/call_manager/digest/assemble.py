@@ -232,12 +232,13 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     # 4. Dedup: each call lands in exactly one (profile, bucket).
     # Selection rule: must_include bucket beats top beats borderline (by design —
     # must_include is the user's hard filter and overrides score-based ranking).
-    # Within a bucket: highest score wins; tie-break by lowest profile_id (spec line 420).
+    # Within a bucket: highest score wins; ties broken by highest cosine similarity; then by
+    # lowest profile_id (spec line 420).
     _BUCKET_PRIORITY = {"must_include": 0, "top": 1, "borderline": 2}
     primary_assignment: dict[int, tuple[Profile, str, CallRanking | None]] = {}
     secondary_profile_names: dict[int, list[str]] = defaultdict(list)
     for cid, candidates in per_call.items():
-        # Pick "primary": min by (bucket priority, -score, profile_id).
+        # Pick "primary": min by (bucket priority, -score, -cosine, profile_id).
         def _key(item):
             prof, bucket, rk = item
             score = rk.aggregate_score if rk else -1
