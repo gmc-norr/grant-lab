@@ -22,6 +22,9 @@ class LLMResult:
     topic_argmax: int
     eligibility: str
     exclusions: str
+    # G-Eval expected value over the rating token's logprobs (Phase 3).
+    # None ⇒ extraction failed or remote/argmax path → use topic_argmax.
+    topic_expected: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,12 +65,15 @@ def aggregate(
     if llm.eligibility == "fail":
         return AggregateResult(0, "eligibility")
 
-    if llm.exclusions == "fail":
-        # Spec: min(10, topic_argmax * 2). Matches v1's "≤ 10" behavior.
-        return AggregateResult(min(10, llm.topic_argmax * 2), "exclusion")
+    # Effective topic: use EV when available, fall back to argmax.
+    topic = llm.topic_expected if llm.topic_expected is not None else float(llm.topic_argmax)
 
-    # Clean path: topic_argmax × 20.
-    base = llm.topic_argmax * 20
+    if llm.exclusions == "fail":
+        # Spec: min(10, topic * 2). Matches v1's "≤ 10" behavior.
+        return AggregateResult(min(10, round(topic * 2)), "exclusion")
+
+    # Clean path: topic × 20.
+    base = round(topic * 20)
     if llm.eligibility == "unclear":
         base = min(base, 50)
     return AggregateResult(base, None)

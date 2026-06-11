@@ -192,3 +192,36 @@ def test_aggregate_embedding_unknown_does_not_short_circuit():
     r = aggregate(gates, llm)
     assert r.score == 60
     assert r.reason is None
+
+
+# --- topic_expected (EV) field ---
+
+
+def test_aggregate_uses_expected_value_when_present():
+    llm = LLMResult(topic_argmax=4, eligibility="pass", exclusions="pass", topic_expected=2.75)
+    r = aggregate(_gates_pass(), llm)
+    assert r.score == round(2.75 * 20)  # 55
+    assert r.reason is None
+
+
+def test_aggregate_expected_value_rounds_at_bucket_boundaries():
+    for ev, want in [(2.25, 45), (2.95, 59), (3.0, 60)]:
+        llm = LLMResult(topic_argmax=3, eligibility="pass", exclusions="pass", topic_expected=ev)
+        assert aggregate(_gates_pass(), llm).score == want
+
+
+def test_aggregate_expected_value_respects_unclear_cap():
+    llm = LLMResult(topic_argmax=5, eligibility="unclear", exclusions="pass", topic_expected=4.8)
+    # 4.8 * 20 = 96, capped to 50
+    assert aggregate(_gates_pass(), llm).score == 50
+
+
+def test_aggregate_expected_value_exclusion_cap():
+    llm = LLMResult(topic_argmax=5, eligibility="pass", exclusions="fail", topic_expected=4.6)
+    # min(10, round(4.6*2)) = min(10, 9) = 9
+    assert aggregate(_gates_pass(), llm).score == 9
+
+
+def test_aggregate_falls_back_to_argmax_when_expected_none():
+    llm = LLMResult(topic_argmax=3, eligibility="pass", exclusions="pass", topic_expected=None)
+    assert aggregate(_gates_pass(), llm).score == 60
