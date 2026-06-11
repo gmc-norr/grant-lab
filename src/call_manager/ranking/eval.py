@@ -31,6 +31,9 @@ _logger = logging.getLogger(__name__)
 _REPORT_PATH = (
     Path(os.environ.get("CALL_MANAGER_DATA_DIR", "data")).resolve() / "golden_set_last.json"
 )
+_HISTORY_PATH = (
+    Path(os.environ.get("CALL_MANAGER_DATA_DIR", "data")).resolve() / "golden_set_history.jsonl"
+)
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,7 @@ def run_golden_set_eval(
 
     actual: list[float] = []
     expected: list[float] = []
+    version_counts: dict[str, int] = {}
     with session_factory() as session:
         for t in triples:
             row = session.execute(
@@ -144,6 +148,7 @@ def run_golden_set_eval(
                 continue
             actual.append(float(row.aggregate_score))
             expected.append(float(t["expected_score"]))
+            version_counts[row.prompt_version] = version_counts.get(row.prompt_version, 0) + 1
 
     tau = kendalls_tau(actual, expected) if len(actual) >= 2 else None
 
@@ -162,6 +167,7 @@ def run_golden_set_eval(
         },
     )
     _persist_report(report)
+    _append_history(report, version_counts)
     return report
 
 
@@ -180,6 +186,31 @@ def _persist_report(report: GoldenSetReport) -> None:
             }
         )
     )
+
+
+def _append_history(report: GoldenSetReport, version_counts: dict[str, int]) -> None:
+    """Append one JSONL line per run so P3/P4 before/after tau stays readable.
+    Best-effort: a write failure must never fail the eval tick."""
+    from datetime import UTC, datetime
+
+    line = json.dumps(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "n_fixture": report.n_fixture,
+            "n_compared": report.n_compared,
+            "tau": report.tau,
+            "prompt_version_counts": version_counts,
+        }
+    )
+    try:
+        _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _HISTORY_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as e:
+        _logger.warning(
+            "ranking.golden_eval.history_write_failed",
+            extra={"event": "golden_history_write_failed", "error": str(e)},
+        )
 
 
 def load_last_report() -> GoldenSetReport | None:
