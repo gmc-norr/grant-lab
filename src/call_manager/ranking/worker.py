@@ -181,6 +181,7 @@ def drain_queue(
                         prompt_version=result.prompt_version,
                         raw_response=result.raw_response or {},
                         embed_similarity=new_sim,
+                        topic_fit_expected=result.topic_fit_expected,
                         summary=new_summary,
                         applicant_notes=new_notes,
                         ranked_at=datetime.now(UTC),

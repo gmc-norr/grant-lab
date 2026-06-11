@@ -711,3 +711,50 @@ def test_worker_preserves_embed_similarity_when_new_rank_returns_none(
     # rationale etc. all updated normally (verified by the score change).
     assert r.embed_similarity == 0.83
     assert r.aggregate_score == 80
+
+
+def test_worker_persists_topic_fit_expected(pg_session_factory, monkeypatch):
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        s.commit()
+
+    parsed = Parsed(
+        topic_fit_rating=4,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=72,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="m",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.5,
+        topic_fit_expected=3.6,
+    )
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_k: stub)
+    drain_queue(session_factory=pg_session_factory, client=None, batch_size=10)
+
+    with pg_session_factory() as s:
+        r = s.execute(select(CallRanking)).scalar_one()
+    assert r.topic_fit_expected == 3.6
+    assert r.aggregate_score == 72
