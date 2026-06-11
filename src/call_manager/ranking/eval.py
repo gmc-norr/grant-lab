@@ -19,14 +19,6 @@ from call_manager.db.models import CallRanking
 
 _logger = logging.getLogger(__name__)
 
-# From src/call_manager/ranking/eval.py: parents[0] is `ranking/`, [1] is
-# `call_manager/`, [2] is `src/`, [3] is the repo root. Fixture lives at
-# <repo>/tests/fixtures/golden_set.json — so parents[3], not [2].
-_DEFAULT_FIXTURE = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "golden_set.json"
-# Sanity check the parents[3] math — fail loudly at import time if the
-# repo layout shifts and this constant points somewhere unexpected.
-assert _DEFAULT_FIXTURE.parent.name == "fixtures", _DEFAULT_FIXTURE
-
 # Path the weekly eval job writes to and /admin reads from. Computed once
 # at import — env-var override only takes effect on (re-)import. Tests
 # override this constant via monkeypatch.setattr rather than the env var.
@@ -99,34 +91,43 @@ def run_golden_set_eval(
     Fixture schema is trusted: each triple must have integer call_id,
     profile_id, and numeric expected_score. No defensive validation —
     curated by hospital admins."""
-    path = Path(fixture_path) if fixture_path else _DEFAULT_FIXTURE
-    if not path.exists():
-        _logger.warning(
-            "ranking.golden_eval.fixture_missing",
-            extra={"event": "golden_fixture_missing", "path": str(path)},
-        )
-        return GoldenSetReport(n_fixture=0, n_compared=0, tau=None)
-
-    triples_raw = json.loads(path.read_text())
-    # Dedup on (call_id, profile_id) — keep first occurrence. A duplicated
-    # triple would otherwise double-weight that pair in tau, biasing the
-    # result. Log a warning so a curator notices fixture errors.
-    seen: set[tuple[int, int]] = set()
-    triples: list[dict] = []
-    for t in triples_raw:
-        key = (t["call_id"], t["profile_id"])
-        if key in seen:
+    if fixture_path is not None:
+        path = Path(fixture_path)
+        if not path.exists():
             _logger.warning(
-                "ranking.golden_eval.duplicate_triple",
-                extra={
-                    "event": "golden_duplicate_triple",
-                    "call_id": t["call_id"],
-                    "profile_id": t["profile_id"],
-                },
+                "ranking.golden_eval.fixture_missing",
+                extra={"event": "golden_fixture_missing", "path": str(path)},
             )
-            continue
-        seen.add(key)
-        triples.append(t)
+            return GoldenSetReport(n_fixture=0, n_compared=0, tau=None)
+        triples_raw = json.loads(path.read_text())
+        seen: set[tuple[int, int]] = set()
+        triples: list[dict] = []
+        for t in triples_raw:
+            key = (t["call_id"], t["profile_id"])
+            if key in seen:
+                _logger.warning(
+                    "ranking.golden_eval.duplicate_triple",
+                    extra={
+                        "event": "golden_duplicate_triple",
+                        "call_id": t["call_id"],
+                        "profile_id": t["profile_id"],
+                    },
+                )
+                continue
+            seen.add(key)
+            triples.append(t)
+    else:
+        from call_manager.db.models import GoldenSetTriple
+
+        with session_factory() as session:
+            triples = [
+                {
+                    "call_id": t.call_id,
+                    "profile_id": t.profile_id,
+                    "expected_score": t.expected_score,
+                }
+                for t in session.execute(select(GoldenSetTriple)).scalars().all()
+            ]
     n_fixture = len(triples)
 
     actual: list[float] = []
