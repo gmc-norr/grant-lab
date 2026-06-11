@@ -1,5 +1,4 @@
 from functools import partial
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -53,6 +52,9 @@ def _stub_rank_pair_returning(score: int = 80):
 
 
 def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_session_factory):
+    """End-to-end of the async first-run flow: create a profile (no inline
+    bootstrap), let the bootstrap WORKER draft + embed + enqueue backfill, drain
+    the ranking queue, then browse the ranked feed."""
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
@@ -86,7 +88,8 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
     client = TestClient(app)
     client.cookies.set("session", signer.make(user_id=uid))
 
-    # 1. Create a profile (bootstrap mocked)
+    # The worker's bootstrap_profile is mocked; llm_succeeded/pubmed_status
+    # default to success on DraftProfile, so the worker takes the success path.
     fake_draft = DraftProfile(
         description="E2E test profile",
         structured={
@@ -101,10 +104,9 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
         publications_fetched=0,
         publications_skipped=0,
     )
-    with (
-        patch("call_manager.web.routes.profiles.bootstrap_profile", return_value=fake_draft),
-        client,
-    ):
+
+    with client:
+        # 1. Create the profile — async: no inline bootstrap, a queued job is enqueued.
         r = client.post(
             "/profiles/new",
             data={
@@ -123,25 +125,22 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
             profile = s.execute(select(Profile).where(Profile.name == "E2E Profile")).scalar_one()
         profile_id = profile.id
 
-        # 2. Save the edit → backfill triggers
-        r = client.post(
-            f"/profiles/{profile_id}/edit",
-            data={
-                "description": "edited desc",
-                "areas": "ai",
-                "budget_min": "",
-                "budget_max": "",
-                "trl_min": "",
-                "trl_max": "",
-                "must_include": "",
-                "hard_exclusions": "",
-            },
-            follow_redirects=False,
-        )
-        assert r.status_code == 303
+        # 2. Run the bootstrap worker → writes the description, embeds (mocked),
+        #    and enqueues the ranking backfill for the seeded call.
+        from call_manager.profiles import bootstrap_worker as bw
 
-        # 3. Ranking jobs were enqueued for our seeded call
+        monkeypatch.setattr(bw, "bootstrap_profile", lambda **_: fake_draft)
+        monkeypatch.setattr(bw, "refresh_profile_embedding", lambda *a, **k: None)
+        bw.run_profile_bootstrap_tick(
+            session_factory=pg_session_factory,
+            pubmed=object(),
+            ollama=object(),
+            embed_client=object(),
+        )
+
         with pg_session_factory() as s:
+            profile = s.get(Profile, profile_id)
+            assert profile.description == "E2E test profile"
             jobs = (
                 s.execute(select(RankingJob).where(RankingJob.profile_id == profile_id))
                 .scalars()
@@ -149,7 +148,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
             )
         assert len(jobs) == 1
 
-        # 4. Drain the queue with a stub rank_pair
+        # 3. Drain the ranking queue with a stub rank_pair.
         from call_manager.ranking import worker as worker_mod
 
         monkeypatch.setattr(worker_mod, "rank_pair", _stub_rank_pair_returning(score=80))
@@ -167,7 +166,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
         assert len(rankings) == 1
         assert rankings[0].aggregate_score == 80
 
-        # 5. Browse the dashboard filtered by this profile
+        # 4. Browse the dashboard filtered by this profile.
         r = client.get(f"/?profile={profile_id}")
         assert r.status_code == 200
         assert "E2E call" in r.text
