@@ -22,11 +22,10 @@ def _mk_profile(session):
     return p.id, u.id
 
 
-def test_bootstrap_table_and_default_column_exist(pg_session_factory):
-    with pg_session_factory() as s:
-        insp = inspect(s.bind)
-        assert "profile_bootstrap_jobs" in insp.get_table_names()
-        assert "default_profile_id" in {c["name"] for c in insp.get_columns("users")}
+def test_bootstrap_table_and_default_column_exist(migrated_engine):
+    insp = inspect(migrated_engine)
+    assert "profile_bootstrap_jobs" in insp.get_table_names()
+    assert "default_profile_id" in {c["name"] for c in insp.get_columns("users")}
 
 
 def test_bootstrap_job_unique_per_profile(pg_session_factory):
