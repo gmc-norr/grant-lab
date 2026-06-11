@@ -29,6 +29,17 @@ def _logged_in(app, pg_session_factory):
     return client
 
 
+def _top_matches_value(html: str) -> str:
+    """Extract the numeric text of the 'Top matches' summary-card value.
+    The value is whitespace-wrapped in the template, so a bare '>N</div>'
+    substring check can't pin it — parse the card structurally instead."""
+    label = html.index("Top matches")
+    value_start = html.index('class="value', label)
+    gt = html.index(">", value_start)
+    end = html.index("</div>", gt)
+    return html[gt + 1 : end].strip()
+
+
 def _seed(pg_session_factory, profile_id):
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
@@ -200,8 +211,12 @@ def test_top_matches_badge_excludes_closed_high_scorer(
     # Top matches = 1 (the open 75), not 2, in BOTH views. An impl that counted
     # high_score over the toggled list_filters would exclude the closed 95 by
     # default but wrongly count it when show_closed=1 → a badge value of 2.
-    assert ">2</div>" not in default.text
-    assert ">2</div>" not in shown.text
+    # Top matches = 1 (the open 75), not 2, in BOTH toggle states. Extract the
+    # card value structurally: the value is whitespace-wrapped, so a ">2</div>"
+    # substring check would never match the Top-matches card and thus could not
+    # catch a high_score=2 regression.
+    assert _top_matches_value(default.text) == "1"
+    assert _top_matches_value(shown.text) == "1"
 
 
 def test_root_inactive_profile_degrades_to_unranked(
