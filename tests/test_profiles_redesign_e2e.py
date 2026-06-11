@@ -32,16 +32,19 @@ def test_pre_migration_profile_ranks_without_error():
     assert msgs and any("Legacy Group" in m["content"] for m in msgs)
 
 
-def test_embedding_text_unaffected_by_new_fields():
+def test_embedding_text_includes_org_capabilities():
+    """Phase 5 (Task 28): org capabilities + patient_populations now feed the
+    embed text so structured org context shapes retrieval. Task 31 NULLs
+    existing vectors to force a re-embed under this richer text."""
     from call_manager.embeddings.similarity import build_profile_text
 
     class _P:
         description = "Hepatology unit"
         structured = {
             "areas": ["liver"],
-            "org": {"capabilities": ["biobank"]},  # must NOT enter embed text
+            "org": {"capabilities": ["biobank"]},
         }
 
     text = build_profile_text(_P())
     assert "Hepatology unit" in text and "liver" in text
-    assert "biobank" not in text  # new fields are prompt-only
+    assert "biobank" in text  # org capabilities now enter the embed text
