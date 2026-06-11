@@ -102,6 +102,19 @@ Also update the now-stale dates in the `test_root_sort_by_deadline` docstring so
     publication date). Vin one → EU two → EU one (relative future deadlines)."""
 ```
 
+**Also fix `test_root_requires_auth` to use a migrated DB.** It currently takes only `pg_url`, so when it runs first in a fresh session the shared testcontainer is un-migrated and the app's startup scheduler job hits a missing `references` table (a pre-existing ordering fragility — the same class as `test_login_form_renders`). Add `pg_session_factory` to its signature so Alembic migrations run before the app lifespan starts:
+
+```python
+def test_root_requires_auth(monkeypatch, pg_url, pg_session_factory):
+    # pg_session_factory pulls in migrated_engine, so the shared testcontainer
+    # is migrated before the app's startup scheduler runs — otherwise this
+    # (first, pg_url-only) test crashes on the not-yet-created references table.
+    app = _setup(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get("/")
+    assert r.status_code == 401
+```
+
 - [ ] **Step 2: Run the feed tests to confirm still green**
 
 Run: `uv run pytest tests/test_web_calls.py -q`
@@ -128,9 +141,15 @@ git commit -m "test(calls): make feed seed deadlines relative (future), robust t
 Add this helper after `_seed_calls`:
 
 ```python
-def _add_closed_call(pg_session_factory, *, title="Closed call", external_id="C-1"):
-    """Insert one call whose deadline is in the past (closed)."""
+def _add_closed_call(
+    pg_session_factory, *, title="Closed call", external_id="C-1", published_at=None
+):
+    """Insert one call whose deadline is in the past (closed). `published_at`
+    defaults to a date older than the open seed calls; pass a newer one to
+    test that closed calls still sort last under the default 'newest' sort."""
     now = datetime.now(UTC)
+    if published_at is None:
+        published_at = datetime(2026, 4, 2, tzinfo=UTC)
     with pg_session_factory() as s:
         eu = s.execute(select(Source).where(Source.slug == "eu_portal")).scalar_one()
         s.add(
@@ -139,7 +158,7 @@ def _add_closed_call(pg_session_factory, *, title="Closed call", external_id="C-
                 external_id=external_id,
                 url="uc",
                 title=title,
-                published_at=datetime(2026, 4, 2, tzinfo=UTC),
+                published_at=published_at,
                 deadline=now - timedelta(days=5),
             )
         )
@@ -186,6 +205,42 @@ def test_closed_calls_sort_last_unranked(monkeypatch, pg_url, pg_session_factory
     assert body.index("Closed call") > body.index("Vin one")
     assert body.index("Closed call") > body.index("EU two")
     assert body.index("Closed call") > body.index("EU one")
+
+
+def test_closed_calls_sort_last_under_newest(monkeypatch, pg_url, pg_session_factory):
+    """Under the DEFAULT 'newest' sort, a recently-published closed call must
+    still sort AFTER older open calls (guards the closed-last key in the
+    unranked branch, not just the deadline sort)."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # open calls published Mar–Apr 2026
+    # Closed but published more recently than any open call → would sort FIRST
+    # under newest-desc without the closed-last key.
+    _add_closed_call(
+        pg_session_factory, external_id="C-NEW", published_at=datetime(2026, 6, 1, tzinfo=UTC)
+    )
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?show_closed=1")  # default sort=newest
+    body = r.text
+    assert body.index("Closed call") > body.index("Vin one")
+    assert body.index("Closed call") > body.index("EU one")
+    assert body.index("Closed call") > body.index("EU two")
+
+
+def test_pagination_total_tracks_toggle(monkeypatch, pg_url, pg_session_factory):
+    """With 3 open + 1 closed and limit=3, the default view's pagination total
+    must count only the 3 open rows (no Next page); show_closed=1 counts all 4
+    and offers page 2. Guards against `total` counting closed rows while the
+    list hides them — which would link to an empty Next page."""
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # 3 open
+    _add_closed_call(pg_session_factory)  # 1 closed
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        default = client.get("/?limit=3")
+        shown = client.get("/?show_closed=1&limit=3")
+    assert "page=2" not in default.text  # 3 open rows, total=3, no Next
+    assert "page=2" in shown.text  # 4 rows, total=4, Next offered
 
 
 def test_open_calls_badge_excludes_closed_regardless_of_toggle(
@@ -278,10 +333,13 @@ def test_top_matches_badge_excludes_closed_high_scorer(
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
     with client:
-        r = client.get(f"/?profile={profile_id}")
-    # Top matches = 1 (the open 75), not 2. Without the open-only filter the
-    # badge would read 2, so no badge should render the value 2.
-    assert ">2</div>" not in r.text
+        default = client.get(f"/?profile={profile_id}")
+        shown = client.get(f"/?profile={profile_id}&show_closed=1")
+    # Top matches = 1 (the open 75), not 2, in BOTH views. An impl that counted
+    # high_score over the toggled list_filters would exclude the closed 95 by
+    # default but wrongly count it when show_closed=1 → a badge value of 2.
+    assert ">2</div>" not in default.text
+    assert ">2</div>" not in shown.text
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -504,6 +562,20 @@ def test_pagination_preserves_show_closed(monkeypatch, pg_url, pg_session_factor
         r = client.get("/?show_closed=1&limit=1")
     assert "show_closed=1" in r.text  # Next link carries the toggle
     assert "page=2" in r.text
+
+
+def test_app_js_autosubmit_selector_is_generalized():
+    """The auto-submit handler must target [data-autosubmit] (both the filter
+    selects AND the show-closed checkbox), not select[data-autosubmit] only —
+    otherwise the toggle silently won't submit. Static guard: there is no JS
+    runtime in the pytest suite, so this asserts the source was generalized."""
+    from pathlib import Path
+
+    import call_manager
+
+    js = (Path(call_manager.__file__).parent / "web" / "static" / "app.js").read_text()
+    assert "[data-autosubmit]" in js
+    assert "select[data-autosubmit]" not in js
 ```
 
 Add this small helper near the top of the test file (after the imports) so the checkbox-state assertion is robust to attribute order:
@@ -519,8 +591,8 @@ def _show_closed_input(html: str) -> str:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `uv run pytest tests/test_web_calls.py -q -k "closed_label or toggle or preserves_show_closed"`
-Expected: FAIL — no `deadline-closed` class yet (past deadline still renders `deadline-soon`); no `show_closed` checkbox; pagination `qs` omits the toggle.
+Run: `uv run pytest tests/test_web_calls.py -q -k "closed_label or toggle or preserves_show_closed or autosubmit"`
+Expected: FAIL — no `deadline-closed` class yet (past deadline still renders `deadline-soon`); no `show_closed` checkbox; pagination `qs` omits the toggle; `app.js` still uses `select[data-autosubmit]`.
 
 - [ ] **Step 3: Add the "Closed" branch to the `deadline_label` macro in `calls_index.html`**
 
@@ -595,7 +667,7 @@ After the `.deadline-watch` rule (line ~384), add:
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
-Run: `uv run pytest tests/test_web_calls.py -q -k "closed_label or toggle or preserves_show_closed"`
+Run: `uv run pytest tests/test_web_calls.py -q -k "closed_label or toggle or preserves_show_closed or autosubmit"`
 Expected: PASS.
 
 - [ ] **Step 9: Run the full feed suite and commit**
@@ -645,6 +717,10 @@ Expected: clean.
 | Pagination preserves `show_closed` | Task 3 |
 | No-deadline (rolling) calls treated as open / always visible | Task 2 (via `open_expr`) + test seed |
 | No migration | (whole plan — derived at query time) |
-| Test fixture robust to wall-clock | Task 1 |
+| Test fixture robust to wall-clock + migrated-DB ordering (`test_root_requires_auth`) | Task 1 |
+| Pagination total tracks the toggle (no empty Next page) | Task 2 (`test_pagination_total_tracks_toggle`) |
+| Closed-last under default newest sort (not only deadline) | Task 2 (`test_closed_calls_sort_last_under_newest`) |
+| Top-matches open-only verified with toggle on AND off | Task 2 |
+| JS selector generalized (static guard) | Task 3 (`test_app_js_autosubmit_selector_is_generalized`) |
 
 All spec sections map to a task. No DB migration. Non-goals (search, save/star, undoable Hide, sort-in-profile, jargon, share, empty-state) are untouched.
