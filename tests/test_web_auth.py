@@ -492,19 +492,24 @@ def test_login_post_drops_unsafe_next(monkeypatch, pg_url, pg_session_factory):
     app, sender = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
         client.post("/login", data={"email": "alice@ki.se", "next": "https://evil.com"})
+    assert len(sender.sent) == 1
     body = sender.sent[-1].text_body
     assert "evil.com" not in body
     assert "next=" not in body
 
 
 def test_login_enumeration_resistant_with_next(monkeypatch, pg_url, pg_session_factory):
-    """next must not change the response across allow/deny branches."""
+    """next must not change the response across allow/deny/rate-limited branches."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
         allowed = client.post("/login", data={"email": "alice@ki.se", "next": "/calls/5"})
         denied = client.post("/login", data={"email": "x@evil.com", "next": "/calls/5"})
-    assert allowed.status_code == denied.status_code == 200
-    assert allowed.text == denied.text  # byte-identical
+        # The rate-limited branch must also return the identical page.
+        app.state.ip_limiter = SlidingWindowLimiter(max_requests=1, window_seconds=60)
+        client.post("/login", data={"email": "alice@ki.se", "next": "/calls/5"})
+        rate_limited = client.post("/login", data={"email": "alice@ki.se", "next": "/calls/5"})
+    assert allowed.status_code == denied.status_code == rate_limited.status_code == 200
+    assert allowed.text == denied.text == rate_limited.text  # byte-identical
 
 
 def test_login_form_shows_configured_domain(monkeypatch, pg_url):
