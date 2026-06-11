@@ -112,6 +112,7 @@ def test_verify_rejects_replay(monkeypatch, pg_url, pg_session_factory):
         )
         r = client.post("/login/verify", data={"token": raw}, follow_redirects=False)
     assert r.status_code == 400
+    assert "text/html" in r.headers["content-type"]
 
 
 def test_verify_survives_post_consumption_failure(monkeypatch, pg_url, pg_session_factory):
@@ -572,3 +573,4 @@ def test_replay_renders_recovery_page(monkeypatch, pg_url, pg_session_factory):
         r = client.post("/login/verify", data={"token": raw}, follow_redirects=False)
     assert r.status_code == 400
     assert "expired" in r.text.lower() or "already used" in r.text.lower()
+    assert 'value="alice@' not in r.text
