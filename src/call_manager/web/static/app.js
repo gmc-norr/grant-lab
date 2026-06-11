@@ -14,9 +14,9 @@
   }
 
   ready(function () {
-    // Selects that submit their enclosing form on change (filter bars).
-    // Markup: <select data-autosubmit> ... </select>
-    document.querySelectorAll("select[data-autosubmit]").forEach(function (el) {
+    // Controls that submit their enclosing form on change (filter bars):
+    // <select data-autosubmit> and <input type="checkbox" data-autosubmit>.
+    document.querySelectorAll("[data-autosubmit]").forEach(function (el) {
       el.addEventListener("change", function () {
         if (el.form) {
           el.form.submit();

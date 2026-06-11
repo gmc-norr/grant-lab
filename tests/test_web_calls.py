@@ -72,6 +72,14 @@ def _seed_calls(pg_session_factory):
         s.commit()
 
 
+def _show_closed_input(html: str) -> str:
+    """Return just the show_closed <input ...> tag, for state assertions."""
+    start = html.index('name="show_closed"')
+    open_lt = html.rfind("<", 0, start)
+    close_gt = html.index(">", start)
+    return html[open_lt : close_gt + 1]
+
+
 def _add_closed_call(
     pg_session_factory, *, title="Closed call", external_id="C-1", published_at=None
 ):
@@ -340,3 +348,56 @@ def test_open_calls_badge_excludes_closed_regardless_of_toggle(
     assert ">3</div>" in default.text
     assert ">3</div>" in shown.text
     assert ">4</div>" not in shown.text
+
+
+def test_closed_deadline_renders_closed_label(monkeypatch, pg_url, pg_session_factory):
+    """A shown closed call's deadline reads grey 'Closed', not red 'deadline-soon'."""
+    app = _setup(monkeypatch, pg_url)
+    _add_closed_call(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?show_closed=1")
+    body = r.text
+    assert "deadline-closed" in body
+    assert "Closed" in body
+    # The closed row must NOT be styled as the urgent (red) deadline.
+    assert "deadline-soon" not in body
+
+
+def test_show_closed_toggle_checkbox_present_and_reflects_state(
+    monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        off = client.get("/")
+        on = client.get("/?show_closed=1")
+    assert 'name="show_closed"' in off.text
+    assert "checked" not in _show_closed_input(off.text)
+    assert "checked" in _show_closed_input(on.text)
+
+
+def test_pagination_preserves_show_closed(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    _seed_calls(pg_session_factory)  # 3 open
+    _add_closed_call(pg_session_factory)  # 1 closed → 4 rows when shown
+    client = _logged_in(app, pg_session_factory)
+    with client:
+        r = client.get("/?show_closed=1&limit=1")
+    assert "show_closed=1" in r.text  # Next link carries the toggle
+    assert "page=2" in r.text
+
+
+def test_app_js_autosubmit_selector_is_generalized():
+    """The auto-submit handler must target [data-autosubmit] (both the filter
+    selects AND the show-closed checkbox), not select[data-autosubmit] only —
+    otherwise the toggle silently won't submit. Static guard: there is no JS
+    runtime in the pytest suite, so this asserts the source was generalized."""
+    from pathlib import Path
+
+    import call_manager
+
+    js = (Path(call_manager.__file__).parent / "web" / "static" / "app.js").read_text()
+    assert "[data-autosubmit]" in js
+    assert "select[data-autosubmit]" not in js
