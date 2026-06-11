@@ -52,7 +52,7 @@ This is simpler and more robust than optimistic `updated_at` versioning for this
 
 ### A3 — Explicit bootstrap outcome, not exception-driven
 
-`bootstrap_profile` deliberately never throws — it swallows `PubMedError` and the LLM exception set and returns an empty-ish draft ([bootstrap.py:31-88](../../../src/call_manager/profiles/bootstrap.py#L31-L88)). So the worker cannot infer success/failure from an exception. We extend the `DraftProfile` dataclass and `bootstrap_profile` with explicit outcome fields, and the worker branches on them (see Component 1). The earlier rationale that "an empty description hard-fails at the embedding gate" was incorrect — a *missing* cosine surfaces as **UNKNOWN → falls through to the LLM**, not FAIL ([criteria.py:8-11](../../../src/call_manager/ranking/criteria.py#L8-L11)). The real reason to withhold backfill on a failed draft is that there is no usable description, so any rankings would rest on empty profile context and be misleading.
+`bootstrap_profile` deliberately never throws — it swallows `PubMedError` and the LLM exception set and returns an empty-ish draft ([bootstrap.py:31-88](../../../src/call_manager/profiles/bootstrap.py#L31-L88)). So the worker cannot infer success/failure from an exception. We extend the `DraftProfile` dataclass and `bootstrap_profile` with explicit outcome fields, and the worker branches on them (see Component 1). `llm_succeeded` is `True` only when the model returned a parseable draft **with a non-blank description** — a parseable-but-empty response (e.g. `{}` or `{"description": ""}`) is a failure, not a success, so it is never embedded or backfilled. The earlier rationale that "an empty description hard-fails at the embedding gate" was incorrect — a *missing* cosine surfaces as **UNKNOWN → falls through to the LLM**, not FAIL ([criteria.py:8-11](../../../src/call_manager/ranking/criteria.py#L8-L11)). The real reason to withhold backfill on a failed draft is that there is no usable description, so any rankings would rest on empty profile context and be misleading.
 
 ## Components
 
@@ -77,19 +77,21 @@ No PubMed or LLM call happens in the request, and the create-path background emb
 3. Run `bootstrap_profile(seed=...)`.
 4. Branch on the outcome:
    - **`llm_succeeded == False`** → **retryable failure.** Record `last_error`, return the job to `queued` until `attempts` is exhausted, then mark `failed`. **No** description write, embed, or backfill.
-   - **`llm_succeeded == True`** (possibly degraded by `pubmed_status`) → **success.** Write `description` and merge the sanitized LLM namespace suggestions into the profile (direct write is safe — A2 guarantees no concurrent writer). Refresh the embedding, **then** enqueue `backfill_profile` (order matches the edit path's existing invariant — ranking jobs must see the post-bootstrap vector). Mark `done`, stamp `completed_at`, and persist `pubmed_status` + `publications_fetched` as result columns.
+   - **`llm_succeeded == True`** (possibly degraded by `pubmed_status`) → **success.** Write `description` and merge the LLM suggestions into the profile **without overwriting any field the user filled** (direct write is safe — A2 guarantees no concurrent writer). The merge carries not only the sanitized namespaces but also the LLM's suggested **rubric fields** (`budget_min/max`, `trl_min/max`, `must_include`, `hard_exclusions`) — the create form does not collect those, so dropping them would regress the pre-fill the old synchronous path provided. Refresh the embedding, **then** enqueue `backfill_profile` (order matches the edit path's existing invariant — ranking jobs must see the post-bootstrap vector). Mark `done`, stamp `completed_at`, and persist `pubmed_status` + `publications_fetched` as result columns.
 5. On terminal completion (`done` or `failed`), **clear the `seed` payload** (drop stored names/ORCIDs/grants — see retention).
 
-**Retry / reclaim:** mirror `WorkspaceSetupJob` — a bounded `attempts` count and a staleness reclaim that returns a `running` job whose process died back to `queued`.
+**Retry / reclaim:** mirror `WorkspaceSetupJob` — a bounded `attempts` count (incremented once per claim) and a staleness reclaim that returns a `running` job whose process died back to `queued`. The worker wraps all post-claim work (bootstrap, merge, embed, backfill, DB writes) in a try/except so that **any** exception transitions the job immediately to `queued` (if attempts remain) or `failed` (if exhausted) with `last_error` — it never leaves the job stuck `running` waiting on the 30-minute reaper. Because `attempts` is incremented at claim, the exhaustion check and the reaper both use `attempts >= MAX` (no `+1`), giving exactly `MAX` attempts.
 
 **Edit-route guard (correctness companion to A2/A3):** `POST /profiles/{id}/edit` (a) returns `409` while a non-terminal bootstrap job exists for the profile, and (b) **skips backfill when the submitted description is blank**, so a user who saves an empty form after a failed bootstrap doesn't enqueue rankings against an empty profile. (The edit route otherwise unchanged.)
 
 ### 2. Bootstrap progress + honest completeness banner
 
-The edit page gains an HTMX status fragment (`GET /profiles/{id}/bootstrap-status`, owner-or-admin gated) that polls the job (`hx-trigger="load, every 3s"`, self-removing once terminal):
+While a bootstrap job is non-terminal, the edit-form GET renders the **entire form disabled** (a wrapping `<fieldset disabled>`), not just the description — otherwise a user could type into other fields and lose them to the `409` save guard (A2). A small HTMX poll element (`GET /profiles/{id}/bootstrap-status`, owner-or-admin gated) watches the job and, the moment it reaches a terminal state, returns an `HX-Refresh: true` response so the page reloads once and comes back fully editable — no manual refresh. The poll element is only mounted while the job is non-terminal at page-load, so a page already loaded in a terminal state does not poll and cannot loop.
 
-- **queued / running** → "Drafting your profile from PubMed and past grants — this can take a minute on the local model," spinner; the description textarea is hidden/disabled and the form is read-only (A2).
-- **done** → reveal the drafted description and show a completeness line driven by the **real** `pubmed_status`, with no fabricated per-member counts:
+The banner wording is rendered by the edit-form GET from the job state:
+
+- **queued / running** → "Drafting your profile from PubMed and past grants — this can take a minute on the local model," spinner; the whole form is disabled and the poll element is mounted.
+- **done** → the editable form plus a completeness line driven by the **real** `pubmed_status`, with no fabricated per-member counts:
   - `ok` → "Found N publications for your members."
   - `empty` → "No publications matched your members on PubMed — the draft rests on your mission text and pasted grants."
   - `unavailable` → "PubMed was unavailable, so the draft rests on your mission text and pasted grants. You can edit the description below."
@@ -109,22 +111,23 @@ The creator's `Subscription(user_id, profile_id, digest_enabled=True)` is insert
 **`calls_index`** ([calls.py:58-99](../../../src/call_manager/web/routes/calls.py#L58-L99)) resolves the profile three ways, distinguishing an **absent** `profile` query param (`None`) from an **explicitly empty** one (`""`):
 
 - **absent** (bare `/`, return visit) → use `user.default_profile_id` when set and still `is_active`; else the unranked feed.
-- **valid id** → use it, and persist as `default_profile_id` **only when it differs** from the stored value.
+- **valid, active id** → use it, and persist as `default_profile_id` **only when it differs** from the stored value.
 - **present but empty** ("— No profile —" chosen) → unranked feed, and **clear** the stored default.
+- **unknown/inactive id** (e.g. a stale `?profile=99999`) → unranked feed, and **leave the stored default untouched** — a bad request must not destroy a user's good default.
 
-An inactive/unknown stored default degrades to the unranked feed, reusing the existing guard at [calls.py:88-99](../../../src/call_manager/web/routes/calls.py#L88-L99).
+Persistence happens **after** the requested id is validated against the active-profile guard, not before, precisely so an unknown/inactive id can't overwrite a valid stored default. An inactive/unknown stored default likewise degrades to the unranked feed.
 
 ### 5. Ranking-status strip (polling, with a failed state)
 
 On the **profile-filtered** feed, a status strip reflects the profile's `ranking_jobs`. It **polls itself** (HTMX, every few seconds) rather than implying scores auto-appear:
 
 - **pending/running > 0** → "Ranking N calls for this profile…" (counts only — **no minute-ETA**; per-job latency is unmeasured and varies with how many pairs short-circuit on cheap gates).
-- **failed > 0** → also surface it: "M calls couldn't be scored automatically." (No "admin notified" claim — ranking dead-letters do not currently alert anyone; that's a separate backlog item.)
-- **queue drained** (no pending/running) → the strip stops polling and either auto-refreshes the feed-list fragment so the new scores show, or, if a full refresh is undesirable, shows a "Scoring complete — reload to see scores" link. Either way it does **not** silently vanish while "—" badges remain.
+- **failed > 0** → also surface it: "M calls couldn't be scored automatically." (No "admin notified" claim — ranking dead-letters do not currently alert anyone; that's a separate backlog item.) The failed count is **unresolved failures only** — `ranking_jobs` rows in `failed` status for which no `call_rankings` row yet exists for that `(call_id, profile_id)` pair. A later successful rerank creates the `CallRanking` and clears the warning, so the strip can't permanently claim a now-scored call "couldn't be scored."
+- **queue drained while polling** (pending went from >0 to 0) → the poll returns `HX-Refresh: true` so the feed reloads and the new scores show. It does **not** silently vanish while "—" badges remain. To avoid a reload loop, the drain-refresh only fires on a *poll* request (a `poll=1` flag), not on the initial mount: a feed loaded with nothing pending renders a static strip (failed message or empty) and does not poll.
 
-Feed-row score badges still reflect DB state at render time; the strip's poll is what makes "scores appear" honest (it drives the refresh), and the failed count explains any badges that stay "—".
+Feed-row score badges reflect DB state at render time; the poll's drain-refresh is what makes "scores appear" honest, and the unresolved-failed count explains any badges that stay "—".
 
-The counts are `SELECT COUNT(*)` over `ranking_jobs` filtered by `profile_id` and status — reads of an existing table, no schema change.
+The counts are `SELECT COUNT(*)` over `ranking_jobs` (the failed count anti-joined against `call_rankings`) filtered by `profile_id` — reads of existing tables, no schema change.
 
 ## Data model
 
@@ -163,7 +166,7 @@ These bound the JSONB payload and protect the serial PubMed worker from a single
 
 **Retention:** the `seed` payload (which contains personal data — member names, ORCIDs, pasted grant text) is **cleared on terminal completion** (`done`/`failed`). The job row persists for status/history; the PII does not. (Aligns with the GDPR concern raised in the product-review backlog.)
 
-**Migration numbering:** the in-flight ranking-v2.1 plan reserves **0042–0045** ([ranking plan §Migrations](../plans/2026-06-11-ranking-v2.1-improvements.md)). This feature therefore begins at **0046**, after those land. A **single migration `0046`** adds both `profile_bootstrap_jobs` and `users.default_profile_id` (they ship together; no independent-rollout need). This ordering is a hard cross-plan dependency — call it out when sequencing.
+**Migration numbering:** the in-flight ranking-v2.1 plan reserves **0042–0045** ([ranking plan §Migrations](../plans/2026-06-11-ranking-v2.1-improvements.md)), but those are not yet merged (current Alembic head is `0041`). A **single migration** adds both `profile_bootstrap_jobs` and `users.default_profile_id` (they ship together). It is numbered **`0046` with `down_revision = "0041"`** — a deliberate Alembic *branch* off `0041` that leaves the `0042–0045` band untouched for the ranking work. On each branch in isolation there is a single head (tests pass); at integration the two heads (`0045` and `0046`) are reconciled with a one-line `alembic merge`. **There is no "renumber to head+1" fallback** — that would collide with the ranking band. (Rejected alternative: block this feature until `0042–0045` land and chain from `0045`; the branch approach unblocks now without disrupting ranking.)
 
 ## Data flow
 
@@ -227,3 +230,15 @@ Following the repo's TDD convention (a test module per behavior; fakes for PubMe
 - *Migration numbering (Medium):* moved to **0046** (single migration) after ranking-v2.1's 0042–0045.
 - *Status strip silent on failure (Medium):* strip **polls**, surfaces a **failed** count, and refreshes the feed on drain instead of vanishing (Component 5).
 - *Judgment calls:* kept `UNIQUE(profile_id)`; confirmed wait-to-backfill on genuine failure with the corrected rationale; single migration after the ranking migrations.
+
+**R2 (2026-06-11) — incorporated Codex review of the implementation plan.** All findings verified against the code and accepted:
+- *Migration fallback collides (High):* removed the "renumber to head+1" fallback; the migration is an explicit Alembic branch (`0046`, `down_revision="0041"`) reconciled by `alembic merge` at integration (A1 / Data model).
+- *Parseable-empty LLM output ranked (High):* `llm_succeeded` now requires a non-blank description (A3).
+- *Worker exceptions don't retry (High):* the worker wraps all post-claim work in try/except → immediate `queued`/`failed` transition; `attempts` counted once at claim, exhaustion/reaper use `attempts >= MAX` (A3 / Retry & reclaim).
+- *Edit page never becomes editable on terminal poll (High):* whole form is disabled (`<fieldset disabled>`) while active, and the poll returns `HX-Refresh: true` on terminal to reload once (Component 2).
+- *Strip vanishes without refreshing (High):* drain-while-polling returns `HX-Refresh: true`; the initial mount does not, so no loop (Component 5).
+- *Failed counts permanently misleading (Medium):* failed count is unresolved-only — anti-joined against `call_rankings` (Component 5).
+- *Sticky default persists invalid ids (Medium):* validate the requested id against the active-profile guard **before** persisting; an unknown/inactive id leaves the stored default untouched (Component 4).
+- *Merge drops the generated rubric (Medium):* the merge now carries the LLM's `budget`/`trl`/`must_include`/`hard_exclusions` suggestions where the user left them blank (Component 1).
+- *Seed caps silently truncate (Medium):* oversized member count / overlong lines are **rejected** (not truncated), consistent with the mission-text cap (Data model / Testing).
+- *Strip test FK + added coverage:* the plan seeds real `Source`/`Call` rows; added tests for atomic rollback, pre-existing-default preservation, PubMed degraded success, embed-before-backfill ordering, reaper/backfill-failure, and scheduler registration.
