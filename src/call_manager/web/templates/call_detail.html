@@ -49,7 +49,7 @@
           Cosine similarity: {{ '%.3f' % ranking.embed_similarity }}
         </div>
       {% endif %}
-      {% if ranking.escalated %}
+      {% if ranking.escalated and ranking.escalated_from_score is not none %}
         <div class="muted escalation">
           Escalated from {{ ranking.escalated_from_score }}
           {% set _amodel = ranking.analysis_model or ranking.model %}

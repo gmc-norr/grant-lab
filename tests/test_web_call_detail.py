@@ -191,14 +191,16 @@ def test_call_detail_omits_cosine_line_when_embed_similarity_is_none(
     assert "Cosine similarity" not in r.text
 
 
-def test_call_detail_shows_escalated_from(monkeypatch, pg_url, pg_session_factory, profile_factory):
+def test_call_detail_shows_escalated_from_to_any_user(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Escalation badge is visible to all logged-in staff — no admin gate.
+    No admin/debug section exists; the card already shows model/cosine
+    provenance to everyone. Visibility-to-all-staff is intended (plan
+    deviation accepted in review)."""
     app = _setup(monkeypatch, pg_url)
     pid, _ = profile_factory(name="EscDetail")
     with pg_session_factory() as s:
-        admin = User(email="adm-cd@ki.se", is_admin=True)
-        s.add(admin)
-        s.flush()
-        admin_id = admin.id
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         c = Call(
             source_id=src.id,
@@ -227,9 +229,7 @@ def test_call_detail_shows_escalated_from(monkeypatch, pg_url, pg_session_factor
         )
         s.commit()
         cid = c.id
-    signer: SessionSigner = app.state.session_signer
-    client = TestClient(app)
-    client.cookies.set("session", signer.make(user_id=admin_id))
+    client = _logged_in(app, pg_session_factory)
     with client:
         r = client.get(f"/calls/{cid}?profile={pid}")
     assert r.status_code == 200
