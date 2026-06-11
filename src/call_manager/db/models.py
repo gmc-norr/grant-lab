@@ -343,6 +343,15 @@ class CallRanking(Base):
         nullable=True,
     )
 
+    # Outcome-based escalation (Phase 4). escalated=True ⇒ a remote (Sonnet)
+    # result replaced the local one; escalated_from_score keeps the local
+    # score for disagreement mining. analysis_model attributes the *displayed*
+    # analysis (summary/applicant_notes), which can differ from `model` after a
+    # failed/capped escalation preserved older Sonnet prose.
+    escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    escalated_from_score: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    analysis_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 class RankingJob(Base):
     __tablename__ = "ranking_jobs"
@@ -458,6 +467,32 @@ class CallRankingCriterion(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     quoted_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     ranked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RankingRemoteAttempt(Base):
+    """Append-only ledger of remote (Sonnet) escalation attempts. The daily
+    cap counts rows here, not call_rankings.escalated, so repeated reranks and
+    failed-but-billed calls are counted honestly (Codex R1)."""
+
+    __tablename__ = "ranking_remote_attempts"
+    __table_args__ = (
+        Index("ix_ranking_remote_attempts_created_at", "created_at"),
+        CheckConstraint(
+            "outcome IN ('success','llm_error','parse_error')",
+            name="ck_ranking_remote_attempts_outcome",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    call_id: Mapped[int] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
