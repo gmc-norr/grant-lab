@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -30,44 +30,52 @@ def _logged_in(app, pg_session_factory, email="alice@ki.se"):
 
 
 def _seed_calls(pg_session_factory):
+    # Deadlines are relative to "now" so the suite is robust to wall-clock and
+    # all three calls stay OPEN — the closed-call filter would otherwise hide
+    # fixed past-2026 dates. Relative order preserved (and all > 30 days out, so
+    # none land in the "deadline within 30 d" badge): Vin (soonest) < EU two < EU one.
+    now = datetime.now(UTC)
     with pg_session_factory() as s:
         eu = s.execute(select(Source).where(Source.slug == "eu_portal")).scalar_one()
         vn = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         s.add_all(
             [
-                # EU one: published April 1, deadline July 1 (latest deadline)
+                # EU one: published April 1, latest deadline.
                 Call(
                     source_id=eu.id,
                     external_id="E-1",
                     url="u1",
                     title="EU one",
                     published_at=datetime(2026, 4, 1, tzinfo=UTC),
-                    deadline=datetime(2026, 7, 1, tzinfo=UTC),
+                    deadline=now + timedelta(days=105),
                 ),
-                # Vin one: published April 5 (newest), deadline May 15 (earliest)
+                # Vin one: published April 5 (newest), soonest deadline.
                 Call(
                     source_id=vn.id,
                     external_id="V-1",
                     url="u2",
                     title="Vin one",
                     published_at=datetime(2026, 4, 5, tzinfo=UTC),
-                    deadline=datetime(2026, 5, 15, tzinfo=UTC),
+                    deadline=now + timedelta(days=45),
                 ),
-                # EU two: published March 1 (oldest), deadline June 10
+                # EU two: published March 1 (oldest), middle deadline.
                 Call(
                     source_id=eu.id,
                     external_id="E-2",
                     url="u3",
                     title="EU two",
                     published_at=datetime(2026, 3, 1, tzinfo=UTC),
-                    deadline=datetime(2026, 6, 10, tzinfo=UTC),
+                    deadline=now + timedelta(days=75),
                 ),
             ]
         )
         s.commit()
 
 
-def test_root_requires_auth(monkeypatch, pg_url):
+def test_root_requires_auth(monkeypatch, pg_url, pg_session_factory):
+    # pg_session_factory pulls in migrated_engine, so the shared testcontainer
+    # is migrated before the app's startup scheduler runs — otherwise this
+    # (first, pg_url-only) test crashes on the not-yet-created references table.
     app = _setup(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.get("/")
@@ -129,7 +137,7 @@ def test_root_summary_counts_full_dataset_despite_paging(monkeypatch, pg_url, pg
 
 def test_root_sort_by_deadline(monkeypatch, pg_url, pg_session_factory):
     """sort=deadline orders soonest-deadline first (irrespective of
-    publication date). Vin one (May 15) → EU two (June 10) → EU one (July 1)."""
+    publication date). Vin one → EU two → EU one (relative future deadlines)."""
     app = _setup(monkeypatch, pg_url)
     _seed_calls(pg_session_factory)
     client = _logged_in(app, pg_session_factory)
