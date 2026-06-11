@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
+from call_manager.db.models import Profile, ProfileBootstrapJob, ProfileKind, ProfileLevel, User
 from call_manager.embeddings.refresh import refresh_profile_embedding
 from call_manager.embeddings.similarity import build_profile_text
 from call_manager.profiles.create import create_profile_with_bootstrap
@@ -271,6 +271,17 @@ def profile_edit_submit(
         # legitimate user who mis-types a URL.
         if p.created_by != user.id and not user.is_admin:
             raise HTTPException(status_code=403, detail="not authorized")
+        active_job = session.execute(
+            select(ProfileBootstrapJob.id).where(
+                ProfileBootstrapJob.profile_id == profile_id,
+                ProfileBootstrapJob.status.in_(("queued", "running")),
+            )
+        ).scalar_one_or_none()
+        if active_job is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="profile is still drafting — try again shortly",
+            )
         # Capture the pre-mutation embedding text for the change-detection
         # below. The re-embed trigger is computed from build_profile_text
         # before/after — not just `description` — because `areas` and the org
@@ -343,14 +354,15 @@ def profile_edit_submit(
     # to complete BEFORE backfill enqueues ranking jobs (otherwise the
     # jobs see the stale pre-edit vector). Skip embedding refresh when the
     # edit left the build_profile_text output unchanged.
-    embed_client = request.app.state.embed_client
-    background.add_task(
-        _refresh_and_backfill_in_background,
-        session_factory=session_factory,
-        embed_client=embed_client,
-        profile_id=profile_id,
-        refresh_embedding=embed_text_changed,
-    )
+    if description.strip():
+        embed_client = request.app.state.embed_client
+        background.add_task(
+            _refresh_and_backfill_in_background,
+            session_factory=session_factory,
+            embed_client=embed_client,
+            profile_id=profile_id,
+            refresh_embedding=embed_text_changed,
+        )
 
     return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)
 
