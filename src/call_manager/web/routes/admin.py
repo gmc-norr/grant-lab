@@ -256,7 +256,7 @@ def admin_rerank(
         )
     for pid in active_profile_ids:
         backfill_profile(session_factory=session_factory, profile_id=pid)
-    return RedirectResponse(url="/admin", status_code=303)
+    return RedirectResponse(url="/admin?ok=rerank", status_code=303)
 
 
 @router.post("/admin/digest/reenable")

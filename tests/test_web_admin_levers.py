@@ -208,3 +208,12 @@ def test_fetch_requires_admin(monkeypatch, pg_url, pg_session_factory):
     with client:
         r = client.post("/admin/sources/vinnova/fetch")
     assert r.status_code == 403
+
+
+def test_rerank_redirects_with_ok_key(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.post("/admin/rerank", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin?ok=rerank"
