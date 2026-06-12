@@ -10,49 +10,52 @@
 
 **Spec:** [docs/superpowers/specs/2026-06-12-proposal-assist-unblock-lifecycle-design.md](../specs/2026-06-12-proposal-assist-unblock-lifecycle-design.md)
 
+**Codex review (incorporated):** the test migration (Task 1) is broader than first scoped — `make_workspace` is called from ~50 files, there are 5 direct constructors in `test_web_workspaces_turns.py`, and three tests *rely* on the `setup` default and must be pinned. Viewers must keep polling the `waiting` card (P2). The phase chip is a unit-testable filter, asserted by exact markup (P3a). Failed-setup raw error text is owner-only (P3b).
+
 ---
 
 ## File structure
 
 | File | Change | Responsibility |
 |------|--------|----------------|
-| `tests/proposal_assist/conftest.py` | `make_workspace` gains `current_phase="spec"` default | Existing tests simulate post-setup workspaces (required migration — the guard changes what a default workspace means). |
-| `tests/proposal_assist/test_kill_switch.py`, `tests/proposal_assist/test_global_cap.py` | add `current_phase="spec"` at 4 direct `Workspace(...)` sites | Same migration for the only direct-constructor turn-posting tests. |
+| `tests/proposal_assist/conftest.py` | `make_workspace` gains `current_phase="spec"` default | Existing tests simulate post-setup workspaces (required — the gate changes what a default workspace means). |
+| `tests/proposal_assist/test_kill_switch.py`, `test_global_cap.py`, `test_web_workspaces_turns.py` | add `current_phase="spec"` at 9 direct `Workspace(...)` turn/composer sites | The constructors that POST `/turns` or assert the composer. |
+| `tests/proposal_assist/test_phase0_setup.py`, `test_phase0_e2e.py`, `test_models_workspace.py` | pin `setup` where the test asserts it | The three setup-relying tests the default change would otherwise break. |
 | `src/call_manager/proposal_assist/web/workspaces.py` | `post_turn` guard; new `GET /{id}/setup-status` route; `get_workspace_main` context | All route logic. |
-| `src/call_manager/web/templates/proposal_assist/partials/setup_status.html` | create | The status card (one branch per job status; self-polls in non-terminal states). |
-| `src/call_manager/web/templates/proposal_assist/workspace_main.html` | composer-vs-card branch; phase-chip label map | Template gating. |
-| `tests/proposal_assist/test_web_workspace_setup_gate.py` | create | All new tests (guard, endpoint per status, gating, chip). |
+| `src/call_manager/web/templates/proposal_assist/partials/setup_status.html` | create | The status card (one branch per job status; self-polls; viewer-aware). |
+| `src/call_manager/web/filters.py` + `src/call_manager/main.py` | add + register a `phase_label` Jinja filter | Humanized, unit-testable phase chip. |
+| `src/call_manager/web/templates/proposal_assist/workspace_main.html` | composer-vs-card branch; `phase_label` chip | Template gating. |
+| `tests/proposal_assist/test_web_workspace_setup_gate.py` | create | Guard, endpoint-per-status, gating, viewer behaviour. |
+| `tests/test_web_filters.py` (or the existing filters test) | add `phase_label` unit tests | Filter incl. unknown-phase fallback. |
 
 No migration. No CSS change (the card reuses the existing `.callout`/`.callout-warning` rules and Pico's `aria-busy` spinner).
 
 ---
 
-### Task 1: Existing-test migration — default test workspaces to post-setup
+### Task 1: Existing-test migration — declare workspace phase explicitly
 
-The 409 guard (Task 2) and composer gating (Task 4) change what a default-phase (`'setup'`) workspace means. Existing turn-posting and main-view tests must create post-setup workspaces. This task is a behavioral no-op until those land — the suite must stay green.
+The 409 guard (Task 2) and composer gating (Task 5) make `current_phase` load-bearing. Today most tests build workspaces at the `setup` server-default but treat them as ready. This task makes the phase explicit: `make_workspace` defaults to `spec` (post-setup — what those tests mean), the few setup-relying tests are pinned to `setup`, and the direct turn/composer constructors get `spec`. The suite must stay green at the end (no feature code exists yet).
 
-**Files:**
-- Modify: `tests/proposal_assist/conftest.py` (the `make_workspace` helper, around line 193)
-- Modify: `tests/proposal_assist/test_kill_switch.py:36,65`
-- Modify: `tests/proposal_assist/test_global_cap.py:119,171`
+**Files:** `tests/proposal_assist/conftest.py`, `test_kill_switch.py`, `test_global_cap.py`, `test_web_workspaces_turns.py`, `test_phase0_setup.py`, `test_phase0_e2e.py`, `test_models_workspace.py`
 
-- [ ] **Step 1: Add the `current_phase` parameter to `make_workspace`**
+- [ ] **Step 1: `make_workspace` gains a `current_phase="spec"` default**
 
-In `tests/proposal_assist/conftest.py`, the helper currently reads:
+In `tests/proposal_assist/conftest.py`, the helper signature (~line 193) currently ends:
 
 ```python
-def make_workspace(
-    session,
-    *,
-    owner=None,
-    title: str = "Test workspace",
-    call_id: int | None = None,
-    profile_id: int | None = None,
     ack_disclosure: bool = False,
 ) -> "Workspace":  # noqa: F821
 ```
 
-and constructs:
+Add the keyword:
+
+```python
+    ack_disclosure: bool = False,
+    current_phase: str = "spec",
+) -> "Workspace":  # noqa: F821
+```
+
+and the constructor (~line 214) currently reads:
 
 ```python
     ws = Workspace(
@@ -63,20 +66,7 @@ and constructs:
     )
 ```
 
-Change the signature to add a keyword with default `"spec"`, and pass it through:
-
-```python
-def make_workspace(
-    session,
-    *,
-    owner=None,
-    title: str = "Test workspace",
-    call_id: int | None = None,
-    profile_id: int | None = None,
-    ack_disclosure: bool = False,
-    current_phase: str = "spec",
-) -> "Workspace":  # noqa: F821
-```
+Add the field:
 
 ```python
     ws = Workspace(
@@ -88,65 +78,147 @@ def make_workspace(
     )
 ```
 
-Also extend the helper's docstring (after the `ack_disclosure` paragraph) with:
+Append to the docstring (after the `ack_disclosure` paragraph):
 
 ```python
     `current_phase` defaults to "spec" (post-setup): most tests simulate a
-    fully set-up workspace where the composer is live and POST /turns is
-    allowed. Pass current_phase="setup" to exercise the Phase-0 gate
-    (status card instead of composer; turns rejected with 409).
+    ready workspace where the composer is live and POST /turns is allowed.
+    Pass current_phase="setup" to exercise the Phase-0 gate (status card
+    instead of composer; turns rejected with 409). Tests that assert the
+    setup default must NOT rely on this helper's default — they pin "setup"
+    explicitly or build the row directly.
 ```
 
-- [ ] **Step 2: Add `current_phase="spec"` at the 4 direct constructor sites**
+- [ ] **Step 2: Pin `setup` in the three setup-relying tests**
 
-In `tests/proposal_assist/test_kill_switch.py` (two sites, lines ~36 and ~65), change:
+These assert `current_phase == "setup"`; the new `spec` default would break them.
+
+In `tests/proposal_assist/test_phase0_setup.py:306`, change:
 
 ```python
-        ws = Workspace(owner_id=owner.id, title="Test")
+        ws = make_workspace(s, call_id=call.id)
 ```
 
 to:
 
 ```python
-        ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
+        ws = make_workspace(s, call_id=call.id, current_phase="setup")
 ```
 
-In `tests/proposal_assist/test_global_cap.py` line ~119, change:
+In `tests/proposal_assist/test_phase0_e2e.py` (~line 97), change:
 
 ```python
-        ws = Workspace(owner_id=owner.id, title="Test")
+        ws = make_workspace(
+            s,
+            owner=owner,
+            call_id=call.id,
+            profile_id=profile.id,
+        )
 ```
 
 to:
 
 ```python
+        ws = make_workspace(
+            s,
+            owner=owner,
+            call_id=call.id,
+            profile_id=profile.id,
+            current_phase="setup",
+        )
+```
+
+In `tests/proposal_assist/test_models_workspace.py`, the defaults test (`test_workspace_phased_columns_have_safe_defaults`, ~line 119-125) must test the genuine model default, so build the row directly instead of via the now-opinionated helper. `make_user` and `Workspace` are already imported in this file. Change:
+
+```python
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        s.refresh(ws)
+        assert ws.current_phase == "setup"
+```
+
+to:
+
+```python
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        s.flush()
+        ws = Workspace(title="Defaults check", owner_id=owner.id)
+        s.add(ws)
+        s.commit()
+        s.refresh(ws)
+        assert ws.current_phase == "setup"
+```
+
+(The remaining assertions in that test — `call_body_snapshot == ""`, etc. — are unchanged.)
+
+- [ ] **Step 3: Add `current_phase="spec"` to the 9 direct turn/composer constructors**
+
+These build a workspace directly (DB-default `setup`) and then POST `/turns` or assert the composer — they must be post-setup.
+
+`tests/proposal_assist/test_kill_switch.py:36` and `:65` — both:
+
+```python
+        ws = Workspace(owner_id=owner.id, title="Test")
+```
+→
+```python
         ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
 ```
 
-and line ~171, change:
+`tests/proposal_assist/test_global_cap.py:119`:
+
+```python
+        ws = Workspace(owner_id=owner.id, title="Test")
+```
+→
+```python
+        ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
+```
+
+`tests/proposal_assist/test_global_cap.py:171`:
 
 ```python
         ws = Workspace(owner_id=owner.id, title="T")
 ```
-
-to:
-
+→
 ```python
         ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
 ```
 
-(These four are the only direct-constructor sites that POST `/workspaces/{id}/turns` through the route. `test_rubric_review_endpoint.py` keeps its own `setup`-phase workspaces deliberately — it tests the setup→spec transition. `test_turns_submit_with_*` call `submit_user_turn()` directly, below the route, so the route guard never sees them. Do NOT touch those files.)
+`tests/proposal_assist/test_web_workspaces_turns.py` — five sites. Line 592:
 
-- [ ] **Step 3: Run the proposal-assist suite to confirm the migration is a no-op**
+```python
+        ws = Workspace(owner_id=owner.id, title="Test ws")
+```
+→
+```python
+        ws = Workspace(owner_id=owner.id, title="Test ws", current_phase="spec")
+```
+
+Lines 638, 717, 782, 840 are each:
+
+```python
+        ws = Workspace(owner_id=owner.id, title="T")
+```
+→
+```python
+        ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
+```
+
+(Tests in `test_*_submit*.py` call `submit_user_turn()` directly, below the route, so the route guard never sees them — do NOT touch those. `test_rubric_review_endpoint.py` manages `current_phase` itself — leave it.)
+
+- [ ] **Step 4: Run the full proposal-assist suite — confirm the migration is green**
 
 Run: `uv run pytest tests/proposal_assist/ -q`
-Expected: everything that passed before still passes (no behavior reads `current_phase` on these paths yet).
+Expected: same pass count as before the change (no feature code reads `current_phase` on these paths yet). If a turn-posting or composer-asserting test fails with the workspace at `setup`, it's a missed constructor — add `current_phase="spec"` there. If a phase-0/default test fails expecting `setup`, pin it `setup`. (The four files that reference `current_phase` are `test_phase0_e2e.py`, `test_phase0_setup.py`, `test_models_workspace.py`, `test_rubric_review_endpoint.py` — a quick `grep -rn current_phase tests/proposal_assist/` re-confirms the universe.)
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tests/proposal_assist/conftest.py tests/proposal_assist/test_kill_switch.py tests/proposal_assist/test_global_cap.py
-git commit -m "test(proposal-assist): default test workspaces to post-setup phase (spec)"
+git add tests/proposal_assist/conftest.py tests/proposal_assist/test_kill_switch.py tests/proposal_assist/test_global_cap.py tests/proposal_assist/test_web_workspaces_turns.py tests/proposal_assist/test_phase0_setup.py tests/proposal_assist/test_phase0_e2e.py tests/proposal_assist/test_models_workspace.py
+git commit -m "test(proposal-assist): make workspace phase explicit (default test workspaces to post-setup)"
 ```
 
 ---
@@ -154,7 +226,7 @@ git commit -m "test(proposal-assist): default test workspaces to post-setup phas
 ### Task 2: `post_turn` setup guard (409)
 
 **Files:**
-- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (`post_turn`, guard right after `_require_owner` at ~line 693)
+- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (`post_turn`, guard right after `_require_owner` at ~line 697)
 - Test: `tests/proposal_assist/test_web_workspace_setup_gate.py` (create)
 
 - [ ] **Step 1: Write the failing tests**
@@ -195,7 +267,6 @@ def test_post_turn_during_setup_returns_409(
     )
     assert response.status_code == 409
     assert "still setting up" in response.json()["detail"]
-    # Nothing was enqueued.
     with pg_session_factory() as s:
         assert s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid)) is None
 
@@ -222,7 +293,7 @@ def test_post_turn_after_setup_proceeds(
 - [ ] **Step 2: Run tests to verify the guard test fails**
 
 Run: `uv run pytest tests/proposal_assist/test_web_workspace_setup_gate.py -v`
-Expected: `test_post_turn_during_setup_returns_409` FAILS (turn accepted, no 409); `test_post_turn_after_setup_proceeds` already passes.
+Expected: `test_post_turn_during_setup_returns_409` FAILS (turn accepted); `test_post_turn_after_setup_proceeds` passes.
 
 - [ ] **Step 3: Add the guard**
 
@@ -248,8 +319,8 @@ In `src/call_manager/proposal_assist/web/workspaces.py`, inside `post_turn`, imm
 Run: `uv run pytest tests/proposal_assist/test_web_workspace_setup_gate.py -v`
 Expected: 2 passed.
 
-Also confirm no regression in the turn-posting suites (now post-setup via Task 1):
-Run: `uv run pytest tests/proposal_assist/test_web_workspaces_turns.py tests/proposal_assist/test_kill_switch.py tests/proposal_assist/test_global_cap.py tests/proposal_assist/test_web_workspaces_disclosure_gate.py tests/proposal_assist/test_web_workspaces_viewer_enforcement.py -q`
+Confirm no regression in the turn-posting suites (post-setup via Task 1):
+Run: `uv run pytest tests/proposal_assist/test_web_workspaces_turns.py tests/proposal_assist/test_kill_switch.py tests/proposal_assist/test_global_cap.py -q`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
@@ -329,10 +400,10 @@ def test_setup_status_waiting_links_rubric_and_stops_polling(
     r = client_authed_owner.get(f"/workspaces/{wsid}/setup-status")
     assert r.status_code == 200
     assert f"/workspaces/{wsid}/rubric-review" in r.text
-    assert "hx-trigger" not in r.text  # terminal: polling stops
+    assert "hx-trigger" not in r.text  # owner has an action: polling stops
 
 
-def test_setup_status_failed_shows_error_and_stops_polling(
+def test_setup_status_failed_owner_sees_error_and_stops_polling(
     client_authed_owner, pg_session_factory, current_user
 ):
     wsid = _make_setup_workspace(
@@ -341,7 +412,7 @@ def test_setup_status_failed_shows_error_and_stops_polling(
     r = client_authed_owner.get(f"/workspaces/{wsid}/setup-status")
     assert r.status_code == 200
     assert "Setup failed" in r.text
-    assert "boom: no rubric" in r.text
+    assert "boom: no rubric" in r.text  # owner sees diagnostics
     assert "hx-trigger" not in r.text
     assert "/rubric-review" not in r.text
 
@@ -358,9 +429,11 @@ def test_setup_status_done_links_back_to_workspace(
     assert "hx-trigger" not in r.text
 
 
-def test_setup_status_viewer_sees_status_without_rubric_link(
+def test_setup_status_viewer_waiting_keeps_polling_without_link(
     client_authed_user, pg_session_factory, current_user
 ):
+    # P2: a viewer has no rubric action, so the waiting card must KEEP polling
+    # to catch the owner's confirm (otherwise it's permanently stale).
     from call_manager.db.models import WorkspaceViewer
     from tests.proposal_assist.conftest import make_user
 
@@ -376,8 +449,32 @@ def test_setup_status_viewer_sees_status_without_rubric_link(
         s.commit()
     r = client_authed_user.get(f"/workspaces/{wsid}/setup-status")
     assert r.status_code == 200
-    assert "/rubric-review" not in r.text  # owner-only action
+    assert "/rubric-review" not in r.text       # owner-only action
+    assert "hx-trigger" in r.text               # still polling (P2)
     assert "Waiting for the owner" in r.text
+
+
+def test_setup_status_failed_viewer_hidden_error(
+    client_authed_user, pg_session_factory, current_user
+):
+    # P3b: raw worker exception text is owner-only; viewers get generic copy.
+    from call_manager.db.models import WorkspaceViewer
+    from tests.proposal_assist.conftest import make_user
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="gate-owner-f@ki.se")
+        s.flush()
+        s.commit()
+    wsid = _make_setup_workspace(
+        pg_session_factory, owner, job_status="failed", last_error="Traceback: secret path /srv/x"
+    )
+    with pg_session_factory() as s:
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=current_user.id))
+        s.commit()
+    r = client_authed_user.get(f"/workspaces/{wsid}/setup-status")
+    assert r.status_code == 200
+    assert "Setup failed" in r.text
+    assert "secret path" not in r.text  # raw diagnostics hidden from viewers
 
 
 def test_setup_status_non_member_403_and_missing_404(
@@ -387,7 +484,6 @@ def test_setup_status_non_member_403_and_missing_404(
 
     from tests.proposal_assist.conftest import make_user
 
-    # Someone else's workspace, current_user not a viewer → 403.
     with pg_session_factory() as s:
         other = make_user(s, email="gate-other@ki.se")
         s.flush()
@@ -395,17 +491,16 @@ def test_setup_status_non_member_403_and_missing_404(
     wsid = _make_setup_workspace(pg_session_factory, other, job_status="running")
     r = client_authed_owner.get(f"/workspaces/{wsid}/setup-status")
     assert r.status_code == 403
-    # Unknown workspace id → 404.
     r = client_authed_owner.get(f"/workspaces/{_uuid.uuid4()}/setup-status")
     assert r.status_code == 404
 ```
 
-Note on `_make_setup_workspace(pg_session_factory, owner, ...)`: the `owner` argument is a `User` row from a previous session; `make_workspace` only reads `owner.id`, which stays loaded on the expunged/returned fixtures used here (this mirrors how existing tests pass `current_user` across sessions).
+(`_make_setup_workspace(pg_session_factory, owner, ...)` reads only `owner.id`, which stays available on the expunged fixture rows — the same cross-session pattern existing tests use; `make_session_factory` sets `expire_on_commit=False`.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/proposal_assist/test_web_workspace_setup_gate.py -v -k setup_status`
-Expected: FAIL — all `setup_status` tests get 404 (route not defined).
+Expected: FAIL — all `setup_status` tests 404 (route not defined).
 
 - [ ] **Step 3: Create the partial**
 
@@ -416,40 +511,38 @@ Create `src/call_manager/web/templates/proposal_assist/partials/setup_status.htm
    workspace.current_phase == 'setup', and returned alone by
    GET /workspaces/{id}/setup-status (the htmx poll target).
 
-   Self-polling: while the job is non-terminal the root div carries
-   hx-get/hx-trigger/hx-swap and replaces itself every 3s; terminal states
-   render WITHOUT the trigger, so the final swap stops the polling.
+   Self-polling: the root div carries hx-get/hx-trigger/hx-swap while the
+   card is non-terminal *for this viewer*, and replaces itself every 3s.
+   - owner: polls during queued/running; stops at waiting (owner has the
+     rubric link to act on), failed, done.
+   - viewer: polls during queued/running AND waiting (no action — must keep
+     watching for the owner's confirm); stops at failed, done.
 
    Context: workspace, setup_status (str — job status, 'queued' when no job
    row exists yet), setup_last_error (str|None), is_owner (bool). #}
-{% set _polling = setup_status in ("queued", "running") %}
+{% set _polling = setup_status in ("queued", "running")
+   or (setup_status == "waiting_for_rubric_review" and not is_owner) %}
 <div id="setup-status"
      class="callout{% if setup_status == 'failed' %} callout-warning{% endif %}"
-     {% if _polling %}hx-get="/workspaces/{{ workspace.id }}/setup-status"
-     hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
-  {% if _polling %}
-    <p aria-busy="true">Setting up your workspace… (usually under a minute)</p>
+     {% if _polling %}hx-get="/workspaces/{{ workspace.id }}/setup-status" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  {% if setup_status == "waiting_for_rubric_review" and is_owner %}
+    <p><strong>Your workspace is ready.</strong></p>
+    <a role="button" href="/workspaces/{{ workspace.id }}/rubric-review">Review the rubric to start drafting</a>
   {% elif setup_status == "waiting_for_rubric_review" %}
-    <div>
-      <p><strong>Your workspace is ready.</strong></p>
-      {% if is_owner %}
-      <a role="button" href="/workspaces/{{ workspace.id }}/rubric-review">Review the rubric to start drafting</a>
-      {% else %}
-      <p class="muted">Waiting for the owner to review the rubric.</p>
-      {% endif %}
-    </div>
+    <p aria-busy="true">Waiting for the owner to review the rubric…</p>
   {% elif setup_status == "failed" %}
-    <div>
-      <p><strong>Setup failed.</strong></p>
+    <p><strong>Setup failed.</strong></p>
+    {% if is_owner %}
       {% if setup_last_error %}<p class="muted">{{ setup_last_error }}</p>{% endif %}
       <p>Delete this workspace and create it again, or contact an administrator.</p>
-    </div>
+    {% else %}
+      <p class="muted">Contact the workspace owner or an administrator.</p>
+    {% endif %}
+  {% elif setup_status == "done" %}
+    <p><strong>Setup is complete.</strong> <a href="/workspaces/{{ workspace.id }}">Reload</a></p>
   {% else %}
-    {# 'done' — only reachable by a stale polling card after the rubric was
-       confirmed in another tab (that transaction also advances the phase, so
-       a fresh page load renders the composer instead of this card). #}
-    <p><strong>Setup is complete.</strong>
-      <a href="/workspaces/{{ workspace.id }}">Reload to start drafting</a></p>
+    {# queued / running / no-job row → still working #}
+    <p aria-busy="true">Setting up your workspace… (usually under a minute)</p>
   {% endif %}
 </div>
 ```
@@ -458,8 +551,8 @@ Create `src/call_manager/web/templates/proposal_assist/partials/setup_status.htm
 
 In `src/call_manager/proposal_assist/web/workspaces.py`:
 
-1. Add `WorkspaceSetupJob` to the existing `from call_manager.db.models import (...)` block (alphabetical position within that import).
-2. Add this route directly AFTER the `get_workspace_main` function (before `post_disclosure`):
+1. Add `WorkspaceSetupJob` to the existing `from call_manager.db.models import (...)` block (alphabetical position).
+2. Add this route directly AFTER `get_workspace_main` (before `post_disclosure`):
 
 ```python
 @router.get("/{workspace_id}/setup-status", response_class=HTMLResponse)
@@ -472,8 +565,8 @@ def get_setup_status(
     """Render ONLY the setup-status card partial (htmx poll target).
 
     The card on the main view polls this every 3s while Phase 0 runs;
-    terminal job states render without the hx-trigger, so the final swap
-    stops the polling. Access mirrors the main view (owner or viewer).
+    terminal states (for the viewing role) render without the hx-trigger,
+    so the final swap stops the polling. Access mirrors the main view.
     """
     ws = _require_owner_or_viewer(
         workspace_id=workspace_id,
@@ -498,7 +591,7 @@ def get_setup_status(
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/proposal_assist/test_web_workspace_setup_gate.py -v`
-Expected: all pass (2 guard + 7 setup-status).
+Expected: all pass (2 guard + 8 setup-status).
 
 - [ ] **Step 6: Commit**
 
@@ -509,11 +602,108 @@ git commit -m "feat(proposal-assist): setup-status card partial + self-terminati
 
 ---
 
-### Task 4: Main-view composer gating + phase chip
+### Task 4: `phase_label` Jinja filter (humanized phase chip)
+
+**Files:**
+- Modify: `src/call_manager/web/filters.py` (add `phase_label`)
+- Modify: `src/call_manager/main.py` (import + register)
+- Test: `tests/test_web_filters.py` (create if absent, else append)
+
+- [ ] **Step 1: Write the failing unit tests**
+
+Append to `tests/test_web_filters.py` (create the file with this content if it doesn't exist):
+
+```python
+from call_manager.web.filters import phase_label
+
+
+def test_phase_label_known_phases():
+    assert phase_label("setup") == "Setting up"
+    assert phase_label("spec") == "Drafting"
+    assert phase_label("plan") == "Planning"
+    assert phase_label("draft") == "Revising"
+    assert phase_label("review") == "Review"
+
+
+def test_phase_label_unknown_falls_back_to_raw():
+    # Defensive: a future phase value (uninsertable today via the DB CHECK)
+    # renders as-is rather than blanking the chip.
+    assert phase_label("negotiation") == "negotiation"
+
+
+def test_phase_label_none():
+    assert phase_label(None) == "—"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/test_web_filters.py -v -k phase_label`
+Expected: FAIL — `ImportError: cannot import name 'phase_label'`.
+
+- [ ] **Step 3: Add the filter**
+
+In `src/call_manager/web/filters.py`, add (after `model_label`, matching the existing label-map-with-passthrough pattern):
+
+```python
+def phase_label(value: str | None) -> str:
+    """Human-readable label for `Workspace.current_phase`. The stored values
+    are the lifecycle enum ('setup','spec','plan','draft','review'); the UI
+    chip should read as words, not a raw token.
+
+    Unknown values pass through unchanged so a future phase isn't swallowed
+    into a blank chip — it just looks slightly raw until added here.
+    """
+    if not value:
+        return "—"
+    return {
+        "setup": "Setting up",
+        "spec": "Drafting",
+        "plan": "Planning",
+        "draft": "Revising",
+        "review": "Review",
+    }.get(value, value)
+```
+
+- [ ] **Step 4: Register the filter**
+
+In `src/call_manager/main.py`, add `phase_label` to the filters import block (~line 41-47):
+
+```python
+from call_manager.web.filters import (
+    criterion_label,
+    display_date,
+    display_dt,
+    model_label,
+    note_category_heading,
+    phase_label,
+)
+```
+
+and register it alongside the others (~line 366-370):
+
+```python
+    templates.env.filters["phase_label"] = phase_label
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_web_filters.py -v -k phase_label`
+Expected: PASS (3 passed).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/call_manager/web/filters.py src/call_manager/main.py tests/test_web_filters.py
+git commit -m "feat(web): phase_label filter for the workspace phase chip"
+```
+
+---
+
+### Task 5: Main-view composer gating + phase chip
 
 **Files:**
 - Modify: `src/call_manager/proposal_assist/web/workspaces.py` (`get_workspace_main`: setup context)
-- Modify: `src/call_manager/web/templates/proposal_assist/workspace_main.html` (gating branch; chip)
+- Modify: `src/call_manager/web/templates/proposal_assist/workspace_main.html` (gating branch; `phase_label` chip)
 - Test: `tests/proposal_assist/test_web_workspace_setup_gate.py` (append)
 
 - [ ] **Step 1: Write the failing tests**
@@ -529,8 +719,8 @@ def test_main_view_during_setup_shows_card_not_composer(
     assert r.status_code == 200
     assert 'id="setup-status"' in r.text
     assert 'id="composer"' not in r.text
-    # Humanized chip: the raw enum value must not render as the phase label.
-    assert "Setting up" in r.text
+    # Exact chip markup (the card ALSO says "Setting up", so assert the chip).
+    assert '<span class="phase-chip">Setting up</span>' in r.text
 
 
 def test_main_view_waiting_shows_rubric_link(
@@ -558,8 +748,7 @@ def test_main_view_after_setup_shows_composer_not_card(
     assert r.status_code == 200
     assert 'id="composer"' in r.text
     assert 'id="setup-status"' not in r.text
-    # Chip shows the spec-phase label, not the raw enum.
-    assert "Drafting" in r.text
+    assert '<span class="phase-chip">Drafting</span>' in r.text
 
 
 def test_main_view_viewer_during_setup_sees_card_without_rubric_link(
@@ -591,12 +780,12 @@ Expected: FAIL — composer renders during setup; no card; chip shows raw `setup
 
 - [ ] **Step 3: Add the setup context to `get_workspace_main`**
 
-In `src/call_manager/proposal_assist/web/workspaces.py`, inside `get_workspace_main`, just before the `is_owner = ws.owner_id == user.id` line, add:
+In `src/call_manager/proposal_assist/web/workspaces.py`, inside `get_workspace_main`, just before the `is_owner = ws.owner_id == user.id` line (~line 604), add:
 
 ```python
-    # Phase-0 gate: while the workspace is in setup, the left pane renders
-    # the setup-status card (partials/setup_status.html) instead of the
-    # composer. Only query the job row when it's actually needed.
+    # Phase-0 gate: while in setup, the left pane renders the setup-status
+    # card (partials/setup_status.html) instead of the composer. Query the
+    # job only when it's actually needed.
     if ws.current_phase == "setup":
         setup_job = session.scalar(
             select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id)
@@ -607,18 +796,20 @@ In `src/call_manager/proposal_assist/web/workspaces.py`, inside `get_workspace_m
         setup_status, setup_last_error = None, None
 ```
 
-and add the two keys to the `TemplateResponse` context dict (alongside `"is_owner"`):
+and add the two keys to the `TemplateResponse` context dict (alongside `"is_owner"`, ~line 612):
 
 ```python
             "setup_status": setup_status,
             "setup_last_error": setup_last_error,
 ```
 
+(`WorkspaceSetupJob` is already imported by Task 3.)
+
 - [ ] **Step 4: Gate the composer and humanize the chip in `workspace_main.html`**
 
 In `src/call_manager/web/templates/proposal_assist/workspace_main.html`:
 
-1. Replace the chip line:
+1. Replace the chip line (line 11):
 
 ```jinja
       <span class="phase-chip">{{ workspace.current_phase }}</span>
@@ -627,83 +818,71 @@ In `src/call_manager/web/templates/proposal_assist/workspace_main.html`:
 with:
 
 ```jinja
-      {% set _phase_labels = {'setup': 'Setting up', 'spec': 'Drafting', 'plan': 'Planning', 'draft': 'Revising', 'review': 'Review'} %}
-      <span class="phase-chip">{{ _phase_labels.get(workspace.current_phase, workspace.current_phase) }}</span>
+      <span class="phase-chip">{{ workspace.current_phase | phase_label }}</span>
 ```
 
-2. Wrap the composer region. The current structure is:
-
-```jinja
-    {% if is_owner %}
-    <form id="composer" ...>
-      ...
-    </form>
-    {% else %}
-    <p class="muted"><em>(read-only — only the workspace owner can send turns)</em></p>
-    {% endif %}
-```
-
-Change the OUTER branching to (the `<form id="composer">…</form>` block itself is unchanged — keep every line of it as-is):
+2. The composer region currently branches `{% if is_owner %}…composer…{% else %}…read-only…{% endif %}` (lines 34-91). Add an outer setup branch — leave the entire `<form id="composer">…</form>` block and the read-only `{% else %}` exactly as they are; only the opening `{% if %}` and the inserted include change:
 
 ```jinja
     {% if workspace.current_phase == 'setup' %}
     {% include "proposal_assist/partials/setup_status.html" %}
     {% elif is_owner %}
-    <form id="composer" ...>
-      ...
+    <form id="composer" class="composer" method="post" enctype="multipart/form-data"
+          ... (unchanged) ...
     </form>
     {% else %}
     <p class="muted"><em>(read-only — only the workspace owner can send turns)</em></p>
     {% endif %}
 ```
 
-(The include sees `workspace`, `setup_status`, `setup_last_error`, `is_owner` from the page context — Jinja includes share the enclosing context by default.)
+(The include inherits `workspace`, `setup_status`, `setup_last_error`, `is_owner` from the page context.)
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/proposal_assist/test_web_workspace_setup_gate.py -v`
-Expected: all pass (13 total).
+Expected: all pass (16 total).
 
-Also confirm the main-view consumers still pass (they now create spec-phase workspaces via Task 1):
-Run: `uv run pytest tests/proposal_assist/test_web_workspaces_turns.py tests/proposal_assist/test_web_workspaces_viewer_enforcement.py tests/proposal_assist/test_web_workspaces_disclosure_gate.py tests/proposal_assist/test_b7_e2e.py -q`
+Confirm the main-view consumers still pass (spec-phase via Task 1):
+Run: `uv run pytest tests/proposal_assist/test_web_workspaces_turns.py tests/proposal_assist/test_web_workspaces_viewer_enforcement.py tests/proposal_assist/test_web_workspaces_disclosure_gate.py tests/proposal_assist/test_web_workspaces_main.py tests/proposal_assist/test_b7_e2e.py -q`
 Expected: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/call_manager/proposal_assist/web/workspaces.py src/call_manager/web/templates/proposal_assist/workspace_main.html tests/proposal_assist/test_web_workspace_setup_gate.py
-git commit -m "feat(proposal-assist): gate composer on Phase-0 setup; humanize phase chip"
+git commit -m "feat(proposal-assist): gate composer on Phase-0 setup; humanized phase chip"
 ```
 
 ---
 
-### Task 5: Whole-feature verification
+### Task 6: Whole-feature verification
 
 **Files:** none (verification only)
 
 - [ ] **Step 1: Lint**
 
-Run: `uv run ruff check src/call_manager/proposal_assist/web/workspaces.py tests/proposal_assist/test_web_workspace_setup_gate.py tests/proposal_assist/conftest.py tests/proposal_assist/test_kill_switch.py tests/proposal_assist/test_global_cap.py`
+Run: `uv run ruff check src/call_manager/proposal_assist/web/workspaces.py src/call_manager/web/filters.py src/call_manager/main.py tests/proposal_assist/test_web_workspace_setup_gate.py tests/test_web_filters.py tests/proposal_assist/conftest.py`
 Expected: `All checks passed!`
 
-Run: `uv run ruff format --check src/call_manager/proposal_assist/web/workspaces.py tests/proposal_assist/test_web_workspace_setup_gate.py tests/proposal_assist/conftest.py tests/proposal_assist/test_kill_switch.py tests/proposal_assist/test_global_cap.py`
-Expected: already formatted (run `uv run ruff format <paths>` and amend the relevant commit if not).
+Run: `uv run ruff format --check src/call_manager/proposal_assist/web/workspaces.py src/call_manager/web/filters.py src/call_manager/main.py tests/proposal_assist/test_web_workspace_setup_gate.py tests/test_web_filters.py`
+Expected: already formatted (else run `uv run ruff format <paths>` and amend the relevant commit).
 
-- [ ] **Step 2: Full proposal-assist sweep**
+- [ ] **Step 2: Full proposal-assist + filters sweep**
 
-Run: `uv run pytest tests/proposal_assist/ -q`
-Expected: all pass — including the rubric-review endpoint tests (own setup-phase workspaces, untouched) and every turn-posting suite (post-setup via Task 1).
+Run: `uv run pytest tests/proposal_assist/ tests/test_web_filters.py -q`
+Expected: all pass — including the rubric-review endpoint tests, every turn-posting suite, and the phase-0 worker tests (pinned to `setup` in Task 1).
 
-- [ ] **Step 3: Spot-check the spec's test checklist**
+- [ ] **Step 3: Spec checklist spot-check**
 
-Every spec testing bullet maps to a test: gating (Task 4 tests), card-per-status incl. `done` + missing-job fallback (Task 3), poll endpoint auth (Task 3 `403/404`), owner-vs-viewer (Tasks 3+4), turn guard 409/proceeds (Task 2), phase chip labels (Task 4: "Setting up"/"Drafting"). One deliberate deviation: the spec's "unknown phase falls back to raw string" is enforced by `.get(..., fallback)` in the template but not tested — the DB CHECK constraint makes an unknown phase uninsertable, so a route-level test can't construct it. Note this in the final report.
+Every spec testing bullet maps to a test: gating (Task 5), card-per-status incl. `done` + missing-job fallback (Task 3), poll-endpoint auth 403/404 (Task 3), owner-vs-viewer incl. P2 viewer-polling and P3b viewer-error-hiding (Task 3), turn guard 409 (Task 2), phase chip exact markup + the `phase_label` unknown fallback (Tasks 4-5). Report any deviation.
 
 ---
 
 ## Self-review notes (for the implementer)
 
-- **Order matters:** Task 1 (test migration) MUST land before Task 2 — without it, the guard turns ~7 existing turn-posting test files red.
-- **`hx-trigger` as the polling marker:** the tests assert presence/absence of the literal `hx-trigger` attribute — it appears in the partial only inside the `{% if _polling %}` guard, so it's a faithful structural proxy for "this card still polls."
-- **No new CSS:** the card reuses `.callout` / `.callout-warning` (app.css section 12) and Pico's `aria-busy` spinner; `role="button"` on the rubric link gets Pico's button styling.
-- **`make_workspace` doesn't create `WorkspaceSetupJob` rows** (the creation route does); the `_make_setup_workspace` helper inserts them explicitly per test.
+- **Order matters:** Task 1 (migration) MUST land before Task 2/5, and Task 4 (filter) before Task 5 (the chip uses it).
+- **`hx-trigger` is the polling marker:** tests assert its presence/absence; it appears only inside the `{% if _polling %}` guard. Owner-`waiting` and all `failed`/`done` cards omit it; viewer-`waiting` keeps it (P2).
+- **Viewer error hiding (P3b):** only the owner branch renders `setup_last_error`; the raw worker exception never reaches a viewer.
+- **No new CSS:** `.callout` / `.callout-warning` (app.css §12) + Pico `aria-busy`; `role="button"` gets Pico button styling.
+- **`make_workspace` doesn't create `WorkspaceSetupJob` rows** (the creation route does); `_make_setup_workspace` inserts them per test.
 - **Known suite flakiness (NOT a regression):** in-process APScheduler threads can race testcontainer teardown (`Event loop is closed` noise, occasionally `test_editing_e2e`); rerun the failed test before suspecting these changes.
