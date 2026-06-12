@@ -263,7 +263,8 @@ def admin_rerank(
     user: User = Depends(require_admin),  # noqa: B008
 ):
     """Enqueue ranking jobs for every active profile × every Call from
-    the last 90 days. Idempotent (partial unique index dedup-guards).
+    the recent-call window (BACKFILL_DAYS days). Idempotent (partial
+    unique index dedup-guards).
 
     `backfill_profile` uses a single bulk INSERT per profile, so the
     total round-trip cost is O(active profiles), not O(active profiles

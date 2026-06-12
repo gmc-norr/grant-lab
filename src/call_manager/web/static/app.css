@@ -1070,6 +1070,28 @@ article table { margin-bottom: 0.25rem; }
   color: var(--cm-warn-text);
 }
 
+/* Disabled-digest-users list (admin digest panel): one row per user —
+   email, when-disabled, and the inline Re-enable button aligned right. */
+.disabled-users {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.disabled-users li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.disabled-users li form {
+  margin: 0 0 0 auto;
+}
+.disabled-users li button {
+  width: auto;
+}
+
 /* Disclosure modal — single fixed div, no JS. The ::before pseudo-element
    is the backdrop: unlike a box-shadow wash it participates in hit-testing,
    so clicks on the dimmed page land on the modal instead of the composer

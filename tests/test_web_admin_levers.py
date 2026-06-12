@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -220,24 +221,29 @@ def test_rerank_redirects_with_ok_key(monkeypatch, pg_url, pg_session_factory):
     assert r.headers["location"] == "/admin?ok=rerank"
 
 
-def test_ok_fetch_renders_success_banner(monkeypatch, pg_url, pg_session_factory):
+@pytest.mark.parametrize(
+    ("param", "css_class", "snippet"),
+    [
+        ("ok=fetch", "banner-ok", "Fetch triggered"),
+        ("ok=digest", "banner-ok", "Weekly digest triggered"),
+        ("ok=reenable", "banner-ok", "User re-enabled"),
+        ("ok=rerank", "banner-ok", "Re-ranking enqueued"),
+        ("err=fetch", "banner-warn", "Couldn&#39;t trigger the fetch"),
+        ("err=digest_unconfigured", "banner-warn", "isn&#39;t configured"),
+    ],
+)
+def test_every_banner_key_renders_its_message(
+    monkeypatch, pg_url, pg_session_factory, param, css_class, snippet
+):
+    """Every redirect key a lever route emits maps to a rendered banner with
+    the right class and an autoescaped message; locks the key→message contract."""
     app = _setup(monkeypatch, pg_url)
     client = _admin_client(app, pg_session_factory)
     with client:
-        r = client.get("/admin?ok=fetch")
+        r = client.get(f"/admin?{param}")
     assert r.status_code == 200
-    assert "banner-ok" in r.text
-    assert "Fetch triggered" in r.text
-
-
-def test_err_digest_unconfigured_renders_warning_banner(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
-    client = _admin_client(app, pg_session_factory)
-    with client:
-        r = client.get("/admin?err=digest_unconfigured")
-    assert r.status_code == 200
-    assert "banner-warn" in r.text
-    assert "isn&#39;t configured" in r.text
+    assert css_class in r.text
+    assert snippet in r.text
 
 
 def test_unknown_banner_key_renders_no_banner(monkeypatch, pg_url, pg_session_factory):
