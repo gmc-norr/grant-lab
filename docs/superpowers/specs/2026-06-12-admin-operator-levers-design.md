@@ -74,7 +74,7 @@ All four are `POST`, gated by `require_admin` (existing dependency), and pass th
 
 ### E. Feedback banner (`admin.html`)
 
-The redirect carries `?ok=<key>` / `?err=<key>`. The template maps a **fixed set of keys to fixed messages** (never echoes the raw param — no XSS) and renders a banner: `.banner.banner-ok` (success, green) or `.banner.banner-warn` (warning, amber). Unknown/absent key → no banner. Keys: `ok ∈ {fetch, digest, reenable, rerank}`, `err ∈ {fetch, digest_unconfigured, reenable}`.
+The redirect carries `?ok=<key>` / `?err=<key>`. The template maps a **fixed set of keys to fixed messages** (never echoes the raw param — no XSS) and renders a banner: `.banner.banner-ok` (success, green) or `.banner.banner-warn` (warning, amber). Unknown/absent key → no banner. Keys: `ok ∈ {fetch, digest, reenable, rerank}`, `err ∈ {fetch, digest_unconfigured}`. (There is no `err=reenable`: a missing user is a tampered/stale `user_id`, handled as a 404 exactly like an unknown source slug — see route 3 and Error handling. Re-enabling an already-enabled user is a harmless no-op that still returns `ok=reenable`.)
 
 **Note:** no `.banner*` CSS rules exist today — the calibration warning's `banner banner-warn` classes ([admin.html:50](../../../src/call_manager/web/templates/admin.html#L50)) are unstyled markup. This slice adds the `.banner` base plus `.banner-ok`/`.banner-warn` variants to `app.css`, which gives the existing calibration banner real styling as a side effect.
 
