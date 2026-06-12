@@ -44,6 +44,7 @@ from call_manager.web.filters import (
     display_dt,
     model_label,
     note_category_heading,
+    phase_label,
 )
 from call_manager.web.middleware import (
     MaxBodySizeMiddleware,
@@ -368,6 +369,7 @@ def create_app() -> FastAPI:
     templates.env.filters["criterion_label"] = criterion_label
     templates.env.filters["model_label"] = model_label
     templates.env.filters["note_category_heading"] = note_category_heading
+    templates.env.filters["phase_label"] = phase_label
     app.state.templates = templates
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(

@@ -116,7 +116,7 @@ def test_post_turn_returns_429_with_global_header(monkeypatch, pg_url, pg_sessio
         owner = User(email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="Test")
+        ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
         s.add(ws)
         s.flush()
         s.add(
@@ -168,7 +168,7 @@ def test_global_cap_wins_when_per_workspace_also_exceeded(monkeypatch, pg_url, p
         owner = User(email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="T")
+        ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
         s.add(ws)
         s.flush()
         # Seed: 200 input tokens used today (over BOTH caps).

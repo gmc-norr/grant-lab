@@ -8,7 +8,7 @@
   <hgroup>
     <h1>{{ workspace.title }}</h1>
     <p class="workspace-meta">
-      <span class="phase-chip">{{ workspace.current_phase }}</span>
+      <span class="phase-chip">{{ workspace.current_phase | phase_label }}</span>
     </p>
   </hgroup>
 </header>
@@ -31,7 +31,9 @@
       {% endfor %}
     </div>
     {% include "proposal_assist/partials/cloud_banner.html" %}
-    {% if is_owner %}
+    {% if workspace.current_phase == 'setup' %}
+    {% include "proposal_assist/partials/setup_status.html" %}
+    {% elif is_owner %}
     <form id="composer" class="composer" method="post" enctype="multipart/form-data"
           action="/workspaces/{{ workspace.id }}/turns"
           hx-post="/workspaces/{{ workspace.id }}/turns"

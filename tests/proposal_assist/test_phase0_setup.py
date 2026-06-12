@@ -190,7 +190,7 @@ def test_phase0_step_4_copies_section_extracts_into_workspace(
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
-        ws = make_workspace(s, call_id=call.id)
+        ws = make_workspace(s, call_id=call.id, current_phase="setup")
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
         s.commit()
         ws_id = ws.id
@@ -240,7 +240,7 @@ def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
-        ws = make_workspace(s, call_id=call.id)
+        ws = make_workspace(s, call_id=call.id, current_phase="setup")
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
         s.commit()
         ws_id = ws.id
@@ -303,7 +303,7 @@ def test_phase0_yields_to_waiting_for_rubric_review(
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
-        ws = make_workspace(s, call_id=call.id)
+        ws = make_workspace(s, call_id=call.id, current_phase="setup")
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
         s.commit()
         ws_id = ws.id
@@ -387,7 +387,7 @@ def test_phase0_steps_1_3_recovers_from_aborted_git_init(
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
-        ws = make_workspace(s, call_id=call.id)
+        ws = make_workspace(s, call_id=call.id, current_phase="setup")
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
         s.commit()
         ws_id = ws.id
