@@ -1049,6 +1049,27 @@ article table { margin-bottom: 0.25rem; }
   margin: 0.5rem 0;
 }
 
+/* Operational feedback banners (admin levers). Also styles the pre-existing
+   calibration warning, whose `banner banner-warn` markup was unstyled. */
+.banner {
+  border-radius: 0.6rem;
+  padding: 0.7rem 1rem;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+  border: 1px solid var(--cm-border);
+  background: var(--cm-surface-sunken);
+}
+.banner-ok {
+  background: var(--cm-good-bg);
+  border-color: var(--cm-good-border);
+  color: var(--cm-good-text);
+}
+.banner-warn {
+  background: var(--cm-warn-bg);
+  border-color: var(--cm-warn-border);
+  color: var(--cm-warn-text);
+}
+
 /* Disclosure modal — single fixed div, no JS. The ::before pseudo-element
    is the backdrop: unlike a box-shadow wash it participates in hit-testing,
    so clicks on the dimmed page land on the modal instead of the composer

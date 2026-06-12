@@ -11,6 +11,24 @@
   <a href="/admin/drafting">Drafting (B7/B8) panel</a>
 </nav>
 
+{% set _ok = request.query_params.get('ok') %}
+{% set _err = request.query_params.get('err') %}
+{% set _ok_msgs = {
+  'fetch': 'Fetch triggered — the source will refresh shortly.',
+  'digest': 'Weekly digest triggered — it will send shortly.',
+  'reenable': 'User re-enabled for the weekly digest.',
+  'rerank': 'Re-ranking enqueued for all active profiles.'
+} %}
+{% set _err_msgs = {
+  'fetch': "Couldn't trigger the fetch — the scheduler or this source's job is unavailable.",
+  'digest_unconfigured': "Digest isn't configured (no email backend), so it can't be sent."
+} %}
+{% if _ok and _ok in _ok_msgs %}
+<div class="banner banner-ok" role="status">{{ _ok_msgs[_ok] }}</div>
+{% elif _err and _err in _err_msgs %}
+<div class="banner banner-warn" role="alert">{{ _err_msgs[_err] }}</div>
+{% endif %}
+
 <article>
   <header><strong>Source health</strong></header>
   <table>

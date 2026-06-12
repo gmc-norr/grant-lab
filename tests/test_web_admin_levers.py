@@ -217,3 +217,34 @@ def test_rerank_redirects_with_ok_key(monkeypatch, pg_url, pg_session_factory):
         r = client.post("/admin/rerank", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/admin?ok=rerank"
+
+
+def test_ok_fetch_renders_success_banner(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin?ok=fetch")
+    assert r.status_code == 200
+    assert "banner-ok" in r.text
+    assert "Fetch triggered" in r.text
+
+
+def test_err_digest_unconfigured_renders_warning_banner(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin?err=digest_unconfigured")
+    assert r.status_code == 200
+    assert "banner-warn" in r.text
+    assert "isn&#39;t configured" in r.text
+
+
+def test_unknown_banner_key_renders_no_banner(monkeypatch, pg_url, pg_session_factory):
+    # A tampered/garbage key must NOT be echoed and must NOT render a banner.
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin?ok=<script>alert(1)</script>")
+    assert r.status_code == 200
+    assert "banner-ok" not in r.text
+    assert "alert(1)" not in r.text  # raw param never echoed
