@@ -602,6 +602,18 @@ def get_workspace_main(
         if s.text
     ]
 
+    # Phase-0 gate: while in setup, the left pane renders the setup-status
+    # card (partials/setup_status.html) instead of the composer. Query the
+    # job only when it's actually needed.
+    if ws.current_phase == "setup":
+        setup_job = session.scalar(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id)
+        )
+        setup_status = setup_job.status if setup_job else "queued"
+        setup_last_error = setup_job.last_error if setup_job else None
+    else:
+        setup_status, setup_last_error = None, None
+
     is_owner = ws.owner_id == user.id
     templates = request.app.state.templates
     return templates.TemplateResponse(
@@ -620,6 +632,8 @@ def get_workspace_main(
             "workspace_attachments": workspace_attachments,
             "workspace_references": workspace_references,
             "chat_reference_map": chat_reference_map,
+            "setup_status": setup_status,
+            "setup_last_error": setup_last_error,
         },
     )
 

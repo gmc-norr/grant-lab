@@ -199,3 +199,61 @@ def test_setup_status_non_member_403_and_missing_404(
     assert r.status_code == 403
     r = client_authed_owner.get(f"/workspaces/{_uuid.uuid4()}/setup-status")
     assert r.status_code == 404
+
+
+def test_main_view_during_setup_shows_card_not_composer(
+    client_authed_owner, pg_session_factory, current_user
+):
+    wsid = _make_setup_workspace(pg_session_factory, current_user, job_status="running")
+    r = client_authed_owner.get(f"/workspaces/{wsid}")
+    assert r.status_code == 200
+    assert 'id="setup-status"' in r.text
+    assert 'id="composer"' not in r.text
+    # Exact chip markup (the card ALSO says "Setting up", so assert the chip).
+    assert '<span class="phase-chip">Setting up</span>' in r.text
+
+
+def test_main_view_waiting_shows_rubric_link(client_authed_owner, pg_session_factory, current_user):
+    wsid = _make_setup_workspace(
+        pg_session_factory, current_user, job_status="waiting_for_rubric_review"
+    )
+    r = client_authed_owner.get(f"/workspaces/{wsid}")
+    assert r.status_code == 200
+    assert f"/workspaces/{wsid}/rubric-review" in r.text
+    assert 'id="composer"' not in r.text
+
+
+def test_main_view_after_setup_shows_composer_not_card(
+    client_authed_owner, pg_session_factory, current_user
+):
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)  # spec phase
+        s.commit()
+        wsid = ws.id
+    r = client_authed_owner.get(f"/workspaces/{wsid}")
+    assert r.status_code == 200
+    assert 'id="composer"' in r.text
+    assert 'id="setup-status"' not in r.text
+    assert '<span class="phase-chip">Drafting</span>' in r.text
+
+
+def test_main_view_viewer_during_setup_sees_card_without_rubric_link(
+    client_authed_user, pg_session_factory, current_user
+):
+    from call_manager.db.models import WorkspaceViewer
+    from tests.proposal_assist.conftest import make_user
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="gate-owner2@ki.se")
+        s.flush()
+        s.commit()
+    wsid = _make_setup_workspace(pg_session_factory, owner, job_status="waiting_for_rubric_review")
+    with pg_session_factory() as s:
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=current_user.id))
+        s.commit()
+    r = client_authed_user.get(f"/workspaces/{wsid}")
+    assert r.status_code == 200
+    assert 'id="setup-status"' in r.text
+    assert "/rubric-review" not in r.text
