@@ -37,6 +37,7 @@
         <th>Source</th>
         <th>Last fetched</th>
         <th>Calls in DB</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -45,6 +46,11 @@
           <td>{{ s.name }} <code class="muted">{{ s.slug }}</code></td>
           <td>{% if s.last_fetched_at %}{{ s.last_fetched_at | display_dt }}{% else %}<span class="muted">never</span>{% endif %}</td>
           <td><strong>{{ s.call_count }}</strong></td>
+          <td>
+            <form method="post" action="/admin/sources/{{ s.slug }}/fetch">
+              <button type="submit" class="secondary outline">Fetch now</button>
+            </form>
+          </td>
         </tr>
       {% endfor %}
     </tbody>

@@ -248,3 +248,14 @@ def test_unknown_banner_key_renders_no_banner(monkeypatch, pg_url, pg_session_fa
     assert r.status_code == 200
     assert "banner-ok" not in r.text
     assert "alert(1)" not in r.text  # raw param never echoed
+
+
+def test_source_rows_have_fetch_forms(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    # vinnova is a migration-seeded source; its row carries a fetch form.
+    assert 'action="/admin/sources/vinnova/fetch"' in r.text
+    assert "Fetch now" in r.text
