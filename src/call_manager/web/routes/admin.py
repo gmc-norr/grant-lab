@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
@@ -21,7 +21,8 @@ from call_manager.db.models import (
     WorkspaceEvent,
 )
 from call_manager.digest.send import week_start as _week_start
-from call_manager.ranking.backfill import backfill_profile
+from call_manager.ranking.backfill import BACKFILL_DAYS, backfill_profile
+from call_manager.scheduler import trigger_job_now
 
 router = APIRouter()
 
@@ -39,10 +40,19 @@ def _digest_panel_context(session) -> dict:
     disabled_users = session.execute(
         select(func.count(User.id)).where(User.digest_disabled_at.is_not(None))
     ).scalar_one()
+    disabled_rows = session.execute(
+        select(User.id, User.email, User.digest_disabled_at)
+        .where(User.digest_disabled_at.is_not(None))
+        .order_by(User.digest_disabled_at.desc())
+    ).all()
     return {
         "digest_last_sent_at": last_run.sent_at if last_run else None,
         "digest_runs_this_week": runs_this_week,
         "digest_disabled_users": disabled_users,
+        "digest_disabled_user_rows": [
+            {"id": r.id, "email": r.email, "digest_disabled_at": r.digest_disabled_at}
+            for r in disabled_rows
+        ],
     }
 
 
@@ -208,6 +218,14 @@ def admin_index(
             select(RankingJob.status, func.count(RankingJob.id)).group_by(RankingJob.status)
         ).all()
         queue_counts = {status: count for status, count in queue_rows}
+        active_profiles_count = session.execute(
+            select(func.count(Profile.id)).where(Profile.is_active.is_(True))
+        ).scalar_one()
+        recent_cutoff = datetime.now(UTC) - timedelta(days=BACKFILL_DAYS)
+        recent_calls_count = session.execute(
+            select(func.count(Call.id)).where(Call.published_at >= recent_cutoff)
+        ).scalar_one()
+        rerank_estimate = active_profiles_count * recent_calls_count
         context = {
             "sources": sources,
             "queue_counts": queue_counts,
@@ -215,6 +233,10 @@ def admin_index(
             "queue_status_running": RankingJobStatus.RUNNING.value,
             "queue_status_failed": RankingJobStatus.FAILED.value,
             "queue_status_done": RankingJobStatus.DONE.value,
+            "rerank_estimate": rerank_estimate,
+            "active_profiles_count": active_profiles_count,
+            "recent_calls_count": recent_calls_count,
+            "backfill_days": BACKFILL_DAYS,
             "user": user,
         }
         context.update(_digest_panel_context(session))
@@ -241,7 +263,8 @@ def admin_rerank(
     user: User = Depends(require_admin),  # noqa: B008
 ):
     """Enqueue ranking jobs for every active profile × every Call from
-    the last 90 days. Idempotent (partial unique index dedup-guards).
+    the recent-call window (BACKFILL_DAYS days). Idempotent (partial
+    unique index dedup-guards).
 
     `backfill_profile` uses a single bulk INSERT per profile, so the
     total round-trip cost is O(active profiles), not O(active profiles
@@ -255,4 +278,57 @@ def admin_rerank(
         )
     for pid in active_profile_ids:
         backfill_profile(session_factory=session_factory, profile_id=pid)
-    return RedirectResponse(url="/admin", status_code=303)
+    return RedirectResponse(url="/admin?ok=rerank", status_code=303)
+
+
+@router.post("/admin/digest/reenable")
+def admin_reenable_user(
+    request: Request,
+    user_id: int = Form(...),
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    """Clear digest_disabled_at for a bounced user so the weekly digest
+    resumes for them. Idempotent: a no-op if already enabled."""
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        target = session.get(User, user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="unknown user")
+        target.digest_disabled_at = None
+        session.commit()
+    return RedirectResponse(url="/admin?ok=reenable", status_code=303)
+
+
+def _scheduler(request: Request):
+    """The app's APScheduler, or None if absent (e.g. before lifespan)."""
+    return getattr(request.app.state, "scheduler", None)
+
+
+@router.post("/admin/sources/{slug}/fetch")
+def admin_fetch_source(
+    slug: str,
+    request: Request,
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    """Trigger the per-source ingest job (id=ingest:{slug}) to run now."""
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        src = session.execute(select(Source).where(Source.slug == slug)).scalar_one_or_none()
+    if src is None:
+        raise HTTPException(status_code=404, detail="unknown source")
+    ok = trigger_job_now(_scheduler(request), f"ingest:{slug}")
+    key = "ok=fetch" if ok else "err=fetch"
+    return RedirectResponse(url=f"/admin?{key}", status_code=303)
+
+
+@router.post("/admin/digest/send")
+def admin_send_digest(
+    request: Request,
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    """Trigger the weekly digest job to run now. The job is absent when no
+    email backend is configured; run_digest is week-idempotent, so a manual
+    run during the same week safely de-dupes via the DigestRun claim."""
+    ok = trigger_job_now(_scheduler(request), "digest:weekly")
+    key = "ok=digest" if ok else "err=digest_unconfigured"
+    return RedirectResponse(url=f"/admin?{key}", status_code=303)

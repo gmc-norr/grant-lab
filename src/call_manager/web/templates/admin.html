@@ -11,6 +11,24 @@
   <a href="/admin/drafting">Drafting (B7/B8) panel</a>
 </nav>
 
+{% set _ok = request.query_params.get('ok') %}
+{% set _err = request.query_params.get('err') %}
+{% set _ok_msgs = {
+  'fetch': 'Fetch triggered — the source will refresh shortly.',
+  'digest': 'Weekly digest triggered — it will send shortly.',
+  'reenable': 'User re-enabled for the weekly digest.',
+  'rerank': 'Re-ranking enqueued for all active profiles.'
+} %}
+{% set _err_msgs = {
+  'fetch': "Couldn't trigger the fetch — the scheduler or this source's job is unavailable.",
+  'digest_unconfigured': "Digest isn't configured (no email backend), so it can't be sent."
+} %}
+{% if _ok and _ok in _ok_msgs %}
+<div class="banner banner-ok" role="status">{{ _ok_msgs[_ok] }}</div>
+{% elif _err and _err in _err_msgs %}
+<div class="banner banner-warn" role="alert">{{ _err_msgs[_err] }}</div>
+{% endif %}
+
 <article>
   <header><strong>Source health</strong></header>
   <table>
@@ -19,6 +37,7 @@
         <th>Source</th>
         <th>Last fetched</th>
         <th>Calls in DB</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -27,6 +46,11 @@
           <td>{{ s.name }} <code class="muted">{{ s.slug }}</code></td>
           <td>{% if s.last_fetched_at %}{{ s.last_fetched_at | display_dt }}{% else %}<span class="muted">never</span>{% endif %}</td>
           <td><strong>{{ s.call_count }}</strong></td>
+          <td>
+            <form method="post" action="/admin/sources/{{ s.slug }}/fetch">
+              <button type="submit" class="secondary outline">Fetch now</button>
+            </form>
+          </td>
         </tr>
       {% endfor %}
     </tbody>
@@ -41,9 +65,12 @@
     <div class="summary-card"><div class="label">Done</div><div class="value accent-strong">{{ queue_counts.get(queue_status_done, 0) }}</div></div>
     <div class="summary-card"><div class="label">Failed (dead-letter)</div><div class="value {% if queue_counts.get(queue_status_failed, 0) %}accent-soon{% endif %}">{{ queue_counts.get(queue_status_failed, 0) }}</div></div>
   </div>
-  <form method="post" action="/admin/rerank">
-    <button type="submit" class="secondary">Re-rank everything (last 90 days × active profiles)</button>
+  <form method="post" action="/admin/rerank"
+        data-confirm="This enqueues up to ~{{ rerank_estimate }} ranking jobs and may take a while. Continue?">
+    <button type="submit" class="secondary">Re-rank everything (last {{ backfill_days }} days × active profiles)</button>
   </form>
+  <p class="muted">Enqueues up to ~{{ rerank_estimate }} ranking jobs
+    ({{ active_profiles_count }} active profiles × {{ recent_calls_count }} recent calls; upper bound — dedup and dead-letter suppression mean the real count is lower).</p>
 </article>
 
 {% if embedding_calibration_warning %}
@@ -77,6 +104,27 @@
     <dt>Runs this week</dt><dd>{{ digest_runs_this_week }}</dd>
     <dt>Disabled users (3+ bounces)</dt><dd>{{ digest_disabled_users }}</dd>
   </dl>
+
+  {% if digest_disabled_user_rows %}
+  <ul class="disabled-users">
+    {% for du in digest_disabled_user_rows %}
+    <li>
+      {{ du.email }}
+      <span class="muted">disabled {{ du.digest_disabled_at | display_dt }}</span>
+      <form method="post" action="/admin/digest/reenable">
+        <input type="hidden" name="user_id" value="{{ du.id }}">
+        <button type="submit" class="secondary outline">Re-enable</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No disabled users.</p>
+  {% endif %}
+
+  <form method="post" action="/admin/digest/send">
+    <button type="submit" class="secondary">Send digest now</button>
+  </form>
 </article>
 
 <article>
