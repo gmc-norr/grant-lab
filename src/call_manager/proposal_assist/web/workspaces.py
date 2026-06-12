@@ -695,6 +695,16 @@ async def post_turn(
         user=user,
         session=session,
     )
+    # Phase gate: during Phase-0 setup the workspace git repo doesn't exist
+    # yet, so a turn would run the agent against nothing and fail silently.
+    # The composer is suppressed during setup (workspace_main.html); this
+    # guards stale tabs and hand-crafted POSTs. The JSON detail is shown
+    # inline by app.js's global htmx:responseError handler.
+    if ws.current_phase == "setup":
+        raise HTTPException(
+            status_code=409,
+            detail="Workspace is still setting up — review the rubric to start drafting.",
+        )
     settings = request.app.state.settings
     # Auth-first: owner check above runs before this kill-switch gate
     # so a non-owner probing /turns on a workspace they don't own gets
