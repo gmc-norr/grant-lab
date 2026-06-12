@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import User
@@ -311,3 +312,41 @@ def test_disabled_users_listed_most_recent_first(monkeypatch, pg_url, pg_session
     assert "newer@ki.se" in r.text
     # …and the most-recently-disabled user comes first (desc order).
     assert r.text.index("newer@ki.se") < r.text.index("older@ki.se")
+
+
+def test_rerank_button_shows_estimate_and_confirm(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    from datetime import timedelta
+
+    from call_manager.db.models import Call, Source
+
+    # Two active profiles × three recent calls ⇒ estimate of 6 (pins the
+    # multiplication: a stray + / max / single-factor bug would not give 6).
+    profile_factory()
+    profile_factory(name="Group B")
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        for i in range(3):
+            s.add(
+                Call(
+                    source_id=src.id,
+                    external_id=f"E{i}",
+                    url=f"https://x/e{i}",
+                    title="T",
+                    published_at=datetime.now(UTC) - timedelta(days=5),
+                )
+            )
+        s.commit()
+
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    # The destructive form carries a confirm prompt…
+    assert "data-confirm=" in r.text
+    # …and the page states the upper-bound job count (2 profiles × 3 calls = 6).
+    assert "up to ~6" in r.text
+    # …with the breakdown rendered.
+    assert "2 active profiles × 3 recent calls" in r.text

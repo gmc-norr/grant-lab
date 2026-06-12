@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -21,7 +21,7 @@ from call_manager.db.models import (
     WorkspaceEvent,
 )
 from call_manager.digest.send import week_start as _week_start
-from call_manager.ranking.backfill import backfill_profile
+from call_manager.ranking.backfill import BACKFILL_DAYS, backfill_profile
 from call_manager.scheduler import trigger_job_now
 
 router = APIRouter()
@@ -218,6 +218,14 @@ def admin_index(
             select(RankingJob.status, func.count(RankingJob.id)).group_by(RankingJob.status)
         ).all()
         queue_counts = {status: count for status, count in queue_rows}
+        active_profiles_count = session.execute(
+            select(func.count(Profile.id)).where(Profile.is_active.is_(True))
+        ).scalar_one()
+        recent_cutoff = datetime.now(UTC) - timedelta(days=BACKFILL_DAYS)
+        recent_calls_count = session.execute(
+            select(func.count(Call.id)).where(Call.published_at >= recent_cutoff)
+        ).scalar_one()
+        rerank_estimate = active_profiles_count * recent_calls_count
         context = {
             "sources": sources,
             "queue_counts": queue_counts,
@@ -225,6 +233,10 @@ def admin_index(
             "queue_status_running": RankingJobStatus.RUNNING.value,
             "queue_status_failed": RankingJobStatus.FAILED.value,
             "queue_status_done": RankingJobStatus.DONE.value,
+            "rerank_estimate": rerank_estimate,
+            "active_profiles_count": active_profiles_count,
+            "recent_calls_count": recent_calls_count,
+            "backfill_days": BACKFILL_DAYS,
             "user": user,
         }
         context.update(_digest_panel_context(session))
