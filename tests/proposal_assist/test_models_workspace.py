@@ -116,7 +116,10 @@ def test_workspace_phased_columns_have_safe_defaults(pg_session_factory):
     create_workspace() without filling these out — Phase 0 populates
     them later."""
     with pg_session_factory() as s:
-        ws = make_workspace(s)
+        owner = make_user(s)
+        s.flush()
+        ws = Workspace(title="Defaults check", owner_id=owner.id)
+        s.add(ws)
         s.commit()
         s.refresh(ws)
         assert ws.current_phase == "setup"

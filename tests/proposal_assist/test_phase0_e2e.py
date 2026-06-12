@@ -99,6 +99,7 @@ def test_phase0_happy_path_workspace_to_spec(
             owner=owner,
             call_id=call.id,
             profile_id=profile.id,
+            current_phase="setup",
         )
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
         s.commit()
