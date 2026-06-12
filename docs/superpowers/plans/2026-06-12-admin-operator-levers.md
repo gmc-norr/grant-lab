@@ -37,10 +37,10 @@ No migration. No JS change (reuses the existing `form[data-confirm]` handler).
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_scheduler_trigger.py`:
+Create `tests/test_scheduler_trigger.py` (import only `datetime` — `UTC` isn't referenced by these tests and would be an F401):
 
 ```python
-from datetime import UTC, datetime
+from datetime import datetime
 
 from call_manager.scheduler import trigger_job_now
 
@@ -130,13 +130,12 @@ git commit -m "feat(scheduler): trigger_job_now — nudge a scheduled job to run
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_web_admin_levers.py`:
+Create `tests/test_web_admin_levers.py` (no `sqlalchemy.select` import yet — its first use is Task 8's test; importing it now would leave the file F401-dirty through Tasks 2-7):
 
 ```python
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import User
@@ -869,7 +868,13 @@ git commit -m "feat(admin): disabled-users list with Re-enable + Send-digest-now
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_web_admin_levers.py`:
+This test is the file's first use of `select` — add it to the top-level imports of `tests/test_web_admin_levers.py` now (between the `fastapi.testclient` and `call_manager` import groups):
+
+```python
+from sqlalchemy import select
+```
+
+Then append the test:
 
 ```python
 def test_rerank_button_shows_estimate_and_confirm(
