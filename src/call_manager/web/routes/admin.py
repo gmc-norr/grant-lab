@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
@@ -256,3 +256,21 @@ def admin_rerank(
     for pid in active_profile_ids:
         backfill_profile(session_factory=session_factory, profile_id=pid)
     return RedirectResponse(url="/admin", status_code=303)
+
+
+@router.post("/admin/digest/reenable")
+def admin_reenable_user(
+    request: Request,
+    user_id: int = Form(...),
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    """Clear digest_disabled_at for a bounced user so the weekly digest
+    resumes for them. Idempotent: a no-op if already enabled."""
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        target = session.get(User, user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="unknown user")
+        target.digest_disabled_at = None
+        session.commit()
+    return RedirectResponse(url="/admin?ok=reenable", status_code=303)
