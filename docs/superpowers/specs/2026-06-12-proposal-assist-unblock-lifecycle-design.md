@@ -51,6 +51,7 @@ Branches on the setup-job status. The card is the **self-replacing poll element*
 | `queued`, `running` (or **no job row**, defensive) | "Setting up your workspace…" + a quiet working indicator | **yes** |
 | `waiting_for_rubric_review` | "Your workspace is ready. Review the rubric to start drafting." + a prominent **link/button to `/workspaces/{id}/rubric-review`** | no |
 | `failed` | "Setup failed." + the `last_error` text + guidance: delete and recreate the workspace, or contact an admin | no |
+| `done` (only reachable by a still-open card after the rubric was confirmed in another tab — the same transaction sets `current_phase='spec'`) | "Setup is complete." + a link to `/workspaces/{id}` — clicking re-loads the main view, which now renders the composer | no |
 
 Owner vs viewer: the **owner** sees the actionable card (rubric link in the `waiting` state). A **viewer** (shared-read) sees the same status *text* without the owner-only rubric link (the rubric-review route is owner-only — [rubric_review.py:38-43](../../../src/call_manager/proposal_assist/web/rubric_review.py#L38-L43) — so showing a viewer a link they'd get 403 on would be a dead-end of its own). The existing template already distinguishes `is_owner` ([workspace_main.html:34](../../../src/call_manager/web/templates/proposal_assist/workspace_main.html#L34)).
 
@@ -78,7 +79,7 @@ if ws.current_phase == "setup":
     )
 ```
 
-This closes the first-message race at the source: even a stale tab or a hand-crafted POST can't run a turn against a missing repo and fail silently — it fails fast with a clear reason. (How that 409 *renders* in the composer is Slice B's concern; here the composer is suppressed during setup anyway, so this guard is defense-in-depth for the raced/stale path.)
+This closes the first-message race at the source: even a stale tab or a hand-crafted POST can't run a turn against a missing repo and fail silently — it fails fast with a clear reason. And the message is **already user-visible today**: the global `htmx:responseError` handler in app.js ([app.js:88-104](../../../src/call_manager/web/static/app.js#L88-L104)) parses a JSON `{"detail": …}` body and shows it as an inline notice next to the composer, which is exactly what `HTTPException(409, detail=…)` produces. So the loud failure needs no Slice-B work; Slice B only improves the *richer* turn-failure UX (system chat rows, Cancel, reset-on-success).
 
 ## Data flow (happy path)
 
@@ -91,7 +92,7 @@ Create → `303 /workspaces/{id}` (phase=`setup`, job=`queued`) → main view le
 - **Viewer during setup:** informational card, no rubric link.
 - **Turn POST during setup:** `409` with a clear message (component E).
 - **Poll endpoint on a missing/soft-deleted/forbidden workspace:** 404 / 403 exactly as the main view.
-- **Race already resolved in another tab** (owner confirmed the rubric elsewhere): on the still-open setup page, the next poll returns the card for the now-`done` job — which the partial treats as terminal/non-polling. The owner reloads (or navigates) to get the composer; the poll never needs to materialize the composer itself.
+- **Race already resolved in another tab** (owner confirmed the rubric elsewhere): on the still-open setup page, the next poll returns the `done` card (terminal, non-polling, links back to the workspace — see the table). The poll never materializes the composer itself.
 
 ## Non-goals (other Theme-7 slices, explicitly deferred)
 
@@ -105,7 +106,13 @@ Following `tests/test_proposal_assist_*` / `tests/test_web_*` patterns (TestClie
 - **Card per status:** with the `WorkspaceSetupJob` set to each status, the rendered card matches the table in component B — `queued`/`running` include the `hx-trigger` poll attribute and no rubric link; `waiting_for_rubric_review` includes the `/rubric-review` link and **omits** the poll trigger; `failed` shows the `last_error` and omits the trigger.
 - **Poll endpoint:** `GET /workspaces/{id}/setup-status` returns the card partial for the current status; enforces owner-or-viewer (viewer gets the no-link variant); 404 on missing/soft-deleted.
 - **Owner vs viewer:** a viewer in the `waiting_for_rubric_review` state sees the status text but no rubric link.
-- **Turn guard:** `POST /workspaces/{id}/turns` while `current_phase='setup'` returns `409`; the same POST after advancing to `spec` proceeds (existing turn tests stay green).
+- **Turn guard:** `POST /workspaces/{id}/turns` while `current_phase='setup'` returns `409`; the same POST after advancing to `spec` proceeds.
+
+### Existing-test migration (required — the guard changes what a default workspace means)
+
+Existing proposal-assist tests build workspaces without setting `current_phase`, so they sit at the server-default `'setup'` — which until now behaved like a fully-ready workspace. With the guard + composer gating, **every turn-posting and composer-asserting test would 409 / lose its composer**. Affected: the shared `make_workspace` helper ([tests/proposal_assist/conftest.py:214](../../../tests/proposal_assist/conftest.py#L214)) and the direct `Workspace(...)` constructor sites in the turn-posting files (`test_web_workspaces_turns.py`, `test_kill_switch.py`, `test_global_cap.py`, `test_models_chat_summaries.py`, `test_b7_e2e.py`, `test_web_workspaces_disclosure_gate.py`, `test_web_workspaces_viewer_enforcement.py`, plus main-view assertions in the citations/references/files modules that use the helper).
+
+**Migration:** give `make_workspace` a `current_phase: str = "spec"` parameter-with-default (semantically honest — those tests simulate a post-setup workspace), and add `current_phase="spec"` to the direct constructor sites in turn-posting tests. `test_rubric_review_endpoint.py` keeps its own `setup`-phase workspaces — it exercises the setup→spec transition itself and needs no change. The new gate tests explicitly create `'setup'`-phase workspaces.
 - **Phase chip:** the header renders "Setting up" for `setup` and "Drafting" for `spec` (not the raw enum); an unknown phase falls back to its raw string.
 
 ## Files
@@ -114,6 +121,7 @@ Following `tests/test_proposal_assist_*` / `tests/test_web_*` patterns (TestClie
 - Create: `src/call_manager/web/templates/proposal_assist/partials/setup_status.html` (the status card + self-poll).
 - Modify: `src/call_manager/web/templates/proposal_assist/workspace_main.html` (composer-vs-card branch; humanized phase chip).
 - Modify/Add: `src/call_manager/web/static/app.css` if the card needs a rule (reuse existing `.callout`/`.banner` tokens where possible — prefer no new CSS).
-- Add tests: `tests/test_web_workspace_setup_gate.py` (or extend an existing proposal-assist web test module).
+- Add tests: `tests/proposal_assist/test_web_workspace_setup_gate.py` (the proposal-assist test tree, not the top-level one).
+- Modify tests: `tests/proposal_assist/conftest.py` (`make_workspace` gains `current_phase="spec"` default) + the direct `Workspace(...)` constructor sites in the turn-posting test files listed in the migration note.
 
 No migration.
