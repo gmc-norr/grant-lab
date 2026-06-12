@@ -36,7 +36,7 @@ def trigger_job_now(scheduler, job_id: str) -> bool:
     job = scheduler.get_job(job_id)
     if job is None:
         return False
-    job.modify(next_run_time=datetime.now(UTC))
+    job.modify(next_run_time=_dt.now(UTC))
     return True
 ```
 
@@ -48,7 +48,7 @@ The job runs once in APScheduler's background thread — reusing the exact tick 
 
 ### A. `trigger_job_now` helper (`scheduler.py`)
 
-The function above — a pure, unit-testable wrapper over the APScheduler job API. Imported by the admin routes. (`datetime`/`UTC` are already imported in `scheduler.py`.)
+The function above — a pure, unit-testable wrapper over the APScheduler job API. Imported by the admin routes. (`scheduler.py` imports `UTC` and `datetime as _dt` — [scheduler.py:4-5](../../../src/call_manager/scheduler.py#L4-L5) — hence `_dt.now(UTC)` in the snippet.)
 
 ### B. Lever routes (`web/routes/admin.py`)
 
@@ -69,12 +69,14 @@ All four are `POST`, gated by `require_admin` (existing dependency), and pass th
 
 ### D. Re-rank confirm + count preview (`admin.py` + `admin.html`)
 
-- `admin_index` computes `rerank_estimate = active_profiles_count × calls_in_last_90_days_count` — an **upper bound** (the partial-unique dedup means the real enqueue is ≤ this). The 90-day window mirrors `backfill_profile`'s window.
+- `admin_index` computes `rerank_estimate = active_profiles_count × recent_calls_count`, where `recent_calls_count` counts `Call.published_at >= now − BACKFILL_DAYS` days — **import `BACKFILL_DAYS` from `call_manager.ranking.backfill`** ([backfill.py:12](../../../src/call_manager/ranking/backfill.py#L12)) so the window can't drift, and filter on `published_at` (not `created_at`) to match the backfill's `WHERE c.published_at >= :cutoff` ([backfill.py:51](../../../src/call_manager/ranking/backfill.py#L51), which also excludes NULL `published_at`). It's an **upper bound**: the partial-unique dedup and the dead-letter suppression ([backfill.py:54-60](../../../src/call_manager/ranking/backfill.py#L54-L60)) mean the real enqueue is ≤ this.
 - The Re-rank button renders the estimate ("Enqueues up to ~N ranking jobs") and carries `data-confirm="This can enqueue up to N ranking jobs and take a while. Continue?"`, reusing the existing `form[data-confirm]` handler in `app.js` (no new JS; CSP-safe).
 
 ### E. Feedback banner (`admin.html`)
 
-The redirect carries `?ok=<key>` / `?err=<key>`. The template maps a **fixed set of keys to fixed messages** (never echoes the raw param — no XSS) and renders a dismissible banner: `.banner.banner-ok` (success, green — new style) or `.banner.banner-warn` (error, existing style). Unknown/absent key → no banner. Keys: `ok ∈ {fetch, digest, reenable, rerank}`, `err ∈ {fetch, digest_unconfigured, reenable}`.
+The redirect carries `?ok=<key>` / `?err=<key>`. The template maps a **fixed set of keys to fixed messages** (never echoes the raw param — no XSS) and renders a banner: `.banner.banner-ok` (success, green) or `.banner.banner-warn` (warning, amber). Unknown/absent key → no banner. Keys: `ok ∈ {fetch, digest, reenable, rerank}`, `err ∈ {fetch, digest_unconfigured, reenable}`.
+
+**Note:** no `.banner*` CSS rules exist today — the calibration warning's `banner banner-warn` classes ([admin.html:50](../../../src/call_manager/web/templates/admin.html#L50)) are unstyled markup. This slice adds the `.banner` base plus `.banner-ok`/`.banner-warn` variants to `app.css`, which gives the existing calibration banner real styling as a side effect.
 
 ## Data flow (example: fetch a stuck source)
 
@@ -98,8 +100,8 @@ Health visibility (Ollama up/down card; source `last_error`/streak/stale columns
 Following `tests/test_web_admin*.py` patterns (TestClient + `pg_session_factory`, an admin user via `require_admin`):
 
 - **`trigger_job_now` unit tests:** `scheduler=None → False`; a fake scheduler whose `get_job` returns `None → False`; a fake job → `modify` called with a `next_run_time` and returns `True`.
-- **Re-enable:** seed a `User` with `digest_disabled_at` set; `POST /admin/digest/reenable` (admin) → `303` to `/admin?ok=reenable`; DB shows `digest_disabled_at IS NULL`. Missing `user_id` → 404.
-- **Fetch:** inject a fake scheduler on `app.state.scheduler` (after startup); `POST /admin/sources/{slug}/fetch` → `303 ?ok=fetch` and the `ingest:{slug}` job was nudged; unknown slug → 404.
+- **Re-enable:** seed a `User` with `digest_disabled_at` set; `POST /admin/digest/reenable` (admin) → `303` to `/admin?ok=reenable`; DB shows `digest_disabled_at IS NULL`. A `user_id` that matches no user → 404 (a POST missing the field is FastAPI's 422 — don't assert 404 for that).
+- **Fetch:** inject a fake scheduler on `app.state.scheduler` inside the client context, and **restore the real one before the context exits** (try/finally) — lifespan shutdown calls `app.state.scheduler.shutdown(wait=True)` ([main.py:181](../../../src/call_manager/main.py#L181)), so a non-restored swap leaks a live scheduler and aggravates the suite's known APScheduler/testcontainer flakiness. `POST /admin/sources/{slug}/fetch` → `303 ?ok=fetch` and the `ingest:{slug}` job was nudged; unknown slug → 404.
 - **Send digest:** fake scheduler with a `digest:weekly` job → `303 ?ok=digest`; without it → `303 ?err=digest_unconfigured`.
 - **Admin-gated:** a non-admin user → 403 on every lever POST.
 - **Admin page rendering:** the disabled-users list shows a seeded disabled user's email + a Re-enable form; each source row has a Fetch form; the Re-rank button shows the estimate and a `data-confirm`; `?ok=fetch` renders the success banner and `?err=digest_unconfigured` the warning banner (and the rendered text is the fixed message, not the raw param).
@@ -109,7 +111,7 @@ Following `tests/test_web_admin*.py` patterns (TestClient + `pg_session_factory`
 - Modify: `src/call_manager/scheduler.py` (add `trigger_job_now`).
 - Modify: `src/call_manager/web/routes/admin.py` (4 lever routes; disabled-users list + rerank estimate in `admin_index`; redirect params).
 - Modify: `src/call_manager/web/templates/admin.html` (per-source Fetch forms; disabled-users list + Re-enable forms; Send-digest form; rerank estimate + `data-confirm`; the `?ok`/`?err` banner).
-- Modify: `src/call_manager/web/static/app.css` (add `.banner-ok`).
+- Modify: `src/call_manager/web/static/app.css` (add `.banner` base + `.banner-ok` + `.banner-warn` — none exist today; see component E).
 - Modify/Add tests: `tests/test_web_admin_*.py` (or a new `tests/test_web_admin_levers.py`) + a unit test for `trigger_job_now`.
 
 No migration.
