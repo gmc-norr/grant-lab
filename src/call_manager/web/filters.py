@@ -78,6 +78,25 @@ def note_category_heading(value: str | None) -> str:
     return mapping.get(value, value.replace("_", " ").title())
 
 
+def phase_label(value: str | None) -> str:
+    """Human-readable label for `Workspace.current_phase`. The stored values
+    are the lifecycle enum ('setup','spec','plan','draft','review'); the UI
+    chip should read as words, not a raw token.
+
+    Unknown values pass through unchanged so a future phase isn't swallowed
+    into a blank chip — it just looks slightly raw until added here.
+    """
+    if not value:
+        return "—"
+    return {
+        "setup": "Setting up",
+        "spec": "Drafting",
+        "plan": "Planning",
+        "draft": "Revising",
+        "review": "Review",
+    }.get(value, value)
+
+
 def model_label(value: str | None) -> str:
     """Pretty name for the LLM that produced a CallRanking. Stored value
     is the raw model ID (e.g. 'claude-sonnet-4-6', 'gemma4:e4b-it-q4_K_M');
