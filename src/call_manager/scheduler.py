@@ -617,3 +617,21 @@ def build_scheduler(
     if start:
         sched.start()
     return sched
+
+
+def trigger_job_now(scheduler: BackgroundScheduler | None, job_id: str) -> bool:
+    """Ask APScheduler to run the given job once, immediately, then resume its
+    normal schedule. Returns False if the scheduler or the job is absent (e.g.
+    the digest job when no email backend is configured).
+
+    The job runs in APScheduler's background thread, reusing the exact tick
+    closure with its already-wired clients. The jobs carry max_instances=1 +
+    coalesce=True, so a double-trigger collapses to one run.
+    """
+    if scheduler is None:
+        return False
+    job = scheduler.get_job(job_id)
+    if job is None:
+        return False
+    job.modify(next_run_time=_dt.now(UTC))
+    return True
