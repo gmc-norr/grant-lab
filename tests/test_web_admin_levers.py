@@ -136,7 +136,7 @@ def test_fetch_source_nudges_ingest_job(monkeypatch, pg_url, pg_session_factory)
         try:
             r = client.post("/admin/sources/vinnova/fetch", follow_redirects=False)
             assert r.status_code == 303
-            assert r.headers["location"] == "/admin?ok=fetch"
+            assert r.headers["location"] == "/admin?ok=fetch&src=vinnova"
             assert isinstance(job.next_run_time, datetime)
         finally:
             app.state.scheduler = real
@@ -161,7 +161,7 @@ def test_fetch_err_when_job_missing(monkeypatch, pg_url, pg_session_factory):
         try:
             r = client.post("/admin/sources/vinnova/fetch", follow_redirects=False)
             assert r.status_code == 303
-            assert r.headers["location"] == "/admin?err=fetch"
+            assert r.headers["location"] == "/admin?err=fetch&src=vinnova"
         finally:
             app.state.scheduler = real
 
@@ -255,6 +255,30 @@ def test_unknown_banner_key_renders_no_banner(monkeypatch, pg_url, pg_session_fa
     assert r.status_code == 200
     assert "banner-ok" not in r.text
     assert "alert(1)" not in r.text  # raw param never echoed
+
+
+@pytest.mark.parametrize("key", ["ok=fetch", "err=fetch"])
+def test_fetch_banner_names_the_source(monkeypatch, pg_url, pg_session_factory, key):
+    # The fetch banner names the source via a DB lookup of the `src` slug —
+    # the rendered text is the trusted Source.name, never the param itself.
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get(f"/admin?{key}&src=vinnova")
+    assert r.status_code == 200
+    assert '<span class="muted">(Vinnova)</span>' in r.text
+
+
+def test_fetch_banner_never_echoes_unknown_src(monkeypatch, pg_url, pg_session_factory):
+    # A tampered `src` matches no source row: the base message still renders,
+    # the suffix is absent, and the raw value never appears in the page.
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin?ok=fetch&src=<script>alert(1)</script>")
+    assert r.status_code == 200
+    assert "Fetch triggered" in r.text
+    assert "alert(1)" not in r.text  # raw src never echoed
 
 
 def test_source_rows_have_fetch_forms(monkeypatch, pg_url, pg_session_factory):

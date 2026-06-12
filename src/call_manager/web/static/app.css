@@ -726,6 +726,12 @@ input, select, textarea { font-size: 0.95rem; font-weight: 400; }
 article dl { margin-bottom: 0; }
 article table { margin-bottom: 0.25rem; }
 
+/* Row-action buttons in admin tables (e.g. per-source Fetch now): hug the
+   label instead of Pico's default full-width submit, and don't inflate the
+   row with form spacing. */
+article table td form { margin: 0; }
+article table td form button { width: auto; }
+
 .danger-zone {
   border: 1px solid var(--cm-bad-border);
   background: #fffafa;

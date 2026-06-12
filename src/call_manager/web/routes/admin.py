@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -318,7 +319,10 @@ def admin_fetch_source(
         raise HTTPException(status_code=404, detail="unknown source")
     ok = trigger_job_now(_scheduler(request), f"ingest:{slug}")
     key = "ok=fetch" if ok else "err=fetch"
-    return RedirectResponse(url=f"/admin?{key}", status_code=303)
+    # `src` lets the banner name the source. Only DB-validated slugs reach
+    # this line (404 above), and the template re-validates by lookup — the
+    # raw param is never echoed.
+    return RedirectResponse(url=f"/admin?{key}&src={quote(slug)}", status_code=303)
 
 
 @router.post("/admin/digest/send")
