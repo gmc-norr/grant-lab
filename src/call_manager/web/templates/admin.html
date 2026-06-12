@@ -13,6 +13,11 @@
 
 {% set _ok = request.query_params.get('ok') %}
 {% set _err = request.query_params.get('err') %}
+{# `src` names the fetched source in the banner. Like ok/err it is only a
+   lookup key — the rendered text comes from the server-side `sources` rows,
+   so an unknown/tampered value matches nothing and is never echoed. #}
+{% set _src = request.query_params.get('src') %}
+{% set _src_name = (sources | selectattr('slug', 'equalto', _src) | map(attribute='name') | first) if _src else none %}
 {% set _ok_msgs = {
   'fetch': 'Fetch triggered — the source will refresh shortly.',
   'digest': 'Weekly digest triggered — it will send shortly.',
@@ -24,9 +29,9 @@
   'digest_unconfigured': "Digest isn't configured (no email backend), so it can't be sent."
 } %}
 {% if _ok and _ok in _ok_msgs %}
-<div class="banner banner-ok" role="status">{{ _ok_msgs[_ok] }}</div>
+<div class="banner banner-ok" role="status">{{ _ok_msgs[_ok] }}{% if _ok == 'fetch' and _src_name %} <span class="muted">({{ _src_name }})</span>{% endif %}</div>
 {% elif _err and _err in _err_msgs %}
-<div class="banner banner-warn" role="alert">{{ _err_msgs[_err] }}</div>
+<div class="banner banner-warn" role="alert">{{ _err_msgs[_err] }}{% if _err == 'fetch' and _src_name %} <span class="muted">({{ _src_name }})</span>{% endif %}</div>
 {% endif %}
 
 <article>
