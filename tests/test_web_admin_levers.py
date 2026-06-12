@@ -97,3 +97,114 @@ def test_reenable_requires_admin(monkeypatch, pg_url, pg_session_factory):
     with client:
         r = client.post("/admin/digest/reenable", data={"user_id": "1"})
     assert r.status_code == 403
+
+
+class _FakeJob:
+    def __init__(self) -> None:
+        self.next_run_time = "UNSET"
+
+    def modify(self, **kwargs) -> None:
+        self.next_run_time = kwargs["next_run_time"]
+
+
+class _FakeScheduler:
+    """Minimal stand-in for the APScheduler instance on app.state.scheduler.
+
+    A no-op shutdown() so lifespan teardown is harmless even if a test forgets
+    to restore — but tests DO restore (swap-then-restore) so the real scheduler
+    is the one that actually shuts down."""
+
+    def __init__(self, jobs: dict) -> None:
+        self._jobs = dict(jobs)
+
+    def get_job(self, job_id: str):
+        return self._jobs.get(job_id)
+
+    def shutdown(self, wait: bool = True) -> None:
+        return None
+
+
+def test_fetch_source_nudges_ingest_job(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        real = app.state.scheduler
+        job = _FakeJob()
+        app.state.scheduler = _FakeScheduler({"ingest:vinnova": job})
+        try:
+            r = client.post("/admin/sources/vinnova/fetch", follow_redirects=False)
+            assert r.status_code == 303
+            assert r.headers["location"] == "/admin?ok=fetch"
+            assert isinstance(job.next_run_time, datetime)
+        finally:
+            app.state.scheduler = real
+
+
+def test_fetch_unknown_source_404(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.post("/admin/sources/does-not-exist/fetch", follow_redirects=False)
+    assert r.status_code == 404
+
+
+def test_fetch_err_when_job_missing(monkeypatch, pg_url, pg_session_factory):
+    # Valid source row, but no ingest job in the (fake) scheduler — e.g. a
+    # stale DB row whose source was removed from the registry.
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        real = app.state.scheduler
+        app.state.scheduler = _FakeScheduler({})
+        try:
+            r = client.post("/admin/sources/vinnova/fetch", follow_redirects=False)
+            assert r.status_code == 303
+            assert r.headers["location"] == "/admin?err=fetch"
+        finally:
+            app.state.scheduler = real
+
+
+def test_send_digest_nudges_weekly_job(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        real = app.state.scheduler
+        job = _FakeJob()
+        app.state.scheduler = _FakeScheduler({"digest:weekly": job})
+        try:
+            r = client.post("/admin/digest/send", follow_redirects=False)
+            assert r.status_code == 303
+            assert r.headers["location"] == "/admin?ok=digest"
+            assert isinstance(job.next_run_time, datetime)
+        finally:
+            app.state.scheduler = real
+
+
+def test_send_digest_unconfigured_err(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        real = app.state.scheduler
+        app.state.scheduler = _FakeScheduler({})  # no digest:weekly job
+        try:
+            r = client.post("/admin/digest/send", follow_redirects=False)
+            assert r.status_code == 303
+            assert r.headers["location"] == "/admin?err=digest_unconfigured"
+        finally:
+            app.state.scheduler = real
+
+
+def test_fetch_requires_admin(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="nonadmin2@ki.se", is_admin=False)
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        uid = u.id
+    signer: SessionSigner = app.state.session_signer
+    client = TestClient(app)
+    client.cookies.set("session", signer.make(user_id=uid))
+    with client:
+        r = client.post("/admin/sources/vinnova/fetch")
+    assert r.status_code == 403

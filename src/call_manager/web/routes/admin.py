@@ -22,6 +22,7 @@ from call_manager.db.models import (
 )
 from call_manager.digest.send import week_start as _week_start
 from call_manager.ranking.backfill import backfill_profile
+from call_manager.scheduler import trigger_job_now
 
 router = APIRouter()
 
@@ -274,3 +275,38 @@ def admin_reenable_user(
         target.digest_disabled_at = None
         session.commit()
     return RedirectResponse(url="/admin?ok=reenable", status_code=303)
+
+
+def _scheduler(request: Request):
+    """The app's APScheduler, or None if absent (e.g. before lifespan)."""
+    return getattr(request.app.state, "scheduler", None)
+
+
+@router.post("/admin/sources/{slug}/fetch")
+def admin_fetch_source(
+    slug: str,
+    request: Request,
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    """Trigger the per-source ingest job (id=ingest:{slug}) to run now."""
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        src = session.execute(select(Source).where(Source.slug == slug)).scalar_one_or_none()
+    if src is None:
+        raise HTTPException(status_code=404, detail="unknown source")
+    ok = trigger_job_now(_scheduler(request), f"ingest:{slug}")
+    key = "ok=fetch" if ok else "err=fetch"
+    return RedirectResponse(url=f"/admin?{key}", status_code=303)
+
+
+@router.post("/admin/digest/send")
+def admin_send_digest(
+    request: Request,
+    user: User = Depends(require_admin),  # noqa: B008
+):
+    """Trigger the weekly digest job to run now. The job is absent when no
+    email backend is configured; run_digest is week-idempotent, so a manual
+    run during the same week safely de-dupes via the DigestRun claim."""
+    ok = trigger_job_now(_scheduler(request), "digest:weekly")
+    key = "ok=digest" if ok else "err=digest_unconfigured"
+    return RedirectResponse(url=f"/admin?{key}", status_code=303)
