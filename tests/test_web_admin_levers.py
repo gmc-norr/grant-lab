@@ -259,3 +259,55 @@ def test_source_rows_have_fetch_forms(monkeypatch, pg_url, pg_session_factory):
     # vinnova is a migration-seeded source; its row carries a fetch form.
     assert 'action="/admin/sources/vinnova/fetch"' in r.text
     assert "Fetch now" in r.text
+
+
+def test_digest_panel_lists_disabled_user_with_reenable_form(
+    monkeypatch, pg_url, pg_session_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        s.add(User(email="bounced2@ki.se", digest_disabled_at=datetime.now(UTC)))
+        s.commit()
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    # The disabled user's email is listed (not just a count)…
+    assert "bounced2@ki.se" in r.text
+    # …with a re-enable form targeting the lever route.
+    assert 'action="/admin/digest/reenable"' in r.text
+    assert "Re-enable" in r.text
+    # And the send-digest lever is present.
+    assert 'action="/admin/digest/send"' in r.text
+    assert "Send digest now" in r.text
+
+
+def test_digest_panel_shows_none_when_no_disabled_users(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    assert "No disabled users." in r.text
+
+
+def test_disabled_users_listed_most_recent_first(monkeypatch, pg_url, pg_session_factory):
+    from datetime import timedelta
+
+    app = _setup(monkeypatch, pg_url)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        # older bounce
+        s.add(User(email="older@ki.se", digest_disabled_at=now - timedelta(days=3)))
+        # newer bounce
+        s.add(User(email="newer@ki.se", digest_disabled_at=now - timedelta(hours=1)))
+        s.commit()
+    client = _admin_client(app, pg_session_factory)
+    with client:
+        r = client.get("/admin")
+    assert r.status_code == 200
+    # Both listed…
+    assert "older@ki.se" in r.text
+    assert "newer@ki.se" in r.text
+    # …and the most-recently-disabled user comes first (desc order).
+    assert r.text.index("newer@ki.se") < r.text.index("older@ki.se")

@@ -101,6 +101,27 @@
     <dt>Runs this week</dt><dd>{{ digest_runs_this_week }}</dd>
     <dt>Disabled users (3+ bounces)</dt><dd>{{ digest_disabled_users }}</dd>
   </dl>
+
+  {% if digest_disabled_user_rows %}
+  <ul class="disabled-users">
+    {% for du in digest_disabled_user_rows %}
+    <li>
+      {{ du.email }}
+      <span class="muted">disabled {{ du.digest_disabled_at | display_dt }}</span>
+      <form method="post" action="/admin/digest/reenable">
+        <input type="hidden" name="user_id" value="{{ du.id }}">
+        <button type="submit" class="secondary outline">Re-enable</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No disabled users.</p>
+  {% endif %}
+
+  <form method="post" action="/admin/digest/send">
+    <button type="submit" class="secondary">Send digest now</button>
+  </form>
 </article>
 
 <article>

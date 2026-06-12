@@ -40,10 +40,19 @@ def _digest_panel_context(session) -> dict:
     disabled_users = session.execute(
         select(func.count(User.id)).where(User.digest_disabled_at.is_not(None))
     ).scalar_one()
+    disabled_rows = session.execute(
+        select(User.id, User.email, User.digest_disabled_at)
+        .where(User.digest_disabled_at.is_not(None))
+        .order_by(User.digest_disabled_at.desc())
+    ).all()
     return {
         "digest_last_sent_at": last_run.sent_at if last_run else None,
         "digest_runs_this_week": runs_this_week,
         "digest_disabled_users": disabled_users,
+        "digest_disabled_user_rows": [
+            {"id": r.id, "email": r.email, "digest_disabled_at": r.digest_disabled_at}
+            for r in disabled_rows
+        ],
     }
 
 
