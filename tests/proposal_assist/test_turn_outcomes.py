@@ -92,22 +92,27 @@ def test_records_failed_outcome_row_event_and_status(pg_session_factory):
         )
         s.commit()
         assert ok is True
-        j = s.get(TurnJob, job.id)
+        jid, utid, wsid, oid = job.id, user_turn.id, ws.id, owner.id
+
+    with pg_session_factory() as s:
+        j = s.get(TurnJob, jid)
         assert j.status == "failed"
         assert j.completed_at is not None
         row = s.scalar(
-            select(ChatTurn).where(ChatTurn.role == "system", ChatTurn.workspace_id == ws.id)
+            select(ChatTurn).where(ChatTurn.role == "system", ChatTurn.workspace_id == wsid)
         )
         assert row.content["type"] == "turn_outcome"
         assert row.content["outcome"] == "failed"
-        assert row.content["text"] == _FINISH_MSG
-        assert row.content["turn_job_id"] == str(job.id)
-        assert row.content["user_turn_id"] == str(user_turn.id)
+        assert row.content["text"] == (
+            "The drafting assistant couldn't finish this turn. Please try again."
+        )
+        assert row.content["turn_job_id"] == str(jid)
+        assert row.content["user_turn_id"] == str(utid)
         assert "boom" not in row.content["text"]
         ev = s.scalar(select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_failed"))
         assert ev.payload["error"] == "sdk_turn_error: boom"
-        assert ev.actor_id == owner.id
-        assert s.get(ChatTurn, user_turn.id).tokens_in is None  # pre-count cleared
+        assert ev.actor_id == oid
+        assert s.get(ChatTurn, utid).tokens_in is None
 
 
 def test_expected_status_mismatch_returns_false_and_writes_nothing(pg_session_factory):
@@ -163,29 +168,22 @@ def test_emit_chat_false_writes_event_but_no_row(pg_session_factory):
         ws = make_workspace(s, owner=owner)
         user_turn = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "hi"})
         job = TurnJob(
-            workspace_id=ws.id,
-            user_turn_id=user_turn.id,
-            submitted_by_user_id=owner.id,
-            status="queued",
+            workspace_id=ws.id, user_turn_id=user_turn.id,
+            submitted_by_user_id=owner.id, status="queued",
         )
         s.add(job)
         s.commit()
         ok = record_terminal_outcome(
-            s,
-            turn_job_id=job.id,
-            workspace_id=ws.id,
-            outcome="cancelled",
-            expected_status="queued",
-            raw_error="workspace soft-deleted",
-            emit_chat=False,
+            s, turn_job_id=job.id, workspace_id=ws.id, outcome="cancelled",
+            expected_status="queued", raw_error="workspace soft-deleted", emit_chat=False,
         )
         s.commit()
         assert ok is True
-        assert s.get(TurnJob, job.id).status == "cancelled"
+        jid = job.id
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, jid).status == "cancelled"
         assert s.scalar(select(ChatTurn).where(ChatTurn.role == "system")) is None
-        assert (
-            s.scalar(
-                select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_cancelled")
-            )
-            is not None
-        )
+        assert s.scalar(
+            select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_cancelled")
+        ) is not None

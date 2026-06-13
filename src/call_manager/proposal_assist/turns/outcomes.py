@@ -23,10 +23,9 @@ def outcome_message(outcome: str, raw_error: str | None) -> str:
     Args:
         outcome: ``"cancelled"`` or ``"failed"``; any other value is treated
             as failed.
-        raw_error: internal diagnostics string — NEVER echoed into the returned
+        raw_error: internal diagnostics string — never echoed into the returned
             message (it can contain stack/path diagnostics).
 
-    NEVER echoes ``raw_error`` (it can contain stack/path diagnostics).
     Phrased neutrally: the same row is shown to viewers who cannot act,
     and 'orphaned' can follow either a crash or a redeploy.
     """
@@ -57,7 +56,6 @@ def record_terminal_outcome(
     already terminal / in the wrong workspace (no double-finalize). The caller
     commits.
     """
-    terminal = "failed" if outcome == "failed" else "cancelled"
     # Workspace-scoped conditional flip + atomic read-back of the authoritative
     # ids. Test the RETURNING result, NOT rowcount (psycopg3 reports rowcount
     # unreliably for UPDATE ... RETURNING).
@@ -68,19 +66,12 @@ def record_terminal_outcome(
             TurnJob.status == expected_status,
             TurnJob.workspace_id == workspace_id,
         )
-        .values(status=terminal, error=raw_error, completed_at=datetime.now(UTC))
+        .values(status=outcome, error=raw_error, completed_at=datetime.now(UTC))
         .returning(TurnJob.user_turn_id, TurnJob.submitted_by_user_id)
     ).first()
     if row is None:
         return False
     user_turn_id, submitted_by_user_id = row
-    # Expire the TurnJob from the identity map so that any subsequent
-    # session.get(TurnJob, turn_job_id) re-fetches from the DB rather than
-    # returning the stale pre-UPDATE snapshot (core UPDATE bypasses the ORM
-    # identity map; expire_on_commit=False means commit won't do it for us).
-    job_instance = session.identity_map.get((TurnJob, (turn_job_id,), None))
-    if job_instance is not None:
-        session.expire(job_instance)
     # Clear the submit-time tokens_in pre-count on the user-turn row so a
     # terminal turn doesn't keep burning daily-cap budget for input it never
     # actually consumed (mirrors the finalize/reaper behaviour).
