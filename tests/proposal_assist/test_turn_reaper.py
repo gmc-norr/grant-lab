@@ -90,3 +90,44 @@ def test_reaper_respects_custom_ttl(pg_session_factory):
     with pg_session_factory() as s:
         job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
         assert job.status == "failed"
+
+
+def test_reaper_writes_outcome_row_and_event(pg_session_factory):
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+    from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
+
+    old = datetime.now(UTC) - timedelta(seconds=DEFAULT_REAP_TTL_SECONDS + 60)
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        ut = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "hi"}, tokens_in=99
+        )
+        s.add(
+            TurnJob(
+                workspace_id=ws.id,
+                user_turn_id=ut.id,
+                submitted_by_user_id=owner.id,
+                status="running",
+                started_at=old,
+            )
+        )
+        s.commit()
+        wsid, utid = ws.id, ut.id
+
+    assert reap_stuck_turns(session_factory=pg_session_factory) == 1
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
+        assert job.status == "failed"
+        row = s.scalar(
+            select(ChatTurn).where(ChatTurn.role == "system", ChatTurn.workspace_id == wsid)
+        )
+        assert row.content["text"] == "This turn was stopped after running too long."
+        assert (
+            s.scalar(select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_failed"))
+            is not None
+        )
+        assert s.get(ChatTurn, utid).tokens_in is None
