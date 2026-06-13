@@ -34,6 +34,8 @@
     <p><em>(tool call: {{ c.get("name", "?") }})</em></p>
   {%- elif c is mapping and c.get("type") == "tool_result" -%}
     <p><em>(tool result{% if c.get("is_error") %} — error{% endif %})</em></p>
+  {%- elif c is mapping and c.get("type") == "turn_outcome" -%}
+    <p class="turn-outcome">{{ c.get("text", "") }}</p>
   {%- elif c is sequence -%}
     {%- for b in c -%}
       {%- if b is mapping and b.get("type") == "text" -%}
