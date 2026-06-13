@@ -30,7 +30,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
@@ -1299,15 +1299,27 @@ def soft_delete(
         session=session,
     )
     ws.soft_deleted_at = datetime.now(UTC)
-    # Cancel any QUEUED turns for this workspace so a deletion-race turn can't
-    # be dispatched and start spending tokens / editing the repo. Running turns
-    # are left to finish (bounded by turn_max_seconds + the reaper); the drain
-    # query also excludes soft-deleted workspaces, so no NEW turn is dispatched.
-    session.execute(
-        update(TurnJob)
-        .where(TurnJob.workspace_id == workspace_id, TurnJob.status == "queued")
-        .values(status="failed", error="workspace soft-deleted", completed_at=datetime.now(UTC))
-    )
+    # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
+    # through the helper for audit parity (closes each cloud_turn_sent chain),
+    # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,
+    # so a viewer-safe row would be dead-on-arrival. 'cancelled' (owner-
+    # initiated, never started), not 'failed'.
+    queued = session.execute(
+        select(TurnJob.id).where(
+            TurnJob.workspace_id == workspace_id,
+            TurnJob.status == "queued",
+        )
+    ).all()
+    for row in queued:
+        record_terminal_outcome(
+            session,
+            turn_job_id=row.id,
+            workspace_id=workspace_id,
+            outcome="cancelled",
+            expected_status="queued",
+            raw_error="workspace soft-deleted",
+            emit_chat=False,
+        )
     session.commit()
     # B7: scrub attachment bytes from disk. DB rows remain (compliance —
     # audit trail preserved); only the bytes are removed. Errors here
