@@ -138,6 +138,204 @@ async def test_sse_poll_loop_handles_deleted_turn_job(
     assert "event: done" in full
 
 
+@pytest.mark.asyncio
+async def test_generator_does_not_lose_row_finalized_mid_poll(pg_session_factory, current_user):
+    """Bug-2 REGRESSION (this fails on the old rows-first order, passes on the
+    terminal-read-first order). We deterministically commit the finalize as a
+    ONE-SHOT side effect of the poll's first ChatTurn row query — i.e. AFTER that
+    poll's row snapshot. Old order: row query (empty) -> finalize commits ->
+    status read sees terminal -> emits 'done' WITHOUT the outcome row -> lost.
+    New order: status read (still running) -> row query (empty) -> finalize
+    commits -> no 'done' this poll -> next poll delivers the row before 'done'."""
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from call_manager.proposal_assist.web.workspaces import _stream_turn_generator
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="running", queued_at=datetime.now(UTC), started_at=datetime.now(UTC),
+        )
+        s.add(job)
+        s.commit()
+        wsid, jid = ws.id, job.id
+
+    fired = {"done": False}
+
+    def _finalize_once():
+        if fired["done"]:
+            return
+        fired["done"] = True
+        with pg_session_factory() as s2:
+            s2.add(ChatTurn(
+                workspace_id=wsid, role="system",
+                content={"type": "turn_outcome", "outcome": "failed", "text": "FAILMARKER"},
+            ))
+            j = s2.get(TurnJob, jid)
+            j.status = "failed"
+            j.completed_at = datetime.now(UTC)
+            s2.commit()
+
+    class _Sess:
+        """Delegates to a real session; the FIRST scalars() call (the poll's
+        ChatTurn row query) returns its rows, THEN commits the finalize — so the
+        finalize lands just after this poll's row snapshot."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def scalars(self, *a, **k):
+            result = self._inner.scalars(*a, **k)
+            if not fired["done"]:
+                rows = list(result)
+                _finalize_once()
+                return rows
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._inner.__exit__(*a)
+
+    def _factory():
+        return _Sess(pg_session_factory())
+
+    events = []
+    async for chunk in _stream_turn_generator(
+        session_factory=_factory, workspace_id=wsid, turn_job_id=jid, poll_seconds=0.05,
+    ):
+        events.append(chunk)
+        if len(events) > 40:
+            pytest.fail("stream did not terminate")
+    full = "".join(events)
+    assert "FAILMARKER" in full  # FAILS on the old rows-first order (row lost behind done)
+    assert full.index("FAILMARKER") < full.index("event: done")
+
+
+@pytest.mark.asyncio
+async def test_generator_since_position_skips_rows_at_or_below(pg_session_factory, current_user):
+    """A reload connector passes since_position=P so it does not re-yield
+    rows already on the page (position <= P)."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from call_manager.proposal_assist.web.workspaces import _stream_turn_generator
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="completed", queued_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+        )
+        s.add(job)
+        r1 = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "FIRST"})
+        r2 = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "SECOND"})
+        s.commit()
+        wsid, jid, r1id, r2id = ws.id, job.id, r1.id, r2.id
+
+    # Read server-assigned positions in a fresh session.
+    with pg_session_factory() as s:
+        p1 = s.scalar(select(ChatTurn.position).where(ChatTurn.id == r1id))
+        p2 = s.scalar(select(ChatTurn.position).where(ChatTurn.id == r2id))
+    assert p1 < p2
+
+    events = []
+    async for chunk in _stream_turn_generator(
+        session_factory=pg_session_factory, workspace_id=wsid, turn_job_id=jid,
+        since_position=p1, poll_seconds=0.05,
+    ):
+        events.append(chunk)
+        if len(events) > 20:
+            pytest.fail("stream did not terminate")
+    full = "".join(events)
+    assert "SECOND" in full
+    assert "FIRST" not in full
+
+
+def test_stream_route_since_skips_already_rendered_rows(
+    client_authed_owner, pg_session_factory, current_user
+):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="completed", queued_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+        )
+        s.add(job)
+        r1 = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "FIRST"})
+        make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "SECOND"})
+        s.commit()
+        wsid, jid, r1id = ws.id, job.id, r1.id
+
+    with pg_session_factory() as s:
+        p1 = s.scalar(select(ChatTurn.position).where(ChatTurn.id == r1id))
+
+    # Completed job -> the generator does one poll then 'done', so .get() reads
+    # the whole finite stream body.
+    resp = client_authed_owner.get(f"/workspaces/{wsid}/turns/{jid}/stream?since={p1}")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "SECOND" in body
+    assert "FIRST" not in body  # row at position p1 was seeded past
+    assert "event: done" in body
+
+
+def test_render_chat_turn_html_emits_stable_id():
+    """A1/J: the .chat-turn div carries id='chat-turn-{turn.id}' so the
+    client dedup can match the same row across the echo + SSE + history
+    render paths. A turn with no id (never persisted) emits no id attr."""
+    import uuid
+
+    from call_manager.db.models import ChatTurn
+    from call_manager.proposal_assist.web.workspaces import _render_chat_turn_html
+
+    tid = uuid.uuid4()
+    turn = ChatTurn(
+        id=tid,
+        workspace_id=uuid.uuid4(),
+        role="user",
+        content={"type": "text", "text": "hi"},
+        position=1,
+    )
+    snippet = _render_chat_turn_html(turn)
+    assert f'id="chat-turn-{tid}"' in snippet
+
+    idless = ChatTurn(
+        workspace_id=uuid.uuid4(),
+        role="user",
+        content={"type": "text", "text": "hi"},
+        position=1,
+    )
+    assert "chat-turn-None" not in _render_chat_turn_html(idless)
+
+
 def test_render_chat_turn_html_escapes_text_content():
     """H2 regression: text content with HTML tags is escaped."""
     import uuid

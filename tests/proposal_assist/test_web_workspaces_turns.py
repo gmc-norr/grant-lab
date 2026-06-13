@@ -56,8 +56,9 @@ def test_post_turn_response_includes_user_turn_and_sse_connector(
     pg_session_factory,
     current_user,
 ):
-    """H1 regression: response body contains both the rendered user turn
-    AND the SSE-connector div (both appended to #chat-history)."""
+    """H1: response body contains both the rendered user turn AND the SSE
+    connector div (both appended to #chat-history). A2: the connector uses a
+    real `done` delete-child, not the no-op sse-close attribute."""
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
@@ -71,14 +72,77 @@ def test_post_turn_response_includes_user_turn_and_sse_connector(
     )
     assert response.status_code in (200, 201)
     body = response.content.decode()
-    # User turn rendered.
     assert "Hello agent" in body
     assert "chat-turn" in body
-    # SSE connector div present.
     assert "sse-connect=" in body
     assert "/turns/" in body and "/stream" in body
-    assert "hx-ext='sse'" in body or 'hx-ext="sse"' in body
-    assert "sse-close=" in body  # closes on `done` event
+    assert 'hx-ext="sse"' in body
+    # A2: real cleanup via a done delete-child; the no-op sse-close is gone.
+    assert 'sse-swap="done"' in body
+    assert 'hx-swap="delete"' in body
+    assert "sse-close=" not in body
+
+
+def test_post_turn_echo_carries_stable_chat_turn_id(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """A2: the echo renders the PERSISTED user turn (real id), so the client
+    dedup can collapse it against the same row arriving via another live
+    connector."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/turns",
+        data={"content": "Hello agent"},
+    )
+    assert response.status_code in (200, 201)
+    body = response.content.decode()
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
+        user_turn_id = job.user_turn_id
+        # user_turn_id is a real persisted row (nullable FK, but set here).
+        assert s.get(ChatTurn, user_turn_id) is not None
+
+    assert f'id="chat-turn-{user_turn_id}"' in body
+
+
+def test_post_turn_connector_shows_cancel_for_owner(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """The owner who submits a queued turn gets a Cancel control on the
+    connector, targeting its own #cancel-status span (not #chat-history)."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import TurnJob
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/turns",
+        data={"content": "Hello agent"},
+    )
+    body = response.content.decode()
+    with pg_session_factory() as s:
+        jid = s.scalar(select(TurnJob.id).where(TurnJob.workspace_id == wsid))
+    assert f'id="cancel-status-{jid}"' in body
+    assert f"/turns/{jid}/cancel" in body
 
 
 def test_post_turn_escapes_html_in_user_content(
@@ -904,3 +968,145 @@ def test_workspace_main_context_includes_workspace_references(
     assert f'value="{done_id}"' in body
     # The pending ref's id should NOT appear as a picker value (filtered server-side).
     assert f'value="{pending_id}"' not in body
+
+
+def test_reload_renders_connector_for_active_running_job(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """Mid-turn reload: get_workspace_main renders a connector for the active
+    job, seeded at the last rendered chat position. A running job shows the
+    working indicator but no Cancel."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="running", queued_at=datetime.now(UTC), started_at=datetime.now(UTC),
+        )
+        s.add(job)
+        make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "partial"})
+        s.commit()
+        wsid, jid = ws.id, job.id
+        max_pos = s.scalar(
+            select(ChatTurn.position)
+            .where(ChatTurn.workspace_id == wsid)
+            .order_by(ChatTurn.position.desc())
+        )
+
+    body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
+    assert f'id="sse-mount-{jid}"' in body
+    # The connector seed reflects the FULL rendered history (necessary, not
+    # sufficient, for the ordering guarantee — see the note below the test).
+    assert f"?since={max_pos}" in body
+    assert "Working" in body
+    # Running job: no Cancel control.
+    assert f"/turns/{jid}/cancel" not in body
+
+
+def test_reload_connector_for_queued_job_shows_cancel(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="queued", queued_at=datetime.now(UTC),
+        )
+        s.add(job)
+        s.commit()
+        wsid, jid = ws.id, job.id
+
+    body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
+    assert f'id="sse-mount-{jid}"' in body
+    assert f"/turns/{jid}/cancel" in body
+
+
+def test_reload_no_connector_when_no_active_job(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        s.commit()
+        wsid = ws.id
+
+    body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
+    assert "sse-mount-" not in body
+    assert 'data-workspace-id' in body
+
+
+def test_reload_connector_no_cancel_for_viewer(
+    client_authed_user,
+    pg_session_factory,
+    current_user,
+):
+    """A viewer may watch the connector but never gets a Cancel control."""
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import ChatTurn, TurnJob, WorkspaceViewer
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="owner2@ki.se")
+        ws = make_workspace(s, owner=owner, ack_disclosure=True)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=owner.id,
+            status="queued", queued_at=datetime.now(UTC),
+        )
+        s.add(job)
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
+        s.commit()
+        wsid, jid = ws.id, job.id
+
+    body = client_authed_user.get(f"/workspaces/{wsid}").content.decode()
+    assert f'id="sse-mount-{jid}"' in body  # viewer sees the connector
+    assert f"/turns/{jid}/cancel" not in body  # but no Cancel
+
+
+def test_history_loop_renders_stable_chat_turn_id(
+    client_authed_owner, pg_session_factory, current_user
+):
+    """The third dedup render path: the full-page history loop must emit the
+    same id="chat-turn-{id}" the echo + SSE paths do, so client dedup can match
+    a row across all three. Completes the three-path stable-id contract."""
+    from call_manager.db.models import ChatTurn
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        turn = ChatTurn(
+            workspace_id=ws.id, role="user", content={"type": "text", "text": "history row"}
+        )
+        s.add(turn)
+        s.commit()
+        wsid, tid = ws.id, turn.id
+
+    body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
+    assert f'id="chat-turn-{tid}"' in body

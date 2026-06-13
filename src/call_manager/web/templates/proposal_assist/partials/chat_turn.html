@@ -23,7 +23,7 @@
        a defensive "unknown" placeholder so a stale or orphan id never
        crashes the chat view.
 #}
-<div class="chat-turn" data-role="{{ turn.role }}">
+<div class="chat-turn" data-role="{{ turn.role }}"{% if turn.id %} id="chat-turn-{{ turn.id }}"{% endif %}>
   <strong>{{ turn.role }}</strong>
   {%- set c = turn.content -%}
   {%- if c is string -%}

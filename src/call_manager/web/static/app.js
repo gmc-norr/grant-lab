@@ -55,31 +55,102 @@
   });
 })();
 
-// Best-effort §1 turn-lock hint: disable section Edit buttons while a
-// drafting turn is in flight. Server-side 409s remain the authority.
-// On page load: no server plumbing exposes a pending-turn hint in this
-// template context, so load-time disabling is skipped intentionally.
-document.body.addEventListener("htmx:beforeRequest", function (evt) {
-  var elt = evt.detail.elt;
-  if (elt && elt.id === "composer") {
-    document.querySelectorAll(".section-edit-btn").forEach(function (b) {
-      b.disabled = true;
-    });
-  }
-});
-// Re-enable when the SSE connector div is cleaned up (sse-close='done'
-// causes the htmx-sse extension to remove the element, triggering this
-// event — that is the reliable signal that the turn finished).
-document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
-  var id = evt.detail.elt && evt.detail.elt.id;
-  if (id && id.startsWith("sse-mount-")) {
-    reenable();
-  }
-});
+// Section-edit lock (best-effort; server 409s remain authoritative). Editing is
+// disabled while a turn is in flight, and re-enabled only when BOTH (a) no SSE
+// connector remains AND (b) no composer request is still awaiting its response.
+// Tracking composer requests is what keeps a REJECTED submit (409/429/503/400 —
+// which creates no connector) from leaving editing disabled forever, and stops
+// an old connector's deferred cleanup from re-enabling while a new submit is
+// mid-flight (the connector for it has not mounted yet).
+var pendingComposerRequests = 0;
+
 function reenable() {
   document.querySelectorAll(".section-edit-btn").forEach(function (b) {
     b.disabled = false;
   });
+}
+function disableSectionEdits() {
+  document.querySelectorAll(".section-edit-btn").forEach(function (b) {
+    b.disabled = true;
+  });
+}
+function maybeReenable() {
+  // Deferred to a macrotask so DOM mutations (connector add on swap, remove on
+  // cleanup) have settled before we read them.
+  setTimeout(function () {
+    if (pendingComposerRequests === 0 && !document.querySelector('[id^="sse-mount-"]')) {
+      reenable();
+    }
+  }, 0);
+}
+
+document.body.addEventListener("htmx:beforeRequest", function (evt) {
+  if (evt.detail.elt && evt.detail.elt.id === "composer") {
+    pendingComposerRequests++;
+    disableSectionEdits();
+  }
+});
+document.body.addEventListener("htmx:afterRequest", function (evt) {
+  if (evt.detail.elt && evt.detail.elt.id === "composer") {
+    pendingComposerRequests = Math.max(0, pendingComposerRequests - 1);
+    // On success the connector is in the DOM by now (afterSwap precedes
+    // afterRequest), so maybeReenable keeps editing disabled; on a rejected
+    // submit there is no connector, so this is what re-enables it.
+    maybeReenable();
+  }
+});
+
+// A2: when an SSE connector ('sse-mount-*') is cleaned up (its job ended and the
+// 'done' delete-child removed it), (1) refetch the artifact pane (idempotent —
+// harmless after an unchanged/failed turn) and (2) attempt the combined re-enable.
+document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
+  var id = evt.detail.elt && evt.detail.elt.id;
+  if (!id || id.indexOf("sse-mount-") !== 0) return;
+  var host = document.getElementById("chat-history");
+  var wsId = host && host.getAttribute("data-workspace-id");
+  if (wsId && window.htmx) {
+    window.htmx.ajax("GET", "/workspaces/" + wsId + "/artifact", {
+      target: "#artifact-rendered",
+      swap: "innerHTML",
+    });
+  }
+  maybeReenable();
+});
+
+// A2 dedup — the SSE stream is workspace-global, so two live connectors can
+// carry the same row. Suppress duplicates by stable id across BOTH swap paths
+// (the SSE extension's own swap does not fire htmx:beforeSwap, so streamed rows
+// need their own hook).
+document.body.addEventListener("htmx:sseBeforeMessage", function (evt) {
+  if (!window.cmDedup) return;
+  var data = evt.detail && evt.detail.data;
+  var id = window.cmDedup.extractChatTurnId(data);
+  if (id && document.getElementById(id)) {
+    evt.preventDefault(); // already in the DOM — skip this streamed row
+  }
+});
+document.body.addEventListener("htmx:beforeSwap", function (evt) {
+  var target = evt.detail && evt.detail.target;
+  if (!target || target.id !== "chat-history") return;
+  if (!window.cmDedup) return;
+  var resp = evt.detail.serverResponse;
+  if (typeof resp !== "string" || resp.indexOf("chat-turn-") === -1) return;
+  evt.detail.serverResponse = window.cmDedup.stripPresentChatTurns(resp, function (id) {
+    return !!document.getElementById(id);
+  });
+});
+
+// A2 reconnect-on-render: a connector present on page load means a turn is live,
+// so disable editing until it cleans up (symmetric with the re-enable above).
+function disableSectionEditsIfConnectorPresent() {
+  if (document.querySelector('[id^="sse-mount-"]')) {
+    disableSectionEdits();
+  }
+}
+if (document.readyState !== "loading") {
+  disableSectionEditsIfConnectorPresent();
+} else {
+  document.addEventListener("DOMContentLoaded", disableSectionEditsIfConnectorPresent);
 }
 
 // Surface htmx error responses (4xx/5xx) as an inline notice near the

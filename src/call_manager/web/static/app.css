@@ -1169,3 +1169,22 @@ article table td form button { width: auto; }
     scroll-behavior: auto !important;
   }
 }
+
+/* B2 live turn monitor: in-flight indicator + inline Cancel. */
+.turn-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0;
+  font-size: 0.85rem;
+  color: var(--cm-neutral-text);
+}
+.turn-progress button {
+  margin: 0;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+  width: auto;
+}
+.turn-progress [id^="cancel-status-"] {
+  color: var(--cm-neutral-text);
+}

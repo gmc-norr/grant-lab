@@ -154,6 +154,30 @@ def _render_proposal_markdown(raw: str) -> str:
 _CHAT_TURN_PARTIAL = "proposal_assist/partials/chat_turn.html"
 
 
+def _artifact_sections_and_rendered(settings, workspace_id: uuid.UUID):
+    """Read proposal.md and return (raw, rendered_html, sections). Shared by
+    get_workspace_main and the GET /{id}/artifact refresh route so both render
+    identical sections-or-placeholder content."""
+    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
+    proposal_path = repo_dir / "proposal.md"
+    if proposal_path.exists():
+        raw = proposal_path.read_text()
+        rendered = _render_proposal_markdown(raw)
+    else:
+        raw, rendered = "", "<em>(no proposal.md yet)</em>"
+    sections = [
+        {
+            "index": s.index,
+            "heading": s.heading,
+            "sha": s.sha,
+            "rendered": _render_proposal_markdown(s.text),
+        }
+        for s in split_sections(raw)
+        if s.text
+    ]
+    return raw, rendered, sections
+
+
 def _default_templates() -> Jinja2Templates:
     """Construct a Jinja2Templates rooted at the same TEMPLATES_DIR
     used by main.py. Cached after first call so tests that exercise
@@ -275,6 +299,7 @@ async def _stream_turn_generator(
     session_factory,
     workspace_id: uuid.UUID,
     turn_job_id: uuid.UUID,
+    since_position: int | None = None,
     poll_seconds: float = 0.2,
     request: Request | None = None,
     templates: Jinja2Templates | None = None,
@@ -298,21 +323,32 @@ async def _stream_turn_generator(
     When omitted, _render_chat_turn_html falls back to a default
     Jinja2Templates instance rooted at the project's TEMPLATES_DIR.
     """
-    # Seed last_seen_position at the user_turn's position (so we don't
-    # echo the user turn back — it was already shown by the POST handler).
+    # Seed last_seen_position: an explicit since_position (reload / reconnect)
+    # wins; otherwise seed at the user_turn's position so we don't re-echo it.
     with session_factory() as s:
         job = s.get(TurnJob, turn_job_id)
         if job is None or job.workspace_id != workspace_id:
             yield "event: done\ndata: missing\n\n"
             return
-        last_seen_position = (
-            s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
-        )
+        if since_position is not None:
+            last_seen_position = since_position
+        else:
+            last_seen_position = (
+                s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
+            )
 
     while True:
         if request is not None and await request.is_disconnected():
             return
         with session_factory() as s:
+            # (1) Read terminal status FIRST. Because B1's helper writes the
+            # outcome row + status flip in one transaction, any poll that reads
+            # "terminal" is guaranteed by the (later) row fetch below to also
+            # see the outcome row — so no row is lost behind 'done' (bug 2).
+            tj = s.get(TurnJob, turn_job_id)
+            terminal = tj is None or tj.status in TERMINAL_STATUSES
+            # (2) Fetch + yield all rows after the seed (workspace-global;
+            # overlapping rows from other live connectors are deduped client-side).
             new_rows = list(
                 s.scalars(
                     select(ChatTurn)
@@ -323,9 +359,6 @@ async def _stream_turn_generator(
                     .order_by(ChatTurn.position)
                 )
             )
-            # Slice 4 residuals: resolve reference-block IDs for THIS
-            # batch in one query so per-turn render can show the chip's
-            # title without an N+1 lookup.
             ref_ids = _collect_reference_ids(new_rows)
             ref_map = _load_reference_map(s, workspace_id, ref_ids)
             for turn in new_rows:
@@ -336,8 +369,8 @@ async def _stream_turn_generator(
                 )
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
-            tj = s.get(TurnJob, turn_job_id)
-            if tj is None or tj.status in TERMINAL_STATUSES:
+            # (3) Only now, if this job was terminal, close the stream.
+            if terminal:
                 yield f"event: done\ndata: {tj.status if tj is not None else 'missing'}\n\n"
                 return
         await asyncio.sleep(poll_seconds)
@@ -515,6 +548,20 @@ def get_workspace_main(
         user=user,
         session=session,
     )
+    # A2 reconnect-on-render: query active jobs BEFORE the history fetch, so a
+    # job that finalizes between the two reads still has its outcome row picked
+    # up by the (later) history query — the page is never left with no connector
+    # AND a missing final row.
+    active_turn_jobs = list(
+        session.scalars(
+            select(TurnJob)
+            .where(
+                TurnJob.workspace_id == workspace_id,
+                TurnJob.status.in_(("queued", "running")),
+            )
+            .order_by(TurnJob.queued_at, TurnJob.id)
+        )
+    )
     chat_turns = list(
         session.scalars(
             select(ChatTurn)
@@ -522,6 +569,7 @@ def get_workspace_main(
             .order_by(ChatTurn.position)
         )
     )
+    chat_max_position = chat_turns[-1].position if chat_turns else 0
 
     # Slice 4 residuals: lookup map for any reference-block content
     # embedded in the chat history. Built in ONE query (set-of-ids ->
@@ -577,30 +625,7 @@ def get_workspace_main(
     needs_disclosure = prior_ack is None
 
     settings = request.app.state.settings
-    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
-    proposal_path = repo_dir / "proposal.md"
-    if proposal_path.exists():
-        raw = proposal_path.read_text()
-        rendered = _render_proposal_markdown(raw)
-    else:
-        raw, rendered = "", "<em>(no proposal.md yet)</em>"
-
-    # Section-editing slice: the artifact pane renders per-##-section
-    # fragments (section_view.html) so each one can be swapped for an
-    # edit form independently. Empty sections (e.g. a zero-byte preamble)
-    # are skipped — nothing to render or edit. Dicts (not Section objects)
-    # so the template context matches what web/sections.py passes for a
-    # single-fragment render.
-    artifact_sections = [
-        {
-            "index": s.index,
-            "heading": s.heading,
-            "sha": s.sha,
-            "rendered": _render_proposal_markdown(s.text),
-        }
-        for s in split_sections(raw)
-        if s.text
-    ]
+    raw, rendered, artifact_sections = _artifact_sections_and_rendered(settings, workspace_id)
 
     # Phase-0 gate: while in setup, the left pane renders the setup-status
     # card (partials/setup_status.html) instead of the composer. Query the
@@ -624,6 +649,8 @@ def get_workspace_main(
             "user": user,
             "is_owner": is_owner,
             "chat_turns": chat_turns,
+            "active_turn_jobs": active_turn_jobs,
+            "chat_max_position": chat_max_position,
             "artifact_rendered": rendered,
             "artifact_raw": raw,
             "artifact_sections": artifact_sections,
@@ -665,6 +692,37 @@ def get_setup_status(
             "setup_status": job.status if job else "queued",
             "setup_last_error": job.last_error if job else None,
             "is_owner": ws.owner_id == user.id,
+        },
+    )
+
+
+@router.get("/{workspace_id}/artifact", response_class=HTMLResponse)
+def get_artifact_body(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Return ONLY the artifact body (sections-or-placeholder) for the live
+    refresh after a turn ends. Owner-or-viewer; 404 on a missing workspace."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    settings = request.app.state.settings
+    _raw, rendered, artifact_sections = _artifact_sections_and_rendered(settings, ws.id)
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/artifact_body.html",
+        {
+            "workspace": ws,
+            "user": user,
+            "is_owner": ws.owner_id == user.id,
+            "artifact_sections": artifact_sections,
+            "artifact_rendered": rendered,
+            "annotations_enabled": True,
         },
     )
 
@@ -971,53 +1029,27 @@ async def post_turn(
         _rollback_created_uploads()
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # B7 / T4: render the just-posted user turn through the chat_turn
-    # partial — the single source of truth for chat-turn HTML — so the
-    # immediate echo, the SSE renderer, and the history loop all agree.
-    # We build a content shape that matches what submit_user_turn just
-    # persisted: list of {text} + {image} + {reference} blocks when any
-    # inclusions are present, single text dict otherwise. Jinja's auto-
-    # escape inside the partial handles HTML in `content`.
-    #
-    # Slice 4 residuals fix: the prior condition (`if all_ids`) treated
-    # a refs-only turn as text-only, so the user got no visible chip
-    # in the echo until the SSE re-render landed. Including
-    # `reference_ids` in the trigger condition + emitting reference
-    # blocks in the echo restores immediate feedback.
-    if all_ids or reference_ids:
-        echo_content: object = (
-            [{"type": "text", "text": content}]
-            + [{"type": "image", "attachment_id": str(aid)} for aid in all_ids]
-            + [{"type": "reference", "reference_id": str(rid)} for rid in reference_ids]
-        )
-    else:
-        echo_content = {"type": "text", "text": content}
-    echo_turn = ChatTurn(
-        workspace_id=ws.id,
-        role="user",
-        content=echo_content,  # type: ignore[arg-type]
-    )
-    # Load the just-attached references for the echo partial so the
-    # chip shows a title/filename (not the "(unknown)" fallback). Scoped
-    # to this workspace — same query the history-loop path uses.
+    # A2: echo the PERSISTED user turn (real DB id) so the client dedup can
+    # collapse it against the same row streamed by any other live connector.
+    # user_turn_id is a nullable FK (ON DELETE SET NULL); submit_user_turn just
+    # wrote it in the committed transaction, so it is present — but guard the
+    # None case rather than render an id-less echo that would defeat the dedup.
+    persisted = session.get(ChatTurn, job.user_turn_id)
+    if persisted is None:
+        raise HTTPException(status_code=500, detail="user turn vanished after enqueue")
     echo_ref_map = _load_reference_map(
         session,
         ws.id,
-        {str(rid) for rid in reference_ids},
+        _collect_reference_ids([persisted]),
     )
-    user_turn_html = request.app.state.templates.env.get_template(
-        _CHAT_TURN_PARTIAL,
-    ).render(turn=echo_turn, chat_reference_map=echo_ref_map)
-    sse_connector = (
-        f"<div id='sse-mount-{job.id}' "
-        f"hx-ext='sse' "
-        f"sse-connect='/workspaces/{workspace_id}/turns/{job.id}/stream' "
-        f"sse-swap='message' "
-        f"sse-close='done' "
-        f"hx-target='#chat-history' "
-        f"hx-swap='beforeend'></div>"
+    templates = request.app.state.templates
+    user_turn_html = templates.env.get_template(_CHAT_TURN_PARTIAL).render(
+        turn=persisted, chat_reference_map=echo_ref_map
     )
-    return HTMLResponse(user_turn_html + sse_connector)
+    connector_html = templates.env.get_template(
+        "proposal_assist/partials/turn_connector.html"
+    ).render(workspace_id=workspace_id, job=job, since=None, is_owner=True)
+    return HTMLResponse(user_turn_html + connector_html)
 
 
 @router.get("/{workspace_id}/turns/{turn_job_id}/stream")
@@ -1025,6 +1057,7 @@ async def stream_turn(
     workspace_id: uuid.UUID,
     turn_job_id: uuid.UUID,
     request: Request,
+    since: int | None = None,
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> StreamingResponse:
@@ -1048,6 +1081,7 @@ async def stream_turn(
             session_factory=request.app.state.session_factory,
             workspace_id=ws.id,
             turn_job_id=turn_job_id,
+            since_position=since,
             request=request,  # B6-residuals: enables client-disconnect detection
             templates=request.app.state.templates,
         ),
@@ -1431,5 +1465,5 @@ def cancel_turn(
     )
     session.commit()
     if did:
-        return HTMLResponse("<p>cancelled</p>")
-    return HTMLResponse("<p>too late — already started or finished</p>")
+        return HTMLResponse("Cancelled.")
+    return HTMLResponse("Too late — the assistant already started.")
