@@ -296,6 +296,15 @@ def create_app() -> FastAPI:
     @app.exception_handler(HTTPException)
     async def _redirect_html_401(request: Request, exc: HTTPException):
         wants_html = "text/html" in request.headers.get("accept", "")
+        # An htmx PARTIAL request (HX-Request, not a full-page hx-boost
+        # navigation) must always get JSON {"detail": ...} so the global
+        # htmx:responseError handler can render it inline — never a styled
+        # HTML page swapped into a fragment target. Full-page navigations
+        # (no HX-Request, or boosted) keep the styled error page.
+        hx_partial = (
+            request.headers.get("hx-request") == "true"
+            and request.headers.get("hx-boosted") != "true"
+        )
         if exc.status_code == 401 and wants_html:
             # Preserve the originally-requested path so the user lands back
             # there after sign-in. Only for safe methods: threading a POST
@@ -312,10 +321,10 @@ def create_app() -> FastAPI:
                         status_code=303,
                     )
             return RedirectResponse(url="/login", status_code=303)
-        if wants_html and exc.status_code in _HTML_ERROR_STATUSES:
+        if wants_html and not hx_partial and exc.status_code in _HTML_ERROR_STATUSES:
             # A browser hitting a 403/404/etc. should see a styled page, not
             # a bare {"detail": ...} JSON blob. JSON is reserved for API
-            # callers (no text/html in Accept).
+            # callers (no text/html in Accept) and htmx partial requests.
             return app.state.templates.TemplateResponse(
                 request=request,
                 name="error.html",
