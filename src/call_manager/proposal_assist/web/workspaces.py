@@ -524,6 +524,20 @@ def get_workspace_main(
         user=user,
         session=session,
     )
+    # A2 reconnect-on-render: query active jobs BEFORE the history fetch, so a
+    # job that finalizes between the two reads still has its outcome row picked
+    # up by the (later) history query — the page is never left with no connector
+    # AND a missing final row.
+    active_turn_jobs = list(
+        session.scalars(
+            select(TurnJob)
+            .where(
+                TurnJob.workspace_id == workspace_id,
+                TurnJob.status.in_(("queued", "running")),
+            )
+            .order_by(TurnJob.queued_at, TurnJob.id)
+        )
+    )
     chat_turns = list(
         session.scalars(
             select(ChatTurn)
@@ -531,6 +545,7 @@ def get_workspace_main(
             .order_by(ChatTurn.position)
         )
     )
+    chat_max_position = chat_turns[-1].position if chat_turns else 0
 
     # Slice 4 residuals: lookup map for any reference-block content
     # embedded in the chat history. Built in ONE query (set-of-ids ->
@@ -633,6 +648,8 @@ def get_workspace_main(
             "user": user,
             "is_owner": is_owner,
             "chat_turns": chat_turns,
+            "active_turn_jobs": active_turn_jobs,
+            "chat_max_position": chat_max_position,
             "artifact_rendered": rendered,
             "artifact_raw": raw,
             "artifact_sections": artifact_sections,

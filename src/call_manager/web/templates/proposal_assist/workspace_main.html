@@ -25,12 +25,17 @@
   {# LEFT: chat #}
   <div class="workspace-pane">
     <h2>Chat</h2>
-    <div id="chat-history" class="chat-history">
+    <div id="chat-history" class="chat-history" data-workspace-id="{{ workspace.id }}">
       {% for turn in chat_turns %}
         {% include "proposal_assist/partials/chat_turn.html" %}
       {% endfor %}
     </div>
     {% include "proposal_assist/partials/cloud_banner.html" %}
+    {% set workspace_id = workspace.id %}
+    {% for job in active_turn_jobs or [] %}
+      {% set since = chat_max_position %}
+      {% include "proposal_assist/partials/turn_connector.html" %}
+    {% endfor %}
     {% if workspace.current_phase == 'setup' %}
     {% include "proposal_assist/partials/setup_status.html" %}
     {% elif is_owner %}
