@@ -275,6 +275,7 @@ async def _stream_turn_generator(
     session_factory,
     workspace_id: uuid.UUID,
     turn_job_id: uuid.UUID,
+    since_position: int | None = None,
     poll_seconds: float = 0.2,
     request: Request | None = None,
     templates: Jinja2Templates | None = None,
@@ -298,21 +299,32 @@ async def _stream_turn_generator(
     When omitted, _render_chat_turn_html falls back to a default
     Jinja2Templates instance rooted at the project's TEMPLATES_DIR.
     """
-    # Seed last_seen_position at the user_turn's position (so we don't
-    # echo the user turn back — it was already shown by the POST handler).
+    # Seed last_seen_position: an explicit since_position (reload / reconnect)
+    # wins; otherwise seed at the user_turn's position so we don't re-echo it.
     with session_factory() as s:
         job = s.get(TurnJob, turn_job_id)
         if job is None or job.workspace_id != workspace_id:
             yield "event: done\ndata: missing\n\n"
             return
-        last_seen_position = (
-            s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
-        )
+        if since_position is not None:
+            last_seen_position = since_position
+        else:
+            last_seen_position = (
+                s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
+            )
 
     while True:
         if request is not None and await request.is_disconnected():
             return
         with session_factory() as s:
+            # (1) Read terminal status FIRST. Because B1's helper writes the
+            # outcome row + status flip in one transaction, any poll that reads
+            # "terminal" is guaranteed by the (later) row fetch below to also
+            # see the outcome row — so no row is lost behind 'done' (bug 2).
+            tj = s.get(TurnJob, turn_job_id)
+            terminal = tj is None or tj.status in TERMINAL_STATUSES
+            # (2) Fetch + yield all rows after the seed (workspace-global;
+            # overlapping rows from other live connectors are deduped client-side).
             new_rows = list(
                 s.scalars(
                     select(ChatTurn)
@@ -323,9 +335,6 @@ async def _stream_turn_generator(
                     .order_by(ChatTurn.position)
                 )
             )
-            # Slice 4 residuals: resolve reference-block IDs for THIS
-            # batch in one query so per-turn render can show the chip's
-            # title without an N+1 lookup.
             ref_ids = _collect_reference_ids(new_rows)
             ref_map = _load_reference_map(s, workspace_id, ref_ids)
             for turn in new_rows:
@@ -336,8 +345,8 @@ async def _stream_turn_generator(
                 )
                 yield f"data: {rendered}\n\n"
                 last_seen_position = turn.position
-            tj = s.get(TurnJob, turn_job_id)
-            if tj is None or tj.status in TERMINAL_STATUSES:
+            # (3) Only now, if this job was terminal, close the stream.
+            if terminal:
                 yield f"event: done\ndata: {tj.status if tj is not None else 'missing'}\n\n"
                 return
         await asyncio.sleep(poll_seconds)
