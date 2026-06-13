@@ -306,6 +306,10 @@ def create_app() -> FastAPI:
             and request.headers.get("hx-boosted") != "true"
         )
         if exc.status_code == 401 and wants_html:
+            # 401 is intentionally NOT gated on hx_partial: an htmx request
+            # that hits 401 follows the 303 to /login as a full-page
+            # navigation (htmx:responseError does not fire on redirects).
+            # Auth-redirect UX is out of scope for the JSON-detail gate below.
             # Preserve the originally-requested path so the user lands back
             # there after sign-in. Only for safe methods: threading a POST
             # path would produce a final `303 GET` to a POST-only route and
