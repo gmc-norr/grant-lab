@@ -138,6 +138,35 @@ async def test_sse_poll_loop_handles_deleted_turn_job(
     assert "event: done" in full
 
 
+def test_render_chat_turn_html_emits_stable_id():
+    """A1/J: the .chat-turn div carries id='chat-turn-{turn.id}' so the
+    client dedup can match the same row across the echo + SSE + history
+    render paths. A turn with no id (never persisted) emits no id attr."""
+    import uuid
+
+    from call_manager.db.models import ChatTurn
+    from call_manager.proposal_assist.web.workspaces import _render_chat_turn_html
+
+    tid = uuid.uuid4()
+    turn = ChatTurn(
+        id=tid,
+        workspace_id=uuid.uuid4(),
+        role="user",
+        content={"type": "text", "text": "hi"},
+        position=1,
+    )
+    snippet = _render_chat_turn_html(turn)
+    assert f'id="chat-turn-{tid}"' in snippet
+
+    idless = ChatTurn(
+        workspace_id=uuid.uuid4(),
+        role="user",
+        content={"type": "text", "text": "hi"},
+        position=1,
+    )
+    assert "chat-turn-None" not in _render_chat_turn_html(idless)
+
+
 def test_render_chat_turn_html_escapes_text_content():
     """H2 regression: text content with HTML tags is escaped."""
     import uuid
