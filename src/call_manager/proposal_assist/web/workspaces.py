@@ -1392,6 +1392,12 @@ def cancel_turn(
     WorkspaceEvent in the same transaction. Without this, the
     submit-time `cloud_turn_sent` row has no matching outcome event
     and the compliance chain breaks (see B6-residuals review).
+
+    Audit note: the cloud_turn_cancelled actor_id is the turn's
+    submitted_by_user_id (via the helper), which equals the canceller
+    while _require_owner enforces owner-only access and there is no
+    ownership-transfer / admin-on-behalf cancel. If such a path is added,
+    pass the acting user's id to the helper explicitly.
     """
     ws = _require_owner(
         workspace_id=workspace_id,
