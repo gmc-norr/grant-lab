@@ -18,5 +18,5 @@ def test_chat_turn_renders_turn_outcome_notice():
 
     html = tmpl.render(turn=_Turn(), chat_reference_map={})
     assert 'class="turn-outcome"' in html
-    assert "finish this turn" in html
+    assert "couldn&#39;t finish this turn" in html
     assert "<pre>" not in html  # not the fallback branch
