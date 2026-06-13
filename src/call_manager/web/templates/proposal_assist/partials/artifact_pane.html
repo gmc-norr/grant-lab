@@ -15,9 +15,5 @@
    missing proposal.md yields no sections — show the legacy
    artifact_rendered placeholder ("(no proposal.md yet)"). #}
 <div id="artifact-rendered">
-  {% if artifact_sections %}
-    {% include "proposal_assist/partials/artifact_sections.html" %}
-  {% else %}
-    {{ artifact_rendered | safe }}
-  {% endif %}
+  {% include "proposal_assist/partials/artifact_body.html" %}
 </div>

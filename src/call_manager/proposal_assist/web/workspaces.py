@@ -154,6 +154,30 @@ def _render_proposal_markdown(raw: str) -> str:
 _CHAT_TURN_PARTIAL = "proposal_assist/partials/chat_turn.html"
 
 
+def _artifact_sections_and_rendered(settings, workspace_id: uuid.UUID):
+    """Read proposal.md and return (raw, rendered_html, sections). Shared by
+    get_workspace_main and the GET /{id}/artifact refresh route so both render
+    identical sections-or-placeholder content."""
+    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
+    proposal_path = repo_dir / "proposal.md"
+    if proposal_path.exists():
+        raw = proposal_path.read_text()
+        rendered = _render_proposal_markdown(raw)
+    else:
+        raw, rendered = "", "<em>(no proposal.md yet)</em>"
+    sections = [
+        {
+            "index": s.index,
+            "heading": s.heading,
+            "sha": s.sha,
+            "rendered": _render_proposal_markdown(s.text),
+        }
+        for s in split_sections(raw)
+        if s.text
+    ]
+    return raw, rendered, sections
+
+
 def _default_templates() -> Jinja2Templates:
     """Construct a Jinja2Templates rooted at the same TEMPLATES_DIR
     used by main.py. Cached after first call so tests that exercise
@@ -601,30 +625,7 @@ def get_workspace_main(
     needs_disclosure = prior_ack is None
 
     settings = request.app.state.settings
-    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
-    proposal_path = repo_dir / "proposal.md"
-    if proposal_path.exists():
-        raw = proposal_path.read_text()
-        rendered = _render_proposal_markdown(raw)
-    else:
-        raw, rendered = "", "<em>(no proposal.md yet)</em>"
-
-    # Section-editing slice: the artifact pane renders per-##-section
-    # fragments (section_view.html) so each one can be swapped for an
-    # edit form independently. Empty sections (e.g. a zero-byte preamble)
-    # are skipped — nothing to render or edit. Dicts (not Section objects)
-    # so the template context matches what web/sections.py passes for a
-    # single-fragment render.
-    artifact_sections = [
-        {
-            "index": s.index,
-            "heading": s.heading,
-            "sha": s.sha,
-            "rendered": _render_proposal_markdown(s.text),
-        }
-        for s in split_sections(raw)
-        if s.text
-    ]
+    raw, rendered, artifact_sections = _artifact_sections_and_rendered(settings, workspace_id)
 
     # Phase-0 gate: while in setup, the left pane renders the setup-status
     # card (partials/setup_status.html) instead of the composer. Query the
@@ -691,6 +692,37 @@ def get_setup_status(
             "setup_status": job.status if job else "queued",
             "setup_last_error": job.last_error if job else None,
             "is_owner": ws.owner_id == user.id,
+        },
+    )
+
+
+@router.get("/{workspace_id}/artifact", response_class=HTMLResponse)
+def get_artifact_body(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Return ONLY the artifact body (sections-or-placeholder) for the live
+    refresh after a turn ends. Owner-or-viewer; 404 on a missing workspace."""
+    ws = _require_owner_or_viewer(
+        workspace_id=workspace_id,
+        user=user,
+        session=session,
+    )
+    settings = request.app.state.settings
+    _raw, rendered, artifact_sections = _artifact_sections_and_rendered(settings, ws.id)
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/artifact_body.html",
+        {
+            "workspace": ws,
+            "user": user,
+            "is_owner": ws.owner_id == user.id,
+            "artifact_sections": artifact_sections,
+            "artifact_rendered": rendered,
+            "annotations_enabled": True,
         },
     )
 

@@ -1,0 +1,10 @@
+{# Sections-or-placeholder body, shared between page-load (artifact_pane.html)
+   and the GET /{id}/artifact refresh route. Returning this partial (NOT
+   artifact_pane.html) on refresh avoids nesting a duplicate #artifact-rendered.
+   The placeholder path keeps a failed first turn (no proposal.md yet) from
+   refreshing the pane to blank. #}
+{% if artifact_sections %}
+  {% include "proposal_assist/partials/artifact_sections.html" %}
+{% else %}
+  {{ artifact_rendered | safe }}
+{% endif %}

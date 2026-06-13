@@ -143,3 +143,61 @@ def test_artifact_endpoints_allow_viewer(
     _init_workspace_repo(tmp_path, wsid)
     response = client_authed_user.get(f"/workspaces/{wsid}/artifact/raw")
     assert response.status_code == 200
+
+
+def test_artifact_route_returns_body_without_nested_wrapper(
+    client_authed_owner, pg_session_factory, current_user
+):
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    resp = client_authed_owner.get(f"/workspaces/{wsid}/artifact")
+    assert resp.status_code == 200
+    body = resp.content.decode()
+    # No nested #artifact-rendered (the route returns only the body).
+    assert 'id="artifact-rendered"' not in body
+
+
+def test_artifact_route_empty_returns_placeholder_not_blank(
+    client_authed_owner, pg_session_factory, current_user
+):
+    """A workspace with no proposal.md yet returns the placeholder, NOT a
+    blank body (so a failed first turn doesn't blank the pane)."""
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        wsid = ws.id
+
+    resp = client_authed_owner.get(f"/workspaces/{wsid}/artifact")
+    assert resp.status_code == 200
+    assert "no proposal.md yet" in resp.content.decode()
+
+
+def test_artifact_route_404_missing_workspace(client_authed_owner):
+    import uuid
+
+    resp = client_authed_owner.get(f"/workspaces/{uuid.uuid4()}/artifact")
+    assert resp.status_code == 404
+
+
+def test_artifact_route_allows_viewer(
+    client_authed_user, pg_session_factory, current_user
+):
+    from call_manager.db.models import WorkspaceViewer
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="owner3@ki.se")
+        ws = make_workspace(s, owner=owner)
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
+        s.commit()
+        wsid = ws.id
+
+    resp = client_authed_user.get(f"/workspaces/{wsid}/artifact")
+    assert resp.status_code == 200
