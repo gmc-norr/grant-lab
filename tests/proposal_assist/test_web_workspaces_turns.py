@@ -567,9 +567,16 @@ def test_chat_history_view_renders_image_thumbnail(
     assert "chat-image" in body
 
 
-def test_post_turn_error_html_is_escaped(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    """Reflected XSS regression: a malicious Content-Type or upload
-    failure detail must NOT land as live HTML in the swap target."""
+def test_post_turn_error_returns_json_detail(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Reflected-XSS regression (B1/Task 12): a malicious Content-Type on
+    an upload failure is surfaced as a JSON ``{"detail": ...}`` body, not
+    an HTML fragment. The rejection used to render server-escaped HTML;
+    now post_turn raises HTTPException and app.js renders ``detail`` via
+    ``element.textContent`` (XSS-safe by construction). The on-the-wire
+    body is therefore JSON whose ``detail`` is plain text — no HTML
+    structure, and the response content-type is application/json, so the
+    malicious markup can never be parsed as a live ``<script>`` element
+    when swapped into the page."""
     import io
 
     from fastapi.testclient import TestClient
@@ -607,8 +614,16 @@ def test_post_turn_error_html_is_escaped(monkeypatch, pg_url, pg_session_factory
             files={"files": ("x.png", io.BytesIO(b"x"), attack)},
         )
         assert resp.status_code == 400
-        assert "<script>" not in resp.text
-        assert "&lt;script&gt;" in resp.text or "&#x3c;script&#x3e;" in resp.text
+        # Body is JSON (not an HTML fragment): the rejection is rendered
+        # client-side via textContent, so the malicious markup is confined
+        # to a JSON string value rather than landing as live HTML.
+        assert resp.headers["content-type"].startswith("application/json")
+        detail = resp.json()["detail"]
+        # The attacker-controlled content_type is echoed verbatim in the
+        # plain-text detail (no longer HTML-escaped — escaping happened to
+        # protect an HTML body that no longer exists).
+        assert "Unsupported content_type" in detail
+        assert attack in detail
     finally:
         client.__exit__(None, None, None)
 
