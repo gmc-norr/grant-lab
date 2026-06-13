@@ -221,3 +221,31 @@ def test_finalize_failed_wrapper_writes_row_and_event(pg_session_factory):
         )
         assert ev is not None
         assert s.get(ChatTurn, utid).tokens_in is None
+
+
+def test_finalize_failed_wrapper_noop_on_already_terminal(pg_session_factory):
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        job, _ = _running_job(s, ws, submitter=owner)
+        job.status = "completed"  # already terminal — wrapper must be a clean no-op
+        s.commit()
+        wsid, jid, oid = ws.id, job.id, owner.id
+
+    _finalize_failed(
+        pg_session_factory,
+        turn_job_id=jid,
+        workspace_id=wsid,
+        submitted_by_user_id=oid,
+        error="late",
+        tokens_in=0,
+        tokens_out=0,
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, jid).status == "completed"  # unchanged
+        assert s.scalar(select(ChatTurn).where(ChatTurn.role == "system")) is None
+        assert (
+            s.scalar(select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_failed"))
+            is None
+        )

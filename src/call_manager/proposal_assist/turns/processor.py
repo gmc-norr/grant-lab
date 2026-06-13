@@ -447,7 +447,7 @@ def _finalize_failed(
     # nothing — the prior writer already cleared the pre-count and emitted its
     # own event.
     with session_factory() as s:
-        record_terminal_outcome(
+        did = record_terminal_outcome(
             s,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
@@ -459,3 +459,10 @@ def _finalize_failed(
             tokens_out=tokens_out,
         )
         s.commit()
+    if not did:
+        logger.warning(
+            "process_turn_once: turn_job %s failed-finalize is a no-op "
+            "(no 'running' row — already terminal/reaped)",
+            turn_job_id,
+            extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
+        )
