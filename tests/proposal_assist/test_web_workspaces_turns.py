@@ -1088,3 +1088,25 @@ def test_reload_connector_no_cancel_for_viewer(
     body = client_authed_user.get(f"/workspaces/{wsid}").content.decode()
     assert f'id="sse-mount-{jid}"' in body  # viewer sees the connector
     assert f"/turns/{jid}/cancel" not in body  # but no Cancel
+
+
+def test_history_loop_renders_stable_chat_turn_id(
+    client_authed_owner, pg_session_factory, current_user
+):
+    """The third dedup render path: the full-page history loop must emit the
+    same id="chat-turn-{id}" the echo + SSE paths do, so client dedup can match
+    a row across all three. Completes the three-path stable-id contract."""
+    from call_manager.db.models import ChatTurn
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        turn = ChatTurn(
+            workspace_id=ws.id, role="user", content={"type": "text", "text": "history row"}
+        )
+        s.add(turn)
+        s.commit()
+        wsid, tid = ws.id, turn.id
+
+    body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
+    assert f'id="chat-turn-{tid}"' in body
