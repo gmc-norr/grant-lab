@@ -283,5 +283,11 @@ def test_submit_rejected_on_soft_deleted_workspace(pg_session_factory, _settings
     with pg_session_factory() as s:
         assert s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid)) is None
         assert (
-            s.scalar(select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_sent")) is None
+            s.scalar(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == wsid,
+                    WorkspaceEvent.kind == "cloud_turn_sent",
+                )
+            )
+            is None
         )
