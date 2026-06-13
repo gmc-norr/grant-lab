@@ -60,6 +60,7 @@ from call_manager.proposal_assist.tools.history import (
 from call_manager.proposal_assist.tools.proposal import read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
+from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.turns.submit import (
     MAX_TURN_INCLUSIONS,
     submit_user_turn,
@@ -1392,36 +1393,21 @@ def cancel_turn(
     submit-time `cloud_turn_sent` row has no matching outcome event
     and the compliance chain breaks (see B6-residuals review).
     """
-    from datetime import UTC, datetime
-
     ws = _require_owner(
         workspace_id=workspace_id,
         user=user,
         session=session,
     )
-    result = session.execute(
-        update(TurnJob)
-        .where(
-            TurnJob.id == turn_job_id,
-            TurnJob.workspace_id == ws.id,
-            TurnJob.status == "queued",
-        )
-        .values(status="cancelled", completed_at=datetime.now(UTC))
+    did = record_terminal_outcome(
+        session,
+        turn_job_id=turn_job_id,
+        workspace_id=ws.id,
+        outcome="cancelled",
+        expected_status="queued",
+        raw_error=None,
+        emit_chat=True,
     )
-    if result.rowcount:
-        session.add(
-            WorkspaceEvent(
-                workspace_id=ws.id,
-                kind="cloud_turn_cancelled",
-                actor_id=user.id,
-                payload={
-                    "turn_job_id": str(turn_job_id),
-                    "tokens_in": 0,
-                    "tokens_out": 0,
-                },
-            )
-        )
     session.commit()
-    if result.rowcount:
+    if did:
         return HTMLResponse("<p>cancelled</p>")
     return HTMLResponse("<p>too late — already started or finished</p>")
