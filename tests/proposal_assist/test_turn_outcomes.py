@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
 from call_manager.proposal_assist.turns.outcomes import outcome_message, record_terminal_outcome
+from call_manager.proposal_assist.turns.processor import _finalize_failed
 from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
 
@@ -187,3 +188,36 @@ def test_emit_chat_false_writes_event_but_no_row(pg_session_factory):
         assert s.scalar(
             select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_cancelled")
         ) is not None
+
+
+def test_finalize_failed_wrapper_writes_row_and_event(pg_session_factory):
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        job, user_turn = _running_job(s, ws, submitter=owner)
+        s.commit()
+        wsid, jid, utid = ws.id, job.id, user_turn.id
+        oid = owner.id
+
+    _finalize_failed(
+        pg_session_factory,
+        turn_job_id=jid,
+        workspace_id=wsid,
+        submitted_by_user_id=oid,
+        error="sdk_turn_error: kaboom",
+        tokens_in=3,
+        tokens_out=1,
+        user_turn_id=utid,
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, jid).status == "failed"
+        row = s.scalar(
+            select(ChatTurn).where(ChatTurn.role == "system", ChatTurn.workspace_id == wsid)
+        )
+        assert row.content["outcome"] == "failed"
+        ev = s.scalar(
+            select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_failed")
+        )
+        assert ev is not None
+        assert s.get(ChatTurn, utid).tokens_in is None
