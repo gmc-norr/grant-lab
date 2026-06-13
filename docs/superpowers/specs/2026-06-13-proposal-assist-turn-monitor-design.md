@@ -1,7 +1,7 @@
 # Proposal-Assist — Live Turn Monitor — Design Spec
 
 **Date:** 2026-06-13
-**Status:** Draft for implementation (depends on **B1**, [2026-06-12-proposal-assist-turn-outcomes-design.md](2026-06-12-proposal-assist-turn-outcomes-design.md))
+**Status:** Draft — the **monitor-start protocol needs a design pass before planning** (see *Open design issues*); depends on **B1** ([2026-06-12-proposal-assist-turn-outcomes-design.md](2026-06-12-proposal-assist-turn-outcomes-design.md))
 **Audience:** Engineers working on call-manager
 **Theme:** Product review 2026-06-11, Theme 7 (proposal-assist workspace seams), slice **B2** (live turn monitor). B1 handles terminal-outcome recording + error hygiene; this slice handles the live feedback loop.
 
@@ -37,6 +37,15 @@ A persistent monitor streams **all** workspace rows after its seed — including
 **Resolution (chosen): the monitor is the sole renderer of chat rows; drop the optimistic echo.** `post_turn` no longer returns the user-row HTML. The monitor renders the user row + assistant rows. This is correct by construction (one writer of DOM rows → no dedup, no double-render) and the latency cost is negligible: the generator fetches **immediately on connect** (it polls before its first `sleep`), so the user's own row appears within the SSE connect + first-fetch window (tens of ms), not `poll_seconds`. The monitor already renders via the same `_CHAT_TURN_PARTIAL` + reference-map path the echo used, so chips/attachments render identically. If SSE never establishes, the row still appears on reload via B1's history loop — consistent degradation.
 
 **Rejected alternative — keep the echo, dedupe the stream by stable DOM id.** Stamp each streamed row with `id="chat-turn-{uuid}"` and drop it client-side if already present. More surface (id stamping + a dedup hook), more failure modes, and no real latency win given the immediate first poll. Single-source-of-truth wins on principle and on simplicity.
+
+## Open design issues (resolve in a follow-up design pass before B2 is planned)
+
+Codex review (2026-06-13) found the **monitor-start protocol** below to be insufficient. These do **not** affect B1 and do **not** change the *direction* (one workspace monitor, single source of truth), but the **server-decided empty→non-empty emit** mechanism as specced cannot deliver the per-tab guarantee. They are the first agenda items of B2's own brainstorm.
+
+1. **Per-tab start is undecidable from a global queue check.** "Emit the monitor only if the queue was empty" is evaluated against the *workspace*, not the *tab*. If tab A has an active turn and a previously-idle tab B submits, B's submit sees a non-empty queue → returns nothing → **tab B has no monitor and (echo removed) no visible feedback at all**, and the already-rendered monitor in *any* tab never gains a Cancel control for newly stacked jobs (its markup was emitted once). A correct protocol needs **per-connection/per-tab identity** — e.g. the client owns a monitor with a client-generated id and always (re)connects on submit; the server streams to whoever connects — rather than a global emit decision.
+2. **Terminate-vs-submit TOCTOU.** The generator can read "no active jobs," then a new submit commits a user row + job; the generator yields that row and emits `done`, deleting itself **while the new job is active** — a dropped-monitor / duplicate-row window that contradicts the single-source guarantee. The terminal check must be coordinated with submit (a generation/epoch token, "don't terminate in a poll that yielded rows," or submit re-arming the monitor) — to be designed.
+
+The rest of B2 (generator ordering fix, `sse-close` fix, `artifact_body` refresh, reconnect-on-render scaffolding) is unaffected by these.
 
 ## Components
 
@@ -114,7 +123,7 @@ Section editing is disabled whenever any active job exists — set on submit and
 
 ## Error handling / edge cases
 
-- **Echo race on the empty→non-empty boundary:** if a turn finishes between a stacked submit's "any other active job?" check and the response, the worst case is a brief second monitor (the prior one self-terminates on its own `done`); the next poll/reload converges to one. No duplicate-row persistence (rows are deduped by the single-source model in steady state).
+- **Monitor-start races (per-tab emit; terminate-vs-submit):** the empty→non-empty emit rule does **not** safely deliver one-monitor-per-tab, and the terminal check can race a new submit — see **Open design issues**. Resolution is deferred to B2's design pass; do not plan B2's `post_turn`/`get_workspace_main` emit logic until it's resolved.
 - **Two tabs on one workspace:** each tab renders its own monitor; within a tab there is exactly one. Cross-tab streams are independent (no shared DOM), so no duplication.
 - **Connection dropped mid-turn:** the generator's `request.is_disconnected()` check still exits the loop; on reload the monitor reconnects (reconnect-on-render).
 - **Viewer:** may watch the monitor (owner-or-viewer on the stream route); sees streamed assistant rows + B1's viewer-safe `turn_outcome` rows; no Cancel (not owner).
@@ -129,7 +138,7 @@ DOCX export (slice C); resolved call-title/profile pickers, colored status badge
 Following `tests/proposal_assist/*` patterns (TestClient + `pg_session_factory`; the generator is unit-driven directly):
 
 - **Generator monitor mode:** with two queued turns, `done` is emitted only after **both** reach terminal (not after the first); `since_position` seeding does not re-yield rows at/below the seed.
-- **SSE ordering (bug 2):** the test injects the finalize (outcome row + terminal commit) **between** the generator's two reads within a single poll iteration — after the row-fetch read but before the terminal read — via a controllable `session_factory`/hook. Assert the outcome row is yielded **and then** `done` in that same poll. (A naïve test that finalizes before the poll begins passes the old order too and catches nothing — the mid-poll injection is what makes it a real regression test.)
+- **SSE ordering (bug 2):** under the new **terminal-read-first** order there is no longer a "between the two reads" injection point, so test the **durable property** instead: with a finalize that commits the outcome row + terminal status atomically (B1's helper), assert the generator **always yields the outcome row before `done`** — never after it — across several finalize timings (before the poll; immediately after a non-terminal poll's reads; concurrent with a poll). The row may arrive on the same or the next poll; the invariant under test is "no row is lost behind `done`."
 - **Single-emit decision:** `post_turn` from an idle workspace returns a `#ws-turn-monitor` connector and **no** user-row echo; a stacked `post_turn` (active job present) returns an empty body (no second connector).
 - **Reconnect on render:** `get_workspace_main` with an active job renders the monitor seeded at the last rendered position + Cancel per queued job + disabled section-edit buttons; with no active job, no connector and editing enabled.
 - **No double-echo:** across a stacked submit, each chat row appears in `#chat-history` exactly once.
