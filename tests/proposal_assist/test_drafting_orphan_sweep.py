@@ -111,7 +111,6 @@ def test_orphan_sweep_writes_outcome_row_and_event(pg_session_factory):
 
         swept = sweep_orphaned_turn_jobs(s, wsid)
         s.commit()
-        s.expire_all()
 
         assert swept == 1
         job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
