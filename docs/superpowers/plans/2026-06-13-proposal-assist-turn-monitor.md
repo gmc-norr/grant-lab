@@ -19,6 +19,7 @@
 - `src/call_manager/web/templates/proposal_assist/partials/artifact_body.html` — sections-or-placeholder body, extracted from `artifact_pane.html`. Rendered by `artifact_pane.html` (page load) and the new `GET /{id}/artifact` route (refresh).
 - `src/call_manager/web/static/dedup.js` — DOM-free pure helpers `extractChatTurnId(html)` + `stripPresentChatTurns(html, hasId)`; CJS `module.exports` for Node tests **and** `window.cmDedup` for the browser.
 - `tests/js/dedup.test.js` — `node --test` coverage of the two pure helpers.
+- `tests/js/app_wiring.test.js` — loads `app.js` under `node:vm` with DOM stubs and dispatches the real `htmx:sseBeforeMessage` / `htmx:beforeSwap` events to verify the wiring (event names, `preventDefault`, `serverResponse` rewrite).
 
 **Modified files**
 - `src/call_manager/proposal_assist/web/workspaces.py` — `_stream_turn_generator` (`since_position` + terminal-read-first reorder); `stream_turn` (`?since`); `post_turn` (persisted echo + connector partial); `get_workspace_main` (active-jobs query before history + connector context); `cancel_turn` (span-friendly fragment); new `GET /{id}/artifact`; new `_artifact_sections_and_rendered` helper.
@@ -26,7 +27,7 @@
 - `src/call_manager/web/templates/proposal_assist/partials/artifact_pane.html` — include `artifact_body.html`.
 - `src/call_manager/web/templates/proposal_assist/workspace_main.html` — `data-workspace-id` on `#chat-history`; per-active-job connector loop.
 - `src/call_manager/web/templates/base.html` — load `dedup.js` before `app.js`.
-- `src/call_manager/web/static/app.js` — dedup hooks; deferred multi-connector re-enable; artifact refetch on cleanup; load-time disable when a connector is present.
+- `src/call_manager/web/static/app.js` — dedup hooks; request-aware re-enable (composer-request counter + `htmx:afterRequest`, re-enabling only when no connector AND no pending submit remain — so a rejected submit doesn't strand editing); artifact refetch on cleanup; load-time disable when a connector is present.
 - `src/call_manager/web/static/app.css` — `.turn-progress` / Cancel styling.
 - `.github/workflows/ci.yml` — run `node --test tests/js/`.
 - Existing tests updated where the connector markup contract changed.
@@ -118,11 +119,14 @@ Add to `tests/proposal_assist/test_web_workspaces_sse.py`:
 
 ```python
 @pytest.mark.asyncio
-async def test_generator_yields_outcome_row_before_done(pg_session_factory, current_user):
-    """Bug-2 durable property: with the terminal status flip + outcome row
-    committed atomically (as B1's helper does), the reordered generator
-    (read terminal -> fetch rows -> emit done) yields the outcome row
-    BEFORE 'event: done' — never loses it behind done."""
+async def test_generator_does_not_lose_row_finalized_mid_poll(pg_session_factory, current_user):
+    """Bug-2 REGRESSION (this fails on the old rows-first order, passes on the
+    terminal-read-first order). We deterministically commit the finalize as a
+    ONE-SHOT side effect of the poll's first ChatTurn row query — i.e. AFTER that
+    poll's row snapshot. Old order: row query (empty) -> finalize commits ->
+    status read sees terminal -> emits 'done' WITHOUT the outcome row -> lost.
+    New order: status read (still running) -> row query (empty) -> finalize
+    commits -> no 'done' this poll -> next poll delivers the row before 'done'."""
     from datetime import UTC, datetime
 
     from call_manager.db.models import ChatTurn, TurnJob
@@ -135,37 +139,67 @@ async def test_generator_yields_outcome_row_before_done(pg_session_factory, curr
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id,
-            user_turn_id=ut.id,
-            submitted_by_user_id=current_user.id,
-            status="running",
-            queued_at=datetime.now(UTC),
-            started_at=datetime.now(UTC),
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="running", queued_at=datetime.now(UTC), started_at=datetime.now(UTC),
         )
         s.add(job)
         s.commit()
         wsid, jid = ws.id, job.id
 
-    # Atomic finalize: outcome row + status flip in ONE transaction.
-    with pg_session_factory() as s:
-        s.add(ChatTurn(
-            workspace_id=wsid, role="system",
-            content={"type": "turn_outcome", "outcome": "failed", "text": "FAILMARKER"},
-        ))
-        j = s.get(TurnJob, jid)
-        j.status = "failed"
-        j.completed_at = datetime.now(UTC)
-        s.commit()
+    fired = {"done": False}
+
+    def _finalize_once():
+        if fired["done"]:
+            return
+        fired["done"] = True
+        with pg_session_factory() as s2:
+            s2.add(ChatTurn(
+                workspace_id=wsid, role="system",
+                content={"type": "turn_outcome", "outcome": "failed", "text": "FAILMARKER"},
+            ))
+            j = s2.get(TurnJob, jid)
+            j.status = "failed"
+            j.completed_at = datetime.now(UTC)
+            s2.commit()
+
+    class _Sess:
+        """Delegates to a real session; the FIRST scalars() call (the poll's
+        ChatTurn row query) returns its rows, THEN commits the finalize — so the
+        finalize lands just after this poll's row snapshot."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def scalars(self, *a, **k):
+            result = self._inner.scalars(*a, **k)
+            if not fired["done"]:
+                rows = list(result)
+                _finalize_once()
+                return rows
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._inner.__exit__(*a)
+
+    def _factory():
+        return _Sess(pg_session_factory())
 
     events = []
     async for chunk in _stream_turn_generator(
-        session_factory=pg_session_factory, workspace_id=wsid, turn_job_id=jid, poll_seconds=0.05,
+        session_factory=_factory, workspace_id=wsid, turn_job_id=jid, poll_seconds=0.05,
     ):
         events.append(chunk)
-        if len(events) > 20:
+        if len(events) > 40:
             pytest.fail("stream did not terminate")
     full = "".join(events)
-    assert "FAILMARKER" in full
+    assert "FAILMARKER" in full  # FAILS on the old rows-first order (row lost behind done)
     assert full.index("FAILMARKER") < full.index("event: done")
 
 
@@ -217,8 +251,8 @@ async def test_generator_since_position_skips_rows_at_or_below(pg_session_factor
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run pytest tests/proposal_assist/test_web_workspaces_sse.py::test_generator_since_position_skips_rows_at_or_below -v`
-Expected: FAIL with `TypeError: _stream_turn_generator() got an unexpected keyword argument 'since_position'`.
+Run: `uv run pytest tests/proposal_assist/test_web_workspaces_sse.py::test_generator_does_not_lose_row_finalized_mid_poll tests/proposal_assist/test_web_workspaces_sse.py::test_generator_since_position_skips_rows_at_or_below -v`
+Expected: BOTH FAIL — `test_generator_since_position_skips_rows_at_or_below` with `TypeError: ... unexpected keyword argument 'since_position'`; `test_generator_does_not_lose_row_finalized_mid_poll` with `assert "FAILMARKER" in full` failing (the current rows-first order emits `done` without the mid-poll outcome row). These two failures prove the test exercises the reorder, not just any timing.
 
 - [ ] **Step 3: Add `since_position` + reorder the poll body**
 
@@ -317,28 +351,53 @@ git commit -m "feat(proposal-assist): generator since_position seed + terminal-r
 - Modify: `src/call_manager/proposal_assist/web/workspaces.py:1023-1055` (`stream_turn`)
 - Test: `tests/proposal_assist/test_web_workspaces_sse.py`
 
-- [ ] **Step 1: Write the failing route test**
+- [ ] **Step 1: Write the failing route integration test**
 
-Add to `tests/proposal_assist/test_web_workspaces_sse.py`:
+Add to `tests/proposal_assist/test_web_workspaces_sse.py`. This proves `?since` is actually **forwarded** to the generator (not merely accepted): with a completed job (so the stream is finite and `.get` reads the whole body), rows at/below `P` are absent and rows above `P` are present. (Note: FastAPI **ignores** undeclared query params rather than 422-ing, so a signature check alone proves nothing.)
 
 ```python
-def test_stream_route_accepts_since_query_param(pg_session_factory, current_user):
-    """The stream route exposes ?since so reload connectors can seed at the
-    last rendered position. We assert the signature binds it (FastAPI would
-    422 an unknown query only if declared); here we check it is forwarded by
-    inspecting the route's declared query params."""
-    import inspect
+def test_stream_route_since_skips_already_rendered_rows(
+    client_authed_owner, pg_session_factory, current_user
+):
+    from datetime import UTC, datetime
 
-    from call_manager.proposal_assist.web.workspaces import stream_turn
+    from sqlalchemy import select
 
-    params = inspect.signature(stream_turn).parameters
-    assert "since" in params
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="completed", queued_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+        )
+        s.add(job)
+        r1 = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "FIRST"})
+        r2 = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "SECOND"})
+        s.commit()
+        wsid, jid, r1id = ws.id, job.id, r1.id
+
+    with pg_session_factory() as s:
+        p1 = s.scalar(select(ChatTurn.position).where(ChatTurn.id == r1id))
+
+    # Completed job -> the generator does one poll then 'done', so .get() reads
+    # the whole finite stream body.
+    resp = client_authed_owner.get(f"/workspaces/{wsid}/turns/{jid}/stream?since={p1}")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "SECOND" in body
+    assert "FIRST" not in body  # row at position p1 was seeded past
+    assert "event: done" in body
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `uv run pytest tests/proposal_assist/test_web_workspaces_sse.py::test_stream_route_accepts_since_query_param -v`
-Expected: FAIL (`assert "since" in params` — the route has no `since` parameter yet).
+Run: `uv run pytest tests/proposal_assist/test_web_workspaces_sse.py::test_stream_route_since_skips_already_rendered_rows -v`
+Expected: FAIL — without `?since` handling the route ignores the param and the generator seeds at the user-turn position, so `FIRST` (a row above that seed) **is** streamed → `assert "FIRST" not in body` fails.
 
 - [ ] **Step 3: Add the `since` query param + forward it**
 
@@ -374,8 +433,8 @@ Forward it in the `StreamingResponse` call (lines 1046-1055):
 
 - [ ] **Step 4: Run the test**
 
-Run: `uv run pytest tests/proposal_assist/test_web_workspaces_sse.py::test_stream_route_accepts_since_query_param -v`
-Expected: PASS.
+Run: `uv run pytest tests/proposal_assist/test_web_workspaces_sse.py::test_stream_route_since_skips_already_rendered_rows -v`
+Expected: PASS (`FIRST` absent, `SECOND` + `event: done` present).
 
 - [ ] **Step 5: Commit**
 
@@ -613,8 +672,8 @@ def test_reload_renders_connector_for_active_running_job(
 
     body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
     assert f'id="sse-mount-{jid}"' in body
-    # Seed reflects the FULL history (proves active-jobs query ran before the
-    # history fetch — else the seed could miss a row).
+    # The connector seed reflects the FULL rendered history (necessary, not
+    # sufficient, for the ordering guarantee — see the note below the test).
     assert f"?since={max_pos}" in body
     assert "Working" in body
     # Running job: no Cancel control.
@@ -697,6 +756,8 @@ def test_reload_connector_no_cancel_for_viewer(
     assert f"/turns/{jid}/cancel" not in body  # but no Cancel
 ```
 
+> **Ordering note (active-jobs-before-history).** These tests verify the *feature* (connector rendered, seeded at the full history max, owner-gated Cancel) but not the literal "active-jobs query precedes the history query" order — the max position is fixed before the request, so either order satisfies the seed assertion. That ordering is a low-severity correctness guard against a job finalizing *between* the two reads; it is enforced by code placement (Step 3 inserts the active-jobs query immediately before the existing `chat_turns` query) and confirmed in code review. A deterministic interleaving test would require swapping the handler's `app.state.session_factory` for a proxy that commits a finalize between the two queries (cf. Task 2's `_Sess`); that is disproportionate here and is deliberately omitted, not silently skipped.
+
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `uv run pytest tests/proposal_assist/test_web_workspaces_turns.py::test_reload_renders_connector_for_active_running_job -v`
@@ -775,8 +836,8 @@ git commit -m "feat(proposal-assist): reconnect-on-render — per-active-job con
 **Files:**
 - Create: `src/call_manager/web/templates/proposal_assist/partials/artifact_body.html`
 - Modify: `src/call_manager/web/templates/proposal_assist/partials/artifact_pane.html:17-23`
-- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (new `_artifact_sections_and_rendered` helper + `get_workspace_main` reuse + new `GET /{id}/artifact` route)
-- Test: `tests/proposal_assist/test_web_workspaces_artifact.py` (new file)
+- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (new `_artifact_sections_and_rendered` helper + `get_workspace_main` reuse + new `GET /{id}/artifact` route — a distinct path from the existing `/{id}/artifact/raw|history|at|diff` routes, no collision)
+- Test: `tests/proposal_assist/test_web_workspaces_artifact.py` (**existing** file with 7 `/artifact/raw|history|at|diff` tests — append, do not replace)
 
 - [ ] **Step 1: Create the body partial**
 
@@ -807,14 +868,9 @@ In `src/call_manager/web/templates/proposal_assist/partials/artifact_pane.html`,
 
 - [ ] **Step 3: Write the failing route tests**
 
-Create `tests/proposal_assist/test_web_workspaces_artifact.py`:
+**Append** these four tests to the **existing** `tests/proposal_assist/test_web_workspaces_artifact.py` (it already holds 7 tests for `/artifact/raw|history|at|diff` — leave them intact). Do **not** re-add a module docstring or `from __future__` import (the file already has them):
 
 ```python
-"""GET /workspaces/{id}/artifact — the artifact-pane refresh route (B2)."""
-
-from __future__ import annotations
-
-
 def test_artifact_route_returns_body_without_nested_wrapper(
     client_authed_owner, pg_session_factory, current_user
 ):
@@ -876,7 +932,7 @@ def test_artifact_route_allows_viewer(
 - [ ] **Step 4: Run them to verify they fail**
 
 Run: `uv run pytest tests/proposal_assist/test_web_workspaces_artifact.py -v`
-Expected: FAIL (404 for all — the `/artifact` route does not exist; FastAPI returns 404/405).
+Expected: the **four new** `test_artifact_route_*` tests FAIL (no `GET /{id}/artifact` route yet — FastAPI 404/405), while the **7 existing** `/artifact/raw|history|at|diff` tests still PASS (this confirms the append didn't disturb them).
 
 - [ ] **Step 5: Extract the artifact helper + add the route**
 
@@ -1211,13 +1267,14 @@ git commit -m "feat(proposal-assist): DOM-free dedup helpers + node --test + CI 
 
 ---
 
-## Task 9: Browser wiring — dedup hooks, deferred re-enable, artifact refetch
+## Task 9: Browser wiring — dedup hooks, request-aware re-enable, artifact refetch
 
 **Files:**
 - Modify: `src/call_manager/web/templates/base.html:17`
-- Modify: `src/call_manager/web/static/app.js:70-83`
+- Modify: `src/call_manager/web/static/app.js:58-83`
+- Create: `tests/js/app_wiring.test.js`
 
-No automated assertion beyond Task 8's Node tests (this is browser glue calling the tested helpers + standard DOM). After wiring, run the **manual check** in Step 4.
+The dedup *parse* logic is covered by Task 8; this task adds a vm-based harness that loads `app.js` with DOM stubs and dispatches the real events, so a wrong event name, a missing `preventDefault()`, or a missing `serverResponse` rewrite can't slip through CI. The connector/cleanup timing is still confirmed by the **manual check** in Step 5.
 
 - [ ] **Step 1: Load `dedup.js` before `app.js`**
 
@@ -1228,17 +1285,59 @@ In `src/call_manager/web/templates/base.html`, add the dedup script immediately 
   <script src="/static/app.js" defer></script>
 ```
 
-- [ ] **Step 2: Replace the cleanup hook + add the dedup/load hooks**
+- [ ] **Step 2: Replace the turn-lock section with request-aware gating + dedup hooks**
 
-In `src/call_manager/web/static/app.js`, **replace** the existing cleanup block (lines 70-83 — the `htmx:beforeCleanupElement` listener and the `reenable()` function) with:
+In `src/call_manager/web/static/app.js`, **replace** the entire existing turn-lock section (lines 58-83 — from the `// Best-effort §1 turn-lock hint…` comment through the `reenable()` function) with:
 
 ```javascript
-// A2: when an SSE connector ('sse-mount-*') is cleaned up (its job ended and
-// the 'done' delete-child removed it), (1) refetch the artifact pane (idempotent
-// — harmless after an unchanged/failed turn) and (2) re-enable section editing
-// ONLY once no connector remains. The cleanup event fires BEFORE removal, so the
-// re-enable check is deferred to a macrotask that runs after the element is gone;
-// if a new connector mounted meanwhile, editing correctly stays disabled.
+// Section-edit lock (best-effort; server 409s remain authoritative). Editing is
+// disabled while a turn is in flight, and re-enabled only when BOTH (a) no SSE
+// connector remains AND (b) no composer request is still awaiting its response.
+// Tracking composer requests is what keeps a REJECTED submit (409/429/503/400 —
+// which creates no connector) from leaving editing disabled forever, and stops
+// an old connector's deferred cleanup from re-enabling while a new submit is
+// mid-flight (the connector for it has not mounted yet).
+var pendingComposerRequests = 0;
+
+function reenable() {
+  document.querySelectorAll(".section-edit-btn").forEach(function (b) {
+    b.disabled = false;
+  });
+}
+function disableSectionEdits() {
+  document.querySelectorAll(".section-edit-btn").forEach(function (b) {
+    b.disabled = true;
+  });
+}
+function maybeReenable() {
+  // Deferred to a macrotask so DOM mutations (connector add on swap, remove on
+  // cleanup) have settled before we read them.
+  setTimeout(function () {
+    if (pendingComposerRequests === 0 && !document.querySelector('[id^="sse-mount-"]')) {
+      reenable();
+    }
+  }, 0);
+}
+
+document.body.addEventListener("htmx:beforeRequest", function (evt) {
+  if (evt.detail.elt && evt.detail.elt.id === "composer") {
+    pendingComposerRequests++;
+    disableSectionEdits();
+  }
+});
+document.body.addEventListener("htmx:afterRequest", function (evt) {
+  if (evt.detail.elt && evt.detail.elt.id === "composer") {
+    pendingComposerRequests = Math.max(0, pendingComposerRequests - 1);
+    // On success the connector is in the DOM by now (afterSwap precedes
+    // afterRequest), so maybeReenable keeps editing disabled; on a rejected
+    // submit there is no connector, so this is what re-enables it.
+    maybeReenable();
+  }
+});
+
+// A2: when an SSE connector ('sse-mount-*') is cleaned up (its job ended and the
+// 'done' delete-child removed it), (1) refetch the artifact pane (idempotent —
+// harmless after an unchanged/failed turn) and (2) attempt the combined re-enable.
 document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
   var id = evt.detail.elt && evt.detail.elt.id;
   if (!id || id.indexOf("sse-mount-") !== 0) return;
@@ -1250,17 +1349,8 @@ document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
       swap: "innerHTML",
     });
   }
-  setTimeout(function () {
-    if (!document.querySelector('[id^="sse-mount-"]')) {
-      reenable();
-    }
-  }, 0);
+  maybeReenable();
 });
-function reenable() {
-  document.querySelectorAll(".section-edit-btn").forEach(function (b) {
-    b.disabled = false;
-  });
-}
 
 // A2 dedup — the SSE stream is workspace-global, so two live connectors can
 // carry the same row. Suppress duplicates by stable id across BOTH swap paths
@@ -1283,15 +1373,11 @@ document.body.addEventListener("htmx:beforeSwap", function (evt) {
   });
 });
 
-// A2 reconnect-on-render: a connector rendered on page load means a turn is
-// live, so disable section editing until it cleans up (symmetric with the
-// re-enable above). The load-time hint the original comment said was missing
-// now exists as the rendered sse-mount connector(s).
+// A2 reconnect-on-render: a connector present on page load means a turn is live,
+// so disable editing until it cleans up (symmetric with the re-enable above).
 function disableSectionEditsIfConnectorPresent() {
   if (document.querySelector('[id^="sse-mount-"]')) {
-    document.querySelectorAll(".section-edit-btn").forEach(function (b) {
-      b.disabled = true;
-    });
+    disableSectionEdits();
   }
 }
 if (document.readyState !== "loading") {
@@ -1301,25 +1387,124 @@ if (document.readyState !== "loading") {
 }
 ```
 
-The `htmx:beforeRequest` composer-disable block (lines 62-69) is unchanged and stays above this.
+(This supersedes the old `htmx:beforeRequest` block and its outdated "load-time disabling is skipped intentionally" comment.)
 
-- [ ] **Step 3: Verify the full Python suite + lint still pass**
+- [ ] **Step 3: Write + run the wiring harness test**
+
+Create `tests/js/app_wiring.test.js` — loads `app.js` under `node:vm` with minimal DOM/window stubs, dispatches the real events, and asserts the wiring effects:
+
+```javascript
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const APP_JS = path.join(__dirname, "../../src/call_manager/web/static/app.js");
+const dedup = require("../../src/call_manager/web/static/dedup.js");
+
+function loadApp(present) {
+  const presentSet = present || new Set();
+  const handlers = {};
+  const body = {
+    addEventListener: function (name, fn) {
+      (handlers[name] = handlers[name] || []).push(fn);
+    },
+  };
+  const documentStub = {
+    body: body,
+    readyState: "complete",
+    addEventListener: function () {},
+    getElementById: function (id) {
+      return presentSet.has(id) ? { id: id } : null;
+    },
+    querySelector: function () {
+      return null;
+    },
+    querySelectorAll: function () {
+      return [];
+    },
+  };
+  const context = {
+    document: documentStub,
+    window: { cmDedup: dedup, htmx: { ajax: function () {} } },
+    setTimeout: function (fn) {
+      fn();
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(APP_JS, "utf8"), context);
+  return handlers;
+}
+
+function fire(handlers, name, detail) {
+  let prevented = false;
+  const evt = { detail: detail, preventDefault: function () { prevented = true; } };
+  (handlers[name] || []).forEach(function (fn) { fn(evt); });
+  return { evt: evt, prevented: prevented };
+}
+
+test("sseBeforeMessage prevents default for an already-present row", function () {
+  const handlers = loadApp(new Set(["chat-turn-A"]));
+  const res = fire(handlers, "htmx:sseBeforeMessage", {
+    data: '<div class="chat-turn" id="chat-turn-A"><p>x</p></div>',
+  });
+  assert.strictEqual(res.prevented, true);
+});
+
+test("sseBeforeMessage allows a new row", function () {
+  const handlers = loadApp(new Set());
+  const res = fire(handlers, "htmx:sseBeforeMessage", {
+    data: '<div class="chat-turn" id="chat-turn-B"><p>x</p></div>',
+  });
+  assert.strictEqual(res.prevented, false);
+});
+
+test("beforeSwap strips a present row from the POST response, keeps the connector", function () {
+  const handlers = loadApp(new Set(["chat-turn-A"]));
+  const detail = {
+    target: { id: "chat-history" },
+    serverResponse:
+      '<div class="chat-turn" id="chat-turn-A"><p>x</p></div><div id="sse-mount-J"></div>',
+  };
+  fire(handlers, "htmx:beforeSwap", detail);
+  assert.ok(!detail.serverResponse.includes("chat-turn-A"));
+  assert.ok(detail.serverResponse.includes("sse-mount-J"));
+});
+
+test("beforeSwap ignores swaps not targeting #chat-history", function () {
+  const handlers = loadApp(new Set(["chat-turn-A"]));
+  const detail = {
+    target: { id: "artifact-rendered" },
+    serverResponse: '<div class="chat-turn" id="chat-turn-A"></div>',
+  };
+  fire(handlers, "htmx:beforeSwap", detail);
+  assert.ok(detail.serverResponse.includes("chat-turn-A"));
+});
+```
+
+Run: `node --test tests/js/`
+Expected: PASS (Task 8's `dedup.test.js` + these 4 wiring tests). If a handler used the wrong event name or dropped `preventDefault()`/the rewrite, these fail.
+
+- [ ] **Step 4: Verify the full Python suite + lint still pass**
 
 Run: `uv run pytest tests/proposal_assist -q && uv run ruff check .`
 Expected: PASS (no Python changed here, but confirm nothing regressed; ruff does not lint JS).
 
-- [ ] **Step 4: Manual browser check (record the result in the commit/PR)**
+- [ ] **Step 5: Manual browser check (record the result in the commit/PR)**
 
 Start the dev server (per the project recipe) and, as the workspace owner:
 1. Submit a turn → exactly one user row appears; "Working…" shows; the artifact pane repaints when the turn ends; section-edit buttons disable during, re-enable after.
 2. Submit a turn, then immediately submit a second → two connectors; each row appears exactly once (no duplicates); editing re-enables only after **both** finish.
 3. Reload mid-turn → the connector re-appears, streaming resumes, no duplicate rows, artifact repaints on completion.
+4. Trigger a **rejected** submit (e.g. submit during Phase-0 setup → 409, or with drafting disabled → 503): the inline error shows AND section editing re-enables (it is not left stuck disabled).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/call_manager/web/templates/base.html src/call_manager/web/static/app.js
-git commit -m "feat(proposal-assist): browser wiring — dedup hooks, deferred re-enable, artifact refetch"
+git add src/call_manager/web/templates/base.html src/call_manager/web/static/app.js tests/js/app_wiring.test.js
+git commit -m "feat(proposal-assist): browser wiring — dedup hooks, request-aware re-enable, artifact refetch"
 ```
 
 ---
@@ -1372,14 +1557,16 @@ git commit -m "style(proposal-assist): turn-progress / cancel affordance styling
 - [ ] Run the whole Python suite: `uv run pytest -q` → all pass.
 - [ ] Run the JS suite: `node --test tests/js/` → all pass.
 - [ ] Lint: `uv run ruff check .` → clean.
-- [ ] Manual end-to-end (Task 9 Step 4) confirmed.
+- [ ] Manual end-to-end (Task 9 Step 5) confirmed.
 - [ ] Then finish the branch with **superpowers:finishing-a-development-branch** (local `--no-ff` merge to master — no git remote).
 
 ---
 
 ## Self-Review notes (author)
 
-**Spec coverage:** F (generator `since_position` + reorder) → Task 2/3. G (connector partial) → Task 4. H (post_turn persisted echo) → Task 4. I (active-jobs-before-history + reload connectors) → Task 5. J (stable id + two dedup hooks) → Tasks 1, 8, 9. K (deferred multi-connector re-enable) → Task 9. L (artifact_body + route + refetch) → Tasks 6, 9. M (cancel fragment) → Task 7. Operational-assumption / cross-tab notes are documentation-only (no code). Stable-id contract test → Task 1; durable-ordering property → Task 2; dedup helpers automated → Task 8; reconnect-on-render + viewer-no-Cancel → Task 5; artifact route empty-state → Task 6.
+**Spec coverage:** F (generator `since_position` + reorder) → Task 2/3. G (connector partial) → Task 4. H (post_turn persisted echo) → Task 4. I (active-jobs-before-history + reload connectors) → Task 5. J (stable id + two dedup hooks) → Tasks 1, 8, 9. K (request-aware multi-connector re-enable — counter + `htmx:afterRequest`) → Task 9. L (artifact_body + route + refetch) → Tasks 6, 9. M (cancel fragment) → Task 7. Operational-assumption / cross-tab notes are documentation-only (no code). Stable-id contract test → Task 1; deterministic bug-2 regression → Task 2; `?since` forwarding integration test → Task 3; dedup helpers + wiring automated → Tasks 8, 9; reconnect-on-render + viewer-no-Cancel → Task 5; artifact route empty-state → Task 6.
+
+**Codex plan-review (2026-06-13) corrections folded in:** (1) Task 2's ordering test is now a deterministic intra-poll race (`_Sess` proxy commits the finalize right after the poll's row snapshot) that **fails on the old rows-first order** — the earlier finalize-before-start test passed without the reorder. (2) Task 9 adds composer-request tracking + `htmx:afterRequest` so a **rejected** submit (no connector) re-enables editing instead of stranding it, and an old connector's cleanup can't re-enable mid-new-submit. (3) Task 9 adds a `node:vm` wiring harness so a wrong event name / missing `preventDefault` / missing `serverResponse` rewrite fails CI. (4) Task 3's `?since` test is a real stream integration test (rows ≤ P absent), and its incorrect "FastAPI 422s undeclared params" comment is removed. (5) Task 6 **appends** to the pre-existing `test_web_workspaces_artifact.py` (7 `/artifact/raw|history|at|diff` tests) rather than claiming to create it; the new `/{id}/artifact` path doesn't collide with the `/artifact/*` sub-routes. (6) Task 5's reload test comment no longer over-claims to prove query order; the literal active-jobs-before-history order is enforced by code placement + review (deterministic interleaving deliberately omitted as disproportionate for a Low guard).
 
 **Type/name consistency:** the connector partial uses `job` (object, `.id`/`.status`), `workspace_id`, `since`, `is_owner` — provided identically by `post_turn` (`.render(workspace_id=…, job=job, since=None, is_owner=True)`) and the `workspace_main.html` loop (`{% set workspace_id %}`, loop var `job`, `{% set since = chat_max_position %}`, `is_owner` in context). `window.cmDedup.{extractChatTurnId,stripPresentChatTurns}` names match dedup.js exports and the Node test imports. `_artifact_sections_and_rendered` returns `(raw, rendered, sections)`, consumed consistently by `get_workspace_main` and `get_artifact_body`.
 
