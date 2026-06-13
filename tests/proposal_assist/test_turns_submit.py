@@ -244,3 +244,44 @@ async def test_concurrent_submits_cannot_overshoot_cap(monkeypatch, pg_url, pg_s
         )
 
     assert sorted(results) == ["capped", "ok"], f"expected one ok and one capped, got {results}"
+
+
+def test_submit_rejected_on_soft_deleted_workspace(pg_session_factory, _settings_env):
+    """A submit that races a soft_delete (workspace already soft-deleted by the
+    time submit acquires the FOR UPDATE lock) must be rejected — no TurnJob,
+    no cloud_turn_sent — so the drain can never orphan a queued turn."""
+    from datetime import UTC, datetime
+
+    import pytest
+    from sqlalchemy import select
+
+    from call_manager.config import Settings
+    from call_manager.db.models import TurnJob, WorkspaceEvent
+    from call_manager.proposal_assist.turns.submit import submit_user_turn
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    settings = Settings()
+
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        ws.soft_deleted_at = datetime.now(UTC)  # already soft-deleted
+        s.commit()
+        wsid = ws.id
+
+    with pg_session_factory() as s:
+        with pytest.raises(ValueError):
+            submit_user_turn(
+                session=s,
+                workspace_id=wsid,
+                content_text="hi",
+                submitted_by_user_id=owner.id,
+                settings=settings,
+            )
+        s.rollback()
+
+    with pg_session_factory() as s:
+        assert s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid)) is None
+        assert (
+            s.scalar(select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_sent")) is None
+        )

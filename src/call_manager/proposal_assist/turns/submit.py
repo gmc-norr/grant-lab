@@ -236,15 +236,19 @@ def submit_user_turn(
     # transaction commits first (turn starts strictly after the user's commit).
     acquire_commit_mutex(session, workspace_id)
 
-    # Lock the workspace row for the duration of this transaction.
-    # If the workspace doesn't exist, raise — the caller (web layer)
-    # will have already 404'd before reaching this code, so a missing
-    # row here means a programmer error.
+    # Lock the workspace row for the duration of this transaction AND re-check
+    # soft_deleted_at under the lock. submit and soft_delete serialize on this
+    # row (submit's SELECT FOR UPDATE conflicts with soft_delete's UPDATE), so
+    # re-reading here catches the post-deletion ordering: a None result means
+    # the workspace is missing OR soft-deleted → reject, so no turn can be
+    # enqueued (and orphan its cloud_turn_sent) after deletion.
     locked = session.execute(
-        select(Workspace.id).where(Workspace.id == workspace_id).with_for_update()
+        select(Workspace.id)
+        .where(Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None))
+        .with_for_update()
     ).scalar_one_or_none()
     if locked is None:
-        raise ValueError(f"workspace {workspace_id} does not exist")
+        raise ValueError(f"workspace {workspace_id} does not exist or was deleted")
 
     # Early input validation: empty submits would otherwise reach the
     # resolver and surface as the confusing
