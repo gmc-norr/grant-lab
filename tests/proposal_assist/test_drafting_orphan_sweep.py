@@ -92,3 +92,35 @@ def test_sweep_returns_zero_when_nothing_to_do(pg_session_factory):
         ws = make_workspace(s)
         s.commit()
         assert sweep_orphaned_turn_jobs(s, ws.id) == 0
+
+
+def test_orphan_sweep_writes_outcome_row_and_event(pg_session_factory):
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+    from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
+
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        ut = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "hi"})
+        s.add(TurnJob(workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=owner.id,
+                      status="running", started_at=datetime.now(UTC)))
+        s.commit()
+        wsid = ws.id
+
+        swept = sweep_orphaned_turn_jobs(s, wsid)
+        s.commit()
+        s.expire_all()
+
+        assert swept == 1
+        job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
+        assert job.status == "failed"
+        row = s.scalar(
+            select(ChatTurn).where(ChatTurn.role == "system", ChatTurn.workspace_id == wsid)
+        )
+        assert row.content["text"] == "This turn was interrupted. Please try again."
+        event = s.scalar(
+            select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_failed")
+        )
+        assert event is not None
