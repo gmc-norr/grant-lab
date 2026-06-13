@@ -56,8 +56,9 @@ def test_post_turn_response_includes_user_turn_and_sse_connector(
     pg_session_factory,
     current_user,
 ):
-    """H1 regression: response body contains both the rendered user turn
-    AND the SSE-connector div (both appended to #chat-history)."""
+    """H1: response body contains both the rendered user turn AND the SSE
+    connector div (both appended to #chat-history). A2: the connector uses a
+    real `done` delete-child, not the no-op sse-close attribute."""
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
@@ -71,14 +72,77 @@ def test_post_turn_response_includes_user_turn_and_sse_connector(
     )
     assert response.status_code in (200, 201)
     body = response.content.decode()
-    # User turn rendered.
     assert "Hello agent" in body
     assert "chat-turn" in body
-    # SSE connector div present.
     assert "sse-connect=" in body
     assert "/turns/" in body and "/stream" in body
-    assert "hx-ext='sse'" in body or 'hx-ext="sse"' in body
-    assert "sse-close=" in body  # closes on `done` event
+    assert 'hx-ext="sse"' in body
+    # A2: real cleanup via a done delete-child; the no-op sse-close is gone.
+    assert 'sse-swap="done"' in body
+    assert 'hx-swap="delete"' in body
+    assert "sse-close=" not in body
+
+
+def test_post_turn_echo_carries_stable_chat_turn_id(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """A2: the echo renders the PERSISTED user turn (real id), so the client
+    dedup can collapse it against the same row arriving via another live
+    connector."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/turns",
+        data={"content": "Hello agent"},
+    )
+    assert response.status_code in (200, 201)
+    body = response.content.decode()
+
+    with pg_session_factory() as s:
+        job = s.scalar(select(TurnJob).where(TurnJob.workspace_id == wsid))
+        user_turn_id = job.user_turn_id
+        # user_turn_id is a real persisted row (nullable FK, but set here).
+        assert s.get(ChatTurn, user_turn_id) is not None
+
+    assert f'id="chat-turn-{user_turn_id}"' in body
+
+
+def test_post_turn_connector_shows_cancel_for_owner(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """The owner who submits a queued turn gets a Cancel control on the
+    connector, targeting its own #cancel-status span (not #chat-history)."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import TurnJob
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)
+        s.commit()
+        wsid = ws.id
+
+    response = client_authed_owner.post(
+        f"/workspaces/{wsid}/turns",
+        data={"content": "Hello agent"},
+    )
+    body = response.content.decode()
+    with pg_session_factory() as s:
+        jid = s.scalar(select(TurnJob.id).where(TurnJob.workspace_id == wsid))
+    assert f'id="cancel-status-{jid}"' in body
+    assert f"/turns/{jid}/cancel" in body
 
 
 def test_post_turn_escapes_html_in_user_content(

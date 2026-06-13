@@ -980,53 +980,27 @@ async def post_turn(
         _rollback_created_uploads()
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # B7 / T4: render the just-posted user turn through the chat_turn
-    # partial — the single source of truth for chat-turn HTML — so the
-    # immediate echo, the SSE renderer, and the history loop all agree.
-    # We build a content shape that matches what submit_user_turn just
-    # persisted: list of {text} + {image} + {reference} blocks when any
-    # inclusions are present, single text dict otherwise. Jinja's auto-
-    # escape inside the partial handles HTML in `content`.
-    #
-    # Slice 4 residuals fix: the prior condition (`if all_ids`) treated
-    # a refs-only turn as text-only, so the user got no visible chip
-    # in the echo until the SSE re-render landed. Including
-    # `reference_ids` in the trigger condition + emitting reference
-    # blocks in the echo restores immediate feedback.
-    if all_ids or reference_ids:
-        echo_content: object = (
-            [{"type": "text", "text": content}]
-            + [{"type": "image", "attachment_id": str(aid)} for aid in all_ids]
-            + [{"type": "reference", "reference_id": str(rid)} for rid in reference_ids]
-        )
-    else:
-        echo_content = {"type": "text", "text": content}
-    echo_turn = ChatTurn(
-        workspace_id=ws.id,
-        role="user",
-        content=echo_content,  # type: ignore[arg-type]
-    )
-    # Load the just-attached references for the echo partial so the
-    # chip shows a title/filename (not the "(unknown)" fallback). Scoped
-    # to this workspace — same query the history-loop path uses.
+    # A2: echo the PERSISTED user turn (real DB id) so the client dedup can
+    # collapse it against the same row streamed by any other live connector.
+    # user_turn_id is a nullable FK (ON DELETE SET NULL); submit_user_turn just
+    # wrote it in the committed transaction, so it is present — but guard the
+    # None case rather than render an id-less echo that would defeat the dedup.
+    persisted = session.get(ChatTurn, job.user_turn_id)
+    if persisted is None:
+        raise HTTPException(status_code=500, detail="user turn vanished after enqueue")
     echo_ref_map = _load_reference_map(
         session,
         ws.id,
-        {str(rid) for rid in reference_ids},
+        _collect_reference_ids([persisted]),
     )
-    user_turn_html = request.app.state.templates.env.get_template(
-        _CHAT_TURN_PARTIAL,
-    ).render(turn=echo_turn, chat_reference_map=echo_ref_map)
-    sse_connector = (
-        f"<div id='sse-mount-{job.id}' "
-        f"hx-ext='sse' "
-        f"sse-connect='/workspaces/{workspace_id}/turns/{job.id}/stream' "
-        f"sse-swap='message' "
-        f"sse-close='done' "
-        f"hx-target='#chat-history' "
-        f"hx-swap='beforeend'></div>"
+    templates = request.app.state.templates
+    user_turn_html = templates.env.get_template(_CHAT_TURN_PARTIAL).render(
+        turn=persisted, chat_reference_map=echo_ref_map
     )
-    return HTMLResponse(user_turn_html + sse_connector)
+    connector_html = templates.env.get_template(
+        "proposal_assist/partials/turn_connector.html"
+    ).render(workspace_id=workspace_id, job=job, since=None, is_owner=True)
+    return HTMLResponse(user_turn_html + connector_html)
 
 
 @router.get("/{workspace_id}/turns/{turn_job_id}/stream")
