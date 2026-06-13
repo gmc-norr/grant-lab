@@ -71,6 +71,7 @@ from call_manager.proposal_assist.drafting.contract import (
 )
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
+from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -437,47 +438,31 @@ def _finalize_failed(
     tokens_out: int,
     user_turn_id: uuid.UUID | None = None,
 ) -> None:
+    # Thin wrapper: the helper performs the conditional running→failed flip,
+    # clears the user-turn token pre-count, writes the viewer-safe system row,
+    # and writes the cloud_turn_failed event — all in one transaction. It reads
+    # user_turn_id / submitted_by_user_id from the row via RETURNING, so the
+    # passed-in copies are no longer threaded (kept in the signature so callers
+    # are unchanged). A no-op (already terminal/reaped) returns False and writes
+    # nothing — the prior writer already cleared the pre-count and emitted its
+    # own event.
     with session_factory() as s:
-        # Clear the submit-time pre-count on the user-turn row: a turn
-        # that failed never produced a real assistant response, so the
-        # estimate should not keep counting against the daily cap.
-        # (_finalize_success clears this too; mirror the behaviour here
-        # so a failed turn doesn't permanently burn cap budget.)
-        if user_turn_id is not None:
-            user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
-            if user_turn is not None:
-                user_turn.tokens_in = None
-        # Conditional transition (mirrors _finalize_success): only fail a job
-        # still 'running'. If the reaper already failed it, re-failing would
-        # emit a duplicate cloud_turn_failed event and clobber the reaper's
-        # error string. The missing-user-turn finalize path can run before any
-        # 'running' state is set in pathological cases, so we tolerate a
-        # missing row (rowcount 0) by skipping the audit event.
-        failed = s.execute(
-            update(TurnJob)
-            .where(TurnJob.id == turn_job_id, TurnJob.status == "running")
-            .values(status="failed", error=error, completed_at=datetime.now(UTC))
-        )
-        if (failed.rowcount or 0) == 0:
-            s.commit()  # persist the tokens_in clearing, skip the duplicate event
-            logger.warning(
-                "process_turn_once: turn_job %s failed-finalize is a no-op "
-                "(no 'running' row — already terminal/reaped)",
-                turn_job_id,
-                extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
-            )
-            return
-        s.add(
-            WorkspaceEvent(
-                workspace_id=workspace_id,
-                kind="cloud_turn_failed",
-                actor_id=submitted_by_user_id,
-                payload={
-                    "turn_job_id": str(turn_job_id),
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "error": error,
-                },
-            )
+        did = record_terminal_outcome(
+            s,
+            turn_job_id=turn_job_id,
+            workspace_id=workspace_id,
+            outcome="failed",
+            expected_status="running",
+            raw_error=error,
+            emit_chat=True,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
         )
         s.commit()
+    if not did:
+        logger.warning(
+            "process_turn_once: turn_job %s failed-finalize is a no-op "
+            "(no 'running' row — already terminal/reaped)",
+            turn_job_id,
+            extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
+        )

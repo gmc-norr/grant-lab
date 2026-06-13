@@ -194,6 +194,41 @@ def test_cancel_writes_cloud_turn_cancelled_event(
         assert events[0].payload["turn_job_id"] == str(jid)
 
 
+def test_cancel_writes_system_outcome_row(client_authed_owner, pg_session_factory, current_user):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+                      status="queued", queued_at=datetime.now(UTC))
+        s.add(job)
+        s.commit()
+        wsid, jid = ws.id, job.id
+
+    resp = client_authed_owner.post(f"/workspaces/{wsid}/turns/{jid}/cancel")
+    assert resp.status_code == 200
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, jid).status == "cancelled"
+        row = s.scalar(
+            select(ChatTurn).where(ChatTurn.role == "system", ChatTurn.workspace_id == wsid)
+        )
+        assert row.content["outcome"] == "cancelled"
+        assert row.content["text"] == "This turn was cancelled before it started."
+        evt = s.scalar(
+            select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_cancelled")
+        )
+        assert evt is not None
+
+
 def test_cancel_noop_writes_no_event(
     client_authed_owner,
     pg_session_factory,

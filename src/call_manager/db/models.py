@@ -776,7 +776,7 @@ class ChatTurn(Base):
     __tablename__ = "chat_turns"
     __table_args__ = (
         CheckConstraint(
-            "role IN ('user','assistant','tool')",
+            "role IN ('user','assistant','tool','system')",
             name="ck_chat_turns_role",
         ),
         Index("ix_chat_turns_ws_created", "workspace_id", "created_at"),

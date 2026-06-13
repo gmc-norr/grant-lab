@@ -14,7 +14,6 @@ context, and main.py registers the `display_dt` / `criterion_label`
 from __future__ import annotations
 
 import asyncio
-import html as _html
 import logging
 import uuid
 from pathlib import Path
@@ -30,7 +29,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
@@ -60,6 +59,7 @@ from call_manager.proposal_assist.tools.history import (
 from call_manager.proposal_assist.tools.proposal import read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
+from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.turns.submit import (
     MAX_TURN_INCLUSIONS,
     submit_user_turn,
@@ -758,9 +758,9 @@ async def post_turn(
     # sensitive but the inverted order broke the auth-first pattern
     # used elsewhere in this router.
     if not settings.drafting_enabled:
-        return HTMLResponse(
-            "<p>Drafting is currently disabled by an administrator. Please try again later.</p>",
+        raise HTTPException(
             status_code=503,
+            detail="Drafting is currently disabled by an administrator. Please try again later.",
         )
 
     # Spec 2026-06-10 §9: enforce the cloud-LLM data-disclosure acknowledgement
@@ -778,10 +778,12 @@ async def post_turn(
         .limit(1)
     )
     if prior_ack is None:
-        return HTMLResponse(
-            "<p>Please acknowledge the data-disclosure notice before "
-            "sending a message to the drafting assistant.</p>",
+        raise HTTPException(
             status_code=403,
+            detail=(
+                "Please acknowledge the data-disclosure notice before "
+                "sending a message to the drafting assistant."
+            ),
         )
 
     storage = AttachmentStorage(root=Path(settings.workspaces_dir))
@@ -823,9 +825,9 @@ async def post_turn(
     # been written yet.
     early_inclusions = len(real_files) + len(attachment_ids) + len(reference_ids)
     if early_inclusions > MAX_TURN_INCLUSIONS:
-        return HTMLResponse(
-            f"<p>Too many inclusions: {early_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
+        raise HTTPException(
             status_code=400,
+            detail=f"Too many inclusions: {early_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.",
         )
     new_upload_ids: list[uuid.UUID] = []
     for upload in real_files:
@@ -833,34 +835,36 @@ async def post_turn(
         if content_type not in _ALLOWED_MIMES:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(
-                f"<p>Unsupported content_type: {_html.escape(repr(content_type))}</p>",
+            raise HTTPException(
                 status_code=400,
+                detail=f"Unsupported content_type: {content_type!r}",
             )
         try:
             data = await _read_capped(upload, _MAX_BYTES)
         except HTTPException as e:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code)
+            raise HTTPException(status_code=e.status_code, detail=str(e.detail)) from e
         if not data:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse("<p>empty upload</p>", status_code=400)
+            raise HTTPException(status_code=400, detail="empty upload")
         try:
             fmt, width_px, height_px = _probe_image_format(data)
         except HTTPException as e:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code)
+            raise HTTPException(status_code=e.status_code, detail=str(e.detail)) from e
         detected_mime = _PIL_FORMAT_TO_MIME[fmt]
         if detected_mime != content_type:
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse(
-                f"<p>content_type {_html.escape(repr(content_type))} does not "
-                f"match the actual image format {_html.escape(repr(detected_mime))}</p>",
+            raise HTTPException(
                 status_code=400,
+                detail=(
+                    f"content_type {content_type!r} does not match "
+                    f"the actual image format {detected_mime!r}"
+                ),
             )
         suffix = _SUFFIX_BY_MIME[content_type]
         aid = uuid.uuid4()
@@ -881,7 +885,7 @@ async def post_turn(
             )
             session.rollback()
             _rollback_created_uploads()
-            return HTMLResponse("<p>storage write failed</p>", status_code=500)
+            raise HTTPException(status_code=500, detail="storage write failed") from e
         # Record now so a downstream failure rolls back even files we
         # haven't yet inserted a row for (the row insert below could
         # still raise).
@@ -913,9 +917,9 @@ async def post_turn(
     if all_inclusions > MAX_TURN_INCLUSIONS:
         session.rollback()
         _rollback_created_uploads()
-        return HTMLResponse(
-            f"<p>Too many inclusions: {all_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.</p>",
+        raise HTTPException(
             status_code=400,
+            detail=f"Too many inclusions: {all_inclusions} > {MAX_TURN_INCLUSIONS} max per turn.",
         )
 
     try:
@@ -940,31 +944,32 @@ async def post_turn(
     except GlobalTokenCapExceeded as e:
         session.rollback()
         _rollback_created_uploads()
-        return HTMLResponse(
-            f"<p>Global org-wide daily token cap exceeded: {_html.escape(e.reason)}. "
-            f"Used {e.used_in} input / {e.used_out} output today; "
-            f"cap is {e.cap_in} / {e.cap_out}. Try again after midnight "
-            f"Europe/Stockholm or ask an admin to raise the cap.</p>",
+        raise HTTPException(
             status_code=429,
+            detail=(
+                f"Global org-wide daily token cap exceeded: {e.reason}. "
+                f"Used {e.used_in} input / {e.used_out} output today; "
+                f"cap is {e.cap_in} / {e.cap_out}. "
+                "Try again after midnight Europe/Stockholm or ask an admin to raise the cap."
+            ),
             headers={"X-Token-Cap": "global"},
-        )
+        ) from e
     except TokenCapExceeded as e:
         session.rollback()
         _rollback_created_uploads()
-        return HTMLResponse(
-            f"<p>Workspace daily token cap exceeded: {_html.escape(e.reason)}. "
-            f"Used {e.used_in} input / {e.used_out} output today; "
-            f"cap is {e.cap_in} / {e.cap_out}. Try again after midnight "
-            f"Europe/Stockholm or ask an admin to raise the cap.</p>",
+        raise HTTPException(
             status_code=429,
-        )
+            detail=(
+                f"Workspace daily token cap exceeded: {e.reason}. "
+                f"Used {e.used_in} input / {e.used_out} output today; "
+                f"cap is {e.cap_in} / {e.cap_out}. "
+                "Try again after midnight Europe/Stockholm or ask an admin to raise the cap."
+            ),
+        ) from e
     except ValueError as e:
         session.rollback()
         _rollback_created_uploads()
-        return HTMLResponse(
-            f"<p>{_html.escape(str(e))}</p>",
-            status_code=400,
-        )
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # B7 / T4: render the just-posted user turn through the chat_turn
     # partial — the single source of truth for chat-turn HTML — so the
@@ -1298,15 +1303,27 @@ def soft_delete(
         session=session,
     )
     ws.soft_deleted_at = datetime.now(UTC)
-    # Cancel any QUEUED turns for this workspace so a deletion-race turn can't
-    # be dispatched and start spending tokens / editing the repo. Running turns
-    # are left to finish (bounded by turn_max_seconds + the reaper); the drain
-    # query also excludes soft-deleted workspaces, so no NEW turn is dispatched.
-    session.execute(
-        update(TurnJob)
-        .where(TurnJob.workspace_id == workspace_id, TurnJob.status == "queued")
-        .values(status="failed", error="workspace soft-deleted", completed_at=datetime.now(UTC))
-    )
+    # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
+    # through the helper for audit parity (closes each cloud_turn_sent chain),
+    # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,
+    # so a viewer-safe row would be dead-on-arrival. 'cancelled' (owner-
+    # initiated, never started), not 'failed'.
+    queued = session.execute(
+        select(TurnJob.id).where(
+            TurnJob.workspace_id == workspace_id,
+            TurnJob.status == "queued",
+        )
+    ).all()
+    for row in queued:
+        record_terminal_outcome(
+            session,
+            turn_job_id=row.id,
+            workspace_id=workspace_id,
+            outcome="cancelled",
+            expected_status="queued",
+            raw_error="workspace soft-deleted",
+            emit_chat=False,
+        )
     session.commit()
     # B7: scrub attachment bytes from disk. DB rows remain (compliance —
     # audit trail preserved); only the bytes are removed. Errors here
@@ -1391,37 +1408,28 @@ def cancel_turn(
     WorkspaceEvent in the same transaction. Without this, the
     submit-time `cloud_turn_sent` row has no matching outcome event
     and the compliance chain breaks (see B6-residuals review).
-    """
-    from datetime import UTC, datetime
 
+    Audit note: the cloud_turn_cancelled actor_id is the turn's
+    submitted_by_user_id (via the helper), which equals the canceller
+    while _require_owner enforces owner-only access and there is no
+    ownership-transfer / admin-on-behalf cancel. If such a path is added,
+    pass the acting user's id to the helper explicitly.
+    """
     ws = _require_owner(
         workspace_id=workspace_id,
         user=user,
         session=session,
     )
-    result = session.execute(
-        update(TurnJob)
-        .where(
-            TurnJob.id == turn_job_id,
-            TurnJob.workspace_id == ws.id,
-            TurnJob.status == "queued",
-        )
-        .values(status="cancelled", completed_at=datetime.now(UTC))
+    did = record_terminal_outcome(
+        session,
+        turn_job_id=turn_job_id,
+        workspace_id=ws.id,
+        outcome="cancelled",
+        expected_status="queued",
+        raw_error=None,
+        emit_chat=True,
     )
-    if result.rowcount:
-        session.add(
-            WorkspaceEvent(
-                workspace_id=ws.id,
-                kind="cloud_turn_cancelled",
-                actor_id=user.id,
-                payload={
-                    "turn_job_id": str(turn_job_id),
-                    "tokens_in": 0,
-                    "tokens_out": 0,
-                },
-            )
-        )
     session.commit()
-    if result.rowcount:
+    if did:
         return HTMLResponse("<p>cancelled</p>")
     return HTMLResponse("<p>too late — already started or finished</p>")

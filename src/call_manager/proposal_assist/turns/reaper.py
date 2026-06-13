@@ -22,10 +22,11 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from call_manager.db.models import ChatTurn, TurnJob
+from call_manager.db.models import TurnJob
+from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -57,37 +58,28 @@ def reap_stuck_turns(
     cutoff = current - timedelta(seconds=ttl_seconds)
 
     with session_factory() as s:
-        # Collect the stuck rows first so we can also clear the submit-time
-        # tokens_in pre-count on their linked user-turn rows. submit_user_turn
-        # pre-stamps the USER chat_turns row with an estimate (attachment vision
-        # tokens + len(text)//4) that counts against the daily cap; only the
-        # finalize paths clear it. The reaper bypasses finalize, so without this
-        # a reaped (esp. vision) turn would permanently burn cap budget for
-        # input it never actually consumed.
+        # Per-job so each reaped turn gets a viewer-safe system row + audit
+        # event (the helper also clears the user-turn token pre-count). Stuck
+        # turns are normally zero, so per-job cost is irrelevant.
         stuck = s.execute(
-            select(TurnJob.id, TurnJob.user_turn_id).where(
+            select(TurnJob.id, TurnJob.workspace_id).where(
                 TurnJob.status == "running",
                 TurnJob.started_at.is_not(None),
                 TurnJob.started_at < cutoff,
             )
         ).all()
-        reaped = len(stuck)
-        if reaped:
-            job_ids = [row.id for row in stuck]
-            user_turn_ids = [row.user_turn_id for row in stuck if row.user_turn_id is not None]
-            s.execute(
-                update(TurnJob)
-                .where(TurnJob.id.in_(job_ids))
-                .values(
-                    status="failed",
-                    error=f"reaped: stuck in running > {ttl_seconds}s (workspace wedged)",
-                    completed_at=current,
-                )
-            )
-            if user_turn_ids:
-                s.execute(
-                    update(ChatTurn).where(ChatTurn.id.in_(user_turn_ids)).values(tokens_in=None)
-                )
+        reaped = 0
+        for row in stuck:
+            if record_terminal_outcome(
+                s,
+                turn_job_id=row.id,
+                workspace_id=row.workspace_id,
+                outcome="failed",
+                expected_status="running",
+                raw_error=f"reaped: stuck in running > {ttl_seconds}s (workspace wedged)",
+                emit_chat=True,
+            ):
+                reaped += 1
         s.commit()
 
     if reaped:

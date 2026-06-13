@@ -1044,6 +1044,16 @@ article table td form button { width: auto; }
   border-color: var(--cm-warn-border);
   color: var(--cm-warn-text);
 }
+.turn-outcome {
+  color: var(--cm-neutral-text);
+  font-style: italic;
+  background: var(--cm-neutral-bg);
+  border: 1px solid var(--cm-neutral-border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.4rem 0;
+  font-size: 0.9rem;
+}
 
 .htmx-error-notice {
   background: var(--cm-bad-bg);

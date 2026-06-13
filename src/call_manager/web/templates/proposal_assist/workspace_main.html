@@ -40,7 +40,7 @@
           hx-target="#chat-history"
           hx-swap="beforeend"
           hx-encoding="multipart/form-data"
-          hx-on::after-request="this.reset()">
+          hx-on::after-request="if (event.detail.successful) this.reset()">
       <textarea name="content" rows="3" required placeholder="Write to the drafting assistant…"></textarea>
 
       <details>
