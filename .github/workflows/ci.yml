@@ -27,3 +27,11 @@ jobs:
 
       - name: Pytest
         run: uv run pytest -v
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JS unit tests
+        run: node --test tests/js/
