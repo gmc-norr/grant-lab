@@ -269,6 +269,44 @@ async def test_generator_since_position_skips_rows_at_or_below(pg_session_factor
     assert "FIRST" not in full
 
 
+def test_stream_route_since_skips_already_rendered_rows(
+    client_authed_owner, pg_session_factory, current_user
+):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="completed", queued_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+        )
+        s.add(job)
+        r1 = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "FIRST"})
+        make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "SECOND"})
+        s.commit()
+        wsid, jid, r1id = ws.id, job.id, r1.id
+
+    with pg_session_factory() as s:
+        p1 = s.scalar(select(ChatTurn.position).where(ChatTurn.id == r1id))
+
+    # Completed job -> the generator does one poll then 'done', so .get() reads
+    # the whole finite stream body.
+    resp = client_authed_owner.get(f"/workspaces/{wsid}/turns/{jid}/stream?since={p1}")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "SECOND" in body
+    assert "FIRST" not in body  # row at position p1 was seeded past
+    assert "event: done" in body
+
+
 def test_render_chat_turn_html_emits_stable_id():
     """A1/J: the .chat-turn div carries id='chat-turn-{turn.id}' so the
     client dedup can match the same row across the echo + SSE + history

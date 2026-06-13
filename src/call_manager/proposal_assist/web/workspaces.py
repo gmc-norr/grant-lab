@@ -1034,6 +1034,7 @@ async def stream_turn(
     workspace_id: uuid.UUID,
     turn_job_id: uuid.UUID,
     request: Request,
+    since: int | None = None,
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> StreamingResponse:
@@ -1057,6 +1058,7 @@ async def stream_turn(
             session_factory=request.app.state.session_factory,
             workspace_id=ws.id,
             turn_job_id=turn_job_id,
+            since_position=since,
             request=request,  # B6-residuals: enables client-disconnect detection
             templates=request.app.state.templates,
         ),
