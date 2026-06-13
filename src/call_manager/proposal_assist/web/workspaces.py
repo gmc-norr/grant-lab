@@ -1465,5 +1465,5 @@ def cancel_turn(
     )
     session.commit()
     if did:
-        return HTMLResponse("<p>cancelled</p>")
-    return HTMLResponse("<p>too late — already started or finished</p>")
+        return HTMLResponse("Cancelled.")
+    return HTMLResponse("Too late — the assistant already started.")

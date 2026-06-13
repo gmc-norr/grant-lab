@@ -280,3 +280,34 @@ def test_cancel_noop_writes_no_event(
             .all()
         )
         assert len(events) == 0
+
+
+def test_cancel_returns_span_friendly_fragment(
+    client_authed_owner,
+    pg_session_factory,
+    current_user,
+):
+    """The cancel response targets a <span> (#cancel-status-{job}), so it must
+    be inline text, not a block <p>."""
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import ChatTurn, TurnJob
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
+        s.add(ut)
+        s.flush()
+        job = TurnJob(
+            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
+            status="queued", queued_at=datetime.now(UTC),
+        )
+        s.add(job)
+        s.commit()
+        wsid, jid = ws.id, job.id
+
+    resp = client_authed_owner.post(f"/workspaces/{wsid}/turns/{jid}/cancel")
+    assert resp.status_code == 200
+    assert resp.text == "Cancelled."
+    assert "<p>" not in resp.text
