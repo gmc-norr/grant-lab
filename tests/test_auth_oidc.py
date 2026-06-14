@@ -91,7 +91,7 @@ def test_happy_path():
     [
         {"iss": "https://evil"},
         {"aud": "other"},
-        {"exp": int(time.time()) - 10},
+        {"exp": int(time.time()) - 3600},  # expired well beyond the 60s leeway
         {"nonce": "wrong"},
         {"email_verified": False},
     ],

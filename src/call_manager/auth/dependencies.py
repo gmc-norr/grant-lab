@@ -28,12 +28,19 @@ def get_current_user(request: Request, session: str | None = Cookie(default=None
         user = db.get(User, data.user_id)
         if user is None:
             raise HTTPException(status_code=401, detail="user not found")
+        # Status gate BEFORE the epoch check: the admin disable flow sets
+        # status='disabled' AND bumps session_epoch in the same transaction. If
+        # the epoch check ran first it would mask a disabled account as a generic
+        # 401 ("session revoked" -> /login), so the AccountInactive handler
+        # (-> /auth/no-access, clearing the cookie) would never fire for the
+        # canonical disable path. Checking status first routes pending/disabled
+        # accounts to their holding page regardless of epoch.
+        if user.status != "active":
+            raise AccountInactive(user.status)
         # Reject cookies minted before a logout / admin revocation bumped the
         # epoch. Stateless cookies are otherwise valid for their full TTL.
         if user.session_epoch != data.session_epoch:
             raise HTTPException(status_code=401, detail="session revoked")
-        if user.status != "active":
-            raise AccountInactive(user.status)
         db.expunge(user)
     return user
 

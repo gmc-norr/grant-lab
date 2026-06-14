@@ -56,6 +56,29 @@ def test_concurrent_insert_reresolves(pg_session_factory, monkeypatch):
         assert res.user.email == "pre@ki.se"
 
 
+def test_resolve_does_not_stamp_last_login_at(pg_session_factory):
+    # last_login_at is owned by the callback (active-only), not by resolution —
+    # a matched disabled/pending account must not have it advanced on a refused
+    # sign-in attempt.
+    with pg_session_factory() as s:
+        s.add(User(email="dis@ki.se", status="disabled", oidc_iss=ISS, oidc_sub="s6"))
+        s.commit()
+    with pg_session_factory() as s:
+        res = resolve_google_account(s, iss=ISS, sub="s6", email="dis@ki.se", name=None)
+        assert res.outcome == "matched" and res.user.status == "disabled"
+        assert res.user.last_login_at is None
+
+
+def test_long_google_name_is_truncated(pg_session_factory):
+    # A Google display name longer than users.name (varchar 200) must be
+    # truncated, not raise a DataError on insert.
+    with pg_session_factory() as s:
+        res = resolve_google_account(s, iss=ISS, sub="s7", email="long@gmail.com", name="z" * 300)
+        s.commit()
+        assert res.outcome == "created"
+        assert len(res.user.name) == 200
+
+
 def test_link_attaches_identity(pg_session_factory):
     with pg_session_factory() as s:
         u = User(email="me@ki.se", status="active")

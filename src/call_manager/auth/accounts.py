@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -31,14 +30,23 @@ def resolve_google_account(
 
     existing = _by_identity(session, iss, sub)
     if existing is not None:
-        existing.last_login_at = datetime.now(UTC)
+        # Do NOT stamp last_login_at here — a matched account may be pending or
+        # disabled, in which case the sign-in is refused. The callback is the
+        # single owner of last_login_at and only stamps it for active logins.
         return AccountResolution("matched", existing)
 
     if session.execute(select(User).where(User.email == email)).scalar_one_or_none():
         return AccountResolution("email_collision", None)
 
     user = User(
-        email=email, name=name, oidc_iss=iss, oidc_sub=sub, is_admin=False, status="pending"
+        email=email,
+        # name comes from Google's `name` claim (validated <= 4096 chars); the
+        # column is varchar(200), so truncate to avoid a DataError on insert.
+        name=name[:200] if name else None,
+        oidc_iss=iss,
+        oidc_sub=sub,
+        is_admin=False,
+        status="pending",
     )
     session.add(user)
     try:
@@ -47,7 +55,6 @@ def resolve_google_account(
         session.rollback()
         winner = _by_identity(session, iss, sub)
         if winner is not None:
-            winner.last_login_at = datetime.now(UTC)
             return AccountResolution("matched", winner)
         return AccountResolution("email_collision", None)
     return AccountResolution("created", user)

@@ -96,9 +96,12 @@ def google_callback(
     session_factory = request.app.state.session_factory
     session_signer = request.app.state.session_signer
 
-    # Rate-limit within the clean-redirect contract (no raw 429 that skips cleanup).
-    if not request.app.state.ip_limiter.allow(_client_ip(request)):
-        return _clean("/auth/error")
+    # No rate-limit on the callback: it is a public, side-effect-free GET until
+    # the encrypted txn cookie + state match, which already gate the only
+    # expensive work (the Google token exchange). Consuming the shared login
+    # ip_limiter here would let anyone hammering this URL (or a mail-scanner
+    # prefetching the redirect) exhaust an IP's budget and lock real users out of
+    # /login. Rate-limiting stays on /auth/google/start, the user-initiated leg.
     if error or not code or not state:
         return _clean("/auth/error")
 

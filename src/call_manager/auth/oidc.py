@@ -123,7 +123,11 @@ class OIDCClient:
         }
         try:
             claims = self._decode(id_token, claims_options)
-            claims.validate()  # exp / iat / essential presence
+            # leeway tolerates modest server/Google clock skew so a token with
+            # iat a few seconds in the future (or exp just past) isn't spuriously
+            # rejected; without it (authlib default 0) skew causes intermittent
+            # sign-in failures.
+            claims.validate(leeway=60)  # exp / iat / essential presence
         except (JoseError, ValueError, KeyError) as e:
             raise IdTokenInvalid(f"decode/validate failed: {e}") from e
 

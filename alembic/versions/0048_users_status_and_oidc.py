@@ -21,7 +21,17 @@ def upgrade() -> None:
     # Add nullable first so we can backfill pre-existing (trusted) rows to
     # 'active', THEN set the going-forward default to 'pending' (fail closed).
     op.add_column("users", sa.Column("status", sa.String(length=16), nullable=True))
-    op.execute("UPDATE users SET status = 'active' WHERE status IS NULL")
+    # Fail-SAFE backfill: only activate pre-existing rows that actually completed
+    # a login (last_login_at set). The OLD magic-link flow auto-created a row for
+    # ANY allowed-domain email that merely submitted the form (even if the link
+    # was never clicked), so blanket-activating every row would let never-
+    # confirmed addresses bypass the new pending->approve gate this feature adds.
+    # Unconfirmed rows fall to 'pending'; configured admins are re-activated by
+    # admin bootstrap on startup regardless.
+    op.execute(
+        "UPDATE users SET status = 'active' WHERE status IS NULL AND last_login_at IS NOT NULL"
+    )
+    op.execute("UPDATE users SET status = 'pending' WHERE status IS NULL")
     op.alter_column("users", "status", server_default="pending", nullable=False)
 
     op.add_column("users", sa.Column("oidc_iss", sa.Text(), nullable=True))
