@@ -333,20 +333,19 @@ function closeReaderDrawer() {
 
 document.body.addEventListener("click", function (evt) {
   var t = evt.target;
-  var citeUrl = citeReaderUrl(t);
+  var citeEl = t && t.closest ? t.closest("a.cite") : null;
+  var citeUrl = citeEl ? citeReaderUrl(citeEl) : null;
   if (citeUrl) {
     if (evt.preventDefault) evt.preventDefault();
-    openReaderDrawer(citeUrl, t);
+    openReaderDrawer(citeUrl, citeEl);
     return;
   }
   // prev/next inside the drawer
-  if (
-    t && t.classList && t.classList.contains("cite-nav") &&
-    t.getAttribute && READER_HREF_RE.test(t.getAttribute("href") || "")
-  ) {
+  var navEl = t && t.closest ? t.closest("a.cite-nav") : null;
+  if (navEl && navEl.getAttribute && READER_HREF_RE.test(navEl.getAttribute("href") || "")) {
     if (evt.preventDefault) evt.preventDefault();
     var drawer = document.getElementById("reference-drawer");
-    openReaderDrawer(t.getAttribute("href"), drawer && drawer._returnFocusTo);
+    openReaderDrawer(navEl.getAttribute("href"), drawer && drawer._returnFocusTo);
     return;
   }
   if (t && t.closest && t.closest("[data-reader-close], #reference-drawer-backdrop")) {
