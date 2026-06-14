@@ -527,20 +527,23 @@ async def fetch_reference_impl(
 
     limiter = getattr(ctx, "reference_ingest_limiter", None)
 
+    _limiter_acquired = False
     if limiter is not None:
         try:
             acquired = limiter.try_acquire()
         except Exception:
-            acquired = True  # limiter broken — proceed unguarded
+            # Limiter broken — proceed unguarded. Critically leave
+            # _limiter_acquired False so the finally block does NOT release a
+            # slot we never took (which would over-release the semaphore).
+            acquired = True
+        else:
+            _limiter_acquired = acquired
         if not acquired:
             _refund_fetch_slot()
             return {
                 "error": "server busy — too many ingests in progress; retry shortly",
                 "fetch_count": new_count - 1,
             }
-        _limiter_acquired = True
-    else:
-        _limiter_acquired = False
 
     try:
 
