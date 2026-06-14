@@ -10,11 +10,13 @@ import json
 import uuid
 
 import pytest
+from sqlalchemy import func, select
 
-from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.db.models import Reference, ReferenceChunk, WorkspaceEvent
 from call_manager.proposal_assist.references.deletion import delete_or_tombstone_reference
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.references.test_reprocess import _insert_failed_ref
 
 EMBED_DIM = 1024
 
@@ -242,13 +244,71 @@ def test_corrupt_ledger_fails_closed_to_tombstone(pg_session_factory, tmp_path):
     assert byte_path.exists()
 
 
-# ---------------------------------------------------------------------------
-# Audit event tests (Task 7)
-# ---------------------------------------------------------------------------
-from sqlalchemy import select  # noqa: E402
+def test_tombstone_writes_audit_event(pg_session_factory, tmp_path):
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    _write_ledger(repo_dir, [{"id": "ev-1", "reference_id": str(rid)}])
 
-from call_manager.db.models import WorkspaceEvent  # noqa: E402
-from tests.proposal_assist.references.test_reprocess import _insert_failed_ref  # noqa: E402
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+    assert outcome == "tombstoned"
+
+    with pg_session_factory() as s:
+        count = s.scalar(
+            select(func.count(WorkspaceEvent.id)).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "reference.tombstoned",
+            )
+        )
+        assert count == 1
+
+
+def test_retombstone_does_not_duplicate_audit_event(pg_session_factory, tmp_path):
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    _write_ledger(repo_dir, [{"id": "ev-1", "reference_id": str(rid)}])
+
+    # First tombstone.
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+    assert outcome == "tombstoned"
+
+    # Second tombstone on the same (already tombstoned) ref.
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+    assert outcome == "tombstoned"
+
+    # Should only have ONE reference.tombstoned event, not two.
+    with pg_session_factory() as s:
+        count = s.scalar(
+            select(func.count(WorkspaceEvent.id)).where(
+                WorkspaceEvent.workspace_id == wsid,
+                WorkspaceEvent.kind == "reference.tombstoned",
+            )
+        )
+        assert count == 1, f"expected 1 tombstone event, got {count}"
 
 
 def test_hard_delete_writes_audit_event(pg_session_factory, tmp_path):

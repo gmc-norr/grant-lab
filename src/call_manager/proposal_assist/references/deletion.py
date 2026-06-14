@@ -91,6 +91,14 @@ def delete_or_tombstone_reference(
         # material (we leave an existing timestamp untouched).
         if ref.tombstoned_at is None:
             ref.tombstoned_at = datetime.now(UTC)
+            session.add(
+                WorkspaceEvent(
+                    workspace_id=workspace_id,
+                    kind="reference.tombstoned",
+                    actor_id=actor_id,
+                    payload={"reference_id": str(rid), "outcome": "tombstoned"},
+                )
+            )
         # Library shrank (spec 2026-06-10 §3): stale supported findings that
         # point at this reference and re-enqueue their sections. Same
         # transaction as the tombstone — one commit covers both.
@@ -103,14 +111,6 @@ def delete_or_tombstone_reference(
             )
         except Exception:  # noqa: BLE001 — invalidation is best-effort
             logger.exception("claim-analysis invalidation failed (tombstone)")
-        session.add(
-            WorkspaceEvent(
-                workspace_id=workspace_id,
-                kind="reference.tombstoned",
-                actor_id=actor_id,
-                payload={"reference_id": str(rid), "outcome": "tombstoned"},
-            )
-        )
         session.commit()
         return "tombstoned"
 
