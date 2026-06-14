@@ -32,6 +32,13 @@ class Settings(BaseSettings):
         default_factory=list, alias="INITIAL_ADMIN_EMAIL"
     )
     app_base_url: str = Field(alias="APP_BASE_URL")
+    google_oidc_enabled: bool = Field(default=False, alias="GOOGLE_OIDC_ENABLED")
+    google_client_id: str | None = Field(default=None, alias="GOOGLE_CLIENT_ID")
+    google_client_secret: str | None = Field(default=None, alias="GOOGLE_CLIENT_SECRET")
+    google_oidc_discovery_url: str = Field(
+        default="https://accounts.google.com/.well-known/openid-configuration",
+        alias="GOOGLE_OIDC_DISCOVERY_URL",
+    )
     resend_api_key: str | None = Field(default=None, alias="RESEND_API_KEY")
     email_from: str = Field(default="no-reply@example.com", alias="EMAIL_FROM")
     # Set to True only when running behind a proxy we control that
@@ -349,6 +356,17 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _require_google_credentials_when_enabled(self):
+        if self.google_oidc_enabled and (
+            not self.google_client_id or not self.google_client_secret
+        ):
+            raise ValueError(
+                "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required when "
+                "GOOGLE_OIDC_ENABLED is true."
+            )
+        return self
+
     @field_validator("app_base_url", mode="after")
     @classmethod
     def _require_url_scheme(cls, v: str) -> str:
@@ -403,3 +421,8 @@ class Settings(BaseSettings):
         start.
         """
         return self.app_base_url.lower().startswith("https://")
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def google_redirect_uri(self) -> str:
+        return self.app_base_url.rstrip("/") + "/auth/google/callback"
