@@ -310,14 +310,22 @@ function openReaderDrawer(url, triggerEl) {
   drawer.hidden = false;
   if (backdrop) backdrop.hidden = !readerIsOverlay();
   applyReaderModal(true);
-  setTimeout(function () {
-    var mark = document.getElementById("ev-target");
-    if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: "center" });
-    if (readerIsOverlay()) {
-      var closeBtn = drawer.querySelector ? drawer.querySelector("[data-reader-close]") : null;
-      if (closeBtn && closeBtn.focus) closeBtn.focus();
-    }
-  }, 0);
+  // The scroll-to-evidence + focus run on htmx:afterSettle (see below): the GET
+  // swaps the fragment in asynchronously, so #ev-target isn't in the DOM yet.
+}
+
+// Once the reader fragment has settled into #reference-drawer, jump to the
+// highlighted evidence. Covers first-open AND prev/next nav (both swap here).
+function focusReaderEvidence() {
+  var drawer = document.getElementById("reference-drawer");
+  if (!drawer || drawer.hidden) return;
+  var mark = document.getElementById("ev-target");
+  if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: "center" });
+  // Modal overlay only: pull focus into the dialog now that its content exists.
+  if (readerIsOverlay()) {
+    var closeBtn = drawer.querySelector ? drawer.querySelector("[data-reader-close]") : null;
+    if (closeBtn && closeBtn.focus) closeBtn.focus();
+  }
 }
 
 function closeReaderDrawer() {
@@ -400,4 +408,10 @@ document.body.addEventListener("keydown", function (evt) {
   } else if (evt.key === "Tab") {
     trapReaderFocus(evt);
   }
+});
+
+document.body.addEventListener("htmx:afterSettle", function (evt) {
+  var swapped = (evt.detail && evt.detail.target) || evt.target;
+  if (!swapped || swapped.id !== "reference-drawer") return;
+  focusReaderEvidence();
 });

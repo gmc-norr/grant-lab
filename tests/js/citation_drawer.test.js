@@ -81,12 +81,13 @@ function loadWithDrawer(opts) {
   const items = opts.items || [];
   const handlers = {};
   const drawer = {
+    id: "reference-drawer",
     hidden: opts.hidden === undefined ? false : opts.hidden,
     _focused: 0,
     focus() { this._focused++; },
     contains(el) { return items.indexOf(el) !== -1; },
     querySelectorAll() { return items.slice(); },
-    querySelector() { return null; },
+    querySelector() { return opts.closeBtn || null; },
     setAttribute() {},
     _returnFocusTo: null,
   };
@@ -98,7 +99,11 @@ function loadWithDrawer(opts) {
       },
       addEventListener() {},
       readyState: "complete",
-      getElementById(id) { return id === "reference-drawer" ? drawer : null; },
+      getElementById(id) {
+        if (id === "reference-drawer") return drawer;
+        if (id === "ev-target") return opts.mark || null;
+        return null;
+      },
       querySelector() { return null; },
       querySelectorAll() { return []; },
       activeElement: opts.active || null,
@@ -189,4 +194,44 @@ test("keydown routes Tab to the trap and Escape still closes", () => {
   // Escape closes the drawer
   onKey({ key: "Escape" });
   assert.ok(drawer.hidden, "Escape closed the drawer");
+});
+
+// --- Scroll-to-evidence on async swap (the open is racy; the swap is not) ----
+
+function mark() {
+  return { _s: 0, scrollIntoView() { this._s++; } };
+}
+
+test("htmx:afterSettle on the reader drawer scrolls the evidence into view", () => {
+  const m = mark();
+  const { drawer, handlers } = loadWithDrawer({ mark: m, overlay: false });
+  handlers["htmx:afterSettle"][0]({ detail: { target: drawer } });
+  assert.strictEqual(m._s, 1, "evidence scrolled into view after the fragment settled");
+});
+
+test("htmx:afterSettle ignores swaps into other targets", () => {
+  const m = mark();
+  const { handlers } = loadWithDrawer({ mark: m, overlay: false });
+  handlers["htmx:afterSettle"][0]({ detail: { target: { id: "artifact-rendered" } } });
+  assert.strictEqual(m._s, 0, "unrelated swap does not move the reader");
+});
+
+test("htmx:afterSettle does not scroll when the drawer is hidden", () => {
+  const m = mark();
+  const { drawer, handlers } = loadWithDrawer({ mark: m, hidden: true, overlay: false });
+  handlers["htmx:afterSettle"][0]({ detail: { target: drawer } });
+  assert.strictEqual(m._s, 0, "hidden drawer is not scrolled");
+});
+
+test("htmx:afterSettle focuses the close button only in the modal overlay", () => {
+  // Desktop side-panel: no focus steal.
+  const closeDesktop = focusable();
+  const deskCtx = loadWithDrawer({ mark: mark(), closeBtn: closeDesktop, overlay: false });
+  deskCtx.handlers["htmx:afterSettle"][0]({ detail: { target: deskCtx.drawer } });
+  assert.ok(!closeDesktop.focused(), "desktop: close button not focused");
+  // Narrow overlay (modal): focus lands on the close button.
+  const closeOverlay = focusable();
+  const ovCtx = loadWithDrawer({ mark: mark(), closeBtn: closeOverlay, overlay: true });
+  ovCtx.handlers["htmx:afterSettle"][0]({ detail: { target: ovCtx.drawer } });
+  assert.ok(closeOverlay.focused(), "overlay: close button focused");
 });
