@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Reference, Workspace, WorkspaceEvent
+from call_manager.db.models import Reference, WorkspaceEvent
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 from call_manager.proposal_assist.references.ingest import (
@@ -36,7 +36,7 @@ from call_manager.proposal_assist.references.ingest import (
 )
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.proposal_assist.web._perms import is_member, require_member, require_owner
+from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 # Temporary aliases — removed in a later task once call sites use require_member directly.
 _require_owner = require_owner
