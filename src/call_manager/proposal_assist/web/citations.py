@@ -354,7 +354,11 @@ def citation_reader_fragment(
     if ev is None:
         raise HTTPException(status_code=404, detail="no such evidence id")
 
-    ref = session.get(Reference, uuid.UUID(str(ev["reference_id"])))
+    try:
+        ref_uuid = uuid.UUID(str(ev["reference_id"]))
+    except (ValueError, TypeError):
+        return _reader_response(request, ws, ctx={"error": "The cited reference is unavailable."})
+    ref = session.get(Reference, ref_uuid)
     if ref is None or ref.workspace_id != workspace_id:
         return _reader_response(request, ws, ctx={"error": "The cited reference is unavailable."})
 

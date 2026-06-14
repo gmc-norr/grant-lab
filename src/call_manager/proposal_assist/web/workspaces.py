@@ -18,8 +18,6 @@ import logging
 import uuid
 from pathlib import Path
 
-import bleach
-import markdown
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -119,53 +117,6 @@ def _parse_optional_int(raw: str | None, field: str) -> int | None:
         return int(raw)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"invalid {field}") from e
-
-
-# Rev2 / Codex H2: sanitize agent-controlled markdown before render.
-_ALLOWED_TAGS = [
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "p",
-    "br",
-    "hr",
-    "strong",
-    "em",
-    "code",
-    "pre",
-    "ul",
-    "ol",
-    "li",
-    "blockquote",
-    "a",
-    "table",
-    "thead",
-    "tbody",
-    "tr",
-    "th",
-    "td",
-]
-_ALLOWED_ATTRS = {"a": ["href", "title"]}
-
-
-def _render_proposal_markdown(raw: str) -> str:
-    """Render proposal.md content to safe HTML.
-
-    H2 fix: markdown.markdown() emits raw HTML for any raw HTML in the
-    input; bleach.clean strips tags not in the allowlist + dangerous
-    attributes. Output is then trusted to render via `| safe` in the
-    template.
-    """
-    html = markdown.markdown(raw, extensions=["extra"])
-    return bleach.clean(
-        html,
-        tags=_ALLOWED_TAGS,
-        attributes=_ALLOWED_ATTRS,
-        strip=True,
-    )
 
 
 _CHAT_TURN_PARTIAL = "proposal_assist/partials/chat_turn.html"
@@ -606,8 +557,8 @@ def get_workspace_main(
 
     Uses `request.app.state.templates` (the existing instance with registered
     filters + base.html nav). Context key is `user` (NOT `current_user`) to
-    match base.html.  artifact_rendered is bleach-cleaned by
-    _render_proposal_markdown before it reaches the template (rev2 / H2).
+    match base.html.  artifact_rendered is sanitized via render_proposal_with_citations
+    before it reaches the template.
     """
     ws = _require_owner_or_viewer(
         workspace_id=workspace_id,

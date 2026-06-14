@@ -263,6 +263,25 @@ def test_corrupt_ledger_returns_degraded_200(reader_env):
     assert "unavailable" in r.text.lower()
 
 
+def test_non_uuid_reference_id_returns_degraded_200(reader_env):
+    """A ledger row with a non-UUID reference_id must yield 200 + 'unavailable', not 500."""
+    client, wid, ev = reader_env(locatable=True)
+    # Overwrite citations.json so the evidence row has a non-UUID reference_id
+    workspaces_dir = client.app.state.settings.workspaces_dir
+    citations_path = Path(workspaces_dir) / str(wid) / "repo" / CITATIONS_FILENAME
+    ledger_text = citations_path.read_text(encoding="utf-8")
+    import json
+    ledger = json.loads(ledger_text)
+    # Patch the reference_id to a non-UUID string
+    for row in ledger["evidence"]:
+        if row.get("id") == ev:
+            row["reference_id"] = "not-a-uuid"
+    citations_path.write_text(json.dumps(ledger), encoding="utf-8")
+    r = client.get(f"/workspaces/{wid}/citations/{ev}/reader")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+
+
 def test_cross_workspace_reference_boundary(reader_env, pg_session_factory, tmp_path):
     """A reference belonging to workspace B must not be readable via workspace A's reader."""
     # Set up workspace A with a normal env (ev_id, wid from reader_env)
