@@ -90,20 +90,51 @@ def test_upload_markdown_creates_row(monkeypatch, pg_url, pg_session_factory, tm
     assert refs[0].text_status == "done"
 
 
-def test_upload_returns_403_for_non_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_upload_allowed_for_member(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """A WorkspaceViewer (member) can upload references — permission widened from
+    owner-only to member-gated (Task 8)."""
+    from tests.proposal_assist._refs_helpers import FakeEmbedClient
+
+    app = _build_app(monkeypatch, pg_url, tmp_path)
+    app.state.session_factory = pg_session_factory
+    # Disable embed and citation so ingest completes without Ollama / LLM.
+    app.state.embed_client = FakeEmbedClient()
+    app.state.citation_service = None
+    with pg_session_factory() as s:
+        _, wsid = _seed_owner_and_workspace(s)
+        member = User(status="active", email="member-upload@ki.se")
+        s.add(member)
+        s.flush()
+        from call_manager.db.models import WorkspaceViewer
+
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=member.id))
+        s.commit()
+        member_id = member.id
+    client = _authed(app, user_id=member_id)
+    try:
+        resp = client.post(
+            f"/workspaces/{wsid}/references",
+            data={"kind": "paper"},
+            files={"file": ("x.md", io.BytesIO(b"# t"), "text/markdown")},
+        )
+    finally:
+        client.__exit__(None, None, None)
+    assert resp.status_code == 200, (
+        f"member upload must succeed; got {resp.status_code}: {resp.text}"
+    )
+
+
+def test_upload_returns_403_for_non_member(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """A user who is neither owner nor WorkspaceViewer (true stranger) is denied
+    upload with 403."""
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s)
-        viewer = User(status="active", email="viewer@ki.se")
-        s.add(viewer)
+        stranger = User(status="active", email="stranger-upload@ki.se")
+        s.add(stranger)
         s.commit()
-        viewer_id = viewer.id
-        # Add viewer permission (mirrors B7 pattern; viewers CAN read, can't upload).
-        from call_manager.db.models import WorkspaceViewer
-
-        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer_id))
-        s.commit()
-    client = _authed(app, user_id=viewer_id)
+        stranger_id = stranger.id
+    client = _authed(app, user_id=stranger_id)
     try:
         resp = client.post(
             f"/workspaces/{wsid}/references",
@@ -707,37 +738,37 @@ def test_metadata_post_does_not_overwrite_existing_human_readable_citekey(
 # ---------------------------------------------------------------------------
 
 
-def test_viewer_denied_on_metadata_get_and_post(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    """WorkspaceViewer (read-only) must receive 403 on both GET and POST
-    of the owner-only metadata review routes."""
+def test_member_allowed_on_metadata_get_and_post(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """WorkspaceViewer (member) must receive 200 on GET and 303 on POST
+    of the metadata review routes — permission widened to members (Task 8)."""
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner_id, wsid = _seed_owner_and_workspace(s, email="viewer-meta-owner@ki.se")
+        owner_id, wsid = _seed_owner_and_workspace(s, email="member-meta-owner@ki.se")
         ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=owner_id)
-        viewer = User(status="active", email="viewer-meta@ki.se")
-        s.add(viewer)
+        member = User(status="active", email="member-meta@ki.se")
+        s.add(member)
         s.flush()
         from call_manager.db.models import WorkspaceViewer
 
-        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=member.id))
         s.commit()
-        viewer_id = viewer.id
+        member_id = member.id
 
-    client = _authed(app, user_id=viewer_id)
+    client = _authed(app, user_id=member_id)
     try:
         get_resp = client.get(f"/workspaces/{wsid}/references/{ref_id}/metadata")
         post_resp = client.post(
             f"/workspaces/{wsid}/references/{ref_id}/metadata",
-            data={"title": "X"},
+            data={"title": "Member Title"},
             follow_redirects=False,
         )
     finally:
         client.__exit__(None, None, None)
-    assert get_resp.status_code == 403, (
-        f"viewer GET metadata must be 403; got {get_resp.status_code}"
+    assert get_resp.status_code == 200, (
+        f"member GET metadata must be 200; got {get_resp.status_code}"
     )
-    assert post_resp.status_code == 403, (
-        f"viewer POST metadata must be 403; got {post_resp.status_code}"
+    assert post_resp.status_code == 303, (
+        f"member POST metadata must be 303; got {post_resp.status_code}"
     )
 
 
@@ -863,42 +894,43 @@ def test_panel_owner_approved_shows_ok_badge_no_review_link(
     )
 
 
-def test_panel_viewer_non_approved_shows_badge_no_review_link(
+def test_panel_member_non_approved_shows_badge_and_review_link(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    """A viewer (non-owner) viewing a non-approved reference sees the badge
-    but no 'Review metadata' link (is_owner is False)."""
+    """A WorkspaceViewer (member) viewing a non-approved reference sees the
+    metadata badge AND the 'Review metadata' link — can_manage_references is
+    True for members (Task 8)."""
     from call_manager.db.models import WorkspaceViewer
 
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner_id, wsid = _seed_owner_and_workspace(s, email="meta-viewer-owner@ki.se")
+        owner_id, wsid = _seed_owner_and_workspace(s, email="meta-member-owner@ki.se")
         ref_id = _seed_reference_with_status(
             s, workspace_id=wsid, uploaded_by=owner_id, metadata_status="extracted"
         )
-        viewer = User(status="active", email="meta-viewer@ki.se")
-        s.add(viewer)
+        member = User(status="active", email="meta-member@ki.se")
+        s.add(member)
         s.flush()
-        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=member.id))
         s.commit()
-        viewer_id = viewer.id
-    client = _authed(app, user_id=viewer_id)
+        member_id = member.id
+    client = _authed(app, user_id=member_id)
     try:
         resp = client.get(f"/workspaces/{wsid}/references")
     finally:
         client.__exit__(None, None, None)
     assert resp.status_code == 200
-    # Badge should be present.
+    # Metadata status badge should be present.
     assert "metadata: extracted" in resp.text, (
-        f"Expected metadata status badge for viewer; got: {resp.text!r}"
+        f"Expected metadata status badge for member; got: {resp.text!r}"
     )
-    # Review link must NOT appear for viewers.
+    # Review link MUST appear for members (can_manage_references is True).
     expected_href = f"/workspaces/{wsid}/references/{ref_id}/metadata"
-    assert expected_href not in resp.text, (
-        f"Viewer must NOT see 'Review metadata' link; got: {resp.text!r}"
+    assert expected_href in resp.text, (
+        f"Member must see 'Review metadata' link href; got: {resp.text!r}"
     )
-    assert "Review metadata" not in resp.text, (
-        f"Viewer must NOT see 'Review metadata' text; got: {resp.text!r}"
+    assert "Review metadata" in resp.text, (
+        f"Member must see 'Review metadata' text; got: {resp.text!r}"
     )
 
 

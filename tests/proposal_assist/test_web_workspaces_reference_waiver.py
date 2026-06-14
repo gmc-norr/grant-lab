@@ -218,25 +218,34 @@ def test_non_member_cannot_waive(monkeypatch, pg_url, pg_session_factory, tmp_pa
         assert s.get(Reference, rid).metadata_waiver is False
 
 
-def test_viewer_cannot_waive(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_member_can_waive(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """A WorkspaceViewer (member) can set a metadata waiver — permission widened
+    from owner-only to member-gated (Task 8)."""
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        _, wsid, rid = _seed(s, email="waive-viewer-owner@ki.se")
-        viewer = User(status="active", email="waive-viewer@ki.se")
-        s.add(viewer)
+        _, wsid, rid = _seed(s, email="waive-member-owner@ki.se")
+        member = User(status="active", email="waive-member@ki.se")
+        s.add(member)
         s.flush()
-        s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
+        s.add(WorkspaceViewer(workspace_id=wsid, user_id=member.id))
         s.commit()
-        viewer_id = viewer.id
+        member_id = member.id
 
-    client = _authed(app, user_id=viewer_id)
+    client = _authed(app, user_id=member_id)
     try:
-        resp = client.post(f"/workspaces/{wsid}/references/{rid}/waiver", data={"waiver": "true"})
+        resp = client.post(
+            f"/workspaces/{wsid}/references/{rid}/waiver",
+            data={"waiver": "true", "reason": "member override"},
+        )
     finally:
         client.__exit__(None, None, None)
-    assert resp.status_code == 403
+    assert resp.status_code == 200, (
+        f"member waive must succeed; got {resp.status_code}: {resp.text}"
+    )
     with pg_session_factory() as s:
-        assert s.get(Reference, rid).metadata_waiver is False
+        ref = s.get(Reference, rid)
+        assert ref.metadata_waiver is True
+        assert ref.metadata_waiver_reason == "member override"
 
 
 def test_waiver_other_workspace_reference_404(monkeypatch, pg_url, pg_session_factory, tmp_path):

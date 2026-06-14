@@ -21,12 +21,12 @@
   {% else %}
     <span class="status status-pending">metadata: {{ ref.metadata_status }}</span>
   {% endif %}
-  {% if is_owner and ref.metadata_status != "approved" %}
+  {% if can_manage_references and ref.metadata_status != "approved" %}
     <a href="/workspaces/{{ ref.workspace_id }}/references/{{ ref.id }}/metadata">Review metadata</a>
   {% endif %}
   {# Waiver control: only when metadata is NOT already citable (approved /
      verified_external both pass the bibliography gate without a waiver). #}
-  {% if is_owner and ref.metadata_status not in ("approved", "verified_external") %}
+  {% if can_manage_references and ref.metadata_status not in ("approved", "verified_external") %}
     {% if ref.metadata_waiver %}
       <span class="status status-ok">metadata waived{% if ref.metadata_waiver_reason %}: {{ ref.metadata_waiver_reason|e }}{% endif %}</span>
       <form hx-post="/workspaces/{{ ref.workspace_id }}/references/{{ ref.id }}/waiver"

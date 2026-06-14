@@ -36,13 +36,25 @@ from call_manager.proposal_assist.references.ingest import (
 )
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.proposal_assist.web._perms import require_member, require_owner
-
-# Temporary aliases — removed in a later task once call sites use require_member directly.
-_require_owner = require_owner
-_require_owner_or_viewer = require_member
+from call_manager.proposal_assist.web._perms import is_member, require_member
 
 logger = logging.getLogger(__name__)
+
+
+def _caps(ws, user, session) -> dict:
+    """Compute per-user capability flags for a workspace.
+
+    ``is_owner`` gates owner-only surfaces (Settings link, future
+    owner-exclusive actions).  ``can_manage_references`` is the wider
+    gate that covers any workspace member (owner OR WorkspaceViewer row)
+    — used by reference upload / metadata review / waiver controls.
+    """
+    owner = ws.owner_id == user.id
+    return {
+        "is_owner": owner,
+        "can_manage_references": owner or is_member(workspace_id=ws.id, user=user, session=session),
+    }
+
 
 router = APIRouter(prefix="/workspaces", tags=["references"])
 
@@ -126,15 +138,18 @@ def references_panel(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> HTMLResponse:
-    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
     refs = list(
         session.scalars(
             select(Reference)
-            .where(Reference.workspace_id == workspace_id)
+            .where(
+                Reference.workspace_id == workspace_id,
+                Reference.tombstoned_at.is_(None),
+            )
             .order_by(Reference.created_at.desc())
         )
     )
-    is_owner = ws.owner_id == user.id
+    settings = request.app.state.settings
     return request.app.state.templates.TemplateResponse(
         request,
         "proposal_assist/workspace_references.html",
@@ -142,7 +157,9 @@ def references_panel(
             "user": user,
             "workspace": ws,
             "references": refs,
-            "is_owner": is_owner,
+            "reference_max_batch_files": settings.reference_max_batch_files,
+            "reference_max_batch_bytes": settings.reference_max_batch_bytes,
+            **_caps(ws, user, session),
         },
     )
 
@@ -161,7 +178,7 @@ async def upload_reference(
     kind: str = Form("paper"),
     file: UploadFile = File(...),  # noqa: B008
 ) -> HTMLResponse:
-    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
 
     content_type = (file.content_type or "").lower()
     if content_type not in _ALLOWED_MIMES:
@@ -232,7 +249,7 @@ async def upload_reference(
         return templates.TemplateResponse(
             request,
             "proposal_assist/partials/reference_row.html",
-            {"ref": ref, "workspace": ws, "is_owner": True},
+            {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
         )
 
 
@@ -258,7 +275,7 @@ def fetch_reference_route(
         SSRFError,
     )
 
-    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
     if kind not in ALLOWED_KINDS:
         return HTMLResponse(
             f"<p>Invalid kind: {_html.escape(repr(kind))}</p>",
@@ -327,7 +344,7 @@ def fetch_reference_route(
         return templates.TemplateResponse(
             request,
             "proposal_assist/partials/reference_row.html",
-            {"ref": ref, "workspace": ws, "is_owner": True},
+            {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
         )
 
 
@@ -396,7 +413,7 @@ def get_reference_metadata(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> HTMLResponse:
-    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
         raise HTTPException(status_code=404, detail="reference not found")
@@ -436,7 +453,7 @@ async def post_reference_metadata(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> Response:
-    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
         raise HTTPException(status_code=404, detail="reference not found")
@@ -532,7 +549,7 @@ def post_reference_waiver(
     full metadata approval. The change is audited via a WorkspaceEvent. Returns
     the updated reference-row partial for an HTMX swap.
     """
-    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
         raise HTTPException(status_code=404, detail="reference not found")
@@ -561,7 +578,7 @@ def post_reference_waiver(
     return request.app.state.templates.TemplateResponse(
         request,
         "proposal_assist/partials/reference_row.html",
-        {"ref": ref, "workspace": ws, "is_owner": True},
+        {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
     )
 
 
@@ -578,7 +595,7 @@ def serve_reference_raw(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> Response:
-    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
         # Don't leak existence — 404 for cross-workspace lookups too.
