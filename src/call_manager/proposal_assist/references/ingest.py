@@ -274,7 +274,7 @@ def ingest_bytes(
                                 reference_id,
                             )
 
-                    csl, source, status = extract_reference_metadata(
+                    csl, source, status, classified_kind = extract_reference_metadata(
                         source_type=ref3.source_type,
                         source_meta=source_meta,
                         mime_type=ref3.mime_type,

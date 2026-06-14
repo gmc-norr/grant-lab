@@ -84,7 +84,7 @@ def test_fetched_crossref_uses_provider_metadata_and_skips_llm():
         CitationLLMResult(data={"title": "LLM Title"}, usage=None, model="m", cap_exceeded=False)
     )
 
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="crossref",
         source_meta=CROSSREF_SOURCE_META,
         mime_type="application/pdf",
@@ -112,7 +112,7 @@ def test_uploaded_pdf_heuristic_title_wins_llm_author_merges():
     )
     stub = _StubCitationService(llm_result)
 
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="uploaded",
         source_meta=None,
         mime_type="application/pdf",
@@ -144,7 +144,7 @@ def test_cap_exceeded_degrades_to_heuristic_no_raise():
     )
     stub = _StubCitationService(cap_result)
 
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="uploaded",
         source_meta=None,
         mime_type="text/plain",
@@ -166,7 +166,7 @@ def test_llm_raises_caught_degrades_gracefully_no_raise():
     raising_stub = _RaisingCitationService()
 
     # No exception should propagate out
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="uploaded",
         source_meta=None,
         mime_type="text/plain",
@@ -186,7 +186,7 @@ def test_llm_raises_caught_degrades_gracefully_no_raise():
 
 def test_no_citation_service_uploaded_plain_text_heuristic_only():
     """No citation_service and uploaded plain text → heuristic-only, no error."""
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="uploaded",
         source_meta=None,
         mime_type="text/plain",
@@ -213,7 +213,7 @@ def test_llm_title_as_list_degrades():
     )
     stub = _StubCitationService(llm_result)
 
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="uploaded",
         source_meta=None,
         mime_type="text/plain",
@@ -242,7 +242,7 @@ def test_heuristic_only_when_no_text():
         )
     )
 
-    csl, source, status = extract_reference_metadata(
+    csl, source, status, _kind = extract_reference_metadata(
         source_type="uploaded",
         source_meta=None,
         mime_type="application/pdf",
@@ -257,3 +257,67 @@ def test_heuristic_only_when_no_text():
     assert source == "heuristic"
     assert status == "extracted"
     assert csl.get("title") == "PDF Only"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: _kind sentinel tests
+# ---------------------------------------------------------------------------
+
+
+class _Result:
+    def __init__(self, data):
+        self.data = data
+        self.cap_exceeded = False
+        self.cap_scope = None
+
+
+class _Svc:
+    def __init__(self, data):
+        self._data = data
+
+    def complete_json(self, *, workspace_id, op, system, user):
+        return _Result(self._data)
+
+
+def test_kind_popped_and_returned_not_in_csl():
+    svc = _Svc({"title": "A Paper", "_kind": "data"})
+    csl, source, status, kind = extract_reference_metadata(
+        source_type="uploaded",
+        source_meta=None,
+        mime_type="application/pdf",
+        data=b"%PDF-1.4",
+        text="some text",
+        workspace_id=uuid.uuid4(),
+        citation_service=svc,
+    )
+    assert kind == "data"
+    assert "_kind" not in csl
+    assert csl.get("title") == "A Paper"
+    assert status == "extracted"
+
+
+def test_invalid_kind_returns_none():
+    svc = _Svc({"title": "X", "_kind": "nonsense"})
+    _csl, _src, _st, kind = extract_reference_metadata(
+        source_type="uploaded",
+        source_meta=None,
+        mime_type="application/pdf",
+        data=b"%PDF-1.4",
+        text="t",
+        workspace_id=uuid.uuid4(),
+        citation_service=svc,
+    )
+    assert kind is None
+
+
+def test_no_llm_returns_kind_none():
+    _csl, _src, _st, kind = extract_reference_metadata(
+        source_type="uploaded",
+        source_meta=None,
+        mime_type="text/plain",
+        data=b"hello",
+        text="t",
+        workspace_id=uuid.uuid4(),
+        citation_service=None,
+    )
+    assert kind is None
