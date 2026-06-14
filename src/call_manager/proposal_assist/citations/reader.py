@@ -15,6 +15,12 @@ import markdown
 
 from call_manager.proposal_assist.citations.ledger import find_by_id
 from call_manager.proposal_assist.citations.markers import MARKER_RE, find_markers
+from call_manager.proposal_assist.citations.quotes import (
+    QuoteAmbiguous,
+    QuoteNotFound,
+    find_quote_offsets,
+    normalize_for_quote_match,
+)
 
 
 def build_citation_numbering(proposal_text: str, ledger: dict) -> dict[str, int]:
@@ -161,6 +167,50 @@ def _inject_links(
     return (root.text or "") + "".join(
         lxml.html.tostring(c, encoding="unicode") for c in root
     )
+
+
+def _all_indices(haystack: str, needle: str) -> list[int]:
+    out, start = [], 0
+    if not needle:
+        return out
+    while True:
+        i = haystack.find(needle, start)
+        if i == -1:
+            return out
+        out.append(i)
+        start = i + 1
+
+
+def locate_evidence(
+    full_text: str, chunk_text: str | None, quote: str
+) -> tuple[int, int] | None:
+    """Return [start, end) of the evidence span in ``full_text``, or None.
+
+    Recomputes live (never trusts stored offsets):
+      1. If the cited chunk is available, find the quote uniquely WITHIN the
+         chunk, place the chunk UNIQUELY in full_text, map the offsets, and
+         accept only if in-bounds and the span normalizes to the quote.
+      2. Otherwise / on any failure: find the quote uniquely in full_text.
+      3. Ambiguous or not found -> None."""
+    if chunk_text:
+        try:
+            cstart, cend = find_quote_offsets(chunk_text, quote)
+        except (QuoteNotFound, QuoteAmbiguous):
+            cstart = cend = None
+        if cstart is not None:
+            placements = _all_indices(full_text, chunk_text)
+            if len(placements) == 1:
+                s = placements[0] + cstart
+                e = placements[0] + cend
+                if 0 <= s < e <= len(full_text) and (
+                    normalize_for_quote_match(full_text[s:e])
+                    == normalize_for_quote_match(quote)
+                ):
+                    return (s, e)
+    try:
+        return find_quote_offsets(full_text, quote)
+    except (QuoteNotFound, QuoteAmbiguous):
+        return None
 
 
 def render_proposal_with_citations(
