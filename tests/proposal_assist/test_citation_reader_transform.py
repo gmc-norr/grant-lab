@@ -110,12 +110,17 @@ def test_cite_link_carries_stance_class_when_provided():
     assert 'class="cite cite--supports"' in html
 
 
-def test_stance_value_is_escaped_in_class_attribute():
+def test_stance_value_cannot_break_out_of_class_attribute():
+    import lxml.html as _LH
+
     text = "Claim [@wang2016]<!-- ev:ev-aaaaaa -->."
     nums = build_citation_numbering(text, LEDGER)
     html = render_proposal_with_citations(
         text, number_by_ev=nums, workspace_id=WID,
         stance_by_ev={"ev-aaaaaa": 'sup"orts'},  # adversarial stance
     )
-    assert 'cite--sup"orts' not in html
-    assert "cite--sup&quot;orts" in html
+    # Re-parse: the quote must be safely contained as a single attribute value —
+    # no attribute break-out, no injected markup.
+    a = _LH.fragment_fromstring(html, create_parent="div").find(".//a")
+    assert a is not None
+    assert a.get("class") == 'cite cite--sup"orts'

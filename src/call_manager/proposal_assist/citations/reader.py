@@ -10,7 +10,6 @@ import html as _html
 import re
 
 import bleach
-import lxml.etree
 import lxml.html
 import markdown
 
@@ -160,7 +159,7 @@ def _inject_links(
                 parent.insert(idx + 1 + i, child)
 
     return (root.text or "") + "".join(
-        lxml.etree.tostring(c, encoding="unicode") for c in root
+        lxml.html.tostring(c, encoding="unicode") for c in root
     )
 
 
