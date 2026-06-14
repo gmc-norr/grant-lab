@@ -54,7 +54,16 @@ from call_manager.web.middleware import (
     SecurityHeadersMiddleware,
     build_csp,
 )
-from call_manager.web.routes import admin, auth, calls, golden_set, health, me, profiles
+from call_manager.web.routes import (
+    admin,
+    auth,
+    calls,
+    golden_set,
+    health,
+    me,
+    oauth_google,
+    profiles,
+)
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -446,6 +455,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(oauth_google.router)
     app.include_router(me.router)
     app.include_router(calls.router)
     app.include_router(admin.router)
