@@ -47,6 +47,14 @@ from call_manager.proposal_assist.references.storage import ReferenceStorage
 
 logger = logging.getLogger(__name__)
 
+# Chunk size for reference embedding. Sized conservatively so chunks fit the
+# context window of small embedding models (e.g. mxbai-embed-large ~512 tokens
+# on Ollama 0.21, which 400s on ~1500-char dense chunks). The embed client's
+# shrink-and-retry is the safety net; this keeps retries (and the content loss
+# they cause) rare. NOTE: char-budgeted, not token-budgeted — a token-aware,
+# model-derived budget is part of the planned references/ranking RAG revamp.
+_REFERENCE_CHUNK_CHARS = 1000
+
 
 @dataclass
 class IngestResult:
@@ -167,7 +175,7 @@ def ingest_bytes(
         sections = extract_text_bounded(
             mime=mime_type, data=data, timeout_seconds=extract_timeout_seconds
         )
-        chunks = chunk_sections(sections)
+        chunks = chunk_sections(sections, max_chunk_chars=_REFERENCE_CHUNK_CHARS)
         if not chunks:
             raise ExtractError("no chunks produced from extracted text")
 

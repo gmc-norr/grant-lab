@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -125,3 +127,98 @@ def test_embed_accepts_custom_expected_dim():
     )
     out = client.embed("anything")
     assert len(out) == 768
+
+
+# --------------------------------------------------------------------------
+# Shrink-and-retry on over-long inputs. Ollama 0.21 fails over-long inputs two
+# ways: a 400 "exceeds the context length" (mxbai-embed-large) or NaN
+# components (bge-m3). Both are length problems, so embed() halves the input
+# and retries down to a floor rather than hard-failing the whole reference.
+# --------------------------------------------------------------------------
+
+
+def _input_len(req: httpx.Request) -> int:
+    return len(json.loads(req.content.decode())["input"])
+
+
+def _len_error_400() -> httpx.Response:
+    return httpx.Response(400, json={"error": "the input length exceeds the context length"})
+
+
+def _ok(vec: list[float]) -> httpx.Response:
+    return httpx.Response(200, json={"embeddings": [vec]})
+
+
+def _nan_ok(vec: list[float]) -> httpx.Response:
+    # httpx's json= encoder rejects NaN, but Ollama really does emit a literal
+    # NaN, which json.loads (resp.json()) parses — so build the body by hand.
+    body = json.dumps({"embeddings": [vec]}).encode()
+    return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+
+def test_embed_shrinks_and_retries_on_context_length_400():
+    vec = [0.1] * 1024
+    seen: list[int] = []
+
+    def handler(req):
+        n = _input_len(req)
+        seen.append(n)
+        return _len_error_400() if n > 1000 else _ok(vec)
+
+    client = OllamaEmbedClient(
+        base_url="http://x", model="mxbai-embed-large", transport=httpx.MockTransport(handler)
+    )
+    out = client.embed("z" * 2500)
+    assert out == vec
+    assert len(seen) >= 2  # retried at least once
+    assert seen[-1] <= 1000  # the accepted attempt fit the context window
+
+
+def test_embed_retries_on_nonfinite_for_long_input():
+    """The bge-m3 NaN-on-long-input bug is also length-related, so it's
+    retried by shrinking — not an immediate hard fail."""
+    good = [0.1] * 1024
+    bad = [0.1] * 1023 + [float("nan")]
+
+    def handler(req):
+        return _nan_ok(bad) if _input_len(req) > 1000 else _ok(good)
+
+    client = OllamaEmbedClient(
+        base_url="http://x", model="bge-m3", transport=httpx.MockTransport(handler)
+    )
+    out = client.embed("z" * 2500)
+    assert out == good
+
+
+def test_embed_gives_up_when_length_error_persists():
+    """If even a short input still 400s, stop shrinking and raise — a
+    sub-paragraph that won't embed is a real error, not a length problem."""
+    calls: list[int] = []
+
+    def handler(req):
+        calls.append(_input_len(req))
+        return _len_error_400()
+
+    client = OllamaEmbedClient(
+        base_url="http://x", model="mxbai-embed-large", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(LLMError):
+        client.embed("z" * 2000)
+    assert len(calls) >= 2  # it shrank and retried before giving up
+
+
+def test_embed_does_not_retry_on_non_length_400():
+    """A 400 that isn't about length (e.g. unknown model) is a real error —
+    fail immediately, don't waste attempts shrinking."""
+    calls: list[int] = []
+
+    def handler(req):
+        calls.append(_input_len(req))
+        return httpx.Response(400, json={"error": "model 'foo' not found"})
+
+    client = OllamaEmbedClient(
+        base_url="http://x", model="foo", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(LLMError):
+        client.embed("z" * 2000)
+    assert len(calls) == 1  # not retried

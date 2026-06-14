@@ -16,6 +16,23 @@ from call_manager.ranking.ollama_client import LLMError
 
 _logger = logging.getLogger(__name__)
 
+# Below this length we stop shrinking and fail loud: a sub-paragraph that still
+# won't embed is a real error, not a length problem worth retrying.
+_MIN_EMBED_CHARS = 256
+
+
+class _InputTooLong(Exception):
+    """Internal sentinel: an embed attempt failed in a way that *shrinking the
+    input* may fix. Ollama 0.21 fails over-long inputs two ways — a 400
+    'exceeds the context length' (mxbai-embed-large) or NaN components (bge-m3)
+    — both length-related. Caught by embed()'s retry loop; never escapes here.
+    """
+
+
+def _is_length_error(body: str) -> bool:
+    b = body.lower()
+    return "context length" in b or ("length" in b and "exceed" in b)
+
 
 class OllamaEmbedClient:
     """POST /api/embed wrapper.
@@ -45,7 +62,34 @@ class OllamaEmbedClient:
 
     def embed(self, text: str) -> list[float]:
         """Embed a single string. Returns a `expected_dim`-length float vector
-        (default 1024 — bge-m3's native dimension)."""
+        (default 1024 — bge-m3's native dimension).
+
+        Over-long inputs are halved and retried (Ollama 0.21 fails them as a
+        400 'exceeds the context length' or as NaN components); below
+        `_MIN_EMBED_CHARS` we give up and raise rather than embed noise."""
+        attempt = text
+        while True:
+            try:
+                return self._embed_once(attempt)
+            except _InputTooLong as e:
+                if len(attempt) <= _MIN_EMBED_CHARS:
+                    raise LLMError(
+                        f"ollama embed failed even at {len(attempt)} chars "
+                        f"(input too long for model {self.model!r}): {e}"
+                    ) from e
+                shrunk = len(attempt) // 2
+                _logger.warning(
+                    "embedding input too long (%d chars) for model %s; retrying at %d",
+                    len(attempt),
+                    self.model,
+                    shrunk,
+                    extra={"event": "embed_input_shrink"},
+                )
+                attempt = attempt[:shrunk]
+
+    def _embed_once(self, text: str) -> list[float]:
+        """One embed attempt. Raises `_InputTooLong` for length-related
+        failures (retryable by shrinking) and `LLMError` for everything else."""
         try:
             with httpx.Client(
                 base_url=self._base_url,
@@ -59,8 +103,12 @@ class OllamaEmbedClient:
                         "input": text,
                     },
                 )
+                if resp.status_code == 400 and _is_length_error(resp.text):
+                    raise _InputTooLong(resp.text.strip()[:200])
                 resp.raise_for_status()
                 data = resp.json()
+        except _InputTooLong:
+            raise
         except (httpx.HTTPError, ValueError) as e:
             raise LLMError(f"ollama embed failed: {e}") from e
 
@@ -90,8 +138,8 @@ class OllamaEmbedClient:
         # stores it without complaint. Fail loud at the source instead.
         vec = [float(x) for x in first]
         if not all(math.isfinite(x) for x in vec):
-            raise LLMError(
-                "ollama embed returned non-finite value (NaN/Inf) — "
-                "likely the long-input NaN bug; refusing to store."
-            )
+            # Non-finite components are Ollama 0.21's long-input NaN bug — a
+            # length problem, so signal a retry (shrink) rather than store
+            # noise. If it persists below the floor, embed() raises LLMError.
+            raise _InputTooLong("non-finite (NaN/Inf) components — long-input NaN bug")
         return vec
