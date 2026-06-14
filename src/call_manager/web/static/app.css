@@ -1222,3 +1222,84 @@ article table td form button { width: auto; }
 .turn-progress [id^="cancel-status-"] {
   color: var(--cm-neutral-text);
 }
+
+/* Citation source viewer — clickable markers + reference drawer */
+a.cite {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78em;
+  font-weight: 700;
+  color: var(--cm-primary);
+  text-decoration: none;
+  padding: 0 0.15em;
+  cursor: pointer;
+}
+a.cite:hover { text-decoration: underline; }
+/* Stance-tinted markers (Consensus-style scannability). Neutral/unknown keeps
+   the default teal above. */
+a.cite--supports { color: var(--cm-good-text); }
+a.cite--contradicts { color: var(--cm-bad-text); }
+
+.reference-drawer[hidden],
+.reference-drawer-backdrop[hidden] { display: none; }
+
+/* Desktop (>=1024px): the drawer takes the chat column — non-modal side panel. */
+@media (min-width: 1024px) {
+  .reference-drawer {
+    position: fixed;
+    top: 0; bottom: 0; left: 0;
+    width: calc(50vw - 1.25rem);
+    max-width: 720px;
+    background: var(--cm-surface);
+    border-right: 1px solid var(--cm-border);
+    box-shadow: 4px 0 18px rgba(0,0,0,.10);
+    z-index: 40;
+    overflow: hidden;
+  }
+  .reference-drawer-backdrop { display: none !important; }
+}
+
+/* Narrow (<1024px): full overlay modal dialog. */
+@media (max-width: 1023.98px) {
+  .reference-drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: var(--cm-surface);
+    overflow: hidden;
+  }
+  .reference-drawer-backdrop {
+    position: fixed; inset: 0; z-index: 49;
+    background: rgba(15,23,42,.45);
+  }
+  body.reader-scroll-lock { overflow: hidden; }
+}
+
+.reference-reader { display: flex; flex-direction: column; height: 100%; }
+.reference-reader__head {
+  padding: 0.7rem 0.9rem;
+  background: var(--cm-primary-soft);
+  border-bottom: 1px solid var(--cm-primary-border);
+}
+.reference-reader__titlerow { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.reference-reader__source { font-weight: 700; color: var(--cm-primary); }
+.reference-reader__close { width: auto; margin: 0; padding: 0.1rem 0.5rem; background: transparent; border: none; color: var(--cm-muted); cursor: pointer; }
+.reference-reader__meta { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.35rem; font-size: 0.85rem; flex-wrap: wrap; }
+.reference-reader__claim { color: var(--cm-muted); font-style: italic; }
+.reference-reader__nav { display: flex; justify-content: space-between; align-items: center; margin-top: 0.4rem; font-size: 0.85rem; }
+.reference-reader__nav .cite-nav { color: var(--cm-primary); font-weight: 600; text-decoration: none; }
+.reference-reader__nav .cite-nav.is-disabled { color: var(--cm-muted); opacity: 0.5; }
+.reference-reader__count { color: var(--cm-muted); }
+.reference-reader__hint { margin: 0.4rem 0 0; font-size: 0.82rem; color: var(--cm-warn-text); }
+.reference-reader__note { margin: 1rem; color: var(--cm-muted); }
+.reference-reader__body { flex: 1; overflow-y: auto; padding: 0.9rem; }
+.reference-reader__text { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; font-size: 0.9rem; line-height: 1.6; margin: 0; }
+.reference-reader__text mark {
+  background: var(--cm-warn-bg);
+  border-bottom: 2px solid var(--cm-warn-border);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.stance-chip { border-radius: 999px; padding: 0 0.55em; font-size: 0.7rem; font-weight: 700; }
+.stance-supports { background: var(--cm-good-bg); color: var(--cm-good-text); border: 1px solid var(--cm-good-border); }
+.stance-contradicts { background: var(--cm-bad-bg); color: var(--cm-bad-text); border: 1px solid var(--cm-bad-border); }
+.confidence-chip { border-radius: 999px; padding: 0 0.55em; font-size: 0.7rem; font-weight: 600; background: var(--cm-neutral-bg); color: var(--cm-muted); border: 1px solid var(--cm-neutral-border); }

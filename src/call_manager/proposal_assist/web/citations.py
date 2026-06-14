@@ -17,18 +17,22 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
+from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
 from call_manager.proposal_assist.citations.bibliography import (
     BuildBibliographyBlocked,
     build_bibliography,
     compose_export,
 )
-from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
+from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
@@ -252,3 +256,162 @@ def export_composed(
         media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — citation reader drawer fragment
+# ---------------------------------------------------------------------------
+
+_MAX_READER_CHARS = 500_000
+_WINDOW_RADIUS = 4000
+
+
+def _source_line(ref: Reference) -> str:
+    csl = ref.csl_json or ref.csl_json_extracted or {}
+    title = ref.title or csl.get("title") or ref.filename
+    bits = [ref.citekey] if ref.citekey else []
+    bits.append(str(title))
+    return " · ".join(b for b in bits if b)
+
+
+def _highlight_whole(text: str) -> str:
+    return '<mark id="ev-target">' + _html.escape(text) + "</mark>"
+
+
+def _highlight_window(full_text: str, s: int, e: int, radius: int = _WINDOW_RADIUS) -> str:
+    lo = max(0, s - radius)
+    hi = min(len(full_text), e + radius)
+    return (
+        _html.escape(full_text[lo:s])
+        + '<mark id="ev-target">' + _html.escape(full_text[s:e]) + "</mark>"
+        + _html.escape(full_text[e:hi])
+    )
+
+
+def _reader_body(
+    full_text: str | None, chunk: ReferenceChunk | None, quote: str
+) -> tuple[str, str | None]:
+    """Missing-data matrix + oversized window. Returns (html, note). Everything
+    is HTML-escaped except the single injected <mark>."""
+    if full_text is None and chunk is None:
+        return "", None
+    if full_text is None:
+        # text.txt absent, chunk present — highlight the chunk text
+        return _highlight_whole(chunk.text), "Showing the cited section."
+    span = citation_reader.locate_evidence(full_text, chunk.text if chunk else None, quote)
+    if span is None:
+        if chunk is not None:
+            return _highlight_whole(chunk.text), (
+                "Showing the cited section — couldn't pinpoint the exact sentence "
+                "in the full document."
+            )
+        return (
+            _html.escape(full_text[: 2 * _WINDOW_RADIUS]),
+            "Couldn't pinpoint the cited sentence.",
+        )
+    s, e = span
+    if len(full_text) > _MAX_READER_CHARS:
+        return _highlight_window(full_text, s, e), "Showing the cited section of a large document."
+    return (
+        _html.escape(full_text[:s])
+        + '<mark id="ev-target">' + _html.escape(full_text[s:e]) + "</mark>"
+        + _html.escape(full_text[e:])
+    ), None
+
+
+def _reader_response(request: Request, ws, *, ctx: dict) -> HTMLResponse:
+    base: dict = {
+        "source_line": None, "claim": None, "stance": None, "confidence": None,
+        "index": 0, "total": 0, "prev_ev": None, "next_ev": None,
+        "tombstoned": False, "no_text": False, "note": None, "body_html": "",
+        "evidence_id": None, "error": None,
+    }
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/citation_reader.html",
+        {"workspace": ws, **base, **ctx},
+    )
+
+
+@router.get("/{workspace_id}/citations/{evidence_id}/reader", response_class=HTMLResponse)
+def citation_reader_fragment(
+    workspace_id: uuid.UUID,
+    evidence_id: str,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
+    repo_dir = Path(request.app.state.settings.workspaces_dir) / str(workspace_id) / "repo"
+
+    citations_path = repo_dir / CITATIONS_FILENAME
+    try:
+        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
+    except ValueError:
+        return _reader_response(request, ws, ctx={"error": "Citations are unavailable."})
+
+    ev = find_by_id(ledger, evidence_id)
+    if ev is None:
+        raise HTTPException(status_code=404, detail="no such evidence id")
+
+    try:
+        ref_uuid = uuid.UUID(str(ev["reference_id"]))
+    except (ValueError, TypeError):
+        return _reader_response(request, ws, ctx={"error": "The cited reference is unavailable."})
+    ref = session.get(Reference, ref_uuid)
+    if ref is None or ref.workspace_id != workspace_id:
+        return _reader_response(request, ws, ctx={"error": "The cited reference is unavailable."})
+
+    locator = ev.get("locator") or {}
+    chunk = None
+    ci = locator.get("chunk_index")
+    if ci is not None:
+        chunk = session.scalar(
+            select(ReferenceChunk).where(
+                ReferenceChunk.reference_id == ref.id,
+                ReferenceChunk.chunk_index == ci,
+                ReferenceChunk.workspace_id == workspace_id,
+            )
+        )
+
+    storage = ReferenceStorage(request.app.state.settings.workspaces_dir)
+    text_path = storage.text_path_for(workspace_id=workspace_id, reference_id=ref.id)
+    # Only read text.txt when indexing is complete; otherwise treat as absent.
+    text_indexed = ref.text_status == "done"
+    full_text: str | None = (
+        text_path.read_text(encoding="utf-8")
+        if text_indexed and text_path.exists()
+        else None
+    )
+
+    proposal_path = repo_dir / PROPOSAL_FILENAME
+    proposal_text = proposal_path.read_text() if proposal_path.exists() else ""
+    order = citation_reader.evidence_order_for_reference(
+        proposal_text, ledger, ev["reference_id"]
+    )
+    total = len(order)
+    pos = order.index(evidence_id) if evidence_id in order else -1
+    idx = pos + 1 if pos >= 0 else 0
+    prev_ev = order[pos - 1] if pos > 0 else None
+    next_ev = order[pos + 1] if 0 <= pos < total - 1 else None
+
+    # no_text=True when text hasn't been indexed yet — show "not available" notice
+    # regardless of whether we have a chunk.  Chunk fallback is only used when
+    # indexing is done but text.txt is missing (e.g. extraction failed or skipped).
+    no_text = not text_indexed
+    if no_text:
+        body_html, note = "", None
+    else:
+        body_html, note = _reader_body(full_text, chunk, ev.get("evidence_quote") or "")
+
+    ctx = {
+        "source_line": _source_line(ref),
+        "claim": (ev.get("claim_context") or {}).get("text"),
+        "stance": (ev.get("stance") or "").upper(),
+        "confidence": (ev.get("confidence") or "").upper(),
+        "index": idx, "total": total, "prev_ev": prev_ev, "next_ev": next_ev,
+        "tombstoned": ref.tombstoned_at is not None,
+        "no_text": no_text,
+        "note": note, "body_html": body_html, "evidence_id": evidence_id,
+    }
+    return _reader_response(request, ws, ctx=ctx)

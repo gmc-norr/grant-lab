@@ -201,7 +201,7 @@ def get_section_annotations(
     with the same sha among indices < n at HEAD.
     """
     ws = _require_owner_or_viewer(workspace_id=workspace_id, user=user, session=session)
-    _, sections = _read_sections(request, workspace_id)  # 404 if no proposal.md
+    sections = _read_sections(request, workspace_id).sections  # 404 if no proposal.md
     # Mirror _section_or_404: reject out-of-range n so callers get a clean 404
     # rather than a silent empty strip from an off-by-one index.
     if n < 0 or n >= len(sections):
@@ -351,8 +351,9 @@ def post_section_reanalyze(
 ) -> HTMLResponse:
     """Re-enqueue claim analysis for the section's LIVE content at HEAD."""
     ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
-    head, sections = _read_sections(request, workspace_id)
-    section = _section_or_404(sections, n)
+    r = _read_sections(request, workspace_id)
+    section = _section_or_404(r.sections, n)
+    head = r.head
     enqueue_section_job(
         session,
         workspace_id=ws.id,
@@ -362,7 +363,7 @@ def post_section_reanalyze(
         commit_sha=head,
     )
     session.commit()
-    occurrence = sum(1 for s in sections[:n] if s.sha == section.sha)
+    occurrence = sum(1 for s in r.sections[:n] if s.sha == section.sha)
     return _strip_response(
         request,
         session,
