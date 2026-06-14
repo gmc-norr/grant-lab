@@ -240,3 +240,40 @@ def test_corrupt_ledger_fails_closed_to_tombstone(pg_session_factory, tmp_path):
         assert remaining == 1
     # Stored bytes retained.
     assert byte_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Audit event tests (Task 7)
+# ---------------------------------------------------------------------------
+from sqlalchemy import select  # noqa: E402
+
+from call_manager.db.models import WorkspaceEvent  # noqa: E402
+from tests.proposal_assist.references.test_reprocess import _insert_failed_ref  # noqa: E402
+
+
+def test_hard_delete_writes_audit_event(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid, owner_id = ws.id, ws.owner_id
+    storage = ReferenceStorage(root=tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    with pg_session_factory() as s:
+        rid = _insert_failed_ref(s, storage, workspace_id=wsid, data=b"# H\n\nbody")
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+            actor_id=owner_id,
+        )
+    assert outcome == "deleted"
+    with pg_session_factory() as s:
+        kinds = {
+            e.kind
+            for e in s.scalars(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wsid))
+        }
+        assert "reference.deleted" in kinds

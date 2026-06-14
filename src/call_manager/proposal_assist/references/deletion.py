@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.db.models import Reference, ReferenceChunk, WorkspaceEvent
 from call_manager.proposal_assist.analysis.invalidation import on_reference_unavailable
 from call_manager.proposal_assist.citations.ledger import load_ledger
 
@@ -45,6 +45,7 @@ def delete_or_tombstone_reference(
     reference_id: uuid.UUID | str,
     workspace_id: uuid.UUID,
     storage: ReferenceStorage | None = None,
+    actor_id: int | None = None,
 ) -> str:
     """Tombstone a cited reference or hard-delete an uncited one.
 
@@ -61,6 +62,11 @@ def delete_or_tombstone_reference(
     ``storage`` is the byte-cleanup seam. When ``None`` (and a hard-delete is
     needed) only the DB rows are removed; callers that own the filesystem should
     pass a ``ReferenceStorage`` so the stored bytes are removed too.
+
+    A ``WorkspaceEvent`` audit row (``kind="reference.tombstoned"`` or
+    ``kind="reference.deleted"``) is written inside the same transaction as the
+    delete/tombstone, guaranteeing atomic audit coverage. Pass ``actor_id`` to
+    record which user performed the action.
     """
     try:
         rid = uuid.UUID(str(reference_id))
@@ -97,6 +103,14 @@ def delete_or_tombstone_reference(
             )
         except Exception:  # noqa: BLE001 — invalidation is best-effort
             logger.exception("claim-analysis invalidation failed (tombstone)")
+        session.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="reference.tombstoned",
+                actor_id=actor_id,
+                payload={"reference_id": str(rid), "outcome": "tombstoned"},
+            )
+        )
         session.commit()
         return "tombstoned"
 
@@ -123,6 +137,14 @@ def delete_or_tombstone_reference(
         ReferenceChunk.reference_id == rid,
         ReferenceChunk.workspace_id == workspace_id,
     ).delete(synchronize_session=False)
+    session.add(
+        WorkspaceEvent(
+            workspace_id=workspace_id,
+            kind="reference.deleted",
+            actor_id=actor_id,
+            payload={"reference_id": str(rid), "outcome": "deleted"},
+        )
+    )
     session.delete(ref)
     session.commit()
 
