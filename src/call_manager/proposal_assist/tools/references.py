@@ -7,6 +7,7 @@ six tools added in Slice 2 are read-only — no mutation, no fetch.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from pathlib import Path
@@ -592,8 +593,7 @@ async def fetch_reference_impl(
         thread_result = await run_in_threadpool(_do_fetch_and_ingest)
     finally:
         if _limiter_acquired:
-            import contextlib
-
+            # Defensive: a release() failure must not mask the real result/error.
             with contextlib.suppress(Exception):
                 limiter.release()
 
