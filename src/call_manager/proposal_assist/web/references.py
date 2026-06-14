@@ -277,7 +277,16 @@ async def upload_reference(
     except ValueError as e:
         return HTMLResponse(f"<p>{_html.escape(str(e))}</p>", status_code=400)
 
-    # (Task 14 will insert the reference.added audit event here.)
+    with factory() as sev:
+        sev.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="reference.added",
+                actor_id=user.id,
+                payload={"reference_id": str(result.reference_id)},
+            )
+        )
+        sev.commit()
     with factory() as s2:
         ref = s2.scalar(select(Reference).where(Reference.id == result.reference_id))
         return request.app.state.templates.TemplateResponse(
@@ -382,6 +391,16 @@ async def fetch_reference_route(
     except OSError:
         return HTMLResponse("<p>storage write failed</p>", status_code=500)
 
+    with factory() as sev:
+        sev.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="reference.added",
+                actor_id=user.id,
+                payload={"reference_id": str(result.reference_id)},
+            )
+        )
+        sev.commit()
     # Reload via fresh session to render the final (post-Phase-2) state.
     with factory() as s2:
         ref = s2.scalar(select(Reference).where(Reference.id == result.reference_id))
@@ -501,6 +520,8 @@ async def post_reference_metadata(
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
         raise HTTPException(status_code=404, detail="reference not found")
+    if ref.tombstoned_at is not None:
+        raise HTTPException(status_code=404, detail="reference not found")
 
     form = dict(await request.form())
 
@@ -551,6 +572,14 @@ async def post_reference_metadata(
     from sqlalchemy.exc import IntegrityError
 
     try:
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="reference.metadata_approved",
+                actor_id=user.id,
+                payload={"reference_id": str(reference_id)},
+            )
+        )
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -560,6 +589,14 @@ async def post_reference_metadata(
         if isinstance(csl.get("title"), str) and csl["title"]:
             ref.title = csl["title"]
         ref.metadata_status = "approved"
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="reference.metadata_approved",
+                actor_id=user.id,
+                payload={"reference_id": str(reference_id)},
+            )
+        )
         session.commit()
 
     target = f"/workspaces/{ws.id}/references"
@@ -596,6 +633,8 @@ def post_reference_waiver(
     ws = require_member(workspace_id=workspace_id, user=user, session=session)
     ref = session.scalar(select(Reference).where(Reference.id == reference_id))
     if ref is None or ref.workspace_id != ws.id:
+        raise HTTPException(status_code=404, detail="reference not found")
+    if ref.tombstoned_at is not None:
         raise HTTPException(status_code=404, detail="reference not found")
 
     new_state = waiver.strip().lower() in _WAIVER_TRUE
