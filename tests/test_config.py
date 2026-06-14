@@ -159,3 +159,16 @@ def test_citation_llm_provider_defaults_to_local(monkeypatch):
     from call_manager.config import Settings
 
     assert Settings().citation_llm_provider == "ollama"
+
+
+def test_reference_ingest_settings_defaults(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@localhost/z")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    from call_manager.config import Settings
+
+    s = Settings()
+    assert s.reference_ingest_concurrency == 3
+    assert s.reference_max_batch_files == 25
+    assert s.reference_max_batch_bytes == 200 * 1024 * 1024

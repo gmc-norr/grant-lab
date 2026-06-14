@@ -238,6 +238,21 @@ class Settings(BaseSettings):
         "the reference is then marked text_status='failed'. Guards the single "
         "app process against a pathological upload pinning the CPU.",
     )
+    reference_ingest_concurrency: int = Field(
+        default=3,
+        ge=1,
+        le=32,
+        description="Max concurrent reference ingests across upload/fetch/tool. "
+        "Acquired before buffering the body; over-capacity uploads get 429.",
+    )
+    reference_max_batch_files: int = Field(
+        default=25, ge=1, description="Client-enforced max PDFs per drag-drop batch."
+    )
+    reference_max_batch_bytes: int = Field(
+        default=200 * 1024 * 1024,
+        ge=1,
+        description="Client-enforced max total bytes per drag-drop batch.",
+    )
     compaction_turn_threshold: int = Field(
         default=100,
         alias="COMPACTION_TURN_THRESHOLD",
