@@ -18,6 +18,15 @@
 {% if can_manage_references %}
 <article>
   <header><strong>Add references</strong></header>
+  <div id="reference-dropzone" class="reference-dropzone"
+       data-post-url="/workspaces/{{ workspace.id }}/references"
+       data-max-files="{{ reference_max_batch_files }}"
+       data-max-bytes="{{ reference_max_batch_bytes }}"
+       tabindex="0" role="button"
+       aria-label="Drop PDF references here or click to choose files">
+    <p>Drop PDF references here, or click to choose.</p>
+    <input type="file" id="reference-dropzone-input" accept="application/pdf,.pdf" multiple hidden>
+  </div>
   <form method="post" enctype="multipart/form-data" class="reference-upload"
         action="/workspaces/{{ workspace.id }}/references"
         hx-post="/workspaces/{{ workspace.id }}/references"
