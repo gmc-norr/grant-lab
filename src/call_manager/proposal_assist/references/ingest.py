@@ -30,6 +30,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import update as _sql_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -375,4 +376,66 @@ def ingest_bytes(
         citation_service=citation_service,
         extract_timeout_seconds=extract_timeout_seconds,
         auto_classify_kind=auto_classify_kind,
+    )
+
+
+class ReprocessConflict(Exception):
+    """Raised when a reference cannot be claimed for reprocess (not failed,
+    or already being reprocessed)."""
+
+
+def reprocess_reference(
+    *,
+    session_factory,
+    storage: ReferenceStorage,
+    embedder: Embedder,
+    reference_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    citation_service,
+    extract_timeout_seconds: float = 30.0,
+) -> IngestResult:
+    """Re-run extract/embed/metadata on an EXISTING reference's stored bytes.
+
+    Atomically claims failed->running so concurrent reprocess calls cannot both
+    proceed (they would collide on the unique (reference_id, chunk_index)
+    index). Deletes any leftover chunks before re-embedding. Raises
+    ReprocessConflict if the row is not in 'failed' state."""
+    with session_factory() as s:
+        claimed = s.execute(
+            _sql_update(Reference)
+            .where(
+                Reference.id == reference_id,
+                Reference.workspace_id == workspace_id,
+                Reference.text_status == "failed",
+            )
+            .values(text_status="running", text_error=None)
+            .returning(Reference.mime_type)
+        ).first()
+        if claimed is None:
+            s.rollback()
+            raise ReprocessConflict(f"reference {reference_id} not claimable for reprocess")
+        mime_type = claimed[0]
+        s.query(ReferenceChunk).filter(
+            ReferenceChunk.reference_id == reference_id,
+            ReferenceChunk.workspace_id == workspace_id,
+        ).delete(synchronize_session=False)
+        s.commit()
+
+    suffix = suffix_for_mime(mime_type)
+    data = storage.path_for(
+        workspace_id=workspace_id, reference_id=reference_id, suffix=suffix
+    ).read_bytes()
+
+    return run_postwrite_phases(
+        session_factory=session_factory,
+        storage=storage,
+        embedder=embedder,
+        reference_id=reference_id,
+        workspace_id=workspace_id,
+        mime_type=mime_type,
+        data=data,
+        source_meta=None,
+        citation_service=citation_service,
+        extract_timeout_seconds=extract_timeout_seconds,
+        auto_classify_kind=False,
     )
