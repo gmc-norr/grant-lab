@@ -34,6 +34,7 @@ from call_manager.proposal_assist.references.ingest import (
     ingest_bytes,
     suffix_for_mime,
 )
+from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,6 @@ _ALLOWED_MIMES = frozenset(
         "application/x-ipynb+json",
     }
 )
-_ALLOWED_KINDS = frozenset({"paper", "prior_proposal", "analysis", "data"})
 _MAX_BYTES = 50 * 1024 * 1024  # 50 MB per spec REFERENCES_MAX_BYTES default
 _CHUNK_BYTES = 64 * 1024
 
@@ -194,7 +194,7 @@ async def upload_reference(
             f"<p>Unsupported content_type: {_html.escape(repr(content_type))}</p>",
             status_code=400,
         )
-    if kind not in _ALLOWED_KINDS:
+    if kind not in ALLOWED_KINDS:
         return HTMLResponse(
             f"<p>Invalid kind: {_html.escape(repr(kind))}</p>",
             status_code=400,
@@ -284,7 +284,7 @@ def fetch_reference_route(
     )
 
     ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
-    if kind not in _ALLOWED_KINDS:
+    if kind not in ALLOWED_KINDS:
         return HTMLResponse(
             f"<p>Invalid kind: {_html.escape(repr(kind))}</p>",
             status_code=400,
