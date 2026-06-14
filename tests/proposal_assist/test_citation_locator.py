@@ -32,9 +32,19 @@ def test_ambiguous_quote_without_usable_chunk_returns_none():
     assert locate_evidence(FULL, None, "AUC of 0.925") is None
 
 
-def test_stale_offsets_do_not_matter_quote_is_relocated():
-    se = locate_evidence(FULL, CHUNK, QUOTE)
+def test_chunk_ambiguous_in_full_text_falls_back_to_unique_quote():
+    # chunk appears twice; we cannot anchor by it, but the quote is unique in
+    # full_text -> path 2 should locate it correctly.
+    repeated_chunk = "Methods section text."
+    full = (
+        repeated_chunk + "\n\n"
+        "The sensitivity was 0.97 in this cohort.\n\n"
+        + repeated_chunk + "\n"
+    )
+    quote = "sensitivity was 0.97 in this cohort"
+    se = locate_evidence(full, repeated_chunk, quote)
     assert se is not None
+    assert _span(full, se).replace("\n", " ") == "sensitivity was 0.97 in this cohort"
 
 
 def test_quote_absent_returns_none():
