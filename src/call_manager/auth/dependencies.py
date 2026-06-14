@@ -6,6 +6,14 @@ from call_manager.auth.session_cookie import InvalidSession
 from call_manager.db.models import User
 
 
+class AccountInactive(Exception):
+    """Authenticated cookie, but the account is not active (pending/disabled)."""
+
+    def __init__(self, status: str):
+        self.status = status
+        super().__init__(status)
+
+
 def get_current_user(request: Request, session: str | None = Cookie(default=None)) -> User:
     if session is None:
         raise HTTPException(status_code=401, detail="not authenticated")
@@ -24,6 +32,8 @@ def get_current_user(request: Request, session: str | None = Cookie(default=None
         # epoch. Stateless cookies are otherwise valid for their full TTL.
         if user.session_epoch != data.session_epoch:
             raise HTTPException(status_code=401, detail="session revoked")
+        if user.status != "active":
+            raise AccountInactive(user.status)
         db.expunge(user)
     return user
 
