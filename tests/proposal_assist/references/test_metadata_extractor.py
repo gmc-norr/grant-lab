@@ -276,7 +276,10 @@ class _Svc:
         self._data = data
 
     def complete_json(self, *, workspace_id, op, system, user):
-        return _Result(self._data)
+        # Hand back a fresh copy each call: extract_reference_metadata pops
+        # "_kind" off the returned dict, which would otherwise mutate this
+        # stub's stored data and break a second call against the same stub.
+        return _Result(dict(self._data))
 
 
 def test_kind_popped_and_returned_not_in_csl():
