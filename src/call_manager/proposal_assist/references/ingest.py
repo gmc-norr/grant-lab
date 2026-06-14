@@ -98,6 +98,12 @@ def run_postwrite_phases(
     extract_timeout_seconds: float,
     auto_classify_kind: bool,
 ) -> IngestResult:
+    """Run Phase 2 (extract+chunk+embed, retain-on-failure) + claim-analysis
+    invalidation + Phase 3 (metadata/citekey/optional kind classification)
+    against an ALREADY-INSERTED, COMMITTED Reference row whose bytes are
+    already on disk. Used by both ingest_bytes (after Phase 1) and
+    reprocess_reference (after claiming failed→running). Phase-2 failure is
+    non-fatal (sets text_status='failed' and returns)."""
     # Phase 2: run Stage 1 in a fresh session (row is now visible).
     with session_factory() as s2:
         ref2 = s2.get(Reference, reference_id)
@@ -421,21 +427,35 @@ def reprocess_reference(
         ).delete(synchronize_session=False)
         s.commit()
 
-    suffix = suffix_for_mime(mime_type)
-    data = storage.path_for(
-        workspace_id=workspace_id, reference_id=reference_id, suffix=suffix
-    ).read_bytes()
-
-    return run_postwrite_phases(
-        session_factory=session_factory,
-        storage=storage,
-        embedder=embedder,
-        reference_id=reference_id,
-        workspace_id=workspace_id,
-        mime_type=mime_type,
-        data=data,
-        source_meta=None,
-        citation_service=citation_service,
-        extract_timeout_seconds=extract_timeout_seconds,
-        auto_classify_kind=False,
-    )
+    try:
+        suffix = suffix_for_mime(mime_type)
+        data = storage.path_for(
+            workspace_id=workspace_id, reference_id=reference_id, suffix=suffix
+        ).read_bytes()
+        return run_postwrite_phases(
+            session_factory=session_factory,
+            storage=storage,
+            embedder=embedder,
+            reference_id=reference_id,
+            workspace_id=workspace_id,
+            mime_type=mime_type,
+            data=data,
+            source_meta=None,
+            citation_service=citation_service,
+            extract_timeout_seconds=extract_timeout_seconds,
+            auto_classify_kind=False,
+        )
+    except Exception:
+        logger.exception(
+            "reprocess_reference aborted after claim workspace=%s reference=%s"
+            " — reverting to failed",
+            workspace_id,
+            reference_id,
+        )
+        with session_factory() as s_rev:
+            ref_rev = s_rev.get(Reference, reference_id)
+            if ref_rev is not None:
+                ref_rev.text_status = "failed"
+                ref_rev.text_error = "reprocess aborted before extraction"
+                s_rev.commit()
+        raise

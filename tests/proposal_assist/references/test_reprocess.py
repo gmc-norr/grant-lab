@@ -77,3 +77,71 @@ def test_reprocess_rejects_non_failed(pg_session_factory, tmp_path):
             citation_service=None,
             extract_timeout_seconds=30.0,
         )
+
+
+def test_reprocess_reverts_to_failed_if_bytes_missing(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+    storage = ReferenceStorage(root=tmp_path)
+    with pg_session_factory() as s:
+        rid = _insert_failed_ref(s, storage, workspace_id=wsid, data=b"# H\n\nbody")
+    # Delete the stored original bytes so read_bytes() raises after the claim.
+    storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".md").unlink()
+
+    with pytest.raises(FileNotFoundError):
+        reprocess_reference(
+            session_factory=pg_session_factory,
+            storage=storage,
+            embedder=FakeEmbedder(),
+            reference_id=rid,
+            workspace_id=wsid,
+            citation_service=None,
+            extract_timeout_seconds=30.0,
+        )
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref.text_status == "failed"  # reverted, not stuck in 'running'
+
+
+def test_reprocess_clears_leftover_chunks(pg_session_factory, tmp_path):
+    from sqlalchemy import select
+
+    from call_manager.db.models import ReferenceChunk
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+    storage = ReferenceStorage(root=tmp_path)
+    with pg_session_factory() as s:
+        rid = _insert_failed_ref(
+            s, storage, workspace_id=wsid, data=b"# H\n\nreal body content here"
+        )
+        # Simulate orphan chunks left by a prior failed attempt.
+        s.add(
+            ReferenceChunk(
+                reference_id=rid,
+                workspace_id=wsid,
+                chunk_index=0,
+                section_path=None,
+                text="stale",
+                embedding=[0.0] * 1024,
+                embedding_model="fake-embedder",
+            )
+        )
+        s.commit()
+    reprocess_reference(
+        session_factory=pg_session_factory,
+        storage=storage,
+        embedder=FakeEmbedder(),
+        reference_id=rid,
+        workspace_id=wsid,
+        citation_service=None,
+        extract_timeout_seconds=30.0,
+    )
+    with pg_session_factory() as s:
+        chunks = list(s.scalars(select(ReferenceChunk).where(ReferenceChunk.reference_id == rid)))
+        assert len(chunks) >= 1
+        assert all(c.text != "stale" for c in chunks)  # stale chunk gone, fresh ones present
