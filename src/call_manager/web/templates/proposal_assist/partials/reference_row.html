@@ -1,6 +1,7 @@
 {# Single reference row — used by the panel list AND as the HTMX swap-in
    response from POST /workspaces/<id>/references. Context provides
-   `ref` (Reference), `workspace` (Workspace), and `is_owner` (bool). #}
+   `ref` (Reference), `workspace` (Workspace), `is_owner` (bool), and
+   `can_manage_references` (bool) — member-level controls gate on the latter. #}
 <div class="reference-row" data-reference-id="{{ ref.id }}">
   <strong>{{ ref.filename|e }}</strong>
   <span class="kind">[{{ ref.kind }}]</span>

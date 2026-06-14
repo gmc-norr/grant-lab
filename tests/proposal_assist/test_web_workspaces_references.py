@@ -413,8 +413,8 @@ def test_metadata_post_owner_approves(monkeypatch, pg_url, pg_session_factory, t
     assert ref.title == "Corrected Title"
 
 
-def test_metadata_get_non_owner_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    """Non-owner GET on metadata review → 403."""
+def test_metadata_get_non_member_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Non-member (stranger, no WorkspaceViewer row) GET on metadata review → 403."""
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)
@@ -431,8 +431,8 @@ def test_metadata_get_non_owner_returns_403(monkeypatch, pg_url, pg_session_fact
     assert resp.status_code == 403
 
 
-def test_metadata_post_non_owner_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    """Non-owner POST on metadata review → 403."""
+def test_metadata_post_non_member_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Non-member (stranger, no WorkspaceViewer row) POST on metadata review → 403."""
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)

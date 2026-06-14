@@ -349,8 +349,8 @@ def fetch_reference_route(
 
 
 # ---------------------------------------------------------------------------
-# GET  /workspaces/<id>/references/<id>/metadata — owner metadata review form
-# POST /workspaces/<id>/references/<id>/metadata — owner metadata approve/correct
+# GET  /workspaces/<id>/references/<id>/metadata — member metadata review form
+# POST /workspaces/<id>/references/<id>/metadata — member metadata approve/correct
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +523,7 @@ async def post_reference_metadata(
 
 
 # ---------------------------------------------------------------------------
-# POST /workspaces/<id>/references/<id>/waiver — owner overrides the metadata
+# POST /workspaces/<id>/references/<id>/waiver — a member overrides the metadata
 # gate so an unapproved reference can still be cited in the bibliography/export.
 # ---------------------------------------------------------------------------
 

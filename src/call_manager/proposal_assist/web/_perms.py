@@ -47,7 +47,12 @@ def require_member(*, workspace_id: uuid.UUID, user, session: Session) -> Worksp
 
 def is_member(*, workspace_id: uuid.UUID, user, session: Session) -> bool:
     """Non-raising membership check for capability computation (used later)."""
-    ws = session.scalar(select(Workspace).where(Workspace.id == workspace_id))
+    ws = session.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.soft_deleted_at.is_(None),
+        )
+    )
     if ws is None:
         return False
     if ws.owner_id == user.id:
