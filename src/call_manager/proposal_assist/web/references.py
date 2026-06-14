@@ -1,11 +1,11 @@
 """Web routes for references — Slice 1 (panel + upload + raw serve).
 
-Permission policy:
-- GET  /workspaces/<id>/references                    owner OR viewer
-- POST /workspaces/<id>/references                    owner only
-- GET  /workspaces/<id>/references/<id>/raw           owner OR viewer
-- GET  /workspaces/<id>/references/<id>/metadata      owner only
-- POST /workspaces/<id>/references/<id>/metadata      owner only
+Permission policy (member = owner OR a WorkspaceViewer row):
+- GET  /workspaces/<id>/references                    any workspace member
+- POST /workspaces/<id>/references                    any workspace member
+- GET  /workspaces/<id>/references/<id>/raw           any workspace member
+- GET  /workspaces/<id>/references/<id>/metadata      any workspace member
+- POST /workspaces/<id>/references/<id>/metadata      any workspace member
 
 Atomicity: mirrors B7 attachments — Phase 1 atomic, Phase 2 sync Stage 1
 retain-on-failure. See ingest.py.
@@ -268,7 +268,7 @@ def fetch_reference_route(
     kind: str = Form("paper"),
 ) -> HTMLResponse:
     """User-facing counterpart to the agent's fetch_reference MCP
-    tool. Owner-only; runs the same dispatcher; reuses ingest_bytes."""
+    tool. Member-only (owner or workspace member); runs the same dispatcher; reuses ingest_bytes."""
     from call_manager.proposal_assist.references.dispatcher import dispatch_fetch
     from call_manager.proposal_assist.references.fetcher import (
         FetchError,
@@ -542,9 +542,9 @@ def post_reference_waiver(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ) -> HTMLResponse:
-    """Set or clear a reference's metadata waiver (owner only).
+    """Set or clear a reference's metadata waiver (any workspace member).
 
-    The waiver lets the owner deliberately override the fail-closed metadata gate
+    The waiver lets any member deliberately override the fail-closed metadata gate
     for ONE reference so build_bibliography / composed export can cite it without
     full metadata approval. The change is audited via a WorkspaceEvent. Returns
     the updated reference-row partial for an HTMX swap.

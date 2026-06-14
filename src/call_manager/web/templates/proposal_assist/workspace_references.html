@@ -15,7 +15,7 @@
   <a href="/workspaces">All workspaces</a>
 </nav>
 
-{% if is_owner %}
+{% if can_manage_references %}
 <article>
   <header><strong>Add references</strong></header>
   <form method="post" enctype="multipart/form-data" class="reference-upload"
@@ -60,7 +60,7 @@
   </form>
 </article>
 {% else %}
-<p class="muted"><em>(read-only — only the workspace owner can upload references)</em></p>
+<p class="muted"><em>(read-only — you don't have edit access to this workspace)</em></p>
 {% endif %}
 
 <div id="reference-list">
