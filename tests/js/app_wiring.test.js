@@ -25,11 +25,53 @@ function loadApp(opts) {
       (handlers[name] = handlers[name] || []).push(fn);
     },
   };
+
+  // Minimal DOM model for the inline error-notice region: #chat-history and
+  // its parent. responseError inserts a <p class="htmx-error-notice"> as a
+  // sibling before #chat-history; the success path clears it. `notices` is the
+  // live list of those banners currently under the parent.
+  const notices = [];
+  const chatHistoryParent = {
+    querySelector: function (sel) {
+      if (sel === ":scope > .htmx-error-notice") {
+        return notices.length ? notices[notices.length - 1] : null;
+      }
+      return null;
+    },
+    querySelectorAll: function (sel) {
+      // Return a snapshot (like a static NodeList) so callers can remove while iterating.
+      return sel === ":scope > .htmx-error-notice" ? notices.slice() : [];
+    },
+    insertBefore: function (node /* , ref */) {
+      node.parentNode = this;
+      if (node.className === "htmx-error-notice") notices.push(node);
+    },
+  };
+  const chatHistoryEl = {
+    id: "chat-history",
+    parentNode: chatHistoryParent,
+    getAttribute: function () { return "ws-1"; },
+  };
+
   const documentStub = {
     body: body,
     readyState: "complete",
     addEventListener: function () {},
+    createElement: function () {
+      return {
+        className: "",
+        textContent: "",
+        parentNode: null,
+        setAttribute: function () {},
+        remove: function () {
+          const i = notices.indexOf(this);
+          if (i !== -1) notices.splice(i, 1);
+          this.parentNode = null;
+        },
+      };
+    },
     getElementById: function (id) {
+      if (id === "chat-history") return chatHistoryEl;
       return presentSet.has(id)
         ? { id: id, getAttribute: function () { return "ws-1"; } }
         : null;
@@ -57,6 +99,8 @@ function loadApp(opts) {
     handlers: handlers,
     context: context,
     buttons: buttons,
+    chatHistory: chatHistoryEl,
+    notices: function () { return notices.slice(); },
     setConnector: function (v) { state.connector = !!v; },
   };
 }
@@ -135,4 +179,45 @@ test("the edit lock ignores non-composer requests", function () {
   const app = loadApp({ connector: false });
   fire(app.handlers, "htmx:beforeRequest", { elt: { id: "something-else" } });
   assert.strictEqual(app.context.pendingComposerRequests, 0);
+});
+
+// --- stale rejection banner (the cap-error-survives-a-success bug) ---
+
+function rejectComposer(app, status, detail) {
+  // Simulate a rejected composer submit: htmx fires responseError with the
+  // hx-target (#chat-history) as detail.target; app.js renders an inline notice.
+  fire(app.handlers, "htmx:responseError", {
+    xhr: { status: status, responseText: JSON.stringify({ detail: detail }) },
+    target: app.chatHistory,
+  });
+}
+
+test("a rejected composer submit renders one inline error banner", function () {
+  const app = loadApp({});
+  rejectComposer(app, 429, "cap exceeded");
+  const notices = app.notices();
+  assert.strictEqual(notices.length, 1);
+  assert.strictEqual(notices[0].className, "htmx-error-notice");
+  assert.strictEqual(notices[0].textContent, "cap exceeded");
+});
+
+test("a successful composer submit clears the stale rejection banner", function () {
+  const app = loadApp({});
+  rejectComposer(app, 429, "cap exceeded"); // first attempt: rejected
+  assert.strictEqual(app.notices().length, 1, "banner shown after rejection");
+  // Second attempt succeeds (cap raised). The stale banner must not linger.
+  fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  fire(app.handlers, "htmx:afterRequest", { elt: { id: "composer" }, successful: true });
+  assert.strictEqual(app.notices().length, 0, "success clears the stale banner");
+});
+
+test("a still-rejected resubmit keeps exactly one (current) banner", function () {
+  const app = loadApp({});
+  rejectComposer(app, 429, "cap exceeded");
+  fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  fire(app.handlers, "htmx:afterRequest", { elt: { id: "composer" }, successful: false });
+  rejectComposer(app, 503, "drafting busy"); // a different rejection
+  const notices = app.notices();
+  assert.strictEqual(notices.length, 1, "no stacking — replace, not accumulate");
+  assert.strictEqual(notices[0].textContent, "drafting busy", "shows the latest error");
 });

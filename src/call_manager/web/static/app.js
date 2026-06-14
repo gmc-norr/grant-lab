@@ -74,6 +74,26 @@ function disableSectionEdits() {
     b.disabled = true;
   });
 }
+function clearComposerErrorNotice() {
+  // Remove any inline rejection banner left beside #chat-history by a prior
+  // rejected submit (cap/lock/validation 4xx). The htmx:responseError handler
+  // only swaps an OLD error for a NEWER error; a later SUCCESS has nothing to
+  // swap, so without this the stale banner lingers — it sits beside
+  // #chat-history, which the append-swap never touches. Scoped to the same
+  // ":scope > .htmx-error-notice" placement responseError inserts at.
+  var host = document.getElementById("chat-history");
+  var parent = host && host.parentNode;
+  if (!parent) return;
+  var stale = parent.querySelectorAll(":scope > .htmx-error-notice");
+  for (var i = 0; i < stale.length; i++) {
+    var n = stale[i];
+    if (n.remove) {
+      n.remove();
+    } else if (n.parentNode && n.parentNode.removeChild) {
+      n.parentNode.removeChild(n);
+    }
+  }
+}
 function maybeReenable() {
   // Deferred to a macrotask so DOM mutations (connector add on swap, remove on
   // cleanup) have settled before we read them.
@@ -93,6 +113,12 @@ document.body.addEventListener("htmx:beforeRequest", function (evt) {
 document.body.addEventListener("htmx:afterRequest", function (evt) {
   if (evt.detail.elt && evt.detail.elt.id === "composer") {
     pendingComposerRequests = Math.max(0, pendingComposerRequests - 1);
+    // A successful turn submit clears any stale rejection banner from a prior
+    // rejected attempt (the cap/lock/validation error that responseError can
+    // only replace, never retire on its own).
+    if (evt.detail.successful) {
+      clearComposerErrorNotice();
+    }
     // On success the connector is in the DOM by now (afterSwap precedes
     // afterRequest), so maybeReenable keeps editing disabled; on a rejected
     // submit there is no connector, so this is what re-enables it.
