@@ -83,82 +83,20 @@ def suffix_for_mime(mime: str) -> str:
     return _MIME_TO_SUFFIX[mime]
 
 
-def ingest_bytes(
+def run_postwrite_phases(
     *,
     session_factory,
-    session: Session,
     storage: ReferenceStorage,
     embedder: Embedder,
+    reference_id: uuid.UUID,
     workspace_id: uuid.UUID,
-    kind: str,
-    source_type: str,
-    source_uri: str | None,
-    filename: str,
     mime_type: str,
     data: bytes,
-    uploaded_by: int | None,
-    source_meta: dict | None = None,
-    citation_service=None,
-    extract_timeout_seconds: float = 30.0,
-    auto_classify_kind: bool = False,
+    source_meta: dict | None,
+    citation_service,
+    extract_timeout_seconds: float,
+    auto_classify_kind: bool,
 ) -> IngestResult:
-    """Run all phases. Caller is responsible for committing the session
-    after Phase 1 (we commit Phase 2 and Phase 3 internally on fresh sessions).
-
-    Phase 3 (metadata extraction + citekey) is skipped entirely when both
-    source_meta is falsy and citation_service is None, leaving
-    metadata_status='pending'. Phase 3 failure is non-fatal: Phase 1+2
-    result is always returned."""
-
-    suffix = suffix_for_mime(mime_type)
-    reference_id = uuid.uuid4()
-
-    # Phase 1: write bytes, then insert row in the caller's tx.
-    # On any post-write failure (INSERT, commit, etc.), unlink the bytes
-    # to avoid orphan files (B7 attachments pattern; code-review residuals fix).
-    storage.write_atomic(
-        workspace_id=workspace_id,
-        reference_id=reference_id,
-        suffix=suffix,
-        data=data,
-    )
-    try:
-        relative_path = f"{workspace_id}/references/{reference_id}/original{suffix}"
-        original_sha256 = hashlib.sha256(data).hexdigest()
-        ref = Reference(
-            id=reference_id,
-            workspace_id=workspace_id,
-            kind=kind,
-            source_type=source_type,
-            source_uri=source_uri,
-            title=None,  # Slice 2 will derive from metadata; v1 leaves NULL
-            filename=filename,
-            storage_path=relative_path,
-            mime_type=mime_type,
-            bytes_total=len(data),
-            original_sha256=original_sha256,
-            text_status="pending",
-            outline_status="skipped",  # v1; v1.1 changes to 'pending'
-            uploaded_by=uploaded_by,
-        )
-        session.add(ref)
-        session.commit()
-        # Caller may call s.commit() again; it is a harmless no-op.
-    except Exception:
-        # Clean up the bytes we just wrote. The row either was never
-        # inserted (pre-commit) or the commit failed (no row visible).
-        # Either way the file is now an orphan; remove it.
-        try:
-            storage.delete_one(workspace_id=workspace_id, reference_id=reference_id)
-        except Exception:
-            # Don't mask the original failure if cleanup also fails.
-            logger.exception(
-                "ingest Phase 1 rollback: storage.delete_one failed for workspace=%s reference=%s",
-                workspace_id,
-                reference_id,
-            )
-        raise
-
     # Phase 2: run Stage 1 in a fresh session (row is now visible).
     with session_factory() as s2:
         ref2 = s2.get(Reference, reference_id)
@@ -347,3 +285,94 @@ def ingest_bytes(
                 )
 
     return ingest_result
+
+
+def ingest_bytes(
+    *,
+    session_factory,
+    session: Session,
+    storage: ReferenceStorage,
+    embedder: Embedder,
+    workspace_id: uuid.UUID,
+    kind: str,
+    source_type: str,
+    source_uri: str | None,
+    filename: str,
+    mime_type: str,
+    data: bytes,
+    uploaded_by: int | None,
+    source_meta: dict | None = None,
+    citation_service=None,
+    extract_timeout_seconds: float = 30.0,
+    auto_classify_kind: bool = False,
+) -> IngestResult:
+    """Run all phases. Caller is responsible for committing the session
+    after Phase 1 (we commit Phase 2 and Phase 3 internally on fresh sessions).
+
+    Phase 3 (metadata extraction + citekey) is skipped entirely when both
+    source_meta is falsy and citation_service is None, leaving
+    metadata_status='pending'. Phase 3 failure is non-fatal: Phase 1+2
+    result is always returned."""
+
+    suffix = suffix_for_mime(mime_type)
+    reference_id = uuid.uuid4()
+
+    # Phase 1: write bytes, then insert row in the caller's tx.
+    # On any post-write failure (INSERT, commit, etc.), unlink the bytes
+    # to avoid orphan files (B7 attachments pattern; code-review residuals fix).
+    storage.write_atomic(
+        workspace_id=workspace_id,
+        reference_id=reference_id,
+        suffix=suffix,
+        data=data,
+    )
+    try:
+        relative_path = f"{workspace_id}/references/{reference_id}/original{suffix}"
+        original_sha256 = hashlib.sha256(data).hexdigest()
+        ref = Reference(
+            id=reference_id,
+            workspace_id=workspace_id,
+            kind=kind,
+            source_type=source_type,
+            source_uri=source_uri,
+            title=None,  # Slice 2 will derive from metadata; v1 leaves NULL
+            filename=filename,
+            storage_path=relative_path,
+            mime_type=mime_type,
+            bytes_total=len(data),
+            original_sha256=original_sha256,
+            text_status="pending",
+            outline_status="skipped",  # v1; v1.1 changes to 'pending'
+            uploaded_by=uploaded_by,
+        )
+        session.add(ref)
+        session.commit()
+        # Caller may call s.commit() again; it is a harmless no-op.
+    except Exception:
+        # Clean up the bytes we just wrote. The row either was never
+        # inserted (pre-commit) or the commit failed (no row visible).
+        # Either way the file is now an orphan; remove it.
+        try:
+            storage.delete_one(workspace_id=workspace_id, reference_id=reference_id)
+        except Exception:
+            # Don't mask the original failure if cleanup also fails.
+            logger.exception(
+                "ingest Phase 1 rollback: storage.delete_one failed for workspace=%s reference=%s",
+                workspace_id,
+                reference_id,
+            )
+        raise
+
+    return run_postwrite_phases(
+        session_factory=session_factory,
+        storage=storage,
+        embedder=embedder,
+        reference_id=reference_id,
+        workspace_id=workspace_id,
+        mime_type=mime_type,
+        data=data,
+        source_meta=source_meta,
+        citation_service=citation_service,
+        extract_timeout_seconds=extract_timeout_seconds,
+        auto_classify_kind=auto_classify_kind,
+    )
