@@ -271,3 +271,93 @@ document.body.addEventListener("htmx:responseError", function (evt) {
   if (prev) prev.remove();
   target.parentNode.insertBefore(notice, target);
 });
+
+// --- Citation source viewer: open the reference drawer from a cite link ---
+var READER_HREF_RE = /^\/workspaces\/[^/]+\/citations\/ev-[0-9a-f]{6,}\/reader$/;
+
+function citeReaderUrl(el) {
+  // Only links WE injected carry class="cite" (agent HTML can't — no class in
+  // the bleach allowlist) AND match the exact reader-route shape.
+  if (!el || !el.classList || !el.classList.contains("cite")) return null;
+  var href = el.getAttribute ? el.getAttribute("href") : null;
+  return href && READER_HREF_RE.test(href) ? href : null;
+}
+
+function readerIsOverlay() {
+  return !!(window.matchMedia && window.matchMedia("(max-width: 1023.98px)").matches);
+}
+
+function applyReaderModal(open) {
+  // Modal semantics (scroll lock + aria-modal) are NARROW-ONLY.
+  var drawer = document.getElementById("reference-drawer");
+  var overlay = open && readerIsOverlay();
+  if (document.body && document.body.classList) {
+    document.body.classList[overlay ? "add" : "remove"]("reader-scroll-lock");
+  }
+  if (drawer && drawer.setAttribute) {
+    drawer.setAttribute("aria-modal", overlay ? "true" : "false");
+  }
+}
+
+function openReaderDrawer(url, triggerEl) {
+  var drawer = document.getElementById("reference-drawer");
+  var backdrop = document.getElementById("reference-drawer-backdrop");
+  if (!drawer) return;
+  if (triggerEl) drawer._returnFocusTo = triggerEl;
+  if (window.htmx) {
+    window.htmx.ajax("GET", url, { target: "#reference-drawer", swap: "innerHTML" });
+  }
+  drawer.hidden = false;
+  if (backdrop) backdrop.hidden = !readerIsOverlay();
+  applyReaderModal(true);
+  setTimeout(function () {
+    var mark = document.getElementById("ev-target");
+    if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: "center" });
+    if (readerIsOverlay()) {
+      var closeBtn = drawer.querySelector ? drawer.querySelector("[data-reader-close]") : null;
+      if (closeBtn && closeBtn.focus) closeBtn.focus();
+    }
+  }, 0);
+}
+
+function closeReaderDrawer() {
+  var drawer = document.getElementById("reference-drawer");
+  var backdrop = document.getElementById("reference-drawer-backdrop");
+  if (!drawer) return;
+  drawer.hidden = true;
+  if (backdrop) backdrop.hidden = true;
+  applyReaderModal(false);
+  var back = drawer._returnFocusTo;
+  if (back && back.focus) back.focus();
+}
+
+document.body.addEventListener("click", function (evt) {
+  var t = evt.target;
+  var citeUrl = citeReaderUrl(t);
+  if (citeUrl) {
+    if (evt.preventDefault) evt.preventDefault();
+    openReaderDrawer(citeUrl, t);
+    return;
+  }
+  // prev/next inside the drawer
+  if (
+    t && t.classList && t.classList.contains("cite-nav") &&
+    t.getAttribute && READER_HREF_RE.test(t.getAttribute("href") || "")
+  ) {
+    if (evt.preventDefault) evt.preventDefault();
+    var drawer = document.getElementById("reference-drawer");
+    openReaderDrawer(t.getAttribute("href"), drawer && drawer._returnFocusTo);
+    return;
+  }
+  if (t && t.closest && t.closest("[data-reader-close], #reference-drawer-backdrop")) {
+    if (evt.preventDefault) evt.preventDefault();
+    closeReaderDrawer();
+  }
+});
+
+document.body.addEventListener("keydown", function (evt) {
+  if (evt.key === "Escape") {
+    var drawer = document.getElementById("reference-drawer");
+    if (drawer && !drawer.hidden) closeReaderDrawer();
+  }
+});
