@@ -336,3 +336,171 @@ def admin_send_digest(
     ok = trigger_job_now(_scheduler(request), "digest:weekly")
     key = "ok=digest" if ok else "err=digest_unconfigured"
     return RedirectResponse(url=f"/admin?{key}", status_code=303)
+
+
+def _lock_active_admin_count(db) -> int:
+    """Count active admins while LOCKING those rows, so two concurrent
+    demote/disable transactions serialize and can't both pass the guard."""
+    db.execute(
+        select(User.id).where(User.is_admin.is_(True), User.status == "active").with_for_update()
+    ).all()
+    return db.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.is_admin.is_(True), User.status == "active")
+    ).scalar_one()
+
+
+@router.get("/admin/users/pending")
+def pending_users(request: Request, page: int = 1, admin: User = Depends(require_admin)):  # noqa: B008
+    page = max(1, page)
+    per_page = 50
+    with request.app.state.session_factory() as db:
+        rows = (
+            db.execute(
+                select(User)
+                .where(User.status == "pending")
+                .order_by(User.created_at.asc())
+                .limit(per_page)
+                .offset((page - 1) * per_page)
+            )
+            .scalars()
+            .all()
+        )
+        users = [
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "created_at": u.created_at,
+                "google_linked": u.oidc_sub is not None,
+            }
+            for u in rows
+        ]
+    return request.app.state.templates.TemplateResponse(
+        request=request, name="admin_users_pending.html", context={"users": users, "page": page}
+    )
+
+
+@router.get("/admin/users")
+def list_users(request: Request, page: int = 1, admin: User = Depends(require_admin)):  # noqa: B008
+    page = max(1, page)
+    per_page = 50
+    with request.app.state.session_factory() as db:
+        rows = (
+            db.execute(
+                select(User)
+                .where(User.status != "pending")
+                .order_by(User.email.asc())
+                .limit(per_page)
+                .offset((page - 1) * per_page)
+            )
+            .scalars()
+            .all()
+        )
+        users = [
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "status": u.status,
+                "is_admin": u.is_admin,
+            }
+            for u in rows
+        ]
+        total = db.execute(
+            select(func.count()).select_from(User).where(User.status != "pending")
+        ).scalar_one()
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="admin_users.html",
+        context={"users": users, "page": page, "per_page": per_page, "total": total},
+    )
+
+
+@router.post("/admin/users/{user_id}/approve")
+def approve_user(
+    request: Request,
+    user_id: int,
+    role: str = Form("member"),
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    if role not in ("member", "admin"):
+        raise HTTPException(status_code=400, detail="invalid role")
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "pending":
+            raise HTTPException(status_code=400, detail="user is not pending")
+        u.status = "active"
+        u.is_admin = role == "admin"
+        u.approved_by_user_id = admin.id
+        u.approved_at = datetime.now(UTC)
+        db.commit()
+    return RedirectResponse(url="/admin/users/pending", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/deny")
+def deny_user(request: Request, user_id: int, admin: User = Depends(require_admin)):  # noqa: B008
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "pending":
+            raise HTTPException(status_code=400, detail="user is not pending")
+        u.status = "disabled"
+        db.commit()
+    return RedirectResponse(url="/admin/users/pending", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/disable")
+def disable_user(request: Request, user_id: int, admin: User = Depends(require_admin)):  # noqa: B008
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "active":
+            raise HTTPException(status_code=400, detail="user is not active")
+        if u.is_admin and _lock_active_admin_count(db) <= 1:
+            raise HTTPException(status_code=400, detail="cannot disable the last active admin")
+        u.status = "disabled"
+        u.session_epoch = (u.session_epoch or 0) + 1
+        db.commit()
+    return RedirectResponse(url="/admin/users", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/enable")
+def enable_user(request: Request, user_id: int, admin: User = Depends(require_admin)):  # noqa: B008
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "disabled":
+            raise HTTPException(status_code=400, detail="user is not disabled")
+        u.status = "active"
+        db.commit()
+    return RedirectResponse(url="/admin/users", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/role")
+def change_role(
+    request: Request,
+    user_id: int,
+    role: str = Form(...),
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    if role not in ("member", "admin"):
+        raise HTTPException(status_code=400, detail="invalid role")
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "active":
+            raise HTTPException(status_code=400, detail="user is not active")
+        demoting = u.is_admin and role == "member"
+        if demoting and _lock_active_admin_count(db) <= 1:
+            raise HTTPException(status_code=400, detail="cannot demote the last active admin")
+        u.is_admin = role == "admin"
+        db.commit()
+    return RedirectResponse(url="/admin/users", status_code=303)

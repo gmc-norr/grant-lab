@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="container">
+  <h1>Pending accounts</h1>
+  {% if not users %}<p>No accounts awaiting approval.</p>{% endif %}
+  {% for u in users %}
+  <article>
+    <p><strong>{{ u.email }}</strong>{% if u.name %} — {{ u.name }}{% endif %}
+       {% if u.google_linked %}<small>(Google)</small>{% endif %}</p>
+    <form method="post" action="/admin/users/{{ u.id }}/approve" style="display:inline">
+      <input type="hidden" name="role" value="member" /><button type="submit">Approve as member</button>
+    </form>
+    <form method="post" action="/admin/users/{{ u.id }}/approve" style="display:inline">
+      <input type="hidden" name="role" value="admin" /><button type="submit">Approve as admin</button>
+    </form>
+    <form method="post" action="/admin/users/{{ u.id }}/deny" style="display:inline">
+      <button type="submit" class="secondary">Deny</button>
+    </form>
+  </article>
+  {% endfor %}
+  <p><a href="/admin/users">All users</a> · <a href="/admin">Admin home</a></p>
+</main>
+{% endblock %}
