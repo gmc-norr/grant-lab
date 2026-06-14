@@ -35,7 +35,9 @@ from sqlalchemy.orm import Session
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     Attachment,
+    Call,
     ChatTurn,
+    Profile,
     Reference,
     TurnJob,
     User,
@@ -102,6 +104,17 @@ def _parse_deadline_form(deadline: str | None):
         return datetime.fromisoformat(deadline)
     except ValueError as e:
         raise HTTPException(status_code=400, detail="invalid deadline (expected ISO-8601)") from e
+
+
+def _parse_optional_int(raw: str | None, field: str) -> int | None:
+    """Coerce an optional form field to int. Empty/blank ⇒ None (the picker's
+    '— none —' option submits ''). A non-numeric value is a 400, not a 500."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"invalid {field}") from e
 
 
 # Rev2 / Codex H2: sanitize agent-controlled markdown before render.
@@ -445,13 +458,23 @@ def get_new_workspace_form(
     call_id: int | None = None,
     profile_id: int | None = None,
 ) -> HTMLResponse:
-    """New-workspace form. Optional ?call_id= and ?profile_id= pre-fill
-    the form fields (used by the /calls/{id} 'Start drafting' button)."""
+    """New-workspace form. A call is required (Phase 0 can't run without one),
+    so the form renders a <select> of real calls — picking an invalid id is
+    impossible from the UI. Optional ?call_id= / ?profile_id= pre-select the
+    matching option (used by the /calls/{id} 'Start drafting' button)."""
     templates = request.app.state.templates
+    calls = list(session.scalars(select(Call).order_by(Call.title)))
+    profiles = list(session.scalars(select(Profile).order_by(Profile.name)))
     return templates.TemplateResponse(
         request,
         "proposal_assist/workspace_new.html",
-        {"prefill_call_id": call_id, "prefill_profile_id": profile_id, "user": user},
+        {
+            "calls": calls,
+            "profiles": profiles,
+            "prefill_call_id": call_id,
+            "prefill_profile_id": profile_id,
+            "user": user,
+        },
     )
 
 
@@ -461,22 +484,35 @@ def post_new_workspace(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
     title: str = Form(...),
-    call_id: int | None = Form(None),
-    profile_id: int | None = Form(None),
+    call_id: str | None = Form(None),
+    profile_id: str | None = Form(None),
     deadline: str | None = Form(None),
 ) -> RedirectResponse:
-    """Create + enqueue Phase 0 + redirect to the new workspace's main view."""
+    """Create + enqueue Phase 0 + redirect to the new workspace's main view.
+
+    A call is REQUIRED: Phase 0 snapshots the call body to extract the section
+    + rubric templates, and raises if there's none. We validate that the call
+    (and the optional profile) actually exist *before* the insert, so a bad id
+    is a clean 400 instead of a raw foreign-key-violation 500."""
     title = title.strip()
     if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
         raise HTTPException(status_code=400, detail="invalid title")
+    cid = _parse_optional_int(call_id, "call_id")
+    pid = _parse_optional_int(profile_id, "profile_id")
+    if cid is None:
+        raise HTTPException(status_code=400, detail="A linked call is required.")
+    if session.get(Call, cid) is None:
+        raise HTTPException(status_code=400, detail=f"No such call: {cid}")
+    if pid is not None and session.get(Profile, pid) is None:
+        raise HTTPException(status_code=400, detail=f"No such profile: {pid}")
     parsed_deadline = _parse_deadline_form(deadline)
 
     ws = _create_workspace(
         session=session,
         owner_id=user.id,
         title=title,
-        call_id=call_id,
-        profile_id=profile_id,
+        call_id=cid,
+        profile_id=pid,
     )
     if parsed_deadline:
         ws.deadline = parsed_deadline

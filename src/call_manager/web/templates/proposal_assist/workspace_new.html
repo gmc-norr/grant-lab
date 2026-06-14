@@ -4,21 +4,34 @@
 <a href="/workspaces" class="backlink">&larr; All workspaces</a>
 <hgroup>
   <h1>New workspace</h1>
-  <p>Start a drafting workspace, optionally linked to a call and profile.</p>
+  <p>Start a drafting workspace for a funding call.</p>
 </hgroup>
 <form method="post" action="/workspaces/new">
   <label>Title (required)
     <input name="title" required>
   </label>
-  <label>Linked call ID (optional)
-    <input name="call_id" type="number" value="{{ prefill_call_id or '' }}">
+  <label>Call (required)
+    <select name="call_id" required>
+      <option value="" disabled{% if not prefill_call_id %} selected{% endif %}>— select a call —</option>
+      {% for call in calls %}
+      <option value="{{ call.id }}"{% if prefill_call_id == call.id %} selected{% endif %}>{{ call.title }}</option>
+      {% endfor %}
+    </select>
   </label>
-  <label>Profile ID (optional)
-    <input name="profile_id" type="number" value="{{ prefill_profile_id or '' }}">
+  <label>Profile (optional)
+    <select name="profile_id">
+      <option value=""{% if not prefill_profile_id %} selected{% endif %}>— none —</option>
+      {% for profile in profiles %}
+      <option value="{{ profile.id }}"{% if prefill_profile_id == profile.id %} selected{% endif %}>{{ profile.name }}</option>
+      {% endfor %}
+    </select>
   </label>
   <label>Deadline (optional)
     <input name="deadline" type="date">
   </label>
-  <button type="submit">Create</button>
+  {% if not calls %}
+  <p class="muted">No calls are available yet — a workspace must be linked to a call, so ingest a call first (calls appear here once a source has been fetched).</p>
+  {% endif %}
+  <button type="submit"{% if not calls %} disabled{% endif %}>Create</button>
 </form>
 {% endblock %}
