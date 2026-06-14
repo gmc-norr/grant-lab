@@ -17,7 +17,7 @@ def _app(monkeypatch, pg_url):
 
 def _client(app, pg_session_factory, set_default=False):
     with pg_session_factory() as s:
-        u = User(email="u@ki.se")
+        u = User(status="active", email="u@ki.se")
         s.add(u)
         s.flush()
         p = Profile(

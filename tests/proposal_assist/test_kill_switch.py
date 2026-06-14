@@ -30,7 +30,7 @@ def _authed_client(app, *, user_id: int) -> TestClient:
 def test_post_turn_returns_503_when_kill_switch_off(monkeypatch, pg_url, pg_session_factory):
     app = _build_app_kill(monkeypatch, pg_url, drafting_enabled=False)
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
@@ -59,7 +59,7 @@ def test_post_turn_works_when_kill_switch_on(monkeypatch, pg_url, pg_session_fac
     """Sanity: defaulted/explicitly-True kill switch lets submits through."""
     app = _build_app_kill(monkeypatch, pg_url, drafting_enabled=True)
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")

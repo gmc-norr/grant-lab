@@ -16,7 +16,7 @@ def _setup(monkeypatch, pg_url):
 
 def _admin_client(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="root@ki.se", is_admin=True)
+        u = User(status="active", email="root@ki.se", is_admin=True)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -86,7 +86,7 @@ def test_admin_rerank_requires_admin(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     # Non-admin user
     with pg_session_factory() as s:
-        u = User(email="nonadmin@ki.se", is_admin=False)
+        u = User(status="active", email="nonadmin@ki.se", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)

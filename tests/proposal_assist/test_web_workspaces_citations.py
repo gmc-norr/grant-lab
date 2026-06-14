@@ -36,7 +36,7 @@ def _authed(app, *, user_id):
 
 
 def _seed_owner_and_workspace(session, *, email="owner@ki.se"):
-    owner = User(email=email)
+    owner = User(status="active", email=email)
     session.add(owner)
     session.flush()
     ws = Workspace(owner_id=owner.id, title="T")
@@ -100,7 +100,7 @@ def test_citations_panel_viewer_can_read(monkeypatch, pg_url, pg_session_factory
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s, email="cit-viewer-owner@ki.se")
-        viewer = User(email="cit-viewer@ki.se")
+        viewer = User(status="active", email="cit-viewer@ki.se")
         s.add(viewer)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
@@ -120,7 +120,7 @@ def test_citations_panel_non_member_403(monkeypatch, pg_url, pg_session_factory,
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s, email="cit-403-owner@ki.se")
-        other = User(email="cit-403-other@ki.se")
+        other = User(status="active", email="cit-403-other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -280,7 +280,7 @@ def test_validate_citations_non_member_403(monkeypatch, pg_url, pg_session_facto
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s, email="val-403-owner@ki.se")
-        other = User(email="val-403-other@ki.se")
+        other = User(status="active", email="val-403-other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -297,7 +297,7 @@ def test_validate_citations_viewer_allowed(monkeypatch, pg_url, pg_session_facto
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s, email="val-viewer-owner@ki.se")
-        viewer = User(email="val-viewer@ki.se")
+        viewer = User(status="active", email="val-viewer@ki.se")
         s.add(viewer)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
@@ -328,7 +328,7 @@ _SMITH_CSL = {
 def _seed_composed_workspace(session, tmp_path, *, email, metadata_status="approved"):
     """Owner + workspace + one approved Reference + proposal.md/citations.json
     wired together by a single citekey marker. Returns (owner_id, wsid)."""
-    owner = User(email=email)
+    owner = User(status="active", email=email)
     session.add(owner)
     session.flush()
     ws = Workspace(owner_id=owner.id, title="T", citation_style="vancouver")
@@ -439,7 +439,7 @@ def test_export_composed_non_member_403(monkeypatch, pg_url, pg_session_factory,
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_composed_workspace(s, tmp_path, email="exp-403-owner@ki.se")
-        other = User(email="exp-403-other@ki.se")
+        other = User(status="active", email="exp-403-other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id

@@ -45,7 +45,10 @@ def app(_settings_env, pg_session_factory, tmp_path):
 @pytest.fixture
 def users(app, pg_session_factory):
     with pg_session_factory() as s:
-        rows = {role: User(email=f"ann-{role}@ki.se") for role in ("owner", "viewer", "outsider")}
+        rows = {
+            role: User(status="active", email=f"ann-{role}@ki.se")
+            for role in ("owner", "viewer", "outsider")
+        }
         s.add_all(rows.values())
         s.commit()
         return {role: u.id for role, u in rows.items()}

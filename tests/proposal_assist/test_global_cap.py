@@ -113,7 +113,7 @@ def test_post_turn_returns_429_with_global_header(monkeypatch, pg_url, pg_sessio
     app = create_app()
 
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
@@ -165,7 +165,7 @@ def test_global_cap_wins_when_per_workspace_also_exceeded(monkeypatch, pg_url, p
     app = create_app()
 
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")

@@ -33,7 +33,7 @@ def _admin_client(app, pg_session_factory):
 def test_reenable_clears_digest_disabled_at(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        bounced = User(email="bounced@ki.se", digest_disabled_at=datetime.now(UTC))
+        bounced = User(status="active", email="bounced@ki.se", digest_disabled_at=datetime.now(UTC))
         s.add(bounced)
         s.commit()
         s.refresh(bounced)
@@ -56,7 +56,7 @@ def test_reenable_clears_digest_disabled_at(monkeypatch, pg_url, pg_session_fact
 def test_reenable_already_enabled_is_noop_ok(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        enabled = User(email="fine@ki.se", digest_disabled_at=None)
+        enabled = User(status="active", email="fine@ki.se", digest_disabled_at=None)
         s.add(enabled)
         s.commit()
         s.refresh(enabled)
@@ -297,7 +297,7 @@ def test_digest_panel_lists_disabled_user_with_reenable_form(
 ):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="bounced2@ki.se", digest_disabled_at=datetime.now(UTC)))
+        s.add(User(status="active", email="bounced2@ki.se", digest_disabled_at=datetime.now(UTC)))
         s.commit()
     client = _admin_client(app, pg_session_factory)
     with client:
@@ -329,9 +329,21 @@ def test_disabled_users_listed_most_recent_first(monkeypatch, pg_url, pg_session
     now = datetime.now(UTC)
     with pg_session_factory() as s:
         # older bounce
-        s.add(User(email="older@ki.se", digest_disabled_at=now - timedelta(days=3)))
+        s.add(
+            User(
+                status="active",
+                email="older@ki.se",
+                digest_disabled_at=now - timedelta(days=3),
+            )
+        )
         # newer bounce
-        s.add(User(email="newer@ki.se", digest_disabled_at=now - timedelta(hours=1)))
+        s.add(
+            User(
+                status="active",
+                email="newer@ki.se",
+                digest_disabled_at=now - timedelta(hours=1),
+            )
+        )
         s.commit()
     client = _admin_client(app, pg_session_factory)
     with client:

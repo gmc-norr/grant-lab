@@ -83,6 +83,7 @@ def login_form(request: Request, next: str | None = None):
         context={
             "next_path": safe_next(next),
             "allowed_domains": settings.allowed_email_domains,
+            "google_oidc_enabled": settings.google_oidc_enabled,
         },
     )
 

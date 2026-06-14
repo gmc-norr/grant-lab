@@ -17,7 +17,7 @@ def _app(monkeypatch, pg_url):
 
 def _owner_profile(app, pg_session_factory, job_status):
     with pg_session_factory() as s:
-        u = User(email="owner@ki.se", is_admin=False)
+        u = User(status="active", email="owner@ki.se", is_admin=False)
         s.add(u)
         s.flush()
         p = Profile(

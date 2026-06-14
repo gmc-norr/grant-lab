@@ -94,7 +94,7 @@ def reader_env(monkeypatch, pg_url, pg_session_factory, tmp_path):
 
         with pg_session_factory() as s:
             # Owner
-            owner = User(email=f"reader-owner-{_uuid.uuid4().hex[:6]}@ki.se")
+            owner = User(status="active", email=f"reader-owner-{_uuid.uuid4().hex[:6]}@ki.se")
             s.add(owner)
             s.flush()
             owner_id = owner.id
@@ -107,7 +107,7 @@ def reader_env(monkeypatch, pg_url, pg_session_factory, tmp_path):
 
             # Optional viewer
             if as_viewer:
-                viewer = User(email=f"reader-viewer-{_uuid.uuid4().hex[:6]}@ki.se")
+                viewer = User(status="active", email=f"reader-viewer-{_uuid.uuid4().hex[:6]}@ki.se")
                 s.add(viewer)
                 s.flush()
                 s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
@@ -291,7 +291,7 @@ def test_cross_workspace_reference_boundary(reader_env, pg_session_factory, tmp_
     foreign_unique_text = "FOREIGN_SECRET_CONTENT_XYZ_99999"
     foreign_ref_id = None
     with pg_session_factory() as s:
-        owner_b = User(email=f"owner-b-{_uuid.uuid4().hex[:6]}@ki.se")
+        owner_b = User(status="active", email=f"owner-b-{_uuid.uuid4().hex[:6]}@ki.se")
         s.add(owner_b)
         s.flush()
         ws_b = Workspace(owner_id=owner_b.id, title="Workspace B")

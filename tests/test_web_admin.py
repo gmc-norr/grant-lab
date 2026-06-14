@@ -18,7 +18,11 @@ def _setup(monkeypatch, pg_url):
 
 def _logged_in(app, pg_session_factory, *, is_admin: bool):
     with pg_session_factory() as s:
-        u = User(email="root@ki.se" if is_admin else "alice@ki.se", is_admin=is_admin)
+        u = User(
+            status="active",
+            email="root@ki.se" if is_admin else "alice@ki.se",
+            is_admin=is_admin,
+        )
         s.add(u)
         s.commit()
         s.refresh(u)

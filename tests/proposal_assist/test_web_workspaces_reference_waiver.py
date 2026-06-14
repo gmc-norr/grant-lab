@@ -49,7 +49,7 @@ def _authed(app, *, user_id):
 
 
 def _seed(session, *, email, metadata_status="pending"):
-    owner = User(email=email)
+    owner = User(status="active", email=email)
     session.add(owner)
     session.flush()
     ws = Workspace(owner_id=owner.id, title="T")
@@ -204,7 +204,7 @@ def test_non_member_cannot_waive(monkeypatch, pg_url, pg_session_factory, tmp_pa
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid, rid = _seed(s, email="waive-nonmember-owner@ki.se")
-        other = User(email="waive-nonmember-other@ki.se")
+        other = User(status="active", email="waive-nonmember-other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -222,7 +222,7 @@ def test_viewer_cannot_waive(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid, rid = _seed(s, email="waive-viewer-owner@ki.se")
-        viewer = User(email="waive-viewer@ki.se")
+        viewer = User(status="active", email="waive-viewer@ki.se")
         s.add(viewer)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))

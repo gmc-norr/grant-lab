@@ -13,7 +13,7 @@ def _logged_in_client(monkeypatch, pg_url, pg_session_factory, *, email="alice@k
     app = create_app()
 
     with pg_session_factory() as s:
-        u = User(email=email)
+        u = User(status="active", email=email)
         s.add(u)
         s.commit()
         s.refresh(u)

@@ -32,7 +32,7 @@ def _authed_client(app, *, user_id: int) -> TestClient:
 def _make_owner_and_workspace(session, *, owner_email: str = "owner@ki.se"):
     """Create a User + a Workspace owned by them with a non-empty rubric.
     Returns (user_id, workspace_id)."""
-    owner = User(email=owner_email)
+    owner = User(status="active", email=owner_email)
     session.add(owner)
     session.flush()
     ws = Workspace(
@@ -73,7 +73,7 @@ def test_rubric_review_get_returns_403_for_non_owner(
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         _, wsid = _make_owner_and_workspace(s, owner_email="owner@ki.se")
-        other = User(email="other@ki.se")
+        other = User(status="active", email="other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -93,7 +93,7 @@ def test_rubric_review_get_returns_404_for_missing_workspace(
 ):
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="x@ki.se")
+        u = User(status="active", email="x@ki.se")
         s.add(u)
         s.commit()
         uid = u.id
@@ -308,7 +308,7 @@ def test_rubric_review_post_returns_403_for_non_owner(
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         _, wsid = _make_owner_and_workspace(s, owner_email="owner@ki.se")
-        other = User(email="other@ki.se")
+        other = User(status="active", email="other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -358,7 +358,7 @@ def test_workspace_main_view_returns_403_for_non_viewer(
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         _, wsid = _make_owner_and_workspace(s)
-        other = User(email="other-ws@ki.se")
+        other = User(status="active", email="other-ws@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id

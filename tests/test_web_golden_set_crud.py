@@ -26,7 +26,7 @@ def _app(monkeypatch, pg_url):
 
 def _admin(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="root@ki.se", is_admin=True)
+        u = User(status="active", email="root@ki.se", is_admin=True)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -100,7 +100,7 @@ def test_add_rejects_out_of_range_score(monkeypatch, pg_url, pg_session_factory)
 def test_golden_set_page_requires_admin(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se", is_admin=False)
+        u = User(status="active", email="alice@ki.se", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)
