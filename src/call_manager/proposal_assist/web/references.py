@@ -30,7 +30,9 @@ from starlette.concurrency import run_in_threadpool
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Reference, WorkspaceEvent
 from call_manager.db.session import get_db_dependency
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.admission import OverCapacity
+from call_manager.proposal_assist.references.deletion import delete_or_tombstone_reference
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 from call_manager.proposal_assist.references.ingest import (
     IngestResult,
@@ -620,6 +622,42 @@ def post_reference_waiver(
         "proposal_assist/partials/reference_row.html",
         {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /workspaces/<id>/references/<id>/delete — member-gated delete/tombstone
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{workspace_id}/references/{reference_id}/delete", response_class=HTMLResponse)
+def delete_reference_route(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
+    storage = _storage_for(request)
+    repo_dir = workspace_repo_dir(request.app.state.settings.workspaces_dir, ws.id)
+    try:
+        outcome = delete_or_tombstone_reference(
+            session=session,
+            repo_dir=repo_dir,
+            reference_id=reference_id,
+            workspace_id=ws.id,
+            storage=storage,
+            actor_id=user.id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="reference not found") from None
+    if outcome == "tombstoned":
+        # Row removed (empty main content); OOB toast explains retention.
+        return HTMLResponse(
+            '<span id="ref-toast" hx-swap-oob="true">'
+            "Reference deleted (retained because it is cited).</span>"
+        )
+    return HTMLResponse("")  # hard delete → empty body removes the row
 
 
 # ---------------------------------------------------------------------------
