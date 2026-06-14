@@ -24,10 +24,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Reference, WorkspaceEvent
 from call_manager.db.session import get_db_dependency
+from call_manager.proposal_assist.references.admission import OverCapacity
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 from call_manager.proposal_assist.references.ingest import (
     IngestResult,
@@ -176,80 +178,78 @@ async def upload_reference(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
     kind: str = Form("paper"),
+    auto_classify: bool = Form(False),
     file: UploadFile = File(...),  # noqa: B008
 ) -> HTMLResponse:
     ws = require_member(workspace_id=workspace_id, user=user, session=session)
-
     content_type = (file.content_type or "").lower()
     if content_type not in _ALLOWED_MIMES:
         return HTMLResponse(
             f"<p>Unsupported content_type: {_html.escape(repr(content_type))}</p>",
             status_code=400,
         )
-    if kind not in ALLOWED_KINDS:
+    if not auto_classify and kind not in ALLOWED_KINDS:
         return HTMLResponse(
             f"<p>Invalid kind: {_html.escape(repr(kind))}</p>",
             status_code=400,
         )
 
+    storage = _storage_for(request)
+    embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
+    factory = request.app.state.session_factory
+    limiter = request.app.state.reference_ingest_limiter
+    settings = request.app.state.settings
+    caps = _caps(ws, user, session)
+
     try:
-        data = await _read_capped(file, _MAX_BYTES)
+        with limiter.slot():
+            data = await _read_capped(file, _MAX_BYTES)
+            # (Task 10 will insert PDF magic-byte sniff + sha256 dedup here.)
+            effective_kind = "paper" if auto_classify else kind
+
+            def _run():
+                with factory() as own:  # thread-owned session, never the request session
+                    return ingest_bytes(
+                        session_factory=factory,
+                        session=own,
+                        storage=storage,
+                        embedder=embedder,
+                        workspace_id=ws.id,
+                        kind=effective_kind,
+                        source_type="uploaded",
+                        source_uri=None,
+                        filename=_sanitize_filename(
+                            file.filename or f"reference{suffix_for_mime(content_type)}"
+                        ),
+                        mime_type=content_type,
+                        data=data,
+                        uploaded_by=user.id,
+                        citation_service=request.app.state.citation_service,
+                        extract_timeout_seconds=settings.reference_extract_timeout_seconds,
+                        auto_classify_kind=auto_classify,
+                    )
+
+            result: IngestResult = await run_in_threadpool(_run)
+    except OverCapacity:
+        return HTMLResponse(
+            "<p>Server busy — retry shortly.</p>",
+            status_code=429,
+            headers={"Retry-After": "2"},
+        )
     except HTTPException as e:
         return HTMLResponse(f"<p>{_html.escape(str(e.detail))}</p>", status_code=e.status_code)
-
-    storage = _storage_for(request)
-    embed_client = request.app.state.embed_client  # OllamaEmbedClient from main.py
-    embedder = OllamaEmbedderAdapter(embed_client)
-
-    try:
-        # ingest_bytes runs Phase 1 (atomic write + INSERT) using the
-        # caller's session, then Phase 2 (Stage 1 extract+chunk+embed) on
-        # fresh internal sessions. Phase 2 is retain-on-failure: on
-        # extract/embed errors the row + bytes stay on disk with
-        # text_status='failed'.
-        # Phase 3 (metadata extraction) runs when citation_service is
-        # provided; uploads have no fetcher-supplied source_meta.
-        result: IngestResult = ingest_bytes(
-            session_factory=request.app.state.session_factory,
-            session=session,
-            storage=storage,
-            embedder=embedder,
-            workspace_id=ws.id,
-            kind=kind,
-            source_type="uploaded",
-            source_uri=None,
-            filename=_sanitize_filename(
-                file.filename or f"reference{suffix_for_mime(content_type)}"
-            ),
-            mime_type=content_type,
-            data=data,
-            uploaded_by=user.id,
-            citation_service=request.app.state.citation_service,
-            extract_timeout_seconds=request.app.state.settings.reference_extract_timeout_seconds,
-        )
-    except OSError as e:
-        logger.warning(
-            "upload_reference: write_atomic failed for workspace=%s: %s",
-            ws.id,
-            e,
-        )
-        session.rollback()
+    except OSError:
         return HTMLResponse("<p>storage write failed</p>", status_code=500)
     except ValueError as e:
-        session.rollback()
         return HTMLResponse(f"<p>{_html.escape(str(e))}</p>", status_code=400)
 
-    # Phase 2 has already run on its own sessions. Re-read the row from a
-    # fresh session so we see the final text_status/text_error written by
-    # Phase 2 (the caller's `session` may still hold a stale snapshot).
-    factory = request.app.state.session_factory
+    # (Task 14 will insert the reference.added audit event here.)
     with factory() as s2:
         ref = s2.scalar(select(Reference).where(Reference.id == result.reference_id))
-        templates = request.app.state.templates
-        return templates.TemplateResponse(
+        return request.app.state.templates.TemplateResponse(
             request,
             "proposal_assist/partials/reference_row.html",
-            {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
+            {"ref": ref, "workspace": ws, **caps},
         )
 
 
@@ -259,7 +259,7 @@ async def upload_reference(
 
 
 @router.post("/{workspace_id}/references/fetch")
-def fetch_reference_route(
+async def fetch_reference_route(
     workspace_id: uuid.UUID,
     request: Request,
     user=Depends(get_current_user),  # noqa: B008
@@ -269,7 +269,10 @@ def fetch_reference_route(
 ) -> HTMLResponse:
     """User-facing counterpart to the agent's fetch_reference MCP
     tool. Member-only (owner or workspace member); runs the same dispatcher; reuses ingest_bytes."""
-    from call_manager.proposal_assist.references.dispatcher import dispatch_fetch
+    from call_manager.proposal_assist.references.dispatcher import (
+        detect_source_type,
+        dispatch_fetch,
+    )
     from call_manager.proposal_assist.references.fetcher import (
         FetchError,
         SSRFError,
@@ -282,69 +285,76 @@ def fetch_reference_route(
             status_code=400,
         )
 
+    # Validate input before acquiring the limiter slot — bad input shouldn't
+    # block a slot that a valid request could use.
     try:
-        data, filename, mime_type, source_meta = dispatch_fetch(input)
+        detect_source_type(input)
     except ValueError as e:
-        # detect_source_type rejected the input.
-        return HTMLResponse(
-            f"<p>{_html.escape(str(e))}</p>",
-            status_code=400,
-        )
-    except SSRFError as e:
-        return HTMLResponse(
-            f"<p>{_html.escape(str(e))}</p>",
-            status_code=400,
-        )
-    except FetchError as e:
-        return HTMLResponse(
-            f"<p>fetch failed: {_html.escape(str(e))}</p>",
-            status_code=502,
-        )
-
-    storage = _storage_for(request)
-    embed_client = request.app.state.embed_client
-    embedder = OllamaEmbedderAdapter(embed_client)
-
-    try:
-        result: IngestResult = ingest_bytes(
-            session_factory=request.app.state.session_factory,
-            session=session,
-            storage=storage,
-            embedder=embedder,
-            workspace_id=ws.id,
-            kind=kind,
-            source_type=source_meta["source"],
-            source_uri=input,
-            filename=_sanitize_filename(filename),
-            mime_type=mime_type,
-            data=data,
-            uploaded_by=user.id,
-            source_meta=source_meta,
-            citation_service=request.app.state.citation_service,
-            extract_timeout_seconds=request.app.state.settings.reference_extract_timeout_seconds,
-        )
-        session.commit()
-    except OSError as e:
-        logger.warning(
-            "fetch_reference_route: write_atomic failed for workspace=%s: %s",
-            ws.id,
-            e,
-        )
-        session.rollback()
-        return HTMLResponse("<p>storage write failed</p>", status_code=500)
-    except ValueError as e:
-        session.rollback()
         return HTMLResponse(f"<p>{_html.escape(str(e))}</p>", status_code=400)
 
-    # Reload via fresh session to render the final (post-Phase-2) state.
     factory = request.app.state.session_factory
+    storage = _storage_for(request)
+    embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
+    limiter = request.app.state.reference_ingest_limiter
+    settings = request.app.state.settings
+    caps = _caps(ws, user, session)
+
+    try:
+        with limiter.slot():
+
+            def _run():
+                # The fetch (network I/O + DNS) and ingest are both
+                # blocking; run them together in the thread so the event
+                # loop is free while we wait.
+                try:
+                    fetch_data, filename, mime_type, source_meta = dispatch_fetch(input)
+                except (ValueError, SSRFError, FetchError):
+                    raise
+
+                with factory() as own:
+                    result = ingest_bytes(
+                        session_factory=factory,
+                        session=own,
+                        storage=storage,
+                        embedder=embedder,
+                        workspace_id=ws.id,
+                        kind=kind,
+                        source_type=source_meta["source"],
+                        source_uri=input,
+                        filename=_sanitize_filename(filename),
+                        mime_type=mime_type,
+                        data=fetch_data,
+                        uploaded_by=user.id,
+                        source_meta=source_meta,
+                        citation_service=request.app.state.citation_service,
+                        extract_timeout_seconds=settings.reference_extract_timeout_seconds,
+                    )
+                return result
+
+            result: IngestResult = await run_in_threadpool(_run)
+    except OverCapacity:
+        return HTMLResponse(
+            "<p>Server busy — retry shortly.</p>",
+            status_code=429,
+            headers={"Retry-After": "2"},
+        )
+    except ValueError as e:
+        # detect_source_type rejected the input (re-raised from _run).
+        return HTMLResponse(f"<p>{_html.escape(str(e))}</p>", status_code=400)
+    except SSRFError as e:
+        return HTMLResponse(f"<p>{_html.escape(str(e))}</p>", status_code=400)
+    except FetchError as e:
+        return HTMLResponse(f"<p>fetch failed: {_html.escape(str(e))}</p>", status_code=502)
+    except OSError:
+        return HTMLResponse("<p>storage write failed</p>", status_code=500)
+
+    # Reload via fresh session to render the final (post-Phase-2) state.
     with factory() as s2:
         ref = s2.scalar(select(Reference).where(Reference.id == result.reference_id))
-        templates = request.app.state.templates
-        return templates.TemplateResponse(
+        return request.app.state.templates.TemplateResponse(
             request,
             "proposal_assist/partials/reference_row.html",
-            {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
+            {"ref": ref, "workspace": ws, **caps},
         )
 
 

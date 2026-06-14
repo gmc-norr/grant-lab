@@ -20,6 +20,7 @@ from call_manager.db.session import make_engine, make_session_factory
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
+from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web.annotations import (
     router as annotations_router,
 )
@@ -145,6 +146,7 @@ async def lifespan(app: FastAPI):
     workspace_controller = build_workspace_controller(
         settings=settings,
         session_factory=app.state.session_factory,
+        reference_ingest_limiter=app.state.reference_ingest_limiter,
     )
     app.state.workspace_controller = workspace_controller
 
@@ -445,6 +447,9 @@ def create_app() -> FastAPI:
         base_url=settings.ollama_url,
         model=settings.embedding_model,
         expected_dim=settings.embedding_dim,
+    )
+    app.state.reference_ingest_limiter = IngestLimiter(
+        capacity=settings.reference_ingest_concurrency
     )
 
     # Vendored static assets (htmx.min.js lives here). Serving locally

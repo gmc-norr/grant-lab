@@ -68,6 +68,11 @@ class ToolContext:
     # the agent never saw becomes a tool error instead of a lost update.
     agent_view_head: str | None = field(default=None)
 
+    # Process-wide ingest admission limiter (threading.Semaphore-backed).
+    # None disables the limiter guard in fetch_reference_impl (e.g. in tests
+    # that build a bare ToolContext without app.state).
+    reference_ingest_limiter: object | None = field(default=None)
+
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap a plain-dict tool result in the MCP content-block envelope.

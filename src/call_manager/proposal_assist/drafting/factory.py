@@ -22,8 +22,9 @@ def build_workspace_controller(
     *,
     settings: Settings,
     session_factory: sessionmaker,
+    reference_ingest_limiter: object | None = None,
 ) -> WorkspaceController:
-    adapter = _build_adapter(settings, session_factory)
+    adapter = _build_adapter(settings, session_factory, reference_ingest_limiter)
     registry = SubprocessRegistry(
         adapter=adapter,
         idle_seconds=settings.workspace_idle_timeout_seconds,
@@ -35,7 +36,11 @@ def build_workspace_controller(
     )
 
 
-def _build_adapter(settings: Settings, session_factory: sessionmaker) -> DraftingAgent:
+def _build_adapter(
+    settings: Settings,
+    session_factory: sessionmaker,
+    reference_ingest_limiter: object | None = None,
+) -> DraftingAgent:
     choice = settings.drafting_adapter.lower()
     if choice == "fake":
         return FakeAgentAdapter()
@@ -67,6 +72,7 @@ def _build_adapter(settings: Settings, session_factory: sessionmaker) -> Draftin
                 session_factory=session_factory,
                 settings=settings,
                 citation_service=_citation_service,
+                reference_ingest_limiter=reference_ingest_limiter,
             )
             return build_proposal_assist_mcp_server(ctx)
 

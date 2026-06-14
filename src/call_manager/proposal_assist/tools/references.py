@@ -506,17 +506,6 @@ async def fetch_reference_impl(
             )
             s2.commit()
 
-    # Do the fetch + ingest. On failure we refund the cap slot above so a
-    # transient error doesn't permanently shrink the per-turn budget.
-    try:
-        data, filename, mime_type, source_meta = dispatch_fetch(input)
-    except SSRFError as e:
-        _refund_fetch_slot()
-        return {"error": f"SSRF refused: {e}", "fetch_count": new_count - 1}
-    except FetchError as e:
-        _refund_fetch_slot()
-        return {"error": f"fetch failed: {e}", "fetch_count": new_count - 1}
-
     storage = ReferenceStorage(root=Path(ctx.settings.workspaces_dir))
     if embedder is None:
         from call_manager.embeddings.client import OllamaEmbedClient
@@ -529,35 +518,84 @@ async def fetch_reference_impl(
         )
         embedder = OllamaEmbedderAdapter(embed_client)
 
-    with ctx.session_factory() as s:
-        try:
-            ingest_result = ingest_bytes(
-                session_factory=ctx.session_factory,
-                session=s,
-                storage=storage,
-                embedder=embedder,
-                workspace_id=ctx.workspace_id,
-                kind=kind,
-                source_type=source_meta["source"],
-                source_uri=input,
-                filename=filename,
-                mime_type=mime_type,
-                data=data,
-                uploaded_by=None,  # agent-initiated, no actor_id
-                source_meta=source_meta,
-                citation_service=ctx.citation_service,
-                extract_timeout_seconds=ctx.settings.reference_extract_timeout_seconds,
-            )
-            s.commit()
-        except Exception as e:
-            s.rollback()
-            _refund_fetch_slot()
-            return {"error": f"ingest failed: {e}", "fetch_count": new_count - 1}
+    # Acquire the process-wide ingest limiter (if wired) AFTER the per-turn
+    # cap increment but BEFORE the blocking fetch + ingest work. On
+    # OverCapacity: refund the turn slot (the fetch never happened) and
+    # return a retryable busy error. If no limiter is present (e.g. older
+    # test ToolContexts), proceed unguarded.
+    from starlette.concurrency import run_in_threadpool
 
-    return {
-        "reference_id": str(ingest_result.reference_id),
-        "filename": filename,
-        "source_type": source_meta["source"],
-        "fetch_count": new_count,
-        "text_status": ingest_result.text_status,
-    }
+    limiter = getattr(ctx, "reference_ingest_limiter", None)
+
+    if limiter is not None:
+        try:
+            acquired = limiter.try_acquire()
+        except Exception:
+            acquired = True  # limiter broken — proceed unguarded
+        if not acquired:
+            _refund_fetch_slot()
+            return {
+                "error": "server busy — too many ingests in progress; retry shortly",
+                "fetch_count": new_count - 1,
+            }
+        _limiter_acquired = True
+    else:
+        _limiter_acquired = False
+
+    try:
+
+        def _do_fetch_and_ingest():
+            # Do the fetch + ingest. On failure we refund the cap slot above
+            # so a transient error doesn't permanently shrink the per-turn budget.
+            try:
+                data, filename, mime_type, source_meta = dispatch_fetch(input)
+            except SSRFError as e:
+                return {"_refund": True, "error": f"SSRF refused: {e}"}
+            except FetchError as e:
+                return {"_refund": True, "error": f"fetch failed: {e}"}
+
+            with ctx.session_factory() as s:
+                try:
+                    ingest_result = ingest_bytes(
+                        session_factory=ctx.session_factory,
+                        session=s,
+                        storage=storage,
+                        embedder=embedder,
+                        workspace_id=ctx.workspace_id,
+                        kind=kind,
+                        source_type=source_meta["source"],
+                        source_uri=input,
+                        filename=filename,
+                        mime_type=mime_type,
+                        data=data,
+                        uploaded_by=None,  # agent-initiated, no actor_id
+                        source_meta=source_meta,
+                        citation_service=ctx.citation_service,
+                        extract_timeout_seconds=ctx.settings.reference_extract_timeout_seconds,
+                    )
+                    s.commit()
+                except Exception as e:
+                    s.rollback()
+                    return {"_refund": True, "error": f"ingest failed: {e}"}
+
+            return {
+                "reference_id": str(ingest_result.reference_id),
+                "filename": filename,
+                "source_type": source_meta["source"],
+                "fetch_count": new_count,
+                "text_status": ingest_result.text_status,
+            }
+
+        thread_result = await run_in_threadpool(_do_fetch_and_ingest)
+    finally:
+        if _limiter_acquired:
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                limiter.release()
+
+    if thread_result.get("_refund"):
+        _refund_fetch_slot()
+        return {"error": thread_result["error"], "fetch_count": new_count - 1}
+
+    return thread_result

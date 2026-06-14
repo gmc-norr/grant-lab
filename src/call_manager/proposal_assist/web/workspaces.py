@@ -1115,6 +1115,7 @@ def _make_tool_ctx(request: Request, ws: Workspace) -> ToolContext:
         session_factory=request.app.state.session_factory,
         settings=settings,
         citation_service=getattr(request.app.state, "citation_service", None),
+        reference_ingest_limiter=getattr(request.app.state, "reference_ingest_limiter", None),
     )
 
 
