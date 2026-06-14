@@ -41,7 +41,7 @@ def _admin_client(app, *, admin_email: str = "admin@ki.se") -> TestClient:
     with sf() as s:
         u = s.scalar(select(User).where(User.email == admin_email))
         if u is None:
-            u = User(email=admin_email, is_admin=True)
+            u = User(status="active", email=admin_email, is_admin=True)
             s.add(u)
             s.commit()
             s.refresh(u)
@@ -57,7 +57,7 @@ def _admin_client(app, *, admin_email: str = "admin@ki.se") -> TestClient:
 def test_drafting_panel_returns_403_for_non_admin(monkeypatch, pg_url, pg_session_factory):
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="user@ki.se", is_admin=False)
+        u = User(status="active", email="user@ki.se", is_admin=False)
         s.add(u)
         s.commit()
         uid = u.id
@@ -101,7 +101,7 @@ def test_drafting_panel_shows_per_workspace_usage(monkeypatch, pg_url, pg_sessio
     app = _build_app(monkeypatch, pg_url)
 
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="VisibleInPanel")
@@ -132,7 +132,7 @@ def test_drafting_panel_shows_per_workspace_usage(monkeypatch, pg_url, pg_sessio
 def test_drafting_panel_shows_recent_failed_events(monkeypatch, pg_url, pg_session_factory):
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(email="o@ki.se")
+        owner = User(status="active", email="o@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="WithFails")
@@ -168,7 +168,7 @@ def test_panel_shows_exceeded_state_when_over_cap(monkeypatch, pg_url, pg_sessio
     the b8-residuals readability rewrite of the input-row Jinja."""
     app = _build_app(monkeypatch, pg_url, drafting_enabled=True)
     with pg_session_factory() as s:
-        owner = User(email="o@ki.se")
+        owner = User(status="active", email="o@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="OverCapWs")
@@ -200,7 +200,7 @@ def test_payload_with_html_chars_is_safely_rendered(monkeypatch, pg_url, pg_sess
     that quoted user input) MUST NOT render as live HTML."""
     app = _build_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(email="o@ki.se")
+        owner = User(status="active", email="o@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="W")

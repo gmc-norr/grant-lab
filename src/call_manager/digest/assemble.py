@@ -73,7 +73,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     No DB writes — pure read. The caller (run_digest) writes the digest_runs
     row only AFTER a successful send."""
     user = session.get(User, user_id)
-    if user is None or user.digest_disabled_at is not None:
+    if user is None or user.status != "active" or user.digest_disabled_at is not None:
         return None
 
     # 1. Subscribed active profiles, digest_enabled

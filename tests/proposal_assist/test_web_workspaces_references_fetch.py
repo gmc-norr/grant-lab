@@ -58,7 +58,7 @@ def _authed(app, *, user_id):
 
 
 def _seed_owner_and_workspace(session, *, email=None):
-    owner = User(email=email or f"owner-{uuid.uuid4()}@ki.se")
+    owner = User(status="active", email=email or f"owner-{uuid.uuid4()}@ki.se")
     session.add(owner)
     session.flush()
     ws = Workspace(owner_id=owner.id, title="T")
@@ -137,7 +137,7 @@ def test_fetch_returns_403_for_non_owner(monkeypatch, pg_url, pg_session_factory
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s)
-        other = User(email=f"other-{uuid.uuid4()}@ki.se")
+        other = User(status="active", email=f"other-{uuid.uuid4()}@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id

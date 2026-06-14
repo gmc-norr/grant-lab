@@ -18,7 +18,7 @@ def _setup(monkeypatch, pg_url):
 
 def _logged_in(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="user@ki.se")
+        u = User(status="active", email="user@ki.se")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -155,19 +155,43 @@ def test_profile_view_closed_call_never_outranks_open(
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         closed = Call(
-            source_id=src.id, external_id="CL", url="https://x/cl", title="Closed high",
-            published_at=datetime(2026, 4, 1, tzinfo=UTC), deadline=now - timedelta(days=5),
+            source_id=src.id,
+            external_id="CL",
+            url="https://x/cl",
+            title="Closed high",
+            published_at=datetime(2026, 4, 1, tzinfo=UTC),
+            deadline=now - timedelta(days=5),
         )
         openc = Call(
-            source_id=src.id, external_id="OP", url="https://x/op", title="Open low",
-            published_at=datetime(2026, 4, 2, tzinfo=UTC), deadline=now + timedelta(days=20),
+            source_id=src.id,
+            external_id="OP",
+            url="https://x/op",
+            title="Open low",
+            published_at=datetime(2026, 4, 2, tzinfo=UTC),
+            deadline=now + timedelta(days=20),
         )
         s.add_all([closed, openc])
         s.flush()
-        s.add(CallRanking(call_id=closed.id, profile_id=profile_id, aggregate_score=95,
-                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
-        s.add(CallRanking(call_id=openc.id, profile_id=profile_id, aggregate_score=20,
-                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.add(
+            CallRanking(
+                call_id=closed.id,
+                profile_id=profile_id,
+                aggregate_score=95,
+                rationale="x",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
+        s.add(
+            CallRanking(
+                call_id=openc.id,
+                profile_id=profile_id,
+                aggregate_score=20,
+                rationale="x",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
         s.commit()
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)
@@ -189,19 +213,43 @@ def test_top_matches_badge_excludes_closed_high_scorer(
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         closed = Call(
-            source_id=src.id, external_id="CH", url="https://x/ch", title="Closed top",
-            published_at=datetime(2026, 4, 1, tzinfo=UTC), deadline=now - timedelta(days=3),
+            source_id=src.id,
+            external_id="CH",
+            url="https://x/ch",
+            title="Closed top",
+            published_at=datetime(2026, 4, 1, tzinfo=UTC),
+            deadline=now - timedelta(days=3),
         )
         openc = Call(
-            source_id=src.id, external_id="OH", url="https://x/oh", title="Open top",
-            published_at=datetime(2026, 4, 2, tzinfo=UTC), deadline=now + timedelta(days=20),
+            source_id=src.id,
+            external_id="OH",
+            url="https://x/oh",
+            title="Open top",
+            published_at=datetime(2026, 4, 2, tzinfo=UTC),
+            deadline=now + timedelta(days=20),
         )
         s.add_all([closed, openc])
         s.flush()
-        s.add(CallRanking(call_id=closed.id, profile_id=profile_id, aggregate_score=95,
-                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
-        s.add(CallRanking(call_id=openc.id, profile_id=profile_id, aggregate_score=75,
-                          rationale="x", model="gemma4:e4b-q8", prompt_version="v2.0"))
+        s.add(
+            CallRanking(
+                call_id=closed.id,
+                profile_id=profile_id,
+                aggregate_score=95,
+                rationale="x",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
+        s.add(
+            CallRanking(
+                call_id=openc.id,
+                profile_id=profile_id,
+                aggregate_score=75,
+                rationale="x",
+                model="gemma4:e4b-q8",
+                prompt_version="v2.0",
+            )
+        )
         s.commit()
     app = _setup(monkeypatch, pg_url)
     client = _logged_in(app, pg_session_factory)

@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from call_manager.auth.email import InMemoryEmailSender
 from call_manager.auth.rate_limit import SlidingWindowLimiter
+from call_manager.db.models import User
 from call_manager.main import create_app
 
 
@@ -110,6 +111,11 @@ def test_known_email_not_locked_out_by_disallowed_spam(monkeypatch, pg_url, pg_s
     """
     app = _mk_login_app(monkeypatch, pg_url)
     app.state.email_limiter = SlidingWindowLimiter(max_requests=2, window_seconds=60, name="email")
+    # Magic-link is login-only: a link is only sent for an existing ACTIVE
+    # account. Seed the victim so the allowance assertion is meaningful.
+    with pg_session_factory() as s:
+        s.add(User(status="active", email="victim@ki.se"))
+        s.commit()
     with TestClient(app) as client:
         # Hammer disallowed-domain addresses.
         for i in range(10):

@@ -18,6 +18,20 @@
   </form>
 </article>
 
+{% if google_oidc_enabled %}
+<article>
+  <header><strong>Google sign-in</strong></header>
+  {% if google_linked %}
+    <p>Google sign-in: <strong>connected</strong>.</p>
+  {% else %}
+    <form method="post" action="/auth/google/start">
+      <input type="hidden" name="link" value="1" />
+      <button type="submit">Connect Google account</button>
+    </form>
+  {% endif %}
+</article>
+{% endif %}
+
 <article>
   <header><strong>Weekly digest subscriptions</strong></header>
   <p class="muted">Check the profiles whose Monday-morning digest you want emailed to you.</p>

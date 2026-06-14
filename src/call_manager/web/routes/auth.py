@@ -83,6 +83,7 @@ def login_form(request: Request, next: str | None = None):
         context={
             "next_path": safe_next(next),
             "allowed_domains": settings.allowed_email_domains,
+            "google_oidc_enabled": settings.google_oidc_enabled,
         },
     )
 
@@ -164,11 +165,16 @@ def login_submit(
         user = session.execute(
             select(User).where(User.email == email_normalized)
         ).scalar_one_or_none()
-        if user is None:
-            user = User(email=email_normalized)
-            session.add(user)
-            session.flush()
-
+        # Magic-link is login-only: never auto-provision. Only issue a token for
+        # an existing ACTIVE account. The response body is identical on every
+        # branch (enumeration-resistant *body*); note the timing residual risk
+        # documented in the spec — bounded by the per-email/per-IP limiters.
+        if user is None or user.status != "active":
+            _logger.info(
+                "login skipped: no active account",
+                extra={"event": "login_no_active_account", "email_fp": email_fp},
+            )
+            return response
         raw = issue_token(session, user_id=user.id, ttl_minutes=15)
         session.commit()
 
@@ -273,6 +279,11 @@ def login_verify_consume(
         user = session.get(User, user_id)
         if user is None:
             raise HTTPException(status_code=400, detail="invalid link")
+        # Re-check status at consume: the account may have been disabled between
+        # the link being mailed and clicked.
+        if user.status != "active":
+            target = "/auth/pending" if user.status == "pending" else "/auth/no-access"
+            return RedirectResponse(url=target, status_code=303)
         user.last_login_at = datetime.now(UTC)
         session_epoch = user.session_epoch
         session.commit()

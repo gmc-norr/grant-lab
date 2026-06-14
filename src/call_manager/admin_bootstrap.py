@@ -48,7 +48,11 @@ def bootstrap_admins(
         for email in valid:
             user = session.query(User).filter_by(email=email).one_or_none()
             if user is None:
-                session.add(User(email=email, is_admin=True))
-            elif not user.is_admin:
+                session.add(User(email=email, is_admin=True, status="active"))
+            else:
+                # Configured admins are the lockout-recovery path: ensure both
+                # admin AND active on every startup. To permanently disable one,
+                # remove them from INITIAL_ADMIN_EMAIL first.
                 user.is_admin = True
+                user.status = "active"
         session.commit()

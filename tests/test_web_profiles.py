@@ -26,7 +26,7 @@ def _logged_in(app, pg_session_factory, *, is_admin: bool = True, user_id: int |
         uid = user_id
     else:
         with pg_session_factory() as s:
-            u = User(email="u@ki.se", is_admin=is_admin)
+            u = User(status="active", email="u@ki.se", is_admin=is_admin)
             s.add(u)
             s.commit()
             s.refresh(u)
@@ -566,7 +566,7 @@ def test_profile_edit_allows_owner(monkeypatch, pg_url, pg_session_factory):
     # profile before generating the logged-in client. _logged_in creates
     # u@ki.se itself, so pre-seed the user here and mirror its email.
     with pg_session_factory() as s:
-        u = User(email="owner-only@ki.se", is_admin=False)
+        u = User(status="active", email="owner-only@ki.se", is_admin=False)
         s.add(u)
         s.flush()
         p = Profile(
@@ -1140,7 +1140,7 @@ def test_edit_persists_new_fields_and_schedules_backfill(monkeypatch, pg_url, pg
     with pg_session_factory() as s:
         from call_manager.db.models import User
 
-        u = User(email="o@ki.se")
+        u = User(status="active", email="o@ki.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -1182,7 +1182,7 @@ def test_edit_rejects_unknown_level(monkeypatch, pg_url, pg_session_factory):
     from call_manager.db.models import Profile, User
 
     with pg_session_factory() as s:
-        u = User(email="o2@ki.se")
+        u = User(status="active", email="o2@ki.se")
         s.add(u)
         s.flush()
         p = Profile(

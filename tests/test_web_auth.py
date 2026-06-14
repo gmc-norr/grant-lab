@@ -25,6 +25,14 @@ def _mk_app(monkeypatch, pg_url):
     return app, sender
 
 
+def _seed_active(pg_session_factory, email="alice@ki.se"):
+    """Magic-link is login-only: a link is issued only for an existing ACTIVE
+    account. Tests that assert an email is sent must seed one first."""
+    with pg_session_factory() as s:
+        s.add(User(status="active", email=email))
+        s.commit()
+
+
 def test_login_form_renders(monkeypatch, pg_url):
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
@@ -35,6 +43,7 @@ def test_login_form_renders(monkeypatch, pg_url):
 
 def test_login_post_sends_email_for_allowed_domain(monkeypatch, pg_url, pg_session_factory):
     app, sender = _mk_app(monkeypatch, pg_url)
+    _seed_active(pg_session_factory)
     with TestClient(app) as client:
         r = client.post("/login", data={"email": "alice@ki.se"}, follow_redirects=False)
     assert r.status_code == 200
@@ -44,14 +53,15 @@ def test_login_post_sends_email_for_allowed_domain(monkeypatch, pg_url, pg_sessi
     assert "/login/verify?token=" in sender.sent[0].text_body
 
 
-def test_login_post_creates_user_on_first_request(monkeypatch, pg_url, pg_session_factory):
+def test_login_post_does_not_create_user_on_first_request(monkeypatch, pg_url, pg_session_factory):
+    """Magic-link is login-only: posting an unknown email must NOT auto-create
+    a user (provisioning happens only via the admin-gated Google flow)."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
-        client.post("/login", data={"email": "brand-new@ki.se"})
+        r = client.post("/login", data={"email": "brand-new@ki.se"})
+    assert r.status_code == 200
     with pg_session_factory() as s:
-        u = s.query(User).filter_by(email="brand-new@ki.se").one()
-        assert u.name is None
-        assert u.is_admin is False
+        assert s.query(User).filter_by(email="brand-new@ki.se").one_or_none() is None
 
 
 def test_login_post_silently_drops_disallowed_domain(monkeypatch, pg_url, pg_session_factory):
@@ -65,6 +75,7 @@ def test_login_post_silently_drops_disallowed_domain(monkeypatch, pg_url, pg_ses
 
 def test_login_post_is_rate_limited_per_email(monkeypatch, pg_url, pg_session_factory):
     app, sender = _mk_app(monkeypatch, pg_url)
+    _seed_active(pg_session_factory)
     app.state.email_limiter = SlidingWindowLimiter(max_requests=2, window_seconds=60)
     with TestClient(app) as client:
         for _ in range(5):
@@ -76,7 +87,7 @@ def test_login_post_is_rate_limited_per_email(monkeypatch, pg_url, pg_session_fa
 def test_verify_sets_session_cookie_and_redirects(monkeypatch, pg_url, pg_session_factory):
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -99,7 +110,7 @@ def test_verify_rejects_unknown_token(monkeypatch, pg_url):
 def test_verify_rejects_replay(monkeypatch, pg_url, pg_session_factory):
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -128,7 +139,7 @@ def test_verify_survives_post_consumption_failure(monkeypatch, pg_url, pg_sessio
 
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -185,6 +196,7 @@ def test_login_swallows_email_send_failure(monkeypatch, pg_url, pg_session_facto
     """
     app, _ = _mk_app(monkeypatch, pg_url)
     app.state.email_sender = _ExplodingSender()
+    _seed_active(pg_session_factory)
 
     with (
         caplog.at_level(logging.WARNING, logger="call_manager.web.routes.auth"),
@@ -217,6 +229,7 @@ def test_login_emits_structured_logs(
     monkeypatch, pg_url, pg_session_factory, caplog, expected_event
 ):
     app, _ = _mk_app(monkeypatch, pg_url)
+    _seed_active(pg_session_factory)
     with (
         caplog.at_level(logging.INFO, logger="call_manager.web.routes.auth"),
         TestClient(app) as client,
@@ -286,14 +299,12 @@ def test_untrusted_proxy_ignores_x_forwarded_for(monkeypatch, pg_url, pg_session
     assert "9.9.9.9" not in app.state.ip_limiter._events
 
 
-def test_get_verify_renders_interstitial_without_consuming(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_get_verify_renders_interstitial_without_consuming(monkeypatch, pg_url, pg_session_factory):
     """GET /login/verify renders the confirm page and does NOT consume the
     token — a mail-scanner pre-fetch must leave it valid for the human."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -320,12 +331,10 @@ def test_get_verify_renders_with_unknown_token(monkeypatch, pg_url):
     assert "confirm sign-in" in r.text.lower()
 
 
-def test_post_verify_consumes_and_redirects_to_next(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_verify_consumes_and_redirects_to_next(monkeypatch, pg_url, pg_session_factory):
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -342,12 +351,10 @@ def test_post_verify_consumes_and_redirects_to_next(
     assert "session" in r.cookies
 
 
-def test_post_verify_unsafe_next_falls_back_to_root(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_verify_unsafe_next_falls_back_to_root(monkeypatch, pg_url, pg_session_factory):
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -363,15 +370,13 @@ def test_post_verify_unsafe_next_falls_back_to_root(
     assert r.headers["location"] == "/"
 
 
-def test_post_verify_succeeds_under_origin_csrf_check(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_verify_succeeds_under_origin_csrf_check(monkeypatch, pg_url, pg_session_factory):
     """The real interstitial POST carries same-origin Origin/Referer; the
     CSRF middleware must allow it. Regression guard against reintroducing
     no-referrer / Origin: null on the verify response."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)
@@ -428,9 +433,7 @@ def test_json_401_unaffected_by_next(monkeypatch, pg_url):
     assert r.headers["content-type"].startswith("application/json")
 
 
-def test_next_threaded_end_to_end_with_nested_query(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_next_threaded_end_to_end_with_nested_query(monkeypatch, pg_url, pg_session_factory):
     """Full digest journey, exercising BOTH browser handoffs that carry
     next: GET /login?next renders the hidden field; the user submits the
     value FROM that form; the emailed magic-link GET renders the hidden
@@ -442,6 +445,7 @@ def test_next_threaded_end_to_end_with_nested_query(
     import re
 
     app, sender = _mk_app(monkeypatch, pg_url)
+    _seed_active(pg_session_factory)
     nxt = "/calls/5?profile=3&source=x"
 
     def hidden(text, name):
@@ -457,9 +461,7 @@ def test_next_threaded_end_to_end_with_nested_query(
 
         # 2. Submit the email WITH the next value read from the rendered form.
         client.post("/login", data={"email": "alice@ki.se", "next": hidden(g.text, "next")})
-        verify_url = re.search(
-            r"(/login/verify\?\S+)", sender.sent[-1].text_body
-        ).group(1)
+        verify_url = re.search(r"(/login/verify\?\S+)", sender.sent[-1].text_body).group(1)
 
         # 3. Browser GETs the emailed link → interstitial renders hidden
         #    token + next (no consume).
@@ -491,6 +493,7 @@ def test_login_sent_preserves_next_in_back_link(monkeypatch, pg_url, pg_session_
 def test_login_post_drops_unsafe_next(monkeypatch, pg_url, pg_session_factory):
     """An open-redirect next must never reach the magic-link URL."""
     app, sender = _mk_app(monkeypatch, pg_url)
+    _seed_active(pg_session_factory)
     with TestClient(app) as client:
         client.post("/login", data={"email": "alice@ki.se", "next": "https://evil.com"})
     assert len(sender.sent) == 1
@@ -560,7 +563,7 @@ def test_replay_renders_recovery_page(monkeypatch, pg_url, pg_session_factory):
     recovery page — still 400, but the dedicated body."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="alice@ki.se")
+        u = User(status="active", email="alice@ki.se")
         s.add(u)
         s.flush()
         raw = issue_token(s, user_id=u.id, ttl_minutes=15)

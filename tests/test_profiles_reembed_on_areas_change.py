@@ -18,7 +18,7 @@ def _app(monkeypatch, pg_url):
 def test_editing_only_areas_triggers_reembed(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="root@ki.se", is_admin=True)
+        u = User(status="active", email="root@ki.se", is_admin=True)
         s.add(u)
         s.flush()
         p = Profile(

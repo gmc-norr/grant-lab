@@ -657,7 +657,7 @@ def test_post_turn_error_returns_json_detail(monkeypatch, pg_url, pg_session_fac
     app = create_app()
 
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="Test ws", current_phase="spec")
@@ -711,7 +711,7 @@ def test_post_turn_with_reference_ids_form_field(monkeypatch, pg_url, pg_session
 
     app = create_app()
     with pg_session_factory() as s:
-        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
@@ -790,7 +790,7 @@ def test_post_turn_with_reference_ids_only_echoes_reference_chip(
 
     app = create_app()
     with pg_session_factory() as s:
-        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
@@ -855,7 +855,7 @@ def test_post_turn_with_reference_ids_returns_400_for_pending_reference(
 
     app = create_app()
     with pg_session_factory() as s:
-        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
@@ -913,7 +913,7 @@ def test_workspace_main_context_includes_workspace_references(
 
     app = create_app()
     with pg_session_factory() as s:
-        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
@@ -991,8 +991,12 @@ def test_reload_renders_connector_for_active_running_job(
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
-            status="running", queued_at=datetime.now(UTC), started_at=datetime.now(UTC),
+            workspace_id=ws.id,
+            user_turn_id=ut.id,
+            submitted_by_user_id=current_user.id,
+            status="running",
+            queued_at=datetime.now(UTC),
+            started_at=datetime.now(UTC),
         )
         s.add(job)
         make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "partial"})
@@ -1030,8 +1034,11 @@ def test_reload_connector_for_queued_job_shows_cancel(
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
-            status="queued", queued_at=datetime.now(UTC),
+            workspace_id=ws.id,
+            user_turn_id=ut.id,
+            submitted_by_user_id=current_user.id,
+            status="queued",
+            queued_at=datetime.now(UTC),
         )
         s.add(job)
         s.commit()
@@ -1056,7 +1063,7 @@ def test_reload_no_connector_when_no_active_job(
 
     body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
     assert "sse-mount-" not in body
-    assert 'data-workspace-id' in body
+    assert "data-workspace-id" in body
 
 
 def test_reload_connector_no_cancel_for_viewer(
@@ -1077,8 +1084,11 @@ def test_reload_connector_no_cancel_for_viewer(
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=owner.id,
-            status="queued", queued_at=datetime.now(UTC),
+            workspace_id=ws.id,
+            user_turn_id=ut.id,
+            submitted_by_user_id=owner.id,
+            status="queued",
+            queued_at=datetime.now(UTC),
         )
         s.add(job)
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))

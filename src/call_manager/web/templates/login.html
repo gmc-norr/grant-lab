@@ -29,6 +29,12 @@
       {% endif %}
       <button type="submit">Send login link</button>
     </form>
+    {% if google_oidc_enabled %}
+    <form method="post" action="/auth/google/start">
+      {% if next_path %}<input type="hidden" name="next" value="{{ next_path }}" />{% endif %}
+      <button type="submit">Continue with Google</button>
+    </form>
+    {% endif %}
   </div>
 </div>
 {% endblock %}

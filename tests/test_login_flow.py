@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from call_manager.auth.email import InMemoryEmailSender
 from call_manager.auth.rate_limit import SlidingWindowLimiter
+from call_manager.db.models import User
 from call_manager.main import create_app
 
 
@@ -13,6 +14,12 @@ def test_full_login_flow(monkeypatch, pg_url, pg_session_factory):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+
+    # Magic-link is login-only: it issues a link only for an existing ACTIVE
+    # account. Seed one before requesting the link.
+    with pg_session_factory() as s:
+        s.add(User(status="active", email="alice@ki.se"))
+        s.commit()
 
     app = create_app()
     sender = InMemoryEmailSender()

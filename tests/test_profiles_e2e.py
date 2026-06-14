@@ -79,7 +79,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
     app = create_app()
     # Login as a user
     with pg_session_factory() as s:
-        u = User(email="e2e@ki.se")
+        u = User(status="active", email="e2e@ki.se")
         s.add(u)
         s.commit()
         s.refresh(u)

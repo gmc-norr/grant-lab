@@ -48,7 +48,7 @@ def _seed_user_with_payload(s, *, email):
         Subscription,
     )
 
-    u = User(email=email)
+    u = User(email=email, status="active")
     s.add(u)
     s.flush()
     p = Profile(

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="container">
+  <h1>Users</h1>
+  <table>
+    <thead><tr><th>Email</th><th>Status</th><th>Role</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td>{{ u.email }}</td><td>{{ u.status }}</td>
+        <td>{{ "admin" if u.is_admin else "member" }}</td>
+        <td>
+          {% if u.status == "active" %}
+            <form method="post" action="/admin/users/{{ u.id }}/disable" style="display:inline">
+              <button type="submit" class="secondary">Disable</button></form>
+            <form method="post" action="/admin/users/{{ u.id }}/role" style="display:inline">
+              <input type="hidden" name="role" value="{{ "member" if u.is_admin else "admin" }}" />
+              <button type="submit">{{ "Make member" if u.is_admin else "Make admin" }}</button></form>
+          {% elif u.status == "disabled" %}
+            <form method="post" action="/admin/users/{{ u.id }}/enable" style="display:inline">
+              <button type="submit">Enable</button></form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p>Showing page {{ page }} ({{ total }} total).
+     {% if page > 1 %}<a href="/admin/users?page={{ page - 1 }}">Prev</a>{% endif %}
+     {% if total > page * per_page %}<a href="/admin/users?page={{ page + 1 }}">Next</a>{% endif %}
+  </p>
+  <p><a href="/admin/users/pending">Pending approvals</a> · <a href="/admin">Admin home</a></p>
+</main>
+{% endblock %}

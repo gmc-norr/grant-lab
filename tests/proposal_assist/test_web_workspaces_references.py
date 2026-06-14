@@ -27,7 +27,7 @@ def _authed(app, *, user_id):
 
 
 def _seed_owner_and_workspace(session, *, email="owner@ki.se"):
-    owner = User(email=email)
+    owner = User(status="active", email=email)
     session.add(owner)
     session.flush()
     ws = Workspace(owner_id=owner.id, title="T")
@@ -53,7 +53,7 @@ def test_panel_returns_403_for_non_viewer(monkeypatch, pg_url, pg_session_factor
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s)
-        other = User(email="other@ki.se")
+        other = User(status="active", email="other@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -94,7 +94,7 @@ def test_upload_returns_403_for_non_owner(monkeypatch, pg_url, pg_session_factor
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         _, wsid = _seed_owner_and_workspace(s)
-        viewer = User(email="viewer@ki.se")
+        viewer = User(status="active", email="viewer@ki.se")
         s.add(viewer)
         s.commit()
         viewer_id = viewer.id
@@ -264,7 +264,7 @@ def test_raw_returns_404_when_same_owner_of_both_workspaces(
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         # ONE owner with TWO workspaces.
-        owner = User(email="dual-owner@ki.se")
+        owner = User(status="active", email="dual-owner@ki.se")
         s.add(owner)
         s.flush()
         ws_a = Workspace(owner_id=owner.id, title="A")
@@ -388,7 +388,7 @@ def test_metadata_get_non_owner_returns_403(monkeypatch, pg_url, pg_session_fact
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)
         ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
-        other = User(email="noowner@ki.se")
+        other = User(status="active", email="noowner@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -406,7 +406,7 @@ def test_metadata_post_non_owner_returns_403(monkeypatch, pg_url, pg_session_fac
     with pg_session_factory() as s:
         uid, wsid = _seed_owner_and_workspace(s)
         ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=uid)
-        other = User(email="noowner2@ki.se")
+        other = User(status="active", email="noowner2@ki.se")
         s.add(other)
         s.commit()
         other_id = other.id
@@ -429,7 +429,7 @@ def test_metadata_get_cross_workspace_returns_404(
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         # Owner has two workspaces; ref is in ws_a.
-        owner = User(email="cross-owner@ki.se")
+        owner = User(status="active", email="cross-owner@ki.se")
         s.add(owner)
         s.flush()
         ws_a = Workspace(owner_id=owner.id, title="A")
@@ -455,7 +455,7 @@ def test_metadata_post_cross_workspace_returns_404(
     app = _build_app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         # Same owner with two workspaces; ref lives in ws_a.
-        owner = User(email="cross-post-owner@ki.se")
+        owner = User(status="active", email="cross-post-owner@ki.se")
         s.add(owner)
         s.flush()
         ws_a = Workspace(owner_id=owner.id, title="A")
@@ -714,7 +714,7 @@ def test_viewer_denied_on_metadata_get_and_post(monkeypatch, pg_url, pg_session_
     with pg_session_factory() as s:
         owner_id, wsid = _seed_owner_and_workspace(s, email="viewer-meta-owner@ki.se")
         ref_id = _seed_reference_with_extracted(s, workspace_id=wsid, uploaded_by=owner_id)
-        viewer = User(email="viewer-meta@ki.se")
+        viewer = User(status="active", email="viewer-meta@ki.se")
         s.add(viewer)
         s.flush()
         from call_manager.db.models import WorkspaceViewer
@@ -876,7 +876,7 @@ def test_panel_viewer_non_approved_shows_badge_no_review_link(
         ref_id = _seed_reference_with_status(
             s, workspace_id=wsid, uploaded_by=owner_id, metadata_status="extracted"
         )
-        viewer = User(email="meta-viewer@ki.se")
+        viewer = User(status="active", email="meta-viewer@ki.se")
         s.add(viewer)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))

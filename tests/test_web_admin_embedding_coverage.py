@@ -25,7 +25,11 @@ def _setup(monkeypatch, pg_url):
 
 def _logged_in(app, pg_session_factory, *, is_admin: bool):
     with pg_session_factory() as s:
-        u = User(email="root@ki.se" if is_admin else "alice@ki.se", is_admin=is_admin)
+        u = User(
+            status="active",
+            email="root@ki.se" if is_admin else "alice@ki.se",
+            is_admin=is_admin,
+        )
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -83,7 +87,7 @@ def test_admin_shows_embedding_coverage_counts(monkeypatch, pg_url, pg_session_f
             )
         )
 
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         # Profile 1: current model. Non-empty description so it counts toward
@@ -141,7 +145,7 @@ def test_admin_embedding_coverage_excludes_blank_description_profiles(
     app = _setup(monkeypatch, pg_url)
     vec_zero = [0.0] * 1024
     with pg_session_factory() as s:
-        owner = User(email="owner-blank@ki.se")
+        owner = User(status="active", email="owner-blank@ki.se")
         s.add(owner)
         s.flush()
         # Profile A: non-empty description, embedded current model → counts
@@ -202,7 +206,7 @@ def test_blank_description_profile_with_areas_is_counted(monkeypatch, pg_url, pg
     and must appear in coverage totals."""
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(email="areas@ki.se")
+        owner = User(status="active", email="areas@ki.se")
         s.add(owner)
         s.flush()
         s.add(

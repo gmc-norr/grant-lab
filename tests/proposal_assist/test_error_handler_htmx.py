@@ -17,7 +17,7 @@ def test_htmx_partial_gets_json_detail_even_with_accept_html(  # noqa: E501
     app = create_app()
 
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="setup")  # Phase-0 → 409 gate
@@ -54,7 +54,7 @@ def test_plain_browser_navigation_still_gets_html_error_page(  # noqa: E501
     app = create_app()
 
     with pg_session_factory() as s:
-        owner = User(email="owner@ki.se")
+        owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T", current_phase="setup")
@@ -66,8 +66,9 @@ def test_plain_browser_navigation_still_gets_html_error_page(  # noqa: E501
     client.__enter__()
     try:
         client.cookies.set("session", app.state.session_signer.make(user_id=uid))
-        resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"},
-                           headers={"Accept": "text/html"})  # no HX-Request
+        resp = client.post(
+            f"/workspaces/{wsid}/turns", data={"content": "hi"}, headers={"Accept": "text/html"}
+        )  # no HX-Request
     finally:
         client.__exit__(None, None, None)
 

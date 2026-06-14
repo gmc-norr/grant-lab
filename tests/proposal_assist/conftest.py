@@ -101,7 +101,7 @@ def current_user(_app, pg_session_factory):
     is replaced with the test one so get_current_user() resolves against the
     same DB the test writes to."""
     with pg_session_factory() as s:
-        u = User(email="owner-fixture@ki.se")
+        u = User(status="active", email="owner-fixture@ki.se")
         s.add(u)
         s.commit()
         uid = u.id
@@ -171,7 +171,7 @@ def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
     specific email pass it explicitly."""
     from call_manager.db.models import User
 
-    u = User(email=email)
+    u = User(status="active", email=email)
     session.add(u)
     session.flush()
     return u

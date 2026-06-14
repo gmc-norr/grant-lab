@@ -94,7 +94,7 @@ def reader_env(monkeypatch, pg_url, pg_session_factory, tmp_path):
 
         with pg_session_factory() as s:
             # Owner
-            owner = User(email=f"reader-owner-{_uuid.uuid4().hex[:6]}@ki.se")
+            owner = User(status="active", email=f"reader-owner-{_uuid.uuid4().hex[:6]}@ki.se")
             s.add(owner)
             s.flush()
             owner_id = owner.id
@@ -107,7 +107,7 @@ def reader_env(monkeypatch, pg_url, pg_session_factory, tmp_path):
 
             # Optional viewer
             if as_viewer:
-                viewer = User(email=f"reader-viewer-{_uuid.uuid4().hex[:6]}@ki.se")
+                viewer = User(status="active", email=f"reader-viewer-{_uuid.uuid4().hex[:6]}@ki.se")
                 s.add(viewer)
                 s.flush()
                 s.add(WorkspaceViewer(workspace_id=wsid, user_id=viewer.id))
@@ -243,9 +243,7 @@ def test_reference_text_is_html_escaped(reader_env):
     # the XSS payload in context should be HTML-escaped in the rendered body.
     xss_prefix = "danger <script>alert(1)</script> ok. "
     evidence_quote = "The treatment reduced mortality by 30 percent."
-    client, wid, ev = reader_env(
-        text_txt=f"{xss_prefix}{evidence_quote} More text here."
-    )
+    client, wid, ev = reader_env(text_txt=f"{xss_prefix}{evidence_quote} More text here.")
     r = client.get(f"/workspaces/{wid}/citations/{ev}/reader")
     assert r.status_code == 200
     assert "<script>alert" not in r.text and "&lt;script&gt;" in r.text
@@ -271,6 +269,7 @@ def test_non_uuid_reference_id_returns_degraded_200(reader_env):
     citations_path = Path(workspaces_dir) / str(wid) / "repo" / CITATIONS_FILENAME
     ledger_text = citations_path.read_text(encoding="utf-8")
     import json
+
     ledger = json.loads(ledger_text)
     # Patch the reference_id to a non-UUID string
     for row in ledger["evidence"]:
@@ -291,7 +290,7 @@ def test_cross_workspace_reference_boundary(reader_env, pg_session_factory, tmp_
     foreign_unique_text = "FOREIGN_SECRET_CONTENT_XYZ_99999"
     foreign_ref_id = None
     with pg_session_factory() as s:
-        owner_b = User(email=f"owner-b-{_uuid.uuid4().hex[:6]}@ki.se")
+        owner_b = User(status="active", email=f"owner-b-{_uuid.uuid4().hex[:6]}@ki.se")
         s.add(owner_b)
         s.flush()
         ws_b = Workspace(owner_id=owner_b.id, title="Workspace B")

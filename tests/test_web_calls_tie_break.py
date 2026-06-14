@@ -29,7 +29,7 @@ def test_dashboard_ranked_list_breaks_ties_by_cosine(monkeypatch, pg_url, pg_ses
     ranked list (/?profile=<id>)."""
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="dash@ki.se", is_admin=True)
+        u = User(status="active", email="dash@ki.se", is_admin=True)
         s.add(u)
         s.flush()
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
@@ -91,7 +91,7 @@ def test_call_detail_best_profile_breaks_ties_by_cosine(monkeypatch, pg_url, pg_
     chosen as best_profile_id."""
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="root@ki.se", is_admin=True)
+        u = User(status="active", email="root@ki.se", is_admin=True)
         s.add(u)
         s.flush()
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()

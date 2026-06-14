@@ -24,7 +24,7 @@ def _setup(monkeypatch, pg_url):
 
 def _logged_in(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="cd@ki.se")
+        u = User(status="active", email="cd@ki.se")
         s.add(u)
         s.commit()
         s.refresh(u)

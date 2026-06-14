@@ -8,7 +8,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from call_manager.auth.csrf import OriginCSRFMiddleware
+from call_manager.auth.dependencies import AccountInactive
 from call_manager.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
+from call_manager.auth.oauth_txn import TransactionCipher
+from call_manager.auth.oidc import OIDCClient
 from call_manager.auth.rate_limit import SlidingWindowLimiter
 from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import SessionSigner
@@ -51,7 +54,16 @@ from call_manager.web.middleware import (
     SecurityHeadersMiddleware,
     build_csp,
 )
-from call_manager.web.routes import admin, auth, calls, golden_set, health, me, profiles
+from call_manager.web.routes import (
+    admin,
+    auth,
+    calls,
+    golden_set,
+    health,
+    me,
+    oauth_google,
+    profiles,
+)
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -342,6 +354,26 @@ def create_app() -> FastAPI:
             headers=getattr(exc, "headers", None) or {},
         )
 
+    @app.exception_handler(AccountInactive)
+    async def _inactive_account(request: Request, exc: AccountInactive):
+        wants_html = "text/html" in request.headers.get("accept", "")
+        hx_partial = (
+            request.headers.get("hx-request") == "true"
+            and request.headers.get("hx-boosted") != "true"
+        )
+        if wants_html and not hx_partial:
+            target = "/auth/pending" if exc.status == "pending" else "/auth/no-access"
+            resp = RedirectResponse(url=target, status_code=303)
+            resp.delete_cookie(
+                "session",
+                path="/",
+                httponly=True,
+                secure=settings.cookie_secure,
+                samesite="lax",
+            )
+            return resp
+        return JSONResponse(status_code=403, content={"detail": "account not active"})
+
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
@@ -393,6 +425,16 @@ def create_app() -> FastAPI:
         secret=settings.session_secret,
         max_age_seconds=settings.session_max_age_seconds,
     )
+    app.state.oauth_txn_cipher = TransactionCipher(secret=settings.session_secret)
+    app.state.google_oidc_client = (
+        OIDCClient(
+            discovery_url=settings.google_oidc_discovery_url,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        if settings.google_oidc_enabled
+        else None
+    )
     # Single shared embed client: handed to the scheduler (ingest tick uses it
     # to embed touched calls before enqueueing ranking jobs — Codex H1) and to
     # the profile-edit handler (re-embed on description change). Each
@@ -413,6 +455,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(oauth_google.router)
     app.include_router(me.router)
     app.include_router(calls.router)
     app.include_router(admin.router)
