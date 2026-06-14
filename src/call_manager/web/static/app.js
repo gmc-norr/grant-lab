@@ -331,6 +331,44 @@ function closeReaderDrawer() {
   if (back && back.focus) back.focus();
 }
 
+function readerFocusables() {
+  var drawer = document.getElementById("reference-drawer");
+  if (!drawer || !drawer.querySelectorAll) return [];
+  // Close button, prev/next nav links, and any explicitly focusable node.
+  // Disabled controls and tabindex="-1" (incl. the drawer container) excluded.
+  var nodes = drawer.querySelectorAll(
+    'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  );
+  return Array.prototype.slice.call(nodes);
+}
+
+function trapReaderFocus(evt) {
+  // Tab trap is NARROW-ONLY (modal). The desktop side-panel is non-modal, so
+  // focus is free to flow back to the proposal — same policy as scroll-lock.
+  var drawer = document.getElementById("reference-drawer");
+  if (!drawer || drawer.hidden || !readerIsOverlay()) return;
+  var items = readerFocusables();
+  if (!items.length) {
+    // Transient (content not swapped in yet): keep focus on the dialog itself.
+    if (evt.preventDefault) evt.preventDefault();
+    if (drawer.focus) drawer.focus();
+    return;
+  }
+  var first = items[0];
+  var last = items[items.length - 1];
+  var active = document.activeElement;
+  var inside = drawer.contains ? drawer.contains(active) : true;
+  if (evt.shiftKey) {
+    if (!inside || active === first) {
+      if (evt.preventDefault) evt.preventDefault();
+      if (last.focus) last.focus();
+    }
+  } else if (!inside || active === last) {
+    if (evt.preventDefault) evt.preventDefault();
+    if (first.focus) first.focus();
+  }
+}
+
 document.body.addEventListener("click", function (evt) {
   var t = evt.target;
   var citeEl = t && t.closest ? t.closest("a.cite") : null;
@@ -355,8 +393,11 @@ document.body.addEventListener("click", function (evt) {
 });
 
 document.body.addEventListener("keydown", function (evt) {
+  var drawer = document.getElementById("reference-drawer");
+  if (!drawer || drawer.hidden) return;
   if (evt.key === "Escape") {
-    var drawer = document.getElementById("reference-drawer");
-    if (drawer && !drawer.hidden) closeReaderDrawer();
+    closeReaderDrawer();
+  } else if (evt.key === "Tab") {
+    trapReaderFocus(evt);
   }
 });
