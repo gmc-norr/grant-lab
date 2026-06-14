@@ -49,10 +49,13 @@ from call_manager.db.models import (
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
+from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
+from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.references.storage import ReferenceStorage
+from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
     get_artifact_history_impl,
@@ -167,6 +170,24 @@ def _render_proposal_markdown(raw: str) -> str:
 _CHAT_TURN_PARTIAL = "proposal_assist/partials/chat_turn.html"
 
 
+def _citation_render_maps_for(
+    settings, workspace_id, proposal_text: str
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Proposal-wide (ev->number, ev->stance) maps. A missing/corrupt ledger
+    yields EMPTY maps so markers render inert and the proposal still renders
+    (never raises)."""
+    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
+    citations_path = repo_dir / CITATIONS_FILENAME
+    try:
+        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
+    except (ValueError, OSError):
+        return {}, {}
+    return (
+        citation_reader.build_citation_numbering(proposal_text, ledger),
+        citation_reader.build_citation_stances(ledger),
+    )
+
+
 def _artifact_sections_and_rendered(settings, workspace_id: uuid.UUID):
     """Read proposal.md and return (raw, rendered_html, sections). Shared by
     get_workspace_main and the GET /{id}/artifact refresh route so both render
@@ -175,15 +196,23 @@ def _artifact_sections_and_rendered(settings, workspace_id: uuid.UUID):
     proposal_path = repo_dir / "proposal.md"
     if proposal_path.exists():
         raw = proposal_path.read_text()
-        rendered = _render_proposal_markdown(raw)
+        number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
+        rendered = citation_reader.render_proposal_with_citations(
+            raw, number_by_ev=number_by_ev, workspace_id=workspace_id, stance_by_ev=stance_by_ev
+        )
     else:
-        raw, rendered = "", "<em>(no proposal.md yet)</em>"
+        raw, rendered, number_by_ev, stance_by_ev = "", "<em>(no proposal.md yet)</em>", {}, {}
     sections = [
         {
             "index": s.index,
             "heading": s.heading,
             "sha": s.sha,
-            "rendered": _render_proposal_markdown(s.text),
+            "rendered": citation_reader.render_proposal_with_citations(
+                s.text,
+                number_by_ev=number_by_ev,
+                workspace_id=workspace_id,
+                stance_by_ev=stance_by_ev,
+            ),
         }
         for s in split_sections(raw)
         if s.text

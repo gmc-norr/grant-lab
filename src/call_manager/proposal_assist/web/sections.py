@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Workspace
+from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import (
@@ -45,7 +46,7 @@ from call_manager.proposal_assist.editing.save import (
 from call_manager.proposal_assist.editing.sectionizer import Section, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.web.workspaces import (
-    _render_proposal_markdown,
+    _citation_render_maps_for,
     _require_owner,
     _require_owner_or_viewer,
     _session_dep,
@@ -60,7 +61,7 @@ _EDIT_PARTIAL = "proposal_assist/partials/section_edit.html"
 
 
 def _read_sections(request: Request, workspace_id: uuid.UUID) -> tuple[str, list[Section]]:
-    """Read the workspace repo's proposal.md and return (HEAD sha, sections).
+    """Read the workspace repo's proposal.md and return (raw_text, sections).
 
     404 if proposal.md (or the repo itself) doesn't exist yet — same
     user-facing failure as export_markdown's "no proposal.md yet".
@@ -70,11 +71,12 @@ def _read_sections(request: Request, workspace_id: uuid.UUID) -> tuple[str, list
     if not proposal.exists():
         raise HTTPException(status_code=404, detail="no proposal.md yet")
     try:
-        head = current_head(repo_dir)
+        current_head(repo_dir)
     except GitCommitError as e:
         logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
         raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-    return head, split_sections(proposal.read_text())
+    raw = proposal.read_text()
+    return raw, split_sections(raw)
 
 
 def _section_or_404(sections: list[Section], n: int) -> Section:
@@ -83,14 +85,24 @@ def _section_or_404(sections: list[Section], n: int) -> Section:
     return sections[n]
 
 
-def _section_ctx(section: Section) -> dict:
+def _section_ctx(
+    section: Section,
+    number_by_ev: dict[str, int],
+    stance_by_ev: dict[str, str],
+    workspace_id: uuid.UUID,
+) -> dict:
     """Template-facing dict for one section (Jinja getattr→getitem
     fallback makes ``{{ s.index }}`` etc. work on plain dicts)."""
     return {
         "index": section.index,
         "heading": section.heading,
         "sha": section.sha,
-        "rendered": _render_proposal_markdown(section.text),
+        "rendered": citation_reader.render_proposal_with_citations(
+            section.text,
+            number_by_ev=number_by_ev,
+            workspace_id=workspace_id,
+            stance_by_ev=stance_by_ev,
+        ),
     }
 
 
@@ -99,6 +111,9 @@ def _view_fragment(
     workspace: Workspace,
     section: Section,
     *,
+    number_by_ev: dict[str, int],
+    stance_by_ev: dict[str, str],
+    workspace_id: uuid.UUID,
     is_owner: bool,
     issues: list[dict] | None = None,
 ) -> HTMLResponse:
@@ -108,7 +123,7 @@ def _view_fragment(
         _VIEW_PARTIAL,
         {
             "workspace": workspace,
-            "s": _section_ctx(section),
+            "s": _section_ctx(section, number_by_ev, stance_by_ev, workspace_id),
             "is_owner": is_owner,
             "issues": issues or [],
             # Task 11: the view partial lazy-loads the annotation strip for
@@ -132,9 +147,19 @@ def get_section_view(
         user=user,
         session=session,
     )
-    _, sections = _read_sections(request, workspace_id)
+    settings = request.app.state.settings
+    raw, sections = _read_sections(request, workspace_id)
     section = _section_or_404(sections, n)
-    return _view_fragment(request, ws, section, is_owner=ws.owner_id == user.id)
+    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
+    return _view_fragment(
+        request,
+        ws,
+        section,
+        number_by_ev=number_by_ev,
+        stance_by_ev=stance_by_ev,
+        workspace_id=workspace_id,
+        is_owner=ws.owner_id == user.id,
+    )
 
 
 @router.get("/{workspace_id}/sections/{n}/edit", response_class=HTMLResponse)
@@ -161,15 +186,22 @@ def get_section_edit(
             status_code=409,
             detail=TURN_IN_FLIGHT_MESSAGE,
         )
-    head, sections = _read_sections(request, workspace_id)
+    settings = request.app.state.settings
+    raw, sections = _read_sections(request, workspace_id)
     section = _section_or_404(sections, n)
+    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
+    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+    head = current_head(repo_dir)
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
         _EDIT_PARTIAL,
         {
             "workspace": ws,
-            "s": {**_section_ctx(section), "raw": section.text},
+            "s": {
+                **_section_ctx(section, number_by_ev, stance_by_ev, workspace_id),
+                "raw": section.text,
+            },
             "base_commit_sha": head,
         },
     )
@@ -195,7 +227,7 @@ def post_section_save(
     )
     settings = request.app.state.settings
     # Capture pre-save section count so we can detect splits/merges later.
-    _, sections_before = _read_sections(request, workspace_id)
+    _, sections_before = _read_sections(request, workspace_id)  # raw not needed pre-save
     n_before = len(sections_before)
     try:
         result = save_section(
@@ -254,13 +286,18 @@ def post_section_save(
 
     # Re-read the committed document so the fragment reflects exactly what
     # was saved (newline glue, extra-heading splits).
-    _, sections_after = _read_sections(request, workspace_id)
+    raw_after, sections_after = _read_sections(request, workspace_id)
     n_after = len(sections_after)
+    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw_after)
 
     if n_after != n_before:
         # Section count changed (e.g. a new ## heading was added): re-render
         # the entire artifact pane so all section divs are in sync.
-        artifact_sections = [_section_ctx(s) for s in sections_after if s.text]
+        artifact_sections = [
+            _section_ctx(s, number_by_ev, stance_by_ev, workspace_id)
+            for s in sections_after
+            if s.text
+        ]
         templates = request.app.state.templates
         resp = templates.TemplateResponse(
             request,
@@ -280,4 +317,13 @@ def post_section_save(
 
     # Fast path: count unchanged — return only the saved section's fragment.
     section = _section_or_404(sections_after, n)
-    return _view_fragment(request, ws, section, is_owner=True, issues=result.issues)
+    return _view_fragment(
+        request,
+        ws,
+        section,
+        number_by_ev=number_by_ev,
+        stance_by_ev=stance_by_ev,
+        workspace_id=workspace_id,
+        is_owner=True,
+        issues=result.issues,
+    )

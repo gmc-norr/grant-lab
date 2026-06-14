@@ -1,8 +1,11 @@
 """Shared fixtures for proposal_assist tests. See plan's
 'Project Conventions Reference' section for context."""
 
+import json
 import socket
+import uuid as _uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -287,3 +290,26 @@ def make_chat_summary(
     session.add(cs)
     session.flush()
     return cs
+
+
+@pytest.fixture
+def make_workspace_repo(tmp_path):
+    """Write proposal.md + citations.json under a temp workspaces_dir and return
+    (settings_like, workspace_id). settings_like only needs `.workspaces_dir`."""
+
+    class _S:
+        def __init__(self, d):
+            self.workspaces_dir = str(d)
+
+    def _make(*, proposal="", ledger=None, ledger_raw=None):
+        wid = _uuid.uuid4()
+        repo = Path(tmp_path) / str(wid) / "repo"
+        repo.mkdir(parents=True)
+        (repo / "proposal.md").write_text(proposal)
+        if ledger_raw is not None:
+            (repo / "citations.json").write_text(ledger_raw)
+        elif ledger is not None:
+            (repo / "citations.json").write_text(json.dumps(ledger))
+        return _S(tmp_path), wid
+
+    return _make
