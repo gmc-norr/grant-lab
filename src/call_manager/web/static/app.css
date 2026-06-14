@@ -875,6 +875,17 @@ article table td form button { width: auto; }
   cursor: pointer;
 }
 .composer button[type="submit"] { width: auto; }
+/* While a turn from this tab is live the Send button shows a distinct "working"
+   colour (amber) + "Working…" label and is disabled, so it's obvious the agent
+   is running and the same submit can't be fired again. */
+.composer button[type="submit"].is-working,
+.composer button[type="submit"]:disabled {
+  background: var(--cm-warn-bg);
+  border-color: var(--cm-warn-border);
+  color: var(--cm-warn-text);
+  cursor: progress;
+  opacity: 1;
+}
 .att-pick { display: inline-block; margin: 0.25em; font-weight: 450; }
 .att-pick img {
   max-width: 80px;
@@ -1175,9 +1186,32 @@ article table td form button { width: auto; }
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin: 0.25rem 0;
-  font-size: 0.85rem;
-  color: var(--cm-neutral-text);
+  margin: 0.35rem 0;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--cm-primary);
+  background: var(--cm-primary-soft);
+  border: 1px solid var(--cm-primary-border);
+  border-radius: 0.6rem;
+  align-self: flex-start;
+}
+/* A pulsing dot so it's unmistakable the agent is actively working. */
+.turn-progress::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--cm-primary);
+  animation: cm-pulse 1s ease-in-out infinite;
+}
+@keyframes cm-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.75); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .turn-progress::before { animation: none; opacity: 1; }
 }
 .turn-progress button {
   margin: 0;

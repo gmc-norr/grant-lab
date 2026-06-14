@@ -55,24 +55,65 @@
   });
 })();
 
-// Section-edit lock (best-effort; server 409s remain authoritative). Editing is
-// disabled while a turn is in flight, and re-enabled only when BOTH (a) no SSE
-// connector remains AND (b) no composer request is still awaiting its response.
-// Tracking composer requests is what keeps a REJECTED submit (409/429/503/400 —
-// which creates no connector) from leaving editing disabled forever, and stops
-// an old connector's deferred cleanup from re-enabling while a new submit is
-// mid-flight (the connector for it has not mounted yet).
+// Section-edit + send lock (best-effort; server 409s remain authoritative).
+// Editing AND the composer's Send button are disabled while a turn is in
+// flight, and re-enabled only when BOTH (a) no SSE connector remains AND (b) no
+// composer request is still awaiting its response. Tracking composer requests
+// is what keeps a REJECTED submit (409/429/503/400 — which creates no
+// connector) from leaving the controls disabled forever, and stops an old
+// connector's deferred cleanup from re-enabling while a new submit is mid-flight
+// (the connector for it has not mounted yet).
 var pendingComposerRequests = 0;
 
+function setSendBusy(busy) {
+  // Give the Send button a visible "working" state (color via .is-working +
+  // a "Working…" label) and disable it while a turn from THIS tab is live, so
+  // it is obvious the agent is running and a second identical submit can't be
+  // fired by accident. Cross-tab stacking is unaffected (a fresh tab has no
+  // local connector). The idle label is captured once so it restores exactly.
+  var btn = document.querySelector('#composer button[type="submit"]');
+  if (!btn) return;
+  btn.disabled = busy;
+  if (busy) {
+    if (btn.classList) btn.classList.add("is-working");
+    if (btn._idleLabel === undefined) btn._idleLabel = btn.textContent;
+    btn.textContent = "Working…";
+  } else {
+    if (btn.classList) btn.classList.remove("is-working");
+    if (btn._idleLabel !== undefined) {
+      btn.textContent = btn._idleLabel;
+      btn._idleLabel = undefined;
+    }
+  }
+}
 function reenable() {
   document.querySelectorAll(".section-edit-btn").forEach(function (b) {
     b.disabled = false;
   });
+  setSendBusy(false);
 }
 function disableSectionEdits() {
   document.querySelectorAll(".section-edit-btn").forEach(function (b) {
     b.disabled = true;
   });
+  setSendBusy(true);
+}
+
+// Auto-scroll the chat audit trail to the newest turn. The trail is a fixed-
+// height scroll region; without this, an appended user turn / "Working…" card /
+// streamed agent row lands below the fold and the user can't tell anything
+// happened (and re-submits). We stick to the bottom only when the user is
+// already near it, so scrolling up to read history is never hijacked.
+function isNearChatBottom(el, threshold) {
+  if (threshold == null) threshold = 120;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+function scrollChatToBottom(force) {
+  var el = document.getElementById("chat-history");
+  if (!el) return;
+  if (force || isNearChatBottom(el)) {
+    el.scrollTop = el.scrollHeight;
+  }
 }
 function clearComposerErrorNotice() {
   // Remove any inline rejection banner left beside #chat-history by a prior
@@ -105,19 +146,30 @@ function maybeReenable() {
 }
 
 document.body.addEventListener("htmx:beforeRequest", function (evt) {
-  if (evt.detail.elt && evt.detail.elt.id === "composer") {
-    pendingComposerRequests++;
-    disableSectionEdits();
+  if (!(evt.detail.elt && evt.detail.elt.id === "composer")) return;
+  // Guard against a duplicate/stacked submit from THIS tab while a turn is
+  // already in flight (a connector is mounted) or a prior submit has not
+  // returned yet — the exact "nothing happened, click/Enter again" double-send
+  // that silently burns a whole agent run. The disabled Send button stops most
+  // clicks; this also catches Enter-key submits. Cross-tab stacking is
+  // unaffected (a fresh tab has no local connector).
+  if (pendingComposerRequests > 0 || document.querySelector('[id^="sse-mount-"]')) {
+    evt.preventDefault();
+    return;
   }
+  pendingComposerRequests++;
+  disableSectionEdits();
 });
 document.body.addEventListener("htmx:afterRequest", function (evt) {
   if (evt.detail.elt && evt.detail.elt.id === "composer") {
     pendingComposerRequests = Math.max(0, pendingComposerRequests - 1);
     // A successful turn submit clears any stale rejection banner from a prior
     // rejected attempt (the cap/lock/validation error that responseError can
-    // only replace, never retire on its own).
+    // only replace, never retire on its own) and jumps the trail to the newest
+    // turn (you just sent — always follow it, even if you'd scrolled up).
     if (evt.detail.successful) {
       clearComposerErrorNotice();
+      scrollChatToBottom(true);
     }
     // On success the connector is in the DOM by now (afterSwap precedes
     // afterRequest), so maybeReenable keeps editing disabled; on a rejected
@@ -177,6 +229,26 @@ if (document.readyState !== "loading") {
   disableSectionEditsIfConnectorPresent();
 } else {
   document.addEventListener("DOMContentLoaded", disableSectionEditsIfConnectorPresent);
+}
+
+// Chat auto-scroll (chat-client behaviour): keep the trail pinned to the newest
+// turn as content is appended — your sent turn, streamed agent rows, the
+// "Working…" connector — but only when you are already near the bottom, so
+// scrolling up to read earlier turns is never hijacked. A MutationObserver
+// catches every append path regardless of which htmx event (or the SSE
+// extension's own swap) produced it.
+function startChatAutoScroll() {
+  var el = document.getElementById("chat-history");
+  if (!el || typeof MutationObserver === "undefined") return;
+  new MutationObserver(function () {
+    scrollChatToBottom(false);
+  }).observe(el, { childList: true, subtree: true });
+  scrollChatToBottom(true); // land on the latest turn on initial load
+}
+if (document.readyState !== "loading") {
+  startChatAutoScroll();
+} else {
+  document.addEventListener("DOMContentLoaded", startChatAutoScroll);
 }
 
 // Surface htmx error responses (4xx/5xx) as an inline notice near the

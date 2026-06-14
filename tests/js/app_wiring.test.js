@@ -47,10 +47,34 @@ function loadApp(opts) {
       if (node.className === "htmx-error-notice") notices.push(node);
     },
   };
+  // Scroll geometry for the trail; tests can preset it via opts.scroll.
+  const scroll = Object.assign(
+    { scrollTop: 0, scrollHeight: 1000, clientHeight: 400 },
+    opts.scroll || {}
+  );
   const chatHistoryEl = {
     id: "chat-history",
     parentNode: chatHistoryParent,
     getAttribute: function () { return "ws-1"; },
+    get scrollTop() { return scroll.scrollTop; },
+    set scrollTop(v) { scroll.scrollTop = v; },
+    get scrollHeight() { return scroll.scrollHeight; },
+    get clientHeight() { return scroll.clientHeight; },
+  };
+
+  // The composer's Send button, with a class recorder so tests can assert the
+  // .is-working color state alongside disabled/label.
+  const sendButton = {
+    disabled: false,
+    textContent: "Send",
+    classList: (function () {
+      const set = new Set();
+      return {
+        add: function (c) { set.add(c); },
+        remove: function (c) { set.delete(c); },
+        contains: function (c) { return set.has(c); },
+      };
+    })(),
   };
 
   const documentStub = {
@@ -77,6 +101,7 @@ function loadApp(opts) {
         : null;
     },
     querySelector: function (sel) {
+      if (sel === '#composer button[type="submit"]') return sendButton;
       if (sel && sel.indexOf("sse-mount-") !== -1) {
         return state.connector ? { id: "sse-mount-x" } : null;
       }
@@ -100,6 +125,8 @@ function loadApp(opts) {
     context: context,
     buttons: buttons,
     chatHistory: chatHistoryEl,
+    sendButton: sendButton,
+    scroll: scroll,
     notices: function () { return notices.slice(); },
     setConnector: function (v) { state.connector = !!v; },
   };
@@ -220,4 +247,75 @@ test("a still-rejected resubmit keeps exactly one (current) banner", function ()
   const notices = app.notices();
   assert.strictEqual(notices.length, 1, "no stacking — replace, not accumulate");
   assert.strictEqual(notices[0].textContent, "drafting busy", "shows the latest error");
+});
+
+// --- chat auto-scroll (stick-to-bottom like a chat client) ---
+
+test("isNearChatBottom: true at the bottom, false when scrolled up", function () {
+  const app = loadApp({ scroll: { scrollTop: 600, scrollHeight: 1000, clientHeight: 400 } });
+  // distance from bottom = 1000 - 600 - 400 = 0 -> near
+  assert.strictEqual(app.context.isNearChatBottom(app.chatHistory), true);
+  app.scroll.scrollTop = 100; // distance = 1000 - 100 - 400 = 500 -> far
+  assert.strictEqual(app.context.isNearChatBottom(app.chatHistory), false);
+});
+
+test("scrollChatToBottom(false) sticks only when already near the bottom", function () {
+  const app = loadApp({ scroll: { scrollTop: 100, scrollHeight: 1000, clientHeight: 400 } });
+  app.context.scrollChatToBottom(false); // scrolled up: must NOT yank down
+  assert.strictEqual(app.scroll.scrollTop, 100, "left alone while reading history");
+  app.scroll.scrollTop = 600; // now near the bottom
+  app.context.scrollChatToBottom(false);
+  assert.strictEqual(app.scroll.scrollTop, 1000, "follows new content when near bottom");
+});
+
+test("scrollChatToBottom(true) always jumps to the bottom (you just sent)", function () {
+  const app = loadApp({ scroll: { scrollTop: 0, scrollHeight: 1000, clientHeight: 400 } });
+  app.context.scrollChatToBottom(true);
+  assert.strictEqual(app.scroll.scrollTop, 1000);
+});
+
+test("a successful composer submit force-scrolls to the newest turn", function () {
+  const app = loadApp({ scroll: { scrollTop: 0, scrollHeight: 1000, clientHeight: 400 } });
+  fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  fire(app.handlers, "htmx:afterRequest", { elt: { id: "composer" }, successful: true });
+  assert.strictEqual(app.scroll.scrollTop, 1000, "jumps to the latest after sending");
+});
+
+// --- Send button working state + double-submit guard ---
+
+test("composer beforeRequest puts Send into a visible working state", function () {
+  const app = loadApp({ connector: false });
+  fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  assert.strictEqual(app.sendButton.disabled, true);
+  assert.strictEqual(app.sendButton.textContent, "Working…");
+  assert.ok(app.sendButton.classList.contains("is-working"), "gets the .is-working color class");
+});
+
+test("a rejected submit restores the Send button to idle", function () {
+  const app = loadApp({ connector: false });
+  fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  fire(app.handlers, "htmx:afterRequest", { elt: { id: "composer" }, successful: false });
+  assert.strictEqual(app.sendButton.disabled, false);
+  assert.strictEqual(app.sendButton.textContent, "Send");
+  assert.ok(!app.sendButton.classList.contains("is-working"));
+});
+
+test("Send stays working through a successful turn until the connector cleans up", function () {
+  const app = loadApp({ connector: false });
+  fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  app.setConnector(true); // connector mounted on the successful swap
+  fire(app.handlers, "htmx:afterRequest", { elt: { id: "composer" }, successful: true });
+  assert.strictEqual(app.sendButton.disabled, true, "stays working while the agent runs");
+  assert.strictEqual(app.sendButton.textContent, "Working…");
+  app.setConnector(false);
+  fire(app.handlers, "htmx:beforeCleanupElement", { elt: { id: "sse-mount-J" } });
+  assert.strictEqual(app.sendButton.disabled, false, "back to idle when the turn ends");
+  assert.strictEqual(app.sendButton.textContent, "Send");
+});
+
+test("a second submit while a turn is live is blocked (no double-send)", function () {
+  const app = loadApp({ connector: true }); // a turn is already in flight
+  const res = fire(app.handlers, "htmx:beforeRequest", { elt: { id: "composer" } });
+  assert.strictEqual(res.prevented, true, "the duplicate request is cancelled");
+  assert.strictEqual(app.context.pendingComposerRequests, 0, "not counted as a new in-flight submit");
 });
