@@ -86,6 +86,19 @@ def test_evidence_order_for_reference_is_document_order():
     order = evidence_order_for_reference(PROPOSAL, LEDGER, "R1")
     assert order == ["ev-aaaaaa", "ev-cccccc"]
     assert evidence_order_for_reference(PROPOSAL, LEDGER, "R2") == ["ev-bbbbbb"]
+
+
+def test_build_citation_stances_maps_ev_to_stance():
+    from call_manager.proposal_assist.citations.reader import build_citation_stances
+
+    led = {
+        "version": 2,
+        "evidence": [
+            {"id": "ev-aaaaaa", "citekey": "w", "reference_id": "R1", "stance": "supports"},
+            {"id": "ev-bbbbbb", "citekey": "l", "reference_id": "R2"},  # no stance → omitted
+        ],
+    }
+    assert build_citation_stances(led) == {"ev-aaaaaa": "supports"}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -138,6 +151,16 @@ def evidence_order_for_reference(
         if row is not None and str(row.get("reference_id")) == str(reference_id):
             out.append(m["ev_id"])
     return out
+
+
+def build_citation_stances(ledger: dict) -> dict[str, str]:
+    """Map each evidence id to its stance (e.g. 'supports'/'contradicts'), used
+    to tint the inline citation marker. Rows without a stance are omitted."""
+    return {
+        e["id"]: e["stance"]
+        for e in ledger.get("evidence", [])
+        if e.get("id") and e.get("stance")
+    }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -208,6 +231,16 @@ def test_forged_anchor_in_agent_html_is_neutralized():
         'Evil <a class="cite" href="/workspaces/x/citations/ev-zzz/reader">x</a> end.'
     )
     assert 'class="cite"' not in html  # only server-injected links carry it
+
+
+def test_cite_link_carries_stance_class_when_provided():
+    text = "Claim [@wang2016]<!-- ev:ev-aaaaaa -->."
+    nums = build_citation_numbering(text, LEDGER)
+    html = render_proposal_with_citations(
+        text, number_by_ev=nums, workspace_id=WID,
+        stance_by_ev={"ev-aaaaaa": "supports"},
+    )
+    assert 'class="cite cite--supports"' in html
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -265,7 +298,7 @@ def _to_sentinels(raw_text: str, number_by_ev: dict[str, int]) -> str:
     return MARKER_RE.sub(_sub, cleaned)
 
 
-def _inject_links(sanitized_html: str, workspace_id) -> str:
+def _inject_links(sanitized_html: str, workspace_id, stance_by_ev=None) -> str:
     """Replace sentinels with trusted cite links, but ONLY inside eligible text
     nodes — never within attributes or <code>/<pre>. lxml gives a real tree, so
     attributes are untouched automatically; we additionally skip code/pre."""
@@ -276,7 +309,9 @@ def _inject_links(sanitized_html: str, workspace_id) -> str:
 
     def _link_html(n: str, ev: str) -> str:
         href = f"/workspaces/{workspace_id}/citations/{ev}/reader"
-        return f'<a class="cite" href="{_html.escape(href)}">[{n}]</a>'
+        stance = (stance_by_ev or {}).get(ev)
+        cls = f"cite cite--{stance}" if stance else "cite"
+        return f'<a class="{cls}" href="{_html.escape(href)}">[{n}]</a>'
 
     def _expand(text: str) -> str | None:
         if text is None or _SENT_OPEN not in text:
@@ -316,16 +351,17 @@ def _inject_links(sanitized_html: str, workspace_id) -> str:
 
 
 def render_proposal_with_citations(
-    raw_text: str, *, number_by_ev: dict[str, int], workspace_id
+    raw_text: str, *, number_by_ev: dict[str, int], workspace_id, stance_by_ev=None
 ) -> str:
     """markdown → bleach → inject cite links. With an empty map this is exactly
-    the legacy render (markers inert)."""
+    the legacy render (markers inert). ``stance_by_ev`` (optional) tints each
+    marker by stance via a ``cite--<stance>`` class."""
     with_sentinels = _to_sentinels(raw_text, number_by_ev)
     rendered = markdown.markdown(with_sentinels, extensions=["extra"])
     sanitized = bleach.clean(
         rendered, tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS, strip=True
     )
-    return _inject_links(sanitized, workspace_id)
+    return _inject_links(sanitized, workspace_id, stance_by_ev)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -447,16 +483,22 @@ from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 
 
-def _citation_numbering_for(settings, workspace_id, proposal_text: str) -> dict[str, int]:
-    """Proposal-wide ev-id→number map. A missing/corrupt ledger yields an EMPTY
-    map so markers render inert and the proposal still renders (never raises)."""
+def _citation_render_maps_for(
+    settings, workspace_id, proposal_text: str
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Proposal-wide (ev→number, ev→stance) maps. A missing/corrupt ledger
+    yields EMPTY maps so markers render inert and the proposal still renders
+    (never raises)."""
     repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
     citations_path = repo_dir / CITATIONS_FILENAME
     try:
         ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
     except (ValueError, OSError):
-        return {}
-    return citation_reader.build_citation_numbering(proposal_text, ledger)
+        return {}, {}
+    return (
+        citation_reader.build_citation_numbering(proposal_text, ledger),
+        citation_reader.build_citation_stances(ledger),
+    )
 ```
 
 Then change the body of `_artifact_sections_and_rendered` (lines 170-191):
@@ -467,19 +509,20 @@ def _artifact_sections_and_rendered(settings, workspace_id: uuid.UUID):
     proposal_path = repo_dir / "proposal.md"
     if proposal_path.exists():
         raw = proposal_path.read_text()
-        number_by_ev = _citation_numbering_for(settings, workspace_id, raw)
+        number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
         rendered = citation_reader.render_proposal_with_citations(
-            raw, number_by_ev=number_by_ev, workspace_id=workspace_id
+            raw, number_by_ev=number_by_ev, workspace_id=workspace_id, stance_by_ev=stance_by_ev
         )
     else:
-        raw, rendered, number_by_ev = "", "<em>(no proposal.md yet)</em>", {}
+        raw, rendered, number_by_ev, stance_by_ev = "", "<em>(no proposal.md yet)</em>", {}, {}
     sections = [
         {
             "index": s.index,
             "heading": s.heading,
             "sha": s.sha,
             "rendered": citation_reader.render_proposal_with_citations(
-                s.text, number_by_ev=number_by_ev, workspace_id=workspace_id
+                s.text, number_by_ev=number_by_ev, workspace_id=workspace_id,
+                stance_by_ev=stance_by_ev,
             ),
         }
         for s in split_sections(raw)
@@ -493,30 +536,31 @@ Now `web/sections.py` — `_section_ctx` must receive the shared map. Change its
 ```python
 # web/sections.py
 from call_manager.proposal_assist.web.workspaces import (
-    _citation_numbering_for,
+    _citation_render_maps_for,
     _render_proposal_markdown,  # keep existing import
 )
 from call_manager.proposal_assist.citations import reader as citation_reader
 
 
-def _section_ctx(section, number_by_ev: dict[str, int], settings, workspace_id) -> dict:
+def _section_ctx(section, number_by_ev, stance_by_ev, workspace_id) -> dict:
     return {
         "index": section.index,
         "heading": section.heading,
         "sha": section.sha,
         "rendered": citation_reader.render_proposal_with_citations(
-            section.text, number_by_ev=number_by_ev, workspace_id=workspace_id
+            section.text, number_by_ev=number_by_ev, workspace_id=workspace_id,
+            stance_by_ev=stance_by_ev,
         ),
     }
 ```
 
-In every `_section_ctx(...)` call site (`_view_fragment`, `get_section_edit`, `post_section_save`’s `artifact_sections = [...]`), pass the map built from the full proposal text already in scope:
+In every `_section_ctx(...)` call site (`_view_fragment`, `get_section_edit`, `post_section_save`’s `artifact_sections = [...]`), pass the maps built from the full proposal text already in scope:
 
 ```python
 # wherever the route has the full proposal text `raw` (from _read_sections) and
 # `settings`/`workspace_id`:
-number_by_ev = _citation_numbering_for(settings, workspace_id, raw)
-# ... _section_ctx(section, number_by_ev, settings, workspace_id) ...
+number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
+# ... _section_ctx(section, number_by_ev, stance_by_ev, workspace_id) ...
 ```
 
 (If a call site lacks `settings`, read it from `request.app.state.settings`. `_read_sections` already returns the full `raw` text — reuse it; do not re-read the file.)
@@ -839,6 +883,7 @@ def citation_reader_fragment(
         "source_line": _source_line(ref),
         "claim": claim,
         "stance": (ev.get("stance") or "").upper(),
+        "confidence": (ev.get("confidence") or "").upper(),
         "index": idx, "total": total,
         "prev_ev": prev_ev, "next_ev": next_ev,
         "tombstoned": ref.tombstoned_at is not None,
@@ -904,10 +949,10 @@ def _reader_response(request, ws, *, ctx):
         request,
         "proposal_assist/partials/citation_reader.html",
         {"workspace": ws, **{
-            "source_line": None, "claim": None, "stance": None, "index": 0,
-            "total": 0, "prev_ev": None, "next_ev": None, "tombstoned": False,
-            "no_text": False, "note": None, "body_html": "", "evidence_id": None,
-            "error": None,
+            "source_line": None, "claim": None, "stance": None, "confidence": None,
+            "index": 0, "total": 0, "prev_ev": None, "next_ev": None,
+            "tombstoned": False, "no_text": False, "note": None, "body_html": "",
+            "evidence_id": None, "error": None,
         }, **ctx},
     )
 ```
@@ -928,9 +973,10 @@ Create the template `partials/citation_reader.html`:
     {% if error %}
       <p class="reference-reader__note">{{ error }}</p>
     {% else %}
-      {% if stance or claim %}
+      {% if stance or confidence or claim %}
       <div class="reference-reader__meta">
         {% if stance %}<span class="stance-chip stance-{{ stance|lower }}">{{ stance }}</span>{% endif %}
+        {% if confidence %}<span class="confidence-chip">confidence: {{ confidence|lower }}</span>{% endif %}
         {% if claim %}<span class="reference-reader__claim">claim: “{{ claim }}”</span>{% endif %}
       </div>
       {% endif %}
@@ -1006,6 +1052,10 @@ a.cite {
   cursor: pointer;
 }
 a.cite:hover { text-decoration: underline; }
+/* Stance-tinted markers (Consensus-style scannability). Neutral/unknown keeps
+   the default teal above. */
+a.cite--supports { color: var(--cm-good-text); }
+a.cite--contradicts { color: var(--cm-bad-text); }
 
 .reference-drawer[hidden],
 .reference-drawer-backdrop[hidden] { display: none; }
@@ -1071,6 +1121,7 @@ a.cite:hover { text-decoration: underline; }
 .stance-chip { border-radius: 999px; padding: 0 0.55em; font-size: 0.7rem; font-weight: 700; }
 .stance-supports { background: var(--cm-good-bg); color: var(--cm-good-text); border: 1px solid var(--cm-good-border); }
 .stance-contradicts { background: var(--cm-bad-bg); color: var(--cm-bad-text); border: 1px solid var(--cm-bad-border); }
+.confidence-chip { border-radius: 999px; padding: 0 0.55em; font-size: 0.7rem; font-weight: 600; background: var(--cm-neutral-bg); color: var(--cm-muted); border: 1px solid var(--cm-neutral-border); }
 ```
 
 - [ ] **Step 3: Verify CSS parses (brace balance) and the page still renders**
