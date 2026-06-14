@@ -193,9 +193,15 @@ New router `web/routes/oauth_google.py`. Both endpoints are **rate-limited** by
 
 - Remove the auto-create branch
   ([`auth.py:167-170`](../../../src/call_manager/web/routes/auth.py#L167-L170)): a
-  token is issued **only** for an existing `active` user. Enumeration-resistance
-  preserved (identical "check your email" page on every branch; no token issued
-  for unknown/non-active emails).
+  token is issued **only** for an existing `active` user. The response body stays
+  identical on every branch ("check your email"); no token is issued for
+  unknown/non-active emails. **Residual risk:** because an active account now does
+  extra work (token write + synchronous email send) while unknown/non-active
+  emails return early, a *timing* side-channel exists that the old auto-create
+  flow did not have. It is bounded by the per-email (5/15 min) and per-IP (30/15
+  min) limiters; fully closing it (constant-time / off-request email dispatch) is
+  noted as future work, not done here. We therefore claim *body*-level
+  enumeration resistance, not timing-level.
 - **Re-check status at consume** (per Codex): `login_verify_consume`
   ([`auth.py:272`](../../../src/call_manager/web/routes/auth.py#L272)) must verify
   `status == 'active'` **immediately before issuing the session** — a user can be
