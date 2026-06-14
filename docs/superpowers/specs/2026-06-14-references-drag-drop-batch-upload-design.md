@@ -101,7 +101,7 @@ Dropped PDFs carry no user-chosen kind; the single-file picker is unchanged.
 
 - **Pre-ingest / transport failures** (non-PDF 400, oversize 400, overload 429, aborted upload): **no row is created** (they fail before Phase 1 insert), so re-dropping is a clean fresh upload — no dedup conflict.
 - **Retained ingestion failures** (Phase 2/3 fail after insert → `text_status='failed'`): the row persists with stored bytes.
-- **Dedup short-circuit** ("already present", skip ingest) applies **only** to a same-`(workspace_id, original_sha256)` non-tombstoned ref with `text_status='done'`. A `failed` (or in-progress) same-hash ref does **not** report "already present."
+- **Dedup is scoped to the drag-drop (`auto_classify`) path** — the single-file picker keeps its explicit-kind semantics and does not dedup (re-uploading identical bytes there is a deliberate, rare act and must not silently discard the chosen kind). On the drag-drop path, a same-`(workspace_id, original_sha256)` non-tombstoned ref short-circuits ingest and returns the existing row. The **"already present"** badge shows only when that ref is `text_status='done'`; a `failed`/in-progress match returns its row *without* the badge.
 - **Reprocess route:** **`POST /workspaces/{id}/references/{ref_id}/reprocess`**, member-gated, re-runs ingest Stage 2/3 against the already-stored bytes (no re-upload). A failed row renders a **Reprocess** control; the drop-zone failed-state "retry" calls reprocess for retained-failure rows, and re-uploads for transport failures.
 - Re-dropping a file whose hash matches an existing **failed** ref returns that existing row (no duplicate) surfaced in its failed+reprocess state — not a misleading "already present."
 
@@ -119,7 +119,7 @@ Dropped PDFs carry no user-chosen kind; the single-file picker is unchanged.
 | Component | Change |
 |---|---|
 | `web/_perms.py` *(new)* | Shared `require_member` / `require_owner`; imported by references + citations web modules. |
-| `web/references.py` | Use shared guards on all ref endpoints; compute `is_owner` + `can_manage_references`; `auto_classify` field; up-front 429 admission + shared semaphore + threadpool offload (own session); `%PDF-` sniff; sha256 dedup (done-only); new `delete`, `kind`, `reprocess` routes; panel excludes tombstoned; tombstone guards; audit events. |
+| `web/references.py` | Use shared guards on all ref endpoints; compute `is_owner` + `can_manage_references`; `auto_classify` field; up-front 429 admission + shared semaphore + threadpool offload (own session); `%PDF-` sniff; drag-drop-scoped sha256 dedup (any live same-hash row); new `delete`, `kind`, `reprocess` routes; panel excludes tombstoned; tombstone guards; audit events. |
 | `web/citations.py` | Update import + call sites to `require_member` (behavior unchanged). |
 | `references/kinds.py` *(new)* | `ALLOWED_KINDS` shared constant. |
 | `references/ingest.py` | `auto_classify_kind` param; provisional `kind='paper'`; apply classified kind in Phase 3; own-session entry for threadpool use; import `ALLOWED_KINDS`. |

@@ -209,36 +209,41 @@ async def upload_reference(
     try:
         with limiter.slot():
             data = await _read_capped(file, _MAX_BYTES)
-            if auto_classify and not data.startswith(b"%PDF-"):
-                return HTMLResponse(
-                    "<p>Drag-drop accepts real PDF files only.</p>", status_code=400
-                )
-
-            # Dedup by content hash: a re-dropped file that matches a live
-            # (non-tombstoned) reference returns that row instead of creating a
-            # duplicate. A 'done' match shows "already present"; a failed/in-progress
-            # match returns its row so the user can recover it via Reprocess.
-            sha = hashlib.sha256(data).hexdigest()
-            with factory() as sdup:
-                dup = sdup.scalar(
-                    select(Reference)
-                    .where(
-                        Reference.workspace_id == ws.id,
-                        Reference.original_sha256 == sha,
-                        Reference.tombstoned_at.is_(None),
+            # Drag-drop path only: PDFs (don't trust the browser content_type) +
+            # content-hash dedup. Dedup is scoped to drag-drop because that's the
+            # batch/re-drop path it's for; the single-file picker keeps its
+            # explicit-kind semantics (re-uploading identical bytes there is a
+            # deliberate, rare act and must not silently discard the chosen kind).
+            if auto_classify:
+                if not data.startswith(b"%PDF-"):
+                    return HTMLResponse(
+                        "<p>Drag-drop accepts real PDF files only.</p>", status_code=400
                     )
-                    .order_by(Reference.created_at.desc())
-                )
-                dup_id = dup.id if dup else None
-                dup_done = bool(dup and dup.text_status == "done")
-            if dup_id is not None:
-                with factory() as s2:
-                    ref = s2.get(Reference, dup_id)
-                    return request.app.state.templates.TemplateResponse(
-                        request,
-                        "proposal_assist/partials/reference_row.html",
-                        {"ref": ref, "workspace": ws, "already_present": dup_done, **caps},
+                # A re-dropped file matching a live (non-tombstoned) reference
+                # returns that row instead of duplicating. A 'done' match shows
+                # "already present"; a failed/in-progress match returns its row so
+                # the user can recover it via Reprocess.
+                sha = hashlib.sha256(data).hexdigest()
+                with factory() as sdup:
+                    dup = sdup.scalar(
+                        select(Reference)
+                        .where(
+                            Reference.workspace_id == ws.id,
+                            Reference.original_sha256 == sha,
+                            Reference.tombstoned_at.is_(None),
+                        )
+                        .order_by(Reference.created_at.desc())
                     )
+                    dup_id = dup.id if dup else None
+                    dup_done = bool(dup and dup.text_status == "done")
+                if dup_id is not None:
+                    with factory() as s2:
+                        ref = s2.get(Reference, dup_id)
+                        return request.app.state.templates.TemplateResponse(
+                            request,
+                            "proposal_assist/partials/reference_row.html",
+                            {"ref": ref, "workspace": ws, "already_present": dup_done, **caps},
+                        )
             effective_kind = "paper" if auto_classify else kind
 
             def _run():

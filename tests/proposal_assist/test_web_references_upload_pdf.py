@@ -51,13 +51,13 @@ def test_duplicate_done_pdf_skips_reingest(monkeypatch, pg_url, tmp_path, pg_ses
     pdf = _real_pdf_bytes()
     r1 = client.post(
         f"/workspaces/{wsid}/references",
-        data={"kind": "paper"},
+        data={"auto_classify": "true"},
         files={"file": ("p.pdf", pdf, "application/pdf")},
     )
     assert r1.status_code == 200, r1.text
     r2 = client.post(
         f"/workspaces/{wsid}/references",
-        data={"kind": "paper"},
+        data={"auto_classify": "true"},
         files={"file": ("p.pdf", pdf, "application/pdf")},
     )
     assert r2.status_code == 200
@@ -83,7 +83,7 @@ def test_redrop_of_failed_ref_does_not_duplicate(monkeypatch, pg_url, tmp_path, 
     pdf = _real_pdf_bytes()
     r1 = client.post(
         f"/workspaces/{wsid}/references",
-        data={"kind": "paper"},
+        data={"auto_classify": "true"},
         files={"file": ("p.pdf", pdf, "application/pdf")},
     )
     assert r1.status_code == 200, r1.text
@@ -96,7 +96,7 @@ def test_redrop_of_failed_ref_does_not_duplicate(monkeypatch, pg_url, tmp_path, 
     # Re-drop the identical bytes: must return the existing (failed) row, not a dup.
     r2 = client.post(
         f"/workspaces/{wsid}/references",
-        data={"kind": "paper"},
+        data={"auto_classify": "true"},
         files={"file": ("p.pdf", pdf, "application/pdf")},
     )
     assert r2.status_code == 200, r2.text
@@ -109,3 +109,35 @@ def test_redrop_of_failed_ref_does_not_duplicate(monkeypatch, pg_url, tmp_path, 
         )
     assert count == 1  # no duplicate row
     assert statuses == ["failed"]  # still the original failed row (not re-ingested)
+
+
+def test_single_file_picker_does_not_dedup(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    """Dedup is scoped to the drag-drop (auto_classify) path. The single-file
+    picker must NOT dedup, so re-uploading identical bytes with a different kind
+    creates a distinct row and honours the explicitly chosen kind."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    app.state.embed_client = FakeEmbedClient()
+    app.state.citation_service = None
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid, owner_id = ws.id, ws.owner_id
+    client = authed_client(app, user_id=owner_id)
+    pdf = _real_pdf_bytes()
+    r1 = client.post(
+        f"/workspaces/{wsid}/references",
+        data={"kind": "paper"},
+        files={"file": ("p.pdf", pdf, "application/pdf")},
+    )
+    assert r1.status_code == 200, r1.text
+    r2 = client.post(
+        f"/workspaces/{wsid}/references",
+        data={"kind": "data"},
+        files={"file": ("p.pdf", pdf, "application/pdf")},
+    )
+    assert r2.status_code == 200, r2.text
+    with pg_session_factory() as s:
+        kinds = sorted(
+            s.scalars(select(Reference.kind).where(Reference.workspace_id == wsid))
+        )
+    assert kinds == ["data", "paper"]  # two distinct rows, explicit kinds preserved
