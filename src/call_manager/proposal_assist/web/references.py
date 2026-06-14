@@ -36,7 +36,9 @@ from call_manager.proposal_assist.references.deletion import delete_or_tombstone
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 from call_manager.proposal_assist.references.ingest import (
     IngestResult,
+    ReprocessConflict,
     ingest_bytes,
+    reprocess_reference,
     suffix_for_mime,
 )
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
@@ -696,6 +698,73 @@ def delete_reference_route(
             "Reference deleted (retained because it is cited).</span>"
         )
     return HTMLResponse("")  # hard delete → empty body removes the row
+
+
+# ---------------------------------------------------------------------------
+# POST /workspaces/<id>/references/<id>/reprocess — member-gated recovery
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{workspace_id}/references/{reference_id}/reprocess", response_class=HTMLResponse)
+async def reprocess_reference_route(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
+    ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+    if ref is None or ref.workspace_id != ws.id or ref.tombstoned_at is not None:
+        raise HTTPException(status_code=404, detail="reference not found")
+
+    storage = _storage_for(request)
+    embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
+    factory = request.app.state.session_factory
+    limiter = request.app.state.reference_ingest_limiter
+    settings = request.app.state.settings
+    citation_service = request.app.state.citation_service
+
+    try:
+        with limiter.slot():
+
+            def _run():
+                return reprocess_reference(
+                    session_factory=factory,
+                    storage=storage,
+                    embedder=embedder,
+                    reference_id=reference_id,
+                    workspace_id=ws.id,
+                    citation_service=citation_service,
+                    extract_timeout_seconds=settings.reference_extract_timeout_seconds,
+                )
+
+            await run_in_threadpool(_run)
+    except OverCapacity:
+        return HTMLResponse(
+            "<p>Server busy — retry shortly.</p>", status_code=429, headers={"Retry-After": "2"}
+        )
+    except ReprocessConflict:
+        raise HTTPException(
+            status_code=409, detail="reference is not in a reprocessable state"
+        ) from None
+
+    session.add(
+        WorkspaceEvent(
+            workspace_id=ws.id,
+            kind="reference.reprocessed",
+            actor_id=user.id,
+            payload={"reference_id": str(reference_id)},
+        )
+    )
+    session.commit()
+    with factory() as s2:
+        ref2 = s2.scalar(select(Reference).where(Reference.id == reference_id))
+        return request.app.state.templates.TemplateResponse(
+            request,
+            "proposal_assist/partials/reference_row.html",
+            {"ref": ref2, "workspace": ws, **_caps(ws, user, session)},
+        )
 
 
 # ---------------------------------------------------------------------------
