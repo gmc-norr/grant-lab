@@ -2,4 +2,4 @@ from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 
 
 def test_allowed_kinds_exact_set():
-    assert ALLOWED_KINDS == frozenset({"paper", "prior_proposal", "analysis", "data"})
+    assert frozenset({"paper", "prior_proposal", "analysis", "data"}) == ALLOWED_KINDS

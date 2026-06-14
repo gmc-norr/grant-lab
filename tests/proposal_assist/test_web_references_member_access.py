@@ -34,7 +34,7 @@ def test_member_sees_upload_form(monkeypatch, pg_url, tmp_path, pg_session_facto
     resp = authed_client(app, user_id=member_id).get(f"/workspaces/{wsid}/references")
     assert resp.status_code == 200
     # The upload form posts to the references endpoint; a member must see it.
-    assert "enctype=\"multipart/form-data\"" in resp.text
+    assert 'enctype="multipart/form-data"' in resp.text
     assert "read-only" not in resp.text.lower()
 
 

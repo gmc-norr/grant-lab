@@ -281,7 +281,9 @@ def _highlight_window(full_text: str, s: int, e: int, radius: int = _WINDOW_RADI
     hi = min(len(full_text), e + radius)
     return (
         _html.escape(full_text[lo:s])
-        + '<mark id="ev-target">' + _html.escape(full_text[s:e]) + "</mark>"
+        + '<mark id="ev-target">'
+        + _html.escape(full_text[s:e])
+        + "</mark>"
         + _html.escape(full_text[e:hi])
     )
 
@@ -312,17 +314,29 @@ def _reader_body(
         return _highlight_window(full_text, s, e), "Showing the cited section of a large document."
     return (
         _html.escape(full_text[:s])
-        + '<mark id="ev-target">' + _html.escape(full_text[s:e]) + "</mark>"
+        + '<mark id="ev-target">'
+        + _html.escape(full_text[s:e])
+        + "</mark>"
         + _html.escape(full_text[e:])
     ), None
 
 
 def _reader_response(request: Request, ws, *, ctx: dict) -> HTMLResponse:
     base: dict = {
-        "source_line": None, "claim": None, "stance": None, "confidence": None,
-        "index": 0, "total": 0, "prev_ev": None, "next_ev": None,
-        "tombstoned": False, "no_text": False, "note": None, "body_html": "",
-        "evidence_id": None, "error": None,
+        "source_line": None,
+        "claim": None,
+        "stance": None,
+        "confidence": None,
+        "index": 0,
+        "total": 0,
+        "prev_ev": None,
+        "next_ev": None,
+        "tombstoned": False,
+        "no_text": False,
+        "note": None,
+        "body_html": "",
+        "evidence_id": None,
+        "error": None,
     }
     return request.app.state.templates.TemplateResponse(
         request,
@@ -377,16 +391,12 @@ def citation_reader_fragment(
     # Only read text.txt when indexing is complete; otherwise treat as absent.
     text_indexed = ref.text_status == "done"
     full_text: str | None = (
-        text_path.read_text(encoding="utf-8")
-        if text_indexed and text_path.exists()
-        else None
+        text_path.read_text(encoding="utf-8") if text_indexed and text_path.exists() else None
     )
 
     proposal_path = repo_dir / PROPOSAL_FILENAME
     proposal_text = proposal_path.read_text() if proposal_path.exists() else ""
-    order = citation_reader.evidence_order_for_reference(
-        proposal_text, ledger, ev["reference_id"]
-    )
+    order = citation_reader.evidence_order_for_reference(proposal_text, ledger, ev["reference_id"])
     total = len(order)
     pos = order.index(evidence_id) if evidence_id in order else -1
     idx = pos + 1 if pos >= 0 else 0
@@ -407,9 +417,14 @@ def citation_reader_fragment(
         "claim": (ev.get("claim_context") or {}).get("text"),
         "stance": (ev.get("stance") or "").upper(),
         "confidence": (ev.get("confidence") or "").upper(),
-        "index": idx, "total": total, "prev_ev": prev_ev, "next_ev": next_ev,
+        "index": idx,
+        "total": total,
+        "prev_ev": prev_ev,
+        "next_ev": next_ev,
         "tombstoned": ref.tombstoned_at is not None,
         "no_text": no_text,
-        "note": note, "body_html": body_html, "evidence_id": evidence_id,
+        "note": note,
+        "body_html": body_html,
+        "evidence_id": evidence_id,
     }
     return _reader_response(request, ws, ctx=ctx)
