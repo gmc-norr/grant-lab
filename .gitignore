@@ -34,3 +34,4 @@ var/
 .DS_Store
 Thumbs.db
 .superpowers/
+api_key.txt
