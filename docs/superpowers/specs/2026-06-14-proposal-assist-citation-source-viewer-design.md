@@ -1,7 +1,7 @@
 # Citation Source Viewer (proposal-assist) — Design
 
-**Status:** approved design (brainstorm 2026-06-14), revised after Codex review
-(2026-06-14). Ready for an implementation plan.
+**Status:** approved design (brainstorm 2026-06-14), revised after two rounds of
+Codex review (2026-06-14). Ready for an implementation plan.
 **Stack:** current — FastAPI + Jinja2 + HTMX, server-rendered, no SPA. Additive only.
 
 ## Goal
@@ -80,6 +80,12 @@ pane full render and each per-section / save-cancel fragment render
 Markers whose ev-id is absent from the ledger, or ledger rows with no marker in
 `proposal.md` (orphans), are excluded from the map.
 
+**Fail-safe (render path):** if `citations.json` is missing or unparseable the
+map is **empty** — every marker renders inert (literal text, ev-comment stripped,
+as today) and the proposal **still renders normally**. The numbering-map builder
+adds a ledger dependency to the artifact render path, so it must never let a bad
+ledger fail or 500 the proposal render.
+
 **Injection AFTER sanitization (security-critical).** We do **not** add `class`
 to the bleach allowlist (that would let agent-authored raw HTML forge its own
 `a.cite`). Instead:
@@ -90,8 +96,14 @@ to the bleach allowlist (that would let agent-authored raw HTML forge its own
 2. markdown + bleach run as today — the sentinel is inert text; any agent raw
    `<a class="cite" …>` loses its `class` (still not in the allowlist) and so can
    never be matched by the drawer JS.
-3. Post-bleach: replace each sentinel with **trusted** markup
-   `<a class="cite" href="/workspaces/{wid}/citations/{ev}/reader">[n]</a>`.
+3. Post-bleach: **parse the sanitized HTML and substitute sentinels only inside
+   eligible text nodes** — never within attribute values or inside `<code>`/
+   `<pre>` — replacing each with **trusted** markup
+   `<a class="cite" href="/workspaces/{wid}/citations/{ev}/reader">[n]</a>`. A
+   blind string replace is unsafe: a marker the agent places in a code span, a
+   link URL, or a `title` attribute would otherwise inject anchor markup into
+   that context. (A text-node walk naturally skips attributes; the code/pre
+   exclusion keeps cite links out of code samples.)
 
 Result: only server-injected links carry `class="cite"`; agent input never forms
 a URL or functioning marker. (Regression test: forged `<a class="cite">` in agent
@@ -99,18 +111,22 @@ markdown is neutralized.)
 
 ### B. Evidence locator (pure, independently testable)
 
-`locate_evidence(full_text, cited_chunk, evidence) -> (start, end) | None`
+`locate_evidence(full_text, cited_chunk | None, evidence) -> (start, end) | None`
 
 Takes the workspace-scoped **cited `ReferenceChunk`** (looked up by
-`reference_id` + `locator.chunk_index`) — the chunk text is the disambiguator.
-Ladder:
-1. Locate `cited_chunk.text` within `full_text` (exact, then whitespace-
-   normalized) → the chunk's region. Apply the chunk-relative
-   `evidence_quote_offsets` inside that region → the exact span. (Most precise;
-   resolves duplicate quotes because it is anchored to *this* chunk.)
-2. If the chunk can't be placed: search `evidence_quote` in `full_text` (exact →
-   ws-normalized); accept **only if exactly one** match. **Collect all matches;
-   if >1 remain ambiguous, return `None`.**
+`reference_id` + `locator.chunk_index`; may be `None` — see the missing-data
+matrix) — the chunk text is the disambiguator. Ladder:
+1. Place `cited_chunk.text` within `full_text` (exact, then whitespace-
+   normalized) **only if the placement is unique**, then apply the chunk-relative
+   `evidence_quote_offsets` inside that region. **Validate before accepting the
+   span:** (a) the chunk placement is unique, (b) the offsets are **in bounds**,
+   and (c) the selected span **whitespace-normalizes to `evidence_quote`**. Any
+   failure — duplicate chunk, out-of-bounds or stale offsets, span that doesn't
+   match the quote — **falls through to step 2** rather than confidently
+   highlighting the wrong passage.
+2. If the chunk can't be placed/validated: search `evidence_quote` in `full_text`
+   (exact → ws-normalized); accept **only if exactly one** match. **Collect all
+   matches; if >1 remain ambiguous, return `None`.**
 3. `None` is not a dead end: the route falls back to rendering the **chunk text
    itself** (always available), highlighted whole, with a "showing the cited
    section — couldn't pinpoint the exact sentence in the full document" note.
@@ -151,10 +167,13 @@ in the ledger (forged/stale link) — it surfaces via the existing generic notic
   `preventDefault` → load the href fragment into `#reference-drawer` → open →
   scroll `#ev-target` into view (centered). prev/next swap the fragment in place
   and re-scroll.
-- **Accessibility (esp. the narrow overlay):** `role="dialog"`, `aria-modal="true"`,
-  labelled by the source line; **move focus into the drawer on open** and **restore
-  focus to the triggering `[n]` on close**; **trap focus** while the overlay is
-  open; **lock background scroll** while the overlay is open; Esc and ✕ close.
+- **Accessibility — modal semantics are narrow-only.** The desktop side panel
+  (drawer in the chat column) is **non-modal**: the proposal must stay interactive
+  beside it — **no `aria-modal`, no focus trap, no background scroll lock**; Esc/✕
+  close and focus restores to the triggering `[n]`. The **narrow overlay**
+  (<1024px) is a true dialog: `role="dialog"` + `aria-modal="true"` labelled by the
+  source line, **focus moved in and trapped**, **background scroll locked**, Esc/✕
+  close + focus restore. (Apply the modal behaviors only at the overlay breakpoint.)
 
 ## Data flow
 
@@ -184,10 +203,19 @@ All reads. Source of truth unchanged (git `citations.json` + DB + `text.txt`).
   bounded neighborhood of `full_text`) instead of the entire document, with a
   "showing the cited section of a large document" note. Normal sources render in
   full.
-- **Corrupt/unparseable `citations.json`** → degraded fragment ("citations
-  unavailable"), logged; never a 500 in the drawer.
-- **Missing `text.txt` / missing chunk** (`chunk_index` out of range) → treated as
-  the no-text / locator-None fallbacks above (200), logged.
+- **Corrupt/unparseable `citations.json`** → in the **reader route**, a degraded
+  fragment ("citations unavailable"), logged; in the **artifact render path**, an
+  empty numbering map so all markers render inert and the proposal still renders
+  (§A fail-safe). Never a 500 in either path.
+- **Missing-data matrix** (all 200, logged; `locate_evidence` takes an *optional*
+  chunk, and the route may call it with optional full text):
+  - text.txt **present** + chunk **present** → locate per §B.
+  - text.txt **present** + chunk **absent** → unique-search the quote in full text
+    (highlight only on a single match; otherwise render the text with a "couldn't
+    pinpoint" note).
+  - text.txt **absent** + chunk **present** → render & **highlight the chunk text**
+    directly.
+  - **both absent** → "source text not available" notice.
 
 ## Security
 
@@ -204,19 +232,24 @@ All reads. Source of truth unchanged (git `citations.json` + DB + `text.txt`).
 - **Numbering/transform** (pytest): proposal-wide numbering stable across multiple
   sections and the save/cancel fragment path; repeat citations share `n`; unknown
   ev-id → inert escaped text; **forged `<a class="cite">` in agent markdown is
-  neutralized**; export path untouched.
+  neutralized**; **a marker inside a code span / link URL / `title` attribute stays
+  literal** (text-node-aware injection); **corrupt/missing ledger → markers inert
+  but the proposal still renders** (render-path regression); export path untouched.
 - **Locator** (pytest, pure): chunk-anchored exact placement; ws-normalized chunk
-  placement; duplicate-quote disambiguation via the chunk; ambiguous → None;
-  None → chunk fallback.
+  placement; **non-unique chunk placement rejected**; **out-of-bounds offsets
+  rejected**; **span that doesn't normalize to `evidence_quote` rejected**;
+  duplicate-quote disambiguation; ambiguous → None; the **missing-data matrix**
+  (4 combinations of text.txt × chunk presence).
 - **Route** (pytest + TestClient): owner & viewer auth; fragment structure
   (`#ev-target`, header fields); prev/next from proposal.md order incl. ends and
   orphan/standalone; **200 for tombstone / no-text / oversized / locator-fallback;
   404 only for unknown ev**; HTML-escaping; **corrupt-ledger, missing text.txt,
   missing chunk, oversized-window** cases.
 - **JS** (`tests/js/`, node --test): `a.cite` click loads + opens; scroll-to-
-  target; prev/next swap; Esc/✕ close; **focus moves in on open, restores to the
-  trigger on close, focus trap, background scroll lock**; responsive overlay vs
-  column branch.
+  target; prev/next swap; Esc/✕ close; focus moves in on open and restores to the
+  trigger on close; **modal behaviors (focus trap, scroll lock, `aria-modal`) apply
+  only at the overlay breakpoint, not the desktop side panel**; responsive overlay
+  vs column branch.
 
 ## Scope boundaries / non-goals
 
