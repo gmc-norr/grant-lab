@@ -215,6 +215,8 @@ def test_dismiss_with_reason(client_owner, ws_setup, pg_session_factory, users):
 
 
 def test_reanalyze_enqueues_and_shows_pending(client_owner, ws_setup, pg_session_factory):
+    import re
+
     ws_id = ws_setup["ws_id"]
     r = client_owner.post(f"/workspaces/{ws_id}/sections/1/reanalyze")
     assert r.status_code == 200
@@ -223,6 +225,8 @@ def test_reanalyze_enqueues_and_shows_pending(client_owner, ws_setup, pg_session
         job = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one()
         assert job.status == "queued"
         assert job.section_sha == ws_setup["sha"]
+        # commit_sha must be a real 40-char hex SHA, NOT the proposal text.
+        assert re.fullmatch(r"[0-9a-f]{40}", job.commit_sha), job.commit_sha
 
 
 def test_strip_shows_failed_job_with_retry(

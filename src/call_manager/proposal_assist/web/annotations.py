@@ -42,7 +42,7 @@ from call_manager.db.models import (
 )
 from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
 from call_manager.proposal_assist.analysis.queue import enqueue_section_job
-from call_manager.proposal_assist.citations.gitio import GitCommitError
+from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
@@ -351,8 +351,11 @@ def post_section_reanalyze(
 ) -> HTMLResponse:
     """Re-enqueue claim analysis for the section's LIVE content at HEAD."""
     ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
-    head, sections = _read_sections(request, workspace_id)
+    _, sections = _read_sections(request, workspace_id)
     section = _section_or_404(sections, n)
+    settings = request.app.state.settings
+    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+    head = current_head(repo_dir)
     enqueue_section_job(
         session,
         workspace_id=ws.id,
