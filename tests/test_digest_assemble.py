@@ -23,7 +23,7 @@ def now():
 
 
 def _seed_user_with_profile(s, *, email="u@ki.se", profile_name="P", must_include=None):
-    u = User(email=email)
+    u = User(email=email, status="active")
     s.add(u)
     s.flush()
     p = Profile(
@@ -92,7 +92,7 @@ def _seed_call(
 
 def test_assemble_returns_none_when_no_subscriptions(pg_session_factory, now):
     with pg_session_factory() as s:
-        u = User(email="lonely@ki.se")
+        u = User(email="lonely@ki.se", status="active")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -218,7 +218,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(pg_session_facto
     overrides score-based ranking. Spec line 420 says 'highest-scoring profile
     wins' but that's score within bucket; must-include is a separate signal."""
     with pg_session_factory() as s:
-        u = User(email="bp@ki.se")
+        u = User(email="bp@ki.se", status="active")
         s.add(u)
         s.flush()
         p_must = Profile(
@@ -289,7 +289,7 @@ def test_assemble_dedup_must_include_beats_top_in_other_profile(pg_session_facto
 def test_assemble_handles_profile_missing_must_include_key(pg_session_factory, now):
     """Older profiles may have structured={} without the must_include key."""
     with pg_session_factory() as s:
-        u = User(email="legacy@ki.se")
+        u = User(email="legacy@ki.se", status="active")
         s.add(u)
         s.flush()
         p = Profile(
@@ -436,7 +436,7 @@ def test_assemble_dedup_across_profiles_keeps_highest_score(pg_session_factory, 
     """Same call ranked against two profiles. Lands once, in the higher
     section. The other profile's section gets an `also_in_profiles` note."""
     with pg_session_factory() as s:
-        u = User(email="multi@ki.se")
+        u = User(email="multi@ki.se", status="active")
         s.add(u)
         s.flush()
         p_low = Profile(

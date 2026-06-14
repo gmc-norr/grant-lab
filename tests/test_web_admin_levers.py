@@ -19,7 +19,7 @@ def _setup(monkeypatch, pg_url):
 
 def _admin_client(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="root@ki.se", is_admin=True)
+        u = User(email="root@ki.se", is_admin=True, status="active")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -88,7 +88,7 @@ def test_reenable_unknown_user_404(monkeypatch, pg_url, pg_session_factory):
 def test_reenable_requires_admin(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="nonadmin@ki.se", is_admin=False)
+        u = User(email="nonadmin@ki.se", is_admin=False, status="active")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -199,7 +199,7 @@ def test_send_digest_unconfigured_err(monkeypatch, pg_url, pg_session_factory):
 def test_fetch_requires_admin(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="nonadmin2@ki.se", is_admin=False)
+        u = User(email="nonadmin2@ki.se", is_admin=False, status="active")
         s.add(u)
         s.commit()
         s.refresh(u)

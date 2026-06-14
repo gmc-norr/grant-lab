@@ -49,8 +49,8 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
     Assert: A receives the must-include call; B receives nothing.
     """
     with pg_session_factory() as s:
-        ua = User(email="alice@ki.se")
-        ub = User(email="bob@ki.se")
+        ua = User(email="alice@ki.se", status="active")
+        ub = User(email="bob@ki.se", status="active")
         s.add_all([ua, ub])
         s.flush()
         p1 = Profile(

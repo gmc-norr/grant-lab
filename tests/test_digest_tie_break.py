@@ -19,7 +19,7 @@ _FUTURE = datetime(2099, 12, 31, tzinfo=UTC)
 def _seed_two_equal_score_calls(s, *, cos_a: float | None, cos_b: float | None):
     """Two calls, same aggregate_score=80, different cosines. Higher cosine
     must sort first in the digest 'top' bucket."""
-    u = User(email="tie@ki.se")
+    u = User(email="tie@ki.se", status="active")
     s.add(u)
     s.flush()
     p = Profile(

@@ -28,6 +28,18 @@ class DigestRunSummary:
     users_disabled: int = 0
 
 
+def candidate_user_ids(session) -> list[int]:
+    """Active, digest-enabled subscribers. Excludes disabled/pending accounts
+    (status) and bounce-disabled digests (digest_disabled_at)."""
+    return list(
+        session.execute(
+            select(distinct(Subscription.user_id))
+            .join(User, User.id == Subscription.user_id)
+            .where(User.digest_disabled_at.is_(None), User.status == "active")
+        ).scalars().all()
+    )
+
+
 def week_start(now: datetime) -> datetime:
     """Stockholm-week start (Monday 00:00 Europe/Stockholm) for the week
     containing `now`.
@@ -65,17 +77,9 @@ def run_digest(
     # Skipping disabled users at SQL keeps the `users_processed` metric meaningful
     # — assemble_for_user would also reject them, but we'd inflate the count.
     with session_factory() as session:
-        candidate_user_ids = (
-            session.execute(
-                select(distinct(Subscription.user_id))
-                .join(User, User.id == Subscription.user_id)
-                .where(User.digest_disabled_at.is_(None))
-            )
-            .scalars()
-            .all()
-        )
+        candidate_ids = candidate_user_ids(session)
 
-    for uid in candidate_user_ids:
+    for uid in candidate_ids:
         summary.users_processed += 1
         with session_factory() as session:
             # Skip if already sent this week (idempotency)
