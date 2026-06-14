@@ -66,3 +66,46 @@ def test_duplicate_done_pdf_skips_reingest(monkeypatch, pg_url, tmp_path, pg_ses
             select(func.count()).select_from(Reference).where(Reference.workspace_id == wsid)
         )
     assert count == 1  # dedup: no second row created
+
+
+def test_redrop_of_failed_ref_does_not_duplicate(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    """A re-dropped file matching a FAILED (non-tombstoned) row returns that
+    row rather than creating a duplicate — the subtle dedup property: dedup
+    matches ANY live same-hash row, not just 'done' ones."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    app.state.embed_client = FakeEmbedClient()
+    app.state.citation_service = None
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid, owner_id = ws.id, ws.owner_id
+    client = authed_client(app, user_id=owner_id)
+    pdf = _real_pdf_bytes()
+    r1 = client.post(
+        f"/workspaces/{wsid}/references",
+        data={"kind": "paper"},
+        files={"file": ("p.pdf", pdf, "application/pdf")},
+    )
+    assert r1.status_code == 200, r1.text
+    # Simulate a retained ingestion failure on that row.
+    with pg_session_factory() as s:
+        ref = s.scalar(select(Reference).where(Reference.workspace_id == wsid))
+        ref.text_status = "failed"
+        ref.text_error = "simulated"
+        s.commit()
+    # Re-drop the identical bytes: must return the existing (failed) row, not a dup.
+    r2 = client.post(
+        f"/workspaces/{wsid}/references",
+        data={"kind": "paper"},
+        files={"file": ("p.pdf", pdf, "application/pdf")},
+    )
+    assert r2.status_code == 200, r2.text
+    with pg_session_factory() as s:
+        count = s.scalar(
+            select(func.count()).select_from(Reference).where(Reference.workspace_id == wsid)
+        )
+        statuses = list(
+            s.scalars(select(Reference.text_status).where(Reference.workspace_id == wsid))
+        )
+    assert count == 1  # no duplicate row
+    assert statuses == ["failed"]  # still the original failed row (not re-ingested)
