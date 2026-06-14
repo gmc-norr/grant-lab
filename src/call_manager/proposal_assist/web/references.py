@@ -625,6 +625,44 @@ def post_reference_waiver(
 
 
 # ---------------------------------------------------------------------------
+# PATCH /workspaces/<id>/references/<id>/kind — member-gated kind correction
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/{workspace_id}/references/{reference_id}/kind", response_class=HTMLResponse)
+def patch_reference_kind(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    kind: str = Form(...),
+    user=Depends(get_current_user),  # noqa: B008
+    session: Session = Depends(_session_dep),  # noqa: B008
+) -> HTMLResponse:
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
+    if kind not in ALLOWED_KINDS:
+        return HTMLResponse(f"<p>Invalid kind: {_html.escape(repr(kind))}</p>", status_code=400)
+    ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+    if ref is None or ref.workspace_id != ws.id or ref.tombstoned_at is not None:
+        raise HTTPException(status_code=404, detail="reference not found")
+    old = ref.kind
+    ref.kind = kind
+    session.add(
+        WorkspaceEvent(
+            workspace_id=ws.id,
+            kind="reference.kind_changed",
+            actor_id=user.id,
+            payload={"reference_id": str(ref.id), "from": old, "to": kind},
+        )
+    )
+    session.commit()
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "proposal_assist/partials/reference_row.html",
+        {"ref": ref, "workspace": ws, **_caps(ws, user, session)},
+    )
+
+
+# ---------------------------------------------------------------------------
 # POST /workspaces/<id>/references/<id>/delete — member-gated delete/tombstone
 # ---------------------------------------------------------------------------
 
