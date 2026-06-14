@@ -187,3 +187,30 @@ def test_routes_404_when_disabled(monkeypatch, pg_url, pg_session_factory):
     app = create_app()
     with TestClient(app) as c:
         assert c.post("/auth/google/start", data={}).status_code == 404
+
+
+def test_connect_google_links_active_user(monkeypatch, pg_url, pg_session_factory):
+    app, fake = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(email="link@ki.se", status="active")
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        uid = u.id
+    with TestClient(app) as c:
+        c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+        start = c.post("/auth/google/start", data={"link": "1"}, follow_redirects=False)
+        q = parse_qs(urlparse(start.headers["location"]).query)
+        fake.set_code("LC", _claims(sub="g-link", email="whatever@gmail.com", nonce=q["nonce"][0]))
+        r = c.get(f"/auth/google/callback?code=LC&state={q['state'][0]}",
+                  headers={"accept": "text/html"}, follow_redirects=False)
+        assert r.headers["location"] == "/me"
+    with pg_session_factory() as s:
+        assert s.get(User, uid).oidc_sub == "g-link"
+
+
+def test_connect_google_unauthenticated_redirects_to_login(monkeypatch, pg_url, pg_session_factory):
+    app, _ = _setup(monkeypatch, pg_url)
+    with TestClient(app) as c:
+        r = c.post("/auth/google/start", data={"link": "1"}, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/login"

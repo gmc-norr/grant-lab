@@ -33,6 +33,8 @@ def me_page(request: Request, user: User = Depends(get_current_user)):  # noqa: 
             "user": user,
             "profiles": profiles,
             "subscribed_ids": subscribed_ids,
+            "google_oidc_enabled": request.app.state.settings.google_oidc_enabled,
+            "google_linked": user.oidc_sub is not None,
         },
     )
 
