@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Reference, Workspace, WorkspaceEvent, WorkspaceViewer
+from call_manager.db.models import Reference, Workspace, WorkspaceEvent
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
 from call_manager.proposal_assist.references.ingest import (
@@ -36,6 +36,11 @@ from call_manager.proposal_assist.references.ingest import (
 )
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 from call_manager.proposal_assist.references.storage import ReferenceStorage
+from call_manager.proposal_assist.web._perms import is_member, require_member, require_owner
+
+# Temporary aliases — removed in a later task once call sites use require_member directly.
+_require_owner = require_owner
+_require_owner_or_viewer = require_member
 
 logger = logging.getLogger(__name__)
 
@@ -69,36 +74,6 @@ _CHUNK_BYTES = 64 * 1024
 def _session_dep(request: Request):
     factory = request.app.state.session_factory
     yield from get_db_dependency(factory)()
-
-
-def _require_owner(*, workspace_id: uuid.UUID, user, session: Session) -> Workspace:
-    ws = session.scalar(
-        select(Workspace).where(Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None))
-    )
-    if ws is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
-    if ws.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="owner only")
-    return ws
-
-
-def _require_owner_or_viewer(*, workspace_id: uuid.UUID, user, session: Session) -> Workspace:
-    ws = session.scalar(
-        select(Workspace).where(Workspace.id == workspace_id, Workspace.soft_deleted_at.is_(None))
-    )
-    if ws is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
-    if ws.owner_id == user.id:
-        return ws
-    is_viewer = session.scalar(
-        select(WorkspaceViewer.user_id).where(
-            WorkspaceViewer.workspace_id == workspace_id,
-            WorkspaceViewer.user_id == user.id,
-        )
-    )
-    if is_viewer is None:
-        raise HTTPException(status_code=403, detail="owner or viewer only")
-    return ws
 
 
 _FILENAME_OK = re.compile(r"[^A-Za-z0-9._-]")

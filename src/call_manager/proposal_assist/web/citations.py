@@ -38,10 +38,8 @@ from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
 # Reuse the exact auth + session deps from references.py so the policy stays
 # identical (owner-or-viewer read access; non-member → 403).
-from call_manager.proposal_assist.web.references import (
-    _require_owner_or_viewer,
-    _session_dep,
-)
+from call_manager.proposal_assist.web._perms import require_member as _require_owner_or_viewer
+from call_manager.proposal_assist.web.references import _session_dep
 
 logger = logging.getLogger(__name__)
 
