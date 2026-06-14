@@ -42,12 +42,39 @@ class User(Base):
         # lowercase at the DB level — combined with UNIQUE(email), this
         # guarantees one row per address regardless of case.
         CheckConstraint("email = lower(email)", name="ck_users_email_lowercase"),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'disabled')",
+            name="ck_users_status_valid",
+        ),
+        CheckConstraint(
+            "(oidc_iss IS NULL) = (oidc_sub IS NULL)",
+            name="ck_users_oidc_paired_null",
+        ),
+        Index(
+            "uq_users_oidc_identity",
+            "oidc_iss",
+            "oidc_sub",
+            unique=True,
+            postgresql_where=text("oidc_sub IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
     name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Fails CLOSED: a User created without an explicit status is `pending`
+    # (no access). Only the migration backfill and admin bootstrap make a
+    # user `active`.
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    oidc_iss: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oidc_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

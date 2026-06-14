@@ -113,7 +113,7 @@ def profile_factory(pg_session_factory):
         structured: dict | None = None,
     ) -> tuple[int, int]:
         with pg_session_factory() as s:
-            u = User(email=f"owner-{len(created)}@ki.se")
+            u = User(email=f"owner-{len(created)}@ki.se", status="active")
             s.add(u)
             s.flush()
             p = Profile(
