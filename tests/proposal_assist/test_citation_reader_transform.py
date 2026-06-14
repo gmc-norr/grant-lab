@@ -81,7 +81,7 @@ def test_marker_becomes_numbered_cite_link():
 
 def test_unknown_marker_stays_inert_text():
     html = _render("Bogus [@ghost]<!-- ev:ev-ffffff -->.")
-    assert "cite" not in html
+    assert 'class="cite"' not in html
     assert "[@ghost]" in html
     assert "ev-ffffff" not in html
 
@@ -108,3 +108,14 @@ def test_cite_link_carries_stance_class_when_provided():
         stance_by_ev={"ev-aaaaaa": "supports"},
     )
     assert 'class="cite cite--supports"' in html
+
+
+def test_stance_value_is_escaped_in_class_attribute():
+    text = "Claim [@wang2016]<!-- ev:ev-aaaaaa -->."
+    nums = build_citation_numbering(text, LEDGER)
+    html = render_proposal_with_citations(
+        text, number_by_ev=nums, workspace_id=WID,
+        stance_by_ev={"ev-aaaaaa": 'sup"orts'},  # adversarial stance
+    )
+    assert 'cite--sup"orts' not in html
+    assert "cite--sup&quot;orts" in html

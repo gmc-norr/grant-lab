@@ -10,6 +10,7 @@ import html as _html
 import re
 
 import bleach
+import lxml.etree
 import lxml.html
 import markdown
 
@@ -129,7 +130,7 @@ def _inject_links(
     def _link_html(n: str, ev: str) -> str:
         href = f"/workspaces/{workspace_id}/citations/{ev}/reader"
         stance = (stance_by_ev or {}).get(ev)
-        cls = f"cite cite--{stance}" if stance else "cite"
+        cls = f"cite cite--{_html.escape(stance)}" if stance else "cite"
         return f'<a class="{cls}" href="{_html.escape(href)}">[{n}]</a>'
 
     def _expand(text: str | None) -> str | None:
@@ -159,7 +160,7 @@ def _inject_links(
                 parent.insert(idx + 1 + i, child)
 
     return (root.text or "") + "".join(
-        lxml.html.tostring(c, encoding="unicode") for c in root
+        lxml.etree.tostring(c, encoding="unicode") for c in root
     )
 
 
