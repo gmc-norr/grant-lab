@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -60,8 +61,14 @@ _VIEW_PARTIAL = "proposal_assist/partials/section_view.html"
 _EDIT_PARTIAL = "proposal_assist/partials/section_edit.html"
 
 
-def _read_sections(request: Request, workspace_id: uuid.UUID) -> tuple[str, list[Section]]:
-    """Read the workspace repo's proposal.md and return (raw_text, sections).
+class _ProposalRead(NamedTuple):
+    raw: str
+    head: str
+    sections: list[Section]
+
+
+def _read_sections(request: Request, workspace_id: uuid.UUID) -> _ProposalRead:
+    """Read the workspace repo's proposal.md and return a _ProposalRead NamedTuple.
 
     404 if proposal.md (or the repo itself) doesn't exist yet — same
     user-facing failure as export_markdown's "no proposal.md yet".
@@ -71,12 +78,12 @@ def _read_sections(request: Request, workspace_id: uuid.UUID) -> tuple[str, list
     if not proposal.exists():
         raise HTTPException(status_code=404, detail="no proposal.md yet")
     try:
-        current_head(repo_dir)
+        head = current_head(repo_dir)
     except GitCommitError as e:
         logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
         raise HTTPException(status_code=404, detail="no proposal.md yet") from e
     raw = proposal.read_text()
-    return raw, split_sections(raw)
+    return _ProposalRead(raw=raw, head=head, sections=split_sections(raw))
 
 
 def _section_or_404(sections: list[Section], n: int) -> Section:
@@ -148,9 +155,9 @@ def get_section_view(
         session=session,
     )
     settings = request.app.state.settings
-    raw, sections = _read_sections(request, workspace_id)
-    section = _section_or_404(sections, n)
-    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
+    r = _read_sections(request, workspace_id)
+    section = _section_or_404(r.sections, n)
+    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, r.raw)
     return _view_fragment(
         request,
         ws,
@@ -187,11 +194,9 @@ def get_section_edit(
             detail=TURN_IN_FLIGHT_MESSAGE,
         )
     settings = request.app.state.settings
-    raw, sections = _read_sections(request, workspace_id)
-    section = _section_or_404(sections, n)
-    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw)
-    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-    head = current_head(repo_dir)
+    r = _read_sections(request, workspace_id)
+    section = _section_or_404(r.sections, n)
+    number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, r.raw)
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
@@ -202,7 +207,7 @@ def get_section_edit(
                 **_section_ctx(section, number_by_ev, stance_by_ev, workspace_id),
                 "raw": section.text,
             },
-            "base_commit_sha": head,
+            "base_commit_sha": r.head,
         },
     )
 
@@ -227,7 +232,7 @@ def post_section_save(
     )
     settings = request.app.state.settings
     # Capture pre-save section count so we can detect splits/merges later.
-    _, sections_before = _read_sections(request, workspace_id)  # raw not needed pre-save
+    sections_before = _read_sections(request, workspace_id).sections  # raw not needed pre-save
     n_before = len(sections_before)
     try:
         result = save_section(
@@ -286,7 +291,8 @@ def post_section_save(
 
     # Re-read the committed document so the fragment reflects exactly what
     # was saved (newline glue, extra-heading splits).
-    raw_after, sections_after = _read_sections(request, workspace_id)
+    r = _read_sections(request, workspace_id)
+    raw_after, sections_after = r.raw, r.sections
     n_after = len(sections_after)
     number_by_ev, stance_by_ev = _citation_render_maps_for(settings, workspace_id, raw_after)
 

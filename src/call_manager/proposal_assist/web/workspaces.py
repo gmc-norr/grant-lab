@@ -54,6 +54,7 @@ from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.history import (
@@ -176,7 +177,7 @@ def _citation_render_maps_for(
     """Proposal-wide (ev->number, ev->stance) maps. A missing/corrupt ledger
     yields EMPTY maps so markers render inert and the proposal still renders
     (never raises)."""
-    repo_dir = Path(settings.workspaces_dir) / str(workspace_id) / "repo"
+    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
     citations_path = repo_dir / CITATIONS_FILENAME
     try:
         ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)

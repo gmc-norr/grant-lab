@@ -23,8 +23,8 @@ def test_numbering_is_stable_per_section_render(make_workspace_repo):
 
     raw, rendered, sections = _artifact_sections_and_rendered(settings, wid)
     section_b = next(s for s in sections if s["heading"] == "B")
-    assert "/citations/ev-cccccc/reader\">[1]</a>" in section_b["rendered"]
-    assert "/citations/ev-bbbbbb/reader\">[2]</a>" in section_b["rendered"]
+    assert f'/workspaces/{wid}/citations/ev-cccccc/reader">[1]</a>' in section_b["rendered"]
+    assert f'/workspaces/{wid}/citations/ev-bbbbbb/reader">[2]</a>' in section_b["rendered"]
 
 
 def test_corrupt_ledger_renders_proposal_with_inert_markers(make_workspace_repo):
