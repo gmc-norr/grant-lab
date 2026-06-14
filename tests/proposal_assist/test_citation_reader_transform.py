@@ -1,5 +1,6 @@
 from call_manager.proposal_assist.citations.reader import (
     build_citation_numbering,
+    build_citation_stances,
     evidence_order_for_reference,
 )
 
@@ -39,9 +40,17 @@ def test_evidence_order_for_reference_is_document_order():
     assert evidence_order_for_reference(PROPOSAL, LEDGER, "R2") == ["ev-bbbbbb"]
 
 
-def test_build_citation_stances_maps_ev_to_stance():
-    from call_manager.proposal_assist.citations.reader import build_citation_stances
+def test_evidence_order_dedups_repeated_ev_id():
+    # A duplicated marker id (data anomaly) must appear once, order preserved.
+    text = (
+        "A [@wang2016]<!-- ev:ev-aaaaaa -->. "
+        "B [@wang2016]<!-- ev:ev-cccccc -->. "
+        "Dup [@wang2016]<!-- ev:ev-aaaaaa -->."
+    )
+    assert evidence_order_for_reference(text, LEDGER, "R1") == ["ev-aaaaaa", "ev-cccccc"]
 
+
+def test_build_citation_stances_maps_ev_to_stance():
     led = {
         "version": 2,
         "evidence": [

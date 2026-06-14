@@ -32,12 +32,20 @@ def evidence_order_for_reference(
     proposal_text: str, ledger: dict, reference_id: str
 ) -> list[str]:
     """Ordered (document order) list of live evidence ids whose ledger row cites
-    ``reference_id``. Drives prev/next + 'i of N'."""
+    ``reference_id``. Drives prev/next + 'i of N'.
+
+    Duplicate marker ids (data anomaly) are collapsed to first occurrence so that
+    ``order.index(ev_id)`` is always unambiguous."""
     out: list[str] = []
+    seen: set[str] = set()
     for m in find_markers(proposal_text):
-        row = find_by_id(ledger, m["ev_id"])
+        ev_id = m["ev_id"]
+        if ev_id in seen:
+            continue
+        row = find_by_id(ledger, ev_id)
         if row is not None and str(row.get("reference_id")) == str(reference_id):
-            out.append(m["ev_id"])
+            seen.add(ev_id)
+            out.append(ev_id)
     return out
 
 
