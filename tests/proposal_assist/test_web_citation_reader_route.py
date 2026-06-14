@@ -7,6 +7,7 @@ tombstoned, text_status!=done, missing-data), 404 only for unknown evidence_id.
 from __future__ import annotations
 
 import uuid as _uuid
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -248,3 +249,77 @@ def test_reference_text_is_html_escaped(reader_env):
     r = client.get(f"/workspaces/{wid}/citations/{ev}/reader")
     assert r.status_code == 200
     assert "<script>alert" not in r.text and "&lt;script&gt;" in r.text
+
+
+def test_corrupt_ledger_returns_degraded_200(reader_env):
+    """A corrupt citations.json must yield a 200 degraded fragment, not a 500."""
+    client, wid, ev = reader_env(locatable=True)
+    # Locate and overwrite the ledger with malformed JSON
+    workspaces_dir = client.app.state.settings.workspaces_dir
+    citations_path = Path(workspaces_dir) / str(wid) / "repo" / CITATIONS_FILENAME
+    citations_path.write_text("{ not json", encoding="utf-8")
+    r = client.get(f"/workspaces/{wid}/citations/{ev}/reader")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+
+
+def test_cross_workspace_reference_boundary(reader_env, pg_session_factory, tmp_path):
+    """A reference belonging to workspace B must not be readable via workspace A's reader."""
+    # Set up workspace A with a normal env (ev_id, wid from reader_env)
+    client, wid_a, ev_id = reader_env(locatable=True)
+
+    # Seed workspace B with a foreign reference containing unique identifying text
+    foreign_unique_text = "FOREIGN_SECRET_CONTENT_XYZ_99999"
+    foreign_ref_id = None
+    with pg_session_factory() as s:
+        owner_b = User(email=f"owner-b-{_uuid.uuid4().hex[:6]}@ki.se")
+        s.add(owner_b)
+        s.flush()
+        ws_b = Workspace(owner_id=owner_b.id, title="Workspace B")
+        s.add(ws_b)
+        s.flush()
+        ref_b = Reference(
+            workspace_id=ws_b.id,
+            kind="paper",
+            source_type="uploaded",
+            filename="foreign.pdf",
+            storage_path=f"{ws_b.id}/references/foreign.pdf",
+            mime_type="application/pdf",
+            citekey="foreign2021",
+            title=foreign_unique_text,
+            text_status="done",
+            metadata_status="approved",
+            tombstoned_at=None,
+        )
+        s.add(ref_b)
+        s.commit()
+        foreign_ref_id = ref_b.id
+
+    # Overwrite workspace A's citations.json so its evidence row points to the
+    # foreign reference id (from workspace B)
+    workspaces_dir = client.app.state.settings.workspaces_dir
+    citations_path = Path(workspaces_dir) / str(wid_a) / "repo" / CITATIONS_FILENAME
+    evidence_quote = "The treatment reduced mortality by 30 percent."
+    row = {
+        "id": ev_id,
+        "citekey": "smith2021",
+        "reference_id": str(foreign_ref_id),  # <-- foreign workspace's ref
+        "locator": {"chunk_index": 0, "section_path": "Introduction"},
+        "source_content_hash": None,
+        "chunk_content_hash": "deadbeef",
+        "evidence_quote": evidence_quote,
+        "evidence_quote_offsets": [0, len(evidence_quote)],
+        "stance": "supports",
+        "confidence": "high",
+        "claim_context": {"text": "Our approach lowers mortality.", "hash": "cafef00d"},
+        "citation_snapshot": "Smith 2021",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    ledger = append_evidence(empty_ledger(), row)
+    citations_path.write_text(dump_ledger(ledger), encoding="utf-8")
+
+    r = client.get(f"/workspaces/{wid_a}/citations/{ev_id}/reader")
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+    assert foreign_unique_text not in r.text

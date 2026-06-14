@@ -263,6 +263,7 @@ def export_composed(
 # ---------------------------------------------------------------------------
 
 _MAX_READER_CHARS = 500_000
+_WINDOW_RADIUS = 4000
 
 
 def _source_line(ref: Reference) -> str:
@@ -277,7 +278,7 @@ def _highlight_whole(text: str) -> str:
     return '<mark id="ev-target">' + _html.escape(text) + "</mark>"
 
 
-def _highlight_window(full_text: str, s: int, e: int, radius: int = 4000) -> str:
+def _highlight_window(full_text: str, s: int, e: int, radius: int = _WINDOW_RADIUS) -> str:
     lo = max(0, s - radius)
     hi = min(len(full_text), e + radius)
     return (
@@ -304,7 +305,10 @@ def _reader_body(
                 "Showing the cited section — couldn't pinpoint the exact sentence "
                 "in the full document."
             )
-        return _html.escape(full_text[: 2 * 4000]), "Couldn't pinpoint the cited sentence."
+        return (
+            _html.escape(full_text[: 2 * _WINDOW_RADIUS]),
+            "Couldn't pinpoint the cited sentence.",
+        )
     s, e = span
     if len(full_text) > _MAX_READER_CHARS:
         return _highlight_window(full_text, s, e), "Showing the cited section of a large document."
