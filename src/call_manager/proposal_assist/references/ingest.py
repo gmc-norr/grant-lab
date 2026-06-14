@@ -100,6 +100,7 @@ def ingest_bytes(
     source_meta: dict | None = None,
     citation_service=None,
     extract_timeout_seconds: float = 30.0,
+    auto_classify_kind: bool = False,
 ) -> IngestResult:
     """Run all phases. Caller is responsible for committing the session
     after Phase 1 (we commit Phase 2 and Phase 3 internally on fresh sessions).
@@ -312,6 +313,8 @@ def ingest_bytes(
                                 ref3.metadata_status = status
                             else:
                                 ref3.metadata_status = "failed"
+                            if auto_classify_kind and classified_kind:
+                                ref3.kind = classified_kind
                             ref3.citekey = generate_citekey(key_source, workspace_id, s3)
                             s3.commit()
                             break

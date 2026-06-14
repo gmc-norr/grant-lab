@@ -894,3 +894,72 @@ def test_phase3_empty_csl_assigns_fallback_citekey(pg_session_factory, tmp_path)
     assert ref.metadata_status == "failed"
     assert ref.citekey is not None
     assert ref.citekey.startswith("ref-")
+
+
+class _Res:
+    def __init__(self, data):
+        self.data = data
+        self.cap_exceeded = False
+        self.cap_scope = None
+
+
+class _Svc:
+    def __init__(self, data):
+        self._data = data
+
+    def complete_json(self, *, workspace_id, op, system, user):
+        return _Res(dict(self._data))
+
+
+def test_auto_classify_overrides_provisional_kind(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+    storage = ReferenceStorage(root=tmp_path)
+    with pg_session_factory() as s:
+        res = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=FakeEmbedder(),
+            workspace_id=wsid,
+            kind="paper",
+            source_type="uploaded",
+            source_uri=None,
+            filename="d.md",
+            mime_type="text/markdown",
+            data=b"# Heading\n\nbody text here",
+            uploaded_by=None,
+            citation_service=_Svc({"title": "Dataset", "_kind": "data"}),
+            auto_classify_kind=True,
+        )
+    with pg_session_factory() as s:
+        assert s.get(Reference, res.reference_id).kind == "data"
+
+
+def test_explicit_kind_not_overwritten(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+    storage = ReferenceStorage(root=tmp_path)
+    with pg_session_factory() as s:
+        res = ingest_bytes(
+            session_factory=pg_session_factory,
+            session=s,
+            storage=storage,
+            embedder=FakeEmbedder(),
+            workspace_id=wsid,
+            kind="prior_proposal",
+            source_type="uploaded",
+            source_uri=None,
+            filename="d.md",
+            mime_type="text/markdown",
+            data=b"# H\n\nbody",
+            uploaded_by=None,
+            citation_service=_Svc({"title": "T", "_kind": "data"}),
+            auto_classify_kind=False,
+        )
+    with pg_session_factory() as s:
+        assert s.get(Reference, res.reference_id).kind == "prior_proposal"
