@@ -26,7 +26,11 @@ def test_enabled_requires_client_credentials(monkeypatch):
 
 
 def test_enabled_with_credentials_ok(monkeypatch):
-    s = _base(monkeypatch, GOOGLE_OIDC_ENABLED="true",
-              GOOGLE_CLIENT_ID="cid", GOOGLE_CLIENT_SECRET="csecret")
+    s = _base(
+        monkeypatch,
+        GOOGLE_OIDC_ENABLED="true",
+        GOOGLE_CLIENT_ID="cid",
+        GOOGLE_CLIENT_SECRET="csecret",
+    )
     assert s.google_oidc_enabled is True
     assert s.google_client_id == "cid"

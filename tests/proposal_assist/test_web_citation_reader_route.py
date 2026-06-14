@@ -243,9 +243,7 @@ def test_reference_text_is_html_escaped(reader_env):
     # the XSS payload in context should be HTML-escaped in the rendered body.
     xss_prefix = "danger <script>alert(1)</script> ok. "
     evidence_quote = "The treatment reduced mortality by 30 percent."
-    client, wid, ev = reader_env(
-        text_txt=f"{xss_prefix}{evidence_quote} More text here."
-    )
+    client, wid, ev = reader_env(text_txt=f"{xss_prefix}{evidence_quote} More text here.")
     r = client.get(f"/workspaces/{wid}/citations/{ev}/reader")
     assert r.status_code == 200
     assert "<script>alert" not in r.text and "&lt;script&gt;" in r.text
@@ -271,6 +269,7 @@ def test_non_uuid_reference_id_returns_degraded_200(reader_env):
     citations_path = Path(workspaces_dir) / str(wid) / "repo" / CITATIONS_FILENAME
     ledger_text = citations_path.read_text(encoding="utf-8")
     import json
+
     ledger = json.loads(ledger_text)
     # Patch the reference_id to a non-UUID string
     for row in ledger["evidence"]:

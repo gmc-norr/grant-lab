@@ -6,8 +6,10 @@ from call_manager.main import create_app
 
 def _env(monkeypatch, pg_url, enabled):
     for k, v in {
-        "DATABASE_URL": pg_url, "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se", "APP_BASE_URL": "http://testserver",
+        "DATABASE_URL": pg_url,
+        "SESSION_SECRET": "test-secret-at-least-16-chars",
+        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
     if enabled:

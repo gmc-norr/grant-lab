@@ -36,7 +36,9 @@ def candidate_user_ids(session) -> list[int]:
             select(distinct(Subscription.user_id))
             .join(User, User.id == Subscription.user_id)
             .where(User.digest_disabled_at.is_(None), User.status == "active")
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
 
 

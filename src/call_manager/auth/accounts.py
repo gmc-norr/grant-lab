@@ -22,8 +22,9 @@ def _by_identity(session: Session, iss: str, sub: str) -> User | None:
     ).scalar_one_or_none()
 
 
-def resolve_google_account(session: Session, *, iss: str, sub: str, email: str,
-                           name: str | None) -> AccountResolution:
+def resolve_google_account(
+    session: Session, *, iss: str, sub: str, email: str, name: str | None
+) -> AccountResolution:
     """1. match (iss,sub); 2. email exists -> collision (never auto-link);
     3. else create a PENDING account. Race-safe via unique-index re-resolution."""
     email = email.strip().lower()
@@ -36,8 +37,9 @@ def resolve_google_account(session: Session, *, iss: str, sub: str, email: str,
     if session.execute(select(User).where(User.email == email)).scalar_one_or_none():
         return AccountResolution("email_collision", None)
 
-    user = User(email=email, name=name, oidc_iss=iss, oidc_sub=sub,
-                is_admin=False, status="pending")
+    user = User(
+        email=email, name=name, oidc_iss=iss, oidc_sub=sub, is_admin=False, status="pending"
+    )
     session.add(user)
     try:
         session.flush()

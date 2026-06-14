@@ -65,13 +65,20 @@ def google_start(
         payload["link_epoch"] = user.session_epoch
 
     url = client.build_authorization_url(
-        redirect_uri=settings.google_redirect_uri, state=state, nonce=nonce,
+        redirect_uri=settings.google_redirect_uri,
+        state=state,
+        nonce=nonce,
         code_challenge=challenge,
     )
     resp = RedirectResponse(url=url, status_code=303)
     resp.set_cookie(
-        _TXN_COOKIE, cipher.make(payload), max_age=_TXN_MAX_AGE, httponly=True,
-        secure=settings.cookie_secure, samesite="lax", path="/auth/google",
+        _TXN_COOKIE,
+        cipher.make(payload),
+        max_age=_TXN_MAX_AGE,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        path="/auth/google",
     )
     return resp
 
@@ -107,7 +114,8 @@ def google_callback(
 
     try:
         token = client.exchange_code(
-            code=code, code_verifier=txn["code_verifier"],
+            code=code,
+            code_verifier=txn["code_verifier"],
             redirect_uri=settings.google_redirect_uri,
         )
         claims = client.validate_id_token(token["id_token"], expected_nonce=txn["nonce"])
@@ -148,9 +156,12 @@ def google_callback(
     target = safe_next(txn.get("next")) or "/"
     resp = _clean(target)
     resp.set_cookie(
-        "session", session_signer.make(user_id=user_id, session_epoch=session_epoch),
-        max_age=settings.session_max_age_seconds, httponly=True,
-        secure=settings.cookie_secure, samesite="lax",
+        "session",
+        session_signer.make(user_id=user_id, session_epoch=session_epoch),
+        max_age=settings.session_max_age_seconds,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
     )
     _logger.info("google sign-in success", extra={"event": "google_signin_success"})
     return resp
@@ -159,16 +170,19 @@ def google_callback(
 @router.get("/auth/pending", response_class=HTMLResponse)
 def auth_pending(request: Request):
     return request.app.state.templates.TemplateResponse(
-        request=request, name="account_pending.html", context={})
+        request=request, name="account_pending.html", context={}
+    )
 
 
 @router.get("/auth/no-access", response_class=HTMLResponse)
 def auth_no_access(request: Request):
     return request.app.state.templates.TemplateResponse(
-        request=request, name="account_no_access.html", context={})
+        request=request, name="account_no_access.html", context={}
+    )
 
 
 @router.get("/auth/error", response_class=HTMLResponse)
 def auth_error(request: Request):
     return request.app.state.templates.TemplateResponse(
-        request=request, name="auth_error.html", context={})
+        request=request, name="auth_error.html", context={}
+    )

@@ -35,8 +35,14 @@ def generate_pkce() -> tuple[str, str]:
 class OIDCClient:
     """Minimal OIDC relying-party client. Discovery-driven, RS256-only."""
 
-    def __init__(self, *, discovery_url: str, client_id: str, client_secret: str,
-                 http_client: httpx.Client | None = None):
+    def __init__(
+        self,
+        *,
+        discovery_url: str,
+        client_id: str,
+        client_secret: str,
+        http_client: httpx.Client | None = None,
+    ):
         self._discovery_url = discovery_url
         self._client_id = client_id
         self._client_secret = client_secret
@@ -68,18 +74,25 @@ class OIDCClient:
 
     def build_authorization_url(self, *, redirect_uri, state, nonce, code_challenge) -> str:
         params = {
-            "response_type": "code", "client_id": self._client_id,
-            "redirect_uri": redirect_uri, "scope": "openid email profile",
-            "state": state, "nonce": nonce,
-            "code_challenge": code_challenge, "code_challenge_method": "S256",
+            "response_type": "code",
+            "client_id": self._client_id,
+            "redirect_uri": redirect_uri,
+            "scope": "openid email profile",
+            "state": state,
+            "nonce": nonce,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
         return self._meta()["authorization_endpoint"] + "?" + urlencode(params)
 
     def exchange_code(self, *, code, code_verifier, redirect_uri) -> dict:
         data = {
-            "grant_type": "authorization_code", "code": code,
-            "redirect_uri": redirect_uri, "client_id": self._client_id,
-            "client_secret": self._client_secret, "code_verifier": code_verifier,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+            "code_verifier": code_verifier,
         }
         try:
             r = self._http.post(self._meta()["token_endpoint"], data=data)

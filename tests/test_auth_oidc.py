@@ -51,9 +51,15 @@ def _make_client(token_response=None, keys=None, alg="RS256"):
 def _claims(**over):
     now = int(time.time())
     base = {
-        "iss": ISS, "aud": AUD, "sub": "1234567890", "email": "p@gmail.com",
-        "email_verified": True, "name": "P", "nonce": "the-nonce",
-        "iat": now, "exp": now + 600,
+        "iss": ISS,
+        "aud": AUD,
+        "sub": "1234567890",
+        "email": "p@gmail.com",
+        "email_verified": True,
+        "name": "P",
+        "nonce": "the-nonce",
+        "iat": now,
+        "exp": now + 600,
     }
     base.update(over)
     return base
@@ -67,7 +73,8 @@ def test_pkce_and_token():
 
 def test_authorization_url():
     url = _make_client().build_authorization_url(
-        redirect_uri="https://app/cb", state="st", nonce="no", code_challenge="cc")
+        redirect_uri="https://app/cb", state="st", nonce="no", code_challenge="cc"
+    )
     assert "code_challenge=cc" in url and "code_challenge_method=S256" in url
     assert "state=st" in url and "nonce=no" in url and "scope=openid" in url
 
@@ -79,10 +86,16 @@ def test_happy_path():
     assert claims["sub"] == "1234567890" and claims["email_verified"] is True
 
 
-@pytest.mark.parametrize("over", [
-    {"iss": "https://evil"}, {"aud": "other"}, {"exp": int(time.time()) - 10},
-    {"nonce": "wrong"}, {"email_verified": False},
-])
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"iss": "https://evil"},
+        {"aud": "other"},
+        {"exp": int(time.time()) - 10},
+        {"nonce": "wrong"},
+        {"email_verified": False},
+    ],
+)
 def test_rejects_bad_claims(over):
     client = _make_client()
     with pytest.raises(IdTokenInvalid):
@@ -101,7 +114,8 @@ def test_rejects_missing_essential_claim(missing):
 def test_array_aud_with_matching_azp_ok():
     client = _make_client()
     claims = client.validate_id_token(
-        _id_token(_claims(aud=[AUD, "x"], azp=AUD)), expected_nonce="the-nonce")
+        _id_token(_claims(aud=[AUD, "x"], azp=AUD)), expected_nonce="the-nonce"
+    )
     assert claims["sub"] == "1234567890"
 
 
@@ -109,7 +123,8 @@ def test_array_aud_without_our_id_rejected():
     client = _make_client()
     with pytest.raises(IdTokenInvalid):
         client.validate_id_token(
-            _id_token(_claims(aud=["a", "b"], azp="a")), expected_nonce="the-nonce")
+            _id_token(_claims(aud=["a", "b"], azp="a")), expected_nonce="the-nonce"
+        )
 
 
 def test_unknown_kid_triggers_jwks_refetch():

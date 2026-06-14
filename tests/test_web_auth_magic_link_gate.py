@@ -9,8 +9,10 @@ from call_manager.main import create_app
 
 def _setup(monkeypatch, pg_url):
     for k, v in {
-        "DATABASE_URL": pg_url, "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se", "APP_BASE_URL": "http://testserver",
+        "DATABASE_URL": pg_url,
+        "SESSION_SECRET": "test-secret-at-least-16-chars",
+        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
     app = create_app()
@@ -30,6 +32,7 @@ def test_unknown_email_creates_no_user_no_token(monkeypatch, pg_url, pg_session_
 
 def test_disabled_after_issue_cannot_consume(monkeypatch, pg_url, pg_session_factory):
     from call_manager.auth.tokens import issue_token
+
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(email="real@ki.se", status="active")
@@ -42,7 +45,11 @@ def test_disabled_after_issue_cannot_consume(monkeypatch, pg_url, pg_session_fac
         s.get(User, uid).status = "disabled"
         s.commit()
     with TestClient(app) as c:
-        r = c.post("/login/verify", data={"token": raw},
-                   headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.post(
+            "/login/verify",
+            data={"token": raw},
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.status_code == 303 and r.headers["location"] == "/auth/no-access"
         assert "session=" not in "".join(h for h in r.headers.get_list("set-cookie"))

@@ -991,8 +991,12 @@ def test_reload_renders_connector_for_active_running_job(
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
-            status="running", queued_at=datetime.now(UTC), started_at=datetime.now(UTC),
+            workspace_id=ws.id,
+            user_turn_id=ut.id,
+            submitted_by_user_id=current_user.id,
+            status="running",
+            queued_at=datetime.now(UTC),
+            started_at=datetime.now(UTC),
         )
         s.add(job)
         make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "partial"})
@@ -1030,8 +1034,11 @@ def test_reload_connector_for_queued_job_shows_cancel(
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=current_user.id,
-            status="queued", queued_at=datetime.now(UTC),
+            workspace_id=ws.id,
+            user_turn_id=ut.id,
+            submitted_by_user_id=current_user.id,
+            status="queued",
+            queued_at=datetime.now(UTC),
         )
         s.add(job)
         s.commit()
@@ -1056,7 +1063,7 @@ def test_reload_no_connector_when_no_active_job(
 
     body = client_authed_owner.get(f"/workspaces/{wsid}").content.decode()
     assert "sse-mount-" not in body
-    assert 'data-workspace-id' in body
+    assert "data-workspace-id" in body
 
 
 def test_reload_connector_no_cancel_for_viewer(
@@ -1077,8 +1084,11 @@ def test_reload_connector_no_cancel_for_viewer(
         s.add(ut)
         s.flush()
         job = TurnJob(
-            workspace_id=ws.id, user_turn_id=ut.id, submitted_by_user_id=owner.id,
-            status="queued", queued_at=datetime.now(UTC),
+            workspace_id=ws.id,
+            user_turn_id=ut.id,
+            submitted_by_user_id=owner.id,
+            status="queued",
+            queued_at=datetime.now(UTC),
         )
         s.add(job)
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))

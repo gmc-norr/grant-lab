@@ -66,8 +66,9 @@ def test_plain_browser_navigation_still_gets_html_error_page(  # noqa: E501
     client.__enter__()
     try:
         client.cookies.set("session", app.state.session_signer.make(user_id=uid))
-        resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"},
-                           headers={"Accept": "text/html"})  # no HX-Request
+        resp = client.post(
+            f"/workspaces/{wsid}/turns", data={"content": "hi"}, headers={"Accept": "text/html"}
+        )  # no HX-Request
     finally:
         client.__exit__(None, None, None)
 

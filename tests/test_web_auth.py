@@ -299,9 +299,7 @@ def test_untrusted_proxy_ignores_x_forwarded_for(monkeypatch, pg_url, pg_session
     assert "9.9.9.9" not in app.state.ip_limiter._events
 
 
-def test_get_verify_renders_interstitial_without_consuming(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_get_verify_renders_interstitial_without_consuming(monkeypatch, pg_url, pg_session_factory):
     """GET /login/verify renders the confirm page and does NOT consume the
     token — a mail-scanner pre-fetch must leave it valid for the human."""
     app, _ = _mk_app(monkeypatch, pg_url)
@@ -333,9 +331,7 @@ def test_get_verify_renders_with_unknown_token(monkeypatch, pg_url):
     assert "confirm sign-in" in r.text.lower()
 
 
-def test_post_verify_consumes_and_redirects_to_next(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_verify_consumes_and_redirects_to_next(monkeypatch, pg_url, pg_session_factory):
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="alice@ki.se")
@@ -355,9 +351,7 @@ def test_post_verify_consumes_and_redirects_to_next(
     assert "session" in r.cookies
 
 
-def test_post_verify_unsafe_next_falls_back_to_root(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_verify_unsafe_next_falls_back_to_root(monkeypatch, pg_url, pg_session_factory):
     app, _ = _mk_app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="alice@ki.se")
@@ -376,9 +370,7 @@ def test_post_verify_unsafe_next_falls_back_to_root(
     assert r.headers["location"] == "/"
 
 
-def test_post_verify_succeeds_under_origin_csrf_check(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_post_verify_succeeds_under_origin_csrf_check(monkeypatch, pg_url, pg_session_factory):
     """The real interstitial POST carries same-origin Origin/Referer; the
     CSRF middleware must allow it. Regression guard against reintroducing
     no-referrer / Origin: null on the verify response."""
@@ -441,9 +433,7 @@ def test_json_401_unaffected_by_next(monkeypatch, pg_url):
     assert r.headers["content-type"].startswith("application/json")
 
 
-def test_next_threaded_end_to_end_with_nested_query(
-    monkeypatch, pg_url, pg_session_factory
-):
+def test_next_threaded_end_to_end_with_nested_query(monkeypatch, pg_url, pg_session_factory):
     """Full digest journey, exercising BOTH browser handoffs that carry
     next: GET /login?next renders the hidden field; the user submits the
     value FROM that form; the emailed magic-link GET renders the hidden
@@ -471,9 +461,7 @@ def test_next_threaded_end_to_end_with_nested_query(
 
         # 2. Submit the email WITH the next value read from the rendered form.
         client.post("/login", data={"email": "alice@ki.se", "next": hidden(g.text, "next")})
-        verify_url = re.search(
-            r"(/login/verify\?\S+)", sender.sent[-1].text_body
-        ).group(1)
+        verify_url = re.search(r"(/login/verify\?\S+)", sender.sent[-1].text_body).group(1)
 
         # 3. Browser GETs the emailed link → interstitial renders hidden
         #    token + next (no consume).

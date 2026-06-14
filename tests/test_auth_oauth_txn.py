@@ -8,7 +8,10 @@ def test_round_trip():
     c = TransactionCipher(secret="x" * 32)
     token = c.make({"state": "s", "nonce": "n", "code_verifier": "v", "next": "/x"})
     assert c.read(token, max_age_seconds=600) == {
-        "state": "s", "nonce": "n", "code_verifier": "v", "next": "/x",
+        "state": "s",
+        "nonce": "n",
+        "code_verifier": "v",
+        "next": "/x",
     }
 
 

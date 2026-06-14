@@ -26,6 +26,7 @@ class FakeOIDC:
 
     def exchange_code(self, *, code, code_verifier, redirect_uri):
         from call_manager.auth.oidc import OIDCError
+
         if self.fail_exchange or code not in self._codes:
             raise OIDCError("bad code")
         return {
@@ -36,6 +37,7 @@ class FakeOIDC:
 
     def validate_id_token(self, id_token, *, expected_nonce):
         from call_manager.auth.oidc import IdTokenInvalid
+
         claims = jwt.decode(id_token, {"keys": [_KEY.as_dict(is_private=False)]})
         claims.validate()
         if claims.get("nonce") != expected_nonce:
@@ -47,9 +49,13 @@ class FakeOIDC:
 
 def _setup(monkeypatch, pg_url):
     for k, v in {
-        "DATABASE_URL": pg_url, "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se", "APP_BASE_URL": "http://testserver",
-        "GOOGLE_OIDC_ENABLED": "true", "GOOGLE_CLIENT_ID": AUD, "GOOGLE_CLIENT_SECRET": "secret",
+        "DATABASE_URL": pg_url,
+        "SESSION_SECRET": "test-secret-at-least-16-chars",
+        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "APP_BASE_URL": "http://testserver",
+        "GOOGLE_OIDC_ENABLED": "true",
+        "GOOGLE_CLIENT_ID": AUD,
+        "GOOGLE_CLIENT_SECRET": "secret",
     }.items():
         monkeypatch.setenv(k, v)
     app = create_app()
@@ -60,8 +66,16 @@ def _setup(monkeypatch, pg_url):
 
 def _claims(**over):
     now = int(time.time())
-    base = {"iss": ISS, "aud": AUD, "sub": "g-1", "email": "new@gmail.com",
-            "email_verified": True, "name": "New", "iat": now, "exp": now + 600}
+    base = {
+        "iss": ISS,
+        "aud": AUD,
+        "sub": "g-1",
+        "email": "new@gmail.com",
+        "email_verified": True,
+        "name": "New",
+        "iat": now,
+        "exp": now + 600,
+    }
     base.update(over)
     return base
 
@@ -85,8 +99,11 @@ def test_callback_new_user_pending(monkeypatch, pg_url, pg_session_factory):
     with TestClient(app) as c:
         state, nonce = _start(c)
         fake.set_code("C", _claims(nonce=nonce))
-        r = c.get(f"/auth/google/callback?code=C&state={state}",
-                  headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.get(
+            f"/auth/google/callback?code=C&state={state}",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.status_code == 303 and r.headers["location"] == "/auth/pending"
         assert r.headers.get("referrer-policy") == "no-referrer"
         assert "oauth_txn=" in "".join(r.headers.get_list("set-cookie"))  # cleared
@@ -102,8 +119,11 @@ def test_callback_active_user_gets_session(monkeypatch, pg_url, pg_session_facto
     with TestClient(app) as c:
         state, nonce = _start(c)
         fake.set_code("C2", _claims(sub="g-2", email="ok@ki.se", nonce=nonce))
-        r = c.get(f"/auth/google/callback?code=C2&state={state}",
-                  headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.get(
+            f"/auth/google/callback?code=C2&state={state}",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.status_code == 303 and r.headers["location"] == "/"
         assert "session=" in "".join(r.headers.get_list("set-cookie"))
 
@@ -116,8 +136,11 @@ def test_callback_disabled_user_no_access(monkeypatch, pg_url, pg_session_factor
     with TestClient(app) as c:
         state, nonce = _start(c)
         fake.set_code("C9", _claims(sub="g-9", email="no@ki.se", nonce=nonce))
-        r = c.get(f"/auth/google/callback?code=C9&state={state}",
-                  headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.get(
+            f"/auth/google/callback?code=C9&state={state}",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.headers["location"] == "/auth/no-access"
 
 
@@ -129,8 +152,11 @@ def test_callback_email_collision_error(monkeypatch, pg_url, pg_session_factory)
     with TestClient(app) as c:
         state, nonce = _start(c)
         fake.set_code("C3", _claims(sub="g-3", email="dupe@ki.se", nonce=nonce))
-        r = c.get(f"/auth/google/callback?code=C3&state={state}",
-                  headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.get(
+            f"/auth/google/callback?code=C3&state={state}",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.headers["location"] == "/auth/error"
 
 
@@ -138,8 +164,11 @@ def test_callback_state_mismatch_error(monkeypatch, pg_url, pg_session_factory):
     app, _ = _setup(monkeypatch, pg_url)
     with TestClient(app) as c:
         _start(c)
-        r = c.get("/auth/google/callback?code=X&state=WRONG",
-                  headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.get(
+            "/auth/google/callback?code=X&state=WRONG",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.headers["location"] == "/auth/error"
         assert r.headers.get("referrer-policy") == "no-referrer"
 
@@ -148,8 +177,9 @@ def test_callback_provider_error_param(monkeypatch, pg_url, pg_session_factory):
     app, _ = _setup(monkeypatch, pg_url)
     with TestClient(app) as c:
         state, _ = _start(c)
-        r = c.get(f"/auth/google/callback?error=access_denied&state={state}",
-                  follow_redirects=False)
+        r = c.get(
+            f"/auth/google/callback?error=access_denied&state={state}", follow_redirects=False
+        )
         assert r.headers["location"] == "/auth/error"
 
 
@@ -180,8 +210,10 @@ def test_callback_email_unverified_error(monkeypatch, pg_url, pg_session_factory
 
 def test_routes_404_when_disabled(monkeypatch, pg_url, pg_session_factory):
     for k, v in {
-        "DATABASE_URL": pg_url, "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se", "APP_BASE_URL": "http://testserver",
+        "DATABASE_URL": pg_url,
+        "SESSION_SECRET": "test-secret-at-least-16-chars",
+        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
     app = create_app()
@@ -202,8 +234,11 @@ def test_connect_google_links_active_user(monkeypatch, pg_url, pg_session_factor
         start = c.post("/auth/google/start", data={"link": "1"}, follow_redirects=False)
         q = parse_qs(urlparse(start.headers["location"]).query)
         fake.set_code("LC", _claims(sub="g-link", email="whatever@gmail.com", nonce=q["nonce"][0]))
-        r = c.get(f"/auth/google/callback?code=LC&state={q['state'][0]}",
-                  headers={"accept": "text/html"}, follow_redirects=False)
+        r = c.get(
+            f"/auth/google/callback?code=LC&state={q['state'][0]}",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
         assert r.headers["location"] == "/me"
     with pg_session_factory() as s:
         assert s.get(User, uid).oidc_sub == "g-link"
