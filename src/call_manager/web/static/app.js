@@ -53,6 +53,136 @@
       toggleKind();
     }
   });
+
+  // ---- Reference drop zone (batch PDF upload) -------------------------
+
+  function filterPdfs(files, caps) {
+    var accepted = [], rejected = [];
+    var total = 0;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name || "");
+      if (isPdf) { accepted.push(f); total += f.size || 0; } else { rejected.push(f); }
+    }
+    if (accepted.length > caps.maxFiles)
+      return { accepted: [], rejected: rejected, error: "Too many files (max " + caps.maxFiles + " per drop)." };
+    if (total > caps.maxBytes)
+      return { accepted: [], rejected: rejected, error: "Batch too large (max " + caps.maxBytes + " bytes)." };
+    return { accepted: accepted, rejected: rejected, error: null };
+  }
+
+  // Drives files through queued->processing->done/failed with <=concurrency in
+  // flight. uploadOne(file,row)->Promise<statusCode>; 429 requeues the SAME row
+  // after backoff. Returns a Promise resolving when the queue drains.
+  function runQueue(files, opts) {
+    var concurrency = opts.concurrency || 3;
+    var backoffMs = opts.backoffMs || 2000;
+    // Allow caller to inject a delay function for testing (opts._delay); fall
+    // back to a real setTimeout-based delay, or a zero-tick Promise if
+    // setTimeout is unavailable (e.g. vm unit-test sandboxes).
+    var delay = opts._delay || (typeof setTimeout === "function"
+      ? function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+      : function () { return Promise.resolve(); });
+    var items = [];
+    for (var i = 0; i < files.length; i++) {
+      items.push({ file: files[i], row: opts.makeRow(files[i]) });
+    }
+    var idx = 0, active = 0;
+    return new Promise(function (resolve) {
+      function settle() { if (active === 0 && idx >= items.length) resolve(); }
+      function pump() {
+        while (active < concurrency && idx < items.length) {
+          var item = items[idx++];
+          active++;
+          item.row.set("processing");
+          (function (it) {
+            Promise.resolve(opts.uploadOne(it.file, it.row))
+              .then(function (status) {
+                if (status === 429) {
+                  it.row.set("queued");
+                  delay(backoffMs).then(function () { items.push(it); active--; pump(); settle(); });
+                  return;
+                }
+                active--; pump(); settle();
+              })
+              .catch(function () { it.row.set("failed"); active--; pump(); settle(); });
+          })(item);
+        }
+        settle();
+      }
+      if (!items.length) resolve(); else pump();
+    });
+  }
+
+  if (typeof window !== "undefined")
+    window.__refsDropzone = { filterPdfs: filterPdfs, runQueue: runQueue };
+
+  ready(function () {
+    var zone = document.getElementById && document.getElementById("reference-dropzone");
+    if (!zone) return;
+    var input = document.getElementById("reference-dropzone-input");
+    var list = document.getElementById("reference-list");
+    var postUrl = zone.getAttribute("data-post-url");
+    var caps = {
+      maxFiles: parseInt(zone.getAttribute("data-max-files"), 10) || 25,
+      maxBytes: parseInt(zone.getAttribute("data-max-bytes"), 10) || 209715200,
+    };
+
+    function makeRow(file) {
+      var row = document.createElement("div");
+      row.className = "reference-row reference-pending";
+      if (list) list.insertBefore(row, list.firstChild);
+      return {
+        el: row,
+        set: function (state) {
+          row.className = "reference-row reference-" + state;
+          row.textContent = file.name + " — " + state;
+          if (state === "failed") {
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.textContent = "Retry";
+            btn.addEventListener("click", function () {
+              row.remove();
+              runQueue([file], { concurrency: 1, uploadOne: uploadOne, makeRow: makeRow });
+            });
+            row.appendChild(btn);
+          }
+        },
+      };
+    }
+
+    function uploadOne(file, row) {
+      var fd = new FormData();
+      fd.append("file", file);
+      fd.append("auto_classify", "true");
+      return fetch(postUrl, { method: "POST", body: fd }).then(function (resp) {
+        if (resp.status === 429) return 429;
+        return resp.text().then(function (html) {
+          if (!resp.ok) { row.set("failed"); return resp.status; }
+          row.el.outerHTML = html; // swap placeholder for the real partial
+          return 200;
+        });
+      }).catch(function () { row.set("failed"); return 0; });
+    }
+
+    function handle(fileList) {
+      var res = filterPdfs(Array.prototype.slice.call(fileList || []), caps);
+      if (res.error) { window.alert(res.error); return; }
+      if (res.rejected.length)
+        window.alert("Skipped non-PDF files. Use the upload form below for data files (CSV, XLSX, …).");
+      runQueue(res.accepted, { concurrency: 3, uploadOne: uploadOne, makeRow: makeRow });
+    }
+
+    zone.addEventListener("click", function () { if (input) input.click(); });
+    if (input) input.addEventListener("change", function () { handle(input.files); });
+    zone.addEventListener("dragover", function (e) { e.preventDefault(); zone.classList.add("dragover"); });
+    zone.addEventListener("dragleave", function () { zone.classList.remove("dragover"); });
+    zone.addEventListener("drop", function (e) {
+      e.preventDefault();
+      zone.classList.remove("dragover");
+      handle(e.dataTransfer && e.dataTransfer.files);
+    });
+  });
 })();
 
 // Section-edit + send lock (best-effort; server 409s remain authoritative).
@@ -64,6 +194,13 @@
 // connector's deferred cleanup from re-enabling while a new submit is mid-flight
 // (the connector for it has not mounted yet).
 var pendingComposerRequests = 0;
+// Safety valve: document.body / document.querySelector may be absent in
+// unit-test vm stubs that only need the IIFE-exported helpers
+// (e.g. reference_dropzone.test.js).
+var docBody = document.body || { addEventListener: function () {} };
+function docQS(sel) {
+  return document.querySelector ? document.querySelector(sel) : null;
+}
 
 function setSendBusy(busy) {
   // Give the Send button a visible "working" state (color via .is-working +
@@ -71,7 +208,7 @@ function setSendBusy(busy) {
   // it is obvious the agent is running and a second identical submit can't be
   // fired by accident. Cross-tab stacking is unaffected (a fresh tab has no
   // local connector). The idle label is captured once so it restores exactly.
-  var btn = document.querySelector('#composer button[type="submit"]');
+  var btn = docQS('#composer button[type="submit"]');
   if (!btn) return;
   btn.disabled = busy;
   if (busy) {
@@ -139,13 +276,13 @@ function maybeReenable() {
   // Deferred to a macrotask so DOM mutations (connector add on swap, remove on
   // cleanup) have settled before we read them.
   setTimeout(function () {
-    if (pendingComposerRequests === 0 && !document.querySelector('[id^="sse-mount-"]')) {
+    if (pendingComposerRequests === 0 && !docQS('[id^="sse-mount-"]')) {
       reenable();
     }
   }, 0);
 }
 
-document.body.addEventListener("htmx:beforeRequest", function (evt) {
+docBody.addEventListener("htmx:beforeRequest", function (evt) {
   if (!(evt.detail.elt && evt.detail.elt.id === "composer")) return;
   // Guard against a duplicate/stacked submit from THIS tab while a turn is
   // already in flight (a connector is mounted) or a prior submit has not
@@ -153,14 +290,14 @@ document.body.addEventListener("htmx:beforeRequest", function (evt) {
   // that silently burns a whole agent run. The disabled Send button stops most
   // clicks; this also catches Enter-key submits. Cross-tab stacking is
   // unaffected (a fresh tab has no local connector).
-  if (pendingComposerRequests > 0 || document.querySelector('[id^="sse-mount-"]')) {
+  if (pendingComposerRequests > 0 || docQS('[id^="sse-mount-"]')) {
     evt.preventDefault();
     return;
   }
   pendingComposerRequests++;
   disableSectionEdits();
 });
-document.body.addEventListener("htmx:afterRequest", function (evt) {
+docBody.addEventListener("htmx:afterRequest", function (evt) {
   if (evt.detail.elt && evt.detail.elt.id === "composer") {
     pendingComposerRequests = Math.max(0, pendingComposerRequests - 1);
     // A successful turn submit clears any stale rejection banner from a prior
@@ -181,7 +318,7 @@ document.body.addEventListener("htmx:afterRequest", function (evt) {
 // A2: when an SSE connector ('sse-mount-*') is cleaned up (its job ended and the
 // 'done' delete-child removed it), (1) refetch the artifact pane (idempotent —
 // harmless after an unchanged/failed turn) and (2) attempt the combined re-enable.
-document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
+docBody.addEventListener("htmx:beforeCleanupElement", function (evt) {
   var id = evt.detail.elt && evt.detail.elt.id;
   if (!id || id.indexOf("sse-mount-") !== 0) return;
   var host = document.getElementById("chat-history");
@@ -199,7 +336,7 @@ document.body.addEventListener("htmx:beforeCleanupElement", function (evt) {
 // carry the same row. Suppress duplicates by stable id across BOTH swap paths
 // (the SSE extension's own swap does not fire htmx:beforeSwap, so streamed rows
 // need their own hook).
-document.body.addEventListener("htmx:sseBeforeMessage", function (evt) {
+docBody.addEventListener("htmx:sseBeforeMessage", function (evt) {
   if (!window.cmDedup) return;
   var data = evt.detail && evt.detail.data;
   var id = window.cmDedup.extractChatTurnId(data);
@@ -207,7 +344,7 @@ document.body.addEventListener("htmx:sseBeforeMessage", function (evt) {
     evt.preventDefault(); // already in the DOM — skip this streamed row
   }
 });
-document.body.addEventListener("htmx:beforeSwap", function (evt) {
+docBody.addEventListener("htmx:beforeSwap", function (evt) {
   var target = evt.detail && evt.detail.target;
   if (!target || target.id !== "chat-history") return;
   if (!window.cmDedup) return;
@@ -221,7 +358,7 @@ document.body.addEventListener("htmx:beforeSwap", function (evt) {
 // A2 reconnect-on-render: a connector present on page load means a turn is live,
 // so disable editing until it cleans up (symmetric with the re-enable above).
 function disableSectionEditsIfConnectorPresent() {
-  if (document.querySelector('[id^="sse-mount-"]')) {
+  if (docQS('[id^="sse-mount-"]')) {
     disableSectionEdits();
   }
 }
@@ -254,7 +391,7 @@ if (document.readyState !== "loading") {
 // Surface htmx error responses (4xx/5xx) as an inline notice near the
 // triggering element. FastAPI errors are JSON {"detail": "..."}; HTML error
 // fragments are inserted as text, not markup, to avoid injection.
-document.body.addEventListener("htmx:responseError", function (evt) {
+docBody.addEventListener("htmx:responseError", function (evt) {
   var xhr = evt.detail.xhr;
   var msg = "request failed (" + xhr.status + ")";
   try {
@@ -377,7 +514,7 @@ function trapReaderFocus(evt) {
   }
 }
 
-document.body.addEventListener("click", function (evt) {
+docBody.addEventListener("click", function (evt) {
   var t = evt.target;
   var citeEl = t && t.closest ? t.closest("a.cite") : null;
   var citeUrl = citeEl ? citeReaderUrl(citeEl) : null;
@@ -400,7 +537,7 @@ document.body.addEventListener("click", function (evt) {
   }
 });
 
-document.body.addEventListener("keydown", function (evt) {
+docBody.addEventListener("keydown", function (evt) {
   var drawer = document.getElementById("reference-drawer");
   if (!drawer || drawer.hidden) return;
   if (evt.key === "Escape") {
@@ -410,7 +547,7 @@ document.body.addEventListener("keydown", function (evt) {
   }
 });
 
-document.body.addEventListener("htmx:afterSettle", function (evt) {
+docBody.addEventListener("htmx:afterSettle", function (evt) {
   var swapped = (evt.detail && evt.detail.target) || evt.target;
   if (!swapped || swapped.id !== "reference-drawer") return;
   focusReaderEvidence();
