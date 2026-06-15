@@ -41,14 +41,13 @@ class InMemoryEmailSender:
 
 
 class ConsoleEmailSender:
-    """Local-dev sender: writes the full message to the logger so developers
-    can copy the magic link out of the app's stderr stream.
+    """Local-dev sender: writes the full message (subject + body) to the logger
+    so developers can read outgoing alert/digest mail from the app's stderr.
 
-    SECURITY: never select this in production — it logs the full magic link
-    body, which inside a 15-minute window is equivalent to a session token.
-    `create_app()` only allows it when `cookie_secure=False` (i.e. dev over
-    plain HTTP); a misconfigured prod (https without `RESEND_API_KEY`) must
-    fail to start, not silently log credentials.
+    SECURITY: never select this in production — it logs the full message body to
+    the log aggregator. `create_app()` only allows it when `cookie_secure=False`
+    (i.e. dev over plain HTTP); production falls back to NoOpEmailSender instead,
+    which drops messages without logging their contents.
     """
 
     def send(self, *, to: str, subject: str, text_body: str) -> None:
@@ -75,15 +74,16 @@ class NoOpEmailSender:
 
 @dataclass
 class SMTPEmailSender:
-    """Send magic-link emails via stdlib smtplib (STARTTLS on port 587).
+    """Send plain-text notification emails via stdlib smtplib (STARTTLS on 587).
 
     Mirrors the ResendEmailSender interface (`send(*, to, subject, text_body)`)
     so it can slot into the same email_sender slot in create_app(). Uses the
-    same STARTTLS+login+sendmail flow as email.client.SMTPClient but targets
-    the single-field text-only magic-link path — intentional duplication, v1.
+    same STARTTLS+login+sendmail flow as email.client.SMTPClient but targets the
+    single-field text-only path — intentional duplication, v1. Since magic-link
+    login was removed, this carries best-effort ingestion/digest alerts only.
 
-    SECURITY: only used for magic-link delivery (plain-text body). The digest
-    path uses email.client.SMTPClient which also supports HTML parts.
+    SECURITY: plain-text body only. The digest path uses email.client.SMTPClient
+    which also supports HTML parts.
     """
 
     host: str
@@ -104,9 +104,9 @@ class SMTPEmailSender:
             with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as conn:
                 # Verify the server cert + hostname. A bare starttls() uses
                 # Python's CERT_NONE default, which silently accepts any cert
-                # and leaves the magic link (a 15-min bearer token) open to an
-                # active MITM. create_default_context() enables CERT_REQUIRED
-                # and check_hostname.
+                # and leaves message contents open to an active MITM.
+                # create_default_context() enables CERT_REQUIRED and
+                # check_hostname.
                 ctx = ssl.create_default_context()
                 conn.starttls(context=ctx)
                 if self.user and self.password:

@@ -29,4 +29,9 @@ def test_0049_0050_round_trip(pg_url):
         assert "password_hash" in cols
         assert "magic_link_tokens" not in inspect(eng).get_table_names()
     finally:
+        # Always restore the shared session DB to head — even if an assertion
+        # above fails between the downgrade and the upgrade. A stranded 0048
+        # schema would cascade UndefinedTable errors into every later test that
+        # shares this testcontainer. upgrade-to-head is idempotent at head.
+        command.upgrade(cfg, "head")
         eng.dispose()
