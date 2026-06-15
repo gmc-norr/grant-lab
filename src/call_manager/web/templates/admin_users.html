@@ -16,6 +16,9 @@
             <form method="post" action="/admin/users/{{ u.id }}/role" style="display:inline">
               <input type="hidden" name="role" value="{{ "member" if u.is_admin else "admin" }}" />
               <button type="submit">{{ "Make member" if u.is_admin else "Make admin" }}</button></form>
+            <form method="post" action="/admin/users/{{ u.id }}/reset-password" style="display:inline">
+              <input type="password" name="new_password" placeholder="new password" required>
+              <button type="submit" class="secondary">Reset password</button></form>
           {% elif u.status == "disabled" %}
             <form method="post" action="/admin/users/{{ u.id }}/enable" style="display:inline">
               <button type="submit">Enable</button></form>

@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import require_admin
+from call_manager.auth.passwords import WeakPassword, hash_password
 from call_manager.db.models import (
     Call,
     ChatTurn,
@@ -423,6 +424,7 @@ def approve_user(
     request: Request,
     user_id: int,
     role: str = Form("member"),
+    initial_password: str = Form(default=""),
     admin: User = Depends(require_admin),  # noqa: B008
 ):
     if role not in ("member", "admin"):
@@ -433,6 +435,15 @@ def approve_user(
             raise HTTPException(status_code=404, detail="user not found")
         if u.status != "pending":
             raise HTTPException(status_code=400, detail="user is not pending")
+        # Local (non-OAuth) accounts need an admin-issued password to log in.
+        if u.oidc_sub is None and not initial_password:
+            raise HTTPException(status_code=400, detail="initial password required")
+        if initial_password:
+            try:
+                u.password_hash = hash_password(initial_password)
+            except WeakPassword as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            u.session_epoch = (u.session_epoch or 0) + 1  # credential issued -> revoke prior
         u.status = "active"
         u.is_admin = role == "admin"
         u.approved_by_user_id = admin.id
@@ -502,5 +513,25 @@ def change_role(
         if demoting and _lock_active_admin_count(db) <= 1:
             raise HTTPException(status_code=400, detail="cannot demote the last active admin")
         u.is_admin = role == "admin"
+        db.commit()
+    return RedirectResponse(url="/admin/users", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/reset-password")
+def reset_password(
+    request: Request,
+    user_id: int,
+    new_password: str = Form(...),
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        try:
+            u.password_hash = hash_password(new_password)
+        except WeakPassword as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        u.session_epoch = (u.session_epoch or 0) + 1  # revoke the target's sessions
         db.commit()
     return RedirectResponse(url="/admin/users", status_code=303)
