@@ -81,6 +81,7 @@ async def lifespan(app: FastAPI):
         app.state.session_factory,
         emails=app.state.settings.initial_admin_emails,
         allowed_domains=app.state.settings.allowed_email_domains,
+        password=app.state.settings.initial_admin_password,
     )
 
     # Sweep stranded reference rows from a prior crash: anything in

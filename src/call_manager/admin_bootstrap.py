@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from sqlalchemy.orm import sessionmaker
 
 from call_manager.auth.domain import domain_allowed
+from call_manager.auth.passwords import hash_password
 from call_manager.db.models import User
 
 _logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ def bootstrap_admins(
     session_factory: sessionmaker,
     emails: Iterable[str],
     allowed_domains: list[str],
+    password: str | None = None,
 ) -> None:
     """Promote or create admin users from INITIAL_ADMIN_EMAIL on startup.
 
@@ -48,11 +50,17 @@ def bootstrap_admins(
         for email in valid:
             user = session.query(User).filter_by(email=email).one_or_none()
             if user is None:
-                session.add(User(email=email, is_admin=True, status="active"))
+                user = User(email=email, is_admin=True, status="active")
+                session.add(user)
             else:
                 # Configured admins are the lockout-recovery path: ensure both
                 # admin AND active on every startup. To permanently disable one,
                 # remove them from INITIAL_ADMIN_EMAIL first.
                 user.is_admin = True
                 user.status = "active"
+            if password is not None:
+                # Break-glass: (re)apply the configured password every startup and
+                # bump the epoch so any session under an old password is revoked.
+                user.password_hash = hash_password(password)
+                user.session_epoch = (user.session_epoch or 0) + 1
         session.commit()
