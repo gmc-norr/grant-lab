@@ -57,10 +57,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Attachment, Workspace, WorkspaceViewer
+from call_manager.db.models import Attachment
 from call_manager.db.session import get_db_dependency
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
+from call_manager.proposal_assist.web._perms import (
+    require_member as _require_owner_or_viewer,
+)
+from call_manager.proposal_assist.web._perms import (
+    require_owner as _require_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,49 +111,6 @@ _PIL_FORMAT_TO_MIME = {
 def _session_dep(request: Request):
     factory = request.app.state.session_factory
     yield from get_db_dependency(factory)()
-
-
-def _load_workspace_or_404(workspace_id: uuid.UUID, session: Session) -> Workspace:
-    ws = session.get(Workspace, workspace_id)
-    if ws is None or ws.soft_deleted_at is not None:
-        raise HTTPException(status_code=404, detail="workspace not found")
-    return ws
-
-
-def _require_owner(
-    *,
-    workspace_id: uuid.UUID,
-    user,
-    session: Session,
-) -> Workspace:
-    ws = _load_workspace_or_404(workspace_id, session)
-    if ws.owner_id != user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="only the workspace owner may perform this action",
-        )
-    return ws
-
-
-def _require_owner_or_viewer(
-    *,
-    workspace_id: uuid.UUID,
-    user,
-    session: Session,
-) -> Workspace:
-    ws = _load_workspace_or_404(workspace_id, session)
-    if ws.owner_id == user.id:
-        return ws
-    is_viewer = (
-        session.query(WorkspaceViewer).filter_by(workspace_id=workspace_id, user_id=user.id).first()
-        is not None
-    )
-    if not is_viewer:
-        raise HTTPException(
-            status_code=403,
-            detail="you do not have access to this workspace",
-        )
-    return ws
 
 
 def _storage_for(request: Request) -> AttachmentStorage:

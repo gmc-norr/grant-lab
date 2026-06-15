@@ -17,30 +17,11 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
+from call_manager.db.models import WorkspaceEvent, WorkspaceSetupJob
 from call_manager.db.session import get_db_dependency
+from call_manager.proposal_assist.web._perms import require_owner as _require_owner
 
 router = APIRouter(prefix="/workspaces", tags=["proposal-assist"])
-
-
-def _require_owner(
-    *,
-    workspace_id: uuid.UUID,
-    user,
-    session: Session,
-) -> Workspace:
-    ws = session.get(Workspace, workspace_id)
-    # Mirror the shared _load_workspace_or_404 pattern in workspaces.py /
-    # files.py / references.py: a soft-deleted workspace is treated as
-    # absent so its owner can't keep mutating the rubric after deletion.
-    if ws is None or ws.soft_deleted_at is not None:
-        raise HTTPException(status_code=404, detail="workspace not found")
-    if ws.owner_id != user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="only the workspace owner may view or edit the rubric",
-        )
-    return ws
 
 
 def _session_dep(request: Request):

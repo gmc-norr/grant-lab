@@ -46,10 +46,14 @@ from call_manager.proposal_assist.editing.save import (
 )
 from call_manager.proposal_assist.editing.sectionizer import Section, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.web._perms import (
+    require_member as _require_owner_or_viewer,
+)
+from call_manager.proposal_assist.web._perms import (
+    require_owner as _require_owner,
+)
 from call_manager.proposal_assist.web.workspaces import (
     _citation_render_maps_for,
-    _require_owner,
-    _require_owner_or_viewer,
     _session_dep,
 )
 
