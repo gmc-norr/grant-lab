@@ -71,6 +71,7 @@ class User(Base):
     )
     oidc_iss: Mapped[str | None] = mapped_column(Text, nullable=True)
     oidc_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by_user_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
