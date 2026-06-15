@@ -91,24 +91,6 @@ def test_settings_require_session_secret(monkeypatch):
         Settings()
 
 
-def test_create_app_refuses_to_start_without_resend_key_in_prod(monkeypatch, pg_url):
-    """Security-critical invariant: in production (https URL) with no
-    RESEND_API_KEY set, the app MUST refuse to boot rather than silently
-    falling back to ConsoleEmailSender (which would log magic links to
-    stderr — a 15-minute takeover window for anyone with log access).
-    """
-    from call_manager.main import create_app
-
-    monkeypatch.setenv("DATABASE_URL", pg_url)
-    monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
-    monkeypatch.delenv("RESEND_API_KEY", raising=False)
-
-    with pytest.raises(RuntimeError, match="RESEND_API_KEY"):
-        create_app()
-
-
 def test_admin_dashboard_url_gets_trailing_slash_appended(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")

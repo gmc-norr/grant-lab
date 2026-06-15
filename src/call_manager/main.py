@@ -9,7 +9,12 @@ from fastapi.templating import Jinja2Templates
 
 from call_manager.auth.csrf import OriginCSRFMiddleware
 from call_manager.auth.dependencies import AccountInactive
-from call_manager.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
+from call_manager.auth.email import (
+    ConsoleEmailSender,
+    NoOpEmailSender,
+    ResendEmailSender,
+    SMTPEmailSender,
+)
 from call_manager.auth.oauth_txn import TransactionCipher
 from call_manager.auth.oidc import OIDCClient
 from call_manager.auth.rate_limit import SlidingWindowLimiter
@@ -234,10 +239,11 @@ def create_app() -> FastAPI:
     # - SMTP_HOST set (no RESEND key)     → SMTPEmailSender — accepted production transport
     #   for sites that run their own SMTP relay (e.g. Postfix/SendGrid SMTP).
     # - No key, no SMTP, cookie_secure=False → ConsoleEmailSender (dev over plain HTTP).
-    # - No key, no SMTP, cookie_secure=True  → REFUSE to start. Falling back to
-    #   ConsoleEmailSender in prod would (a) silently break login delivery and
-    #   (b) write the full magic link to stderr/log aggregator — a 15-minute
-    #   takeover window for anyone with log access. Loud failure only.
+    # - No key, no SMTP, cookie_secure=True  → NoOpEmailSender (prod). The email
+    #   sender is now best-effort only (ingestion/digest alerts); login no longer
+    #   depends on it (magic-link auth was removed). We drop alerts silently
+    #   rather than console-log their bodies in prod — ConsoleEmailSender stays
+    #   dev-only because it logs full message contents.
     # Tests override this with InMemoryEmailSender via app.state after creation.
     if settings.resend_api_key:
         email_sender = ResendEmailSender(
@@ -252,13 +258,12 @@ def create_app() -> FastAPI:
             from_address=settings.email_from,
         )
     elif not settings.cookie_secure:
-        email_sender = ConsoleEmailSender()
+        email_sender = ConsoleEmailSender()  # dev over plain HTTP
     else:
-        raise RuntimeError(
-            "RESEND_API_KEY or SMTP_HOST is required when APP_BASE_URL is https://. "
-            "Refusing to fall back to ConsoleEmailSender in production "
-            "(would log magic links to stderr — see auth/email.py)."
-        )
+        # Prod with no transport: drop best-effort alerts rather than refuse to
+        # start or console-log alert bodies. (Magic-link login — the original
+        # reason for the hard requirement — has been removed.)
+        email_sender = NoOpEmailSender()
 
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)

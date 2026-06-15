@@ -64,6 +64,16 @@ class ConsoleEmailSender:
 
 
 @dataclass
+class NoOpEmailSender:
+    """Drops messages without delivering OR logging their contents. Production
+    fallback when no transport is configured: best-effort ingestion alerts are
+    discarded rather than console-logged (alert bodies include error details)."""
+
+    def send(self, *, to: str, subject: str, text_body: str) -> None:
+        _logger.info("email dropped (no transport configured)", extra={"event": "email_dropped"})
+
+
+@dataclass
 class SMTPEmailSender:
     """Send magic-link emails via stdlib smtplib (STARTTLS on port 587).
 

@@ -1,8 +1,11 @@
 """Tests for create_app() email-sender startup selection logic."""
 
-import pytest
-
-from call_manager.auth.email import ConsoleEmailSender, ResendEmailSender, SMTPEmailSender
+from call_manager.auth.email import (
+    ConsoleEmailSender,
+    NoOpEmailSender,
+    ResendEmailSender,
+    SMTPEmailSender,
+)
 from call_manager.main import create_app
 
 
@@ -45,12 +48,15 @@ def test_no_email_creds_http_selects_console_email_sender(monkeypatch, pg_url):
     app.state.engine.dispose()
 
 
-def test_no_email_creds_https_raises_runtime_error(monkeypatch, pg_url):
-    """No RESEND key, no SMTP, https → RuntimeError (refuse to log magic links)."""
+def test_no_email_creds_https_selects_noop_email_sender(monkeypatch, pg_url):
+    """No RESEND key, no SMTP, https → NoOpEmailSender. The email sender is now
+    best-effort only (magic-link login was removed), so prod no longer refuses to
+    start; it drops alerts silently instead of console-logging their bodies."""
     _set_min_env(monkeypatch, pg_url)
     monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
-    with pytest.raises(RuntimeError, match="RESEND_API_KEY or SMTP_HOST"):
-        create_app()
+    app = create_app()
+    assert isinstance(app.state.email_sender, NoOpEmailSender)
+    app.state.engine.dispose()
 
 
 def test_create_app_exposes_citation_service(monkeypatch, pg_url):

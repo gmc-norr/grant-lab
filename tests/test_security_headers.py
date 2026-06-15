@@ -65,14 +65,15 @@ def test_oversized_body_rejected_with_413(migrated_engine, pg_url, monkeypatch):
 
 
 def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):
-    # Depends on pg_session_factory (not just migrated_engine) so its teardown
-    # truncates tables: POST /login auto-provisions a User row, and leaving it
-    # in the shared container DB would collide with other suites.
+    # Probe the body-size cap via POST /login. The login form requires both
+    # email and password; an unknown email returns the same enumeration-safe
+    # 200 page (no row created), so this asserts only that the normal-sized body
+    # was NOT rejected by the size cap. (pg_session_factory kept for DB setup.)
     _set_http_env(monkeypatch, pg_url)
     monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "1000000")
     app = create_app()
     with TestClient(app) as client:
-        r = client.post("/login", data={"email": "bodycap-probe@ki.se"})
+        r = client.post("/login", data={"email": "bodycap-probe@ki.se", "password": "x" * 16})
     # Login always returns the same 200 page (enumeration-safe); the point is
     # it was NOT rejected by the size cap.
     assert r.status_code == 200

@@ -59,10 +59,16 @@ def test_trusted_proxy_reads_x_forwarded_for(monkeypatch, pg_url, pg_session_fac
     app.state.ip_limiter = SlidingWindowLimiter(max_requests=1, window_seconds=60)
 
     with TestClient(app) as client:
-        client.post("/login", data={"email": "a@ki.se", "password": _PW},
-                    headers={"X-Forwarded-For": "1.1.1.1"})
-        client.post("/login", data={"email": "b@ki.se", "password": _PW},
-                    headers={"X-Forwarded-For": "2.2.2.2"})
+        client.post(
+            "/login",
+            data={"email": "a@ki.se", "password": _PW},
+            headers={"X-Forwarded-For": "1.1.1.1"},
+        )
+        client.post(
+            "/login",
+            data={"email": "b@ki.se", "password": _PW},
+            headers={"X-Forwarded-For": "2.2.2.2"},
+        )
 
     assert "1.1.1.1" in app.state.ip_limiter._events
     assert "2.2.2.2" in app.state.ip_limiter._events
