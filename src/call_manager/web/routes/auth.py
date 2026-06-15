@@ -3,17 +3,14 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Cookie, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 
-from call_manager.auth.domain import domain_allowed
-from call_manager.auth.email import EmailSendFailed
+from call_manager.auth.passwords import verify_password
 from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import InvalidSession
-from call_manager.auth.tokens import InvalidToken, consume_token, issue_token
 from call_manager.db.models import User
 
 _logger = logging.getLogger(__name__)
@@ -84,6 +81,7 @@ def login_form(request: Request, next: str | None = None):
             "next_path": safe_next(next),
             "allowed_domains": settings.allowed_email_domains,
             "google_oidc_enabled": settings.google_oidc_enabled,
+            "error": None,
         },
     )
 
@@ -92,219 +90,70 @@ def login_form(request: Request, next: str | None = None):
 def login_submit(
     request: Request,
     email: str = Form(...),
+    password: str = Form(...),
     next: str | None = Form(default=None),
 ):
     settings = request.app.state.settings
     email_limiter = request.app.state.email_limiter
     ip_limiter = request.app.state.ip_limiter
-    email_sender = request.app.state.email_sender
     session_factory = request.app.state.session_factory
-
-    # Validate `next` once. It rides into the magic-link URL and the
-    # "Back to sign in" link on the check-your-email page. It NEVER
-    # influences any allow/deny/rate-limit branch below, so the response
-    # stays byte-identical across branches (enumeration-resistance intact).
+    session_signer = request.app.state.session_signer
     safe = safe_next(next)
-    back_href = "/login"
-    if safe:
-        back_href = "/login?" + urlencode({"next": safe})
 
-    # Always show the same page. Never leak rate-limit/allowlist/shape state.
-    response = request.app.state.templates.TemplateResponse(
-        request=request, name="login_sent.html", context={"back_href": back_href}
-    )
-
-    # 1. Length cap BEFORE anything that keys off the email. Prevents an
-    #    unbounded email field from growing the rate-limiter dict.
-    if len(email) > MAX_EMAIL_LEN:
-        _logger.info(
-            "login rejected: email too long",
-            extra={"event": "login_rejected_oversized"},
+    def _denied() -> HTMLResponse:
+        # One generic message for unknown email / wrong password / no-credential /
+        # rate-limited. Status 200 so the global 401->/login handler can't loop.
+        return request.app.state.templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={
+                "next_path": safe,
+                "allowed_domains": settings.allowed_email_domains,
+                "google_oidc_enabled": settings.google_oidc_enabled,
+                "error": "Invalid email or password.",
+            },
         )
-        return response
 
+    if len(email) > MAX_EMAIL_LEN:
+        return _denied()
     email_normalized = email.strip().lower()
-    client_ip = _client_ip(request)
     email_fp = _email_fingerprint(email_normalized)
 
-    _logger.info(
-        "login requested",
-        extra={"event": "login_requested", "email_fp": email_fp, "ip": client_ip},
-    )
-
-    if not ip_limiter.allow(client_ip):
+    if not ip_limiter.allow(_client_ip(request)) or not email_limiter.allow(email_normalized):
         _logger.info(
-            "login rate-limited by IP",
-            extra={"event": "login_rate_limited_ip", "ip": client_ip},
+            "login rate-limited",
+            extra={"event": "login_rate_limited", "email_fp": email_fp},
         )
-        return response
-    # Domain check BEFORE the per-email limiter. Consuming the per-email
-    # bucket for an address that will never receive mail (disallowed domain)
-    # lets an attacker lock out any *known* allowed email by spamming it
-    # — a targeted account-lockout DoS. Only emails that resolve to a real,
-    # mail-eligible user should spend a per-email token. The IP limiter
-    # above still caps every request regardless of domain.
-    #
-    # The response is identical on every branch (the shared `response`
-    # object), so reordering does NOT change what the client observes —
-    # the enumeration-resistance contract is preserved.
-    if not domain_allowed(email_normalized, settings.allowed_email_domains):
-        _logger.info(
-            "login rejected: domain not allowed",
-            extra={"event": "login_domain_rejected", "email_fp": email_fp},
-        )
-        return response
-    if not email_limiter.allow(email_normalized):
-        _logger.info(
-            "login rate-limited by email",
-            extra={"event": "login_rate_limited_email", "email_fp": email_fp},
-        )
-        return response
+        return _denied()
 
     with session_factory() as session:
         user = session.execute(
             select(User).where(User.email == email_normalized)
         ).scalar_one_or_none()
-        # Magic-link is login-only: never auto-provision. Only issue a token for
-        # an existing ACTIVE account. The response body is identical on every
-        # branch (enumeration-resistant *body*); note the timing residual risk
-        # documented in the spec — bounded by the per-email/per-IP limiters.
-        if user is None or user.status != "active":
-            _logger.info(
-                "login skipped: no active account",
-                extra={"event": "login_no_active_account", "email_fp": email_fp},
-            )
-            return response
-        raw = issue_token(session, user_id=user.id, ttl_minutes=15)
-        session.commit()
-
-    params = {"token": raw}
-    if safe:
-        params["next"] = safe
-    link = f"{settings.app_base_url.rstrip('/')}/login/verify?{urlencode(params)}"
-    try:
-        email_sender.send(
-            to=email_normalized,
-            subject="Your Call Manager login link",
-            text_body=f"Click to sign in (valid 15 min):\n\n{link}\n",
-        )
-    except EmailSendFailed:
-        # Log and return the same "check your email" page. Raising would
-        # surface a 500 which (a) leaks that this address was worth sending
-        # to and (b) leaves the user behind the email rate-limit for 15 min.
-        _logger.warning(
-            "email send failed",
-            extra={"event": "login_email_send_failed", "email_fp": email_fp},
-            exc_info=True,
-        )
-        return response
-
-    _logger.info(
-        "login email sent",
-        extra={"event": "login_email_sent", "email_fp": email_fp},
-    )
-    return response
-
-
-@router.get("/login/verify", response_class=HTMLResponse)
-def login_verify_confirm(request: Request, token: str, next: str | None = None):
-    """Render the scanner-proof 'Confirm sign-in' interstitial.
-
-    NO side effects: this does not consume the token. Hospital mail
-    gateways (Safe Links / Proofpoint / Mimecast) pre-fetch URLs with a
-    GET to scan them, so leaving the token untouched here means the human's
-    later POST still works.
-
-    The response OVERRIDES the app-wide `Referrer-Policy: same-origin`
-    (set by SecurityHeadersMiddleware, which leaves a handler's own header
-    alone). The page extends base.html, which loads same-origin /static
-    assets (pico/app CSS+JS, favicon, htmx); under `same-origin` those
-    sub-requests would carry the full verify URL — INCLUDING ?token= — in
-    their Referer. `strict-origin` sends only scheme+host (no path/query),
-    so the token never leaks, while still giving the CSRF check the
-    non-null Origin/Referer it needs for the confirm POST. (`no-referrer`
-    is forbidden: it nulls Origin on form POSTs → 403.)
-    """
-    response = request.app.state.templates.TemplateResponse(
-        request=request,
-        name="login_confirm.html",
-        context={"token": token, "next_path": safe_next(next)},
-    )
-    response.headers["Referrer-Policy"] = "strict-origin"
-    return response
-
-
-@router.post("/login/verify")
-def login_verify_consume(
-    request: Request,
-    token: str = Form(...),
-    next: str | None = Form(default=None),
-):
-    session_factory = request.app.state.session_factory
-    session_signer = request.app.state.session_signer
-    ip_limiter = request.app.state.ip_limiter
-    settings = request.app.state.settings
-
-    # The IP rate-limit lives on the verb that actually consumes the token.
-    client_ip = _client_ip(request)
-    if not ip_limiter.allow(client_ip):
-        _logger.info(
-            "verify rate-limited by IP",
-            extra={"event": "verify_rate_limited_ip", "ip": client_ip},
-        )
-        raise HTTPException(status_code=429, detail="too many requests")
-
-    # Commit consumption in its own transaction so any later failure
-    # (user missing, DB hiccup, code change that raises) cannot roll the
-    # consumption back. Single-use must not depend on what happens after.
-    with session_factory() as session:
-        try:
-            user_id = consume_token(session, token)
-        except InvalidToken:
-            # A human clicked a stale/used interstitial. Show a dedicated
-            # recovery page (HTTP 400, preserving the status semantics)
-            # with an inline new-link form that carries `next` forward.
-            return request.app.state.templates.TemplateResponse(
-                request=request,
-                name="login_link_expired.html",
-                context={
-                    "next_path": safe_next(next),
-                    "allowed_domains": settings.allowed_email_domains,
-                },
-                status_code=400,
-            )
-        session.commit()
-
-    with session_factory() as session:
-        user = session.get(User, user_id)
-        if user is None:
-            raise HTTPException(status_code=400, detail="invalid link")
-        # Re-check status at consume: the account may have been disabled between
-        # the link being mailed and clicked.
+        # verify_password runs argon2 even when user is None / has no hash
+        # (dummy path), so timing doesn't reveal account existence.
+        stored = user.password_hash if user is not None else None
+        if not verify_password(stored, password):
+            _logger.info("login failed", extra={"event": "login_failed", "email_fp": email_fp})
+            return _denied()
         if user.status != "active":
             target = "/auth/pending" if user.status == "pending" else "/auth/no-access"
             return RedirectResponse(url=target, status_code=303)
         user.last_login_at = datetime.now(UTC)
+        user_id = user.id
         session_epoch = user.session_epoch
         session.commit()
 
-    cookie_value = session_signer.make(user_id=user_id, session_epoch=session_epoch)
-    target = safe_next(next) or "/"
-    response = RedirectResponse(url=target, status_code=303)
+    response = RedirectResponse(url=safe or "/", status_code=303)
     response.set_cookie(
         "session",
-        cookie_value,
+        session_signer.make(user_id=user_id, session_epoch=session_epoch),
         max_age=settings.session_max_age_seconds,
         httponly=True,
-        secure=settings.cookie_secure,  # True when APP_BASE_URL is https://
+        secure=settings.cookie_secure,
         samesite="lax",
     )
-    # The POST body carried the single-use token; suppress Referer so the
-    # post-login page can't leak anything to third parties. Safe on this
-    # redirect (the next request is a GET — no CSRF check — so no Origin:
-    # null regression).
-    response.headers["Referrer-Policy"] = "no-referrer"
-    _logger.info("verify success", extra={"event": "verify_success"})
+    _logger.info("login success", extra={"event": "login_success", "email_fp": email_fp})
     return response
 
 
