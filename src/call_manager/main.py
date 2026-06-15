@@ -64,6 +64,7 @@ from call_manager.web.routes import (
     me,
     oauth_google,
     profiles,
+    register,
 )
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
@@ -461,6 +462,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(register.router)
     app.include_router(oauth_google.router)
     app.include_router(me.router)
     app.include_router(calls.router)
