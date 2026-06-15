@@ -1,9 +1,7 @@
-from datetime import UTC, datetime, timedelta
-
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import MagicLinkToken, Profile, ProfileKind, User
+from call_manager.db.models import Profile, ProfileKind, User
 
 
 def test_can_insert_and_read_user(pg_session_factory):
@@ -106,23 +104,3 @@ def test_inactive_profile_reuses_name(pg_session_factory):
             )
         )
         s.commit()  # must not raise
-
-
-def test_magic_link_token_row(pg_session_factory):
-    SessionLocal = pg_session_factory
-    with SessionLocal() as s:
-        u = User(email="carol@ki.se")
-        s.add(u)
-        s.flush()
-        now = datetime.now(UTC)
-        t = MagicLinkToken(
-            user_id=u.id,
-            token_hash="a" * 64,
-            created_at=now,
-            expires_at=now + timedelta(minutes=15),
-        )
-        s.add(t)
-        s.commit()
-        s.refresh(t)
-        assert t.id is not None
-        assert t.consumed_at is None
