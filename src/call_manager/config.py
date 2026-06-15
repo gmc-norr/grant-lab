@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     initial_admin_emails: Annotated[list[str], NoDecode] = Field(
         default_factory=list, alias="INITIAL_ADMIN_EMAIL"
     )
+    initial_admin_password: str | None = Field(default=None, alias="INITIAL_ADMIN_PASSWORD")
     app_base_url: str = Field(alias="APP_BASE_URL")
     google_oidc_enabled: bool = Field(default=False, alias="GOOGLE_OIDC_ENABLED")
     google_client_id: str | None = Field(default=None, alias="GOOGLE_CLIENT_ID")
@@ -400,6 +401,17 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [p.strip().lower() for p in v.split(",") if p.strip()]
         return v
+
+    @field_validator("initial_admin_password", mode="after")
+    @classmethod
+    def _validate_initial_admin_password(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None  # None / whitespace-only -> unset (no trivial credential)
+        if len(v) < 12:
+            raise ValueError(
+                "INITIAL_ADMIN_PASSWORD must be at least 12 characters (or empty/unset)."
+            )
+        return v  # unchanged — surrounding whitespace may be part of the password
 
     @field_validator("allowed_email_domains", mode="after")
     @classmethod
