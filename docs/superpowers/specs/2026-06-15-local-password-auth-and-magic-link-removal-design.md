@@ -52,16 +52,17 @@ signs in with credentials before any other accounts exist. **LDAP is deferred.**
 
 ## Data model changes
 
-One Alembic migration (**`0049`**; head is `0048`):
+**Two** Alembic migrations (head is `0048`), split so each implementation task
+stays green (the test fixture truncates every *model* table, so the table can only
+be dropped once the `MagicLinkToken` model is also gone):
 
-- `users`: **add `password_hash`** `Text`, **nullable** (OAuth2-only accounts and
-  not-yet-approved local requests have none).
-- **Drop the `magic_link_tokens` table**; remove the `MagicLinkToken` model + the
-  `User.magic_link_tokens` relationship.
+- **`0049`** — `users`: **add `password_hash`** `Text`, **nullable** (OAuth2-only
+  accounts and not-yet-approved local requests have none).
+- **`0050`** — **drop the `magic_link_tokens` table** (paired with removing the
+  `MagicLinkToken` model + the `User.magic_link_tokens` relationship). `downgrade()`
+  re-creates it **with the named constraints from `0001`** (`fk_mlt_user_id`,
+  `uq_mlt_token_hash`). A test exercises the down/up round-trip.
 - `status`/`oidc_*`/approval columns unchanged.
-
-`downgrade()` re-creates `magic_link_tokens` (per migration `0001`) and drops
-`password_hash`.
 
 ## Registration (access request)
 
@@ -70,14 +71,18 @@ New `web/routes/register.py`:
 - **`GET /register`** — email (+ optional display name) form; link back to `/login`.
 - **`POST /register`** — rate-limited (per-IP + per-email):
   1. Normalize email; enforce the **domain allowlist** (`domain_allowed`).
-  2. Insert a `pending` account with **no `password_hash`** and no oidc identity.
-     Use **insert-then-catch `IntegrityError`** (mirrors `resolve_google_account`)
-     to stay race-safe against a concurrent local/Google registration.
-  3. On a duplicate email (or the caught `IntegrityError`), return the **same**
-     "request received — pending approval" response and create nothing — and still
-     perform an **argon2 dummy hash** so the duplicate path costs the same as a
-     fresh insert (no existence leak by timing).
-  4. Render the "request received / awaiting approval" page.
+  2. Truncate the optional display name to the `users.name` column width (200).
+  3. **On every eligible attempt** (domain OK, not rate-limited) perform **one
+     argon2 dummy hash** — registration never sets a password, so this is what
+     equalizes timing between a fresh insert and a duplicate (the dummy work must
+     be on *both* paths, not just duplicates).
+  4. Insert a `pending` account with **no `password_hash`** and no oidc identity
+     via **insert-then-catch `IntegrityError`** (mirrors `resolve_google_account`;
+     **no pre-`SELECT`**). On the caught conflict, create nothing.
+  5. Render a **dedicated "request received — pending approval" page**
+     (`register_received.html`) — *not* the sign-in holding page, whose copy
+     ("your sign-in worked") is false for a registration request. The response
+     body is identical for fresh and duplicate requests (no enumeration).
 
 A pending request grants **no access** and holds **no usable credential** until an
 admin approves it and sets a password.
@@ -178,7 +183,11 @@ Delete:
 - **Add** `INITIAL_ADMIN_PASSWORD` (str | None; empty → unset; non-empty < 12 →
   startup error).
 - **Keep** `RESEND_API_KEY`/`SMTP_HOST`/`EMAIL_FROM` (ingestion alerts).
-- **Relax** the create_app email-sender prod requirement (above).
+- **Relax** the create_app email-sender prod requirement: instead of refusing to
+  start, when no `RESEND_API_KEY`/`SMTP_HOST` is configured, use `ConsoleEmailSender`
+  in dev (http) and a **`NoOpEmailSender`** in prod (https) — the latter drops
+  best-effort alerts **without logging recipient/body** (alert bodies include the
+  last ingestion error, so don't console-log them in prod).
 - `.env.example`: document `INITIAL_ADMIN_PASSWORD` (+ "unset after first login").
 
 ## Security
@@ -189,8 +198,9 @@ Delete:
 - **Race-safe registration** — insert-then-catch `IntegrityError`.
 - **Min password length ≥ 12** everywhere (registration-issued, admin set/reset,
   own change, bootstrap).
-- **Revocation** — `session_epoch` bumped on every credential change (own,
-  admin-reset, bootstrap, disable); own-change re-mints the cookie.
+- **Revocation** — `session_epoch` bumped on **every** credential change:
+  approval-issued initial password, admin reset, own change, bootstrap, and
+  disable; own-change re-mints the cookie.
 - **No session-only privilege escalation** — there is no self-set-first-password
   path; OAuth-only accounts get a local password only via admin reset.
 - Cookies / CSRF / security headers / CSP unchanged.
