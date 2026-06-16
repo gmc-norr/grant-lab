@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from call_manager.auth.dependencies import get_current_user
@@ -32,3 +32,18 @@ def get_me(user: User = Depends(get_current_user)):  # noqa: B008
         ),
         capabilities={"admin": user.is_admin},
     )
+
+
+class DefaultProfileIn(BaseModel):
+    profile_id: int | None
+
+
+@router.post("/me/default-profile", status_code=200)
+def set_default(request: Request, body: DefaultProfileIn, user: User = Depends(get_current_user)):  # noqa: B008
+    from call_manager.web.dashboard import set_default_profile
+
+    sf = request.app.state.session_factory
+    with sf() as session:
+        set_default_profile(session, user_id=user.id, profile_id=body.profile_id)
+        session.commit()
+    return {"ok": True}
