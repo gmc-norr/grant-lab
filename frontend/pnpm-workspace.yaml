@@ -1,0 +1,7 @@
+# frontend/pnpm-workspace.yaml — pnpm-native project settings (supply-chain spec §3.1).
+# Cooldown: refuse any version published more recently than ~7 days (minutes).
+# This is the camelCase pnpm setting and MUST live here, not in .npmrc.
+# Requires pnpm >= 10.16.0 (pinned via package.json "packageManager").
+minimumReleaseAge: 10080
+# Exempt nothing yet; add a package here only after review if a hotfix is urgent.
+minimumReleaseAgeExclude: []
