@@ -49,6 +49,7 @@ from call_manager.proposal_assist.web.sections import (
 from call_manager.proposal_assist.web.workspaces import (
     router as workspaces_router,
 )
+from call_manager.web.api import router as api_router
 from call_manager.web.api.errors import api_error, api_request, code_for
 from call_manager.web.filters import (
     criterion_label,
@@ -511,4 +512,5 @@ def create_app() -> FastAPI:
     app.include_router(files_router)
     app.include_router(references_router)
     app.include_router(citations_router)
+    app.include_router(api_router)
     return app
