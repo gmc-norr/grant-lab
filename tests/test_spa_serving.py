@@ -75,17 +75,26 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     assert c.head("/totally-unknown").status_code == 404
     # The internal SPA catch-all must not leak into the OpenAPI schema.
     assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
+    # PROD must keep the STRICT CSP — the relaxed dev policy must NOT leak to
+    # prod. This exercises the prod branch of the
+    # build_csp(dev=settings.spa_mode == "dev") wiring (the security-critical
+    # gate); a regression flipping it would relax script-src/connect-src here.
+    prod_csp = c.get("/app").headers["content-security-policy"]
+    assert "'unsafe-inline'" not in prod_csp.split("script-src")[1].split(";")[0]
+    assert "ws:" not in prod_csp
 
 
 def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):
     _env(monkeypatch, pg_url, SPA_MODE="dev")
     c = TestClient(create_app())
     csp = c.get("/login").headers.get("content-security-policy", "")
-    # Dev must allow Vite's HMR WebSocket (and its inline dev bootstrap); prod must not.
+    # Dev must allow BOTH Vite relaxations: the HMR WebSocket (connect-src ws:)
+    # and the injected inline dev bootstrap (script-src 'unsafe-inline').
     assert "ws:" in csp or "ws://localhost" in csp
+    assert "script-src 'self' 'unsafe-inline'" in csp
 
 
-def test_prod_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_factory):
+def test_disabled_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_factory):
     _env(monkeypatch, pg_url, SPA_MODE="disabled")
     c = TestClient(create_app())
     csp = c.get("/login").headers.get("content-security-policy", "")

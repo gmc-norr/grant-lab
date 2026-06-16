@@ -18,8 +18,12 @@ function spaIndexFallback(): PluginOption {
     configureServer(server) {
       server.middlewares.use((req: Connect.IncomingMessage, res, next) => {
         const url = (req.url ?? "/").split("?")[0];
-        const accepts = (req.headers.accept ?? "").includes("text/html");
-        if (req.method === "GET" && accepts && !isViteAsset(url) && isSpaRoute(url)) {
+        // No Accept gate: prod's _spa_fallback serves the shell for ANY GET to
+        // an SPA-owned route, so dev must too (else GET /app with an explicit
+        // Accept: application/json would 404 in dev but 200 in prod). The
+        // isViteAsset guard still routes /@vite, /src, /node_modules to Vite,
+        // and isSpaRoute still proxies /api/... + unknown paths to uvicorn.
+        if (req.method === "GET" && !isViteAsset(url) && isSpaRoute(url)) {
           const html = readFileSync(resolve(__dirname, "index.html"), "utf-8");
           server.transformIndexHtml(url, html).then((out) => {
             res.setHeader("Content-Type", "text/html");
