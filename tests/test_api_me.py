@@ -26,7 +26,7 @@ def _login(app, pg_session_factory):
     return c, uid
 
 
-def test_me_unauthenticated_is_envelope_401(monkeypatch, pg_url, pg_session_factory):
+def test_me_unauthenticated_is_envelope_401(monkeypatch, pg_url):
     c = TestClient(_app(monkeypatch, pg_url))
     r = c.get("/api/me")
     assert r.status_code == 401
@@ -41,3 +41,19 @@ def test_me_returns_user(monkeypatch, pg_url, pg_session_factory):
     body = r.json()
     assert body["user"]["id"] == uid
     assert body["user"]["email"] == "u@ki.se"
+    assert body["user"]["status"] == "active"
+    assert body["capabilities"] == {"admin": False}
+
+
+def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(status="active", email="admin@ki.se", is_admin=True)
+        s.add(u)
+        s.commit()
+        uid = u.id
+    c = TestClient(app)
+    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+    r = c.get("/api/me")
+    assert r.status_code == 200
+    assert r.json()["capabilities"] == {"admin": True}

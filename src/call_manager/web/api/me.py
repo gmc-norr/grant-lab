@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from call_manager.auth.dependencies import get_current_user
@@ -22,7 +22,7 @@ class MeOut(BaseModel):
 
 
 @router.get("/me", response_model=MeOut)
-def get_me(request: Request, user: User = Depends(get_current_user)):  # noqa: B008
+def get_me(user: User = Depends(get_current_user)):  # noqa: B008
     return MeOut(
         user=UserOut(
             id=user.id,
