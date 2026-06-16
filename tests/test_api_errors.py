@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from call_manager.db.models import Profile, ProfileKind, User
 from call_manager.main import create_app
 
 
@@ -12,6 +13,27 @@ def _app(monkeypatch, pg_url):
     }.items():
         monkeypatch.setenv(k, v)
     return create_app()
+
+
+def _login(app, pg_session_factory):
+    with pg_session_factory() as s:
+        u = User(status="active", email="u@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="Grp",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT.value,
+            level="group",
+            description="d",
+            structured={},
+            created_by=u.id,
+        )
+        s.add(p)
+        s.commit()
+        uid, pid = u.id, p.id
+    c = TestClient(app)
+    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+    return c, uid, pid
 
 
 def test_api_unknown_path_returns_envelope_404(monkeypatch, pg_url, pg_session_factory):
@@ -121,3 +143,30 @@ def test_api_body_too_large_is_envelope(monkeypatch, pg_url, pg_session_factory)
     )
     assert r.status_code == 413
     assert r.json()["error"]["code"] == "payload_too_large"
+
+
+def test_api_validation_error_is_envelope(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, _uid, _pid = _login(app, pg_session_factory)
+    r = c.post(
+        "/api/me/default-profile",
+        headers={"origin": "http://testserver"},
+        json={"profile_id": "abc"},
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["error"]["code"] == "validation_error"
+
+
+def test_api_inactive_account_is_envelope(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(status="pending", email="pending@ki.se")
+        s.add(u)
+        s.commit()
+        uid = u.id
+    c = TestClient(app)
+    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+    r = c.get("/api/me")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "account_inactive"

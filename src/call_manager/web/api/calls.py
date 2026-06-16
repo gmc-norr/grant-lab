@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User
@@ -16,8 +16,11 @@ router = APIRouter()
 class CallOut(BaseModel):
     id: int
     title: str
-    deadline: str | None
-    published_at: str | None
+    # Typed as datetime so the OpenAPI schema emits `format: date-time`.
+    # Pydantic v2 serializes tz-aware datetimes to ISO-8601 (with the +00:00
+    # offset), so the wire value is unchanged from the prior str passthrough.
+    deadline: datetime | None
+    published_at: datetime | None
     source_name: str | None
     source_slug: str | None
     # None = no ranking row for this call/profile (the score itself is NOT NULL).
@@ -41,7 +44,13 @@ class PaginationOut(BaseModel):
 class EffectiveOut(BaseModel):
     source: str | None
     sort: Literal["newest", "deadline"]
-    profile_id: int | None
+    profile_id: int | None = Field(
+        description=(
+            "The RESOLVED profile id, not the requested one. An unknown or "
+            "inactive requested id is degraded to null (no error), so a client "
+            "cannot distinguish a silently-ignored selection from 'no selection'."
+        )
+    )
     show_closed: bool
 
 
@@ -72,10 +81,6 @@ class DashboardOut(BaseModel):
     ranking: RankingOut
     effective: EffectiveOut
     facets: FacetsOut
-
-
-def _iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt is not None else None
 
 
 @router.get("/calls", response_model=DashboardOut)
@@ -109,8 +114,8 @@ def get_calls(
             CallOut(
                 id=call.id,
                 title=call.title,
-                deadline=_iso(call.deadline),
-                published_at=_iso(call.published_at),
+                deadline=call.deadline,
+                published_at=call.published_at,
                 source_name=(call.source.name if call.source else None),
                 source_slug=(call.source.slug if call.source else None),
                 aggregate_score=(ranking.aggregate_score if ranking else None),

@@ -1,7 +1,27 @@
 from __future__ import annotations
 
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from starlette.requests import Request
+
+
+class ApiErrorBody(BaseModel):
+    """OpenAPI SCHEMA mirror of the inner envelope (see ``envelope_dict``).
+
+    Schema-only — the runtime keeps emitting plain dicts via ``envelope_dict``;
+    these models exist solely so the generated OpenAPI documents the real
+    ``{error: {code, message, detail?}}`` shape (Plan 3 TS codegen).
+    """
+
+    code: str
+    message: str
+    detail: object | None = None
+
+
+class ApiError(BaseModel):
+    """OpenAPI SCHEMA mirror of the error envelope (see ``envelope_dict``)."""
+
+    error: ApiErrorBody
 
 
 def envelope_dict(code: str, message: str, detail: object | None = None) -> dict:

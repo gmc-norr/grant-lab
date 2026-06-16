@@ -14,7 +14,9 @@ class AccountInactive(Exception):
         super().__init__(status)
 
 
-def get_current_user(request: Request, session: str | None = Cookie(default=None)) -> User:
+def get_current_user(
+    request: Request, session: str | None = Cookie(default=None, include_in_schema=False)
+) -> User:
     if session is None:
         raise HTTPException(status_code=401, detail="not authenticated")
     signer = request.app.state.session_signer
@@ -45,7 +47,9 @@ def get_current_user(request: Request, session: str | None = Cookie(default=None
     return user
 
 
-def require_admin(request: Request, session: str | None = Cookie(default=None)) -> User:
+def require_admin(
+    request: Request, session: str | None = Cookie(default=None, include_in_schema=False)
+) -> User:
     user = get_current_user(request, session=session)
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="admin required")

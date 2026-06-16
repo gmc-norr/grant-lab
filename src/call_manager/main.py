@@ -403,13 +403,18 @@ def create_app() -> FastAPI:
             return resp
         return JSONResponse(status_code=403, content={"detail": "account not active"})
 
+    from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
 
     @app.exception_handler(RequestValidationError)
     async def _api_validation(request: Request, exc: RequestValidationError):
+        # jsonable_encoder coerces any non-JSON-serializable Pydantic ctx (a
+        # ValueError/Decimal/bytes raised by a future validator) so json.dumps
+        # inside the handler can't throw and degrade this 422 to a 500.
+        detail = jsonable_encoder(exc.errors())
         if api_request(request):
-            return api_error(422, "validation_error", "request validation failed", exc.errors())
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+            return api_error(422, "validation_error", "request validation failed", detail)
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     @app.exception_handler(Exception)
     async def _api_500(request: Request, exc: Exception):
