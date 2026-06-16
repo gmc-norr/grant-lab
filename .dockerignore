@@ -1,0 +1,34 @@
+# .dockerignore — keep the SPA build context minimal AND secretless.
+# The build container (frontend/Dockerfile) only needs frontend/ (source +
+# lockfiles); everything else is excluded so no secrets, tenant data, or the
+# Python venv ever enter the build image.
+
+# VCS + worktrees
+.git
+.gitignore
+.worktrees
+
+# Python venv, build outputs, caches (large; never needed for the JS build)
+.venv
+dist
+*.egg-info
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Node deps + outputs (installed fresh inside the container from the lockfile)
+**/node_modules
+frontend/dist
+
+# Container-emitted SPA bundle (an OUTPUT, not an input)
+src/call_manager/web/spa
+
+# Secrets / confidential tenant data — MUST NOT enter the build context
+var
+data
+*.env
+.env*
+api_key.txt
+.claude

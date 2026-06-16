@@ -366,6 +366,32 @@ python -m call_manager.embeddings.cli backfill
 systemctl restart call-manager    # only after the CLI exits 0
 ```
 
+### Frontend / SPA deploy (when `frontend/` changes, or to enable `SPA_MODE=prod`)
+
+The SPA is built in an **ephemeral, non-root, secretless container** (never a
+host `pnpm`/`npm`), which emits only the static bundle. The app process never
+runs a package manager — it only serves the static files.
+
+```bash
+# 1. Build the SPA in the ephemeral secretless container (no host pnpm/npm, no
+#    app secrets, no var/ mount; base image pinned by digest):
+docker build -f frontend/Dockerfile -t call-manager-spa-build .
+container=$(docker create call-manager-spa-build)
+rm -rf src/call_manager/web/spa && mkdir -p src/call_manager/web/spa
+docker cp "$container:/build/dist/." src/call_manager/web/spa/
+docker rm "$container"
+# 2. Verify the artifact BEFORE (re)starting the app:
+test -f src/call_manager/web/spa/index.html || { echo "SPA build missing"; exit 1; }
+# 3. Package + (re)start. `uv build --wheel` includes the bundle via the hatch
+#    `artifacts` rule; SPA_MODE=prod then serves it (and fails fast if absent):
+uv build --wheel
+sudo systemctl restart call-manager
+```
+
+Set `SPA_MODE=prod` in the app environment to serve the built SPA (at `/app` in
+Plan 2). The default `disabled` leaves the server-rendered dashboard as the
+whole surface, so this step is only needed once the SPA is being served.
+
 ### Content-rollout deploy (changes to ingestion content, prompt, or embedding model)
 
 When a deploy alters what the LLM/embedding sees — e.g., new adapter fields populated into `Call.full_text`, a `PROMPT_VERSION` bump, or an `EMBEDDING_MODEL` swap — existing rows are **stale** and must be refreshed. The full sequence:

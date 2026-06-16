@@ -51,6 +51,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/call_manager"]
+# The SPA bundle (src/call_manager/web/spa/) is emitted by the secretless
+# container build (frontend/Dockerfile) and is gitignored; hatchling excludes
+# VCS-ignored files by default, so this `artifacts` glob is REQUIRED to package
+# it into the wheel. CI asserts the built wheel contains spa/index.html.
+artifacts = ["src/call_manager/web/spa/**/*"]
 
 [tool.uv]
 # Cooldown: only consider artifacts published before this instant. Bump

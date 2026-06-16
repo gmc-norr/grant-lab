@@ -60,7 +60,57 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          # Single source of truth for the Node version (matches frontend/.nvmrc
+          # and the node:22 build container) — bump in one place.
+          node-version-file: frontend/.nvmrc
 
-      - name: JS unit tests
+      - name: JS unit tests (legacy static app.js)
         run: node --test tests/js/
+
+      # --- Frontend SPA (Plan 2): pnpm frozen + scripts-off, scanners, container build ---
+      - name: Enable corepack (pnpm pinned via package.json packageManager)
+        run: corepack enable
+
+      - name: Frontend deps (frozen, scripts off)
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: Frontend unit tests (vitest)
+        run: cd frontend && pnpm run test
+
+      # Block on PRODUCTION (runtime/browser) deps — these are what ship in the
+      # SPA bundle. react/react-dom are currently clean.
+      - name: pnpm audit (production deps — blocking)
+        run: cd frontend && pnpm audit --prod --audit-level=high
+      # Dev/build-tooling advisories (vite/esbuild/vitest dev-server, etc.) do
+      # NOT reach production (FastAPI serves only static files — no node, vite,
+      # or vitest at runtime) and are mitigated by the ephemeral secretless build
+      # + never exposing dev servers (no `vitest --ui`). Surface them
+      # (non-blocking); Dependabot (npm) drives the toolchain bumps.
+      - name: pnpm audit (all deps — informational)
+        run: cd frontend && pnpm audit || true
+
+      - name: OSV-Scanner (pnpm-lock.yaml)
+        uses: google/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
+        with:
+          scan-args: "--lockfile=frontend/pnpm-lock.yaml"
+
+      # Build the SPA in the ephemeral, non-root, secretless container — then
+      # extract ONLY the static bundle and package it into the wheel. The wheel
+      # MUST contain spa/index.html (a missing-build wheel fails here, not at
+      # runtime). NOTE: Socket CLI (spec §5) is a token-gated follow-up — it
+      # needs SOCKET_SECURITY_API_KEY; pnpm audit + OSV over the lockfile +
+      # Dependabot (npm) provide the tokenless JS supply-chain baseline.
+      - name: Build SPA in the ephemeral secretless container
+        run: docker build -f frontend/Dockerfile -t call-manager-spa-build .
+
+      - name: Extract the SPA bundle into the package tree
+        run: |
+          c=$(docker create call-manager-spa-build)
+          rm -rf src/call_manager/web/spa && mkdir -p src/call_manager/web/spa
+          docker cp "$c:/build/dist/." src/call_manager/web/spa/
+          docker rm "$c"
+
+      - name: Build the wheel and assert it contains the SPA
+        run: |
+          uv build --wheel
+          unzip -l dist/*.whl | grep -q "call_manager/web/spa/index.html"

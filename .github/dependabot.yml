@@ -19,3 +19,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # Frontend JS deps (React SPA, Plan 2) managed by pnpm (frontend/package.json
+  # + pnpm-lock.yaml). Same reviewed-dep-add discipline applies; the
+  # minimumReleaseAge cooldown (pnpm-workspace.yaml) still gates what installs.
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"

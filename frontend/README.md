@@ -61,3 +61,15 @@ like `/login` is not hijacked by Vite; an unknown path returns FastAPI's JSON
 404) is verified by running the recipe above manually. A CI integration that
 stands up uvicorn (with Postgres) + Vite together is intentionally deferred — it
 is heavy and flaky relative to the value over the unit-level coverage.
+
+## Dependency audit posture
+
+CI **blocks** on `pnpm audit --prod` (production/runtime deps that ship in the
+browser bundle — currently `react`/`react-dom`, clean). It **surfaces but does
+not block** on dev/build-tooling advisories (vite/esbuild/vitest dev-server
+issues, etc.): those never reach production — the deployed app is FastAPI
+serving static files, with no node/vite/vitest at runtime — and are further
+mitigated by the ephemeral secretless build container and by not exposing dev
+servers (we run `vitest run`, never `vitest --ui`). Dependabot (npm ecosystem,
+`/frontend`) drives the toolchain bumps that clear them. Socket CLI (spec §5) is
+a token-gated follow-up (needs `SOCKET_SECURITY_API_KEY`).
