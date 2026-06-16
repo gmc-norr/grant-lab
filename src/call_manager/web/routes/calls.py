@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -15,11 +15,13 @@ from call_manager.db.models import (
     CallRanking,
     CallRankingCriterion,
     Profile,
-    RankingJob,
-    RankingJobStatus,
-    Source,
     User,
     UserCallDismissal,
+)
+from call_manager.web.dashboard import (
+    _ranking_counts,
+    build_dashboard_view,
+    resolve_profile_selection,
 )
 
 
@@ -42,19 +44,10 @@ def _parse_optional_profile_id(raw: str | None) -> int | None:
 
 router = APIRouter()
 
-# Per design spec: "Sort: score, deadline, newest." Score lands in Plan 3
-# (per-profile). For Plan 2 we offer the two ordering primitives that don't
-# depend on rankings.
+# Per design spec: "Sort: score, deadline, newest." The ordering primitives live
+# in web/dashboard.py (the shared read-model); this Literal stays here to type the
+# query param. Kept in sync with dashboard.Sort.
 _Sort = Literal["newest", "deadline"]
-
-
-def _order_for(sort: _Sort):
-    if sort == "deadline":
-        # Soonest deadline first; never-expires (NULL) sink to the bottom.
-        return (Call.deadline.asc().nullslast(), Call.id.desc())
-    # "newest" (default): most recently published first; older or unknown
-    # publication date sink to the bottom.
-    return (Call.published_at.desc().nullslast(), Call.id.desc())
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -68,232 +61,46 @@ def calls_index(
     show_closed: bool = Query(default=False),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    raw_profile = profile  # None = absent; "" = explicit "no profile"
-    requested_id = _parse_optional_profile_id(profile)
-    _now = datetime.now(UTC)
-    _soon_cutoff = _now + timedelta(days=30)
-    # "Closed" is derived from the deadline — no status column. A call with no
-    # deadline (rolling) is open. Same comparison used in filter, sort, badges.
-    closed_expr = and_(Call.deadline.isnot(None), Call.deadline <= _now)
-    open_expr = or_(Call.deadline.is_(None), Call.deadline > _now)
-    offset = (page - 1) * limit
+    # Read logic lives in the shared read-model service (web/dashboard.py) so the
+    # JSON /api/calls endpoint can reuse it with persist=False. The Jinja path
+    # KEEPS the sticky-default WRITE here: resolve with persist=True, commit the
+    # (possible) preference change, then build the read-only view.
     session_factory = request.app.state.session_factory
     with session_factory() as session:
-        # Resolve the source slug to an id once. An unknown/stale slug degrades
-        # to "all sources" (selection cleared) rather than a confusing empty
-        # feed with the bad slug still selected.
-        source_id: int | None = None
-        if source:
-            source_id = session.scalar(select(Source.id).where(Source.slug == source))
-            if source_id is None:
-                source = None
-
-        # Three-way sticky-default resolution:
-        # - absent (None): use user's stored default if still active, else unranked.
-        # - explicit empty (""): unranked, and CLEAR the stored default.
-        # - an id was given: validate BEFORE persisting; invalid/inactive → unranked,
-        #   stored default untouched.
-        if raw_profile is None:
-            # Bare / or return visit — honour stored default if still active.
-            stored = session.scalar(select(User.default_profile_id).where(User.id == user.id))
-            if stored is not None:
-                profile_id: int | None = session.scalar(
-                    select(Profile.id).where(Profile.id == stored, Profile.is_active.is_(True))
-                )
-            else:
-                profile_id = None
-        elif raw_profile == "":
-            # Explicit "— No profile —": clear stored default.
-            u = session.get(User, user.id)
-            if u is not None and u.default_profile_id is not None:
-                u.default_profile_id = None
-                session.commit()
-            profile_id = None
-        else:
-            # An id was requested — validate BEFORE persisting.
-            profile_id = session.scalar(
-                select(Profile.id).where(Profile.id == requested_id, Profile.is_active.is_(True))
-            )
-            if profile_id is not None:
-                u = session.get(User, user.id)
-                if u is not None and u.default_profile_id != profile_id:
-                    u.default_profile_id = profile_id
-                    session.commit()
-            # Invalid/inactive request → profile_id stays None; stored default untouched.
-
-        profile = profile_id  # type: ignore[assignment]  # rest of handler uses int
-
-        # Load the profile object when we have a valid id (for ranked view and
-        # downstream metric queries). Already validated active above.
-        profile_obj: Profile | None = None
-        if profile is not None:
-            profile_obj = session.execute(
-                select(Profile).where(Profile.id == profile, Profile.is_active.is_(True))
-            ).scalar_one_or_none()
-            if profile_obj is None:
-                profile = None
-
-        # When a profile is selected, LEFT JOIN call_rankings for THAT
-        # profile and sort by score desc (nulls last). Without a profile,
-        # fall back to the unranked sort (newest/deadline).
-        if profile is not None and profile_obj is not None:
-            stmt = (
-                select(Call, CallRanking)
-                .options(joinedload(Call.source))
-                .outerjoin(
-                    CallRanking,
-                    (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile),
-                )
-                .order_by(
-                    closed_expr.asc(),  # open (False=0) before closed (True=1)
-                    CallRanking.aggregate_score.desc().nullslast(),
-                    CallRanking.embed_similarity.desc().nullslast(),
-                    Call.published_at.desc().nullslast(),
-                    Call.id.desc(),
-                )
-                .limit(limit)
-                .offset(offset)
-            )
-        else:
-            stmt = (
-                select(Call, None)
-                .options(joinedload(Call.source))
-                .order_by(closed_expr.asc(), *_order_for(sort))
-                .limit(limit)
-                .offset(offset)
-            )
-        dismissed_subq = (
-            select(UserCallDismissal.call_id)
-            .where(UserCallDismissal.user_id == user.id)
-            .scalar_subquery()
+        profile_id = resolve_profile_selection(
+            session, user_id=user.id, raw_profile=profile, persist=True
         )
-        # Filters shared by the page query and the summary aggregates, so the
-        # badges reflect the whole filtered dataset — not just the page.
-        base_filters = [Call.id.notin_(dismissed_subq)]
-        if source_id is not None:
-            base_filters.append(Call.source_id == source_id)
-        # The list (and its pagination total) hide closed calls by default.
-        list_filters = list(base_filters)
-        if not show_closed:
-            list_filters.append(open_expr)
-        stmt = stmt.where(*list_filters)
-        rows = session.execute(stmt).unique().all()
-        # Normalize to (Call, CallRanking|None) shape regardless of branch
-        calls_with_rankings: list[tuple[Call, CallRanking | None]] = [
-            (row[0], row[1] if profile is not None else None) for row in rows
-        ]
-
-        # Summary metrics computed with aggregates over the full filtered set
-        # (independent of limit/offset), so a corpus larger than one page can't
-        # undercount the badges.
-
-        # Pagination total tracks the visible (toggled) set.
-        list_total = (
-            session.scalar(select(func.count()).select_from(Call).where(*list_filters)) or 0
+        session.commit()
+        view = build_dashboard_view(
+            session,
+            user_id=user.id,
+            source=source,
+            sort=sort,
+            profile_id=profile_id,
+            limit=limit,
+            page=page,
+            show_closed=show_closed,
         )
-        # "Open calls" badge is always the genuine open count, toggle or not.
-        open_count = (
-            session.scalar(
-                select(func.count()).select_from(Call).where(*base_filters, open_expr)
-            )
-            or 0
-        )
-        soon_deadline = (
-            session.scalar(
-                select(func.count())
-                .select_from(Call)
-                .where(
-                    *base_filters,
-                    Call.deadline.isnot(None),
-                    Call.deadline > _now,
-                    Call.deadline <= _soon_cutoff,
-                )
-            )
-            or 0
-        )
-        high_score = 0
-        if profile is not None and profile_obj is not None:
-            high_score = (
-                session.scalar(
-                    select(func.count())
-                    .select_from(CallRanking)
-                    .join(Call, Call.id == CallRanking.call_id)
-                    .where(
-                        *base_filters,
-                        open_expr,  # a closed call is never a "top match"
-                        CallRanking.profile_id == profile,
-                        CallRanking.aggregate_score >= 70,
-                    )
-                )
-                or 0
-            )
-
-        sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
-        profiles = (
-            session.execute(
-                select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name)
-            )
-            .scalars()
-            .all()
-        )
+        # Detach Call AND its joined `source` together before the session closes.
         session.expunge_all()
-
-    summary = {"open_count": open_count, "high_score": high_score, "soon_deadline": soon_deadline}
-    pagination = {
-        "page": page,
-        "limit": limit,
-        "has_prev": page > 1,
-        "has_next": offset + len(calls_with_rankings) < list_total,
-    }
 
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="calls_index.html",
         context={
-            "calls_with_rankings": calls_with_rankings,
-            "sources": sources,
-            "profiles": profiles,
-            "selected_source": source,
-            "selected_sort": sort,
-            "selected_profile_id": profile,
-            "show_closed": show_closed,
-            "summary": summary,
-            "pagination": pagination,
-            "now": _now,
+            "calls_with_rankings": view.calls,
+            "sources": view.sources,
+            "profiles": view.profiles,
+            "selected_source": view.effective["source"],
+            "selected_sort": view.effective["sort"],
+            "selected_profile_id": view.effective["profile_id"],
+            "show_closed": view.effective["show_closed"],
+            "summary": view.summary,
+            "pagination": view.pagination,
+            "now": view.now,
             "user": user,
         },
     )
-
-
-def _ranking_counts(session, profile_id: int) -> tuple[int, int]:
-    pending = (
-        session.scalar(
-            select(func.count())
-            .select_from(RankingJob)
-            .where(
-                RankingJob.profile_id == profile_id,
-                RankingJob.status.in_((RankingJobStatus.PENDING, RankingJobStatus.RUNNING)),
-            )
-        )
-        or 0
-    )
-    # Unresolved failures only: a FAILED job with no CallRanking yet for that pair.
-    scored = select(CallRanking.call_id).where(
-        CallRanking.profile_id == profile_id, CallRanking.call_id == RankingJob.call_id
-    )
-    failed = (
-        session.scalar(
-            select(func.count())
-            .select_from(RankingJob)
-            .where(
-                RankingJob.profile_id == profile_id,
-                RankingJob.status == RankingJobStatus.FAILED,
-                ~scored.exists(),
-            )
-        )
-        or 0
-    )
-    return pending, failed
 
 
 # NOTE: must be declared before /calls/{call_id} — FastAPI matches routes in
