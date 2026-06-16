@@ -530,6 +530,14 @@ def create_app() -> FastAPI:
     app.include_router(citations_router)
     app.include_router(api_router)
 
+    # Dev-only SSE validation endpoint (/events/ping). Mounted ONLY in dev so it
+    # never exists in prod/disabled (a test asserts 404 there). Registered before
+    # mount_spa so it is a real route, not swallowed by the catch-all.
+    if settings.spa_mode == "dev":
+        from call_manager.web.api import events as _events
+
+        app.include_router(_events.router)
+
     # MUST be the LAST route registration: mount_spa (when SPA_MODE=prod)
     # installs a catch-all GET /{full_path:path} that returns the SPA index
     # only for manifest-owned routes (is_spa_route) and a real 404 otherwise.
