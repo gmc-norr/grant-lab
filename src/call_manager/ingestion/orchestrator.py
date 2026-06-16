@@ -153,8 +153,17 @@ def run_ingestion(
 
     # --- Step 1: upsert calls + advance source timestamp (one transaction) ---
     try:
+        # Materialize the (body-scraping) generator BEFORE opening the write
+        # transaction. EU-portal's fetch_new_calls scrapes each call body with a
+        # blocking HTTP request as it is iterated; doing that inside the tx below
+        # would hold a write transaction open (idle-in-transaction, pinning a
+        # connection + blocking autovacuum) across all that network I/O. Scrape
+        # first — still inside this try so an AdapterError mid-scrape is caught —
+        # then do the fast upsert loop in a short-lived transaction. (Bounded by
+        # the source's new-call count per run; bodies were already in memory.)
+        fetched_calls = list(fetch)
         with session_factory() as session:
-            for call in fetch:
+            for call in fetched_calls:
                 was_new = upsert_call(session, source_id=source_id, call=call)
                 # Look up the row's id for the embed/enqueue steps.
                 # autoflush=True means the prior INSERT/UPDATE is visible here.

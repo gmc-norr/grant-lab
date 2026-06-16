@@ -353,12 +353,18 @@ def test_assemble_excludes_already_in_prior_digest(pg_session_factory, now):
 
 
 def test_assemble_prior_ids_bounded_to_78_weeks(pg_session_factory, now):
-    """DigestRun rows older than the 78-week window should not contribute to
-    the excluded set. (Their calls are excluded by the deadline filter anyway,
-    but this avoids loading thousands of stale ids into Python over years.)"""
+    """A DEADLINE-BEARING DigestRun row older than the 78-week window should not
+    contribute to the bounded prior_ids set, so a still-open call re-surfaces
+    (the bound limits how many stale ids we load over years). Rolling
+    NULL-deadline calls are instead excluded UNBOUNDED — see
+    test_assemble_rolling_call_not_resent_after_78_weeks."""
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
-        cid_ancient = _seed_call(s, title="Ancient", score=85, profile_id=pid)
+        # Deadline-bearing + still open, so it's eligible and NOT caught by the
+        # unbounded rolling-call (NULL-deadline) exclusion.
+        cid_ancient = _seed_call(
+            s, title="Ancient", score=85, profile_id=pid, deadline=now + timedelta(weeks=4)
+        )
         # A 79-week-old DigestRun: just past the bound, so it drops out of
         # prior_ids and the call is surfaced again.
         ancient_run = DigestRun(
@@ -372,6 +378,28 @@ def test_assemble_prior_ids_bounded_to_78_weeks(pg_session_factory, now):
         payload = assemble_for_user(s, user_id=uid, now=now)
     titles = [e.title for sec in payload.sections for e in sec.entries]
     assert "Ancient" in titles
+
+
+def test_assemble_rolling_call_not_resent_after_78_weeks(pg_session_factory, now):
+    """Regression: a rolling (NULL-deadline) call previously sent MORE than 78
+    weeks ago must NOT be re-sent. Rolling calls never expire, so the 78-week
+    prior_ids window can't bound them — they would re-surface as 'new' once the
+    DigestRun ages out. They are now excluded unbounded by id."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        cid = _seed_call(s, title="Rolling", score=85, profile_id=pid)  # deadline=None
+        s.add(
+            DigestRun(
+                user_id=uid,
+                included_call_ids=[cid],
+                sent_at=now - timedelta(weeks=80),
+            )
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    titles = [] if payload is None else [e.title for sec in payload.sections for e in sec.entries]
+    assert "Rolling" not in titles
 
 
 def test_assemble_long_deadline_call_not_resent_after_26_weeks(pg_session_factory, now):

@@ -125,6 +125,29 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     ):
         prior_ids.update(run or [])
 
+    # Rolling (NULL-deadline) calls never expire, so the 78-week window above
+    # can't bound them: once a previously-sent rolling call ages out of prior_ids
+    # it stays eligible (the `Call.deadline.is_(None)` branch in every candidate
+    # query) and re-surfaces as "new". Exclude EVERY previously-sent call that
+    # currently has a NULL deadline, with NO age bound. Deadline-bearing calls
+    # remain governed by the 78-week window (sized to outlast the longest real
+    # deadline); this only adds the unbounded rolling-call ids.
+    all_prior_ids: set[int] = set()
+    for run in (
+        session.execute(select(DigestRun.included_call_ids).where(DigestRun.user_id == user_id))
+        .scalars()
+        .all()
+    ):
+        all_prior_ids.update(run or [])
+    if all_prior_ids:
+        prior_ids.update(
+            session.execute(
+                select(Call.id).where(Call.id.in_(all_prior_ids), Call.deadline.is_(None))
+            )
+            .scalars()
+            .all()
+        )
+
     excluded = dismissed_ids | prior_ids
 
     # 3. For each profile, build candidate entries (pre-dedup)
