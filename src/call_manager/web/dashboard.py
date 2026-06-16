@@ -80,21 +80,34 @@ def resolve_profile_selection(
             select(Profile.id).where(Profile.id == stored, Profile.is_active.is_(True))
         )
 
-    raw = raw_profile.strip()
-    if raw == "":
+    if raw_profile == "":
         # Explicit "— No profile —": clear stored default (Jinja path only).
+        # Branch on the UNTRIMMED value for byte-for-byte legacy parity: legacy
+        # `calls_index` cleared on `elif raw_profile == ""`. A whitespace-only
+        # value ("%20") is NOT exactly "", so it never reached the clear branch —
+        # it fell through to the id branch, where _parse_optional_profile_id
+        # stripped it to "" and returned None, so the validation lookup found
+        # nothing and the stored default was left untouched. Reproduced below.
         if persist:
             u = session.get(User, user_id)
             if u is not None and u.default_profile_id is not None:
                 u.default_profile_id = None
         return None
 
-    try:
-        requested = int(raw)
-    except ValueError as e:
-        from fastapi import HTTPException
+    # Strip only here, immediately before the parse attempt. A whitespace-only
+    # value strips to "" → treated as "no id requested" (requested=None) →
+    # resolves to None without writing, exactly as legacy did (no 400). Only a
+    # NON-EMPTY, non-integer value 400s (a genuinely malformed URL).
+    raw = raw_profile.strip()
+    if raw == "":
+        requested: int | None = None
+    else:
+        try:
+            requested = int(raw)
+        except ValueError as e:
+            from fastapi import HTTPException
 
-        raise HTTPException(status_code=400, detail=f"invalid profile id: {raw!r}") from e
+            raise HTTPException(status_code=400, detail=f"invalid profile id: {raw!r}") from e
 
     # Validate BEFORE persisting — invalid/inactive leaves the stored default alone.
     valid = session.scalar(
@@ -312,16 +325,12 @@ def build_dashboard_view(
 
     sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
     profiles = (
-        session.execute(
-            select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name)
-        )
+        session.execute(select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name))
         .scalars()
         .all()
     )
 
-    pending, failed = (
-        _ranking_counts(session, profile_id) if profile_id is not None else (0, 0)
-    )
+    pending, failed = _ranking_counts(session, profile_id) if profile_id is not None else (0, 0)
 
     return DashboardView(
         calls=calls,

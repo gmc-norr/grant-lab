@@ -67,3 +67,14 @@ def test_invalid_id_does_not_destroy_default(monkeypatch, pg_url, pg_session_fac
     c.get("/?profile=99999")
     with pg_session_factory() as s:
         assert s.get(User, uid).default_profile_id == pid  # unchanged
+
+
+def test_whitespace_profile_does_not_clear_default(monkeypatch, pg_url, pg_session_factory):
+    # Legacy parity: a whitespace-only ?profile preserved the stored default
+    # (it never matched the exact-"" clear branch, fell through to the id branch,
+    # parsed to None, and never wrote). The refactor must not clear it.
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _client(app, pg_session_factory, set_default=True)
+    c.get("/?profile=%20%20")
+    with pg_session_factory() as s:
+        assert s.get(User, uid).default_profile_id == pid  # unchanged
