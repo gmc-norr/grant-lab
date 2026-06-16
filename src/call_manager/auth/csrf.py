@@ -38,7 +38,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
-from call_manager.web.api.errors import is_api_path
+from call_manager.web.api.errors import envelope_dict, is_api_path
 
 _logger = logging.getLogger(__name__)
 
@@ -124,6 +124,6 @@ def _forbidden(header: str, value: str, *, path: str = "") -> Response:
         extra={"event": "csrf_origin_mismatch", "header": header, "value": value},
     )
     if is_api_path(path):
-        body = json.dumps({"error": {"code": "forbidden", "message": "origin mismatch"}})
+        body = json.dumps(envelope_dict("forbidden", "origin mismatch"))
         return Response(status_code=403, content=body, media_type="application/json")
     return Response(status_code=403, content=b"origin mismatch")

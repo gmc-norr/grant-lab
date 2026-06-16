@@ -11,11 +11,10 @@ materializing bodies.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from call_manager.web.api.errors import is_api_path
+from call_manager.web.api.errors import envelope_dict, is_api_path
 
 
 def build_csp() -> str:
@@ -144,23 +143,9 @@ class MaxBodySizeMiddleware:
         await self.app(scope, limited_receive, send)
 
 
-async def _send_status(send: Send, status: int, body: bytes) -> None:
-    await send(
-        {
-            "type": "http.response.start",
-            "status": status,
-            "headers": [
-                (b"content-type", b"text/plain; charset=utf-8"),
-                (b"content-length", str(len(body)).encode("ascii")),
-            ],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
-
-
 async def _send_error(send: Send, status: int, code: str, message: str, as_json: bool) -> None:
     if as_json:
-        body = json.dumps({"error": {"code": code, "message": message}}).encode()
+        body = json.dumps(envelope_dict(code, message)).encode()
         ctype = b"application/json"
     else:
         body = message.encode()
@@ -176,7 +161,3 @@ async def _send_error(send: Send, status: int, code: str, message: str, as_json:
         }
     )
     await send({"type": "http.response.body", "body": body})
-
-
-# Re-exported alias kept intentionally narrow; callers import the classes.
-_Handler = Callable[[Message], Awaitable[None]]

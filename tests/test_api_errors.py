@@ -95,6 +95,8 @@ def test_non_api_500_is_plain_text(monkeypatch, pg_url, pg_session_factory):
 def test_api_csrf_rejection_is_envelope(monkeypatch, pg_url, pg_session_factory):
     c = TestClient(_app(monkeypatch, pg_url))
     # A cross-origin POST to an /api path: bad Origin → CSRF 403.
+    # CSRF middleware runs before routing, so the route need not exist yet —
+    # a bad Origin is rejected regardless.
     r = c.post("/api/me/default-profile", headers={"origin": "http://evil.example"}, json={})
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "forbidden"

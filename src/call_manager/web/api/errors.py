@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from starlette.requests import Request
 
 
-class ApiErrorBody(BaseModel):
-    code: str
-    message: str
-    detail: object | None = None
+def envelope_dict(code: str, message: str, detail: object | None = None) -> dict:
+    """The single source of truth for the /api error-envelope SHAPE.
 
-
-class ApiError(BaseModel):
-    error: ApiErrorBody
+    Used by the FastAPI layer (api_error) AND the raw-ASGI layers
+    (CSRF + body-size middleware), so the contract can't drift between them.
+    """
+    body: dict = {"code": code, "message": message}
+    if detail is not None:
+        body["detail"] = detail
+    return {"error": body}
 
 
 def is_api_path(path: str) -> bool:
@@ -22,8 +23,7 @@ def is_api_path(path: str) -> bool:
 def api_error(
     status_code: int, code: str, message: str, detail: object | None = None
 ) -> JSONResponse:
-    body = ApiError(error=ApiErrorBody(code=code, message=message, detail=detail))
-    return JSONResponse(status_code=status_code, content=body.model_dump(exclude_none=True))
+    return JSONResponse(status_code=status_code, content=envelope_dict(code, message, detail))
 
 
 STATUS_CODES: dict[int, str] = {
