@@ -46,6 +46,11 @@ export function Dashboard() {
       <h1>Funding calls</h1>
 
       <header>
+        {/* Native POST logout: a full-page nav follows the 303 to /login and
+            carries Origin/CSRF (no client fetch / token plumbing). */}
+        <form method="post" action="/logout">
+          <button type="submit">Sign out</button>
+        </form>
         <label>
           Profile
           <select
