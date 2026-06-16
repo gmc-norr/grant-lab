@@ -81,6 +81,14 @@ jobs:
       - name: Frontend unit tests (vitest)
         run: cd frontend && pnpm run test
 
+      # OpenAPI -> TS drift: regenerate the committed client types from the live
+      # route definitions (DB-free; no server needed) and fail if they changed.
+      # Keeps frontend/src/api/schema.gen.ts in lockstep with the FastAPI schema.
+      - name: OpenAPI types in sync (drift check)
+        run: |
+          bash scripts/gen_openapi_types.sh
+          git diff --exit-code frontend/src/api/schema.gen.ts
+
       # Block on PRODUCTION (runtime/browser) deps — these are what ship in the
       # SPA bundle. react/react-dom are currently clean.
       - name: pnpm audit (production deps — blocking)
