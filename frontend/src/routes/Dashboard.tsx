@@ -54,8 +54,12 @@ export function Dashboard() {
         <label>
           Profile
           <select
-            aria-label="profile"
-            value={params.profile ?? ""}
+            // Bind to the SERVER-RESOLVED id (effective.profile_id), not the raw
+            // ?profile URL param: a bare load resolves the stored default, and an
+            // unknown/inactive id degrades to null — the select must reflect what
+            // the server actually filtered by (Jinja parity). data is guaranteed
+            // present here (loading early-returns above).
+            value={data.effective.profile_id != null ? String(data.effective.profile_id) : ""}
             disabled={setDefault.isPending}
             onChange={(e) => onSelectProfile(e.target.value)}
           >
@@ -72,7 +76,6 @@ export function Dashboard() {
         <label>
           Source
           <select
-            aria-label="source"
             value={params.source ?? ""}
             onChange={(e) => updateParam("source", e.target.value)}
           >
@@ -88,7 +91,6 @@ export function Dashboard() {
         <label>
           Sort
           <select
-            aria-label="sort"
             value={params.sort ?? "newest"}
             onChange={(e) => updateParam("sort", e.target.value)}
           >

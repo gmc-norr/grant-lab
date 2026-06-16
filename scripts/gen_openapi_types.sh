@@ -3,9 +3,11 @@
 # running server or a reachable database: create_app().openapi() builds the
 # schema from the route definitions, and SQLAlchemy's engine is created lazily so
 # no DB connection is attempted. Used to (re)generate the committed types AND by
-# the CI drift check. The package.json `gen:api` script is the HTTP equivalent
-# for dev when a uvicorn is already running; both emit the byte-identical file
-# (same OpenAPI doc -> same openapi-typescript output, pinned version).
+# the CI drift check. The package.json `gen:api` script DELEGATES to this script
+# (bash ../scripts/gen_openapi_types.sh), so dev regeneration and CI run the one
+# canonical generator — same SPA_MODE=disabled, same sort_keys ordering — and can
+# never drift (an earlier HTTP form scraped a live server and diverged by route
+# order + a dev-only /events/ping path, breaking the gate).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp)"

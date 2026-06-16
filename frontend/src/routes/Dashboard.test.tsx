@@ -1,10 +1,37 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
 import { Dashboard } from "./Dashboard";
+
+// Surfaces the live URL search so a test can assert WHEN (not just whether) it changes.
+function LocationProbe() {
+  const loc = useLocation();
+  return <output data-testid="search">{loc.search}</output>;
+}
+
+function dashData(effectiveProfileId: number | null) {
+  return {
+    data: {
+      items: [],
+      summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
+      pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: 0 },
+      ranking: { pending: 0, failed: 0 },
+      effective: { profile_id: effectiveProfileId },
+      facets: {
+        sources: [],
+        profiles: [
+          { id: 7, name: "G" },
+          { id: 9, name: "H" },
+        ],
+      },
+    },
+    error: undefined,
+    response: new Response(),
+  };
+}
 
 function renderAt(url: string) {
   const qc = new QueryClient();
@@ -12,36 +39,64 @@ function renderAt(url: string) {
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[url]}>
         <Dashboard />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-it("deep link does NOT POST default; selecting a profile DOES", async () => {
-  const GET = vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: {
-      items: [],
-      summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
-      pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: 0 },
-      ranking: { pending: 0, failed: 0 },
-      effective: {},
-      facets: { sources: [], profiles: [{ id: 7, name: "G" }] },
-    },
-    error: undefined,
-    response: new Response(),
-  } as never);
+it("deep link is read-only: the select reflects the SERVER-resolved profile, no POST on load", async () => {
+  // Bare load whose stored default resolves to profile 7 server-side (effective.profile_id).
+  const GET = vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData(7) as never);
   const POST = vi.spyOn(clientMod.api, "POST").mockResolvedValue({
     data: { ok: true },
     error: undefined,
     response: new Response(),
   } as never);
 
-  renderAt("/?profile=7"); // deep link
+  renderAt("/");
+  // Select shows the RESOLVED id (7) — Jinja parity — NOT the (absent) URL param.
+  const select = (await screen.findByLabelText(/profile/i)) as HTMLSelectElement;
+  expect(select.value).toBe("7");
   await waitFor(() => expect(GET).toHaveBeenCalled());
-  expect(POST).not.toHaveBeenCalled(); // read-only
+  expect(POST).not.toHaveBeenCalled(); // a load/deep-link never persists a default
+});
 
-  fireEvent.change(await screen.findByLabelText(/profile/i), { target: { value: "7" } });
+it("selecting a profile persists FIRST, then reflects the URL only after the POST resolves", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData(null) as never);
+  let resolvePost: (v: unknown) => void = () => {};
+  const POST = vi
+    .spyOn(clientMod.api, "POST")
+    .mockReturnValue(new Promise((res) => (resolvePost = res)) as never);
+
+  renderAt("/");
+  const select = (await screen.findByLabelText(/profile/i)) as HTMLSelectElement;
+  expect(select.value).toBe(""); // no resolved profile yet
+  fireEvent.change(select, { target: { value: "9" } }); // a REAL change (differs from "")
+
   await waitFor(() =>
-    expect(POST).toHaveBeenCalledWith("/api/me/default-profile", { body: { profile_id: 7 } }),
+    expect(POST).toHaveBeenCalledWith("/api/me/default-profile", { body: { profile_id: 9 } }),
   );
+  // URL must NOT update until the POST resolves (persist-first contract).
+  expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
+  resolvePost({ data: { ok: true }, error: undefined, response: new Response() });
+  await waitFor(() =>
+    expect(screen.getByTestId("search").textContent).toContain("profile=9"),
+  );
+});
+
+it("a failed persist leaves the URL unchanged and surfaces an error", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData(null) as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "x", message: "no" } },
+    response: new Response(),
+  } as never);
+
+  renderAt("/");
+  const select = (await screen.findByLabelText(/profile/i)) as HTMLSelectElement;
+  fireEvent.change(select, { target: { value: "9" } });
+
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/default profile/i));
+  expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
 });

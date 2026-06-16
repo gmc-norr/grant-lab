@@ -10,12 +10,17 @@ from fastapi.responses import StreamingResponse
 router = APIRouter()
 
 
-@router.get("/events/ping")
+# include_in_schema=False: this is an internal dev-only validation harness, not a
+# public API operation — keep it out of /openapi.json (matches the spa_serving
+# catch-all / session-cookie precedent) so the generated TS client never sees it
+# and the openapi drift gate is mode-agnostic. ge=0 on since/cursor so a resume
+# seed can never go negative (which would emit negative event ids).
+@router.get("/events/ping", include_in_schema=False)
 async def ping(
     request: Request,
     max: int = Query(default=0, ge=0),
-    since: int | None = Query(default=None),
-    cursor: int | None = Query(default=None),
+    since: int | None = Query(default=None, ge=0),
+    cursor: int | None = Query(default=None, ge=0),
 ) -> StreamingResponse:
     """Dev-only SSE validation endpoint: replayable named JSON ``ping`` events
     with ids, so the client hook exercises typed events + ids + catch-up via
