@@ -33,7 +33,11 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
     new_ev_id,
 )
-from call_manager.proposal_assist.citations.markers import AnchorError, insert_marker
+from call_manager.proposal_assist.citations.markers import (
+    AnchorError,
+    find_markers,
+    insert_marker,
+)
 from call_manager.proposal_assist.citations.quotes import (
     QuoteAmbiguous,
     QuoteNotFound,
@@ -196,6 +200,38 @@ def insert_from_annotation(
     except ValueError as exc:
         logger.error("corrupt citations.json in workspace %s: %s", workspace.id, exc)
         raise InsertConflict(f"citations.json is invalid: {exc}") from exc
+    # Idempotency repair for a partial prior write: the git commit (step 9)
+    # lands BEFORE annotation.status='inserted' is set on the session and
+    # committed by the CALLER. If that caller commit fails (e.g. a citekey
+    # unique-index race or any OperationalError), the git marker+ledger row are
+    # already durable but annotation.status rolls back to 'open'. A naive retry
+    # would mint a fresh ev_id and write a SECOND marker for the same evidence.
+    # Detect that prior row — occurrence-aware: same (reference_id, chunk_index,
+    # evidence_quote) AND the same claim-context hash AND a still-live marker —
+    # and repair (flip status + return idempotent) instead of re-inserting.
+    # Keying on claim_context_hash keeps this from collapsing two genuinely
+    # distinct citations of the same quote for different claims (the case the
+    # plain status-only check at the top deliberately left to occurrence
+    # semantics); a true same-quote/same-claim retry is the only thing matched.
+    claim_ctx_hash = hashlib.sha256(
+        normalize_for_quote_match(annotation.claim_text).encode("utf-8")
+    ).hexdigest()
+    live_ev_ids = {m["ev_id"] for m in find_markers(doc)}
+    for r in ledger.get("evidence", []):
+        rid = r.get("id")
+        if (
+            rid
+            and rid in live_ev_ids
+            and r.get("reference_id") == str(ref.id)
+            and (r.get("locator") or {}).get("chunk_index") == annotation.chunk_index
+            and r.get("evidence_quote") == annotation.evidence_quote
+            and (r.get("claim_context") or {}).get("hash") == claim_ctx_hash
+        ):
+            annotation.status = "inserted"
+            annotation.resolved_by_user_id = user_id
+            annotation.resolved_at = datetime.now(UTC)
+            return {"idempotent": True, "ev_id": rid, "citekey": r.get("citekey")}
+
     ev_id = new_ev_id()
     citekey = _resolve_citekey_for_ref(session, ledger=ledger, ref=ref, workspace_id=workspace.id)
     try:

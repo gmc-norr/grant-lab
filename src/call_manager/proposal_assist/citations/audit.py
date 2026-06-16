@@ -53,6 +53,7 @@ from call_manager.proposal_assist.citations.quotes import (
     find_quote_offsets,
     normalize_for_quote_match,
 )
+from call_manager.proposal_assist.citations.trust import neutralize_trust_delimiters
 from call_manager.proposal_assist.citations.verdict_cache import (
     VALIDATOR_VERSION,
     build_cache_key,
@@ -473,6 +474,15 @@ def _build_audit_user(*, claim: str, evidence_quote: str, chunk_text: str, stanc
         verdict_instruction = (
             "Respond with exactly one verdict: supports, contradicts, OR unsupported."
         )
+    # Neutralize the closing-delimiter token in every reference-derived span
+    # before interpolating: the chunk is wrapped in <untrusted-reference> but a
+    # body containing the literal close tag could otherwise break out of the
+    # wrapper. EVIDENCE_QUOTE is a verbatim span from the reference (untrusted),
+    # and CLAIM can echo reference content — neutralize all three (shared helper
+    # so this can't drift from resolver/pipeline).
+    claim = neutralize_trust_delimiters(claim)
+    evidence_quote = neutralize_trust_delimiters(evidence_quote)
+    chunk_text = neutralize_trust_delimiters(chunk_text)
     return (
         f"CLAIM: {claim}\n\n"
         f"EVIDENCE_QUOTE: {evidence_quote}\n\n"

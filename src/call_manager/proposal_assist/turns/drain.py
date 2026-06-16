@@ -116,6 +116,23 @@ async def drain_turn_queue_tick(
                 turn_max_seconds,
                 extra={"event": "turn_timed_out", "turn_job_id": str(turn_id)},
             )
+            # Cancelling the turn coroutine interrupts the streaming read but does
+            # NOT drain the SDK subprocess: the abandoned turn's remaining messages
+            # (incl. its ResultMessage) stay queued in the persistent client's
+            # shared stream. If the cached handle is reused, the NEXT turn reads
+            # those leftovers first — mis-attributing transcript rows + token
+            # counts and desyncing every subsequent turn. Terminate the handle so
+            # the next turn cold-launches a fresh, clean subprocess (terminate is
+            # idempotent + releases the advisory lock; guarded so a terminate
+            # failure can't abort the drain tick).
+            try:
+                await controller.terminate(workspace_id)
+            except Exception:
+                logger.exception(
+                    "drain_turn_queue_tick: terminate after timeout failed for "
+                    "workspace %s (handle may be stale until the reaper/idle sweep)",
+                    workspace_id,
+                )
         except Exception:
             logger.exception(
                 "drain_turn_queue_tick: process_turn_once raised for turn_job %s "

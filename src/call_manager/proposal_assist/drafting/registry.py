@@ -141,17 +141,14 @@ class SubprocessRegistry:
     # In-flight accounting
     # ------------------------------------------------------------------
 
-    async def touch(self, workspace_id: uuid.UUID) -> None:
-        """Mark a handle as just-used (so it doesn't get swept). Called
-        by the controller after each turn completes."""
-        async with self._lock:
-            entry = self._entries.get(workspace_id)
-            if entry is not None:
-                entry.last_touched_monotonic = time.monotonic()
-
     async def increment_in_flight(self, workspace_id: uuid.UUID) -> None:
-        """Signal that a send_turn iteration has started for this workspace.
-        Prevents sweep_idle from terminating an active handle."""
+        """TEST-ONLY in-flight increment (no production caller).
+
+        Production turns begin via ``begin_in_flight_exclusive`` (which is
+        atomic test-and-increment); this non-exclusive variant only exists so
+        registry tests can simulate an active handle when exercising sweep_idle.
+        Do not use it on the turn path — it would allow two concurrent turns
+        against one subprocess."""
         async with self._lock:
             entry = self._entries.get(workspace_id)
             if entry is not None:

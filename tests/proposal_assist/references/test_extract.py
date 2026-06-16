@@ -12,6 +12,37 @@ from call_manager.proposal_assist.references.extract import (
 )
 
 
+def test_extract_xml_jats_title_abstract_body():
+    """PubMed/PMC JATS (application/xml, fetch-only) extracts title + abstract +
+    body so a fetched PMID is ingestable (regression: application/xml used to
+    have no suffix mapping and no extractor, so every PMID fetch failed)."""
+    jats = b"""<article>
+      <front><article-meta>
+        <title-group><article-title>A Study of Things</article-title></title-group>
+        <abstract><p>We studied things and found results.</p></abstract>
+      </article-meta></front>
+      <body><sec><title>Methods</title><p>We did the methods.</p></sec></body>
+    </article>"""
+    sections = extract_text(mime="application/xml", data=jats)
+    blob = " ".join(t for (_, t) in sections)
+    assert "A Study of Things" in blob
+    assert "We studied things" in blob
+    assert "We did the methods" in blob
+
+
+def test_extract_xml_rejects_entity_expansion():
+    """defusedxml must refuse a billion-laughs / entity-expansion payload
+    rather than extracting it."""
+    bomb = (
+        b'<?xml version="1.0"?>'
+        b'<!DOCTYPE lolz [<!ENTITY lol "lol">'
+        b'<!ENTITY lol2 "&lol;&lol;&lol;&lol;">]>'
+        b"<article><article-title>&lol2;</article-title></article>"
+    )
+    with pytest.raises(ExtractError):
+        extract_text(mime="application/xml", data=bomb)
+
+
 def test_extract_markdown_splits_by_headings():
     md = b"""# Title
 

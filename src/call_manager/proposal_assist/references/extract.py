@@ -83,6 +83,8 @@ def extract_text(*, mime: str, data: bytes) -> SectionList:
         return _extract_xlsx(data)
     if mime == "application/x-ipynb+json":
         return _extract_ipynb(data)
+    if mime == "application/xml":
+        return _extract_xml(data)
     raise ExtractError(f"unsupported mime: {mime!r}")
 
 
@@ -322,6 +324,49 @@ def _extract_ipynb(data: bytes) -> SectionList:
     flush()
     if not sections:
         return [(None, "")]
+    return sections
+
+
+def _extract_xml(data: bytes) -> SectionList:
+    """Extract readable text from an XML document — in practice PubMed/PMC JATS
+    fetched by fetch_pubmed_pmid (application/xml).
+
+    Parsed with defusedxml so a malicious feed can't trigger entity-expansion
+    or external-entity attacks (matches the fetcher's own parsing). For JATS we
+    prefer article-title + abstract + body; if none are present (non-JATS or a
+    metadata-only record) we fall back to the whole document's text so a
+    reference is never left with zero indexable content."""
+    try:
+        from defusedxml import ElementTree as DET
+        from defusedxml.common import DefusedXmlException
+    except Exception as e:  # pragma: no cover - defusedxml is a hard dep
+        raise ExtractError(f"defusedxml load failed: {e}") from e
+    try:
+        root = DET.fromstring(data)
+    except (DefusedXmlException, DET.ParseError) as e:
+        raise ExtractError(f"xml parse failed: {e}") from e
+
+    def _text_of(el) -> str:  # noqa: ANN001
+        return " ".join(t.strip() for t in el.itertext() if t and t.strip())
+
+    sections: SectionList = []
+    title_el = root.find(".//article-title")
+    if title_el is not None:
+        title = _text_of(title_el)
+        if title:
+            sections.append(("Title", title))
+    for tag, label in (("abstract", "Abstract"), ("body", "Body")):
+        el = root.find(f".//{tag}")
+        if el is not None:
+            body = _text_of(el)
+            if body:
+                sections.append((label, body))
+    if not sections:
+        whole = _text_of(root)
+        if whole:
+            sections.append((None, whole))
+    if not sections:
+        raise ExtractError("xml produced no text")
     return sections
 
 

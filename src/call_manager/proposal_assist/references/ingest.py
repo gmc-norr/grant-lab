@@ -74,6 +74,9 @@ _MIME_TO_SUFFIX = {
     "application/vnd.ms-excel": ".xls",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     "application/x-ipynb+json": ".ipynb",
+    # Fetch-only: fetch_pubmed_pmid returns PMC JATS as application/xml. Not in
+    # the web upload allow-list, so this never accepts a user-uploaded XML.
+    "application/xml": ".xml",
 }
 
 
@@ -133,10 +136,17 @@ def run_postwrite_phases(
             text=full_text,
         )
 
-        # Embed + insert chunks in one tx.
+        # Embed every chunk BEFORE opening a transaction: each embed is a
+        # network round-trip to Ollama (seconds under load + the shrink-retry),
+        # and holding a write tx open across them is idle-in-transaction that
+        # pins a connection and can block autovacuum. Compute vectors first,
+        # then INSERT + flip status in one short tx.
+        embedded = [
+            (i, section_path, text, embedder.embed(text))
+            for i, (section_path, text) in enumerate(chunks)
+        ]
         with session_factory() as s2:
-            for i, (section_path, text) in enumerate(chunks):
-                vec = embedder.embed(text)
+            for i, section_path, text, vec in embedded:
                 s2.add(
                     ReferenceChunk(
                         reference_id=reference_id,

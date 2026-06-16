@@ -13,7 +13,6 @@ turn-run path. The Claude adapter stays ignorant of both.
 from __future__ import annotations
 
 import base64
-import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Attachment, Reference
+from call_manager.proposal_assist.citations.trust import (
+    neutralize_trust_delimiters as _neutralize_trust_delimiters,
+)
 
 _MIME_BY_SUFFIX = {
     ".png": "image/png",
@@ -40,29 +42,9 @@ cyclic module dep (submit imports resolver context indirectly via
 processor)."""
 
 
-def _neutralize_trust_delimiters(text: str) -> str:
-    """Neutralise reference-supplied text that could break out of, or spoof,
-    the wrapper used for reference-content injection.
-
-    Reference bodies can be agent-fetched from arbitrary URLs, so they are
-    attacker-controlled. Two delimiters matter:
-
-    * ``<untrusted-reference>`` / ``</untrusted-reference>`` — the real
-      wrapper (see ``resolve_user_content``). A body containing the closing
-      token could end the wrapper early and continue as if it were
-      higher-trust conversation text.
-    * ``<system>`` / ``</system>`` — defends against a body trying to
-      fabricate an elevated-trust block in models that treat that token
-      specially.
-
-    We rewrite the angle brackets of any such token (case-insensitive,
-    tolerant of internal whitespace) to fullwidth look-alikes so the content
-    stays human-readable but can no longer be parsed as a real delimiter.
-    """
-    return _TRUST_DELIM_RE.sub(lambda m: m.group(0).replace("<", "＜").replace(">", "＞"), text)
-
-
-_TRUST_DELIM_RE = re.compile(r"<\s*/?\s*(?:system|untrusted-reference)\s*>", re.IGNORECASE)
+# _neutralize_trust_delimiters is imported from citations.trust (shared with the
+# citation auditor + claim-analysis verdict prompt) so the neutralization can't
+# drift across the three reference-injection sites.
 
 
 class AttachmentResolutionError(RuntimeError):

@@ -18,7 +18,10 @@ import uuid
 from pathlib import Path
 
 _ALLOWED_SUFFIXES = frozenset(
-    {".pdf", ".md", ".txt", ".docx", ".rtf", ".csv", ".xls", ".xlsx", ".ipynb"}
+    # .xml is fetch-only (PubMed/PMC JATS via fetch_pubmed_pmid); it is NOT in
+    # the web upload allow-list (web/references.py _ALLOWED_MIMES), so users
+    # cannot upload arbitrary XML — only the PubMed fetch path produces it.
+    {".pdf", ".md", ".txt", ".docx", ".rtf", ".csv", ".xls", ".xlsx", ".ipynb", ".xml"}
 )
 
 

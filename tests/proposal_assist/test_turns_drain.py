@@ -1,3 +1,6 @@
+import asyncio
+from collections.abc import AsyncIterator
+
 import pytest
 from sqlalchemy import select
 
@@ -252,3 +255,63 @@ async def test_drain_skips_soft_deleted_workspace(
     assert adapter.launches == []
     with pg_session_factory() as s:
         assert s.get(TurnJob, job_id).status == "queued"
+
+
+class _SlowAdapter(FakeAgentAdapter):
+    """send_turn blocks past any sane turn_max_seconds before yielding, so a
+    drain tick with a small timeout cancels it mid-stream."""
+
+    async def send_turn(self, handle, user_message) -> AsyncIterator[TurnDoneEvent]:  # noqa: ANN001
+        self.last_user_message = user_message
+        self.turns.append((handle, user_message))
+        await asyncio.sleep(30)  # cancelled by wait_for long before this returns
+        yield TurnDoneEvent(tokens_in=1, tokens_out=1, model="fake", session_id="s")
+
+
+@pytest.mark.asyncio
+async def test_drain_terminates_handle_on_turn_timeout(
+    pg_session_factory,
+    _settings_env,
+):
+    """Regression: a turn exceeding turn_max_seconds must TERMINATE the SDK
+    handle, not just cancel the coroutine. Otherwise the cached subprocess is
+    reused with a half-drained message stream and the next turn reads the
+    abandoned turn's leftover messages (cross-turn transcript/token corruption).
+    After the timeout the handle must be gone so the next turn cold-launches."""
+    adapter = _SlowAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        uid = user.id
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+        t = ChatTurn(workspace_id=wsid, role="user", content="hi")
+        s.add(t)
+        s.flush()
+        s.add(
+            TurnJob(
+                workspace_id=wsid,
+                user_turn_id=t.id,
+                status="queued",
+                submitted_by_user_id=uid,
+            )
+        )
+        s.commit()
+
+    dispatched = await drain_turn_queue_tick(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_max_seconds=0.05,  # forces the timeout path
+    )
+    # Timed out → not counted as dispatched.
+    assert dispatched == 0
+    # The fix: the handle was terminated (not left cached with a dirty stream).
+    assert len(adapter.terminations) == 1
+    assert wsid not in registry._entries

@@ -191,8 +191,8 @@ class WorkspaceController:
         in_flight is incremented before iteration begins and decremented in a
         finally block so that sweep_idle never terminates a handle mid-stream,
         even if the turn takes longer than workspace_idle_timeout_seconds.
-        decrement_in_flight also bumps last_touched_monotonic, so a separate
-        touch() call is no longer needed.
+        decrement_in_flight also bumps last_touched_monotonic, so the handle's
+        idle clock resets when the turn ends without a separate call.
 
         Concurrency guard: begin_in_flight_exclusive refuses to start if another
         turn is already streaming for this workspace (e.g. the reaper freed the
