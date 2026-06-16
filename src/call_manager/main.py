@@ -2,10 +2,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import PlainTextResponse
 
 from call_manager.auth.csrf import OriginCSRFMiddleware
 from call_manager.auth.dependencies import AccountInactive
@@ -47,6 +49,7 @@ from call_manager.proposal_assist.web.sections import (
 from call_manager.proposal_assist.web.workspaces import (
     router as workspaces_router,
 )
+from call_manager.web.api.errors import api_error, api_request, code_for
 from call_manager.web.filters import (
     criterion_label,
     display_date,
@@ -314,8 +317,10 @@ def create_app() -> FastAPI:
     # (redirect to /login). API/non-HTML callers always get JSON.
     _HTML_ERROR_STATUSES = {400, 403, 404, 409, 413}
 
-    @app.exception_handler(HTTPException)
-    async def _redirect_html_401(request: Request, exc: HTTPException):
+    @app.exception_handler(StarletteHTTPException)
+    async def _redirect_html_401(request: Request, exc: StarletteHTTPException):
+        if api_request(request):
+            return api_error(exc.status_code, code_for(exc.status_code), exc.detail)
         wants_html = "text/html" in request.headers.get("accept", "")
         # An htmx PARTIAL request (HX-Request, not a full-page hx-boost
         # navigation) must always get JSON {"detail": ...} so the global
@@ -365,6 +370,8 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(AccountInactive)
     async def _inactive_account(request: Request, exc: AccountInactive):
+        if api_request(request):
+            return api_error(403, "account_inactive", "account not active")
         wants_html = "text/html" in request.headers.get("accept", "")
         hx_partial = (
             request.headers.get("hx-request") == "true"
@@ -382,6 +389,23 @@ def create_app() -> FastAPI:
             )
             return resp
         return JSONResponse(status_code=403, content={"detail": "account not active"})
+
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def _api_validation(request: Request, exc: RequestValidationError):
+        if api_request(request):
+            return api_error(422, "validation_error", "request validation failed", exc.errors())
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+    @app.exception_handler(Exception)
+    async def _api_500(request: Request, exc: Exception):
+        if api_request(request):
+            return api_error(500, "internal_error", "internal server error")
+        # Non-/api: Starlette's normal plain 500. Do NOT `raise exc` (yields an EMPTY
+        # body under raise_server_exceptions=False, and a global re-raise is the
+        # "global catch-all" the spec warns against — it would reshape HTML 500s).
+        return PlainTextResponse("Internal Server Error", status_code=500)
 
     app.state.settings = settings
     app.state.engine = engine
