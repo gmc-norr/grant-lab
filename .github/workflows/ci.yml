@@ -18,13 +18,21 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
-          version: "0.4.x"
+          # Match the uv that maintains uv.lock locally (was 0.4.x), so
+          # `uv lock --check` semantics agree with what produced the lock.
+          version: "0.11.x"
 
       - name: Set up Python
         run: uv python install 3.12
 
       - name: Sync deps (frozen)
         run: uv sync --all-extras --frozen
+
+      - name: Verify lockfile up-to-date (incl. exclude-newer)
+        # Fails if pyproject and uv.lock diverge — e.g. someone widened
+        # [tool.uv] exclude-newer in pyproject without re-locking. gen_no_build
+        # --check only validates the wheels-only list, not lock freshness.
+        run: uv lock --check
 
       - name: Verify wheels-only allowlist in sync with uv.lock
         run: uv run python scripts/gen_no_build.py --check
@@ -36,7 +44,9 @@ jobs:
         run: uv run pytest -v
 
       - name: pip-audit (Python deps)
-        run: uv run --with pip-audit pip-audit
+        # pip-audit is now a locked dev dependency (synced above), so we run it
+        # from the synced env rather than an unpinned `--with` resolve.
+        run: uv run pip-audit
 
       - name: OSV-Scanner (uv.lock)
         # google/osv-scanner-action ships no moving major tag; pin the latest v1.x release.

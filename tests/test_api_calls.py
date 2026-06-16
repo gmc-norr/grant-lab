@@ -121,3 +121,25 @@ def test_post_default_profile_persists(monkeypatch, pg_url, pg_session_factory):
     )
     with pg_session_factory() as s:
         assert s.get(User, uid).default_profile_id is None
+
+
+def test_set_default_profile_invalid_404(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _login(app, pg_session_factory)
+    # Establish a valid stored default first.
+    r = c.post(
+        "/api/me/default-profile",
+        headers={"origin": "http://testserver"},
+        json={"profile_id": pid},
+    )
+    assert r.status_code == 200
+    # An unknown profile id 404s and must NOT clobber the stored default.
+    r = c.post(
+        "/api/me/default-profile",
+        headers={"origin": "http://testserver"},
+        json={"profile_id": 999999},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+    with pg_session_factory() as s:
+        assert s.get(User, uid).default_profile_id == pid  # unchanged

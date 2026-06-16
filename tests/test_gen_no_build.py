@@ -70,9 +70,7 @@ def _write(tmp_path: Path, lock: str, pyproject: str) -> tuple[Path, Path]:
 def test_check_passes_when_in_sync(tmp_path, capsys):
     lock_path, pyproject_path = _write(tmp_path, LOCK_IN_SYNC, PYPROJECT_IN_SYNC)
 
-    rc = gen_no_build.main(
-        ["--check"], lock_path=lock_path, pyproject_path=pyproject_path
-    )
+    rc = gen_no_build.main(["--check"], lock_path=lock_path, pyproject_path=pyproject_path)
 
     assert rc == 0
     assert "in sync" in capsys.readouterr().out
@@ -85,9 +83,7 @@ def test_check_fails_when_entry_missing(tmp_path, capsys):
     drifted = PYPROJECT_IN_SYNC.replace('    "alpha-pkg",\n', "")
     lock_path, pyproject_path = _write(tmp_path, LOCK_IN_SYNC, drifted)
 
-    rc = gen_no_build.main(
-        ["--check"], lock_path=lock_path, pyproject_path=pyproject_path
-    )
+    rc = gen_no_build.main(["--check"], lock_path=lock_path, pyproject_path=pyproject_path)
 
     assert rc == 1
     err = capsys.readouterr().err
@@ -97,14 +93,10 @@ def test_check_fails_when_entry_missing(tmp_path, capsys):
 
 def test_check_fails_when_extra_entry(tmp_path, capsys):
     # An entry not present in the lock -> drift.
-    drifted = PYPROJECT_IN_SYNC.replace(
-        '    "zlib-pkg",\n', '    "zlib-pkg",\n    "stale-pkg",\n'
-    )
+    drifted = PYPROJECT_IN_SYNC.replace('    "zlib-pkg",\n', '    "zlib-pkg",\n    "stale-pkg",\n')
     lock_path, pyproject_path = _write(tmp_path, LOCK_IN_SYNC, drifted)
 
-    rc = gen_no_build.main(
-        ["--check"], lock_path=lock_path, pyproject_path=pyproject_path
-    )
+    rc = gen_no_build.main(["--check"], lock_path=lock_path, pyproject_path=pyproject_path)
 
     assert rc == 1
     assert "out of sync" in capsys.readouterr().err
@@ -118,9 +110,7 @@ def test_source_only_package_fails_structurally(tmp_path, capsys):
     )
     lock_path, pyproject_path = _write(tmp_path, lock, PYPROJECT_IN_SYNC)
 
-    rc = gen_no_build.main(
-        ["--check"], lock_path=lock_path, pyproject_path=pyproject_path
-    )
+    rc = gen_no_build.main(["--check"], lock_path=lock_path, pyproject_path=pyproject_path)
 
     assert rc == 2
     err = capsys.readouterr().err
@@ -156,10 +146,19 @@ def test_generate_mode_rewrites_pyproject(tmp_path, capsys):
     assert rc == 0
     assert "Updated no-build-package" in capsys.readouterr().out
     # After regeneration, --check must pass.
-    rc_check = gen_no_build.main(
-        ["--check"], lock_path=lock_path, pyproject_path=pyproject_path
-    )
+    rc_check = gen_no_build.main(["--check"], lock_path=lock_path, pyproject_path=pyproject_path)
     assert rc_check == 0
+
+
+def test_missing_array_fails(tmp_path, capsys):
+    # A pyproject with NO no-build-package array -> structural error (rc 2).
+    pyproject = '[tool.uv]\nexclude-newer = "2026-06-02T00:00:00Z"\n'
+    lock_path, pyproject_path = _write(tmp_path, LOCK_IN_SYNC, pyproject)
+
+    rc = gen_no_build.main(["--check"], lock_path=lock_path, pyproject_path=pyproject_path)
+
+    assert rc == 2
+    assert "no-build-package array not found" in capsys.readouterr().err
 
 
 def test_classify_sorts_names():
