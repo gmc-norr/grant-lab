@@ -44,6 +44,40 @@ def test_api_500_is_sanitized_envelope(monkeypatch, pg_url, pg_session_factory):
     assert "secret internals" not in r.text
 
 
+def test_api_5xx_httpexception_detail_is_not_leaked(monkeypatch, pg_url, pg_session_factory):
+    from fastapi import HTTPException
+
+    app = _app(monkeypatch, pg_url)
+
+    @app.get("/api/_unavailable")
+    def _unavailable():
+        raise HTTPException(status_code=503, detail="db unavailable: secret path /var/db")
+
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.get("/api/_unavailable")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"]["code"] == "internal_error"
+    assert "secret path" not in r.text and "db unavailable" not in r.text
+
+
+def test_api_4xx_httpexception_detail_is_echoed(monkeypatch, pg_url, pg_session_factory):
+    from fastapi import HTTPException
+
+    app = _app(monkeypatch, pg_url)
+
+    @app.get("/api/_teapot")
+    def _teapot():
+        raise HTTPException(status_code=418, detail="i am a teapot")
+
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.get("/api/_teapot")
+    assert r.status_code == 418
+    body = r.json()
+    assert body["error"]["code"] == "error"
+    assert body["error"]["message"] == "i am a teapot"
+
+
 def test_non_api_500_is_plain_text(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
 

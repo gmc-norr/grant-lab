@@ -320,6 +320,12 @@ def create_app() -> FastAPI:
     @app.exception_handler(StarletteHTTPException)
     async def _redirect_html_401(request: Request, exc: StarletteHTTPException):
         if api_request(request):
+            if exc.status_code >= 500:
+                # Sanitize server errors — never echo exc.detail (it may carry internals),
+                # matching the generic Exception handler below.
+                return api_error(exc.status_code, "internal_error", "internal server error")
+            # 4xx detail strings (e.g. "not authenticated", "admin required") are
+            # intentional and useful to the SPA — echo them.
             return api_error(exc.status_code, code_for(exc.status_code), exc.detail)
         wants_html = "text/html" in request.headers.get("accept", "")
         # An htmx PARTIAL request (HX-Request, not a full-page hx-boost
