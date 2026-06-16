@@ -8,8 +8,11 @@ import { expect, test, type Page } from "@playwright/test";
 // --with-deps chromium` (sudo for the OS libs), (2) a seeded ACTIVE e2e user
 // matching the login() helper below, (3) a running Postgres, and (4) the dev
 // (uvicorn SPA_MODE=dev + `pnpm dev`) or prod (`pnpm build` + uvicorn
-// SPA_MODE=prod) front-door up. See playwright.config.ts. Until then this
-// encodes the Rev-2 serving verifications as executable spec, not a placeholder.
+// SPA_MODE=prod) front-door up — with uvicorn's APP_BASE_URL set to the origin
+// the browser POSTs from (dev: http://localhost:5173; prod: http://localhost:8000),
+// else the CSRF middleware 403s the login/logout POSTs. See playwright.config.ts.
+// Until then this encodes the Rev-2 serving verifications as executable spec, not
+// a placeholder.
 
 // REAL login via the server-rendered password form (mirrors the flow in
 // tests/test_web_login_password.py: POST /login {email,password} → 303 /).

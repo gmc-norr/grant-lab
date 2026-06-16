@@ -54,6 +54,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],
+    // Scope unit tests to src/ so vitest does NOT collect the Playwright e2e
+    // specs (frontend/e2e/*.spec.ts) — they use @playwright/test's runner +
+    // browser fixtures and would crash under vitest. Playwright runs them via
+    // its own config (playwright.config.ts).
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
   server: {
     port: 5173,

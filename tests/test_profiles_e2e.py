@@ -166,8 +166,12 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
         assert len(rankings) == 1
         assert rankings[0].aggregate_score == 80
 
-        # 4. Browse the dashboard filtered by this profile.
-        r = client.get(f"/?profile={profile_id}")
+        # 4. Browse the ranked feed filtered by this profile, via the JSON
+        #    /api/calls (the React SPA's data source; the Jinja `GET /` dashboard
+        #    was retired in Plan 3 Task 9). Asserting the typed aggregate_score
+        #    is stronger than the legacy `"80" in r.text` substring.
+        r = client.get(f"/api/calls?profile={profile_id}")
         assert r.status_code == 200
-        assert "E2E call" in r.text
-        assert "80" in r.text
+        body = r.json()
+        scores = {item["title"]: item["aggregate_score"] for item in body["items"]}
+        assert scores["E2E call"] == 80

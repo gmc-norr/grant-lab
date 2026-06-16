@@ -6,6 +6,12 @@ import { defineConfig } from "@playwright/test";
 // The live run is deferred (see e2e/dashboard.spec.ts header): it needs a seeded
 // active e2e user, a running Postgres, and `playwright install --with-deps`
 // (sudo). CI wires the two webServers + seed; locally start them by hand.
+//
+// CSRF constraint: the OriginCSRFMiddleware rejects any state-changing POST whose
+// Origin != APP_BASE_URL, so the uvicorn front-door MUST be started with
+// APP_BASE_URL set to the ORIGIN THE BROWSER POSTS FROM, or login/logout 403:
+//   E2E_MODE=dev  → APP_BASE_URL=http://localhost:5173 (the Vite origin)
+//   E2E_MODE=prod → APP_BASE_URL=http://localhost:8000 (FastAPI serves directly)
 const MODE = process.env.E2E_MODE ?? "dev";
 
 export default defineConfig({

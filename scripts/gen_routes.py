@@ -5,7 +5,10 @@ Single source of truth → a Python module (FastAPI serving) and a TS module
 (Vite proxy + React Router). Run in CI/pre-build.
 
 SPA ownership is an EXACT/PATTERN match, never a prefix/`startswith` test.
-BACKEND_PREFIXES is emitted for the Task-5 dev-proxy carve-out, NOT for ownership.
+BACKEND_PREFIXES / is_backend_route are emitted as a documented prefix set and a
+future explicit-carve-out helper; they are currently NOT consulted by the serving
+or proxy path (the dev proxy is default-to-backend, the prod catch-all keys off
+is_spa_route alone). Never used to decide SPA ownership.
 """
 
 from __future__ import annotations
@@ -58,8 +61,10 @@ from __future__ import annotations
 
 # SPA-owned page routes (EXACT match; React Router owns client sub-paths beneath).
 {SPA_PREFIX}{_py_tuple(SPA_PREFIX, SPA)}
-# Backend prefixes — used ONLY to build the dev-proxy carve-out (Task 5),
-# never to decide SPA ownership.
+# Backend prefixes — the real top-level prefixes mounted in main.py. Currently
+# UNUSED by serving/proxy (dev proxy is default-to-backend; prod catch-all uses
+# is_spa_route); kept as a documented set + future carve-out helper. Never used
+# to decide SPA ownership.
 {BACKEND_PREFIX}{_py_tuple(BACKEND_PREFIX, BACKEND)}
 
 

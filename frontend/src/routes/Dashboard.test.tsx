@@ -100,3 +100,78 @@ it("a failed persist leaves the URL unchanged and surfaces an error", async () =
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/default profile/i));
   expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
 });
+
+// --- row rendering + filter-state reflection (ported from the retired Jinja
+// GET-/ tests: deadline label, show_closed checkbox state, pagination preserves
+// the toggle). These need non-empty items, so they use a fuller body fixture. ---
+
+const isoIn = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+
+function itemsBody(items: object[], extra: object = {}) {
+  return {
+    data: {
+      items,
+      summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
+      pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: items.length },
+      ranking: { pending: 0, failed: 0 },
+      effective: { profile_id: null, source: null, sort: "newest", show_closed: false },
+      facets: { sources: [], profiles: [] },
+      ...extra,
+    },
+    error: undefined,
+    response: new Response(),
+  };
+}
+
+const row = (id: number, title: string, deadline: string | null) => ({
+  id,
+  title,
+  deadline,
+  published_at: null,
+  source_name: null,
+  source_slug: null,
+  aggregate_score: null,
+});
+
+it("renders a DISTINCT deadline affordance: past -> grey 'Closed', near -> urgent (Jinja-label parity)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(
+    itemsBody([row(1, "Past call", isoIn(-5)), row(2, "Soon call", isoIn(5))]) as never,
+  );
+  renderAt("/?show_closed=1");
+  await screen.findByText("Past call"); // wait for the rows to render
+  // Past deadline -> grey "Closed · <date>" state.
+  const closed = document.querySelector('[data-deadline-state="closed"]');
+  expect(closed).not.toBeNull();
+  expect(closed?.textContent).toMatch(/^Closed ·/);
+  // Near deadline -> a DISTINCT urgent state (not "closed", no "Closed" prefix).
+  const soon = document.querySelector('[data-deadline-state="soon"]');
+  expect(soon).not.toBeNull();
+  expect(soon?.textContent ?? "").not.toMatch(/Closed/);
+});
+
+it("the show_closed checkbox reflects the URL: checked with ?show_closed=1", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(itemsBody([]) as never);
+  renderAt("/?show_closed=1");
+  expect(await screen.findByRole("checkbox")).toBeChecked();
+});
+
+it("the show_closed checkbox is unchecked by default", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(itemsBody([]) as never);
+  renderAt("/");
+  expect(await screen.findByRole("checkbox")).not.toBeChecked();
+});
+
+it("paginating preserves the show_closed toggle in the URL", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(
+    itemsBody([], {
+      pagination: { page: 1, limit: 50, has_prev: false, has_next: true, total: 100 },
+    }) as never,
+  );
+  renderAt("/?show_closed=1");
+  fireEvent.click(await screen.findByRole("button", { name: /next/i }));
+  await waitFor(() => {
+    const s = screen.getByTestId("search").textContent ?? "";
+    expect(s).toContain("show_closed=1"); // toggle carried onto the next page
+    expect(s).toContain("page=2");
+  });
+});

@@ -1,14 +1,18 @@
 """Read-only dashboard read-model service.
 
-Extracted from `web/routes/calls.py::calls_index` so the same query/ordering/
-summary logic can back BOTH the live Jinja dashboard (which keeps the
-sticky-default WRITE in its handler) and the future JSON `/api/calls` endpoint
-(which calls with `persist=False`, never writing).
+Originally extracted from the (now-retired) `web/routes/calls.py::calls_index`
+Jinja handler so the same query/ordering/summary logic could be shared. After
+Plan 3 Task 9 flipped `/` to the React SPA and deleted `calls_index`, the sole
+live consumer is the JSON `GET /api/calls` endpoint (`web/api/calls.py`), which
+always calls with `persist=False` and never writes. The explicit sticky-default
+WRITE that used to live in the Jinja handler now lives in
+`POST /api/me/default-profile` (via `set_default_profile`).
 
-PARITY CONTRACT: this module must reproduce the legacy `calls_index` read
+PARITY CONTRACT: this module still reproduces the legacy `calls_index` read
 behavior byte-for-byte — same closed-first tie-break ordering, the same
 dismissed/`show_closed` hide logic, the same summary counts over the full
-filtered set (independent of limit/offset), and the same pagination flags.
+filtered set (independent of limit/offset), and the same pagination flags. That
+behavior is now proven against `/api/calls` in `tests/test_api_calls_feed_behavior.py`.
 """
 
 from __future__ import annotations
@@ -64,9 +68,13 @@ def resolve_profile_selection(
       Invalid/inactive → unranked, stored default untouched. When ``persist`` is
       True and the id is valid, store it as the new default.
 
-    ``persist=True`` is the Jinja path (the sticky-default WRITE lives here, in
-    the user row — the *caller* is responsible for committing). ``persist=False``
-    is the read-only `/api` path: identical resolution, never writes.
+    ``persist=False`` is the read-only `/api/calls` path (the only live caller):
+    identical resolution, never writes. The ``persist=True`` write branch is
+    currently UNUSED — it backed the retired Jinja `calls_index` handler; explicit
+    preference writes now go through `POST /api/me/default-profile`
+    (`set_default_profile`). The branch is retained (and the *caller* is still
+    responsible for committing) against a future server-side resolve-and-persist
+    need.
 
     A non-empty, non-integer value 400s, matching the legacy
     `_parse_optional_profile_id` behavior (a genuinely malformed URL).

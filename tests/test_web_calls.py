@@ -86,15 +86,8 @@ def test_call_detail_404_for_unknown_id(monkeypatch, pg_url, pg_session_factory)
     assert r.status_code == 404
 
 
-def test_app_js_autosubmit_selector_is_generalized():
-    """The auto-submit handler must target [data-autosubmit] (both the filter
-    selects AND the show-closed checkbox), not select[data-autosubmit] only —
-    otherwise the toggle silently won't submit. Static guard: there is no JS
-    runtime in the pytest suite, so this asserts the source was generalized."""
-    from pathlib import Path
-
-    import call_manager
-
-    js = (Path(call_manager.__file__).parent / "web" / "static" / "app.js").read_text()
-    assert "[data-autosubmit]" in js
-    assert "select[data-autosubmit]" not in js
+# NOTE: test_app_js_autosubmit_selector_is_generalized was removed in Plan 3
+# Task 9. The [data-autosubmit] generalization it guarded existed for the Jinja
+# dashboard's filter form + show-closed checkbox; that dashboard (calls_index.html)
+# was retired, leaving NO template consumer of data-autosubmit, so the guard no
+# longer protects any live behavior (the SPA drives filters in React).
