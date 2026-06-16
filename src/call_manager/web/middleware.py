@@ -10,9 +10,12 @@ materializing bodies.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from call_manager.web.api.errors import is_api_path
 
 
 def build_csp() -> str:
@@ -109,15 +112,19 @@ class MaxBodySizeMiddleware:
             await self.app(scope, receive, send)
             return
 
+        as_json = is_api_path(scope.get("path", ""))
+
         for name, value in scope.get("headers", []):
             if name == b"content-length":
                 try:
                     declared = int(value)
                 except ValueError:
-                    await _send_status(send, 400, b"malformed content-length")
+                    await _send_error(send, 400, "bad_request", "malformed content-length", as_json)
                     return
                 if declared > self.max_bytes:
-                    await _send_status(send, 413, b"request body too large")
+                    await _send_error(
+                        send, 413, "payload_too_large", "request body too large", as_json
+                    )
                     return
                 break
 
@@ -144,6 +151,26 @@ async def _send_status(send: Send, status: int, body: bytes) -> None:
             "status": status,
             "headers": [
                 (b"content-type", b"text/plain; charset=utf-8"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+async def _send_error(send: Send, status: int, code: str, message: str, as_json: bool) -> None:
+    if as_json:
+        body = json.dumps({"error": {"code": code, "message": message}}).encode()
+        ctype = b"application/json"
+    else:
+        body = message.encode()
+        ctype = b"text/plain; charset=utf-8"
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", ctype),
                 (b"content-length", str(len(body)).encode("ascii")),
             ],
         }

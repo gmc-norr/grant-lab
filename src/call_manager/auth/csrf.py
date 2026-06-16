@@ -29,6 +29,7 @@ and what OWASP recommends as a practical baseline.
 
 from __future__ import annotations
 
+import json
 import logging
 from urllib.parse import urlparse
 
@@ -36,6 +37,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
+
+from call_manager.web.api.errors import is_api_path
 
 _logger = logging.getLogger(__name__)
 
@@ -99,25 +102,28 @@ class OriginCSRFMiddleware(BaseHTTPMiddleware):
         # certain redirect chains. Treat it as a mismatch — a legitimate
         # same-origin form won't produce it.
         if origin == "null":
-            return _forbidden("origin", origin)
+            return _forbidden("origin", origin, path=request.url.path)
 
         if origin:
             if _hostport(origin) != self._expected_host:
-                return _forbidden("origin", origin)
+                return _forbidden("origin", origin, path=request.url.path)
             return await call_next(request)
 
         if referer:
             if _hostport(referer) != self._expected_host:
-                return _forbidden("referer", referer)
+                return _forbidden("referer", referer, path=request.url.path)
             return await call_next(request)
 
         # Neither header present — allow. See module docstring.
         return await call_next(request)
 
 
-def _forbidden(header: str, value: str) -> Response:
+def _forbidden(header: str, value: str, *, path: str = "") -> Response:
     _logger.warning(
         "csrf.origin_mismatch",
         extra={"event": "csrf_origin_mismatch", "header": header, "value": value},
     )
+    if is_api_path(path):
+        body = json.dumps({"error": {"code": "forbidden", "message": "origin mismatch"}})
+        return Response(status_code=403, content=body, media_type="application/json")
     return Response(status_code=403, content=b"origin mismatch")

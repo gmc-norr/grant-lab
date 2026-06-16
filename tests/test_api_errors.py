@@ -90,3 +90,23 @@ def test_non_api_500_is_plain_text(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 500
     assert r.text == "Internal Server Error"
     assert "error" not in r.headers.get("content-type", "")
+
+
+def test_api_csrf_rejection_is_envelope(monkeypatch, pg_url, pg_session_factory):
+    c = TestClient(_app(monkeypatch, pg_url))
+    # A cross-origin POST to an /api path: bad Origin → CSRF 403.
+    r = c.post("/api/me/default-profile", headers={"origin": "http://evil.example"}, json={})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_api_body_too_large_is_envelope(monkeypatch, pg_url, pg_session_factory):
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "16")
+    c = TestClient(_app(monkeypatch, pg_url))
+    r = c.post(
+        "/api/me/default-profile",
+        headers={"origin": "http://testserver", "content-type": "application/json"},
+        content=b"x" * 64,
+    )
+    assert r.status_code == 413
+    assert r.json()["error"]["code"] == "payload_too_large"
