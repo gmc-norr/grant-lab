@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -17,7 +17,6 @@ from call_manager.db.models import (
     User,
     UserCallDismissal,
 )
-from call_manager.web.dashboard import _ranking_counts
 
 
 def _parse_optional_profile_id(raw: str | None) -> int | None:
@@ -39,36 +38,15 @@ def _parse_optional_profile_id(raw: str | None) -> int | None:
 
 router = APIRouter()
 
+
 # The dashboard index (`GET /`) was retired in Plan 3 Task 9: the React SPA now
 # owns `/` (served by Vite in dev / the prod catch-all), and the read-model
 # (`build_dashboard_view`) is reached only via the JSON `GET /api/calls`. This
 # router now serves the still-server-rendered companion pages: the call-detail
-# page, the HTMX ranking-status strip, and the hide action. The sticky-default
-# WRITE that used to live in `calls_index` moved to `POST /api/me/default-profile`.
-
-
-# NOTE: must be declared before /calls/{call_id} — FastAPI matches routes in
-# declaration order, so "ranking-status" would otherwise be captured as call_id.
-@router.get("/calls/ranking-status", response_class=HTMLResponse)
-def ranking_status(
-    request: Request,
-    profile: int = Query(...),
-    poll: int = Query(default=0),
-    user: User = Depends(get_current_user),  # noqa: B008
-):
-    session_factory = request.app.state.session_factory
-    with session_factory() as session:
-        pending, failed = _ranking_counts(session, profile)
-    if pending == 0 and poll == 1:
-        # Drained while polling → reload the feed so the new scores show.
-        return Response(status_code=200, headers={"HX-Refresh": "true"})
-    return request.app.state.templates.TemplateResponse(
-        request=request,
-        name="partials/ranking_status_strip.html",
-        context={"pending": pending, "failed": failed, "profile_id": profile},
-    )
-
-
+# page and the hide action. The sticky-default WRITE that used to live in
+# `calls_index` moved to `POST /api/me/default-profile`. (The HTMX
+# ranking-status strip was retired with the Jinja dashboard — the SPA renders
+# ranking progress client-side from the `ranking` block of `GET /api/calls`.)
 @router.get("/calls/{call_id}", response_class=HTMLResponse)
 def call_detail(
     request: Request,
@@ -126,7 +104,9 @@ def call_detail(
             .limit(1)
         )
 
-        # See note in calls_index: detach Call AND its joined `source` together.
+        # Detach the Call AND its joined `source` together (joinedload at the
+        # top already populated `source`) so the template can read `call.source`
+        # after the session closes.
         session.expunge_all()
 
     # Pre-compute the "why pass / why fail" detail string for each criterion

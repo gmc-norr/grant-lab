@@ -886,23 +886,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/calls/ranking-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Ranking Status */
-        get: operations["ranking_status_calls_ranking_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/calls/{call_id}": {
         parameters: {
             query?: never;
@@ -5545,38 +5528,6 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
-                };
-            };
-        };
-    };
-    ranking_status_calls_ranking_status_get: {
-        parameters: {
-            query: {
-                profile: number;
-                poll?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

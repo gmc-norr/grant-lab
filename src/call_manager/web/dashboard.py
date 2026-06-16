@@ -162,8 +162,9 @@ def _order_for(sort: Sort):
 def _ranking_counts(session: Session, profile_id: int) -> tuple[int, int]:
     """(pending, unresolved-failed) job counts for a profile.
 
-    Public (importable) name — `web/routes/calls.py::ranking_status` imports it
-    from here. PARITY: identical to the legacy local `_ranking_counts`.
+    Used by `build_dashboard_view` to populate the `ranking` block that the
+    React SPA renders from `GET /api/calls`. PARITY: identical to the legacy
+    local `_ranking_counts` that backed the retired Jinja dashboard.
     """
     pending = (
         session.scalar(
