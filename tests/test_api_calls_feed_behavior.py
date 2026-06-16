@@ -582,6 +582,51 @@ def test_open_count_excludes_closed_regardless_of_toggle(monkeypatch, pg_url, pg
     assert shown["pagination"]["total"] == 4
 
 
+def test_soon_deadline_badge_counts_open_within_30d_only(monkeypatch, pg_url, pg_session_factory):
+    """summary.soon_deadline counts OPEN calls whose deadline is within 30 days
+    and EXCLUDES both >30d-out calls and past-deadline (closed) ones — and, like
+    open_count, is independent of the show_closed toggle."""
+    app = _app(monkeypatch, pg_url)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        eu = s.execute(select(Source).where(Source.slug == "eu_portal")).scalar_one()
+        s.add_all(
+            [
+                Call(
+                    source_id=eu.id,
+                    external_id="SOON",
+                    url="us",
+                    title="Soon deadline",
+                    published_at=datetime(2026, 4, 1, tzinfo=UTC),
+                    deadline=now + timedelta(days=10),  # within 30d → counts
+                ),
+                Call(
+                    source_id=eu.id,
+                    external_id="FAR",
+                    url="uf",
+                    title="Far deadline",
+                    published_at=datetime(2026, 4, 1, tzinfo=UTC),
+                    deadline=now + timedelta(days=60),  # >30d → excluded
+                ),
+                Call(
+                    source_id=eu.id,
+                    external_id="PAST",
+                    url="up",
+                    title="Past deadline",
+                    published_at=datetime(2026, 4, 1, tzinfo=UTC),
+                    deadline=now - timedelta(days=3),  # closed → excluded
+                ),
+            ]
+        )
+        s.commit()
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        default = c.get("/api/calls").json()
+        shown = c.get("/api/calls?show_closed=1").json()
+    assert default["summary"]["soon_deadline"] == 1
+    assert shown["summary"]["soon_deadline"] == 1
+
+
 def test_pagination_total_tracks_toggle(monkeypatch, pg_url, pg_session_factory):
     """3 open + 1 closed, limit=3: default total=3 (no next page); show_closed=1
     total=4 (next page offered). Guards against `total` counting closed rows

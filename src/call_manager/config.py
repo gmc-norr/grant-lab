@@ -526,6 +526,28 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_embedding_thresholds(self):
+        """The two-band embedding gate requires hard_fail <= pregate, both in
+        [0, 1]. An inverted pair (hard_fail > pregate) silently FAILs every pair
+        whose cosine lands in [pregate, hard_fail) — calls that should PASS — so
+        refuse to start rather than mis-rank the whole corpus on a typo'd env."""
+        for name, val in (
+            ("EMBEDDING_PREGATE_THRESHOLD", self.embedding_pregate_threshold),
+            ("EMBEDDING_HARD_FAIL_THRESHOLD", self.embedding_hard_fail_threshold),
+        ):
+            if not 0.0 <= val <= 1.0:
+                raise ValueError(f"{name} must be in [0.0, 1.0] (got {val!r})")
+        if self.embedding_hard_fail_threshold > self.embedding_pregate_threshold:
+            raise ValueError(
+                "EMBEDDING_HARD_FAIL_THRESHOLD "
+                f"({self.embedding_hard_fail_threshold}) must be <= "
+                f"EMBEDDING_PREGATE_THRESHOLD ({self.embedding_pregate_threshold}); "
+                "an inverted gate silently FAILs pairs whose cosine is in "
+                "[pregate, hard_fail) that should PASS."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _require_google_credentials_when_enabled(self):
         if self.google_oidc_enabled and (
             not self.google_client_id or not self.google_client_secret

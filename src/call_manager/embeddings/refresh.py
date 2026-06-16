@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 
 from call_manager.db.models import Call, Profile
 from call_manager.embeddings.similarity import build_call_text, build_profile_text
@@ -274,12 +274,12 @@ def _refresh_missing_embeddings_batch(
             call_q = call_q.where(
                 or_(Call.embedding.is_(None), Call.embedding_model != current_model)
             )
-        call_q = (
-            call_q.where(Call.id > after_call_id)
-            .where(func.length(func.trim(Call.title)) > 0)
-            .order_by(Call.id)
-            .limit(batch_size)
-        )
+        # No SQL title pre-filter: a call with a blank/whitespace title but an
+        # embeddable summary/full_text must still be embedded. build_call_text
+        # composes title+summary+full_text and refresh_call_embedding skips
+        # (returns False) only when ALL are empty — mirrors the profile path
+        # below, keeping the embeddability rule in one place (no SQL duplicate).
+        call_q = call_q.where(Call.id > after_call_id).order_by(Call.id).limit(batch_size)
         call_ids = session.execute(call_q).scalars().all()
     for cid in call_ids:
         with session_factory() as session:

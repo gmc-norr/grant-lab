@@ -190,15 +190,20 @@ def drain_queue(
                 new_summary = result.summary
                 new_notes = result.applicant_notes
                 new_analysis_model = result.analysis_model
-                if new_summary is None or new_notes is None:
+                # The analysis is ONE attributable unit (summary + applicant_notes
+                # + analysis_model). Preserve the prior run's analysis ONLY when
+                # THIS run produced none of it (both fields None — e.g. a gate-fail
+                # re-rank where the LLM never ran, or a cosine short-circuit), and
+                # restore the triple TOGETHER. A run that produced EITHER field
+                # keeps its own triple verbatim — otherwise a partial result would
+                # graft this run's summary onto the prior run's applicant_notes
+                # under a single analysis_model, mis-attributing one of them.
+                if new_summary is None and new_notes is None:
                     existing = session.get(CallRanking, (call_id, profile_id))
                     if existing is not None:
-                        if new_summary is None:
-                            new_summary = existing.summary
-                        if new_notes is None:
-                            new_notes = existing.applicant_notes
-                        if new_analysis_model is None:
-                            new_analysis_model = existing.analysis_model
+                        new_summary = existing.summary
+                        new_notes = existing.applicant_notes
+                        new_analysis_model = existing.analysis_model
 
                 session.merge(
                     CallRanking(
