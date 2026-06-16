@@ -52,6 +52,25 @@ def bootstrap_admins(
             if user is None:
                 user = User(email=email, is_admin=True, status="active")
                 session.add(user)
+                if password is None:
+                    # A freshly-created admin with no password cannot authenticate
+                    # by ANY flow: password login fails (no hash), and Google
+                    # sign-in treats the pre-created email row as a collision and
+                    # refuses to auto-link. Warn loudly so the operator sets
+                    # INITIAL_ADMIN_PASSWORD (or pre-registers the user) rather
+                    # than getting a silent, permanent lockout.
+                    _logger.warning(
+                        "admin bootstrap created an admin with no password",
+                        extra={
+                            "event": "admin_bootstrap_passwordless",
+                            "email": email,
+                            "detail": (
+                                "no INITIAL_ADMIN_PASSWORD set and OIDC cannot link a "
+                                "pre-created email; this admin cannot log in until a "
+                                "password is configured or the user is pre-registered"
+                            ),
+                        },
+                    )
             else:
                 # Configured admins are the lockout-recovery path: ensure both
                 # admin AND active on every startup. To permanently disable one,

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from call_manager.auth.accounts import link_google_identity, resolve_google_account
+from call_manager.auth.domain import domain_allowed
 from call_manager.auth.oauth_txn import InvalidTransaction
 from call_manager.auth.oidc import IdTokenInvalid, OIDCError, generate_pkce, generate_token
 from call_manager.auth.redirects import safe_next
@@ -140,6 +141,14 @@ def google_callback(
             ok = link_google_identity(db, user_id=u.id, iss=iss, sub=sub)
             db.commit()
         return _clean("/me" if ok else "/auth/error")
+
+    # Enforce ALLOWED_EMAIL_DOMAINS on Google SIGN-IN, same as password
+    # registration and admin bootstrap. Without this, a Google account at ANY
+    # domain could create a pending account (and an admin could later approve it
+    # by mistake). Link mode above is exempt — it attaches an identity to an
+    # account that was already admitted through the allow-list.
+    if not domain_allowed(email.strip().lower(), settings.allowed_email_domains):
+        return _clean("/auth/error")
 
     with session_factory() as db:
         res = resolve_google_account(db, iss=iss, sub=sub, email=email, name=name)

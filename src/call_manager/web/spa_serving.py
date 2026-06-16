@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Match
 
 from call_manager.web.spa_routes import is_spa_route
 
@@ -47,4 +48,24 @@ def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
             if request.method in ("GET", "HEAD"):
                 return FileResponse(index)
             raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
+        # Non-SPA path. Distinguish a real route hit with the WRONG method (405)
+        # from a genuinely unknown path (404): the catch-all owns ALL methods, so
+        # without this a wrong-method request to a real route (e.g. POST /api/me,
+        # which is GET-only) would be masked here as 404 instead of the native
+        # 405 that SPA_MODE=dev/disabled return (no catch-all → Starlette's
+        # method-mismatch 405). Collect the methods of any CONCRETE route whose
+        # path matches (excluding THIS catch-all and method-less mounts).
+        allowed: set[str] = set()
+        probe = {"type": "http", "path": path, "method": "GET"}
+        for route in app.routes:
+            if getattr(route, "endpoint", None) is _spa_fallback:
+                continue
+            methods = getattr(route, "methods", None)
+            if not methods:
+                continue
+            match, _ = route.matches(probe)
+            if match is not Match.NONE:
+                allowed.update(methods)
+        if allowed:
+            raise HTTPException(status_code=405, headers={"Allow": ", ".join(sorted(allowed))})
         raise HTTPException(status_code=404, detail="not found")

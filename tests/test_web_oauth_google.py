@@ -98,7 +98,9 @@ def test_callback_new_user_pending(monkeypatch, pg_url, pg_session_factory):
     app, fake = _setup(monkeypatch, pg_url)
     with TestClient(app) as c:
         state, nonce = _start(c)
-        fake.set_code("C", _claims(nonce=nonce))
+        # Allowed-domain (ki.se) email so the sign-in is admitted and creates a
+        # pending account (the disallowed-domain path is covered separately).
+        fake.set_code("C", _claims(email="new@ki.se", nonce=nonce))
         r = c.get(
             f"/auth/google/callback?code=C&state={state}",
             headers={"accept": "text/html"},
@@ -108,7 +110,25 @@ def test_callback_new_user_pending(monkeypatch, pg_url, pg_session_factory):
         assert r.headers.get("referrer-policy") == "no-referrer"
         assert "oauth_txn=" in "".join(r.headers.get_list("set-cookie"))  # cleared
     with pg_session_factory() as s:
-        assert s.query(User).filter_by(email="new@gmail.com").one().status == "pending"
+        assert s.query(User).filter_by(email="new@ki.se").one().status == "pending"
+
+
+def test_callback_disallowed_domain_rejected(monkeypatch, pg_url, pg_session_factory):
+    """A Google sign-in from a domain outside ALLOWED_EMAIL_DOMAINS must NOT
+    create a pending account — it lands on /auth/error, parity with password
+    registration + admin bootstrap. Regression for the OIDC allow-list gap."""
+    app, fake = _setup(monkeypatch, pg_url)  # ALLOWED_EMAIL_DOMAINS=ki.se
+    with TestClient(app) as c:
+        state, nonce = _start(c)
+        fake.set_code("C", _claims(email="outsider@gmail.com", nonce=nonce))
+        r = c.get(
+            f"/auth/google/callback?code=C&state={state}",
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert r.headers["location"] == "/auth/error"
+    with pg_session_factory() as s:
+        assert s.query(User).filter_by(email="outsider@gmail.com").one_or_none() is None
 
 
 def test_callback_active_user_gets_session(monkeypatch, pg_url, pg_session_factory):

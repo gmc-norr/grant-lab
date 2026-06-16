@@ -90,6 +90,12 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     post_root = c.post("/")
     assert post_root.status_code == 405
     assert post_root.headers["allow"] == "GET, HEAD"
+    # A REAL backend route hit with the WRONG method returns a correct 405 (not a
+    # 404 masked by the all-methods catch-all): /healthz is GET-only, so POST gets
+    # 405 with GET in Allow — matching the native 405 that dev/disabled return.
+    wrong_method = c.post("/healthz")
+    assert wrong_method.status_code == 405
+    assert "GET" in wrong_method.headers.get("allow", "")
     # The internal SPA catch-all must not leak into the OpenAPI schema.
     assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
     # PROD must keep the STRICT CSP — the relaxed dev policy must NOT leak to

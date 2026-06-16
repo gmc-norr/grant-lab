@@ -220,7 +220,14 @@ async def lifespan(app: FastAPI):
         # wait=True so an in-flight rank-drain or ingest job completes
         # against the still-open pool — Plan 3 made the rank tick 60s, so
         # mid-flight at shutdown is plausible (was daily-only before).
-        app.state.scheduler.shutdown(wait=True)
+        #
+        # Run the BLOCKING shutdown off the event loop (to_thread). The drain/
+        # idle-sweep ticks run in APScheduler worker threads and block on
+        # run_coroutine_threadsafe(...).result() — they can only finish once the
+        # app loop runs their coroutine. Calling shutdown(wait=True) directly on
+        # the loop would block the loop waiting for those workers, which are in
+        # turn waiting for the loop → self-deadlock until the fut.result timeout.
+        await _asyncio.to_thread(app.state.scheduler.shutdown, wait=True)
         # B6-residuals: terminate every live drafting subprocess before
         # disposing the engine. Without this, each `lifespan` exit leaks
         # SDK subprocesses + the per-workspace pg advisory-lock sessions

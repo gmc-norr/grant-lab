@@ -79,6 +79,12 @@ def _hostport(url: str) -> str | None:
     if host in ("localhost", "127.0.0.1", "::1"):
         host = "localhost"
     scheme = (parsed.scheme or "").lower()
+    # Drop the scheme's DEFAULT port so an explicit `:443` (https) / `:80` (http)
+    # on one side matches an implicit default on the other — they are the same
+    # origin per RFC 3986/6454. Browsers usually omit the default port, but some
+    # proxies/clients send it explicitly; without this they would 403.
+    if port is not None and port == {"http": 80, "https": 443, "ws": 80, "wss": 443}.get(scheme):
+        port = None
     hostport = f"{host}:{port}" if port else host
     return f"{scheme}://{hostport}" if scheme else hostport
 
