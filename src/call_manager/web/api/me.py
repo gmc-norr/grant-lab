@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User
+from call_manager.web.dashboard import set_default_profile
 
 router = APIRouter()
 
@@ -38,12 +39,16 @@ class DefaultProfileIn(BaseModel):
     profile_id: int | None
 
 
-@router.post("/me/default-profile", status_code=200)
-def set_default(request: Request, body: DefaultProfileIn, user: User = Depends(get_current_user)):  # noqa: B008
-    from call_manager.web.dashboard import set_default_profile
+class DefaultProfileOut(BaseModel):
+    default_profile_id: int | None
 
+
+@router.post("/me/default-profile", response_model=DefaultProfileOut)
+def set_default(request: Request, body: DefaultProfileIn, user: User = Depends(get_current_user)):  # noqa: B008
     sf = request.app.state.session_factory
     with sf() as session:
         set_default_profile(session, user_id=user.id, profile_id=body.profile_id)
         session.commit()
-    return {"ok": True}
+    # set_default_profile 404s on an invalid id before we get here, so the stored
+    # value now equals body.profile_id (or None when clearing).
+    return DefaultProfileOut(default_profile_id=body.profile_id)

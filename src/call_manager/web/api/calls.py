@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -19,19 +20,61 @@ class CallOut(BaseModel):
     published_at: str | None
     source_name: str | None
     source_slug: str | None
-    aggregate_score: float | None
+    # None = no ranking row for this call/profile (the score itself is NOT NULL).
+    aggregate_score: int | None
+
+
+class SummaryOut(BaseModel):
+    open_count: int
+    high_score: int
+    soon_deadline: int
+
+
+class PaginationOut(BaseModel):
+    page: int
+    limit: int
+    has_prev: bool
+    has_next: bool
+    total: int
+
+
+class EffectiveOut(BaseModel):
+    source: str | None
+    sort: Literal["newest", "deadline"]
+    profile_id: int | None
+    show_closed: bool
+
+
+class RankingOut(BaseModel):
+    pending: int
+    failed: int
+
+
+class SourceFacet(BaseModel):
+    slug: str
+    name: str
+
+
+class ProfileFacet(BaseModel):
+    id: int
+    name: str
+
+
+class FacetsOut(BaseModel):
+    sources: list[SourceFacet]
+    profiles: list[ProfileFacet]
 
 
 class DashboardOut(BaseModel):
     items: list[CallOut]
-    summary: dict[str, int]
-    pagination: dict[str, object]
-    ranking: dict[str, int]
-    effective: dict[str, object]
-    facets: dict[str, list[dict]]
+    summary: SummaryOut
+    pagination: PaginationOut
+    ranking: RankingOut
+    effective: EffectiveOut
+    facets: FacetsOut
 
 
-def _iso(dt) -> str | None:
+def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
@@ -74,10 +117,10 @@ def get_calls(
             )
             for call, ranking in view.calls
         ]
-        facets = {
-            "sources": [{"slug": s.slug, "name": s.name} for s in view.sources],
-            "profiles": [{"id": p.id, "name": p.name} for p in view.profiles],
-        }
+        facets = FacetsOut(
+            sources=[SourceFacet(slug=s.slug, name=s.name) for s in view.sources],
+            profiles=[ProfileFacet(id=p.id, name=p.name) for p in view.profiles],
+        )
     return DashboardOut(
         items=items,
         summary=view.summary,

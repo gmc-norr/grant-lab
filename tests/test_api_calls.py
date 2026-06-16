@@ -1,6 +1,8 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import Profile, ProfileKind, User
+from call_manager.db.models import Call, CallRanking, Profile, ProfileKind, Source, User
 from call_manager.main import create_app
 
 
@@ -45,6 +47,60 @@ def test_api_calls_is_read_only(monkeypatch, pg_url, pg_session_factory):
     assert "items" in body and "summary" in body and body["ranking"] == {"pending": 0, "failed": 0}
     with pg_session_factory() as s:
         assert s.get(User, uid).default_profile_id is None
+
+
+def test_api_calls_returns_seeded_call_shape(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _login(app, pg_session_factory)
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        src = Source(name="Seeded Source", slug="seeded-source-api-test")
+        s.add(src)
+        s.flush()
+        call = Call(
+            source_id=src.id,
+            external_id="ext-1",
+            url="https://example.test/call/1",
+            title="Open Grant Call",
+            published_at=now,
+            deadline=now + timedelta(days=10),
+        )
+        s.add(call)
+        s.flush()
+        s.add(
+            CallRanking(
+                call_id=call.id,
+                profile_id=pid,
+                aggregate_score=82,
+                model="test-model",
+                prompt_version="v1",
+            )
+        )
+        s.commit()
+        src_slug, src_name = src.slug, src.name
+
+    r = c.get(f"/api/calls?profile={pid}")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert set(item) == {
+        "id",
+        "title",
+        "deadline",
+        "published_at",
+        "source_name",
+        "source_slug",
+        "aggregate_score",
+    }
+    assert item["source_slug"] == src_slug
+    assert item["source_name"] == src_name
+    assert item["aggregate_score"] == 82
+
+    # Typed containers now expose their fields (would catch a key rename).
+    assert set(body["pagination"]) == {"page", "limit", "has_prev", "has_next", "total"}
+    assert set(body["effective"]) == {"source", "sort", "profile_id", "show_closed"}
 
 
 def test_post_default_profile_persists(monkeypatch, pg_url, pg_session_factory):
