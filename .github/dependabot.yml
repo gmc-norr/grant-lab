@@ -1,0 +1,21 @@
+# Dependabot configuration (supply-chain baseline, spec §3.2 / §5).
+# Any PR Dependabot opens that moves uv.lock must still pass the documented
+# dependency-add review (see .github/pull_request_template.md): why + age /
+# downloads / maintainer sanity + whether it ships a build backend. The
+# dependency-review-action (.github/workflows/dependency-review.yml) fails PRs
+# that introduce a known-vulnerable dependency.
+version: 2
+updates:
+  # Python deps managed by uv (pyproject.toml + uv.lock). "uv" is a
+  # first-class Dependabot ecosystem.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # The GitHub Actions we depend on (checkout, setup-uv, osv-scanner, etc.)
+  # are third-party supply-chain surface too — keep them updated.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

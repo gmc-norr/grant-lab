@@ -51,6 +51,130 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/call_manager"]
 
+[tool.uv]
+# Cooldown: only consider artifacts published before this instant. Bump
+# deliberately on intentional dependency updates (supply-chain spec §3.2).
+exclude-newer = "2026-06-02T00:00:00Z"
+# Wheels-preferred: refuse to build source distributions so no third-party
+# sdist build backend runs arbitrary code at install/resolve time (supply-chain
+# spec §3.2, Surface A). uv's global `no-build = true` would also block the
+# editable install of our own first-party project (it has no wheel) and uv
+# offers no allow-list to exempt the project root, while the app + CLIs import
+# `call_manager` via `uv run`, so the project MUST install editable. We instead
+# scope wheels-only to every third-party dependency via `no-build-package`
+# (uv's per-package form of `no-build`). Every dep in uv.lock resolves to a
+# wheel today (verified), so this never runs a third-party build backend, while
+# our own `call_manager` still installs editable for the app + CLIs.
+#
+# This list is GENERATED from uv.lock — do not hand-edit. Regenerate after any
+# uv.lock change (CI enforces it stays in sync; see scripts/gen_no_build.py):
+#     uv run python scripts/gen_no_build.py
+# If a future dependency is legitimately source-only (no wheel), the script
+# flags it: document why in the PR and exclude it (the allowlist exception).
+no-build-package = [
+    "alembic",
+    "annotated-doc",
+    "annotated-types",
+    "anthropic",
+    "anyio",
+    "apscheduler",
+    "argon2-cffi",
+    "argon2-cffi-bindings",
+    "attrs",
+    "authlib",
+    "babel",
+    "bleach",
+    "certifi",
+    "cffi",
+    "charset-normalizer",
+    "claude-agent-sdk",
+    "click",
+    "colorama",
+    "courlan",
+    "cryptography",
+    "dateparser",
+    "defusedxml",
+    "distro",
+    "docker",
+    "docstring-parser",
+    "et-xmlfile",
+    "fastapi",
+    "greenlet",
+    "h11",
+    "htmldate",
+    "httpcore",
+    "httptools",
+    "httpx",
+    "httpx-sse",
+    "idna",
+    "iniconfig",
+    "itsdangerous",
+    "jinja2",
+    "jiter",
+    "joserfc",
+    "jsonschema",
+    "jsonschema-specifications",
+    "justext",
+    "lxml",
+    "lxml-html-clean",
+    "mako",
+    "markdown",
+    "markupsafe",
+    "mcp",
+    "numpy",
+    "openpyxl",
+    "packaging",
+    "pdfminer-six",
+    "pgvector",
+    "pillow",
+    "pluggy",
+    "psycopg",
+    "psycopg-binary",
+    "pycparser",
+    "pydantic",
+    "pydantic-core",
+    "pydantic-settings",
+    "pygments",
+    "pyjwt",
+    "pymupdf",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-httpx",
+    "python-dateutil",
+    "python-docx",
+    "python-dotenv",
+    "python-multipart",
+    "pytz",
+    "pywin32",
+    "pyyaml",
+    "referencing",
+    "regex",
+    "reportlab",
+    "requests",
+    "rpds-py",
+    "ruff",
+    "six",
+    "sniffio",
+    "sqlalchemy",
+    "sse-starlette",
+    "starlette",
+    "striprtf",
+    "testcontainers",
+    "tld",
+    "trafilatura",
+    "typing-extensions",
+    "typing-inspection",
+    "tzdata",
+    "tzlocal",
+    "urllib3",
+    "uvicorn",
+    "uvloop",
+    "watchfiles",
+    "webencodings",
+    "websockets",
+    "wrapt",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

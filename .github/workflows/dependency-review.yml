@@ -1,0 +1,21 @@
+# Fail a PR that introduces a dependency with a known vulnerability, before it
+# can be merged (supply-chain baseline, spec §5 — detection at the PR boundary).
+name: Dependency Review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
