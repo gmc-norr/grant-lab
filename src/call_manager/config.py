@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -342,6 +342,14 @@ class Settings(BaseSettings):
     )
     digest_dry_run: bool = Field(default=False, alias="DIGEST_DRY_RUN")
     admin_dashboard_url: str = Field(default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL")
+    # SPA serving mode (React-SPA foundation, Plan 2):
+    #   'disabled' (default) — no SPA mounted; the server-rendered HTML app is
+    #                          the whole surface (current production behavior).
+    #   'prod'              — FastAPI serves the built SPA from web/spa/ as a
+    #                          manifest-gated catch-all (see web/spa_serving.py).
+    #   'dev'              — SPA is served by the Vite dev server; FastAPI mounts
+    #                          nothing (the dev proxy forwards backend prefixes).
+    spa_mode: Literal["dev", "prod", "disabled"] = Field(default="disabled", alias="SPA_MODE")
 
     @field_validator("admin_dashboard_url", mode="after")
     @classmethod
