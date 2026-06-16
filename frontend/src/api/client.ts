@@ -16,9 +16,26 @@ export class ApiError extends Error {
   }
 }
 
+// Full-page nav to the server-rendered /login, preserving where we were so the
+// user lands back after signing in (mirrors the backend's 401-redirect next=).
+export function redirectToLogin(): void {
+  const next = window.location.pathname + window.location.search;
+  window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+}
+
 // Collapse openapi-fetch's { data, error } envelope: return data, or throw the
 // Plan-1 error envelope ({ error: { code, message } }) as a typed ApiError.
-export function unwrap<T>(res: { data?: T; error?: unknown }): T {
+//
+// 401 is the SINGLE chokepoint for session expiry: every query/mutation goes
+// through unwrap, so the dashboard (which never mounts useSession) is covered
+// too. A logged-out browser reaches the SPA shell at `/` (served with no auth),
+// fires /api/calls → 401 JSON envelope; without this it would dead-end on a
+// generic error with no way to re-authenticate.
+export function unwrap<T>(res: { data?: T; error?: unknown; response?: Response }): T {
+  if (res.response?.status === 401) {
+    redirectToLogin();
+    throw new ApiError("unauthorized", "session expired");
+  }
   if (res.error) {
     const e = res.error as { error?: { code?: string; message?: string } };
     throw new ApiError(e.error?.code ?? "error", e.error?.message ?? "request failed");

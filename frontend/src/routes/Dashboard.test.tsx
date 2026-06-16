@@ -175,3 +175,28 @@ it("paginating preserves the show_closed toggle in the URL", async () => {
     expect(s).toContain("page=2");
   });
 });
+
+it("a 401 (session expired) redirects to /login instead of dead-ending on an error", async () => {
+  // Replace window.location so the full-page nav is observable (jsdom's
+  // assign is a warning no-op).
+  const orig = window.location;
+  const assign = vi.fn();
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { ...orig, pathname: "/", search: "", assign },
+  });
+  try {
+    vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+      data: undefined,
+      error: { error: { code: "unauthorized", message: "no" } },
+      response: new Response(null, { status: 401 }),
+    } as never);
+    renderAt("/");
+    // unwrap sees the 401 and navigates to /login (with a next), rather than
+    // letting the dashboard render its generic "Couldn't load calls." dead-end.
+    await waitFor(() => expect(assign).toHaveBeenCalled());
+    expect(assign.mock.calls[0][0]).toContain("/login");
+  } finally {
+    Object.defineProperty(window, "location", { configurable: true, value: orig });
+  }
+});

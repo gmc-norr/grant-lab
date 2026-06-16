@@ -6,7 +6,8 @@ import { expect, test, type Page } from "@playwright/test";
 // DEFERRED LIVE RUN: authored against the real serving contract, but not run in
 // this environment. Running it needs (1) `pnpm exec playwright install
 // --with-deps chromium` (sudo for the OS libs), (2) a seeded ACTIVE e2e user
-// matching the login() helper below, (3) a running Postgres, and (4) the dev
+// matching the login() helper below PLUS at least one seeded call (the
+// call-detail coexistence test skips on an empty feed), (3) a running Postgres, and (4) the dev
 // (uvicorn SPA_MODE=dev + `pnpm dev`) or prod (`pnpm build` + uvicorn
 // SPA_MODE=prod) front-door up — with uvicorn's APP_BASE_URL set to the origin
 // the browser POSTs from (dev: http://localhost:5173; prod: http://localhost:8000),
@@ -66,8 +67,12 @@ test("navigation to an un-ported call-detail page resolves to FastAPI (coexisten
   await login(page);
   await page.goto("/");
   // Row links are plain anchors to the still-server-rendered Jinja /calls/{id}
-  // (NOT the SPA) — clicking one must land on the FastAPI-rendered detail page.
+  // (NOT the SPA). This test REQUIRES at least one seeded call (see the seed
+  // prerequisite in the header); skip explicitly on an empty feed rather than
+  // silently passing via the masked .catch() — a confusing false green.
   const link = page.locator('a[href^="/calls/"]').first();
-  await link.click().catch(() => {});
+  const count = await page.locator('a[href^="/calls/"]').count();
+  test.skip(count === 0, "no seeded calls in the feed; seed a call to exercise this");
+  await link.click();
   await expect(page).toHaveURL(/\/calls\/\d+/);
 });

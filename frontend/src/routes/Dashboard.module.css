@@ -14,3 +14,13 @@
 .open {
   color: inherit;
 }
+
+/* Summary badge row (Jinja-parity): open / top-matches / soon-deadline counts. */
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.5rem 0 1rem;
+  color: var(--cm-muted);
+}
+

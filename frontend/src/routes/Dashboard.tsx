@@ -42,13 +42,16 @@ export function Dashboard() {
   const setDefault = useSetDefaultProfile();
 
   // Read-only view state: filters update the URL only, never persist a default.
-  // Reset to page 1 whenever a filter changes.
+  // Reset to page 1 whenever a filter changes. Use the FUNCTIONAL updater so the
+  // write merges against the latest params (never a stale `sp` snapshot).
   function updateParam(key: string, value: string) {
-    const next = new URLSearchParams(sp);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    next.delete("page");
-    setSp(next);
+    setSp((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set(key, value);
+      else next.delete(key);
+      next.delete("page");
+      return next;
+    });
   }
 
   async function onSelectProfile(value: string) {
@@ -58,10 +61,15 @@ export function Dashboard() {
     } catch {
       return; // persist failed -> leave URL/selection unchanged (error surfaced below)
     }
-    const next = new URLSearchParams(sp);
-    if (value) next.set("profile", value);
-    else next.delete("profile");
-    setSp(next);
+    // FUNCTIONAL updater: merge against the LATEST params, not the `sp` captured
+    // before the awaited mutation — otherwise a Source/Sort/show_closed change the
+    // user made WHILE the POST was in flight would be silently clobbered here.
+    setSp((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set("profile", value);
+      else next.delete("profile");
+      return next;
+    });
   }
 
   if (isLoading) return <p>Loading…</p>;
@@ -102,7 +110,10 @@ export function Dashboard() {
         <label>
           Source
           <select
-            value={params.source ?? ""}
+            // Bind to the SERVER-RESOLVED source (effective.source), not the raw
+            // ?source param: an unknown/stale slug degrades to "all sources"
+            // server-side, and the control must reflect that (profile-select parity).
+            value={data.effective.source ?? ""}
             onChange={(e) => updateParam("source", e.target.value)}
           >
             <option value="">All sources</option>
@@ -135,6 +146,20 @@ export function Dashboard() {
         </label>
       </header>
 
+      {/* Summary badges (Jinja-parity): the read-model ships these counts on
+          every /api/calls response; surface them rather than discarding them. */}
+      <section aria-label="Summary" className={styles.summary}>
+        <span>
+          <strong>{data.summary.open_count}</strong> open calls
+        </span>
+        <span>
+          <strong>{data.summary.high_score}</strong> top matches
+        </span>
+        <span>
+          <strong>{data.summary.soon_deadline}</strong> closing within 30 days
+        </span>
+      </section>
+
       {data.ranking.pending > 0 && <p>Scoring {data.ranking.pending} calls…</p>}
       {data.ranking.failed > 0 && (
         <p>{data.ranking.failed} calls couldn&apos;t be scored automatically.</p>
@@ -161,11 +186,13 @@ export function Dashboard() {
         page={data.pagination.page}
         hasPrev={data.pagination.has_prev}
         hasNext={data.pagination.has_next}
-        onPage={(p) => {
-          const n = new URLSearchParams(sp);
-          n.set("page", String(p));
-          setSp(n);
-        }}
+        onPage={(p) =>
+          setSp((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set("page", String(p));
+            return next;
+          })
+        }
       />
     </main>
   );
