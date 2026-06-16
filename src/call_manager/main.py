@@ -75,6 +75,7 @@ from call_manager.web.routes import (
     profiles,
     register,
 )
+from call_manager.web.spa_serving import mount_spa
 
 TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
@@ -524,4 +525,12 @@ def create_app() -> FastAPI:
     app.include_router(references_router)
     app.include_router(citations_router)
     app.include_router(api_router)
+
+    # MUST be the LAST route registration: mount_spa (when SPA_MODE=prod)
+    # installs a catch-all GET /{full_path:path} that returns the SPA index
+    # only for manifest-owned routes (is_spa_route) and a real 404 otherwise.
+    # Every real router above is registered first, so concrete routes always
+    # win; an unmatched /api/* still raises HTTPException(404) and flows
+    # through the Plan-1 JSON envelope handler.
+    mount_spa(app, spa_mode=settings.spa_mode)
     return app
