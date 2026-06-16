@@ -321,13 +321,19 @@ def create_app() -> FastAPI:
     @app.exception_handler(StarletteHTTPException)
     async def _redirect_html_401(request: Request, exc: StarletteHTTPException):
         if api_request(request):
+            # Preserve any exception headers (e.g. "Allow" on a 405, "Retry-After"
+            # on a 503) — RFC 7231 §6.5.5 requires Allow on Method Not Allowed.
+            hdrs = getattr(exc, "headers", None)
             if exc.status_code >= 500:
                 # Sanitize server errors — never echo exc.detail (it may carry internals),
-                # matching the generic Exception handler below.
-                return api_error(exc.status_code, "internal_error", "internal server error")
+                # matching the generic Exception handler below. The body is still
+                # sanitized, so propagating headers never leaks internals.
+                return api_error(
+                    exc.status_code, "internal_error", "internal server error", headers=hdrs
+                )
             # 4xx detail strings (e.g. "not authenticated", "admin required") are
             # intentional and useful to the SPA — echo them.
-            return api_error(exc.status_code, code_for(exc.status_code), exc.detail)
+            return api_error(exc.status_code, code_for(exc.status_code), exc.detail, headers=hdrs)
         wants_html = "text/html" in request.headers.get("accept", "")
         # An htmx PARTIAL request (HX-Request, not a full-page hx-boost
         # navigation) must always get JSON {"detail": ...} so the global

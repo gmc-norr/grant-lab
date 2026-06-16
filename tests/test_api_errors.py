@@ -102,6 +102,15 @@ def test_api_csrf_rejection_is_envelope(monkeypatch, pg_url, pg_session_factory)
     assert r.json()["error"]["code"] == "forbidden"
 
 
+def test_api_405_is_envelope_with_allow_header(monkeypatch, pg_url, pg_session_factory):
+    c = TestClient(_app(monkeypatch, pg_url))
+    # /api/me is GET-only; POST with a valid Origin passes CSRF, then routing 405s.
+    r = c.post("/api/me", headers={"origin": "http://testserver"})
+    assert r.status_code == 405
+    assert r.json()["error"]["code"] == "method_not_allowed"
+    assert "GET" in r.headers.get("allow", "")
+
+
 def test_api_body_too_large_is_envelope(monkeypatch, pg_url, pg_session_factory):
     monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "16")
     c = TestClient(_app(monkeypatch, pg_url))

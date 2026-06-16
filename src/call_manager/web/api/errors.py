@@ -21,9 +21,17 @@ def is_api_path(path: str) -> bool:
 
 
 def api_error(
-    status_code: int, code: str, message: str, detail: object | None = None
+    status_code: int,
+    code: str,
+    message: str,
+    detail: object | None = None,
+    headers: dict | None = None,
 ) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content=envelope_dict(code, message, detail))
+    return JSONResponse(
+        status_code=status_code,
+        content=envelope_dict(code, message, detail),
+        headers=headers,
+    )
 
 
 STATUS_CODES: dict[int, str] = {
@@ -31,9 +39,11 @@ STATUS_CODES: dict[int, str] = {
     401: "unauthorized",
     403: "forbidden",
     404: "not_found",
+    405: "method_not_allowed",
     409: "conflict",
     413: "payload_too_large",
     422: "validation_error",
+    429: "too_many_requests",
     500: "internal_error",
 }
 
