@@ -35,9 +35,12 @@ def _env(monkeypatch, pg_url, **extra):
 
 
 def test_disabled_mode_serves_no_spa(monkeypatch, pg_url, pg_session_factory):
+    # The SPA route is `/` (Plan 3 Task 9 flip). In disabled mode nothing serves
+    # it, and with the Jinja calls_index handler retired there is no `GET /`
+    # handler either — so the root is a real 404 (no SPA shell, no dashboard).
     _env(monkeypatch, pg_url, SPA_MODE="disabled")
     c = TestClient(create_app())
-    assert c.get("/app").status_code == 404
+    assert c.get("/").status_code == 404
 
 
 def test_prod_mode_missing_build_fails_fast(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -59,7 +62,9 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
     _env(monkeypatch, pg_url, SPA_MODE="prod")
     c = TestClient(create_app())
-    assert "<title>spa</title>" in c.get("/app").text
+    # The SPA route is `/` (Plan 3 Task 9 flip): the catch-all serves index.html
+    # for the root, while unknown paths stay real 404s.
+    assert "<title>spa</title>" in c.get("/").text
     assert c.get("/api/does-not-exist").status_code == 404
     assert c.get("/totally-unknown").status_code == 404
     # /assets is served by StaticFiles and wins over the catch-all; a missing
@@ -71,7 +76,7 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     assert missing.status_code == 404
     assert "<title>spa</title>" not in missing.text
     # HEAD on a servable SPA route returns 200 (empty body), not 405.
-    assert c.head("/app").status_code == 200
+    assert c.head("/").status_code == 200
     assert c.head("/totally-unknown").status_code == 404
     # An UNKNOWN/typo path is a real 404 for EVERY method (not 405) — the
     # catch-all owns all methods but only matches SPA routes, so a non-existent
@@ -82,16 +87,16 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     assert c.post("/api/does-not-exist").status_code == 404
     # A real SPA route exists but only serves the document on GET/HEAD: other
     # methods get a 405 with a correct Allow header.
-    post_app = c.post("/app")
-    assert post_app.status_code == 405
-    assert post_app.headers["allow"] == "GET, HEAD"
+    post_root = c.post("/")
+    assert post_root.status_code == 405
+    assert post_root.headers["allow"] == "GET, HEAD"
     # The internal SPA catch-all must not leak into the OpenAPI schema.
     assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
     # PROD must keep the STRICT CSP — the relaxed dev policy must NOT leak to
     # prod. This exercises the prod branch of the
     # build_csp(dev=settings.spa_mode == "dev") wiring (the security-critical
     # gate); a regression flipping it would relax script-src/connect-src here.
-    prod_csp = c.get("/app").headers["content-security-policy"]
+    prod_csp = c.get("/").headers["content-security-policy"]
     assert "'unsafe-inline'" not in prod_csp.split("script-src")[1].split(";")[0]
     assert "ws:" not in prod_csp
 

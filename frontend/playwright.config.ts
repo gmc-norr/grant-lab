@@ -1,0 +1,19 @@
+import { defineConfig } from "@playwright/test";
+
+// Dual-mode smoke: the SAME specs run against either dev front-door.
+//   E2E_MODE=dev  (default) → Vite dev server (proxying to uvicorn SPA_MODE=dev) on :5173
+//   E2E_MODE=prod           → FastAPI serving the built SPA (SPA_MODE=prod) on :8000
+// The live run is deferred (see e2e/dashboard.spec.ts header): it needs a seeded
+// active e2e user, a running Postgres, and `playwright install --with-deps`
+// (sudo). CI wires the two webServers + seed; locally start them by hand.
+const MODE = process.env.E2E_MODE ?? "dev";
+
+export default defineConfig({
+  testDir: "./e2e",
+  // No webServer block here on purpose: the dev (Vite + uvicorn) and prod
+  // (uvicorn-only) toplogies differ, and the seeded DB must be brought up out of
+  // band. The harness/CI starts the servers; these specs only drive the browser.
+  use: {
+    baseURL: MODE === "prod" ? "http://localhost:8000" : "http://localhost:5173",
+  },
+});

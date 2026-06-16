@@ -42,3 +42,8 @@ api_key.txt
 frontend/node_modules/
 frontend/dist/
 src/call_manager/web/spa/
+# Playwright e2e outputs (Plan 3 Task 9; the dual-mode run is deferred but these
+# dirs appear the moment it runs locally or in CI — never commit them).
+frontend/test-results/
+frontend/playwright-report/
+frontend/.playwright/

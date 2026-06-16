@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -18,11 +17,7 @@ from call_manager.db.models import (
     User,
     UserCallDismissal,
 )
-from call_manager.web.dashboard import (
-    _ranking_counts,
-    build_dashboard_view,
-    resolve_profile_selection,
-)
+from call_manager.web.dashboard import _ranking_counts
 
 
 def _parse_optional_profile_id(raw: str | None) -> int | None:
@@ -44,63 +39,12 @@ def _parse_optional_profile_id(raw: str | None) -> int | None:
 
 router = APIRouter()
 
-# Per design spec: "Sort: score, deadline, newest." The ordering primitives live
-# in web/dashboard.py (the shared read-model); this Literal stays here to type the
-# query param. Kept in sync with dashboard.Sort.
-_Sort = Literal["newest", "deadline"]
-
-
-@router.get("/", response_class=HTMLResponse)
-def calls_index(
-    request: Request,
-    source: str | None = Query(default=None),
-    sort: _Sort = Query(default="newest"),  # noqa: B008
-    profile: str | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-    page: int = Query(default=1, ge=1),
-    show_closed: bool = Query(default=False),
-    user: User = Depends(get_current_user),  # noqa: B008
-):
-    # Read logic lives in the shared read-model service (web/dashboard.py) so the
-    # JSON /api/calls endpoint can reuse it with persist=False. The Jinja path
-    # KEEPS the sticky-default WRITE here: resolve with persist=True, commit the
-    # (possible) preference change, then build the read-only view.
-    session_factory = request.app.state.session_factory
-    with session_factory() as session:
-        profile_id = resolve_profile_selection(
-            session, user_id=user.id, raw_profile=profile, persist=True
-        )
-        session.commit()
-        view = build_dashboard_view(
-            session,
-            user_id=user.id,
-            source=source,
-            sort=sort,
-            profile_id=profile_id,
-            limit=limit,
-            page=page,
-            show_closed=show_closed,
-        )
-        # Detach Call AND its joined `source` together before the session closes.
-        session.expunge_all()
-
-    return request.app.state.templates.TemplateResponse(
-        request=request,
-        name="calls_index.html",
-        context={
-            "calls_with_rankings": view.calls,
-            "sources": view.sources,
-            "profiles": view.profiles,
-            "selected_source": view.effective["source"],
-            "selected_sort": view.effective["sort"],
-            "selected_profile_id": view.effective["profile_id"],
-            "show_closed": view.effective["show_closed"],
-            "summary": view.summary,
-            "pagination": view.pagination,
-            "now": view.now,
-            "user": user,
-        },
-    )
+# The dashboard index (`GET /`) was retired in Plan 3 Task 9: the React SPA now
+# owns `/` (served by Vite in dev / the prod catch-all), and the read-model
+# (`build_dashboard_view`) is reached only via the JSON `GET /api/calls`. This
+# router now serves the still-server-rendered companion pages: the call-detail
+# page, the HTMX ranking-status strip, and the hide action. The sticky-default
+# WRITE that used to live in `calls_index` moved to `POST /api/me/default-profile`.
 
 
 # NOTE: must be declared before /calls/{call_id} — FastAPI matches routes in

@@ -4,23 +4,6 @@
  */
 
 export interface paths {
-    "/": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Calls Index */
-        get: operations["calls_index__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/admin": {
         parameters: {
             query?: never;
@@ -2232,42 +2215,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    calls_index__get: {
-        parameters: {
-            query?: {
-                source?: string | null;
-                sort?: "newest" | "deadline";
-                profile?: string | null;
-                limit?: number;
-                page?: number;
-                show_closed?: boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     admin_index_admin_get: {
         parameters: {
             query?: never;

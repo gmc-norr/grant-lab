@@ -19,22 +19,25 @@ def test_generated_artifacts_in_sync_and_well_formed():
 
 
 def test_is_spa_route_is_exact_not_prefix():
+    # Post-Plan-3-flip: SPA_ROUTES == ("/",) — the React dashboard owns the root
+    # ONLY. The root special-case must NOT collapse to match-everything (a naive
+    # `path.startswith(r.rstrip("/") + "/")` would, since "/" → "" → matches all),
+    # so every non-root path falls through to FastAPI's real 404.
     from call_manager.web.spa_routes import is_spa_route
 
-    assert is_spa_route("/app") is True
+    assert is_spa_route("/") is True
     assert is_spa_route("/made-up-page") is False
-    assert is_spa_route("/") is False
     assert is_spa_route("/api/me") is False
     assert is_spa_route("/calls/123") is False
-    assert is_spa_route("/app/anything") is True
+    assert is_spa_route("/login") is False
 
 
-def test_root_owns_only_itself_after_plan3_flip(monkeypatch):
-    # Plan 3 flips SPA_ROUTES to ("/",). The load-bearing root special-case must
-    # own ONLY "/" — never collapse to match-everything (a naive
-    # `path.startswith(r.rstrip("/") + "/")` would, since "/" → "" → matches all
-    # paths). Pin it now, before Plan 3 ships the flip: a regression to the naive
-    # form passes every other test but fails this one.
+def test_root_owns_only_itself(monkeypatch):
+    # The load-bearing root special-case (now the shipped manifest) must own ONLY
+    # "/" — never collapse to match-everything. Pinned explicitly via monkeypatch
+    # so a regression to the naive `path.startswith(r.rstrip("/") + "/")` form
+    # (which matches all paths once the owned route is "/") fails here even if the
+    # manifest ever changes.
     import call_manager.web.spa_routes as sr
 
     monkeypatch.setattr(sr, "SPA_ROUTES", ("/",))

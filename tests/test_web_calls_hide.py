@@ -99,14 +99,8 @@ def test_hide_requires_auth(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 401
 
 
-def test_dashboard_omits_dismissed_calls(monkeypatch, pg_url, pg_session_factory):
-    _seed_call(pg_session_factory, title="VisibleCall")
-    hidden = _seed_call(pg_session_factory, title="HiddenCall")
-    app = _setup(monkeypatch, pg_url)
-    client, _ = _logged_in(app, pg_session_factory)
-    with client:
-        client.post(f"/calls/{hidden}/hide")
-        r = client.get("/")
-    assert r.status_code == 200
-    assert "VisibleCall" in r.text
-    assert "HiddenCall" not in r.text
+# NOTE: the "dashboard omits dismissed calls" test (hide then `GET /`) was moved
+# in Plan 3 Task 9 (Jinja calls_index retired) to
+# tests/test_api_calls_feed_behavior.py::test_dismissed_calls_omitted, which hides
+# via this same POST and asserts omission on JSON `GET /api/calls`. The hide POST
+# behaviors (redirect/idempotency/404/auth) stay here.

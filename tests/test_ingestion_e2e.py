@@ -63,10 +63,13 @@ def test_end_to_end_ingest_and_browse(monkeypatch, pg_url, pg_session_factory):
     client = TestClient(app)
     client.cookies.set("session", signer.make(user_id=uid))
 
+    # Browse via the JSON feed (the React SPA's data source; the Jinja `GET /`
+    # dashboard was retired in Plan 3 Task 9).
     with client:
-        r = client.get("/")
+        r = client.get("/api/calls")
         assert r.status_code == 200
-        assert "End-to-end call one" in r.text
-        assert "End-to-end call two" in r.text
-        # Newest first by published_at
-        assert r.text.index("call two") < r.text.index("call one")
+        titles = [item["title"] for item in r.json()["items"]]
+    assert "End-to-end call one" in titles
+    assert "End-to-end call two" in titles
+    # Newest first by published_at: call two (Apr 12) before call one (Apr 10).
+    assert titles.index("End-to-end call two") < titles.index("End-to-end call one")

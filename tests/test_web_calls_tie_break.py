@@ -23,67 +23,11 @@ def _app(monkeypatch, pg_url):
     return create_app()
 
 
-def test_dashboard_ranked_list_breaks_ties_by_cosine(monkeypatch, pg_url, pg_session_factory):
-    """Two calls both scored 80 for the same profile; the one with the higher
-    cosine similarity must appear BEFORE the lower-cosine call in the dashboard
-    ranked list (/?profile=<id>)."""
-    app = _app(monkeypatch, pg_url)
-    with pg_session_factory() as s:
-        u = User(status="active", email="dash@ki.se", is_admin=True)
-        s.add(u)
-        s.flush()
-        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        prof = Profile(
-            name="DashProf",
-            kind=ProfileKind.ORGANIZATIONAL_UNIT,
-            description="d",
-            structured={},
-            created_by=u.id,
-        )
-        s.add(prof)
-        s.flush()
-        c_high = Call(
-            source_id=src.id,
-            external_id="dash-high",
-            url="https://x/dash-high",
-            title="High Cosine Call",
-            published_at=datetime.now(UTC),
-        )
-        c_low = Call(
-            source_id=src.id,
-            external_id="dash-low",
-            url="https://x/dash-low",
-            title="Low Cosine Call",
-            published_at=datetime.now(UTC),
-        )
-        s.add_all([c_high, c_low])
-        s.flush()
-        for call, cos in ((c_high, 0.90), (c_low, 0.40)):
-            s.add(
-                CallRanking(
-                    call_id=call.id,
-                    profile_id=prof.id,
-                    aggregate_score=80,
-                    aggregate_reason=None,
-                    rationale="r",
-                    model="m",
-                    prompt_version="v4.1",
-                    raw_response={},
-                    embed_similarity=cos,
-                    ranked_at=datetime.now(UTC),
-                )
-            )
-        s.commit()
-        pid, uid = prof.id, u.id
-    signer: SessionSigner = app.state.session_signer
-    client = TestClient(app)
-    client.cookies.set("session", signer.make(user_id=uid))
-    with client:
-        r = client.get(f"/?profile={pid}")
-    assert r.status_code == 200
-    body = r.text
-    # Higher-cosine call must appear before lower-cosine call in the HTML
-    assert body.index("High Cosine Call") < body.index("Low Cosine Call")
+# NOTE: the dashboard ranked-list cosine-tiebreak test (`GET /?profile=`) was
+# removed in Plan 3 Task 9 (Jinja calls_index retired); the same tiebreak is now
+# proven on JSON `GET /api/calls` in tests/test_api_calls_feed_behavior.py
+# (test_ranked_ties_broken_by_cosine). The call-detail best-profile tiebreak
+# below uses the still-server-rendered `/calls/{id}` page and stays.
 
 
 def test_call_detail_best_profile_breaks_ties_by_cosine(monkeypatch, pg_url, pg_session_factory):
