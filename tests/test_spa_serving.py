@@ -73,6 +73,18 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     # HEAD on a servable SPA route returns 200 (empty body), not 405.
     assert c.head("/app").status_code == 200
     assert c.head("/totally-unknown").status_code == 404
+    # An UNKNOWN/typo path is a real 404 for EVERY method (not 405) — the
+    # catch-all owns all methods but only matches SPA routes, so a non-existent
+    # path never path-matches into a misleading 405 + Allow header. Matches the
+    # SPA_MODE=disabled behavior and the Plan-2 "unknown -> real 404" contract.
+    assert c.post("/totally-unknown").status_code == 404
+    assert c.request("DELETE", "/totally-unknown").status_code == 404
+    assert c.post("/api/does-not-exist").status_code == 404
+    # A real SPA route exists but only serves the document on GET/HEAD: other
+    # methods get a 405 with a correct Allow header.
+    post_app = c.post("/app")
+    assert post_app.status_code == 405
+    assert post_app.headers["allow"] == "GET, HEAD"
     # The internal SPA catch-all must not leak into the OpenAPI schema.
     assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
     # PROD must keep the STRICT CSP — the relaxed dev policy must NOT leak to

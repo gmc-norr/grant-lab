@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -24,19 +24,27 @@ def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=assets), name="spa-assets")
 
-    # SPA shell fallback for document requests, registered LAST so every real
-    # route wins and only unmatched paths reach here. Serves index.html for
-    # manifest-owned routes (is_spa_route), else a real 404. GET + HEAD only:
-    # HEAD returns the same headers with an empty body (FileResponse strips it
-    # automatically), so monitors / reverse proxies probing a servable page get
-    # 200, not 405. A POST/PUT/etc. to an unmatched path still 405s — correct
-    # (no handler), and for /api it flows through the Plan-1 JSON envelope.
-    # include_in_schema=False keeps this internal serving mechanism out of
-    # /openapi.json (it is not an API operation, and Plan 3 generates a TS
-    # client from that schema).
-    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
-    def _spa_fallback(full_path: str):  # noqa: ANN202
+    # SPA shell fallback, registered LAST so every real route wins and only
+    # unmatched paths reach here. It owns ALL methods on a catch-all path so that
+    # status is decided explicitly rather than by Starlette's path-matched-but-
+    # method-mismatched 405: an UNKNOWN/typo path must be a real 404 for EVERY
+    # method (matching SPA_MODE=disabled and the Plan-2 "unknown -> real 404"
+    # contract; for /api it flows through the Plan-1 JSON envelope). A
+    # manifest-owned SPA route serves the shell on GET/HEAD (HEAD gets the same
+    # headers with an empty body — FileResponse strips it) and 405s other methods
+    # (the page exists but only serves a document). include_in_schema=False keeps
+    # this internal mechanism out of /openapi.json (Plan 3 generates a TS client
+    # from that schema). If it owned only GET/HEAD, a POST to ANY unmatched path
+    # would path-match and 405 with a misleading Allow header instead of 404.
+    @app.api_route(
+        "/{full_path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        include_in_schema=False,
+    )
+    def _spa_fallback(full_path: str, request: Request):  # noqa: ANN202
         path = "/" + full_path
         if is_spa_route(path):
-            return FileResponse(index)
+            if request.method in ("GET", "HEAD"):
+                return FileResponse(index)
+            raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
         raise HTTPException(status_code=404, detail="not found")
