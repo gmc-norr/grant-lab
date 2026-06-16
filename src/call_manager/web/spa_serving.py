@@ -24,12 +24,17 @@ def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=assets), name="spa-assets")
 
-    # GET-only catch-all: the SPA shell is always a GET document request. A
-    # non-GET / HEAD on an unmatched path therefore returns 405 (not 404) in
-    # prod — accepted: the path still has no real handler, the /api envelope
-    # still wraps it (method_not_allowed), and API clients treat 404/405 on an
-    # unknown endpoint equivalently. Registered LAST so real routes win.
-    @app.get("/{full_path:path}")
+    # SPA shell fallback for document requests, registered LAST so every real
+    # route wins and only unmatched paths reach here. Serves index.html for
+    # manifest-owned routes (is_spa_route), else a real 404. GET + HEAD only:
+    # HEAD returns the same headers with an empty body (FileResponse strips it
+    # automatically), so monitors / reverse proxies probing a servable page get
+    # 200, not 405. A POST/PUT/etc. to an unmatched path still 405s — correct
+    # (no handler), and for /api it flows through the Plan-1 JSON envelope.
+    # include_in_schema=False keeps this internal serving mechanism out of
+    # /openapi.json (it is not an API operation, and Plan 3 generates a TS
+    # client from that schema).
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def _spa_fallback(full_path: str):  # noqa: ANN202
         path = "/" + full_path
         if is_spa_route(path):

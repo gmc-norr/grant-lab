@@ -11,10 +11,19 @@ BACKEND_PREFIXES is emitted for the Task-5 dev-proxy carve-out, NOT for ownershi
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = json.loads((ROOT / "frontend/routes.json").read_text())
+# Route paths are URL prefixes and never legitimately contain a double-quote.
+# json.dumps (used for both .py and .ts output) would escape an embedded " as
+# \", which `ruff format` then rewrites to single quotes — breaking the
+# "ruff-clean / idempotent" guarantee below. Reject that input class up front so
+# the guarantee holds for every route the generator will actually accept.
+for _r in [*SRC["spa_routes"], *SRC["backend_prefixes"]]:
+    if '"' in _r:
+        raise ValueError(f"route contains an unsupported double-quote: {_r!r}")
 SPA = sorted(SRC["spa_routes"], key=len, reverse=True)
 BACKEND = sorted(SRC["backend_prefixes"], key=len, reverse=True)
 
@@ -83,7 +92,39 @@ TS = (
     f"export const BACKEND_PREFIXES: string[] = {json.dumps(BACKEND)};\n"
 )
 
-(ROOT / "src/call_manager/web/spa_routes.py").write_text(PY)
-(ROOT / "frontend/src").mkdir(parents=True, exist_ok=True)
-(ROOT / "frontend/src/routes.gen.ts").write_text(TS)
-print("wrote spa_routes.py and routes.gen.ts:", {"spa": SPA, "backend": BACKEND})
+PY_PATH = ROOT / "src/call_manager/web/spa_routes.py"
+TS_PATH = ROOT / "frontend/src/routes.gen.ts"
+
+
+def _write() -> None:
+    PY_PATH.write_text(PY)
+    (ROOT / "frontend/src").mkdir(parents=True, exist_ok=True)
+    TS_PATH.write_text(TS)
+    print("wrote spa_routes.py and routes.gen.ts:", {"spa": SPA, "backend": BACKEND})
+
+
+def _check() -> int:
+    """Exit non-zero if the committed artifacts are stale vs frontend/routes.json
+    (mirrors scripts/gen_no_build.py --check). Writes nothing, so a forgotten
+    regenerate fails CI instead of being silently repaired."""
+    stale = [
+        str(p.relative_to(ROOT))
+        for p, want in ((PY_PATH, PY), (TS_PATH, TS))
+        if not p.exists() or p.read_text() != want
+    ]
+    if stale:
+        print(
+            "ERROR: generated route artifacts are stale vs frontend/routes.json:\n  "
+            + "\n  ".join(stale)
+            + "\nRun: uv run python scripts/gen_routes.py",
+            file=sys.stderr,
+        )
+        return 1
+    print("route artifacts in sync with routes.json")
+    return 0
+
+
+if __name__ == "__main__":
+    if "--check" in sys.argv[1:]:
+        raise SystemExit(_check())
+    _write()

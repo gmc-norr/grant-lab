@@ -37,6 +37,9 @@ jobs:
       - name: Verify wheels-only allowlist in sync with uv.lock
         run: uv run python scripts/gen_no_build.py --check
 
+      - name: Verify route artifacts in sync with routes.json
+        run: uv run python scripts/gen_routes.py --check
+
       - name: Ruff check
         run: uv run ruff check .
 

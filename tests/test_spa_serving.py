@@ -54,6 +54,7 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
 
     spa_dir = tmp_path / "spa"
     (spa_dir / "assets").mkdir(parents=True)
+    (spa_dir / "assets" / "main.js").write_text("console.log('hi');")
     (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
     monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
     _env(monkeypatch, pg_url, SPA_MODE="prod")
@@ -61,3 +62,16 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     assert "<title>spa</title>" in c.get("/app").text
     assert c.get("/api/does-not-exist").status_code == 404
     assert c.get("/totally-unknown").status_code == 404
+    # /assets is served by StaticFiles and wins over the catch-all; a missing
+    # asset 404s and is NOT masked by the SPA shell.
+    asset = c.get("/assets/main.js")
+    assert asset.status_code == 200
+    assert asset.text == "console.log('hi');"
+    missing = c.get("/assets/missing.js")
+    assert missing.status_code == 404
+    assert "<title>spa</title>" not in missing.text
+    # HEAD on a servable SPA route returns 200 (empty body), not 405.
+    assert c.head("/app").status_code == 200
+    assert c.head("/totally-unknown").status_code == 404
+    # The internal SPA catch-all must not leak into the OpenAPI schema.
+    assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
