@@ -13,9 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # SHA-pinned third-party actions (see ci.yml); Dependabot bumps the pins.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@v4
+        # actions/dependency-review-action ships no moving major tag; pin the latest v4.x release.
+        uses: actions/dependency-review-action@bc41886e18ea39df68b1b1245f4184881938e050 # v4.7.2
         with:
           fail-on-severity: high

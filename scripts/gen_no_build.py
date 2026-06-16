@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generate / verify the wheels-only allowlist in ``[tool.uv] no-build-package``.
 
 Supply-chain baseline (see the supply-chain design spec, §3.2): we want uv to
@@ -41,9 +40,13 @@ LOCK = ROOT / "uv.lock"
 ARRAY_RE = re.compile(r"(?ms)^no-build-package = \[\n.*?^\]\n")
 
 
-def third_party_packages() -> tuple[list[str], list[str]]:
-    """Return (sorted dep names with wheels, sorted source-only dep names)."""
-    lock = tomllib.loads(LOCK.read_text())
+def classify_packages(lock: dict) -> tuple[list[str], list[str]]:
+    """Split an already-parsed ``uv.lock`` dict into third-party deps.
+
+    Returns ``(sorted dep names with wheels, sorted source-only dep names)``.
+    Editable / virtual packages (our own first-party project) are skipped —
+    they must stay buildable and never enter the wheels-only allowlist.
+    """
     with_wheels: set[str] = set()
     source_only: set[str] = set()
     for pkg in lock.get("package", []):
@@ -55,14 +58,32 @@ def third_party_packages() -> tuple[list[str], list[str]]:
     return sorted(with_wheels), sorted(source_only)
 
 
+def third_party_packages(lock_path: Path = LOCK) -> tuple[list[str], list[str]]:
+    """Read ``uv.lock`` and classify its packages (see :func:`classify_packages`)."""
+    return classify_packages(tomllib.loads(lock_path.read_text()))
+
+
 def render_array(names: list[str]) -> str:
     body = "".join(f'    "{n}",\n' for n in names)
     return f"no-build-package = [\n{body}]\n"
 
 
-def main(argv: list[str]) -> int:
-    check = "--check" in argv[1:]
-    with_wheels, source_only = third_party_packages()
+def main(
+    argv: list[str] | None = None,
+    *,
+    lock_path: Path = LOCK,
+    pyproject_path: Path = PYPROJECT,
+) -> int:
+    """Generate or (with ``--check``) verify the allowlist.
+
+    ``argv`` is the already-sliced argument list (no program name); it defaults
+    to ``sys.argv[1:]``. ``lock_path`` / ``pyproject_path`` are injectable so the
+    logic can be unit-tested against synthetic files.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    check = "--check" in argv
+    with_wheels, source_only = third_party_packages(lock_path)
 
     if source_only:
         print(
@@ -75,7 +96,7 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    text = PYPROJECT.read_text()
+    text = pyproject_path.read_text()
     if not ARRAY_RE.search(text):
         print("ERROR: no-build-package array not found in pyproject.toml", file=sys.stderr)
         return 2
@@ -94,7 +115,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     if new_text != text:
-        PYPROJECT.write_text(new_text)
+        pyproject_path.write_text(new_text)
         print(f"Updated no-build-package with {len(with_wheels)} packages.")
     else:
         print("no-build-package already up to date.")
@@ -102,4 +123,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main())

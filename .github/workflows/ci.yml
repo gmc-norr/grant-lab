@@ -9,10 +9,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are SHA-pinned (full commit) so a repointed tag can't
+      # inject code into a repo-write build; the trailing comment keeps the human
+      # version, and the github-actions Dependabot ecosystem (see dependabot.yml)
+      # bumps both the SHA and the comment.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           version: "0.4.x"
 
@@ -35,12 +39,13 @@ jobs:
         run: uv run --with pip-audit pip-audit
 
       - name: OSV-Scanner (uv.lock)
-        uses: google/osv-scanner-action@v1
+        # google/osv-scanner-action ships no moving major tag; pin the latest v1.x release.
+        uses: google/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=uv.lock"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
