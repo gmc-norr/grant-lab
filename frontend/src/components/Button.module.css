@@ -1,0 +1,15 @@
+.btn {
+  background: var(--cm-primary);
+  color: #fff;
+  border: 1px solid var(--cm-primary-border);
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
+  cursor: pointer;
+}
+.btn:hover {
+  background: var(--cm-primary-hover);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

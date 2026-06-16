@@ -1,0 +1,7 @@
+.select {
+  border: 1px solid var(--cm-border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  background: var(--cm-surface);
+  color: var(--cm-ink);
+}

@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import react from "@vitejs/plugin-react";
-import { defineConfig, type Connect, type PluginOption } from "vite";
+import { type Connect, type PluginOption } from "vite";
+// vitest/config's defineConfig is a superset of vite's that also accepts `test`.
+import { defineConfig } from "vitest/config";
 
 import { isSpaRoute, isViteAsset, shouldServeViaVite } from "./src/dev-proxy";
 
@@ -45,6 +47,14 @@ export default defineConfig({
   // Do NOT point outDir outside __dirname: in the container __dirname is /build,
   // so ../src/... would resolve to /src/... which is neither present nor writable.
   build: { outDir: resolve(__dirname, "dist"), emptyOutDir: true },
+  // Vitest: jsdom for component tests; jest-dom matchers loaded via the setup
+  // file (kept in src/ so tsc picks up its `expect` type augmentation). `vite
+  // build` ignores this `test` key.
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test-setup.ts"],
+  },
   server: {
     port: 5173,
     // DEFAULT TO BACKEND: forward every path to uvicorn EXCEPT the two classes
