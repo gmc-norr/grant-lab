@@ -1,0 +1,43 @@
+/* frontend/src/styles/tokens.css
+ * Design tokens extracted VERBATIM from src/call_manager/web/static/app.css
+ * (the `[data-theme="light"], :root:not([data-theme="dark"])` block) so the SPA
+ * matches the server-rendered theme exactly. Same selector is kept on purpose.
+ * The SPA does not use Pico, so the `--pico-*` re-tuning from app.css is
+ * intentionally omitted — only the `--cm-*` brand/semantic tokens carry over. */
+[data-theme="light"],
+:root:not([data-theme="dark"]) {
+  /* Brand + semantic palette */
+  --cm-primary:        #0f766e;  /* deep teal */
+  --cm-primary-hover:  #0c5f58;
+  --cm-primary-soft:   #e7f4f2;
+  --cm-primary-border: #b5dcd7;
+  --cm-ink:            #1c2b36;
+  --cm-ink-strong:     #11202b;
+  --cm-muted:          #5d6b7a;
+  --cm-canvas:         #f4f7fa;
+  --cm-surface:        #ffffff;
+  --cm-surface-sunken: #f8fafc;
+  --cm-border:         #e2e8f0;
+  --cm-border-soft:    #ecf1f6;
+
+  --cm-good-text:   #047857;
+  --cm-good-bg:     #e8f7f0;
+  --cm-good-border: #b9e8d4;
+  --cm-warn-text:   #b45309;
+  --cm-warn-bg:     #fdf3e3;
+  --cm-warn-border: #f3dcab;
+  --cm-bad-text:    #b91c1c;
+  --cm-bad-bg:      #fdecec;
+  --cm-bad-border:  #f4c7c7;
+  --cm-neutral-text:   #5d6b7a;
+  --cm-neutral-bg:     #eef2f6;
+  --cm-neutral-border: #dde4ec;
+
+  /* #b45309, not the brighter #d97706: the watch date renders at 0.84em
+     on white and the bright orange only reaches 3.2:1 contrast. */
+  --cm-deadline-soon:  #dc2626;
+  --cm-deadline-watch: #b45309;
+
+  --cm-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --cm-shadow-md: 0 1px 3px rgba(16, 24, 40, 0.07), 0 8px 24px -12px rgba(16, 24, 40, 0.18);
+}
