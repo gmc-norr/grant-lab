@@ -17,7 +17,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from call_manager.web.api.errors import envelope_dict, is_api_path
 
 
-def build_csp() -> str:
+def build_csp(dev: bool = False) -> str:
     """Content-Security-Policy for the dashboard.
 
     ``script-src 'self'`` (no ``'unsafe-inline'``) is the high-value line —
@@ -28,15 +28,27 @@ def build_csp() -> str:
     styles are a far lower risk than inline scripts. ``frame-ancestors 'none'``
     is the modern clickjacking control (paired with ``X-Frame-Options`` for
     older browsers).
+
+    ``dev=True`` (only when ``SPA_MODE=dev``) relaxes two directives so the Vite
+    dev server works: the SPA shell carries an inline bootstrap ``<script>`` and
+    opens an HMR WebSocket to localhost:5173. This is a DEV-ONLY loosening —
+    ``prod`` and ``disabled`` keep the strict ``script-src 'self'`` /
+    ``connect-src 'self'`` policy (asserted by tests). Self-hosted, no-CDN,
+    no-``unsafe-inline``-in-prod is itself a supply-chain control.
     """
+    script = "script-src 'self'"
+    connect = "connect-src 'self'"
+    if dev:
+        script = "script-src 'self' 'unsafe-inline'"
+        connect = "connect-src 'self' ws: http://localhost:5173"
     return "; ".join(
         [
             "default-src 'self'",
-            "script-src 'self'",
+            script,
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data:",
             "font-src 'self'",
-            "connect-src 'self'",
+            connect,
             "form-action 'self'",
             "base-uri 'self'",
             "frame-ancestors 'none'",

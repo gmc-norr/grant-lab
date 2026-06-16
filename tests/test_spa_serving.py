@@ -75,3 +75,18 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     assert c.head("/totally-unknown").status_code == 404
     # The internal SPA catch-all must not leak into the OpenAPI schema.
     assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
+
+
+def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):
+    _env(monkeypatch, pg_url, SPA_MODE="dev")
+    c = TestClient(create_app())
+    csp = c.get("/login").headers.get("content-security-policy", "")
+    # Dev must allow Vite's HMR WebSocket (and its inline dev bootstrap); prod must not.
+    assert "ws:" in csp or "ws://localhost" in csp
+
+
+def test_prod_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_factory):
+    _env(monkeypatch, pg_url, SPA_MODE="disabled")
+    c = TestClient(create_app())
+    csp = c.get("/login").headers.get("content-security-policy", "")
+    assert "script-src 'self'" in csp and "script-src 'self' 'unsafe-inline'" not in csp

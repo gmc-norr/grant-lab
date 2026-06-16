@@ -282,7 +282,11 @@ def create_app() -> FastAPI:
 
     # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
     # referrer-policy). HSTS only when the deployment is https (cookie_secure).
-    app.add_middleware(SecurityHeadersMiddleware, csp=build_csp(), hsts=settings.cookie_secure)
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        csp=build_csp(dev=settings.spa_mode == "dev"),
+        hsts=settings.cookie_secure,
+    )
     # Body-size cap. add_middleware prepends, so adding this LAST makes it the
     # outermost layer — an oversized body is rejected (413) before routing,
     # CSRF, or any handler reads it. Skipped entirely when set to 0.
