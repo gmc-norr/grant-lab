@@ -133,6 +133,27 @@ def test_build_view_reports_nonzero_ranking_counts(pg_session_factory):
     assert view.ranking == {"pending": 1, "failed": 1}
 
 
+def test_resolve_non_int_profile_raises_400(pg_session_factory):
+    # Locks the parity-critical control flow the whitespace fix touched: a
+    # non-integer ?profile is a 400 (matches legacy _parse_optional_profile_id).
+    import pytest
+    from fastapi import HTTPException
+
+    uid = _seed(pg_session_factory)
+    with pg_session_factory() as s, pytest.raises(HTTPException) as ei:
+        resolve_profile_selection(s, user_id=uid, raw_profile="abc", persist=False)
+    assert ei.value.status_code == 400
+
+
+def test_resolve_whitespace_profile_is_none_not_cleared(pg_session_factory):
+    # Whitespace-only strips to empty BEFORE the int() parse → treated as a
+    # no-selection (returns None, no 400) and never routes through the
+    # clear-default branch (which keys on the UNTRIMMED ""). Parity with legacy.
+    uid = _seed(pg_session_factory)
+    with pg_session_factory() as s:
+        assert resolve_profile_selection(s, user_id=uid, raw_profile="   ", persist=False) is None
+
+
 def test_view_dicts_match_api_model_fields(pg_session_factory):
     # Guard read-model<->API model key parity: a rename on either side fails here.
     uid = _seed(pg_session_factory)

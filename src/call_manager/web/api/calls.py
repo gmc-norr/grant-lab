@@ -17,8 +17,10 @@ class CallOut(BaseModel):
     id: int
     title: str
     # Typed as datetime so the OpenAPI schema emits `format: date-time`.
-    # Pydantic v2 serializes tz-aware datetimes to ISO-8601 (with the +00:00
-    # offset), so the wire value is unchanged from the prior str passthrough.
+    # Pydantic v2 serializes tz-aware datetimes to RFC 3339; a UTC value renders
+    # with a `Z` suffix (e.g. ...T12:30:45Z) — NOT the `+00:00` the prior _iso()
+    # str passthrough produced. Same instant, both valid RFC 3339; the
+    # `format: date-time` contract lets the Plan 3 TS client parse either form.
     deadline: datetime | None
     published_at: datetime | None
     source_name: str | None
