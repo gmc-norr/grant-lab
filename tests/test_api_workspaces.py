@@ -453,3 +453,77 @@ def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_fa
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+def test_save_section_non_owner_no_proposal_is_403_not_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """AUTHZ-ORDERING regression: a non-owner probing an existing workspace that has
+    NO proposal.md yet must get 403 (owner only) — NOT 404 ('no proposal.md yet').
+    The pre-read 404 precheck must run AFTER require_owner so the draft-lifecycle
+    state is never disclosed to non-owners (matches the HTMX sibling sections.py:233
+    then :240, which authorizes before any repo I/O)."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        member = User(status="active", email="member@ki.se")
+        s.add_all([owner, member])
+        s.flush()
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        s.add(ws)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
+        s.commit()
+        member_id, ws_id = member.id, ws.id
+    # Deliberately do NOT init the repo / write proposal.md.
+    c = _client(app, member_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/0",
+        json={
+            "content": "## Methods\nbody.\n",
+            "base_commit_sha": "0" * 40,
+            "base_section_sha": "0" * 64,
+        },
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_save_section_busy_is_retriable_429_with_message(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """When the commit mutex times out, the JSON path must surface a RETRIABLE
+    response that preserves the busy message. A 503 would be sanitized to a hard
+    'internal_error' by the global >=500 handler (main.py:335), so the SPA could
+    not distinguish busy from a real 500. The route maps CommitMutexTimeout to 429
+    (too_many_requests) with BUSY_ERROR_MESSAGE + a Retry-After header, which the
+    4xx branch (main.py:344) echoes verbatim."""
+    from call_manager.proposal_assist.drafting.locking import (
+        BUSY_ERROR_MESSAGE,
+        CommitMutexTimeout,
+    )
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, base_section = _capture(tmp_path, ws_id, 1)
+
+    def _boom(*args, **kwargs):
+        raise CommitMutexTimeout("busy")
+
+    monkeypatch.setattr("call_manager.web.api.workspaces.save_section", _boom)
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "## Methods\nrewritten body.\n",
+            "base_commit_sha": base_commit,
+            "base_section_sha": base_section,
+        },
+    )
+    assert r.status_code == 429
+    body = r.json()
+    assert body["error"]["code"] == "too_many_requests"
+    assert body["error"]["message"] == BUSY_ERROR_MESSAGE
+    assert r.headers.get("Retry-After") == "2"

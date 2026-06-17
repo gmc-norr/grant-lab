@@ -171,24 +171,29 @@ def post_save_section(
     owns the transaction: save_section adds rows but does NOT commit, and the
     commit mutex is released by this handler's COMMIT / ROLLBACK."""
     settings = request.app.state.settings
-    # Mirror the HTMX route's pre-read 404 (sections.py:73-89, used at
-    # sections.py:240): before touching save_section, reject a workspace that
-    # has no proposal.md yet OR no git HEAD yet with the SAME user-facing 404 as
-    # export_markdown / _read_sections. save_section reads HEAD + proposal.md
-    # directly (save.py:168-170) and would otherwise surface a raw
-    # FileNotFoundError / GitCommitError (500), not a 404. Cover BOTH the same
-    # way _read_sections does: .exists() first, then catch GitCommitError.
-    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-    if not (repo_dir / PROPOSAL_FILENAME).exists():
-        raise HTTPException(status_code=404, detail="no proposal.md yet")
-    try:
-        current_head(repo_dir)
-    except GitCommitError as e:
-        logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
-        raise HTTPException(status_code=404, detail="no proposal.md yet") from e
     sf = request.app.state.session_factory
     with sf() as session:
+        # Authorize BEFORE touching any repo/proposal state, mirroring the HTMX
+        # sibling (sections.py:233 require_owner, then :240 read). Doing the
+        # pre-read probe first would let a non-owner distinguish "no proposal.md
+        # yet" (404) from "owner only" (403) and leak the draft-lifecycle state of
+        # any workspace UUID they can name — so require_owner runs first.
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Mirror the HTMX route's pre-read 404 (sections.py:73-89, used at
+        # sections.py:240): before touching save_section, reject a workspace that
+        # has no proposal.md yet OR no git HEAD yet with the SAME user-facing 404 as
+        # export_markdown / _read_sections. save_section reads HEAD + proposal.md
+        # directly (save.py:168-170) and would otherwise surface a raw
+        # FileNotFoundError / GitCommitError (500), not a 404. Cover BOTH the same
+        # way _read_sections does: .exists() first, then catch GitCommitError.
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        if not (repo_dir / PROPOSAL_FILENAME).exists():
+            raise HTTPException(status_code=404, detail="no proposal.md yet")
+        try:
+            current_head(repo_dir)
+        except GitCommitError as e:
+            logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
+            raise HTTPException(status_code=404, detail="no proposal.md yet") from e
         try:
             result = save_section(
                 session=session,
@@ -218,7 +223,16 @@ def post_save_section(
             ) from e
         except CommitMutexTimeout as e:
             session.rollback()
-            raise HTTPException(status_code=503, detail=BUSY_ERROR_MESSAGE) from e
+            # On the JSON path a 503 would be sanitized to a hard "internal_error"
+            # by the global >=500 handler (main.py:335), discarding BUSY_ERROR_MESSAGE
+            # so the SPA can't tell "busy" from a real 500. Map to a retriable 429
+            # (too_many_requests) with Retry-After — the 4xx branch (main.py:344)
+            # echoes the busy message verbatim. Mirrors references.py:275-276.
+            raise HTTPException(
+                status_code=429,
+                detail=BUSY_ERROR_MESSAGE,
+                headers={"Retry-After": "2"},
+            ) from e
         except GitCommitError as e:
             session.rollback()
             logger.exception("section save failed for workspace %s section %s", workspace_id, index)
