@@ -206,3 +206,69 @@ def test_draft_folds_whole_proposal_citation_map(monkeypatch, pg_url, pg_session
     assert cites[ev_id]["number"] == 1  # first (and only) citekey numbered over the whole doc
     assert cites[ev_id]["stance"] == "supports"
     assert cites[ev_id]["title"] == "The Smith 2021 Study"
+
+
+def test_draft_does_not_leak_cross_workspace_reference_title(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Security branch: a ledger reference_id that points at a Reference owned by a
+    DIFFERENT workspace must NOT leak that other workspace's title. The ownership
+    guard (ref.workspace_id == workspace_id) forces title=None, while citekey/number/
+    stance still resolve from the marker + ledger. Workspace A is the one being read
+    (owns the proposal/marker); workspace B owns the Reference the ledger points to."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"  # production length: 12 hex (new_ev_id = ev-<uuid.hex[:12]>)
+    proposal = f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n"
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        # Workspace A: the one being read (has the proposal + marker).
+        ws_a = Workspace(title="A", owner_id=owner.id, current_phase="spec")
+        # Workspace B: owns the Reference the ledger's reference_id points to.
+        ws_b = Workspace(title="B", owner_id=owner.id, current_phase="spec")
+        s.add_all([ws_a, ws_b])
+        s.flush()
+        # The Reference belongs to workspace B, NOT workspace A.
+        ref = Reference(
+            workspace_id=ws_b.id,
+            kind="paper",
+            source_type="uploaded",
+            title="Cross-Workspace Secret Title",
+            filename="smith2021.pdf",
+            storage_path="refs/smith2021.pdf",
+            mime_type="application/pdf",
+        )
+        s.add(ref)
+        s.commit()
+        owner_id, ws_a_id, ref_id = owner.id, ws_a.id, ref.id
+    # Seed workspace A's repo with the marker-bearing proposal.
+    _init_repo(tmp_path, ws_a_id, doc=proposal)
+    # Ledger lives in workspace A, but its evidence row's reference_id points at
+    # workspace B's Reference — the ownership guard must refuse to join the title.
+    repo = workspace_repo_dir(tmp_path, ws_a_id)
+    ledger = empty_ledger()
+    ledger["evidence"].append(
+        {
+            "id": ev_id,
+            "citekey": "smith2021",
+            "reference_id": str(ref_id),
+            "stance": "supports",
+        }
+    )
+    (repo / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
+    from call_manager.proposal_assist.citations.gitio import _git_env
+
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-qm", "ledger"], cwd=repo, check=True, env=_git_env())
+
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_a_id}/draft")
+    assert r.status_code == 200, r.text
+    cites = r.json()["citations"]
+    assert ev_id in cites
+    assert cites[ev_id]["citekey"] == "smith2021"
+    assert cites[ev_id]["number"] == 1
+    assert cites[ev_id]["stance"] == "supports"
+    # The cross-workspace Reference title must NOT be leaked.
+    assert cites[ev_id]["title"] is None

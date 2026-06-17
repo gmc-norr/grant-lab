@@ -84,7 +84,9 @@ def _citation_map(session, settings, workspace_id: uuid.UUID, raw: str) -> dict[
                 ref = session.get(Reference, ref_uuid)
                 if ref is not None and ref.workspace_id == workspace_id:
                     csl = ref.csl_json or ref.csl_json_extracted or {}
-                    title = ref.title or csl.get("title") or ref.filename
+                    csl_title = csl.get("title") if isinstance(csl, dict) else None
+                    csl_title = csl_title if isinstance(csl_title, str) else None
+                    title = ref.title or csl_title or ref.filename
         out[ev_id] = CitationOut(
             citekey=m["citekey"],
             number=number_by_ev.get(ev_id),
