@@ -20,7 +20,14 @@ def refresh_staleness(
     *, session: Session, workspace_id: uuid.UUID, workspaces_dir: Path | str
 ) -> int:
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    sections = split_sections((repo_dir / PROPOSAL_FILENAME).read_text())
+    proposal_path = repo_dir / PROPOSAL_FILENAME
+    if not proposal_path.exists():
+        # Workspace is still in setup (Phase-0 hasn't written proposal.md yet).
+        # There are no live sections to compare against — and no draft proposals
+        # could exist yet — so this best-effort sweep is a no-op. Returning early
+        # keeps callers (the list endpoint) from 500ing on an un-set-up workspace.
+        return 0
+    sections = split_sections(proposal_path.read_text())
     live_sha = {i: sec.sha for i, sec in enumerate(sections)}
 
     rows = session.scalars(

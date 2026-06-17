@@ -102,3 +102,28 @@ def test_refresh_marks_proposal_for_deleted_section_stale(pg_session_factory, tm
         s.flush()
 
         assert s.get(ProposedChange, pc.id).status == "stale"
+
+
+def test_refresh_returns_zero_when_proposal_missing(pg_session_factory, tmp_path):
+    # Workspace still in setup: no repo / proposal.md on disk yet. refresh is a
+    # best-effort no-op (returns 0) rather than raising FileNotFoundError, so the
+    # list endpoint can't 500 on an un-set-up workspace.
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Methods\np.\n",
+            base_commit_sha="0" * 40,
+            base_section_sha="deadbeef",
+            origin_kind="interactive_turn",
+        )
+        s.flush()
+
+        n = refresh_staleness(session=s, workspace_id=ws.id, workspaces_dir=str(tmp_path))
+        s.flush()
+
+        assert n == 0
+        assert s.get(ProposedChange, pc.id).status == "pending"
