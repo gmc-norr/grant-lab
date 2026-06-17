@@ -68,3 +68,60 @@ def propose_prose_edit(
     session.add(pc)
     session.flush()
     return pc
+
+
+def propose_citation_insert(
+    *,
+    session: Session,
+    workspace_id: uuid.UUID,
+    section_index: int,
+    base_commit_sha: str,
+    base_section_sha: str,
+    reference_id: str,
+    anchor: str,
+    chunk_index: int,
+    evidence_quote: str,
+    stance: str = "supports",
+    confidence: str | None = None,
+    origin_kind: str,
+    origin_session_id: str | None = None,
+    origin_job_id: uuid.UUID | None = None,
+    triggering_turn_id: uuid.UUID | None = None,
+    triggering_prompt: str | None = None,
+    created_by: int | None = None,
+) -> ProposedChange:
+    """Write a pending ``kind="citation_insert"`` proposed_change row.
+
+    The payload mirrors insert_citation's args (reference_id, anchor,
+    chunk_index, evidence_quote, stance, confidence). ev_id / citekey / offsets
+    are minted authoritatively at accept time (by _insert_citation_locked), not
+    stored here. section_index / base_section_sha are derived by the tool layer
+    from where the anchor falls in the read-time proposal (the citation row still
+    participates in section-keyed staleness). The caller owns the transaction
+    (this only flush()es).
+    """
+    pc = ProposedChange(
+        workspace_id=workspace_id,
+        target_artifact="draft",
+        section_index=section_index,
+        base_commit_sha=base_commit_sha,
+        base_section_sha=base_section_sha,
+        kind="citation_insert",
+        payload={
+            "reference_id": reference_id,
+            "anchor": anchor,
+            "chunk_index": chunk_index,
+            "evidence_quote": evidence_quote,
+            "stance": stance,
+            "confidence": confidence,
+        },
+        origin_kind=origin_kind,
+        origin_session_id=origin_session_id,
+        origin_job_id=origin_job_id,
+        triggering_turn_id=triggering_turn_id,
+        triggering_prompt=triggering_prompt,
+        created_by=created_by,
+    )
+    session.add(pc)
+    session.flush()
+    return pc
