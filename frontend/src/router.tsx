@@ -1,5 +1,6 @@
 import { createBrowserRouter } from "react-router-dom";
 
+import { Cockpit } from "./routes/Cockpit";
 import { Dashboard } from "./routes/Dashboard";
 
 export const router = createBrowserRouter([
@@ -8,6 +9,7 @@ export const router = createBrowserRouter([
   // retired). Keep this in sync with `routes.json` `spa_routes` — the SERVER
   // (manifest) is authoritative for what gets index.html.
   { path: "/", element: <Dashboard /> },
+  { path: "/cockpit/:id", element: <Cockpit /> },
   // In-app catch-all ONLY: a soft 404 for paths the SPA reached client-side via
   // React Router navigation. It is NOT the route authority — the server returns
   // index.html only for manifest SPA routes, so a typed/unknown URL never loads

@@ -74,7 +74,9 @@ def test_happy_path_save(pg_session_factory, tmp_path):
         assert isinstance(res, SaveResult)
         assert res.changed is True
         assert res.commit_sha == current_head(repo) != head
+        assert res.head == res.commit_sha  # new HEAD == the commit just made
         expected = "# T\nintro\n## Background\nnew body\n## Aims\naims\n"
+        assert res.section_sha == split_sections(expected)[1].sha
         assert (repo / "proposal.md").read_text() == expected
 
         av = s.query(ArtifactVersion).one()
@@ -210,6 +212,8 @@ def test_no_change_save_short_circuits(pg_session_factory, tmp_path):
 
         assert res.changed is False
         assert res.commit_sha == head == current_head(repo)
+        assert res.head == head  # HEAD unchanged on a no-op
+        assert res.section_sha == _section_sha(repo, 1)  # base sha preserved
         assert res.job_enqueued is False
         # Tier-1 still ran on the current doc (DOC contains the bare [@x9]).
         assert any(i["type"] == "bare_marker" for i in res.issues)

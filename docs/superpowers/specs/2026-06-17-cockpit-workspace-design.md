@@ -198,20 +198,34 @@ SP3 section soft-locks reduce their frequency later.
 
 ## 7. Editor & the propose→accept review surface
 
-- **WYSIWYG over markdown-as-truth**, built on **Lexical** (chosen over ProseMirror for
-  React-first integration, first-class **accessibility** (a procurement gate for a hospital
-  tool), and `DecoratorNode` for atomic citation widgets). ProseMirror is the fallback;
-  CodeMirror-6 source mode is the risk-free escape hatch.
-- **Server stays authoritative** for markdown render + citation numbering; the editor renders
-  optimistically and the server canonicalizes.
-- **Citation markers are atomic, non-typeable widgets** (`[@key]<!-- ev:id -->`) implemented as
-  `DecoratorNode`s that own and emit the exact marker string.
+- **Markdown-source editing on `CodeMirror-6`, NOT WYSIWYG.** The §12 round-trip spike RAN
+  (2026-06-17) and the WYSIWYG path did NOT clear the gate: a Lexical/`@lexical/markdown`
+  round-trip canonicalizes bytes on first import — corrupting snake_case headings
+  (`## Work_Package_1` → `## Work\_Package\_1`), LaTeX/Windows paths, promoting fake citations
+  out of non-backtick code blocks, and **churning 100% of section SHAs** (the byte-exact
+  `sha256(section.text)` the propose/accept + staleness backbone keys on). That SHA-churn is
+  architectural — it afflicts ProseMirror equally — so we take the spec's own **CodeMirror-6
+  source** escape hatch. The editor edits the **raw `proposal.md` bytes**, so section bytes are
+  stable **by construction** and the SP2a-1/SP2a-2 staleness backbone is untouched (no write-time
+  canonicalization, no staleness re-key, no migration). See
+  `docs/superpowers/notes/2026-06-17-editor-round-trip-spike-findings.md`. (Trade-off: rich
+  markdown *source* + citation pills, not a Word-like surface — judged the right UX for a
+  LaTeX-literate scientific authoring audience, and it keeps the AI's byte-level propose→accept
+  diffs honest. Revisit WYSIWYG only if PIs demand it, paying for a byte-faithful serializer +
+  staleness re-architecture deliberately.)
+- **Server stays authoritative** for markdown render (pandoc preview) + citation numbering; the
+  editor shows the source plus a live read-only render, and the server remains the render of record.
+- **Citation markers are atomic, non-typeable widgets** (`[@key]<!-- ev:id -->`) rendered as
+  **CodeMirror atomic-range decorations** (`Decoration.replace` + `EditorView.atomicRanges`) over
+  the underlying marker text — the bytes stay in the document; the widget is only the rendering,
+  so there is no node-serialization layer that could corrupt them.
 
 **Editor model:** **section-at-a-time** editing (one section opened from the Outline) **plus a
 read-only "Full draft" tab** for continuous reading. This maps 1:1 to per-section
-save/lock/budget/diff and contains the round-trip risk to one section at a time. Center tabs:
-`§ <section>` (editable) · `Full draft` (read-only) · `Spec` · `Scorecard` · `Readiness` · a
-reference's full text. Preserve caret/scroll across swaps.
+save/budget/diff; with CodeMirror source editing there is no round-trip to contain, but
+section-scoping still bounds each save + `base_section_sha` to exactly the edited section. Center
+tabs: `§ <section>` (editable) · `Full draft` (read-only) · `Spec` · `Scorecard` · `Readiness` ·
+a reference's full text. Preserve caret/scroll across swaps.
 
 **Inline AI edits render as:** **inline track-changes** by default (struck old + highlighted
 new, in the flow, one-gesture accept/dismiss); **auto-switch to an anchored diff card** for
@@ -317,11 +331,11 @@ now"** action that writes a deeper one-shot review (`fit-check.md` / `rubric-rev
 
 ## 11. Build decomposition
 
-**SP2a (foundation; gated by the §12 editor round-trip spike):**
+**SP2a (foundation; the §12 editor round-trip spike RAN 2026-06-17 → CodeMirror-6 source, see §7/§12):**
 1. Backend: `proposed_change` table + lifecycle; `propose_*` tools; the **accept** endpoint
-   (replay-as-approver); remove mutating tools from the allowlist; drop `bypassPermissions`.
-2. **Delete the workspace-wide turn-freeze**; client conflict-handler (never drop buffer).
-3. Lexical editor with atomic citation `DecoratorNode`s; section-at-a-time + Full-draft tab.
+   (replay-as-approver); remove mutating tools from the allowlist; drop `bypassPermissions`. **[DONE — SP2a-1 + SP2a-2 merged to master 2026-06-17]**
+2. **Delete the workspace-wide turn-freeze**; client conflict-handler (never drop buffer). **[turn-freeze deletion DONE in SP2a-1; client conflict-handler is frontend, pending]**
+3. **CodeMirror-6 source editor** with atomic citation-marker widgets (range decorations); section-at-a-time + Full-draft tab. (Lexical/WYSIWYG rejected by the §12 spike — see §7.) **← this slice (SP2a-3)**
 4. select-to-cite + chunk-offset-mapped source viewer; citation peek + pin.
 5. Port the three proven things (per-section edit + ask AI, whole-doc chat, claim→source) — AI
    now lands as proposals.
@@ -336,10 +350,18 @@ now"** action that writes a deeper one-shot review (`fit-check.md` / `rubric-rev
 
 ## 12. Testing & risks
 
-- **#1 risk — the editor round-trip.** The pre-plan **spike** must property-test the citation
-  `DecoratorNode` + idempotent markdown serialization against the `split_sections` join==doc
-  invariant. Requirement: **marker + `##` boundary fidelity + idempotent canonical round-trip**
-  (not byte-identical prose). If fragile → ProseMirror; if still fragile → CodeMirror-6 source.
+- **#1 risk — the editor round-trip — RESOLVED (2026-06-17): CodeMirror-6 source.** The pre-plan
+  spike (branch `spike/editor-round-trip`; 5-agent adversarial verification) found the Lexical
+  WYSIWYG round-trip does **not** hold the `split_sections`/section-SHA invariants: a property
+  generator restricted to `[A-Za-z0-9]` masked first-import byte-canonicalization that churns
+  every section SHA, plus snake_case-heading/backslash escaping and fake-citation promotion from
+  non-backtick code blocks — all cross-checked against the real Python `split_sections`. The
+  SHA-churn is architectural (any WYSIWYG-markdown editor canonicalizes on import) and the backbone
+  demands byte-exact section bytes, so we adopt **CodeMirror-6 source editing** — it edits the raw
+  bytes, so the invariant holds **by construction** with no round-trip layer. Findings + the reusable
+  property harness: `docs/superpowers/notes/2026-06-17-editor-round-trip-spike-findings.md`.
+  Residual editor test obligations: atomic-widget decorations never alter document bytes; a no-edit
+  open→save is a byte-exact no-op (section SHA unchanged); accessibility of the source editor + pills.
 - `proposed_change` lifecycle tests (accept/reject/supersede/stale; replay-as-approver;
   double-verify citations).
 - Concurrency/staleness tests (no lost updates without the freeze; born-stale handling; client

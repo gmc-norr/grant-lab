@@ -55,6 +55,8 @@ class SectionStructureError(RuntimeError):
 @dataclass
 class SaveResult:
     commit_sha: str
+    head: str
+    section_sha: str
     issues: list[dict] = field(default_factory=list)
     job_enqueued: bool = False
     changed: bool = True
@@ -213,7 +215,14 @@ def save_section(
         issues = _tier1_issues(
             doc=doc, repo_dir=repo_dir, session=session, workspace_id=workspace.id
         )
-        return SaveResult(commit_sha=head, issues=issues, job_enqueued=False, changed=False)
+        return SaveResult(
+            commit_sha=head,
+            head=head,
+            section_sha=live.sha,
+            issues=issues,
+            job_enqueued=False,
+            changed=False,
+        )
 
     # 7. Reassemble and commit (join invariant: section texts concatenate
     #    byte-identically to the document).
@@ -264,4 +273,11 @@ def save_section(
         section_sha=saved.sha,
         commit_sha=commit_sha,
     )
-    return SaveResult(commit_sha=commit_sha, issues=issues, job_enqueued=job_enqueued, changed=True)
+    return SaveResult(
+        commit_sha=commit_sha,
+        head=commit_sha,
+        section_sha=saved.sha,
+        issues=issues,
+        job_enqueued=job_enqueued,
+        changed=True,
+    )
