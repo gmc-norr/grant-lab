@@ -111,23 +111,23 @@ _REFERENCE_SAFETY_INSTRUCTION = (
 # to self-audit after substantial drafting. This rides in the same system-prompt
 # append as _REFERENCE_SAFETY_INSTRUCTION and persists across every turn.
 _CITATION_INSTRUCTION = (
-    "When a sentence makes a factual or empirical claim that a provided "
-    "reference supports, attach a citation immediately: use search_references "
-    "or read_reference_section to locate the supporting chunk, copy a verbatim "
-    "span from that chunk as the evidence_quote (it must appear word-for-word "
-    "in the chunk), then call insert_citation with the reference_id, the anchor "
-    "(a unique snippet of your draft text the citation should follow), the "
-    "chunk_index, and the evidence_quote. insert_citation assigns or reuses the "
-    "reference's citekey and inserts a [@citekey] marker right after the anchor "
-    "in the draft. Before calling update_citation, remove_citation, or "
-    "rename_citekey, call list_citations first to see existing citations and "
-    "their ev ids. After substantial drafting, call validate_citations and "
-    "resolve any issues it reports; then call list_unsupported_claims to find "
-    "factual claims that still lack a citation. When the draft's citations are "
-    "settled, call build_bibliography to render the formatted reference list. "
-    "Never rewrite or delete passages from commits whose message starts with "
-    "'user edit:' unless the user's message asks for it; read the proposal "
-    "before any replace."
+    "You do not edit or commit the proposal directly — you PROPOSE changes that "
+    "a human reviews and accepts. To rewrite a section, call read_proposal "
+    "first, then propose_edit with the section_index and the whole new section "
+    "text (including its ## heading). When a sentence makes a factual or "
+    "empirical claim that a provided reference supports, propose a citation: use "
+    "search_references or read_reference_section to locate the supporting chunk, "
+    "copy a verbatim span from that chunk as the evidence_quote (it must appear "
+    "word-for-word in the chunk), then call propose_citation with the "
+    "reference_id, the anchor (a unique snippet of the draft the citation should "
+    "follow), the chunk_index, and the evidence_quote. The citekey is assigned "
+    "when a human accepts. Each propose_* call returns a proposed_change_id with "
+    "status 'pending' — it is queued for review, not applied. Use list_citations "
+    "to see existing citations, validate_citations to check them, and "
+    "list_unsupported_claims to find factual claims that still lack a citation. "
+    "When the draft's citations are settled, call build_bibliography to render "
+    "the formatted reference list. Read the proposal before proposing edits to "
+    "it."
 )
 
 
@@ -199,20 +199,22 @@ class ClaudeAgentSDKAdapter:
 
         # CRITICAL security boundary (Codex B2): allowed_tools alone does NOT
         # disable Claude Code's built-in toolbox. The disable is `tools=[]`
-        # PLUS `strict_mcp_config=True`. These MUST be set unconditionally —
-        # with permission_mode defaulting to "bypassPermissions", an adapter
-        # constructed without a tools_factory would otherwise expose the FULL
-        # built-in bash/file toolbox in the workspace repo with no permission
-        # prompts (a latent RCE-class footgun). Always strip the built-ins;
-        # only wire the MCP server + its allowlist when a factory is present.
+        # PLUS `strict_mcp_config=True`. These MUST be set unconditionally — an
+        # adapter constructed without a tools_factory would otherwise expose the
+        # FULL built-in bash/file toolbox in the workspace repo. Always strip the
+        # built-ins; only wire the MCP server + its allowlist when a factory is
+        # present. SP2a-2 also drops permission_mode="bypassPermissions" (now
+        # "default") and de-allowlists every direct-mutation tool: the agent can
+        # only PROPOSE (write proposed_change rows), never commit to the repo —
+        # a structural guarantee, not a behavioral one.
         options_kwargs["tools"] = []
         options_kwargs["strict_mcp_config"] = True
         # Don't load filesystem settings (project/user ~/.claude/settings.json).
         # Same security boundary as tools=[]: those files can carry hooks,
         # permission grants, and MCP server defs that would broaden what the
-        # bypassPermissions agent can do beyond the empty built-in set. The
-        # cwd is inside the app tree, so the CLI would otherwise discover the
-        # project's .claude/settings.json. Pass [] for SDK isolation mode.
+        # agent can do beyond the empty built-in set. The cwd is inside the app
+        # tree, so the CLI would otherwise discover the project's
+        # .claude/settings.json. Pass [] for SDK isolation mode.
         options_kwargs["setting_sources"] = []
         # Neutralize app secrets in the subprocess environment (see
         # _SCRUBBED_ENV_KEYS). Merged over inherited env by the SDK.
@@ -234,8 +236,9 @@ class ClaudeAgentSDKAdapter:
             # list verbatim to the CLI's --allowedTools flag.
             options_kwargs["allowed_tools"] = [
                 "read_proposal",
-                "edit_proposal",
-                "replace_proposal",
+                # SP2a-2 — propose-only mutation (no direct repo writes)
+                "propose_edit",
+                "propose_citation",
                 "get_artifact_history",
                 "read_artifact_at",
                 "diff_artifact",
@@ -250,18 +253,12 @@ class ClaudeAgentSDKAdapter:
                 "summarize_data",
                 # Slice 3 — agent-side fetch
                 "fetch_reference",
-                # Slice 2 Task 9 — citation mutation tools
-                "insert_citation",
-                "remove_citation",
-                "update_citation",
-                "rename_citekey",
-                # read-only citation discovery
+                # read-only citation discovery + audit
                 "list_citations",
-                # Slice 3 Task 5 — citation audit
                 "validate_citations",
-                # Slice 3 Task 7 — uncited-claim discovery
                 "list_unsupported_claims",
-                # Slice 4 Task 5 — bibliography rendering
+                # bibliography rendering (writes bibliography.md — kept: not a
+                # draft/spec section mutation; spec removes only prose+citation)
                 "build_bibliography",
             ]
         return options_kwargs

@@ -91,21 +91,19 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     # Bare names per SDK docstring example (see Task 7 Step 0).
     # NO mcp__ prefix — confirm we're using the bare form.
     assert not any(t.startswith("mcp__") for t in allowed)
-    # Full allowlist coverage: 8 existing (B5) + 6 (Slice 2 — references)
-    # + 1 (Slice 3 — agent-side fetch) + 4 (Slice 2 Task 9 — citation
-    # mutations) + 1 (read-only list_citations) + 1 (validate_citations)
-    # + 1 (list_unsupported_claims) + 1 (Slice 4 — build_bibliography) = 23.
+    # Full allowlist coverage: 19 tools post-SP2a-2 (6 mutating tools removed,
+    # propose_edit + propose_citation added).
     expected_tools = {
-        # existing eight from B5
         "read_proposal",
-        "edit_proposal",
-        "replace_proposal",
+        # SP2a-2 — propose-only mutation
+        "propose_edit",
+        "propose_citation",
         "get_artifact_history",
         "read_artifact_at",
         "diff_artifact",
         "get_call_details",
         "get_profile",
-        # six new reference tools (Slice 2)
+        # Slice 2 — references
         "list_references",
         "search_references",
         "navigate_reference",
@@ -114,18 +112,11 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         "summarize_data",
         # Slice 3 — agent-side fetch
         "fetch_reference",
-        # four citation mutation tools (Slice 2 Task 9)
-        "insert_citation",
-        "remove_citation",
-        "update_citation",
-        "rename_citekey",
-        # read-only citation discovery
+        # read-only citation discovery + audit
         "list_citations",
-        # Slice 3 Task 5 — citation audit
         "validate_citations",
-        # Slice 3 Task 7 — uncited-claim discovery
         "list_unsupported_claims",
-        # Slice 4 Task 5 — bibliography rendering
+        # Slice 4 — bibliography rendering
         "build_bibliography",
     }
     assert set(allowed) == expected_tools
@@ -134,11 +125,11 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
 def test_options_strip_builtin_tools_even_without_tools_factory():
     """SECURITY: tools=[] + strict_mcp_config=True must be set UNCONDITIONALLY.
 
-    With permission_mode defaulting to "bypassPermissions", an adapter built
-    with tools_factory=None would otherwise expose Claude Code's full built-in
-    bash/file toolbox in the workspace repo with no permission prompts — a
-    latent RCE-class footgun. We assert the built-ins are stripped even when
-    no MCP factory is present, and that no MCP wiring leaks through.
+    An adapter built with tools_factory=None would otherwise expose Claude
+    Code's full built-in bash/file toolbox in the workspace repo — a latent
+    RCE-class footgun. We assert the built-ins are stripped even when no MCP
+    factory is present, and that no MCP wiring leaks through. The default
+    permission_mode is now "default" (the bypassPermissions footgun is gone).
     """
     from call_manager.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
@@ -158,5 +149,45 @@ def test_options_strip_builtin_tools_even_without_tools_factory():
     # No factory ⇒ no MCP server and no allowlist wiring.
     assert "mcp_servers" not in kwargs
     assert "allowed_tools" not in kwargs
-    # Default permission mode is the dangerous one — confirms the fix matters.
-    assert kwargs["permission_mode"] == "bypassPermissions"
+    # Default permission mode is now "default" (the bypassPermissions footgun is
+    # gone). tools=[]/strict_mcp_config still strip the built-ins unconditionally.
+    assert kwargs["permission_mode"] == "default"
+
+
+def test_every_collected_tool_is_allowlisted(_settings_env):
+    """permission_mode='default' blocks any non-allowlisted tool. Every tool the
+    registry collects must therefore be on the adapter's allowed_tools, or a
+    background turn would hang on a blocked call with no UI to approve."""
+    import uuid as _uuid
+
+    from call_manager.proposal_assist.drafting.claude_adapter import (
+        ClaudeAgentSDKAdapter,
+    )
+    from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from call_manager.proposal_assist.tools.registry import (
+        ToolContext,
+        _collect_tools,
+        build_proposal_assist_mcp_server,
+    )
+
+    wsid = _uuid.uuid4()
+    ctx = ToolContext(
+        workspace_id=wsid,
+        repo_dir=__import__("pathlib").Path("/tmp/x"),
+        session_factory=None,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+    )
+    collected = {t.name for t in _collect_tools(ctx)}
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="x",
+        workspaces_dir="/tmp",
+        tools_factory=lambda repo_dir, workspace_id: build_proposal_assist_mcp_server(ctx),
+    )
+    kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=wsid))
+    allowed = set(kwargs["allowed_tools"])
+
+    missing = collected - allowed
+    assert missing == set(), f"collected tools not on the allowlist: {missing}"
+    assert allowed == collected
+    assert len(allowed) == 19

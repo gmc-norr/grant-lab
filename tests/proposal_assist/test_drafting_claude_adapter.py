@@ -464,27 +464,27 @@ def test_build_options_appends_reference_safety_system_prompt():
 
 
 def test_build_options_appends_citation_instruction():
-    """The system-prompt append also includes the citation instruction so the
-    agent knows to use insert_citation / validate_citations / list_unsupported_claims
-    and to copy a verbatim evidence_quote from the supporting chunk."""
+    """The system-prompt append includes the citation instruction naming the
+    propose tools (propose_edit / propose_citation) and the read-only audit
+    tools, and tells the agent to copy a verbatim evidence_quote."""
     from call_manager.proposal_assist.drafting import claude_adapter as ca
 
     adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
     sp = kwargs["system_prompt"]
     append = sp["append"]
-    assert "insert_citation" in append
+    assert "propose_citation" in append
+    assert "propose_edit" in append
     assert "validate_citations" in append
     assert "build_bibliography" in append
     assert "evidence_quote" in append or "verbatim" in append
-    # Tool-accuracy: insert_citation takes reference_id + anchor (it assigns/reuses
-    # the citekey itself). The instruction must name those real params.
     assert "reference_id" in append
     assert "anchor" in append
-    # The citation instruction must be non-empty and distinct from the safety one.
+    # No mutating tool names survive in the instruction.
+    assert "insert_citation" not in append
+    assert "edit_proposal" not in append
     assert ca._CITATION_INSTRUCTION
     assert ca._CITATION_INSTRUCTION != ca._REFERENCE_SAFETY_INSTRUCTION
-    # Both instructions must be present in the combined append string.
     assert ca._REFERENCE_SAFETY_INSTRUCTION in append
     assert ca._CITATION_INSTRUCTION in append
 

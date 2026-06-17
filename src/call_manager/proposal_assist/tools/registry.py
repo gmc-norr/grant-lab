@@ -181,10 +181,8 @@ def _collect_tools(ctx: ToolContext) -> list:
         read_artifact_at_impl,
     )
     from call_manager.proposal_assist.tools.proposal import (
-        edit_proposal_impl,
         propose_edit_impl,
         read_proposal_impl,
-        replace_proposal_impl,
     )
 
     @tool(
@@ -225,68 +223,6 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             section_index=section_index,
             new_text=args["new_text"],
-        )
-
-    @tool(
-        "edit_proposal",
-        "Apply a list of {old_string, new_string} surgical edits to "
-        "proposal.md. All-or-nothing: if any anchor is missing or "
-        "ambiguous, no edits are applied. Auto-commits on success.",
-        {
-            "type": "object",
-            "properties": {
-                "edits": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "old_string": {"type": "string"},
-                            "new_string": {"type": "string"},
-                        },
-                        "required": ["old_string", "new_string"],
-                    },
-                },
-                "triggering_turn_id": {"type": "string"},
-            },
-            "required": ["edits"],
-        },
-    )
-    async def edit_proposal(args):
-        from uuid import UUID
-
-        ttid = args.get("triggering_turn_id") or None
-        return await _safe_tool(
-            "edit_proposal",
-            ctx,
-            edit_proposal_impl,
-            ctx,
-            edits=args["edits"],
-            triggering_turn_id=UUID(ttid) if ttid else None,
-        )
-
-    @tool(
-        "replace_proposal",
-        "Overwrite proposal.md with new content. For large structural rewrites. Auto-commits.",
-        {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string"},
-                "triggering_turn_id": {"type": "string"},
-            },
-            "required": ["content"],
-        },
-    )
-    async def replace_proposal(args):
-        from uuid import UUID
-
-        ttid = args.get("triggering_turn_id") or None
-        return await _safe_tool(
-            "replace_proposal",
-            ctx,
-            replace_proposal_impl,
-            ctx,
-            content=args["content"],
-            triggering_turn_id=UUID(ttid) if ttid else None,
         )
 
     @tool(
@@ -549,12 +485,8 @@ def _collect_tools(ctx: ToolContext) -> list:
         )
 
     from call_manager.proposal_assist.tools.citations import (
-        insert_citation_impl,
         list_citations_impl,
         propose_citation_impl,
-        remove_citation_impl,
-        rename_citekey_impl,
-        update_citation_impl,
     )
 
     @tool(
@@ -682,163 +614,16 @@ def _collect_tools(ctx: ToolContext) -> list:
             style=args.get("style"),
         )
 
-    @tool(
-        "insert_citation",
-        "Insert an inline citation marker into proposal.md right after "
-        "`anchor` and record the supporting evidence in the citation ledger, "
-        "in one atomic commit. You MUST pass an exact `chunk_index` and a "
-        "VERBATIM `evidence_quote` copied from that chunk — search_references "
-        "and read_reference_section surface the chunk_index to use. The quote "
-        "is verified against the chunk text; a quote that is absent or "
-        "ambiguous in the chunk is rejected with no commit. `anchor` is a "
-        "unique substring of proposal.md after which the marker is placed.",
-        {
-            "type": "object",
-            "properties": {
-                "reference_id": {"type": "string"},
-                "anchor": {"type": "string"},
-                "chunk_index": {"type": "integer"},
-                "evidence_quote": {"type": "string"},
-                "stance": {
-                    "type": "string",
-                    "enum": ["supports", "contradicts", "background"],
-                    "default": "supports",
-                },
-                "confidence": {
-                    "type": "string",
-                    "enum": ["high", "medium", "low"],
-                },
-            },
-            "required": ["reference_id", "anchor", "chunk_index", "evidence_quote"],
-        },
-    )
-    async def insert_citation(args):
-        try:
-            chunk_index = int(args["chunk_index"])
-        except (TypeError, ValueError, KeyError):
-            return _mcp_error("chunk_index must be an integer")
-        return await _safe_tool(
-            "insert_citation",
-            ctx,
-            insert_citation_impl,
-            ctx,
-            reference_id=args["reference_id"],
-            anchor=args["anchor"],
-            chunk_index=chunk_index,
-            evidence_quote=args["evidence_quote"],
-            stance=args.get("stance", "supports"),
-            confidence=args.get("confidence"),
-        )
-
-    @tool(
-        "remove_citation",
-        "Remove one citation occurrence: its inline marker in proposal.md "
-        "AND its row in the citation ledger, in one atomic commit. Pass the "
-        "`ev-...` evidence id of the occurrence to remove (call list_citations "
-        "to discover it). Other markers/rows that share the same citekey are "
-        "left untouched.",
-        {
-            "type": "object",
-            "properties": {"evidence_id": {"type": "string"}},
-            "required": ["evidence_id"],
-        },
-    )
-    async def remove_citation(args):
-        return await _safe_tool(
-            "remove_citation",
-            ctx,
-            remove_citation_impl,
-            ctx,
-            evidence_id=args["evidence_id"],
-        )
-
-    @tool(
-        "update_citation",
-        "Update an existing citation's binding or metadata (identified by its "
-        "`ev-...` evidence id, which list_citations surfaces). When "
-        "`chunk_index` or `evidence_quote` change, "
-        "the new quote is re-verified against the chunk text and rejected if "
-        "absent or ambiguous. Set `reaccept_claim=true` to re-snapshot the "
-        "live claim sentence around the marker (use after editing the prose "
-        "near a citation). Specify at least one field to change.",
-        {
-            "type": "object",
-            "properties": {
-                "evidence_id": {"type": "string"},
-                "chunk_index": {"type": "integer"},
-                "evidence_quote": {"type": "string"},
-                "stance": {
-                    "type": "string",
-                    "enum": ["supports", "contradicts", "background"],
-                },
-                "confidence": {
-                    "type": "string",
-                    "enum": ["high", "medium", "low"],
-                },
-                "reaccept_claim": {"type": "boolean", "default": False},
-            },
-            "required": ["evidence_id"],
-        },
-    )
-    async def update_citation(args):
-        raw = args.get("chunk_index")
-        if raw is not None:
-            try:
-                raw = int(raw)
-            except (TypeError, ValueError):
-                return _mcp_error("chunk_index must be an integer")
-        return await _safe_tool(
-            "update_citation",
-            ctx,
-            update_citation_impl,
-            ctx,
-            evidence_id=args["evidence_id"],
-            chunk_index=raw,
-            evidence_quote=args.get("evidence_quote"),
-            stance=args.get("stance"),
-            confidence=args.get("confidence"),
-            reaccept_claim=bool(args.get("reaccept_claim", False)),
-        )
-
-    @tool(
-        "rename_citekey",
-        "Rename a citekey across ALL of its inline markers in proposal.md and "
-        "all of its rows in the citation ledger, in one atomic commit "
-        "(evidence ids preserved). The `old_citekey` can be obtained from "
-        "list_citations. Rejected if `new_citekey` is already in use in this "
-        "workspace.",
-        {
-            "type": "object",
-            "properties": {
-                "old_citekey": {"type": "string"},
-                "new_citekey": {"type": "string"},
-            },
-            "required": ["old_citekey", "new_citekey"],
-        },
-    )
-    async def rename_citekey(args):
-        return await _safe_tool(
-            "rename_citekey",
-            ctx,
-            rename_citekey_impl,
-            ctx,
-            old_citekey=args["old_citekey"],
-            new_citekey=args["new_citekey"],
-        )
-
     return [
-        # existing eight
         read_proposal,
         # SP2a-2 — propose-only mutation
         propose_edit,
-        edit_proposal,
-        replace_proposal,
         get_artifact_history,
         read_artifact_at,
         diff_artifact,
         get_call_details,
         get_profile,
-        # six new (Slice 2)
+        # Slice 2 — references
         list_references,
         search_references,
         navigate_reference,
@@ -847,19 +632,14 @@ def _collect_tools(ctx: ToolContext) -> list:
         summarize_data,
         # Slice 3 — agent-side fetch
         fetch_reference,
-        # Slice 2 Task 9 — citation mutation tools
-        insert_citation,
-        remove_citation,
-        update_citation,
-        rename_citekey,
         # read-only citation discovery
         list_citations,
         # SP2a-2 — propose-only citation
         propose_citation,
-        # Slice 3 Task 5 — citation audit
+        # Slice 3 — citation audit
         validate_citations,
-        # Slice 3 Task 7 — uncited-claim discovery
+        # Slice 3 — uncited-claim discovery
         list_unsupported_claims,
-        # Slice 4 Task 5 — bibliography rendering
+        # Slice 4 — bibliography rendering
         build_bibliography,
     ]

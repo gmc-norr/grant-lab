@@ -51,49 +51,37 @@ def _make_ctx():
     )
 
 
-def test_collect_tools_returns_twenty_named_tools():
-    """All twenty tool names are present (8 from B5 + 6 from Slice 2
-    + 1 from Slice 3 + 4 citation mutation tools from Slice 2 Task 9
-    + 1 read-only list_citations). Probes _collect_tools directly instead
-    of fighting the MCP Server's decorator-based API."""
+def test_collect_tools_returns_nineteen_named_tools():
+    """The post-SP2a-2 tool surface: the 6 mutating tools (edit_proposal,
+    replace_proposal, insert_citation, remove_citation, update_citation,
+    rename_citekey) are removed; propose_edit + propose_citation are added.
+    23 - 6 + 2 = 19."""
     from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     names = {t.name for t in tools}
     assert names == {
-        # existing eight from B5
         "read_proposal",
-        "edit_proposal",
-        "replace_proposal",
         "get_artifact_history",
         "read_artifact_at",
         "diff_artifact",
         "get_call_details",
         "get_profile",
-        # six new reference tools (Slice 2)
         "list_references",
         "search_references",
         "navigate_reference",
         "read_reference",
         "read_reference_section",
         "summarize_data",
-        # Slice 3 — agent-side fetch
         "fetch_reference",
-        # four citation mutation tools (Slice 2 Task 9)
-        "insert_citation",
-        "remove_citation",
-        "update_citation",
-        "rename_citekey",
-        # read-only citation discovery
         "list_citations",
-        # Slice 3 Task 5 — citation audit
         "validate_citations",
-        # Slice 3 Task 7 — uncited-claim discovery
         "list_unsupported_claims",
-        # Slice 4 Task 5 — bibliography rendering
         "build_bibliography",
+        "propose_edit",
+        "propose_citation",
     }
-    assert len(tools) == 23
+    assert len(tools) == 19
 
 
 @pytest.mark.asyncio
@@ -175,52 +163,6 @@ async def test_safe_tool_converts_unexpected_exception_to_envelope():
     text = result["content"][0]["text"]
     assert "super-secret" not in text
     assert "quote" not in text
-
-
-@pytest.mark.asyncio
-async def test_citation_tool_closure_returns_error_envelope_for_bad_ref():
-    """A citation tool invoked through its registered MCP closure returns
-    the MCP envelope (not a raised exception) for a simple error case —
-    here, a reference_id that is not a valid uuid."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
-
-    tools = _collect_tools(_make_ctx())
-    insert = next(t for t in tools if t.name == "insert_citation")
-    result = await insert.handler(
-        {
-            "reference_id": "not-a-uuid",
-            "anchor": "somewhere",
-            "chunk_index": 0,
-            "evidence_quote": "x",
-        }
-    )
-    assert result["is_error"] is True
-    assert result["content"][0]["type"] == "text"
-    assert "reference_id" in result["content"][0]["text"]
-
-
-@pytest.mark.asyncio
-async def test_insert_citation_non_integer_chunk_index_returns_envelope():
-    """insert_citation with a non-integer chunk_index must return an MCP error
-    envelope (is_error=True, content type text, message mentions chunk_index /
-    integer) and must NOT raise."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
-
-    tools = _collect_tools(_make_ctx())
-    insert = next(t for t in tools if t.name == "insert_citation")
-    result = await insert.handler(
-        {
-            "reference_id": "some-ref",
-            "anchor": "somewhere",
-            "chunk_index": "not-an-int",
-            "evidence_quote": "some quote",
-        }
-    )
-    assert result["is_error"] is True
-    assert isinstance(result["content"], list)
-    assert result["content"][0]["type"] == "text"
-    text = result["content"][0]["text"]
-    assert "chunk_index" in text or "integer" in text
 
 
 @pytest.mark.asyncio
