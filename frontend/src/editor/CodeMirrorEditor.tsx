@@ -130,11 +130,16 @@ export function CodeMirrorEditor({
       parent: hostRef.current,
     });
     viewRef.current = view;
-    // Expose the view for tests (no behavioral effect in prod).
-    const cmRoot = hostRef.current.querySelector(".cm-editor") as
-      | (HTMLElement & { __cmView?: EditorView })
-      | null;
-    if (cmRoot) cmRoot.__cmView = view;
+    // Expose the view for tests ONLY. Gated behind a non-production env so the
+    // production bundle never leaks a fully-mutable EditorView handle onto the DOM.
+    // vitest runs with MODE === "test" (and DEV === true); the vite dev server has
+    // DEV === true; a production `vite build` has neither, so this is dropped.
+    if (import.meta.env.MODE === "test" || import.meta.env.DEV) {
+      const cmRoot = hostRef.current.querySelector(".cm-editor") as
+        | (HTMLElement & { __cmView?: EditorView })
+        | null;
+      if (cmRoot) cmRoot.__cmView = view;
+    }
     return () => {
       view.destroy();
       viewRef.current = null;

@@ -71,7 +71,8 @@ export class CitationWidget extends WidgetType {
     return el;
   }
 
-  // Block the editor from putting a cursor inside the pill via a pointer event.
+  // Return false so the editor handles pointer events normally; caret entry is
+  // blocked by atomicRanges and the toDOM mousedown preventDefault, not by this hook.
   ignoreEvent(): boolean {
     return false;
   }

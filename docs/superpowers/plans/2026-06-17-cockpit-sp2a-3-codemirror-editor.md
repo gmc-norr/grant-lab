@@ -1483,7 +1483,7 @@ export const citationField = StateField.define<DecorationSet>({
 
 ```
 cd /home/parlar_ai/dev/call-monitor/.worktrees/cockpit-sp2a-3/frontend && pnpm exec vitest run src/editor/citations.test.ts
-# EXPECT: all passed (4 MARKER_RE + 2 markerRanges + 5 citationField + 1 import-guard = 12).
+# EXPECT: all passed (4 MARKER_RE + 2 markerRanges + 4 citationField + 1 import-guard = 11).
 ```
 
 - [ ] Typecheck:
