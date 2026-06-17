@@ -95,6 +95,12 @@ export function CodeMirrorEditor({
     if (!hostRef.current) return;
     const guard = EditorState.transactionFilter.of((tr) => {
       if (!tr.docChanged) return tr;
+      // The controlled remote value-push (see the value effect below) is the
+      // authoritative source of truth — never reject it, or the editor would
+      // permanently desync from the parent's `value` with no reconciliation path
+      // (and no onChange, since rejected transactions don't fire docChanged). The
+      // guard only blocks USER keystrokes from deleting the leading "## " heading.
+      if (tr.annotation(Transaction.remote)) return tr;
       const prev = tr.startState.doc.toString();
       const next = tr.newDoc.toString();
       if (blockedByHeadingGuard(prev, next, requireHeadingRef.current)) {

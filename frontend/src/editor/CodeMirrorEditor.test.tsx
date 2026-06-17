@@ -81,6 +81,38 @@ it("the LIVE transactionFilter rejects a dispatch that would delete the ## headi
   expect(view.state.doc.toString()).toBe("## Methods\nbody.\nmore.\n");
 });
 
+it("does NOT reject a controlled remote value-push even when the pushed value lacks an H2 heading", () => {
+  // Regression: the heading-delete guard is meant to stop a USER keystroke from
+  // deleting the "## " heading, NOT to validate parent-supplied authoritative
+  // content. The controlled `value` prop is the source of truth: pushing value=X
+  // MUST make the editor show X. A remote push whose first line is not an H2
+  // (a clear to "", plain text, or a leading blank line before the heading) must
+  // still apply, or the editor permanently desyncs from the parent with no onChange.
+  const onChange = vi.fn();
+  const { container, rerender } = render(
+    <CodeMirrorEditor value={"## Methods\nold\n"} onChange={onChange} requireHeading />,
+  );
+  const node = container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  };
+  const view = node.__cmView!;
+
+  // (1) parent clears the section (routine clear/loading/discard pattern).
+  rerender(<CodeMirrorEditor value={""} onChange={onChange} requireHeading />);
+  expect(view.state.doc.toString()).toBe(""); // remote push applied, no phantom stale text
+
+  // (2) parent pushes plain text without a heading.
+  rerender(<CodeMirrorEditor value={"plain text without heading\n"} onChange={onChange} requireHeading />);
+  expect(view.state.doc.toString()).toBe("plain text without heading\n");
+
+  // (3) parent pushes a value with a leading blank line before the heading.
+  rerender(<CodeMirrorEditor value={"\n## Methods\nnew\n"} onChange={onChange} requireHeading />);
+  expect(view.state.doc.toString()).toBe("\n## Methods\nnew\n");
+
+  // Remote pushes must NEVER echo back through onChange (would loop).
+  expect(onChange).not.toHaveBeenCalled();
+});
+
 it("renders an atomic citation pill via the production citationPills path and keeps the marker bytes", () => {
   // The production path (citationPills ViewPlugin) is what the component mounts.
   // This proves it actually produces a pill widget under jsdom AND that the raw
