@@ -73,6 +73,9 @@ def accept(
 ) -> dict:
     require_member(workspace_id=workspace_id, user=user, session=session)
     workspaces_dir = request.app.state.settings.workspaces_dir
+    # accept_proposed_change raises NotImplementedError for spec/citation rows;
+    # unreachable in SP2a (only draft/prose_edit rows can be created today) — the
+    # SP2a-2 / SP2b plans that add those paths will map it to an HTTP status.
     try:
         pc = accept_proposed_change(
             session=session,

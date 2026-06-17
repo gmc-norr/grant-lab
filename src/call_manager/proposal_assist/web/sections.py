@@ -40,7 +40,6 @@ from call_manager.proposal_assist.editing.save import (
     TURN_IN_FLIGHT_MESSAGE,
     SectionStructureError,
     StaleSectionError,
-    TurnInFlightError,
     _turn_in_flight,
     save_section,
 )
@@ -183,9 +182,11 @@ def get_section_edit(
 ) -> HTMLResponse:
     """Edit-form fragment for one section. Owner only.
 
-    Soft pre-check: 409 notice if an agent turn is queued/running — the
-    hard guard remains save_section's turn-lock check under the commit
-    mutex; this just avoids offering a form that's doomed to 409 on save.
+    Soft pre-check: 409 notice if an agent turn is queued/running, to avoid
+    offering an edit form while the agent owns the repo. save_section no
+    longer hard-blocks turn-in-flight saves (that guard was removed); races
+    are now handled by the commit mutex + base_section_sha staleness. This
+    soft check is revisited in the propose→accept porting plan.
     """
     ws = _require_owner(
         workspace_id=workspace_id,
@@ -252,12 +253,6 @@ def post_section_save(
         session.commit()
         # Any failure beyond this point must not be reported as a failed save
         # — the save is committed.
-    except TurnInFlightError as e:
-        session.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail=TURN_IN_FLIGHT_MESSAGE,
-        ) from e
     except StaleSectionError as e:
         session.rollback()
         raise HTTPException(

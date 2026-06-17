@@ -41,11 +41,6 @@ TURN_IN_FLIGHT_MESSAGE = "assistant is working — try again when the turn finis
 _TURN_IN_FLIGHT_STATUSES = ("queued", "running")
 
 
-class TurnInFlightError(RuntimeError):
-    """An agent turn is queued or running for this workspace — a user edit
-    would race the agent's git commits. Save again when the turn finishes."""
-
-
 class StaleSectionError(RuntimeError):
     """HEAD moved since the edit form was rendered AND the edited section's
     bytes changed underneath the user — saving would silently clobber."""
