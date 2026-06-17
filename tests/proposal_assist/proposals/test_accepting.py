@@ -268,3 +268,31 @@ def test_accept_rejects_non_prose_kind(pg_session_factory, tmp_path):
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
+
+
+def test_reject_sets_status_and_approver(pg_session_factory, tmp_path):
+    from call_manager.proposal_assist.proposals.accepting import reject_proposed_change
+
+    with pg_session_factory() as s:
+        ws, repo = _setup(s, tmp_path)
+        approver = make_user(s, email="approver@ki.se")
+        s.flush()
+        base_commit, base_section = capture_base(repo, 1)
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Methods\nx.\n",
+            base_commit_sha=base_commit,
+            base_section_sha=base_section,
+            origin_kind="interactive_turn",
+        )
+        s.flush()
+        reject_proposed_change(
+            session=s, proposed_change_id=pc.id, workspace_id=ws.id, approver=approver
+        )
+        s.flush()
+        got = s.get(ProposedChange, pc.id)
+        assert got.status == "rejected"
+        assert got.resolved_by == approver.id
+        assert got.resolved_at is not None

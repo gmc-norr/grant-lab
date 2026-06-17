@@ -88,3 +88,20 @@ def accept_proposed_change(
     pc.resulting_commit_sha = result.commit_sha
     session.flush()
     return pc
+
+
+def reject_proposed_change(
+    *,
+    session: Session,
+    proposed_change_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    approver: User,
+) -> ProposedChange:
+    pc = _load_scoped(session, proposed_change_id, workspace_id)
+    if pc.status != "pending":
+        raise ProposedChangeNotPending(pc.status)
+    pc.status = "rejected"
+    pc.resolved_by = approver.id
+    pc.resolved_at = datetime.now(UTC)
+    session.flush()
+    return pc
