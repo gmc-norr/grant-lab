@@ -142,13 +142,21 @@ class ClaudeAgentSDKAdapter:
         *,
         model: str,
         workspaces_dir: str,
-        permission_mode: str = "bypassPermissions",
+        permission_mode: str = "default",
         tools_factory: Callable[[Path, uuid.UUID], McpSdkServerConfig] | None = None,
+        tool_context_sink: dict[uuid.UUID, Any] | None = None,
     ) -> None:
         self._model = model
         self._workspaces_dir = Path(workspaces_dir)
         self._permission_mode = permission_mode  # type: ignore[assignment]
         self._tools_factory = tools_factory
+        # SP2a-2: the factory's tools_factory closure writes the per-workspace
+        # ToolContext it builds into this sink (keyed by workspace_id) so
+        # set_turn_provenance can stamp the live ctx the MCP closures captured.
+        # None when no factory is wired (the bare-adapter security tests).
+        self._tool_context_sink: dict[uuid.UUID, Any] = (
+            tool_context_sink if tool_context_sink is not None else {}
+        )
 
     async def launch(self, context: LaunchContext) -> AgentHandle:
         """Connect the SDK client for this workspace.
@@ -415,6 +423,11 @@ class ClaudeAgentSDKAdapter:
 
     async def terminate(self, handle: AgentHandle) -> None:
         """Disconnect the SDK client. Safe to call even if never connected."""
+        # Tie the retained ToolContext's lifetime to the subprocess: evict it here
+        # (registry.terminate + sweep_idle both route through this) so the sink
+        # doesn't accumulate one ctx per workspace ever drafted. Done before the
+        # early return so eviction happens even if the client was never connected.
+        self._tool_context_sink.pop(handle.workspace_id, None)
         client: ClaudeSDKClient | None = handle.state.pop("client", None)
         if client is None:
             return
@@ -426,6 +439,26 @@ class ClaudeAgentSDKAdapter:
                 handle.workspace_id,
                 exc_info=True,
             )
+
+    async def set_turn_provenance(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        triggering_turn_id: uuid.UUID | None,
+        triggering_prompt: str | None,
+        created_by: int | None,
+        origin_session_id: str | None,
+    ) -> None:
+        """Stamp provenance onto the retained per-workspace ToolContext that the
+        MCP tool closures captured at launch. No-op if no ctx is retained (e.g.
+        an adapter built without a tools_factory, or before the first launch)."""
+        ctx = self._tool_context_sink.get(workspace_id)
+        if ctx is None:
+            return
+        ctx.triggering_turn_id = triggering_turn_id
+        ctx.triggering_prompt = triggering_prompt
+        ctx.created_by = created_by
+        ctx.origin_session_id = origin_session_id
 
 
 # ---------------------------------------------------------------------------

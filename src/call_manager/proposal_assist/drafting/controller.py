@@ -215,6 +215,25 @@ class WorkspaceController:
     async def terminate(self, workspace_id: uuid.UUID) -> None:
         await self._registry.terminate(workspace_id)
 
+    async def set_turn_provenance(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        triggering_turn_id: uuid.UUID | None,
+        triggering_prompt: str | None,
+        created_by: int | None,
+        origin_session_id: str | None,
+    ) -> None:
+        """Stamp server-trusted provenance onto the workspace's retained
+        ToolContext before send_turn. Called by process_turn_once every turn."""
+        await self._registry.set_turn_provenance(
+            workspace_id,
+            triggering_turn_id=triggering_turn_id,
+            triggering_prompt=triggering_prompt,
+            created_by=created_by,
+            origin_session_id=origin_session_id,
+        )
+
     async def sweep_idle(self) -> int:
         """Terminate any handle untouched for >= the registry's idle window.
 

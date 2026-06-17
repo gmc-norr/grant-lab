@@ -96,3 +96,23 @@ async def test_fake_adapter_send_turn_without_script_returns_terminal_only():
     events = await _collect(fake.send_turn(handle, "unscripted"))
     assert len(events) == 1
     assert isinstance(events[0], TurnDoneEvent)
+
+
+async def test_fake_adapter_records_set_turn_provenance():
+    """set_turn_provenance is part of the DraftingAgent Protocol; the Fake
+    records each call so the processor-stamp test can assert what was passed."""
+    import uuid as _uuid
+
+    fake = FakeAgentAdapter()
+    wsid = _uuid.uuid4()
+    ttid = _uuid.uuid4()
+    await fake.set_turn_provenance(
+        wsid,
+        triggering_turn_id=ttid,
+        triggering_prompt="hello agent",
+        created_by=7,
+        origin_session_id="sess-1",
+    )
+    assert fake.provenance == [
+        (wsid, ttid, "hello agent", 7, "sess-1"),
+    ]

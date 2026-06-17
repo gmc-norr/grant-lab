@@ -85,6 +85,25 @@ _SUMMARY_PREAMBLE = (
 )
 
 
+def _extract_triggering_prompt(content: Any) -> str | None:
+    """The raw typed user text from a ChatTurn.content payload, mirroring the
+    shapes _build_user_content (turns/submit.py) produces: a {"type":"text"}
+    dict, or a block-list whose first {"type":"text"} block holds the text.
+    Returns None if no text block is present. No truncation (the column is
+    nullable Text)."""
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            text = content.get("text")
+            return text if isinstance(text, str) else None
+        return None
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                return text if isinstance(text, str) else None
+    return None
+
+
 def _prepend_summary(
     user_message: str | list[dict[str, Any]], summary_text: str
 ) -> str | list[dict[str, Any]]:
@@ -203,6 +222,11 @@ async def process_turn_once(
             )
             return
 
+        # SP2a-2 §6: capture the raw typed payload while the ORM instance is
+        # still attached — after the with-block closes, user_turn is detached
+        # and lazy-loading user_turn.content would raise DetachedInstanceError.
+        raw_turn_content = user_turn.content
+
         # Compaction session-reset re-injection: a NULL last_sdk_session_id
         # means the next launch starts a FRESH SDK session with no server-side
         # history (the first turn ever, or the turn right after compaction reset
@@ -218,6 +242,28 @@ async def process_turn_once(
             summary_text = latest_summary_text(s, workspace_id)
             if summary_text:
                 user_message = _prepend_summary(user_message, summary_text)
+
+    # SP2a-2 §6: stamp server-trusted provenance onto the workspace's retained
+    # ToolContext BEFORE send_turn and UNCONDITIONALLY every turn. The subprocess
+    # (and its ToolContext) is reused across turns, so a missed stamp would leak
+    # the prior turn's provenance into the propose_* tools. origin_session_id is
+    # the resumed SDK session id at claim time (None on a fresh/post-compaction
+    # session — the real id only lands at TurnDoneEvent).
+    #
+    # COLD-LAUNCH ORDER: the retained ToolContext only exists once launch's
+    # tools_factory has run. set_turn_provenance is a no-op against an empty sink,
+    # so we ensure the launch FIRST (controller.launch is idempotent —
+    # claim_launch_or_wait; send_turn calls it internally anyway), THEN stamp,
+    # THEN send_turn. Without the explicit launch, a workspace's first (cold) turn
+    # would stamp an empty sink and silently drop provenance.
+    await controller.launch(workspace_id)
+    await controller.set_turn_provenance(
+        workspace_id,
+        triggering_turn_id=user_turn_id,
+        triggering_prompt=_extract_triggering_prompt(raw_turn_content),
+        created_by=submitted_by_user_id,
+        origin_session_id=ws_session_id,
+    )
 
     last_assistant_id: uuid.UUID | None = None
     tokens_in = 0

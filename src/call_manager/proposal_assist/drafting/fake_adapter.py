@@ -34,6 +34,13 @@ class FakeAgentAdapter:
         self.terminations: list[AgentHandle] = []
         self.last_user_message: str | list[dict[str, Any]] | None = None
         self._scripted: deque[list[StreamEvent]] = deque()
+        self.provenance: list[tuple[Any, Any, str | None, int | None, str | None]] = []
+        # SP2a-2: track which workspaces have been launched, so a test can prove
+        # the processor stamps provenance AFTER launch (the cold-launch ordering
+        # the plan was revised to fix). provenance_saw_launch[i] is True iff
+        # set_turn_provenance's workspace had already been launch()ed.
+        self._launched_workspaces: set = set()
+        self.provenance_saw_launch: list[bool] = []
 
     def script_next_turn(self, events: list[StreamEvent]) -> None:
         """Queue the events the next send_turn() invocation should yield.
@@ -42,6 +49,7 @@ class FakeAgentAdapter:
 
     async def launch(self, context: LaunchContext) -> AgentHandle:
         self.launches.append(context)
+        self._launched_workspaces.add(context.workspace_id)
         return AgentHandle(
             workspace_id=context.workspace_id,
             state={
@@ -72,3 +80,23 @@ class FakeAgentAdapter:
 
     async def terminate(self, handle: AgentHandle) -> None:
         self.terminations.append(handle)
+
+    async def set_turn_provenance(
+        self,
+        workspace_id,
+        *,
+        triggering_turn_id,
+        triggering_prompt,
+        created_by,
+        origin_session_id,
+    ) -> None:
+        self.provenance_saw_launch.append(workspace_id in self._launched_workspaces)
+        self.provenance.append(
+            (
+                workspace_id,
+                triggering_turn_id,
+                triggering_prompt,
+                created_by,
+                origin_session_id,
+            )
+        )

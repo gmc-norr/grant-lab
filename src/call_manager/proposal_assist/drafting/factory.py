@@ -65,6 +65,8 @@ def _build_adapter(
             settings=settings, session_factory=session_factory
         )
 
+        tool_context_sink: dict = {}
+
         def tools_factory(repo_dir, workspace_id):
             ctx = ToolContext(
                 workspace_id=workspace_id,
@@ -74,11 +76,15 @@ def _build_adapter(
                 citation_service=_citation_service,
                 reference_ingest_limiter=reference_ingest_limiter,
             )
+            # SP2a-2: retain the ctx so set_turn_provenance can stamp the SAME
+            # object the MCP tool closures captured (one ctx per workspace launch).
+            tool_context_sink[workspace_id] = ctx
             return build_proposal_assist_mcp_server(ctx)
 
         return ClaudeAgentSDKAdapter(
             model=settings.proposal_assist_llm_model,
             workspaces_dir=settings.workspaces_dir,
             tools_factory=tools_factory,
+            tool_context_sink=tool_context_sink,
         )
     raise ValueError(f"unknown DRAFTING_ADAPTER choice: {choice!r} (expected 'claude' or 'fake')")

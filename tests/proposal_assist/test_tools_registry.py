@@ -256,3 +256,21 @@ async def test_list_citations_closure_returns_envelope():
     assert result["is_error"] is False
     payload = json.loads(result["content"][0]["text"])
     assert payload == {"citations": []}
+
+
+def test_tool_context_has_provenance_defaults():
+    """The new per-turn provenance fields + agent_view_sections default to
+    None / empty so existing bare-ctx tests keep constructing ToolContext
+    with only the four required args."""
+    ctx = ToolContext(
+        workspace_id=uuid.uuid4(),
+        repo_dir=Path("/tmp/x"),
+        session_factory=None,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+    )
+    assert ctx.triggering_turn_id is None
+    assert ctx.triggering_prompt is None
+    assert ctx.created_by is None
+    assert ctx.origin_session_id is None
+    assert ctx.agent_view_sections == {}
+    assert ctx.agent_view_proposal is None

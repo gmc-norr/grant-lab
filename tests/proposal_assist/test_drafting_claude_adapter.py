@@ -487,3 +487,106 @@ def test_build_options_appends_citation_instruction():
     # Both instructions must be present in the combined append string.
     assert ca._REFERENCE_SAFETY_INSTRUCTION in append
     assert ca._CITATION_INSTRUCTION in append
+
+
+@pytest.mark.asyncio
+async def test_set_turn_provenance_stamps_retained_ctx_after_launch():
+    """The real adapter retains the per-workspace ToolContext the factory built
+    (in the sink) and set_turn_provenance mutates THAT instance, so the live MCP
+    tool closures see the stamped provenance. Pre-launch the sink is empty -> a
+    no-op (no raise); post-launch the SAME ctx carries the values."""
+    import uuid as _uuid
+    from pathlib import Path
+
+    from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from call_manager.proposal_assist.tools.registry import ToolContext
+
+    wsid = _uuid.uuid4()
+    sink: dict = {}
+    captured: dict = {}
+
+    def tools_factory(repo_dir: Path, workspace_id):
+        ctx = ToolContext(
+            workspace_id=workspace_id,
+            repo_dir=repo_dir,
+            session_factory=None,  # type: ignore[arg-type]
+            settings=None,  # type: ignore[arg-type]
+        )
+        sink[workspace_id] = ctx
+        captured["ctx"] = ctx  # the SAME instance the MCP closures would capture
+        # A minimal stand-in for the MCP server config; the adapter only stores it.
+        return {"type": "sdk", "name": "proposal_assist", "instance": object()}
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/test_workspaces",
+        tools_factory=tools_factory,
+        tool_context_sink=sink,
+    )
+    ttid = _uuid.uuid4()
+
+    # Pre-launch: the sink is empty -> stamping is a no-op, never raises.
+    await adapter.set_turn_provenance(
+        wsid,
+        triggering_turn_id=ttid,
+        triggering_prompt="cold",
+        created_by=1,
+        origin_session_id=None,
+    )
+    assert wsid not in sink
+
+    # Launch path populates the sink (we use _build_options_kwargs to trigger the
+    # factory without a live SDK connect()).
+    adapter._build_options_kwargs(LaunchContext(workspace_id=wsid))
+    assert sink[wsid] is captured["ctx"]
+
+    # Now the stamp lands on the retained ctx (the cold-launch path the Fake masks).
+    await adapter.set_turn_provenance(
+        wsid,
+        triggering_turn_id=ttid,
+        triggering_prompt="hello agent",
+        created_by=7,
+        origin_session_id="sess-1",
+    )
+    stamped = captured["ctx"]
+    assert stamped.triggering_turn_id == ttid
+    assert stamped.triggering_prompt == "hello agent"
+    assert stamped.created_by == 7
+    assert stamped.origin_session_id == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_terminate_evicts_tool_context_sink():
+    """terminate() drops the workspace's retained ToolContext from the sink so it
+    doesn't accumulate one ctx per workspace ever drafted. registry.terminate and
+    sweep_idle both route through the adapter's terminate, so this covers both."""
+    import uuid as _uuid
+    from pathlib import Path
+
+    from call_manager.proposal_assist.drafting.contract import AgentHandle, LaunchContext
+    from call_manager.proposal_assist.tools.registry import ToolContext
+
+    wsid = _uuid.uuid4()
+    sink: dict = {}
+
+    def tools_factory(repo_dir: Path, workspace_id):
+        sink[workspace_id] = ToolContext(
+            workspace_id=workspace_id,
+            repo_dir=repo_dir,
+            session_factory=None,  # type: ignore[arg-type]
+            settings=None,  # type: ignore[arg-type]
+        )
+        return {"type": "sdk", "name": "proposal_assist", "instance": object()}
+
+    adapter = ClaudeAgentSDKAdapter(
+        model="claude-haiku-4-5",
+        workspaces_dir="/tmp/test_workspaces",
+        tools_factory=tools_factory,
+        tool_context_sink=sink,
+    )
+    adapter._build_options_kwargs(LaunchContext(workspace_id=wsid))
+    assert wsid in sink
+
+    # terminate evicts even though this handle never connected a client.
+    await adapter.terminate(AgentHandle(workspace_id=wsid))
+    assert wsid not in sink

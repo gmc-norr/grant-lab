@@ -98,4 +98,14 @@ def test_drafting_agent_protocol_methods_exist():
         async def terminate(self, handle: AgentHandle) -> None:
             return None
 
+        async def set_turn_provenance(
+            self,
+            workspace_id,
+            *,
+            triggering_turn_id,
+            triggering_prompt,
+            created_by,
+            origin_session_id,
+        ) -> None: ...
+
     assert isinstance(_Dummy(), DraftingAgent)

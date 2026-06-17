@@ -73,6 +73,31 @@ class ToolContext:
     # that build a bare ToolContext without app.state).
     reference_ingest_limiter: object | None = field(default=None)
 
+    # SP2a-2 §6: per-turn provenance, stamped server-side by process_turn_once
+    # via DraftingAgent.set_turn_provenance onto the retained ToolContext before
+    # each send_turn. NEVER set from model tool args (those are spoofable). The
+    # propose_* tools copy these onto the proposed_change row. Stamped
+    # UNCONDITIONALLY every turn because the subprocess (and this ctx) is reused
+    # across turns — a missed stamp would leak the prior turn's provenance.
+    triggering_turn_id: uuid.UUID | None = field(default=None)
+    triggering_prompt: str | None = field(default=None)
+    created_by: int | None = field(default=None)
+    origin_session_id: str | None = field(default=None)
+
+    # SP2a-2 §3 (Task 2): section_index -> section sha as the agent saw them at
+    # read time (populated by read_proposal_impl, HEAD-first). propose_edit reads
+    # base_section_sha from here; an unread section is rejected (_NOT_READ_ERROR).
+    agent_view_sections: dict[int, str] = field(default_factory=dict)
+
+    # SP2a-2 §3 (Task 2): the full proposal text the agent saw at read time
+    # (populated by read_proposal_impl alongside agent_view_sections). propose_
+    # citation (Task 5) walks split_sections(agent_view_proposal) to map an
+    # anchor offset -> section_index from the SAME read-time snapshot it took the
+    # section shas from, so the (section_index, base_section_sha) pair stays
+    # internally consistent even if a human added/removed a `##` section between
+    # the read and the propose. None until the agent has read once.
+    agent_view_proposal: str | None = field(default=None)
+
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap a plain-dict tool result in the MCP content-block envelope.

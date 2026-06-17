@@ -263,3 +263,22 @@ class SubprocessRegistry:
         touch() after the iterator is fully consumed."""
         async for event in self._adapter.send_turn(handle, user_message):
             yield event
+
+    async def set_turn_provenance(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        triggering_turn_id: uuid.UUID | None,
+        triggering_prompt: str | None,
+        created_by: int | None,
+        origin_session_id: str | None,
+    ) -> None:
+        """Pass-through to the adapter so the processor can stamp provenance on
+        the cached handle's ToolContext before each turn."""
+        await self._adapter.set_turn_provenance(
+            workspace_id,
+            triggering_turn_id=triggering_turn_id,
+            triggering_prompt=triggering_prompt,
+            created_by=created_by,
+            origin_session_id=origin_session_id,
+        )

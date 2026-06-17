@@ -685,3 +685,44 @@ async def test_finalize_failed_clears_user_turn_pre_count(
     assert user_turn.tokens_in is None, (
         "failed turn must clear its user-turn pre-count so it stops counting against the daily cap"
     )
+
+
+@pytest.mark.asyncio
+async def test_process_turn_stamps_provenance_on_adapter(
+    pg_session_factory,
+    _settings_env,
+):
+    """process_turn_once stamps server-trusted provenance via
+    controller.set_turn_provenance after loading the message and before
+    send_turn: triggering_turn_id = the user ChatTurn id, created_by =
+    submitted_by, triggering_prompt = the raw typed text, origin_session_id =
+    None on a fresh (never-resumed) session."""
+    wsid, job_id, controller, adapter = _build_controller_and_submit(
+        pg_session_factory,
+        _settings_env,
+        [TurnDoneEvent(tokens_in=1, tokens_out=1, model="fake", session_id="s1")],
+    )
+
+    with pg_session_factory() as s:
+        user_turn = s.scalar(
+            select(ChatTurn).where(ChatTurn.workspace_id == wsid, ChatTurn.role == "user")
+        )
+        user_turn_id = user_turn.id
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    assert len(adapter.provenance) == 1
+    ws_arg, ttid, prompt, created_by, origin_session_id = adapter.provenance[0]
+    assert ws_arg == wsid
+    assert ttid == user_turn_id
+    assert prompt == "Hi"  # the raw typed text submitted in _build_controller_and_submit
+    assert created_by is not None  # the submitter
+    assert origin_session_id is None  # fresh session, never resumed
+    # The stamp must land AFTER launch (the cold-launch ordering the plan fixed):
+    # the workspace was already launched when set_turn_provenance ran. If the
+    # processor ever reorders the stamp before launch, this flips to [False].
+    assert adapter.provenance_saw_launch == [True]

@@ -137,3 +137,20 @@ class DraftingAgent(Protocol):
     ) -> AsyncIterator[StreamEvent]: ...
 
     async def terminate(self, handle: AgentHandle) -> None: ...
+
+    async def set_turn_provenance(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        triggering_turn_id: uuid.UUID | None,
+        triggering_prompt: str | None,
+        created_by: int | None,
+        origin_session_id: str | None,
+    ) -> None:
+        """Stamp server-trusted provenance onto the workspace's retained
+        ToolContext before the next send_turn. Called UNCONDITIONALLY every turn
+        by process_turn_once (the subprocess is reused across turns, so a missed
+        stamp would leak the prior turn's provenance into the propose_* tools).
+        A no-op if the workspace has no live handle/ctx (the next launch rebuilds
+        the ctx, and the processor re-stamps before send_turn anyway)."""
+        ...
