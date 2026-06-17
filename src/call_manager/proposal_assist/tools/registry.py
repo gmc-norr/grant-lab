@@ -551,6 +551,7 @@ def _collect_tools(ctx: ToolContext) -> list:
     from call_manager.proposal_assist.tools.citations import (
         insert_citation_impl,
         list_citations_impl,
+        propose_citation_impl,
         remove_citation_impl,
         rename_citekey_impl,
         update_citation_impl,
@@ -569,6 +570,56 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     async def list_citations(args):
         return await _safe_tool("list_citations", ctx, list_citations_impl, ctx)
+
+    @tool(
+        "propose_citation",
+        "Propose attaching an inline citation as a PENDING change for a human to "
+        "review and accept — this does NOT insert or commit anything. Pass the "
+        "`reference_id`, an `anchor` (a unique substring of the draft the marker "
+        "should follow), the `chunk_index`, and a VERBATIM `evidence_quote` "
+        "copied word-for-word from that chunk (search_references / "
+        "read_reference_section surface the chunk_index). The quote and anchor "
+        "are verified now; an unverifiable citation is rejected and never "
+        "becomes a pending proposal. The citekey + evidence id are assigned when "
+        "a human accepts. Call read_proposal first. Returns a proposed_change_id "
+        "and status 'pending'.",
+        {
+            "type": "object",
+            "properties": {
+                "reference_id": {"type": "string"},
+                "anchor": {"type": "string"},
+                "chunk_index": {"type": "integer"},
+                "evidence_quote": {"type": "string"},
+                "stance": {
+                    "type": "string",
+                    "enum": ["supports", "contradicts", "background"],
+                    "default": "supports",
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                },
+            },
+            "required": ["reference_id", "anchor", "chunk_index", "evidence_quote"],
+        },
+    )
+    async def propose_citation(args):
+        try:
+            chunk_index = int(args["chunk_index"])
+        except (TypeError, ValueError, KeyError):
+            return _mcp_error("chunk_index must be an integer")
+        return await _safe_tool(
+            "propose_citation",
+            ctx,
+            propose_citation_impl,
+            ctx,
+            reference_id=args["reference_id"],
+            anchor=args["anchor"],
+            chunk_index=chunk_index,
+            evidence_quote=args["evidence_quote"],
+            stance=args.get("stance", "supports"),
+            confidence=args.get("confidence"),
+        )
 
     from call_manager.proposal_assist.tools.audit import (
         build_bibliography_impl,
@@ -803,6 +854,8 @@ def _collect_tools(ctx: ToolContext) -> list:
         rename_citekey,
         # read-only citation discovery
         list_citations,
+        # SP2a-2 — propose-only citation
+        propose_citation,
         # Slice 3 Task 5 — citation audit
         validate_citations,
         # Slice 3 Task 7 — uncited-claim discovery

@@ -70,6 +70,8 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
+from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.proposals.proposing import propose_citation_insert
 from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
@@ -384,6 +386,147 @@ async def insert_citation_impl(
                 stance=stance,
                 confidence=confidence,
             )
+
+
+async def propose_citation_impl(
+    ctx: ToolContext,
+    *,
+    reference_id: str,
+    anchor: str,
+    chunk_index: int,
+    evidence_quote: str,
+    stance: str = "supports",
+    confidence: str | None = None,
+) -> dict[str, Any]:
+    """Propose a citation insert as a PENDING proposed_change (no git commit).
+
+    Runs the propose-time verification subset of the insert checks (the same
+    checks _insert_citation_locked runs, MINUS the commit mutex / write / HEAD
+    touch), so an unverifiable citation never becomes a pending proposal. Anchor
+    existence/uniqueness is verified against the LIVE on-disk proposal (propose-
+    time validity), but the section keying (section_index + base_section_sha) is
+    taken from the agent's READ-TIME snapshot (ctx.agent_view_proposal /
+    ctx.agent_view_sections) so the pair stays consistent if a human added/removed
+    a `##` section between read and propose. Then writes the row via
+    propose_citation_insert. The full authoritative re-verify happens again at
+    accept time under the commit mutex.
+
+    Returns {"proposed_change_id", "status": "pending"} or {"error": ...}.
+    """
+    err = _validate_stance_confidence(stance, confidence)
+    if err is not None:
+        return err
+
+    try:
+        ref_uuid = uuid.UUID(str(reference_id))
+    except (ValueError, AttributeError, TypeError):
+        return {"error": "invalid reference_id (not a uuid)"}
+
+    # Read-time base — required for the section row + anti-clobber staleness.
+    base_commit_sha = ctx.agent_view_head
+    if base_commit_sha is None:
+        return {"error": "you haven't read the proposal yet — call read_proposal first"}
+    # Read-time proposal snapshot — the section keying (index + base_section_sha)
+    # is derived from this, NOT the live on-disk text, so the pair stays consistent
+    # if a human added/removed a `##` section between read and propose.
+    if ctx.agent_view_proposal is None:
+        return {"error": "you haven't read the proposal yet — call read_proposal first"}
+
+    with ctx.session_factory() as session:
+        # 1. Load + workspace-scope the Reference (reject missing/foreign).
+        ref = session.get(Reference, ref_uuid)
+        if ref is None or ref.workspace_id != ctx.workspace_id:
+            return {"error": "reference not found"}
+        # 1a. Tombstoned reference cannot be newly cited.
+        if ref.tombstoned_at is not None:
+            return {"error": "reference is tombstoned and cannot be cited"}
+
+        # 2. Load the ReferenceChunk (reference + index), workspace-scoped.
+        chunk = (
+            session.query(ReferenceChunk)
+            .filter(
+                ReferenceChunk.reference_id == ref_uuid,
+                ReferenceChunk.chunk_index == chunk_index,
+                ReferenceChunk.workspace_id == ctx.workspace_id,
+            )
+            .one_or_none()
+        )
+        if chunk is None:
+            return {"error": "chunk not found"}
+
+        # 3. Read the live proposal (no ledger needed at propose-time).
+        proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
+        if not proposal_path.exists():
+            return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
+        proposal_text = proposal_path.read_text()
+
+        # 4. Quote-verify against the raw chunk text.
+        try:
+            find_quote_offsets(chunk.text, evidence_quote)
+        except QuoteNotFound:
+            return {"error": "evidence quote not found in chunk"}
+        except QuoteAmbiguous:
+            return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk"}
+
+        # 5. Anchor uniqueness — reuse insert_marker purely to trigger AnchorError
+        # on not-found/ambiguous; the mutated text is discarded (we never write it).
+        try:
+            insert_marker(proposal_text, anchor, "anchorprobe", "ev-000000")
+        except AnchorError as exc:
+            if "ambiguous" in str(exc):
+                return {"error": "anchor is ambiguous"}
+            return {"error": "anchor not found"}
+
+        # 6. Map the anchor to the section it falls in (cumulative split offsets),
+        # so the citation row is section-keyed for staleness. Both the section
+        # split AND the base_section_sha come from the READ-TIME snapshot
+        # (ctx.agent_view_proposal / ctx.agent_view_sections), so the
+        # (section_index, base_section_sha) pair is internally consistent even if a
+        # human added/removed a `##` section on disk between read and propose.
+        # NOTE: anchor uniqueness is proven in step 5 via insert_marker, which
+        # SKIPS anchor occurrences overlapping an existing `[@citekey]<!-- ev -->`
+        # marker. The bare `.find(anchor)` below picks the FIRST raw occurrence,
+        # so in a proposal that already contains markers the two could in principle
+        # disagree. This never triggers on a fresh marker-free draft (all the
+        # plan's tests); the overlap-aware occurrence logic is DEFERRED — acceptable
+        # for SP2a-2, do not add the complexity now.
+        read_view = ctx.agent_view_proposal
+        anchor_offset = read_view.find(anchor)
+        sections = split_sections(read_view)
+        cursor = 0
+        section_index = len(sections) - 1
+        for s in sections:
+            if anchor_offset < cursor + len(s.text):
+                section_index = s.index
+                break
+            cursor += len(s.text)
+        base_section_sha = ctx.agent_view_sections.get(section_index)
+        if base_section_sha is None:
+            # The agent read the proposal but this section wasn't in its view
+            # (it never read that far). Treat as unread — mirror prose's contract.
+            return {"error": "you haven't read the proposal yet — call read_proposal first"}
+
+        pc = propose_citation_insert(
+            session=session,
+            workspace_id=ctx.workspace_id,
+            section_index=section_index,
+            base_commit_sha=base_commit_sha,
+            base_section_sha=base_section_sha,
+            reference_id=str(ref_uuid),
+            anchor=anchor,
+            chunk_index=chunk_index,
+            evidence_quote=evidence_quote,
+            stance=stance,
+            confidence=confidence,
+            origin_kind="interactive_turn",
+            origin_session_id=ctx.origin_session_id,
+            triggering_turn_id=ctx.triggering_turn_id,
+            triggering_prompt=ctx.triggering_prompt,
+            created_by=ctx.created_by,
+        )
+        pc_id = str(pc.id)
+        session.commit()
+    return {"proposed_change_id": pc_id, "status": "pending"}
 
 
 def _insert_citation_locked(

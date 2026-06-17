@@ -313,3 +313,44 @@ async def test_propose_edit_closure_returns_pending_envelope(tmp_path):
     result = await propose.handler({"section_index": 1, "new_text": "## Methods\nx.\n"})
     assert result["is_error"] is True
     assert "read_proposal" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_propose_citation_non_integer_chunk_index_returns_envelope():
+    """propose_citation with a non-integer chunk_index returns an MCP error
+    envelope (is_error=True), not a raise — mirrors insert_citation's guard."""
+    from call_manager.proposal_assist.tools.registry import _collect_tools
+
+    tools = _collect_tools(_make_ctx())
+    propose = next(t for t in tools if t.name == "propose_citation")
+    result = await propose.handler(
+        {
+            "reference_id": "some-ref",
+            "anchor": "somewhere",
+            "chunk_index": "not-an-int",
+            "evidence_quote": "some quote",
+        }
+    )
+    assert result["is_error"] is True
+    assert result["content"][0]["type"] == "text"
+    text = result["content"][0]["text"]
+    assert "chunk_index" in text or "integer" in text
+
+
+@pytest.mark.asyncio
+async def test_propose_citation_closure_returns_error_envelope_for_bad_ref():
+    """A bad (non-uuid) reference_id returns the MCP error envelope, not a raise."""
+    from call_manager.proposal_assist.tools.registry import _collect_tools
+
+    tools = _collect_tools(_make_ctx())
+    propose = next(t for t in tools if t.name == "propose_citation")
+    result = await propose.handler(
+        {
+            "reference_id": "not-a-uuid",
+            "anchor": "somewhere",
+            "chunk_index": 0,
+            "evidence_quote": "x",
+        }
+    )
+    assert result["is_error"] is True
+    assert "reference_id" in result["content"][0]["text"]
