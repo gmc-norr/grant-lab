@@ -146,9 +146,9 @@ def save_section(
 
     Caller owns the transaction: rows are added but NOT committed here, and
     the commit mutex is released by the caller's COMMIT/ROLLBACK. Raises
-    CommitMutexTimeout, TurnInFlightError, StaleSectionError,
-    SectionStructureError (pre-commit — no git side-effect), IndexError
-    (section_index out of range), GitCommitError.
+    CommitMutexTimeout, StaleSectionError, SectionStructureError
+    (pre-commit — no git side-effect), IndexError (section_index out of
+    range), GitCommitError.
 
     SectionStructureError is raised when the first line of ``new_text`` is
     not an H2 heading for a non-preamble section, or IS an H2 heading for
@@ -159,11 +159,9 @@ def save_section(
     # 1. Serialize against every other git mutation of this workspace.
     acquire_commit_mutex(session, workspace.id)
 
-    # 2. Turn-lock: an agent turn in flight owns the repo.
-    if _turn_in_flight(session, workspace.id):
-        raise TurnInFlightError(
-            f"an agent turn is in flight for workspace {workspace.id}; retry after it finishes"
-        )
+    # NOTE: the workspace-wide turn-freeze was removed (mechanism B: the agent
+    # no longer commits to proposal.md). Concurrency now rests on the commit
+    # mutex + base_section_sha staleness alone.
 
     # 3. Read the live document under the mutex.
     repo_dir = workspace_repo_dir(workspaces_dir, workspace.id)

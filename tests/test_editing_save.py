@@ -20,7 +20,6 @@ from call_manager.proposal_assist.editing.save import (
     SaveResult,
     SectionStructureError,
     StaleSectionError,
-    TurnInFlightError,
     save_section,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
@@ -96,26 +95,30 @@ def test_happy_path_save(pg_session_factory, tmp_path):
         assert res.job_enqueued is True
 
 
-def test_turn_in_flight_rejected(pg_session_factory, tmp_path):
+def test_turn_in_flight_no_longer_blocks_save(pg_session_factory, tmp_path):
+    """save_section must succeed even when an agent turn is queued/running.
+
+    The workspace-wide turn-freeze was removed: the agent no longer commits
+    directly to proposal.md, so there is no git-level race to prevent.
+    Concurrency is now guarded by the commit mutex + base_section_sha staleness.
+    """
     with pg_session_factory() as s:
         ws, user = _ws(s)
         repo = _init_repo(tmp_path, ws.id)
         head = current_head(repo)
         s.add(TurnJob(workspace_id=ws.id, status="queued"))
         s.flush()
-        with pytest.raises(TurnInFlightError):
-            save_section(
-                session=s,
-                workspace=ws,
-                user_id=user.id,
-                section_index=1,
-                new_text="## Background\nx\n",
-                base_commit_sha=head,
-                base_section_sha=_section_sha(repo, 1),
-                workspaces_dir=tmp_path,
-            )
-        s.rollback()
-        assert (repo / "proposal.md").read_text() == DOC
+        result = save_section(
+            session=s,
+            workspace=ws,
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background\nx\n",
+            base_commit_sha=head,
+            base_section_sha=_section_sha(repo, 1),
+            workspaces_dir=tmp_path,
+        )
+        assert result.commit_sha  # no TurnInFlightError raised
 
 
 def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_factory, tmp_path):
