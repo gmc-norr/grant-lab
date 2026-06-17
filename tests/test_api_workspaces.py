@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from call_manager.db.models import Reference, User, Workspace, WorkspaceViewer
 from call_manager.main import create_app
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME
+from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.test_editing_save import _init_repo
 
@@ -272,3 +272,184 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
     assert cites[ev_id]["stance"] == "supports"
     # The cross-workspace Reference title must NOT be leaked.
     assert cites[ev_id]["title"] is None
+
+
+from call_manager.proposal_assist.proposals.proposing import capture_base  # noqa: E402
+
+
+def _capture(tmp_path, ws_id, index):
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    return capture_base(repo, index)
+
+
+def test_save_section_happy_path_commits_and_changes(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, base_section = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "## Methods\nrewritten body.\n",
+            "base_commit_sha": base_commit,
+            "base_section_sha": base_section,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["changed"] is True
+    assert isinstance(body["commit_sha"], str) and len(body["commit_sha"]) == 40
+    assert body["commit_sha"] != base_commit  # a new commit was made
+    # The SPA's post-save anti-clobber base: head == the new commit, and
+    # section_sha == sha256 of the just-saved section bytes (64 hex).
+    assert body["head"] == body["commit_sha"]
+    assert isinstance(body["section_sha"], str) and len(body["section_sha"]) == 64
+    assert body["section_sha"] != base_section  # the section bytes changed
+    assert isinstance(body["issues"], list)
+    assert body["job_enqueued"] in (True, False)
+    # The bytes actually landed.
+    saved = (workspace_repo_dir(tmp_path, ws_id) / PROPOSAL_FILENAME).read_text()
+    assert saved == "preamble\n\n## Methods\nrewritten body.\n"
+
+
+def test_save_section_no_op_returns_changed_false(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, base_section = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "## Methods\noriginal.\n",  # identical to live
+            "base_commit_sha": base_commit,
+            "base_section_sha": base_section,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["changed"] is False
+    assert body["commit_sha"] == base_commit  # head unchanged
+    assert body["head"] == base_commit  # explicit alias also unchanged
+    assert body["section_sha"] == base_section  # base sha preserved on a no-op
+
+
+def test_save_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, base_section = _capture(tmp_path, ws_id, 1)
+    # Move HEAD AND change the section's bytes underneath the captured base.
+    # (Use the same author env as _init_repo so the concurrent commit succeeds
+    # without relying on a global git identity.)
+    from call_manager.proposal_assist.citations.gitio import _git_env
+
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    (repo / PROPOSAL_FILENAME).write_text("preamble\n\n## Methods\nSOMEONE ELSE EDITED.\n")
+    subprocess.run(["git", "commit", "-aqm", "concurrent"], cwd=repo, check=True, env=_git_env())
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "## Methods\nmy late edit.\n",
+            "base_commit_sha": base_commit,
+            "base_section_sha": base_section,
+        },
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "conflict"
+
+
+def test_save_section_structure_violation_is_400(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, base_section = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "no heading any more\n",  # deletes the ## boundary
+            "base_commit_sha": base_commit,
+            "base_section_sha": base_section,
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "bad_request"
+
+
+def test_save_section_bad_index_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, _ = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/99",
+        json={
+            "content": "## X\nbody.\n",
+            "base_commit_sha": base_commit,
+            "base_section_sha": "0" * 64,
+        },
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_save_section_non_owner_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, member_id, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    base_commit, base_section = _capture(tmp_path, ws_id, 1)
+    c = _client(app, member_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "## Methods\nmember tried to edit.\n",
+            "base_commit_sha": base_commit,
+            "base_section_sha": base_section,
+        },
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """The workspace EXISTS and the caller is the owner (require_owner passes),
+    but there is no proposal.md / no git HEAD yet. The API save route must mirror
+    the HTMX route's pre-read 404 (sections.py:73-89, used at sections.py:240)
+    instead of letting save_section surface a raw FileNotFoundError / GitCommitError
+    (save.py:168-170). Seeds its own owner+workspace WITHOUT `_init_repo`, like
+    test_draft_no_proposal_file_is_404."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        s.add(ws)
+        s.commit()
+        owner_id, ws_id = owner.id, ws.id
+    # Deliberately do NOT init the repo / write proposal.md.
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/0",
+        json={
+            "content": "## Methods\nbody.\n",
+            "base_commit_sha": "0" * 40,
+            "base_section_sha": "0" * 64,
+        },
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
