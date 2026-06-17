@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+from call_manager.db.models import WorkspaceViewer
+from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.proposals.proposing import capture_base, propose_prose_edit
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace
@@ -192,3 +194,122 @@ def test_accept_cross_workspace_returns_404(
 
     resp = client_authed_owner.post(f"/workspaces/{ws_b_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 404
+
+
+def test_accept_endpoint_allows_viewer(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    # The gate is MEMBERSHIP, not ownership: a non-owner workspace member (a
+    # WorkspaceViewer collaborator) can accept. current_user is the viewer here.
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ws-owner@ki.se")
+        ws = make_workspace(s, owner=owner)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
+        pc = _seed_pending(s, ws, tmp_path)
+        s.commit()
+        pc_id, ws_id = str(pc.id), str(ws.id)
+
+    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
+
+
+def test_reject_endpoint_rejects_non_member(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        stranger = make_user(s, email="stranger-r@ki.se")
+        ws = make_workspace(s, owner=stranger)
+        s.flush()
+        pc = _seed_pending(s, ws, tmp_path)
+        s.commit()
+        pc_id, ws_id = str(pc.id), str(ws.id)
+
+    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/reject")
+    assert resp.status_code == 403
+
+
+def test_list_endpoint_rejects_non_member(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        stranger = make_user(s, email="stranger-l@ki.se")
+        ws = make_workspace(s, owner=stranger)
+        s.flush()
+        _seed_pending(s, ws, tmp_path)
+        s.commit()
+        ws_id = str(ws.id)
+
+    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    assert resp.status_code == 403
+
+
+def _seed_pending_then_move_section(s, ws, current_user, tmp_path):
+    # Propose against the section, then have the owner move the SAME section so the
+    # proposal's base_section_sha is now out of date.
+    repo = Path(tmp_path) / str(ws.id) / "repo"
+    _init_repo(repo, "preamble\n\n## Methods\norig.\n")
+    base_commit, base_section = capture_base(repo, 1)
+    pc = propose_prose_edit(
+        session=s,
+        workspace_id=ws.id,
+        section_index=1,
+        new_text="## Methods\nagent.\n",
+        base_commit_sha=base_commit,
+        base_section_sha=base_section,
+        origin_kind="interactive_turn",
+    )
+    save_section(
+        session=s,
+        workspace=ws,
+        user_id=current_user.id,
+        section_index=1,
+        new_text="## Methods\nhuman.\n",
+        base_commit_sha=base_commit,
+        base_section_sha=base_section,
+        workspaces_dir=str(tmp_path),
+    )
+    return pc
+
+
+def test_accept_endpoint_goes_stale_when_section_moved(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    # The section moved after the proposer's read: accept must return 200 with
+    # status "stale" (NOT an error) and must NOT overwrite the human edit.
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        pc = _seed_pending_then_move_section(s, ws, current_user, tmp_path)
+        s.commit()
+        pc_id, ws_id = str(pc.id), str(ws.id)
+
+    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "stale"
+    text = (Path(tmp_path) / ws_id / "repo" / PROPOSAL_FILENAME).read_text()
+    assert "human." in text
+    assert "agent." not in text
+
+
+def test_list_omits_stale_after_section_moves(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    # The list runs refresh_staleness, so a proposal whose section has moved is
+    # flipped to stale and drops out of the pending-only list.
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        _seed_pending_then_move_section(s, ws, current_user, tmp_path)
+        s.commit()
+        ws_id = str(ws.id)
+
+    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []

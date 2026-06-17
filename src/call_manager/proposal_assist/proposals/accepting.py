@@ -29,12 +29,22 @@ def _load_scoped(
     session: Session, proposed_change_id: uuid.UUID, workspace_id: uuid.UUID
 ) -> ProposedChange:
     """Fetch by BOTH id AND workspace_id, so a member of workspace A can never
-    act on a proposed_change id belonging to workspace B (finding #2)."""
+    act on a proposed_change id belonging to workspace B (finding #2).
+
+    Locks the row ``FOR UPDATE`` (held until the caller commits/rolls back) so
+    the pending->terminal transition is serialized: a second concurrent resolve
+    of the same row (double-click, client retry, two members) blocks here until
+    the first commits, then re-reads the now-terminal status and is rejected by
+    the ``status != "pending"`` gate — instead of last-writer-wins corrupting the
+    audit row (e.g. a row reading "rejected"/"stale" while its content is live).
+    """
     pc = session.scalar(
-        select(ProposedChange).where(
+        select(ProposedChange)
+        .where(
             ProposedChange.id == proposed_change_id,
             ProposedChange.workspace_id == workspace_id,
         )
+        .with_for_update()
     )
     if pc is None:
         raise ProposedChangeNotFound(str(proposed_change_id))
@@ -74,7 +84,12 @@ def accept_proposed_change(
             workspaces_dir=workspaces_dir,
         )
     except StaleSectionError:
+        # A human edit landed between the proposer's read and this accept. Stamp
+        # the resolver so a stale-on-accept-attempt is dated and distinguishable
+        # from a passive refresh_staleness sweep (which leaves resolved_* NULL).
         pc.status = "stale"
+        pc.resolved_by = approver.id
+        pc.resolved_at = datetime.now(UTC)
         session.flush()
         return pc
 

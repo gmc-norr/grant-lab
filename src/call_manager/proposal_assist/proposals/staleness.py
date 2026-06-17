@@ -30,12 +30,18 @@ def refresh_staleness(
     sections = split_sections(proposal_path.read_text())
     live_sha = {i: sec.sha for i, sec in enumerate(sections)}
 
+    # FOR UPDATE SKIP LOCKED: don't fight an in-flight accept/reject. A row whose
+    # resolve already holds its FOR UPDATE lock is skipped (that resolve decides
+    # its fate); rows we do lock stay pending until this sweep commits, so we
+    # never overwrite an accept's terminal status with "stale".
     rows = session.scalars(
-        select(ProposedChange).where(
+        select(ProposedChange)
+        .where(
             ProposedChange.workspace_id == workspace_id,
             ProposedChange.status == "pending",
             ProposedChange.target_artifact == "draft",
         )
+        .with_for_update(skip_locked=True)
     ).all()
     n = 0
     for pc in rows:

@@ -141,7 +141,11 @@ def test_accept_does_not_clobber_human_edit_race(pg_session_factory, tmp_path):
         )
         s.flush()
 
-        assert s.get(ProposedChange, pc.id).status == "stale"
+        got = s.get(ProposedChange, pc.id)
+        assert got.status == "stale"
+        # stale-on-accept-attempt is stamped (distinguishes it from a passive sweep)
+        assert got.resolved_by == approver.id
+        assert got.resolved_at is not None
         text = (repo / PROPOSAL_FILENAME).read_text()
         assert "human-edited." in text  # human edit preserved
         assert "agent-version." not in text  # agent proposal NOT applied
@@ -268,6 +272,53 @@ def test_accept_rejects_non_prose_kind(pg_session_factory, tmp_path):
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
+
+
+def test_resolve_takes_row_lock_blocking_concurrent_resolver(pg_session_factory, tmp_path):
+    # The pending->terminal transition must be serialized. _load_scoped locks the
+    # row FOR UPDATE, so while one session is resolving it, a second session cannot
+    # grab the same row concurrently (which is what otherwise lets a double-click /
+    # retry / two-member race corrupt the audit row). We prove the lock is held by
+    # showing a NOWAIT acquisition from a second connection fails.
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from call_manager.proposal_assist.proposals.accepting import _load_scoped
+
+    with pg_session_factory() as setup:
+        ws, repo = _setup(setup, tmp_path)
+        base_commit, base_section = capture_base(repo, 1)
+        pc = propose_prose_edit(
+            session=setup,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Methods\nx.\n",
+            base_commit_sha=base_commit,
+            base_section_sha=base_section,
+            origin_kind="interactive_turn",
+        )
+        setup.commit()
+        pc_id, ws_id = pc.id, ws.id
+
+    holder = pg_session_factory()
+    try:
+        locked = _load_scoped(holder, pc_id, ws_id)  # SELECT ... FOR UPDATE
+        assert locked.status == "pending"
+        # A second connection cannot lock the same row while `holder` holds it.
+        with pg_session_factory() as contender:
+            with pytest.raises(OperationalError):
+                contender.scalar(
+                    select(ProposedChange)
+                    .where(
+                        ProposedChange.id == pc_id,
+                        ProposedChange.workspace_id == ws_id,
+                    )
+                    .with_for_update(nowait=True)
+                )
+            contender.rollback()
+    finally:
+        holder.rollback()
+        holder.close()
 
 
 def test_reject_sets_status_and_approver(pg_session_factory, tmp_path):

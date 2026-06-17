@@ -1,7 +1,7 @@
 """User section save: the single write path for owner edits.
 
 Order inside the per-workspace commit mutex (spec §1):
-turn-lock check → stale-form check → structure guard → no-change
+stale-form check → structure guard → no-change
 short-circuit → git commit → ArtifactVersion('user') →
 WorkspaceEvent('user_edit') → Tier-1 deterministic validation → Tier-2
 job enqueue. The mutex is transaction-scoped; the caller's session.commit()
@@ -63,9 +63,11 @@ class SaveResult:
 def _turn_in_flight(session: Session, workspace_id) -> bool:
     """True if an agent turn is queued or running for this workspace.
 
-    Shared by save_section (hard guard under the commit mutex) and the
-    section-edit web route (soft pre-check so the edit form isn't even
-    offered while a turn owns the repo).
+    save_section no longer consults this (its turn-freeze hard guard was
+    removed). Current callers: analysis/insert.py (hard guard — a citation
+    insert refuses with InsertConflict while a turn owns the repo) and the
+    section-edit web route (soft pre-check so the edit form isn't even offered
+    mid-turn). Save-time concurrency now rests on the commit mutex + staleness.
     """
     return (
         session.query(TurnJob.id)
@@ -154,9 +156,13 @@ def save_section(
     # 1. Serialize against every other git mutation of this workspace.
     acquire_commit_mutex(session, workspace.id)
 
-    # NOTE: the workspace-wide turn-freeze was removed (mechanism B: the agent
-    # no longer commits to proposal.md). Concurrency now rests on the commit
-    # mutex + base_section_sha staleness alone.
+    # NOTE: save_section's workspace-wide turn-freeze hard guard was removed. In
+    # SP2a the drafting agent's direct-commit tools are STILL LIVE (mechanism B's
+    # allowlist swap lands in a later plan), so anti-clobber does NOT yet rest on
+    # "the agent only proposes". It rests on this commit mutex serializing every
+    # git writer + each writer re-checking HEAD/base_section_sha before it writes
+    # (here, and in tools/proposal.py). Do not drop a writer's HEAD/base-sha check
+    # on the assumption that (B) prevents concurrent agent commits.
 
     # 3. Read the live document under the mutex.
     repo_dir = workspace_repo_dir(workspaces_dir, workspace.id)

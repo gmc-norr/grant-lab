@@ -91,8 +91,10 @@ def accept(
         session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SectionStructureError as exc:
+        # 400 for parity with web/sections.py's handler of the same exception
+        # (the proposal's new_text dropped its ## heading or merged sections).
         session.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except CommitMutexTimeout as exc:
         session.rollback()
         raise HTTPException(status_code=503, detail="workspace busy; retry") from exc
