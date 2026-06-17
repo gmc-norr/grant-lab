@@ -146,6 +146,88 @@ it("edits to one section survive switching to another section and back", async (
   );
 });
 
+it("a successful save clears the dirty buffer (Save disables) and keeps the saved content", async () => {
+  // Model a real save round-trip with a server that canonicalises: the user's edit
+  // inserts "MINE_EDIT"; the committed/served bytes the refetch returns carry a
+  // DIFFERENT token, "SERVER_NORM" (e.g. trailing-newline / whitespace normalization
+  // — the kind of divergence that makes onSave's optimistic reconcile load-bearing).
+  //
+  // Why divergent tokens (and not just echoing the saved bytes): with committed ==
+  // buffer, the refetch ALONE would make served-text == buffer, so the section would
+  // read "not dirty" even if the local save path did nothing — i.e. the test would be
+  // tautological. Diverging the committed text forces the assertions to depend on the
+  // success-path reconcile (optimistic setQueryData of head+sha+content, BEFORE the
+  // buffer-clear): only that keeps the user's "MINE_EDIT" on screen and the section
+  // not-dirty; a neutered success path would let the divergent "SERVER_NORM" land and
+  // leave the section dirty (Save enabled) — verified by deliberately neutering the
+  // success path and watching this test fail (non-tautology check).
+  const original = draftPayload(true);
+  const serverCanonicalText = "## Methods\nbody.\nSERVER_NORM";
+  const committed = {
+    data: {
+      head: "b".repeat(40),
+      can_edit: true,
+      sections: [
+        { index: 0, heading: "", text: "preamble\n", sha: "s0" },
+        { index: 1, heading: "Methods", text: serverCanonicalText, sha: "s1-new" },
+      ],
+      citations: {},
+    },
+    error: undefined,
+  };
+  // ORIGINAL for the initial load; COMMITTED for the post-save invalidate-refetch
+  // (mockResolvedValueOnce -> mockResolvedValue, so the refetch returns committed
+  // bytes — realistic prod behavior).
+  vi.spyOn(clientMod.api, "GET")
+    .mockResolvedValueOnce(original as never)
+    .mockResolvedValue(committed as never);
+  // POST resolves a success SaveResultOut (head/section_sha advance to the commit).
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: {
+      commit_sha: "b".repeat(40),
+      head: "b".repeat(40),
+      section_sha: "s1-new",
+      issues: [],
+      job_enqueued: false,
+      changed: true,
+    },
+    error: undefined,
+  } as never);
+
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  // Same act() wrap the 409 test uses: the dispatch fires onChange -> setBuffers (a
+  // React state update outside React's event system); wrap it so the dirty buffer
+  // flushes and Save is enabled before the synchronous click below (otherwise the
+  // click no-ops on a still-disabled button).
+  act(() => {
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "MINE_EDIT" } });
+  });
+  // Dirty -> Save is enabled before we save.
+  const saveBtn = screen.getByRole("button", { name: /^save section$/i });
+  expect(saveBtn).toBeEnabled();
+  expect(document.querySelector(".cm-content")?.textContent).toContain("MINE_EDIT");
+
+  fireEvent.click(saveBtn);
+
+  // (a) After a successful save the section is no longer dirty, so "Save section"
+  // disables again. The success path optimistically reconciles the cache to the saved
+  // content (head + section_sha + text) and clears this section's buffer; the divergent
+  // "SERVER_NORM" refetch does NOT re-dirty the section.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /^save section$/i })).toBeDisabled(),
+  );
+  // (b) No data loss / no revert: the editor still shows the user's saved content
+  // ("MINE_EDIT"), NOT a stale/empty value and NOT the divergent server-canonical
+  // bytes. (We do NOT assert the pure pre-refetch optimistic "no flash" timing —
+  // untestable in jsdom — that property stays inspection-verified in Cockpit.onSave,
+  // which reconciles the cache BEFORE clearing the buffer.)
+  expect(document.querySelector(".cm-content")?.textContent).toContain("MINE_EDIT");
+});
+
 it("a 409 keeps the buffer and shows a conflict prompt; Reload discards and reloads", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   vi.spyOn(clientMod.api, "POST").mockResolvedValue({
