@@ -947,6 +947,69 @@ class ArtifactVersion(Base):
     )
 
 
+class ProposedChange(Base):
+    __tablename__ = "proposed_changes"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','accepted','rejected','superseded','stale')",
+            name="ck_proposed_changes_status",
+        ),
+        CheckConstraint(
+            "target_artifact IN ('draft','spec')",
+            name="ck_proposed_changes_target_artifact",
+        ),
+        CheckConstraint(
+            "kind IN ('prose_edit','citation_insert','citation_remove','citation_update')",
+            name="ck_proposed_changes_kind",
+        ),
+        CheckConstraint(
+            "origin_kind IN ('interactive_turn','coherence_session','evaluator_session','human')",
+            name="ck_proposed_changes_origin_kind",
+        ),
+        Index("ix_proposed_changes_ws_status", "workspace_id", "status"),
+        Index(
+            "ix_proposed_changes_ws_target",
+            "workspace_id",
+            "target_artifact",
+            "section_index",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    target_artifact: Mapped[str] = mapped_column(Text, nullable=False)
+    section_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    base_section_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    origin_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    triggering_turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_turns.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    triggering_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    resolved_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resulting_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Attachment(Base):
     __tablename__ = "attachments"
     __table_args__ = (
