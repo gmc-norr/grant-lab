@@ -1,11 +1,65 @@
 import subprocess
 from pathlib import Path
 
-from call_manager.db.models import WorkspaceViewer
+from call_manager.db.models import Reference, ReferenceChunk, WorkspaceViewer
+from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.proposals.proposing import capture_base, propose_prose_edit
+from call_manager.proposal_assist.proposals.proposing import (
+    capture_base,
+    propose_citation_insert,
+    propose_prose_edit,
+)
+from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace
+
+_EMBED_DIM = 1024
+_CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
+
+
+def _seed_citation_pending(s, ws, tmp_path):
+    repo = Path(tmp_path) / str(ws.id) / "repo"
+    _init_repo(repo, "preamble\n\n## Methods\norig.\n")
+    ref = Reference(
+        workspace_id=ws.id,
+        kind="paper",
+        source_type="uploaded",
+        filename="seed.pdf",
+        storage_path="seed/seed.pdf",
+        mime_type="application/pdf",
+        citekey="smith2021",
+        metadata_status="approved",
+    )
+    s.add(ref)
+    s.flush()
+    s.add(
+        ReferenceChunk(
+            reference_id=ref.id,
+            workspace_id=ws.id,
+            chunk_index=0,
+            section_path="Results",
+            text=_CHUNK_TEXT,
+            embedding=[0.0] * _EMBED_DIM,
+            embedding_model="fake-embedder",
+        )
+    )
+    s.flush()
+    base_commit, base_section = capture_base(repo, 1)
+    pc = propose_citation_insert(
+        session=s,
+        workspace_id=ws.id,
+        section_index=1,
+        base_commit_sha=base_commit,
+        base_section_sha=base_section,
+        reference_id=str(ref.id),
+        anchor="orig.",
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+        origin_kind="interactive_turn",
+    )
+    return pc
 
 
 def _init_repo(repo_dir: Path, content: str) -> None:
@@ -313,3 +367,27 @@ def test_list_omits_stale_after_section_moves(
     resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
     assert resp.status_code == 200
     assert resp.json()["items"] == []
+
+
+def test_accept_citation_endpoint_applies_marker_and_ledger(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        pc = _seed_citation_pending(s, ws, tmp_path)
+        s.commit()
+        pc_id, ws_id = str(pc.id), str(ws.id)
+
+    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
+
+    repo = Path(tmp_path) / ws_id / "repo"
+    proposal_text = (repo / PROPOSAL_FILENAME).read_text()
+    markers = find_markers(proposal_text)
+    assert len(markers) == 1
+    assert markers[0]["citekey"] == "smith2021"
+    ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())
+    assert len(ledger["evidence"]) == 1

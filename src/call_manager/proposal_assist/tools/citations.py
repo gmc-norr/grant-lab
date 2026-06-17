@@ -539,6 +539,7 @@ def _insert_citation_locked(
     evidence_quote: str,
     stance: str,
     confidence: str | None,
+    owns_txn: bool = True,
 ) -> dict[str, Any]:
     # 0. Serialize against every other git mutation of this workspace (spec
     # 2026-06-10 §1). Transaction-scoped: released by this session's
@@ -706,9 +707,20 @@ def _insert_citation_locked(
     if ref.citekey != citekey:
         try:
             ref.citekey = citekey
-            session.commit()
+            # owns_txn=True (default, the async insert_citation_impl path): this
+            # function owns the transaction, so commit the cache write here.
+            # owns_txn=False (the accept replay): the CALLER owns the txn and must
+            # keep the FOR UPDATE pc-row lock + advisory mutex held through the
+            # status flip — flush only; the endpoint's single commit persists it.
+            if owns_txn:
+                session.commit()
+            else:
+                session.flush()
         except Exception:  # noqa: BLE001 — cache write must never fail the tool
-            session.rollback()
+            # Only roll back when we own the txn; rolling back the caller's accept
+            # txn would discard the git/ledger write + status flip. Best-effort: log.
+            if owns_txn:
+                session.rollback()
             logger.warning(
                 "insert_citation: references.citekey cache update failed for "
                 "workspace %s ref %s citekey %s — reconciliation will backfill",

@@ -14,6 +14,7 @@ from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import SectionStructureError
 from call_manager.proposal_assist.proposals.accepting import (
+    CitationAcceptBusy,
     ProposedChangeNotFound,
     ProposedChangeNotPending,
     accept_proposed_change,
@@ -73,9 +74,10 @@ def accept(
 ) -> dict:
     require_member(workspace_id=workspace_id, user=user, session=session)
     workspaces_dir = request.app.state.settings.workspaces_dir
-    # accept_proposed_change raises NotImplementedError for spec/citation rows;
-    # unreachable in SP2a (only draft/prose_edit rows can be created today) — the
-    # SP2a-2 / SP2b plans that add those paths will map it to an HTTP status.
+    # accept_proposed_change replays prose via save_section and citation_insert
+    # via _insert_citation_locked. It raises NotImplementedError only for a spec
+    # target (SP2b). A citation accept that can't re-verify flips the row to
+    # "stale" (returned 200); a busy mutex raises CitationAcceptBusy -> 409.
     try:
         pc = accept_proposed_change(
             session=session,
@@ -95,6 +97,9 @@ def accept(
         # (the proposal's new_text dropped its ## heading or merged sections).
         session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CitationAcceptBusy as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="workspace busy; retry the accept") from exc
     except CommitMutexTimeout as exc:
         session.rollback()
         raise HTTPException(status_code=503, detail="workspace busy; retry") from exc
