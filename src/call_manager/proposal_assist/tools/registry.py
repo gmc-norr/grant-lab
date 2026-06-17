@@ -494,10 +494,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         "List every existing citation in this proposal, read-only. Returns each "
         "citation's `ev_id`, `citekey`, the cited reference/chunk "
         "(reference_id, chunk_index, section_path), stance, confidence, the "
-        "claim text the marker attaches to, and the evidence quote. Call this to "
-        "discover the `ev-...` evidence id required by remove_citation and "
-        "update_citation, and the citekey required by rename_citekey. "
-        "Token-cheap — use it before mutating a citation.",
+        "claim text the marker attaches to, and the evidence quote. Call this "
+        "before proposing a citation change via propose_citation. "
+        "Token-cheap — use it at the start of citation work.",
         {"type": "object", "properties": {}, "required": []},
     )
     async def list_citations(args):
@@ -565,10 +564,10 @@ def _collect_tools(ctx: ToolContext) -> list:
         "(drift, missing references/chunks, broken quotes, orphaned markers) "
         "and, when available, an LLM semantic judge (does the evidence support "
         "the claim?). Returns a list of issues with "
-        "type/severity/citekey/evidence_id/location/detail; fix them with "
-        "update_citation / remove_citation. `semantic_available` is false when "
-        "the audit LLM is unavailable or capped (deterministic results still "
-        "returned).",
+        "type/severity/citekey/evidence_id/location/detail; fix issues by "
+        "proposing a corrected citation via propose_citation. "
+        "`semantic_available` is false when the audit LLM is unavailable or "
+        "capped (deterministic results still returned).",
         {"type": "object", "properties": {}, "required": []},
     )
     async def validate_citations(args):
@@ -581,7 +580,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         "LLM to judge uncited sentences; not exhaustive. `semantic_available` is "
         "false when the audit LLM is unavailable/capped (then candidates may be "
         "empty/partial). Use search_references on a suggested query, then "
-        "insert_citation.",
+        "propose_citation.",
         {"type": "object", "properties": {}, "required": []},
     )
     async def list_unsupported_claims(args):

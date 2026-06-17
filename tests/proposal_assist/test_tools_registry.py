@@ -296,3 +296,23 @@ async def test_propose_citation_closure_returns_error_envelope_for_bad_ref():
     )
     assert result["is_error"] is True
     assert "reference_id" in result["content"][0]["text"]
+
+
+def test_no_tool_description_names_a_removed_mutating_tool():
+    """The 6 direct-mutation tools were de-registered in SP2a-2; no surviving
+    tool's model-visible description may still tell the agent to call them
+    (it would route the agent to a now-nonexistent tool and waste a turn)."""
+    from call_manager.proposal_assist.tools.registry import _collect_tools
+
+    removed = {
+        "edit_proposal",
+        "replace_proposal",
+        "insert_citation",
+        "remove_citation",
+        "update_citation",
+        "rename_citekey",
+    }
+    for t in _collect_tools(_make_ctx()):
+        desc = t.description
+        for name in removed:
+            assert name not in desc, f"{t.name} description still names removed tool {name!r}"

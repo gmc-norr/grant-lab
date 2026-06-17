@@ -88,6 +88,11 @@ CITATIONS_FILENAME = "citations.json"
 # commit mutex; a wedged holder surfaces as this error (web maps it to 503).
 _BUSY_ERROR = BUSY_ERROR_MESSAGE  # canonical string lives in locking.py
 
+# Error string for a transient git-commit failure on the insert path.
+# Promoted to a module-level constant so accepting.py can import and branch on it
+# (transient git failure -> retryable, NOT terminal stale).
+_GIT_COMMIT_FAILED_ERROR = "failed to commit citation"
+
 # Evidence-row ids are minted as ev-<lowercase-hex> (see ledger.new_ev_id).
 EVIDENCE_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
 
@@ -492,6 +497,12 @@ async def propose_citation_impl(
         # for SP2a-2, do not add the complexity now.
         read_view = ctx.agent_view_proposal
         anchor_offset = read_view.find(anchor)
+        if anchor_offset < 0:
+            # The anchor exists in the LIVE proposal (step 5 passed) but was NOT
+            # in what the agent read — a human added/moved it between read and
+            # propose. We cannot key this row to a read-time section; refuse and
+            # make the agent re-read (mirrors prose's read-time contract).
+            return {"error": "you haven't read the proposal yet — call read_proposal first"}
         sections = split_sections(read_view)
         cursor = 0
         section_index = len(sections) - 1
@@ -691,7 +702,7 @@ def _insert_citation_locked(
             ctx.workspace_id,
             ev_id,
         )
-        return {"error": "failed to commit citation"}
+        return {"error": _GIT_COMMIT_FAILED_ERROR}
 
     # Advance the agent's view of HEAD so a following edit/replace in the same
     # turn doesn't spuriously fail its precondition (spec 2026-06-10 §1).
@@ -706,19 +717,24 @@ def _insert_citation_locked(
     # 14. DB cache (AFTER git) — best-effort; git ledger is canonical.
     if ref.citekey != citekey:
         try:
-            ref.citekey = citekey
-            # owns_txn=True (default, the async insert_citation_impl path): this
-            # function owns the transaction, so commit the cache write here.
-            # owns_txn=False (the accept replay): the CALLER owns the txn and must
-            # keep the FOR UPDATE pc-row lock + advisory mutex held through the
-            # status flip — flush only; the endpoint's single commit persists it.
             if owns_txn:
+                # This function owns the txn — commit the cache write here.
+                ref.citekey = citekey
                 session.commit()
             else:
-                session.flush()
+                # The CALLER owns the txn (accept replay). A SAVEPOINT keeps a
+                # surprise IntegrityError (a concurrent same-citekey assignment
+                # racing _resolve_citekey_for_ref's SELECT) from poisoning the
+                # caller's accept transaction: begin_nested auto-rolls-back to the
+                # savepoint on raise, leaving the outer txn usable for the status
+                # flip + the endpoint's single commit. Mirrors reconcile.py.
+                with session.begin_nested():
+                    ref.citekey = citekey
+                    session.flush()
         except Exception:  # noqa: BLE001 — cache write must never fail the tool
-            # Only roll back when we own the txn; rolling back the caller's accept
-            # txn would discard the git/ledger write + status flip. Best-effort: log.
+            # Only roll back when we own the txn; the begin_nested above already
+            # unwound the savepoint for the owns_txn=False case without touching
+            # the outer accept transaction.
             if owns_txn:
                 session.rollback()
             logger.warning(

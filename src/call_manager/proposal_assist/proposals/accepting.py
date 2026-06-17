@@ -12,10 +12,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange, User, Workspace
+from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE
 from call_manager.proposal_assist.editing.save import StaleSectionError, save_section
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.tools.citations import _insert_citation_locked
+from call_manager.proposal_assist.tools.citations import (
+    _GIT_COMMIT_FAILED_ERROR,
+    _insert_citation_locked,
+)
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 
@@ -175,6 +179,12 @@ def _accept_citation_insert(
         if result["error"] == BUSY_ERROR_MESSAGE:
             # Retryable: leave status pending; the endpoint surfaces 409.
             raise CitationAcceptBusy(BUSY_ERROR_MESSAGE)
+        if result["error"] == _GIT_COMMIT_FAILED_ERROR:
+            # Transient infra failure (git/FS), NOT a verification failure. Mirror
+            # the prose GitCommitError path: surface a retryable error and leave
+            # the row pending (the endpoint rolls back -> 500). Do NOT burn the
+            # proposal to terminal 'stale'.
+            raise GitCommitError("citation accept replay failed to commit")
         # Terminal verification failure -> stale, stamped (mirrors prose).
         pc.status = "stale"
         pc.resolved_by = approver.id

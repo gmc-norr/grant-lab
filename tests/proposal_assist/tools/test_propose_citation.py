@@ -168,3 +168,43 @@ async def test_propose_citation_bad_anchor_rejected(pg_session_factory, _setting
         evidence_quote="reduces recurrence by 30%",
     )
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_propose_citation_anchor_absent_from_read_view_rejected(
+    pg_session_factory, _settings_env, tmp_path
+):
+    # FIX 2 regression: if the anchor exists in the LIVE on-disk proposal
+    # (step 5 passes) but was NOT present in the agent's read-time snapshot
+    # (anchor_offset == -1), the offset walk silently collapses section_index
+    # to 0 (preamble), writing a row keyed to the WRONG section. The fix must
+    # detect offset == -1 and return the same "read_proposal first" error,
+    # writing NO ProposedChange row.
+    from sqlalchemy import select
+
+    ctx, wsid, repo = _build_ctx(pg_session_factory, tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    # 1. Populate the agent's view (head + sections) via read_proposal.
+    await read_proposal_impl(ctx)
+
+    # 2. After the read, doctor ctx.agent_view_proposal to a string that LACKS
+    #    the anchor, while the LIVE on-disk proposal still contains it (the
+    #    anchor was introduced on disk by a human after the agent read).
+    ctx.agent_view_proposal = "preamble only, no anchor here\n"
+
+    result = await propose_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,  # ANCHOR lives in the live on-disk proposal
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+    )
+
+    assert "error" in result, f"expected error, got {result}"
+    assert "read_proposal" in result["error"], result["error"]
+
+    # No ProposedChange row written (the citation was refused, not mis-keyed).
+    with pg_session_factory() as s:
+        rows = s.scalars(select(ProposedChange).where(ProposedChange.workspace_id == wsid)).all()
+        assert rows == [], f"expected no rows, got {len(rows)}"

@@ -530,3 +530,135 @@ def test_reject_sets_status_and_approver(pg_session_factory, tmp_path):
         assert got.status == "rejected"
         assert got.resolved_by == approver.id
         assert got.resolved_at is not None
+
+
+def test_citation_accept_citekey_cache_integrity_error_is_savepointed(pg_session_factory, tmp_path):
+    # FIX 1 regression: when the owns_txn=False citekey-cache flush raises
+    # IntegrityError (concurrent citekey collision), a SAVEPOINT must absorb it
+    # so the outer accept transaction stays usable. Without the savepoint the
+    # IntegrityError aborts the Postgres transaction, causing the subsequent
+    # pc.status="accepted" flush and s.commit() to raise PendingRollbackError —
+    # git committed but DB side rolled back, row stays "pending".
+    #
+    # Setup:
+    #   - Reference A has citekey=None (so the cache branch runs)
+    #   - Reference B has citekey="taken123" (seeds the collision)
+    #   - _resolve_citekey_for_ref is monkeypatched to return "taken123",
+    #     guaranteeing the flush will hit the partial unique index.
+    import unittest.mock
+
+    from call_manager.proposal_assist.tools import citations as citations_mod
+
+    with pg_session_factory() as s:
+        ws, repo = _setup(s, tmp_path)
+        approver = make_user(s, email="approver@ki.se")
+        s.flush()
+
+        # Seed reference B to own citekey="taken123" in this workspace.
+        _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="taken123")
+
+        # Seed reference A with citekey=None (cache branch will run).
+        rid_a = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey=None)
+
+        base_commit, base_section = capture_base(repo, 1)
+        pc = propose_citation_insert(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            base_commit_sha=base_commit,
+            base_section_sha=base_section,
+            reference_id=str(rid_a),
+            anchor="original.",
+            chunk_index=0,
+            evidence_quote="reduces recurrence by 30%",
+            stance="supports",
+            confidence="high",
+            origin_kind="interactive_turn",
+        )
+        s.flush()
+
+        # Patch resolver to return the already-taken citekey, forcing a
+        # UniqueViolation on the cache flush.
+        with unittest.mock.patch.object(
+            citations_mod, "_resolve_citekey_for_ref", return_value="taken123"
+        ):
+            # KEY: accept must NOT raise PendingRollbackError; the savepoint
+            # absorbs the IntegrityError and the outer txn stays usable.
+            accept_proposed_change(
+                session=s,
+                proposed_change_id=pc.id,
+                workspace_id=ws.id,
+                approver=approver,
+                workspaces_dir=str(tmp_path),
+            )
+            # must not raise PendingRollbackError
+            s.commit()
+
+        got = s.get(ProposedChange, pc.id)
+        assert got.status == "accepted"
+        assert got.resulting_commit_sha  # git commit landed
+
+        # The citekey-cache write rolled back to the savepoint — ref A citekey
+        # is still None (the collision was absorbed, not committed).
+        from call_manager.db.models import Reference
+
+        ref_a = s.get(Reference, rid_a)
+        assert ref_a.citekey is None
+
+
+def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_factory, tmp_path):
+    # FIX 4 regression: _insert_citation_locked returns {"error": "failed to commit
+    # citation"} on a GitCommitError — a TRANSIENT infra failure, NOT a verification
+    # failure. Without the fix, _accept_citation_insert treats any non-busy error as
+    # terminal (flips row to "stale"). With the fix it raises GitCommitError, leaving
+    # the row "pending" so the caller can retry.
+    import unittest.mock
+
+    from call_manager.proposal_assist.citations.gitio import GitCommitError
+    from call_manager.proposal_assist.tools import citations as citations_mod
+
+    with pg_session_factory() as s:
+        ws, repo = _setup(s, tmp_path)
+        approver = make_user(s, email="approver@ki.se")
+        s.flush()
+        rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
+        base_commit, base_section = capture_base(repo, 1)
+        pc = propose_citation_insert(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            base_commit_sha=base_commit,
+            base_section_sha=base_section,
+            reference_id=str(rid),
+            anchor="original.",
+            chunk_index=0,
+            evidence_quote="reduces recurrence by 30%",
+            stance="supports",
+            confidence="high",
+            origin_kind="interactive_turn",
+        )
+        # Commit so the row exists in the DB; after a rollback s.get can re-fetch it.
+        s.commit()
+        pc_id = pc.id
+
+        # Patch write_and_commit_files (as imported in citations.py) to raise
+        # GitCommitError — simulates a transient git/FS failure.
+        with unittest.mock.patch.object(
+            citations_mod, "write_and_commit_files", side_effect=GitCommitError("boom")
+        ):
+            with pytest.raises(GitCommitError):
+                accept_proposed_change(
+                    session=s,
+                    proposed_change_id=pc_id,
+                    workspace_id=ws.id,
+                    approver=approver,
+                    workspaces_dir=str(tmp_path),
+                )
+            s.rollback()
+
+        # After rollback the row must still be "pending" (retryable, NOT "stale").
+        got = s.get(ProposedChange, pc_id)
+        assert got.status == "pending", (
+            f"expected 'pending' (retryable), got {got.status!r} — "
+            "transient git failure was mis-classified as terminal 'stale'"
+        )
