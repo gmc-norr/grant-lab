@@ -182,6 +182,7 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     from call_manager.proposal_assist.tools.proposal import (
         edit_proposal_impl,
+        propose_edit_impl,
         read_proposal_impl,
         replace_proposal_impl,
     )
@@ -193,6 +194,38 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     async def read_proposal(args):
         return await _safe_tool("read_proposal", ctx, read_proposal_impl, ctx)
+
+    @tool(
+        "propose_edit",
+        "Propose a full-text replacement of one section of proposal.md as a "
+        "PENDING change for a human to review and accept — this does NOT edit "
+        "or commit anything. `section_index` is the 0-based section you are "
+        "rewriting (0 is the preamble); call read_proposal first so the system "
+        "knows which version you based your edit on. `new_text` is the WHOLE new "
+        "section including its `## heading` line. Returns a proposed_change_id "
+        "and status 'pending'.",
+        {
+            "type": "object",
+            "properties": {
+                "section_index": {"type": "integer"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["section_index", "new_text"],
+        },
+    )
+    async def propose_edit(args):
+        try:
+            section_index = int(args["section_index"])
+        except (TypeError, ValueError, KeyError):
+            return _mcp_error("section_index must be an integer")
+        return await _safe_tool(
+            "propose_edit",
+            ctx,
+            propose_edit_impl,
+            ctx,
+            section_index=section_index,
+            new_text=args["new_text"],
+        )
 
     @tool(
         "edit_proposal",
@@ -745,6 +778,8 @@ def _collect_tools(ctx: ToolContext) -> list:
     return [
         # existing eight
         read_proposal,
+        # SP2a-2 — propose-only mutation
+        propose_edit,
         edit_proposal,
         replace_proposal,
         get_artifact_history,

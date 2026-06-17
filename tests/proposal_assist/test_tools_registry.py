@@ -274,3 +274,42 @@ def test_tool_context_has_provenance_defaults():
     assert ctx.origin_session_id is None
     assert ctx.agent_view_sections == {}
     assert ctx.agent_view_proposal is None
+
+
+@pytest.mark.asyncio
+async def test_propose_edit_closure_returns_pending_envelope(tmp_path):
+    """The registered propose_edit closure returns the MCP success envelope
+    with status 'pending' after a read; an unread section returns an error
+    envelope (not a raise)."""
+    import subprocess
+    import uuid as _uuid
+
+    from call_manager.proposal_assist.tools.proposal import (
+        PROPOSAL_FILENAME,
+    )
+    from call_manager.proposal_assist.tools.registry import (
+        ToolContext,
+        _collect_tools,
+    )
+
+    repo = Path(tmp_path) / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "a@b"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / PROPOSAL_FILENAME).write_text("preamble\n\n## Methods\norig.\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    # Error path: no read yet -> error envelope, no raise.
+    ctx = ToolContext(
+        workspace_id=_uuid.uuid4(),
+        repo_dir=repo,
+        session_factory=None,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+    )
+    tools = _collect_tools(ctx)
+    propose = next(t for t in tools if t.name == "propose_edit")
+    result = await propose.handler({"section_index": 1, "new_text": "## Methods\nx.\n"})
+    assert result["is_error"] is True
+    assert "read_proposal" in result["content"][0]["text"]

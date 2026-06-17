@@ -91,6 +91,49 @@ async def read_proposal_impl(ctx: ToolContext) -> dict[str, Any]:
     return {"content": content}
 
 
+async def propose_edit_impl(
+    ctx: ToolContext,
+    *,
+    section_index: int,
+    new_text: str,
+) -> dict[str, Any]:
+    """Propose a full-text replacement of one section as a pending
+    proposed_change (NOT a git commit). The base is the agent's READ-TIME
+    snapshot (ctx.agent_view_head + ctx.agent_view_sections[section_index]) — we
+    MUST NOT recompute it live (capture_base) here, or a human edit landed since
+    the read would silently become the base and accept would clobber it.
+
+    Returns {"proposed_change_id", "status": "pending"} or {"error": ...}.
+    """
+    # Lazy import avoids the proposing<->proposal module cycle.
+    from call_manager.proposal_assist.proposals.proposing import propose_prose_edit
+
+    base_commit_sha = ctx.agent_view_head
+    if base_commit_sha is None:
+        return {"error": _NOT_READ_ERROR}
+    base_section_sha = ctx.agent_view_sections.get(section_index)
+    if base_section_sha is None:
+        return {"error": _NOT_READ_ERROR}
+
+    with ctx.session_factory() as session:
+        pc = propose_prose_edit(
+            session=session,
+            workspace_id=ctx.workspace_id,
+            section_index=section_index,
+            new_text=new_text,
+            base_commit_sha=base_commit_sha,
+            base_section_sha=base_section_sha,
+            origin_kind="interactive_turn",
+            origin_session_id=ctx.origin_session_id,
+            triggering_turn_id=ctx.triggering_turn_id,
+            triggering_prompt=ctx.triggering_prompt,
+            created_by=ctx.created_by,
+        )
+        pc_id = str(pc.id)
+        session.commit()
+    return {"proposed_change_id": pc_id, "status": "pending"}
+
+
 async def edit_proposal_impl(
     ctx: ToolContext,
     *,
