@@ -374,6 +374,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Draft
+         * @description One read for the editor + Outline + Full-draft tab + pills. Member-gated.
+         */
+        get: operations["get_draft_api_workspaces__workspace_id__draft_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/sections/{index}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Save Section
+         * @description Save one section via the single write path. Owner-gated. The endpoint
+         *     owns the transaction: save_section adds rows but does NOT commit, and the
+         *     commit mutex is released by this handler's COMMIT / ROLLBACK.
+         */
+        post: operations["post_save_section_api_workspaces__workspace_id__sections__index__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/error": {
         parameters: {
             query?: never;
@@ -1191,6 +1233,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/workspaces/{workspace_id}/proposed-changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Proposed Changes */
+        get: operations["list_proposed_changes_workspaces__workspace_id__proposed_changes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workspaces/{workspace_id}/proposed-changes/{pc_id}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Accept */
+        post: operations["accept_workspaces__workspace_id__proposed_changes__pc_id__accept_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workspaces/{workspace_id}/proposed-changes/{pc_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject */
+        post: operations["reject_workspaces__workspace_id__proposed_changes__pc_id__reject_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/workspaces/{workspace_id}/references": {
         parameters: {
             query?: never;
@@ -1419,9 +1512,11 @@ export interface paths {
          * Get Section Edit
          * @description Edit-form fragment for one section. Owner only.
          *
-         *     Soft pre-check: 409 notice if an agent turn is queued/running — the
-         *     hard guard remains save_section's turn-lock check under the commit
-         *     mutex; this just avoids offering a form that's doomed to 409 on save.
+         *     Soft pre-check: 409 notice if an agent turn is queued/running, to avoid
+         *     offering an edit form while the agent owns the repo. save_section no
+         *     longer hard-blocks turn-in-flight saves (that guard was removed); races
+         *     are now handled by the commit mutex + base_section_sha staleness. This
+         *     soft check is revisited in the propose→accept porting plan.
          */
         get: operations["get_section_edit_workspaces__workspace_id__sections__n__edit_get"];
         put?: never;
@@ -2082,6 +2177,17 @@ export interface components {
             /** Title */
             title: string;
         };
+        /** CitationOut */
+        CitationOut: {
+            /** Citekey */
+            citekey: string;
+            /** Number */
+            number?: number | null;
+            /** Stance */
+            stance?: string | null;
+            /** Title */
+            title?: string | null;
+        };
         /** DashboardOut */
         DashboardOut: {
             effective: components["schemas"]["EffectiveOut"];
@@ -2101,6 +2207,19 @@ export interface components {
         DefaultProfileOut: {
             /** Default Profile Id */
             default_profile_id: number | null;
+        };
+        /** DraftOut */
+        DraftOut: {
+            /** Can Edit */
+            can_edit: boolean;
+            /** Citations */
+            citations: {
+                [key: string]: components["schemas"]["CitationOut"];
+            };
+            /** Head */
+            head: string;
+            /** Sections */
+            sections: components["schemas"]["SectionOut"][];
         };
         /** EffectiveOut */
         EffectiveOut: {
@@ -2165,6 +2284,43 @@ export interface components {
             failed: number;
             /** Pending */
             pending: number;
+        };
+        /** SaveResultOut */
+        SaveResultOut: {
+            /** Changed */
+            changed: boolean;
+            /** Commit Sha */
+            commit_sha: string;
+            /** Head */
+            head: string;
+            /** Issues */
+            issues: {
+                [key: string]: unknown;
+            }[];
+            /** Job Enqueued */
+            job_enqueued: boolean;
+            /** Section Sha */
+            section_sha: string;
+        };
+        /** SaveSectionIn */
+        SaveSectionIn: {
+            /** Base Commit Sha */
+            base_commit_sha: string;
+            /** Base Section Sha */
+            base_section_sha: string;
+            /** Content */
+            content: string;
+        };
+        /** SectionOut */
+        SectionOut: {
+            /** Heading */
+            heading: string;
+            /** Index */
+            index: number;
+            /** Sha */
+            sha: string;
+            /** Text */
+            text: string;
         };
         /** SourceFacet */
         SourceFacet: {
@@ -2997,6 +3153,235 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DefaultProfileOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_draft_api_workspaces__workspace_id__draft_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    post_save_section_api_workspaces__workspace_id__sections__index__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSectionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SaveResultOut"];
                 };
             };
             /** @description Bad Request */
@@ -4519,6 +4904,107 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_proposed_changes_workspaces__workspace_id__proposed_changes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    accept_workspaces__workspace_id__proposed_changes__pc_id__accept_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                pc_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reject_workspaces__workspace_id__proposed_changes__pc_id__reject_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                pc_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
