@@ -40,6 +40,7 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
+from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,16 @@ async def read_proposal_impl(ctx: ToolContext) -> dict[str, Any]:
     except GitCommitError:
         ctx.agent_view_head = None
     content = path.read_text()
+    # SP2a-2 §3: record the per-section shas the agent saw, so a later
+    # propose_edit takes its base_section_sha from this READ-time snapshot
+    # (anti-clobber) rather than a live recompute. Built from the same `content`
+    # we return, so the dict and the returned text agree exactly.
+    ctx.agent_view_sections = {s.index: s.sha for s in split_sections(content)}
+    # SP2a-2 §3: also retain the full read-time proposal text, so propose_citation
+    # (Task 5) maps an anchor offset -> section_index against the SAME snapshot the
+    # section shas came from (consistent (section_index, base_section_sha) pair even
+    # if a human added/removed a `##` section between read and propose).
+    ctx.agent_view_proposal = content
     return {"content": content}
 
 
