@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from call_manager.db.models import Reference, User, Workspace, WorkspaceViewer
 from call_manager.main import create_app
+from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -858,3 +859,135 @@ def test_citation_source_malformed_nested_fields_degrade_not_500(
     b = r.json()
     assert b["claim"] is None
     assert b["stance"] is None
+
+
+# --- SP2a-4b: human select-to-cite endpoint ---------------------------------
+def _cite_body(bc, bs, rid, **over):
+    body = {
+        "section_index": 1,
+        "base_commit_sha": bc,
+        "base_section_sha": bs,
+        "anchor": "original.",
+        "reference_id": str(rid),
+        "chunk_index": 0,
+        "evidence_quote": "azure",
+        "quote_start": 0,
+        "quote_end": 5,
+        "stance": "supports",
+    }
+    body.update(over)
+    return body
+
+
+def test_post_citation_happy_path(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert set(b) == {"ev_id", "citekey", "commit_sha"}
+    saved = (workspace_repo_dir(tmp_path, ws_id) / PROPOSAL_FILENAME).read_text()
+    assert f"original.[@{b['citekey']}]<!-- ev:{b['ev_id']} -->" in saved
+
+
+def test_post_citation_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, member_id, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    c = _client(app, member_id)
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_post_citation_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    (repo / PROPOSAL_FILENAME).write_text("preamble\n\n## Methods\nCHANGED text.\n")
+    subprocess.run(["git", "commit", "-aqm", "x"], cwd=repo, check=True, env=_git_env())
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid, anchor="original.")
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "conflict"
+
+
+def test_post_citation_double_submit_second_is_409(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    body = _cite_body(bc, bs, rid)
+    r1 = c.post(f"/api/workspaces/{ws_id}/citations", json=body)
+    assert r1.status_code == 200, r1.text
+    r2 = c.post(f"/api/workspaces/{ws_id}/citations", json=body)  # same stale base
+    assert r2.status_code == 409
+    saved = (workspace_repo_dir(tmp_path, ws_id) / PROPOSAL_FILENAME).read_text()
+    assert saved.count("ev:") == 1  # exactly one marker
+
+
+def test_post_citation_quote_mismatch_is_422(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid, evidence_quote="WRONG")
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "validation_error"
+
+
+def test_post_citation_foreign_reference_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    c = _client(app, owner_id)
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, uuid.uuid4()))
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_post_citation_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+
+    def _boom(**kwargs):
+        raise CommitMutexTimeout("busy")
+
+    monkeypatch.setattr("call_manager.web.api.workspaces.insert_citation_for_user", _boom)
+    c = _client(app, owner_id)
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 429
+    assert r.json()["error"]["code"] == "too_many_requests"
+    assert r.headers.get("Retry-After") == "2"

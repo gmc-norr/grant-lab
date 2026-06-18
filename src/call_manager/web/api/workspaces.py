@@ -12,13 +12,19 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Reference, ReferenceChunk, User
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
+from call_manager.proposal_assist.citations.human_cite import (
+    CiteInvalid,
+    CiteRefNotFound,
+    CiteStale,
+    insert_citation_for_user,
+)
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
@@ -104,6 +110,25 @@ class SaveResultOut(BaseModel):
             job_enqueued=result.job_enqueued,
             changed=result.changed,
         )
+
+
+class AddCitationIn(BaseModel):
+    section_index: int
+    base_commit_sha: str
+    base_section_sha: str
+    anchor: str = Field(min_length=1)
+    reference_id: uuid.UUID
+    chunk_index: int
+    evidence_quote: str = Field(min_length=1)
+    quote_start: int = Field(ge=0)
+    quote_end: int = Field(ge=0)
+    stance: str = "supports"
+
+
+class AddCitationOut(BaseModel):
+    ev_id: str
+    citekey: str
+    commit_sha: str
 
 
 def _citation_map(session, settings, workspace_id: uuid.UUID, raw: str) -> dict[str, CitationOut]:
@@ -377,3 +402,66 @@ def post_save_section(
             session.rollback()
             raise HTTPException(status_code=404, detail="no such section") from e
     return SaveResultOut.from_result(result)
+
+
+@router.post("/workspaces/{workspace_id}/citations", response_model=AddCitationOut)
+def post_citation(
+    workspace_id: uuid.UUID,
+    body: AddCitationIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> AddCitationOut:
+    """Human select-to-cite: a direct citation commit (owner-gated). Sync handler
+    (FastAPI threadpools it) calling the sync insert_citation_for_user core; this
+    handler owns the transaction (single commit/rollback, mutex released on it)."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # 404 precheck (mirror the save route): proposal.md + git HEAD must exist.
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        if not (repo_dir / PROPOSAL_FILENAME).exists():
+            raise HTTPException(status_code=404, detail="no proposal.md yet")
+        try:
+            current_head(repo_dir)
+        except GitCommitError as e:
+            raise HTTPException(status_code=404, detail="no proposal.md yet") from e
+        try:
+            result = insert_citation_for_user(
+                session=session,
+                workspace=ws,
+                user_id=user.id,
+                section_index=body.section_index,
+                base_commit_sha=body.base_commit_sha,
+                base_section_sha=body.base_section_sha,
+                anchor=body.anchor,
+                reference_id=body.reference_id,
+                chunk_index=body.chunk_index,
+                evidence_quote=body.evidence_quote,
+                quote_start=body.quote_start,
+                quote_end=body.quote_end,
+                stance=body.stance,
+                workspaces_dir=settings.workspaces_dir,
+            )
+            session.commit()
+        except CiteStale as e:
+            session.rollback()
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except CiteRefNotFound as e:
+            session.rollback()
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except CiteInvalid as e:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        except CommitMutexTimeout as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        except GitCommitError as e:
+            session.rollback()
+            logger.exception("user citation insert failed for workspace %s", workspace_id)
+            raise HTTPException(
+                status_code=500, detail="citation failed — nothing was written"
+            ) from e
+    return AddCitationOut(**result)
