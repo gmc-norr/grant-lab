@@ -508,3 +508,51 @@ def list_references(
                 )
             )
     return out
+
+
+class ChunkOut(BaseModel):
+    chunk_index: int
+    section_path: str | None = None
+    text: str
+
+
+class ReferenceChunksOut(BaseModel):
+    reference_id: str
+    title: str
+    chunks: list[ChunkOut]
+
+
+@router.get(
+    "/workspaces/{workspace_id}/references/{reference_id}/chunks",
+    response_model=ReferenceChunksOut,
+)
+def get_reference_chunks(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> ReferenceChunksOut:
+    """A reference's chunks (verbatim text), for selecting a supporting span.
+    Member-gated; ownership-guarded (cross-workspace reference -> 404)."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        ref = session.get(Reference, reference_id)
+        if ref is None or ref.workspace_id != workspace_id:
+            raise HTTPException(status_code=404, detail="reference not found")
+        csl = ref.csl_json or ref.csl_json_extracted or {}
+        csl_title = csl.get("title") if isinstance(csl, dict) else None
+        title = ref.title or (csl_title if isinstance(csl_title, str) else None) or ref.filename
+        rows = session.scalars(
+            select(ReferenceChunk)
+            .where(
+                ReferenceChunk.reference_id == ref.id,
+                ReferenceChunk.workspace_id == workspace_id,
+            )
+            .order_by(ReferenceChunk.chunk_index)
+        ).all()
+        chunks = [
+            ChunkOut(chunk_index=c.chunk_index, section_path=c.section_path, text=c.text)
+            for c in rows
+        ]
+    return ReferenceChunksOut(reference_id=str(reference_id), title=str(title), chunks=chunks)

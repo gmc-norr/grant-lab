@@ -1054,3 +1054,41 @@ def test_references_list_member_gated_excludes_tombstoned(
     assert one["text_status"] == "done"
     # stranger forbidden
     assert _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/references").status_code == 403
+
+
+def test_reference_chunks_ordered_and_guarded(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, stranger_id, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    # Seed a reference with two chunks (chunk_index 1 added after 0 to test ordering).
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="chunk zero")
+    with pg_session_factory() as s:
+        s.add(ReferenceChunk(
+            reference_id=rid, workspace_id=ws_id, chunk_index=1, section_path="## B",
+            text="chunk one", embedding=[0.0] * 1024, embedding_model="fake",
+        ))
+        s.commit()
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/references/{rid}/chunks")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["reference_id"] == str(rid)
+    assert [c["chunk_index"] for c in body["chunks"]] == [0, 1]
+    assert body["chunks"][0]["text"] == "chunk zero"
+    # stranger forbidden
+    assert _client(app, stranger_id).get(
+        f"/api/workspaces/{ws_id}/references/{rid}/chunks"
+    ).status_code == 403
+
+
+def test_reference_chunks_foreign_reference_is_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/references/{uuid.uuid4()}/chunks")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
