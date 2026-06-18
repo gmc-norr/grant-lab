@@ -15,6 +15,18 @@ type Props = {
  *  query and passes the resolved source in. */
 export function SourceViewer({ source, pinned, onClose, onPin, onNavigate }: Props) {
   const { text, highlight } = source;
+  // Defense-in-depth: the server guarantees 0 <= start <= end <= len(text), but
+  // SP2a-4b will derive these offsets client-side, so reject a reversed/out-of-
+  // range span and fall back to plain text rather than silently duplicating or
+  // dropping characters in a citation viewer.
+  const validHighlight =
+    highlight !== null &&
+    highlight !== undefined &&
+    highlight[0] >= 0 &&
+    highlight[0] <= highlight[1] &&
+    highlight[1] <= text.length
+      ? highlight
+      : null;
   return (
     <aside className="source-viewer" aria-label="Cited source">
       <header className="source-viewer-head">
@@ -72,11 +84,11 @@ export function SourceViewer({ source, pinned, onClose, onPin, onNavigate }: Pro
         <p className="source-viewer-empty">The source text isn’t available yet.</p>
       ) : (
         <div className="source-viewer-body">
-          {highlight ? (
+          {validHighlight ? (
             <>
-              {text.slice(0, highlight[0])}
-              <mark>{text.slice(highlight[0], highlight[1])}</mark>
-              {text.slice(highlight[1])}
+              {text.slice(0, validHighlight[0])}
+              <mark>{text.slice(validHighlight[0], validHighlight[1])}</mark>
+              {text.slice(validHighlight[1])}
             </>
           ) : (
             text

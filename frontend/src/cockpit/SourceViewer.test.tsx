@@ -35,6 +35,22 @@ describe("SourceViewer", () => {
     expect(mark?.textContent).toBe("NEEDLE");
   });
 
+  it("falls back to plain text for a malformed (reversed/out-of-range) highlight", () => {
+    // SP2a-4b will derive offsets client-side; a bad span must not duplicate or
+    // drop text — render the source whole, with no <mark>.
+    const { container } = render(
+      <SourceViewer
+        source={source({ text: "abcNEEDLEdef", highlight: [9, 3] })}
+        pinned={false}
+        onClose={noop}
+        onPin={noop}
+        onNavigate={noop}
+      />,
+    );
+    expect(container.querySelector("mark")).toBeNull();
+    expect(screen.getByText("abcNEEDLEdef")).toBeInTheDocument();
+  });
+
   it("renders the source line, claim and position", () => {
     render(
       <SourceViewer source={source()} pinned={false} onClose={noop} onPin={noop} onNavigate={noop} />,

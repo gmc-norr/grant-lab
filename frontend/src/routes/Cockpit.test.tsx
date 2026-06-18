@@ -96,6 +96,22 @@ function mockGetByPath(draft: unknown, source: unknown) {
       : Promise.resolve(draft)) as never);
 }
 
+// Like mockGetByPath but routes /source by the evidence_id path param (openapi-
+// fetch passes the path TEMPLATE as arg1 and the interpolated id in arg2's
+// params.path), so prev/next navigation can be asserted to refetch the new ev.
+function mockGetByEv(draft: unknown, sourceByEv: Record<string, unknown>) {
+  return vi.spyOn(clientMod.api, "GET").mockImplementation(((
+    path: string,
+    init?: { params?: { path?: { evidence_id?: string } } },
+  ) => {
+    if (path.endsWith("/source")) {
+      const ev = init?.params?.path?.evidence_id ?? "";
+      return Promise.resolve(sourceByEv[ev]);
+    }
+    return Promise.resolve(draft);
+  }) as never);
+}
+
 it("renders the Outline from sections", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   renderCockpit();
@@ -368,8 +384,10 @@ it("pinning moves the source to the pinned pane and closes the center peek", asy
   fireEvent.mouseDown(container.querySelector(".cm-citation-pill")!);
   await screen.findByText(/The Smith 2021 Study/);
   fireEvent.click(screen.getByRole("button", { name: /pin source/i }));
-  // Pinned pane shows it; the Pin button is gone (only the pinned, unpinnable copy remains).
+  // Pinned pane shows it; the Pin button is gone (only the pinned, unpinnable copy remains)
+  // AND the center peek has closed (pin does setPinnedEv + setPeekEv(null)).
   expect(container.querySelector(".cockpit-pinned .source-viewer")).not.toBeNull();
+  expect(container.querySelector(".cockpit-peek")).toBeNull();
   expect(screen.queryByRole("button", { name: /pin source/i })).toBeNull();
 });
 
@@ -381,4 +399,35 @@ it("closing the peek removes the source pane", async () => {
   await screen.findByText(/The Smith 2021 Study/);
   fireEvent.click(screen.getByRole("button", { name: /close source/i }));
   expect(container.querySelector(".cockpit-peek .source-viewer")).toBeNull();
+});
+
+it("Next citation refetches and shows the next reference cite in the peek", async () => {
+  const SECOND_EV = "ev-bbbbbbbbbbbb";
+  mockGetByEv(draftWithPill(), {
+    [PEEK_EV]: sourcePayload({
+      text: "FIRST SOURCE.",
+      highlight: null,
+      index: 1,
+      total: 2,
+      next_ev: SECOND_EV,
+    }),
+    [SECOND_EV]: sourcePayload({
+      evidence_id: SECOND_EV,
+      text: "SECOND SOURCE.",
+      highlight: null,
+      index: 2,
+      total: 2,
+      prev_ev: PEEK_EV,
+      next_ev: null,
+    }),
+  });
+  const { container } = renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  fireEvent.mouseDown(container.querySelector(".cm-citation-pill")!);
+  expect(await screen.findByText("FIRST SOURCE.")).toBeInTheDocument();
+  // Clicking Next must drive peekEv -> next_ev and refetch THAT cite (a wrong-setter
+  // or stale-key regression would keep showing FIRST SOURCE).
+  fireEvent.click(screen.getByRole("button", { name: /next citation/i }));
+  expect(await screen.findByText("SECOND SOURCE.")).toBeInTheDocument();
+  expect(screen.queryByText("FIRST SOURCE.")).toBeNull();
 });
