@@ -431,3 +431,39 @@ it("Next citation refetches and shows the next reference cite in the peek", asyn
   expect(await screen.findByText("SECOND SOURCE.")).toBeInTheDocument();
   expect(screen.queryByText("FIRST SOURCE.")).toBeNull();
 });
+
+it("select-to-cite: selecting a saved claim opens the composer and adds a citation", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/references")) {
+      return Promise.resolve({ data: [{ id: "r1", citekey: "k", title: "Smith", kind: "paper", text_status: "done" }], error: undefined });
+    }
+    if (path.endsWith("/chunks")) {
+      return Promise.resolve({ data: { reference_id: "r1", title: "Smith", chunks: [{ chunk_index: 0, section_path: null, text: "the azure sky" }] }, error: undefined });
+    }
+    return Promise.resolve(draftPayload(true) as never); // /draft
+  }) as never);
+  const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { ev_id: "ev-1", citekey: "k", commit_sha: "a".repeat(40) }, error: undefined } as never);
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  // make a selection in the (clean) section via the editor handle
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  const docText = view.state.doc.toString();
+  const f = docText.indexOf("body");
+  act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } })); // "body." incl. period
+  // the Cite control appears (section is not dirty)
+  fireEvent.click(await screen.findByRole("button", { name: /cite selection/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /Smith/ }));
+  const pre = await screen.findByText("the azure sky");
+  vi.spyOn(window, "getSelection").mockReturnValue({
+    rangeCount: 1,
+    getRangeAt: () => ({ startOffset: 4, endOffset: 9, startContainer: pre.firstChild, endContainer: pre.firstChild, toString: () => "azure" }),
+    toString: () => "azure",
+  } as never);
+  fireEvent.mouseUp(pre);
+  fireEvent.click(await screen.findByRole("button", { name: /add citation/i }));
+  await waitFor(() => expect(post).toHaveBeenCalledOnce());
+  const body = (post.mock.calls[0][1] as { body: Record<string, unknown> }).body;
+  expect(body).toMatchObject({ reference_id: "r1", evidence_quote: "azure", anchor: "body." });
+});

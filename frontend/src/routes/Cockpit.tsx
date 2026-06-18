@@ -5,6 +5,7 @@ import { useParams } from "react-router-dom";
 import { useCitationSource } from "../api/citations";
 import { ApiError } from "../api/client";
 import { useDraft, useSaveSection } from "../api/editor";
+import { CitationComposer } from "../cockpit/CitationComposer";
 import { SourceViewer } from "../cockpit/SourceViewer";
 import { CodeMirrorEditor } from "../editor/CodeMirrorEditor";
 
@@ -45,6 +46,11 @@ export function Cockpit() {
   // promotes it to pinnedEv (right pane). Both drive a useCitationSource query.
   const [peekEv, setPeekEv] = useState<string | null>(null);
   const [pinnedEv, setPinnedEv] = useState<string | null>(null);
+  // SP2a-4b select-to-cite: the editor's current selection (claim span) + whether
+  // the composer is open. The Cite control is gated on a SAVED (non-dirty) section
+  // because the anchor must exist in the on-disk proposal.md.
+  const [selection, setSelection] = useState<{ from: number; to: number; text: string } | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
   // These hooks MUST run before the early returns below so hook order is stable.
   const peek = useCitationSource(id, peekEv);
   const pinned = useCitationSource(id, pinnedEv);
@@ -82,6 +88,10 @@ export function Cockpit() {
     setLastSectionIndex(index);
     setStaleSection(null);
     setSaveError(null);
+    // Drop any stale claim span / open composer: the selection belonged to the
+    // section we just left and its anchor won't exist in the new section.
+    setSelection(null);
+    setComposerOpen(false);
   }
 
   function onEditorChange(next: string) {
@@ -227,16 +237,30 @@ export function Cockpit() {
           requireHeading={tab.kind === "section" && activeIndex > 0}
           readOnly={tab.kind === "full" || !can_edit}
           onPillClick={onPillClick}
+          onSelectionChange={tab.kind === "section" ? setSelection : undefined}
         />
 
         {can_edit && tab.kind === "section" && (
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={save.isPending || !isDirty(activeIndex)}
-          >
-            Save section
-          </button>
+          <div className="cockpit-section-actions">
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={save.isPending || !isDirty(activeIndex)}
+            >
+              Save section
+            </button>
+            {/* The anchor must already exist on disk, so cite is only offered on a
+                SAVED (non-dirty) section; dirty -> disabled with a hint to save. */}
+            <button
+              type="button"
+              className="cite-selection-btn"
+              disabled={!selection || isDirty(activeIndex)}
+              title={isDirty(activeIndex) ? "Save this section first" : undefined}
+              onClick={() => setComposerOpen(true)}
+            >
+              Cite selection
+            </button>
+          </div>
         )}
       </section>
 
@@ -273,6 +297,26 @@ export function Cockpit() {
             />
           )}
         </aside>
+      )}
+
+      {composerOpen && selection && activeSection && (
+        <section className="cockpit-composer" aria-label="Add a citation">
+          <CitationComposer
+            workspaceId={id}
+            claim={{
+              section_index: activeSection.index,
+              base_commit_sha: head,
+              base_section_sha: activeSection.sha,
+              anchor: selection.text,
+            }}
+            onDone={() => {
+              setComposerOpen(false);
+              setSelection(null);
+              void draft.refetch();
+            }}
+            onCancel={() => setComposerOpen(false)}
+          />
+        </section>
       )}
     </main>
   );

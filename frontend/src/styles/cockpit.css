@@ -102,3 +102,55 @@
   color: var(--cm-good-text);
   border: 1px solid var(--cm-good-border);
 }
+
+/* SP2a-4b select-to-cite: the Save/Cite action row, the cite gate button, the
+   composer pane, and the CitationComposer surface. */
+.cockpit-section-actions {
+  display: flex;
+  align-items: center;
+}
+.cite-selection-btn {
+  margin-left: 0.5rem;
+}
+.cockpit-composer {
+  min-width: 20rem;
+  max-width: 30rem;
+}
+.cite-composer {
+  border: 1px solid var(--cm-border);
+  border-radius: 8px;
+  background: var(--cm-surface);
+  box-shadow: var(--cm-shadow-sm);
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.cite-composer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.cite-composer-head button {
+  margin-left: auto;
+}
+.cite-composer-claim {
+  color: var(--cm-muted);
+  font-style: italic;
+}
+.cite-composer-chunk {
+  white-space: pre-wrap;
+  border: 1px solid var(--cm-border);
+  border-radius: 4px;
+  padding: 0.4rem;
+  font-size: 0.9em;
+  cursor: text;
+  max-height: 40vh;
+  overflow: auto;
+}
+.cite-composer-confirm {
+  background: var(--cm-primary-soft);
+  border: 1px solid var(--cm-primary-border);
+  border-radius: 4px;
+  padding: 0.4rem;
+}
