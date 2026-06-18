@@ -1,6 +1,7 @@
 from call_manager.proposal_assist.citations.reader import (
     build_citation_numbering,
     build_citation_stances,
+    build_source_window,
     evidence_order_for_reference,
     render_proposal_with_citations,
 )
@@ -124,3 +125,50 @@ def test_stance_value_cannot_break_out_of_class_attribute():
     a = _LH.fragment_fromstring(html, create_parent="div").find(".//a")
     assert a is not None
     assert a.get("class") == 'cite cite--sup"orts'
+
+
+def test_build_source_window_normal_doc_returns_full_text_and_span():
+    full = "Intro paragraph.\n\nThe cat sat on the mat.\n\nConclusion.\n"
+    chunk = "The cat sat on the mat."
+    quote = "The cat sat on the mat."
+    text, hl, note = build_source_window(full, chunk, quote)
+    assert text == full
+    assert hl is not None and full[hl[0] : hl[1]] == quote
+    assert note is None
+
+
+def test_build_source_window_large_doc_windows_around_span():
+    quote = "NEEDLE SENTENCE."
+    full = ("x" * 20_000) + quote + ("y" * 20_000)
+    text, hl, note = build_source_window(full, None, quote, max_chars=1_000, window_radius=50)
+    assert hl is not None and text[hl[0] : hl[1]] == quote
+    assert len(text) <= 50 + len(quote) + 50
+    assert note is not None and "large document" in note
+
+
+def test_build_source_window_span_not_found_with_chunk_shows_chunk():
+    full = "totally unrelated document body."
+    chunk = "The cited section text."
+    text, hl, note = build_source_window(full, chunk, "quote that is absent everywhere")
+    assert text == chunk
+    assert hl == (0, len(chunk))
+    assert note is not None and "couldn't pinpoint" in note.lower()
+
+
+def test_build_source_window_span_not_found_no_chunk_returns_head():
+    full = "some document " * 50
+    text, hl, note = build_source_window(full, None, "absent quote", window_radius=100)
+    assert hl is None
+    assert text == full[:200]
+    assert note is not None and "couldn't pinpoint" in note.lower()
+
+
+def test_build_source_window_text_absent_chunk_present():
+    text, hl, note = build_source_window(None, "the cited chunk", "anything")
+    assert text == "the cited chunk"
+    assert hl == (0, len("the cited chunk"))
+    assert note == "Showing the cited section."
+
+
+def test_build_source_window_both_absent():
+    assert build_source_window(None, None, "q") == ("", None, None)

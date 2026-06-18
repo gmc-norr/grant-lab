@@ -22,6 +22,11 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 
+# Mirror the Jinja reader's limits (web/citations.py _MAX_READER_CHARS /
+# _WINDOW_RADIUS) so the JSON peek and the legacy HTML drawer window identically.
+SOURCE_MAX_CHARS = 500_000
+SOURCE_WINDOW_RADIUS = 4_000
+
 
 def build_citation_numbering(proposal_text: str, ledger: dict) -> dict[str, int]:
     """Map each live, ledger-backed evidence id to its citation number.
@@ -211,6 +216,52 @@ def locate_evidence(
         return find_quote_offsets(full_text, quote)
     except (QuoteNotFound, QuoteAmbiguous):
         return None
+
+
+def build_source_window(
+    full_text: str | None,
+    chunk_text: str | None,
+    quote: str,
+    *,
+    max_chars: int = SOURCE_MAX_CHARS,
+    window_radius: int = SOURCE_WINDOW_RADIUS,
+) -> tuple[str, tuple[int, int] | None, str | None]:
+    """JSON analogue of the Jinja ``_reader_body``: return ``(text, highlight, note)``.
+
+    ``text`` is the (possibly windowed) source to display; ``highlight`` is the
+    ``[start, end)`` evidence span as offsets INTO ``text`` (NOT the original
+    ``full_text``), or ``None`` when the span can't be pinpointed; ``note`` is an
+    optional human explanation of any degradation. The missing-data matrix mirrors
+    the shipped HTML drawer exactly:
+
+      - full_text and chunk both absent  -> ("", None, None)
+      - full_text absent, chunk present  -> (chunk, whole-span, "Showing the cited section.")
+      - span not found, chunk present    -> (chunk, whole-span, "...couldn't pinpoint...")
+      - span not found, no chunk         -> (full_text head, None, "Couldn't pinpoint...")
+      - span found, oversized doc        -> (window, windowed-span, "...large document.")
+      - span found, normal doc           -> (full_text, span, None)
+    """
+    if full_text is None and chunk_text is None:
+        return "", None, None
+    if full_text is None:
+        # text.txt absent but the cited chunk is available — show the chunk whole.
+        return chunk_text, (0, len(chunk_text)), "Showing the cited section."
+    span = locate_evidence(full_text, chunk_text, quote)
+    if span is None:
+        if chunk_text is not None:
+            return (
+                chunk_text,
+                (0, len(chunk_text)),
+                "Showing the cited section — couldn't pinpoint the exact sentence "
+                "in the full document.",
+            )
+        return full_text[: 2 * window_radius], None, "Couldn't pinpoint the cited sentence."
+    s, e = span
+    if len(full_text) > max_chars:
+        lo = max(0, s - window_radius)
+        hi = min(len(full_text), e + window_radius)
+        return full_text[lo:hi], (s - lo, e - lo), "Showing the cited section of a large document."
+    return full_text, (s, e), None
 
 
 def render_proposal_with_citations(
