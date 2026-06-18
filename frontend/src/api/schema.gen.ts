@@ -374,6 +374,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/citations/{evidence_id}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Citation Source
+         * @description The cited source for ONE evidence id, for the cockpit citation peek.
+         *
+         *     Member-gated, read-only. JSON analogue of the Jinja citation_reader_fragment
+         *     (proposal_assist/web/citations.py): resolve the ledger row -> reference (
+         *     ownership-guarded) -> chunk + extracted text, then return the (windowed) text
+         *     plus a client-side [start,end) highlight. An unknown evidence id or a
+         *     missing/cross-workspace reference is a 404; a not-yet-indexed source returns
+         *     200 with no_text=True (so the peek shows a notice, not an error).
+         */
+        get: operations["get_citation_source_api_workspaces__workspace_id__citations__evidence_id__source_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{workspace_id}/draft": {
         parameters: {
             query?: never;
@@ -2188,6 +2215,45 @@ export interface components {
             /** Title */
             title?: string | null;
         };
+        /** CitationSourceOut */
+        CitationSourceOut: {
+            /** Claim */
+            claim?: string | null;
+            /** Confidence */
+            confidence?: string | null;
+            /** Evidence Id */
+            evidence_id: string;
+            /** Highlight */
+            highlight?: number[] | null;
+            /** Index */
+            index: number;
+            /** Next Ev */
+            next_ev?: string | null;
+            /**
+             * No Text
+             * @default false
+             */
+            no_text: boolean;
+            /** Note */
+            note?: string | null;
+            /** Prev Ev */
+            prev_ev?: string | null;
+            /** Reference Id */
+            reference_id?: string | null;
+            /** Source Line */
+            source_line: string;
+            /** Stance */
+            stance?: string | null;
+            /** Text */
+            text: string;
+            /**
+             * Tombstoned
+             * @default false
+             */
+            tombstoned: boolean;
+            /** Total */
+            total: number;
+        };
         /** DashboardOut */
         DashboardOut: {
             effective: components["schemas"]["EffectiveOut"];
@@ -3153,6 +3219,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DefaultProfileOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_citation_source_api_workspaces__workspace_id__citations__evidence_id__source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                evidence_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CitationSourceOut"];
                 };
             };
             /** @description Bad Request */
