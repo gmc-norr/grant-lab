@@ -220,11 +220,14 @@ def get_citation_source(
             ref = session.get(Reference, ref_uuid)
         if ref is None or ref.workspace_id != workspace_id:
             raise HTTPException(status_code=404, detail="the cited reference is unavailable")
-        # Resolve the cited chunk (if the ledger row names one).
-        locator = ev.get("locator") or {}
+        # Resolve the cited chunk (if the ledger row names one). A hand-edited
+        # ledger may carry a non-dict locator or a non-int chunk_index; coerce
+        # defensively so a malformed-but-valid-JSON row degrades, never 500s.
+        loc = ev.get("locator")
+        locator = loc if isinstance(loc, dict) else {}
         chunk = None
         ci = locator.get("chunk_index")
-        if ci is not None:
+        if isinstance(ci, int) and not isinstance(ci, bool):
             chunk = session.scalar(
                 select(ReferenceChunk).where(
                     ReferenceChunk.reference_id == ref.id,
@@ -256,8 +259,9 @@ def get_citation_source(
         if no_text:
             text, highlight, note = "", None, None
         else:
+            quote = ev.get("evidence_quote")
             text, highlight, note = citation_reader.build_source_window(
-                full_text, chunk.text if chunk else None, ev.get("evidence_quote") or ""
+                full_text, chunk.text if chunk else None, quote if isinstance(quote, str) else ""
             )
         csl = ref.csl_json or ref.csl_json_extracted or {}
         csl_title = csl.get("title") if isinstance(csl, dict) else None
@@ -265,13 +269,20 @@ def get_citation_source(
         bits = [ref.citekey] if ref.citekey else []
         bits.append(str(title))
         source_line = " · ".join(b for b in bits if b)
+        # Coerce the remaining ledger-sourced fields that flow into the typed
+        # response — a non-str value (malformed-but-valid-JSON row) would 500 the
+        # endpoint at Pydantic validation otherwise.
+        cc = ev.get("claim_context")
+        claim = cc.get("text") if isinstance(cc, dict) else None
+        stance = ev.get("stance")
+        confidence = ev.get("confidence")
         return CitationSourceOut(
             evidence_id=evidence_id,
             reference_id=str(ref_uuid),
             source_line=source_line,
-            claim=(ev.get("claim_context") or {}).get("text"),
-            stance=ev.get("stance"),
-            confidence=ev.get("confidence"),
+            claim=claim if isinstance(claim, str) else None,
+            stance=stance if isinstance(stance, str) else None,
+            confidence=confidence if isinstance(confidence, str) else None,
             index=idx,
             total=total,
             prev_ev=prev_ev,

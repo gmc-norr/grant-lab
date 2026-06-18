@@ -817,3 +817,44 @@ def test_citation_source_tombstoned_reference_returns_200(
     r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
     assert r.status_code == 200, r.text
     assert r.json()["tombstoned"] is True
+
+
+def test_citation_source_malformed_nested_fields_degrade_not_500(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Codex finding: a VALID-JSON ledger row (so load_ledger accepts it) with
+    malformed NESTED fields — locator/claim_context not a dict, chunk_index not an
+    int, evidence_quote/stance not a str — must DEGRADE to 200, never raise a raw
+    500 (AttributeError on `.get()` / a Pydantic validation error). The earlier
+    corrupt-ledger test only covers invalid JSON, so this pins the nested case."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    owner_id, _, _, ws_id = _seed(
+        app,
+        pg_session_factory,
+        tmp_path,
+        f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n",
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id)
+    _commit_ledger(
+        tmp_path,
+        ws_id,
+        [
+            {
+                "id": ev_id,
+                "citekey": "smith2021",
+                "reference_id": str(rid),
+                "locator": "bad",  # not a dict -> would crash locator.get(...)
+                "claim_context": "bad",  # not a dict -> would crash .get("text")
+                "chunk_index": "nope",  # also stray top-level (ignored)
+                "evidence_quote": ["bad"],  # not a str
+                "stance": ["bad"],  # not a str -> would 500 Pydantic
+            }
+        ],
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["claim"] is None
+    assert b["stance"] is None
