@@ -76,6 +76,19 @@ describe("useReferences / useReferenceChunks / useAddCitation", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("useReferenceChunks fetches once a reference id is set", async () => {
+    const chunks = {
+      reference_id: "r1",
+      title: "Smith",
+      chunks: [{ chunk_index: 0, section_path: null, text: "the azure sky" }],
+    };
+    vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: chunks, error: undefined } as never);
+    const qc = new QueryClient();
+    const { result } = renderHook(() => useReferenceChunks("ws-1", "r1"), { wrapper: wrapper(qc) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(chunks);
+  });
+
   it("useAddCitation POSTs the body and resolves the result", async () => {
     const out = { ev_id: "ev-1", citekey: "smith2021", commit_sha: "a".repeat(40) };
     const spy = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: out, error: undefined } as never);
@@ -88,5 +101,21 @@ describe("useReferences / useReferenceChunks / useAddCitation", () => {
     };
     await expect(result.current.mutateAsync(body)).resolves.toEqual(out);
     expect(spy).toHaveBeenCalledOnce();
+  });
+
+  it("useAddCitation invalidates the draft query on success", async () => {
+    const out = { ev_id: "ev-1", citekey: "smith2021", commit_sha: "a".repeat(40) };
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: out, error: undefined } as never);
+    const qc = new QueryClient();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { result } = renderHook(() => useAddCitation("ws-1"), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({
+      section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
+      anchor: "claim.", reference_id: "r1", chunk_index: 0,
+      evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
+    });
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] }),
+    );
   });
 });
