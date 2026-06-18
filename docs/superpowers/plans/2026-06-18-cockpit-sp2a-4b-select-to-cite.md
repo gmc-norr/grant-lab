@@ -195,7 +195,9 @@ def test_happy_path_inserts_marker_and_ledger(pg_session_factory, tmp_path):
     row = next(r for r in ledger["evidence"] if r["id"] == out["ev_id"])
     assert row["evidence_quote"] == "azure"
     assert row["evidence_quote_offsets"] == [0, 5]
-    assert row["claim_context"]["text"] == "The sky is blue."
+    # claim_context is the LIVE claim sentence around the marker (canonical
+    # extractor), with the trailing terminator stripped — NOT the raw anchor.
+    assert row["claim_context"]["text"] == "The sky is blue"
 
 
 def test_repeated_span_uses_the_selected_occurrence(pg_session_factory, tmp_path):
@@ -305,6 +307,24 @@ def test_foreign_reference_raises_not_found(pg_session_factory, tmp_path):
             _call(s, ws, reference_id=uuid.uuid4(), anchor="The sky is blue.",
                   evidence_quote="azure", quote_start=0, quote_end=5,
                   base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+
+
+def test_anchor_outside_validated_section_raises_stale(pg_session_factory, tmp_path):
+    """Security: a valid (section_index, base_section_sha) for section 1, but an
+    anchor that only exists in section 2, must NOT land the marker in section 2 —
+    the anchor-in-live.text guard rejects it (the marker may only land in the
+    section whose bytes were validated)."""
+    owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure sky")
+    doc = "preamble\n\n## Claims\nThe sky is blue.\n\n## Other\nElsewhere only.\n"
+    repo = _init_repo(tmp_path, ws_id, doc)
+    bc, bs = _base(repo, 1)  # validate section 1 (Claims)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        with pytest.raises(CiteStale):
+            _call(s, ws, reference_id=ref_id, anchor="Elsewhere only.",  # lives in section 2
+                  evidence_quote="azure", quote_start=0, quote_end=5,
+                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+    assert "ev:" not in (repo / PROPOSAL_FILENAME).read_text()  # nothing committed
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -343,6 +363,7 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
+from call_manager.proposal_assist.citations import claims
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import (
     CITATIONS_FILENAME,
@@ -352,7 +373,7 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
     new_ev_id,
 )
-from call_manager.proposal_assist.citations.markers import AnchorError, insert_marker
+from call_manager.proposal_assist.citations.markers import AnchorError, find_markers, insert_marker
 from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
@@ -425,6 +446,13 @@ def insert_citation_for_user(
     live = sections[section_index]
     if head != base_commit_sha and live.sha != base_section_sha:
         raise CiteStale("this section changed — reopen and re-cite")
+    # The anchor MUST belong to the validated section. insert_marker searches the
+    # whole document, so without this a stale/forged (section_index,
+    # base_section_sha) pair could land the marker in a DIFFERENT, unvalidated
+    # section. Requiring `anchor in live.text` + insert_marker's whole-doc
+    # uniqueness guarantees the single match is the one in this section.
+    if anchor not in live.text:
+        raise CiteStale("this section changed — reopen and re-cite")
 
     # 3. Reference: workspace-scoped, not tombstoned.
     ref = session.get(Reference, reference_id)
@@ -471,7 +499,20 @@ def insert_citation_for_user(
             ) from exc
         raise CiteStale("this section changed — reopen and re-cite") from exc
 
-    # 6. Evidence row (exact stored offsets; claim_context = the selected claim).
+    # 6. Claim context — the LIVE claim sentence around the just-inserted marker,
+    #    via the canonical extractor (claims.py: insert/update/validate MUST share
+    #    claim_sentence_around, so a fresh insert never immediately audits as
+    #    claim_drift). Fall back to the bare anchor only if extraction degenerates.
+    inserted = next((m for m in find_markers(new_doc) if m["ev_id"] == ev_id), None)
+    claim_context_text = (
+        claims.claim_sentence_around(new_doc, inserted["start"], inserted["end"])
+        if inserted is not None
+        else ""
+    )
+    if not claim_context_text:
+        claim_context_text = anchor
+
+    # 7. Evidence row (exact stored offsets).
     now_iso = datetime.now(UTC).isoformat()
     row = build_evidence_row(
         ev_id=ev_id,
@@ -485,9 +526,9 @@ def insert_citation_for_user(
         evidence_quote_offsets=[quote_start, quote_end],
         stance=stance,
         confidence=None,
-        claim_context_text=anchor,
+        claim_context_text=claim_context_text,
         claim_context_hash=hashlib.sha256(
-            normalize_for_quote_match(anchor).encode("utf-8")
+            normalize_for_quote_match(claim_context_text).encode("utf-8")
         ).hexdigest(),
         citation_snapshot=_citation_snapshot(ref.csl_json, citekey),
         created_at=now_iso,
@@ -495,14 +536,14 @@ def insert_citation_for_user(
     )
     new_ledger = append_evidence(ledger, row)
 
-    # 7. Atomic commit — proposal.md + citations.json in ONE commit.
+    # 8. Atomic commit — proposal.md + citations.json in ONE commit.
     commit_sha = write_and_commit_files(
         repo,
         {PROPOSAL_FILENAME: new_doc, CITATIONS_FILENAME: dump_ledger(new_ledger)},
         f"user select-to-cite: {citekey} (user:{user_id})",
     )
 
-    # 8. Provenance (committed by the caller, atomically with the mutex release).
+    # 9. Provenance (committed by the caller, atomically with the mutex release).
     session.add(
         ArtifactVersion(
             workspace_id=workspace.id,
@@ -529,7 +570,7 @@ NOTE: the keyword-only signature places `workspaces_dir` after `stance` (which h
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `cd /home/parlar_ai/dev/call-monitor/.worktrees/cockpit-sp2a-4b && uv run pytest tests/proposal_assist/citations/test_human_cite.py -q`
-Expected: PASS (8 passed). Re-run once in isolation on a `connection refused`.
+Expected: PASS (9 passed). Re-run once in isolation on a `connection refused`.
 
 - [ ] **Step 5: Lint + commit**
 
@@ -1124,7 +1165,7 @@ In `frontend/src/editor/CodeMirrorEditor.tsx`:
             }
             if (u.selectionSet || u.docChanged) {
               const sel = u.state.selection.main;
-              if (!sel.empty && !u.state.readOnly) {
+              if (!sel.empty && !u.state.facet(EditorState.readOnly)) {
                 onSelectionChangeRef.current?.({
                   from: sel.from,
                   to: sel.to,
@@ -1584,7 +1625,7 @@ it("select-to-cite: selecting a saved claim opens the composer and adds a citati
   }).__cmView!;
   const docText = view.state.doc.toString();
   const f = docText.indexOf("body");
-  act(() => view.dispatch({ selection: { anchor: f, head: f + 4 } }));
+  act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } })); // "body." incl. period
   // the Cite control appears (section is not dirty)
   fireEvent.click(await screen.findByRole("button", { name: /cite selection/i }));
   fireEvent.click(await screen.findByRole("button", { name: /Smith/ }));
