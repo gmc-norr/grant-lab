@@ -39,6 +39,8 @@ export type CodeMirrorEditorProps = {
   readOnly?: boolean;
   /** Wired FOR SP2a-4 select-to-cite; defaults to a no-op. */
   onPillClick?: (citekey: string, evId: string) => void;
+  /** SP2a-4b: the current non-empty editor selection (or null when collapsed). */
+  onSelectionChange?: (sel: { from: number; to: number; text: string } | null) => void;
 };
 
 // The `--cm-*` vars below are the existing call-manager (NOT CodeMirror) design
@@ -75,6 +77,7 @@ export function CodeMirrorEditor({
   requireHeading,
   readOnly = false,
   onPillClick = () => {},
+  onSelectionChange = () => {},
 }: CodeMirrorEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -86,9 +89,11 @@ export function CodeMirrorEditor({
   const onChangeRef = useRef(onChange);
   const requireHeadingRef = useRef(requireHeading);
   const onPillClickRef = useRef(onPillClick);
+  const onSelectionChangeRef = useRef(onSelectionChange);
   onChangeRef.current = onChange;
   requireHeadingRef.current = requireHeading;
   onPillClickRef.current = onPillClick;
+  onSelectionChangeRef.current = onSelectionChange;
 
   // Mount ONCE: build EditorView, destroy on unmount.
   useEffect(() => {
@@ -123,6 +128,18 @@ export function CodeMirrorEditor({
           EditorView.updateListener.of((u) => {
             if (u.docChanged && u.transactions.some((t) => !t.annotation(Transaction.remote))) {
               onChangeRef.current(u.state.doc.toString());
+            }
+            if (u.selectionSet || u.docChanged) {
+              const sel = u.state.selection.main;
+              if (!sel.empty && !u.state.facet(EditorState.readOnly)) {
+                onSelectionChangeRef.current?.({
+                  from: sel.from,
+                  to: sel.to,
+                  text: u.state.sliceDoc(sel.from, sel.to),
+                });
+              } else {
+                onSelectionChangeRef.current?.(null);
+              }
             }
           }),
         ],
