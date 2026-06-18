@@ -228,6 +228,38 @@ it("a successful save clears the dirty buffer (Save disables) and keeps the save
   expect(document.querySelector(".cm-content")?.textContent).toContain("MINE_EDIT");
 });
 
+it("a non-conflict save error surfaces a dismissible banner and keeps the buffer", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  // A non-conflict failure — here a 400 structure error, but the SAME onSave path
+  // handles 429 busy / 500 / network. Before this hardening onSave re-threw these as
+  // an unhandled async rejection: no UI feedback, the user had no idea the save failed
+  // (though the buffer was kept). They must now SURFACE without dropping the buffer.
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "bad_request", message: "keep the section's ## heading line" } },
+  } as never);
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  // act() wrap so the dirty buffer flushes and Save is enabled before the click.
+  act(() => {
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "MYWORK" } });
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^save section$/i }));
+  // The error surfaces (carrying the backend message) and the buffer is PRESERVED.
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/keep the section's ## heading/i);
+  // The banner shows the human detail, NOT the raw "bad_request: " machine-code prefix.
+  expect(alert).not.toHaveTextContent(/bad_request/i);
+  expect(document.querySelector(".cm-content")?.textContent).toContain("MYWORK");
+  // Dismiss clears the banner; the edit stays so the user can fix and re-Save.
+  fireEvent.click(screen.getByRole("button", { name: /^dismiss$/i }));
+  await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  expect(document.querySelector(".cm-content")?.textContent).toContain("MYWORK");
+});
+
 it("a 409 keeps the buffer and shows a conflict prompt; Reload discards and reloads", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   vi.spyOn(clientMod.api, "POST").mockResolvedValue({

@@ -8,6 +8,17 @@ import { CodeMirrorEditor } from "../editor/CodeMirrorEditor";
 
 type Tab = { kind: "section"; index: number } | { kind: "full" };
 
+// The banner copy for a failed save. ApiError.message is formatted "code: detail"
+// (api/client.ts), so strip the machine-code prefix and show just the backend's
+// human detail; a non-ApiError falls back to a generic line.
+function saveErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) {
+    const prefix = `${e.code}: `;
+    return e.message.startsWith(prefix) ? e.message.slice(prefix.length) : e.message;
+  }
+  return "Save failed — please try again.";
+}
+
 export function Cockpit() {
   const { id = "" } = useParams();
   const qc = useQueryClient();
@@ -23,6 +34,11 @@ export function Cockpit() {
   const [tab, setTab] = useState<Tab>({ kind: "section", index: 0 });
   // The section index that 409'd; its banner offers Reload (discard) / Keep editing.
   const [staleSection, setStaleSection] = useState<number | null>(null);
+  // A non-conflict save failure (400 structure / 429 busy / 500 / network): surfaced
+  // as a dismissible banner so a save NEVER fails silently. The buffer is preserved
+  // (edits kept); the user can fix and re-Save. Cleared on a new edit, a section
+  // switch, or the start of the next save.
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   if (draft.isLoading) return <main aria-busy="true">Loading cockpit…</main>;
   if (draft.isError || !draft.data) {
@@ -56,10 +72,12 @@ export function Cockpit() {
     setTab({ kind: "section", index });
     setLastSectionIndex(index);
     setStaleSection(null);
+    setSaveError(null);
   }
 
   function onEditorChange(next: string) {
     if (activeIndex < 0) return;
+    setSaveError(null);
     setBuffers((b) => ({ ...b, [activeIndex]: next }));
   }
 
@@ -80,6 +98,7 @@ export function Cockpit() {
     if (!activeSection) return;
     const index = activeSection.index;
     const content = buffers[index] ?? activeSection.text;
+    setSaveError(null);
     try {
       const result = await save.mutateAsync({
         index,
@@ -113,9 +132,14 @@ export function Cockpit() {
         // prompt; "Reload" discards, "Keep editing" dismisses (re-save re-conflicts
         // until reloaded).
         setStaleSection(index);
-      } else {
-        throw e;
+        return;
       }
+      // Any other failure (400 structure, 429 busy, 500, network) must SURFACE, not
+      // fail silently as an unhandled async rejection. A non-conflict failure also
+      // supersedes a prior stale-conflict prompt, so clear it (never stack two
+      // banners). The buffer is preserved — the user can fix and re-Save.
+      setStaleSection(null);
+      setSaveError(saveErrorMessage(e));
     }
   }
 
@@ -170,6 +194,15 @@ export function Cockpit() {
             </button>{" "}
             <button type="button" onClick={() => setStaleSection(null)}>
               Keep editing
+            </button>
+          </p>
+        )}
+
+        {saveError !== null && (
+          <p role="alert">
+            {saveError}{" "}
+            <button type="button" onClick={() => setSaveError(null)}>
+              Dismiss
             </button>
           </p>
         )}
