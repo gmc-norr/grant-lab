@@ -31,10 +31,17 @@ export function CitationComposer({ workspaceId, claim, onDone, onCancel }: Props
   const [error, setError] = useState<string | null>(null);
 
   // Read the DOM selection inside a chunk <pre>; store chunk-local code-point offsets.
-  function captureSelection(chunkIndex: number, chunkText: string) {
+  function captureSelection(chunkIndex: number, chunkText: string, pre: HTMLElement) {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
+    // Offsets are only chunk-relative when the selection lives entirely within
+    // this <pre>'s single text node. Bail (and clear) on cross-node / cross-chunk
+    // selections rather than sending desynced offsets the server would 422.
+    if (range.startContainer !== pre.firstChild || range.endContainer !== pre.firstChild) {
+      setSpan(null);
+      return;
+    }
     const quote = sel.toString();
     if (!quote) {
       setSpan(null);
@@ -117,7 +124,9 @@ export function CitationComposer({ workspaceId, claim, onDone, onCancel }: Props
             <pre
               key={c.chunk_index}
               className="cite-composer-chunk"
-              onMouseUp={() => captureSelection(c.chunk_index, c.text)}
+              // single text node — do not interpolate siblings into this <pre>,
+              // or captureSelection's offsets desync (the guard below would then bail).
+              onMouseUp={(e) => captureSelection(c.chunk_index, c.text, e.currentTarget)}
             >
               {c.text}
             </pre>
