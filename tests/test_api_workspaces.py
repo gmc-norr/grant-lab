@@ -1025,3 +1025,32 @@ def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factor
     r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+def test_references_list_member_gated_excludes_tombstoned(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, stranger_id, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    live = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure")
+    # Distinct citekey: (workspace_id, citekey) is uniquely constrained, so a second
+    # reference in the same workspace must not reuse the helper's default "smith2021".
+    dead = _seed_source_reference(
+        pg_session_factory, tmp_path, ws_id, chunk_text="grey", citekey="jones2022"
+    )
+    from datetime import UTC, datetime
+    with pg_session_factory() as s:
+        s.get(Reference, dead).tombstoned_at = datetime.now(UTC)
+        s.commit()
+    # member can read; tombstoned excluded
+    r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/references")
+    assert r.status_code == 200, r.text
+    ids = {x["id"] for x in r.json()}
+    assert str(live) in ids and str(dead) not in ids
+    one = next(x for x in r.json() if x["id"] == str(live))
+    assert one["title"] == "The Smith 2021 Study"
+    assert one["text_status"] == "done"
+    # stranger forbidden
+    assert _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/references").status_code == 403

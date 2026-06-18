@@ -466,3 +466,45 @@ def post_citation(
                 status_code=500, detail="citation failed — nothing was written"
             ) from e
     return AddCitationOut(**result)
+
+
+class ReferenceListItemOut(BaseModel):
+    id: str
+    citekey: str | None = None
+    title: str
+    kind: str
+    text_status: str
+
+
+@router.get(
+    "/workspaces/{workspace_id}/references", response_model=list[ReferenceListItemOut]
+)
+def list_references(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> list[ReferenceListItemOut]:
+    """The workspace's citable references for the select-to-cite picker. Member-gated."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        refs = session.scalars(
+            select(Reference)
+            .where(Reference.workspace_id == workspace_id, Reference.tombstoned_at.is_(None))
+            .order_by(Reference.created_at.desc())
+        ).all()
+        out: list[ReferenceListItemOut] = []
+        for ref in refs:
+            csl = ref.csl_json or ref.csl_json_extracted or {}
+            csl_title = csl.get("title") if isinstance(csl, dict) else None
+            title = ref.title or (csl_title if isinstance(csl_title, str) else None) or ref.filename
+            out.append(
+                ReferenceListItemOut(
+                    id=str(ref.id),
+                    citekey=ref.citekey,
+                    title=str(title),
+                    kind=ref.kind,
+                    text_status=ref.text_status,
+                )
+            )
+    return out
