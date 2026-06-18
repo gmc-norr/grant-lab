@@ -14,11 +14,12 @@ A workspace **owner** can cite a source directly from the editor: select the cla
 
 ## 2. Architecture & key decisions
 
-- **A new SYNC core `insert_citation_for_user`, not the agent wrapper.** The agent's `insert_citation_impl` is async, has no section anti-clobber check, uses `(reference_id, chunk_index, evidence_quote)`-only idempotency, and searches for the quote (losing the user's chosen occurrence) — all wrong for a human caller. Instead, add a **synchronous** core that mirrors the proven `insert_from_annotation` (`proposal_assist/analysis/insert.py`): it reuses the same low-level helpers — `acquire_commit_mutex`, `_turn_in_flight`, `insert_marker`, `build_evidence_row`, `write_and_commit_files`, `claim_sentence_around` — so it is DRY at the **helper** level while leaving the agent path untouched. The FastAPI endpoint is a **sync `def`** (FastAPI runs it in the threadpool), so the blocking DB + git work never stalls the event loop.
+- **A new SYNC core `insert_citation_for_user`, not the agent wrapper.** The agent's `insert_citation_impl` is async, has no section anti-clobber check, uses `(reference_id, chunk_index, evidence_quote)`-only idempotency, and searches for the quote (losing the user's chosen occurrence) — all wrong for a human caller. Instead, add a **synchronous** core that mirrors the proven `insert_from_annotation` (`proposal_assist/analysis/insert.py`): it reuses the same low-level helpers — `acquire_commit_mutex`, `insert_marker`, `build_evidence_row`, `write_and_commit_files`, `claim_sentence_around` — so it is DRY at the **helper** level while leaving the agent path untouched. The FastAPI endpoint is a **sync `def`** (FastAPI runs it in the threadpool), so the blocking DB + git work never stalls the event loop.
+- **No workspace-wide turn freeze (parent §, line 182).** `insert_from_annotation` predates the cockpit decision to **delete the `_turn_in_flight` block**; this path deliberately does NOT copy that guard. Concurrency safety comes only from the per-workspace commit mutex (serializes the git commit against agent commits) + the section staleness check below — exactly the model `save_section` documents (`save.py:161`).
 - **Anchor = the selected claim span; requires a saved section.** `insert_marker` inserts the marker immediately after the anchor substring, which must occur **exactly once** in the whole proposal (occurrences overlapping existing markers are ignored). The anchor must exist in on-disk `proposal.md`, so citing requires the section to be **saved** (clean buffer).
-- **Section anti-clobber, mirroring `save_section`.** Saved-but-stale is still unsafe: a concurrent save/agent commit can change the claim context while the anchor substring stays unique (Codex High #1). The request therefore carries `section_index` + `base_commit_sha` + `base_section_sha`, and the core — **inside the commit mutex** — verifies HEAD and the target section's `sha256` are unchanged (the same staleness check as `editing/save.py`), raising a stale error otherwise.
+- **Section anti-clobber, mirroring `save_section` (Codex High #1; predicate per Low #3).** Saved-but-stale is still unsafe: a concurrent save/agent commit can change the claim context while the anchor substring stays unique. The request carries `section_index` + `base_commit_sha` + `base_section_sha`, and the core — **inside the commit mutex** — re-splits the live proposal and compares the section at `section_index` to `base_section_sha` using the **same predicate as `save_section` (`save.py:180`): stale only when the cited section's bytes actually changed.** A HEAD that advanced because *other* sections changed does NOT block the cite (whole-proposal anchor uniqueness is still enforced separately by `insert_marker`).
 - **The stale-check subsumes idempotency (Codex High #2).** A replayed or concurrent double-submit carries a now-stale `base_section_sha` (the first insert changed the section's bytes) → it fails the stale-check (409) instead of inserting a duplicate marker. A genuinely new citation of the *same evidence sentence for a different claim* uses a different anchor and a fresh base → it inserts correctly. So this endpoint deliberately uses **no** `(ref,chunk,quote)` idempotency rule.
-- **Quote = the user's exact selected occurrence, by chunk-local offsets (Codex Medium #4; parent §7.1).** The source pane renders the stored `ReferenceChunk.text` **verbatim as a single text node** (`white-space: pre-wrap`), so a DOM selection yields chunk-local `(quote_start, quote_end)` that map 1:1 to the string. The request carries `chunk_index`, `quote_start`, `quote_end`, and the `evidence_quote` substring; the core verifies `normalize(chunk.text[quote_start:quote_end]) == normalize(evidence_quote)` and stores those offsets in the ledger. This honors a repeated span's actual occurrence instead of failing as ambiguous. No offset index, no `ReferenceChunk` migration.
+- **Quote = the user's exact selected occurrence, by chunk-local code-point offsets (Codex Medium #4 + #2, Low #4; parent §7.1).** The source pane renders the stored `ReferenceChunk.text` **verbatim as a single text node** (`white-space: pre-wrap`). The client converts the DOM selection's **UTF-16** offsets to **Unicode code-point** offsets (browser offsets are UTF-16 code units; `chunk.text` is Python code-point indexed, so a non-BMP character before the selection would otherwise shift them — `quotes.py:96`). The request carries `chunk_index`, code-point `quote_start`/`quote_end`, and the selected `evidence_quote`. The server treats **offsets as authoritative**: it derives `evidence_quote = chunk.text[quote_start:quote_end]` and stores *that* (so ledger offsets ⇄ quote are exact by construction), and **422**s if the client-sent `evidence_quote` does not byte-for-byte equal that slice (a desync guard — no normalization). This honors a repeated span's actual occurrence instead of failing as ambiguous. No offset index, no `ReferenceChunk` migration.
 - **Quote-optional / "cite whole section" is dropped from this slice (Codex Medium #3).** `find_quote_offsets` rejects empty quotes and the ledger/audit assume a quote, so chunk-level cites would need new core/ledger/audit semantics. This slice **requires a non-empty selected supporting span**; chunk-level citing is a future extension (§7).
 - **Owner-gated write; member-gated reads.** The POST mutates `proposal.md` → owner-gated (like `save_section`). The reference-list and reference-chunks reads are member-gated (like the draft/peek reads).
 
@@ -33,7 +34,8 @@ Request:
   "quote_start": 12, "quote_end": 48, "stance": "supports" }
 ```
 - `stance` optional, default `"supports"` (`supports|contradicts|background`). No `confidence` (that is an agent self-assessment).
-- `evidence_quote` MUST be non-empty (quote-optional dropped).
+- `quote_start`/`quote_end` are Unicode **code-point** offsets into `chunk.text` (the client converts from the browser's UTF-16 selection offsets); `quote_end > quote_start`, both within `len(chunk.text)`.
+- `evidence_quote` MUST be non-empty (quote-optional dropped) and must equal `chunk.text[quote_start:quote_end]` exactly (the server re-derives + stores the slice).
 
 Handler: `require_owner` → 404 precheck (proposal.md exists + git HEAD, mirroring the save route) → call `insert_citation_for_user(...)` → the endpoint owns the transaction (single `session.commit()` / `rollback`, mirroring the save route), mapping the core's outcomes:
 
@@ -41,8 +43,8 @@ Handler: `require_owner` → 404 precheck (proposal.md exists + git HEAD, mirror
 |---|---|---|
 | success `{ev_id, citekey, commit_sha}` | **200** | — |
 | commit-mutex timeout (busy) | **429** + `Retry-After` | `too_many_requests` |
-| section stale (HEAD/section sha moved) OR an AI turn is in flight OR anchor not found | **409** | `conflict` |
-| anchor ambiguous, or `evidence_quote` ≠ `chunk.text[quote_start:quote_end]`, or chunk_index invalid for the (owned) reference | **422** | `validation_error` |
+| cited section's sha changed (stale) OR anchor not found | **409** | `conflict` |
+| anchor ambiguous, or `evidence_quote` ≠ `chunk.text[quote_start:quote_end]`, or offsets out of range, or chunk_index invalid for the (owned) reference | **422** | `validation_error` |
 | reference missing / foreign / tombstoned | **404** | `not_found` |
 | git commit failed | **500** | `internal_error` |
 
@@ -69,7 +71,7 @@ If the reference has no chunks (not indexed), `chunks: []` and the composer show
 - **Cite affordance:** when a non-empty selection exists in an editable section that is **not dirty**, surface a "Cite selection" control opening the citation composer in the right pane. Disabled (hint "Save this section first") while the section is dirty. **Cite-only** toolbar in this slice.
 - **Citation composer** (right pane, reuses the SourceViewer read style):
   1. `useReferences(id)` → pick a reference (skip/label those with `text_status != "done"`).
-  2. `useReferenceChunks(id, refId)` → render each chunk's `text` **verbatim, single text node, `white-space: pre-wrap`** (so selection offsets align). The user selects the supporting span → capture `(chunk_index, quote_start, quote_end, evidence_quote)`.
+  2. `useReferenceChunks(id, refId)` → render each chunk's `text` **verbatim, single text node, `white-space: pre-wrap`** (so selection offsets align). The user selects the supporting span → capture `(chunk_index, evidence_quote)` and the selection's **code-point** offsets, converting the DOM's UTF-16 offsets (e.g. `[...text.slice(0, utf16Offset)].length`) so they index `chunk.text` the way Python does.
   3. Confirm chip shows the claim (anchor), chosen reference, and the evidence quote → "Add citation".
   4. `useAddCitation(id)` POSTs `{section_index, base_commit_sha, base_section_sha, anchor, reference_id, chunk_index, evidence_quote, quote_start, quote_end, stance}` — `base_commit_sha`/`base_section_sha`/`section_index` come from the loaded draft for the active section. On success, invalidate `['draft', id]` so the new pill renders, then clear the composer + selection.
 - **Hooks** live in `frontend/src/api/citations.ts` (alongside `useCitationSource`).
@@ -77,7 +79,7 @@ If the reference has no chunks (not indexed), `chunks: []` and the composer show
 ## 5. Error handling & preconditions
 
 - **Dirty section** → Cite disabled client-side (anchor must be on disk).
-- **Section stale / AI turn in flight (409)** → "The document changed (or an AI turn is running) — reopen and re-cite"; the draft is invalidated so the user re-selects against fresh text. **Anchor ambiguous / quote-mismatch / bad chunk (422)** → show the reason and **preserve** the composer so the user can pick a longer claim span or a different supporting span. **Reference gone (404)** → "that source is no longer available." **Busy (429)** → retry. **500/network** → generic error, composer preserved.
+- **Cited section stale (409)** → "This section changed — reopen and re-cite"; the draft is invalidated so the user re-selects against fresh text. **Anchor ambiguous / quote-mismatch / bad chunk (422)** → show the reason and **preserve** the composer so the user can pick a longer claim span or a different supporting span. **Reference gone (404)** → "that source is no longer available." **Busy (429)** → retry. **500/network** → generic error, composer preserved.
 - A replayed/concurrent submit fails the stale-check (409), so no duplicate marker is created (idempotency via anti-clobber, §2).
 - **Known limitation:** the 4a peek (`locate_evidence`) recomputes the highlight span live and may be imprecise for a quote that repeats inside one chunk; the ledger's stored offsets remain authoritative. Fixing the peek to prefer stored offsets is out of scope here.
 
@@ -86,10 +88,12 @@ If the reference has no chunks (not indexed), `chunks: []` and the composer show
 **Backend** (mirror `tests/test_api_workspaces.py` + the citations-insert seeding in `tests/proposal_assist/tools/test_citations_insert.py`):
 - POST happy path: marker inserted after the anchor + ledger row committed (offsets = `[quote_start, quote_end]`); returns `{ev_id, citekey, commit_sha}`.
 - owner-gate: member → 403.
-- section stale: a concurrent commit changes the section → 409; **double-submit** (same base shas) → second is 409, exactly one marker exists.
-- AI turn in flight → 409.
+- section stale: a concurrent commit changes the **cited** section → 409; **double-submit** (same base shas) → second is 409, exactly one marker exists.
+- staleness predicate: a concurrent commit changes a **different** section (HEAD moves, cited section sha unchanged) → the cite still **succeeds** (mirrors `save_section`).
+- no turn freeze: an agent turn is recorded in flight but has not touched the cited section → the cite still succeeds (we rely on mutex + section staleness, not `_turn_in_flight`).
 - anchor not found → 409; anchor ambiguous (claim repeats) → 422.
-- quote mismatch (`evidence_quote` ≠ `chunk.text[quote_start:quote_end]`) → 422; chunk_index invalid on an owned ref → 422.
+- quote mismatch (client `evidence_quote` ≠ `chunk.text[quote_start:quote_end]`) → 422; offsets out of range → 422; chunk_index invalid on an owned ref → 422.
+- code-point offsets: a chunk with a non-BMP character (e.g. an emoji) before the selection — code-point offsets slice the intended span and the stored `evidence_quote` is exact.
 - reference foreign/missing/tombstoned → 404.
 - busy (mutex timeout) → 429 with `Retry-After`.
 - repeated-span occurrence: two identical substrings in one chunk, citing each occurrence stores the correct distinct offsets (no false ambiguity).
