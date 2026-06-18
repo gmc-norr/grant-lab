@@ -249,3 +249,62 @@ def test_anchor_outside_validated_section_raises_stale(pg_session_factory, tmp_p
                   evidence_quote="azure", quote_start=0, quote_end=5,
                   base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
     assert "ev:" not in (repo / PROPOSAL_FILENAME).read_text()  # nothing committed
+
+
+def test_provenance_rows_added_but_not_committed(pg_session_factory, tmp_path):
+    """The core adds ArtifactVersion + WorkspaceEvent rows to the session but does
+    NOT commit (caller owns the transaction). Verify both, before any commit."""
+    from call_manager.db.models import ArtifactVersion, WorkspaceEvent
+
+    owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure today")
+    repo = _init_repo(tmp_path, ws_id, DOC)
+    bc, bs = _base(repo, 1)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        out = _call(
+            s, ws, reference_id=ref_id, anchor="The sky is blue.",
+            evidence_quote="azure", quote_start=0, quote_end=5,
+            base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path, user_id=owner_id,
+        )
+        # The pending (uncommitted) rows live in session.new before we commit.
+        pending_av = [o for o in s.new if isinstance(o, ArtifactVersion)]
+        pending_we = [o for o in s.new if isinstance(o, WorkspaceEvent)]
+        assert len(pending_av) == 1
+        assert pending_av[0].commit_sha == out["commit_sha"]
+        assert pending_av[0].created_by == "user"
+        assert len(pending_we) == 1
+        assert pending_we[0].kind == "user_citation_insert"
+        assert pending_we[0].actor_id == owner_id
+        assert pending_we[0].payload["ev_id"] == out["ev_id"]
+        assert pending_we[0].payload["citekey"] == out["citekey"]
+        # Nothing committed yet: a SEPARATE session sees no rows for this workspace.
+        with pg_session_factory() as other:
+            assert other.query(ArtifactVersion).filter_by(workspace_id=ws_id).count() == 0
+            assert other.query(WorkspaceEvent).filter_by(workspace_id=ws_id).count() == 0
+        s.commit()
+    # After the caller commits, the rows are visible.
+    with pg_session_factory() as s:
+        assert s.query(ArtifactVersion).filter_by(workspace_id=ws_id).count() == 1
+
+
+def test_claim_context_falls_back_to_anchor(pg_session_factory, tmp_path, monkeypatch):
+    """If the canonical sentence extractor degenerates to '', claim_context falls
+    back to the bare anchor (so the row still carries a usable claim text/hash)."""
+    owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure today")
+    repo = _init_repo(tmp_path, ws_id, DOC)
+    bc, bs = _base(repo, 1)
+    monkeypatch.setattr(
+        "call_manager.proposal_assist.citations.human_cite.claims.claim_sentence_around",
+        lambda *a, **k: "",
+    )
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        out = _call(
+            s, ws, reference_id=ref_id, anchor="The sky is blue.",
+            evidence_quote="azure", quote_start=0, quote_end=5,
+            base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path, user_id=owner_id,
+        )
+        s.commit()
+    ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())
+    row = next(r for r in ledger["evidence"] if r["id"] == out["ev_id"])
+    assert row["claim_context"]["text"] == "The sky is blue."

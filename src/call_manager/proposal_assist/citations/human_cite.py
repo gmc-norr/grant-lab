@@ -150,6 +150,7 @@ def insert_citation_for_user(
     try:
         ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
     except ValueError as exc:
+        logger.error("corrupt citations.json in workspace %s: %s", workspace.id, exc)
         raise CiteInvalid(f"citations.json is invalid: {exc}") from exc
     ev_id = new_ev_id()
     citekey = _resolve_citekey_for_ref(session, ledger=ledger, ref=ref, workspace_id=workspace.id)
