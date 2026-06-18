@@ -27,15 +27,18 @@ function draftPayload(canEdit: boolean) {
 
 function renderCockpit() {
   const qc = new QueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
-        <Routes>
-          <Route path="/cockpit/:id" element={<Cockpit />} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  return {
+    qc,
+    ...render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+          <Routes>
+            <Route path="/cockpit/:id" element={<Cockpit />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 const PEEK_EV = "ev-abc123def456";
@@ -466,4 +469,79 @@ it("select-to-cite: selecting a saved claim opens the composer and adds a citati
   await waitFor(() => expect(post).toHaveBeenCalledOnce());
   const body = (post.mock.calls[0][1] as { body: Record<string, unknown> }).body;
   expect(body).toMatchObject({ reference_id: "r1", evidence_quote: "azure", anchor: "body." });
+  // onDone refetches + clears the selection inside React state; flush it so the
+  // composer (the single "Add a citation" aside) closes and no act() warning leaks.
+  await waitFor(() => expect(screen.queryByLabelText("Add a citation")).toBeNull());
+});
+
+it("select-to-cite gate: dirtying the section disables Cite (must save first)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  // Select "body." in the CLEAN section -> Cite enabled (anchor exists on disk).
+  const docText = view.state.doc.toString();
+  const f = docText.indexOf("body");
+  act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } }));
+  const cite = await screen.findByRole("button", { name: /cite selection/i });
+  expect(cite).toBeEnabled();
+  // Now dirty the section by inserting at end-of-doc (the held [f,f+5] selection is
+  // unaffected and stays non-empty — see the editor's re-emit test). Cite must
+  // disable because the anchor isn't yet committed to proposal.md.
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "DIRTY" } }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /cite selection/i })).toBeDisabled(),
+  );
+  expect(screen.getByRole("button", { name: /cite selection/i })).toHaveAttribute(
+    "title",
+    "Save this section first",
+  );
+});
+
+it("select-to-cite gate: a draft refetch whose text empties the held anchor disables Cite (stale anchor)", async () => {
+  // Regression for the empty-slice selection fix (CodeMirrorEditor): a held selection
+  // is mapped across a controlled `value` replace when a background draft refetch
+  // returns SHORTER section bytes. The mapped range is non-collapsed but its slice is
+  // empty; the editor now emits null, Cockpit clears `selection`, and Cite disables.
+  // Without the fix the listener would keep a {text:""} selection and leave Cite
+  // enabled with an empty anchor (the user only hits a 422 deep in the composer).
+  const original = draftPayload(true);
+  const shortened = {
+    data: {
+      head: "a".repeat(40),
+      can_edit: true,
+      sections: [
+        { index: 0, heading: "", text: "preamble\n", sha: "s0" },
+        // Same heading line, but the body collapses so the held [f,f+5] range empties.
+        { index: 1, heading: "Methods", text: "## Methods\n", sha: "s1" },
+      ],
+      citations: {},
+    },
+    error: undefined,
+  };
+  vi.spyOn(clientMod.api, "GET")
+    .mockResolvedValueOnce(original as never)
+    .mockResolvedValue(shortened as never);
+  const { qc } = renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  // Select "body." in the CLEAN section -> Cite enabled.
+  const docText = view.state.doc.toString();
+  const f = docText.indexOf("body");
+  act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } }));
+  const cite = await screen.findByRole("button", { name: /cite selection/i });
+  expect(cite).toBeEnabled();
+  // Drive a background refetch that returns the shortened section text. The controlled
+  // value-push maps the held selection to an empty-sliced range -> onSelectionChange(null).
+  await act(async () => {
+    await qc.invalidateQueries({ queryKey: ["draft", "ws-1"] });
+  });
+  // The section is still clean (no edit) but the anchor is gone, so Cite disables.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /cite selection/i })).toBeDisabled(),
+  );
 });

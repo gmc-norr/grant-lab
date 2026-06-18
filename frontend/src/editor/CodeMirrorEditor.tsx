@@ -131,12 +131,9 @@ export function CodeMirrorEditor({
             }
             if (u.selectionSet || u.docChanged) {
               const sel = u.state.selection.main;
-              if (!sel.empty && !u.state.facet(EditorState.readOnly)) {
-                onSelectionChangeRef.current?.({
-                  from: sel.from,
-                  to: sel.to,
-                  text: u.state.sliceDoc(sel.from, sel.to),
-                });
+              const text = u.state.sliceDoc(sel.from, sel.to);
+              if (text && !u.state.facet(EditorState.readOnly)) {
+                onSelectionChangeRef.current?.({ from: sel.from, to: sel.to, text });
               } else {
                 onSelectionChangeRef.current?.(null);
               }

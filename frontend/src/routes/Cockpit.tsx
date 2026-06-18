@@ -300,7 +300,7 @@ export function Cockpit() {
       )}
 
       {composerOpen && selection && activeSection && (
-        <section className="cockpit-composer" aria-label="Add a citation">
+        <section className="cockpit-composer">
           <CitationComposer
             workspaceId={id}
             claim={{

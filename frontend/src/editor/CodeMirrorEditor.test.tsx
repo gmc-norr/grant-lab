@@ -195,3 +195,45 @@ it("re-emits the selection (refreshed) when the doc changes under it", () => {
   expect(calls.length).toBeGreaterThan(beforeLen);
   expect(calls.at(-1)).toEqual({ from, to, text: "The sky is blue." });
 });
+
+it("fires null when a controlled value-push leaves the mapped selection non-collapsed but empty-sliced", () => {
+  // Regression (stale-anchor after a background draft refetch): a held selection is
+  // mapped across a whole-doc `value` replace (the controlled value effect). With
+  // SHORTER pushed text the mapped range is NON-collapsed (from > to, sel.empty ===
+  // false) yet its slice is "". The OLD `!sel.empty` guard would emit a non-null
+  // {from,to,text:""} here, leaving a downstream "Cite selection" anchor enabled but
+  // empty (it only 422s deep in the composer). The NEW guard slices first and emits
+  // null when the text is empty. This test FAILS under the old `!sel.empty` code and
+  // passes under the slice-truthiness guard — i.e. it depends on Fix 1.
+  const calls: Array<{ from: number; to: number; text: string } | null> = [];
+  const { container, rerender } = render(
+    <CodeMirrorEditor
+      value={"## Methods\nThe sky is blue.\n"}
+      onChange={() => {}}
+      requireHeading
+      onSelectionChange={(s) => calls.push(s)}
+    />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  const doc = view.state.doc.toString();
+  const from = doc.indexOf("The sky");
+  const to = from + "The sky is blue.".length;
+  view.dispatch({ selection: { anchor: from, head: to } });
+  expect(calls.at(-1)).not.toBeNull();
+  // A background refetch pushes shorter section bytes through the controlled `value`
+  // prop. The mapped selection becomes a non-collapsed but empty-sliced range.
+  rerender(
+    <CodeMirrorEditor
+      value={"## Methods\nX\n"}
+      onChange={() => {}}
+      requireHeading
+      onSelectionChange={(s) => calls.push(s)}
+    />,
+  );
+  const mapped = view.state.selection.main;
+  expect(mapped.empty).toBe(false); // genuinely non-collapsed (the bug's preconditions)
+  expect(view.state.sliceDoc(mapped.from, mapped.to)).toBe(""); // but its slice is empty
+  expect(calls.at(-1)).toBeNull(); // so the listener emits null (not {text:""})
+});
