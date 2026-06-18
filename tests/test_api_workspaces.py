@@ -527,3 +527,250 @@ def test_save_section_busy_is_retriable_429_with_message(
     assert body["error"]["code"] == "too_many_requests"
     assert body["error"]["message"] == BUSY_ERROR_MESSAGE
     assert r.headers.get("Retry-After") == "2"
+
+
+# --- SP2a-4a: citation source endpoint --------------------------------------
+from call_manager.db.models import ReferenceChunk  # noqa: E402
+from call_manager.proposal_assist.references.storage import ReferenceStorage  # noqa: E402
+
+
+def _seed_source_reference(
+    pg_session_factory,
+    tmp_path,
+    ws_id,
+    *,
+    rid_workspace_id=None,
+    full_text="Intro.\n\nThe cat sat on the mat.\n\nEnd.\n",
+    chunk_text="The cat sat on the mat.",
+    text_status="done",
+    title="The Smith 2021 Study",
+    citekey="smith2021",
+):
+    """Seed a Reference (+ one ReferenceChunk + text.txt) for the source endpoint.
+
+    `rid_workspace_id` lets the Reference belong to a DIFFERENT workspace than the
+    one whose ledger points at it (the cross-workspace leak guard test)."""
+    owner_ws = rid_workspace_id or ws_id
+    with pg_session_factory() as s:
+        ref = Reference(
+            workspace_id=owner_ws,
+            kind="paper",
+            source_type="uploaded",
+            title=title,
+            filename="smith2021.pdf",
+            storage_path="refs/smith2021.pdf",
+            mime_type="application/pdf",
+            citekey=citekey,
+            text_status=text_status,
+        )
+        s.add(ref)
+        s.flush()
+        rid = ref.id
+        s.add(
+            ReferenceChunk(
+                reference_id=rid,
+                workspace_id=owner_ws,
+                chunk_index=0,
+                section_path=None,
+                text=chunk_text,
+                embedding=[0.0] * 1024,  # Vector(1024); value irrelevant to this route
+                embedding_model="fake-embedder",
+            )
+        )
+        s.commit()
+    if text_status == "done":
+        storage = ReferenceStorage(tmp_path)
+        tp = storage.text_path_for(workspace_id=owner_ws, reference_id=rid)
+        tp.parent.mkdir(parents=True, exist_ok=True)
+        tp.write_text(full_text, encoding="utf-8")
+    return rid
+
+
+def _commit_ledger(tmp_path, ws_id, rows):
+    """Write citations.json with `rows` and commit it into the workspace repo."""
+    from call_manager.proposal_assist.citations.gitio import _git_env
+
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    ledger = empty_ledger()
+    ledger["evidence"].extend(rows)
+    (repo / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-qm", "ledger"], cwd=repo, check=True, env=_git_env())
+
+
+def _source_setup(app, pg_session_factory, tmp_path, *, ev_id, quote, **ref_kwargs):
+    owner_id, member_id, stranger_id, ws_id = _seed(
+        app,
+        pg_session_factory,
+        tmp_path,
+        f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n",
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, **ref_kwargs)
+    _commit_ledger(
+        tmp_path,
+        ws_id,
+        [
+            {
+                "id": ev_id,
+                "citekey": "smith2021",
+                "reference_id": str(rid),
+                "locator": {"chunk_index": 0, "section_path": None},
+                "evidence_quote": quote,
+                "stance": "supports",
+                "claim_context": {"text": "The cat is relevant.", "hash": "x"},
+            }
+        ],
+    )
+    return owner_id, member_id, stranger_id, ws_id, rid
+
+
+def test_citation_source_happy_path(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    quote = "The cat sat on the mat."
+    owner_id, _, _, ws_id, _ = _source_setup(
+        app, pg_session_factory, tmp_path, ev_id=ev_id, quote=quote
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["evidence_id"] == ev_id
+    assert "The Smith 2021 Study" in b["source_line"]
+    assert b["claim"] == "The cat is relevant."
+    assert b["stance"] == "supports"
+    assert b["index"] == 1 and b["total"] == 1
+    assert b["prev_ev"] is None and b["next_ev"] is None
+    assert b["no_text"] is False and b["tombstoned"] is False
+    assert b["highlight"] is not None
+    s, e = b["highlight"]
+    assert b["text"][s:e] == quote
+
+
+def test_citation_source_member_can_read(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    _, member_id, _, ws_id, _ = _source_setup(
+        app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
+    )
+    c = _client(app, member_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 200, r.text
+
+
+def test_citation_source_non_member_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    _, _, stranger_id, ws_id, _ = _source_setup(
+        app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
+    )
+    c = _client(app, stranger_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_citation_source_unknown_ev_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id, _ = _source_setup(
+        app, pg_session_factory, tmp_path, ev_id="ev-abc123def456", quote="The cat sat on the mat."
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/ev-000000000000/source")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_citation_source_cross_workspace_reference_is_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The ledger row's reference_id points at a Reference owned by a DIFFERENT
+    workspace — the ownership guard must refuse it (no cross-workspace leak)."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    # Make a second workspace to own the reference.
+    with pg_session_factory() as s:
+        from call_manager.db.models import User, Workspace
+
+        other_owner = User(status="active", email="other@ki.se")
+        s.add(other_owner)
+        s.flush()
+        ws_b = Workspace(title="B", owner_id=other_owner.id, current_phase="spec")
+        s.add(ws_b)
+        s.commit()
+        ws_b_id = ws_b.id
+    owner_id, _, _, ws_id, _ = _source_setup(
+        app,
+        pg_session_factory,
+        tmp_path,
+        ev_id=ev_id,
+        quote="The cat sat on the mat.",
+        rid_workspace_id=ws_b_id,
+        title="Cross-Workspace Secret",
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_citation_source_not_indexed_returns_no_text(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    owner_id, _, _, ws_id, _ = _source_setup(
+        app,
+        pg_session_factory,
+        tmp_path,
+        ev_id=ev_id,
+        quote="The cat sat on the mat.",
+        text_status="pending",
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["no_text"] is True
+    assert b["text"] == ""
+    assert b["highlight"] is None
+
+
+def test_citation_source_prev_next_navigation(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Two cites of the SAME reference -> index/total + prev/next wiring."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev1, ev2 = "ev-aaaaaaaaaaaa", "ev-bbbbbbbbbbbb"
+    owner_id, _, _, ws_id = _seed(
+        app,
+        pg_session_factory,
+        tmp_path,
+        f"preamble\n\n## Methods\nA [@smith2021]<!-- ev:{ev1} --> and "
+        f"B [@smith2021]<!-- ev:{ev2} -->.\n",
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id)
+    _commit_ledger(
+        tmp_path,
+        ws_id,
+        [
+            {
+                "id": ev1,
+                "citekey": "smith2021",
+                "reference_id": str(rid),
+                "locator": {"chunk_index": 0, "section_path": None},
+                "evidence_quote": "The cat sat on the mat.",
+            },
+            {
+                "id": ev2,
+                "citekey": "smith2021",
+                "reference_id": str(rid),
+                "locator": {"chunk_index": 0, "section_path": None},
+                "evidence_quote": "The cat sat on the mat.",
+            },
+        ],
+    )
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev1}/source")
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["index"] == 1 and b["total"] == 2
+    assert b["prev_ev"] is None and b["next_ev"] == ev2

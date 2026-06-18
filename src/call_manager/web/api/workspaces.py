@@ -13,9 +13,10 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Reference, User
+from call_manager.db.models import Reference, ReferenceChunk, User
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
@@ -31,6 +32,7 @@ from call_manager.proposal_assist.editing.save import (
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,24 @@ class CitationOut(BaseModel):
     number: int | None = None
     stance: str | None = None
     title: str | None = None
+
+
+class CitationSourceOut(BaseModel):
+    evidence_id: str
+    reference_id: str | None = None
+    source_line: str
+    claim: str | None = None
+    stance: str | None = None
+    confidence: str | None = None
+    index: int
+    total: int
+    prev_ev: str | None = None
+    next_ev: str | None = None
+    tombstoned: bool = False
+    no_text: bool = False
+    note: str | None = None
+    text: str
+    highlight: list[int] | None = None
 
 
 class DraftOut(BaseModel):
@@ -157,6 +177,111 @@ def get_draft(
         ]
         citations = _citation_map(session, settings, workspace_id, raw)
     return DraftOut(head=head, can_edit=can_edit, sections=sections, citations=citations)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/citations/{evidence_id}/source",
+    response_model=CitationSourceOut,
+)
+def get_citation_source(
+    workspace_id: uuid.UUID,
+    evidence_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> CitationSourceOut:
+    """The cited source for ONE evidence id, for the cockpit citation peek.
+
+    Member-gated, read-only. JSON analogue of the Jinja citation_reader_fragment
+    (proposal_assist/web/citations.py): resolve the ledger row -> reference (
+    ownership-guarded) -> chunk + extracted text, then return the (windowed) text
+    plus a client-side [start,end) highlight. An unknown evidence id or a
+    missing/cross-workspace reference is a 404; a not-yet-indexed source returns
+    200 with no_text=True (so the peek shows a notice, not an error)."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        citations_path = repo_dir / CITATIONS_FILENAME
+        try:
+            ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
+        except (ValueError, OSError) as e:
+            raise HTTPException(status_code=404, detail="citations are unavailable") from e
+        ev = find_by_id(ledger, evidence_id)
+        if ev is None:
+            raise HTTPException(status_code=404, detail="no such evidence id")
+        # Resolve + ownership-guard the reference (never leak a cross-workspace ref).
+        ref = None
+        try:
+            ref_uuid = uuid.UUID(str(ev.get("reference_id")))
+        except (ValueError, TypeError):
+            ref_uuid = None
+        if ref_uuid is not None:
+            ref = session.get(Reference, ref_uuid)
+        if ref is None or ref.workspace_id != workspace_id:
+            raise HTTPException(status_code=404, detail="the cited reference is unavailable")
+        # Resolve the cited chunk (if the ledger row names one).
+        locator = ev.get("locator") or {}
+        chunk = None
+        ci = locator.get("chunk_index")
+        if ci is not None:
+            chunk = session.scalar(
+                select(ReferenceChunk).where(
+                    ReferenceChunk.reference_id == ref.id,
+                    ReferenceChunk.chunk_index == ci,
+                    ReferenceChunk.workspace_id == workspace_id,
+                )
+            )
+        # Extracted text only when indexing is complete (mirrors the Jinja route).
+        storage = ReferenceStorage(settings.workspaces_dir)
+        text_path = storage.text_path_for(workspace_id=workspace_id, reference_id=ref.id)
+        text_indexed = ref.text_status == "done"
+        full_text = (
+            text_path.read_text(encoding="utf-8")
+            if text_indexed and text_path.exists()
+            else None
+        )
+        # Position among this reference's live cites (document order) for "i of N".
+        proposal_path = repo_dir / PROPOSAL_FILENAME
+        proposal_text = proposal_path.read_text() if proposal_path.exists() else ""
+        order = citation_reader.evidence_order_for_reference(
+            proposal_text, ledger, ev["reference_id"]
+        )
+        total = len(order)
+        pos = order.index(evidence_id) if evidence_id in order else -1
+        idx = pos + 1 if pos >= 0 else 0
+        prev_ev = order[pos - 1] if pos > 0 else None
+        next_ev = order[pos + 1] if 0 <= pos < total - 1 else None
+        no_text = not text_indexed
+        if no_text:
+            text, highlight, note = "", None, None
+        else:
+            text, highlight, note = citation_reader.build_source_window(
+                full_text, chunk.text if chunk else None, ev.get("evidence_quote") or ""
+            )
+        csl = ref.csl_json or ref.csl_json_extracted or {}
+        csl_title = csl.get("title") if isinstance(csl, dict) else None
+        title = ref.title or (csl_title if isinstance(csl_title, str) else None) or ref.filename
+        bits = [ref.citekey] if ref.citekey else []
+        bits.append(str(title))
+        source_line = " · ".join(b for b in bits if b)
+        return CitationSourceOut(
+            evidence_id=evidence_id,
+            reference_id=str(ref_uuid),
+            source_line=source_line,
+            claim=(ev.get("claim_context") or {}).get("text"),
+            stance=ev.get("stance"),
+            confidence=ev.get("confidence"),
+            index=idx,
+            total=total,
+            prev_ev=prev_ev,
+            next_ev=next_ev,
+            tombstoned=ref.tombstoned_at is not None,
+            no_text=no_text,
+            note=note,
+            text=text,
+            highlight=list(highlight) if highlight is not None else None,
+        )
 
 
 @router.post("/workspaces/{workspace_id}/sections/{index}", response_model=SaveResultOut)
