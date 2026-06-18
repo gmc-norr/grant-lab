@@ -149,3 +149,49 @@ it("fires onSelectionChange with the selected text, and null when cleared", () =
   view.dispatch({ selection: { anchor: to, head: to } }); // collapse
   expect(calls.at(-1)).toBeNull();
 });
+
+it("does not fire a selection while read-only (fires null instead)", () => {
+  const calls: Array<{ from: number; to: number; text: string } | null> = [];
+  const { container } = render(
+    <CodeMirrorEditor
+      value={"## Methods\nThe sky is blue.\n"}
+      onChange={() => {}}
+      requireHeading
+      readOnly
+      onSelectionChange={(s) => calls.push(s)}
+    />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  const doc = view.state.doc.toString();
+  const from = doc.indexOf("The sky");
+  const to = from + "The sky is blue.".length;
+  view.dispatch({ selection: { anchor: from, head: to } });
+  expect(calls.at(-1)).toBeNull();
+});
+
+it("re-emits the selection (refreshed) when the doc changes under it", () => {
+  const calls: Array<{ from: number; to: number; text: string } | null> = [];
+  const { container } = render(
+    <CodeMirrorEditor
+      value={"## Methods\nThe sky is blue.\n"}
+      onChange={() => {}}
+      requireHeading
+      onSelectionChange={(s) => calls.push(s)}
+    />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  const doc = view.state.doc.toString();
+  const from = doc.indexOf("The sky");
+  const to = from + "The sky is blue.".length;
+  view.dispatch({ selection: { anchor: from, head: to } });
+  const beforeLen = calls.length;
+  // Insert at the very end of the doc: the [from,to] selection is unaffected and
+  // re-emitted via the docChanged branch.
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "ZZ" } });
+  expect(calls.length).toBeGreaterThan(beforeLen);
+  expect(calls.at(-1)).toEqual({ from, to, text: "The sky is blue." });
+});
