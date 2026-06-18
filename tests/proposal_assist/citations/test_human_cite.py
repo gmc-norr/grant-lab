@@ -287,6 +287,34 @@ def test_provenance_rows_added_but_not_committed(pg_session_factory, tmp_path):
         assert s.query(ArtifactVersion).filter_by(workspace_id=ws_id).count() == 1
 
 
+def test_offsets_out_of_range_raises_invalid(pg_session_factory, tmp_path):
+    """quote_end beyond the chunk length fails the chunk-local bounds guard
+    (spec §6: offsets out of range -> 422)."""
+    owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure sky")
+    repo = _init_repo(tmp_path, ws_id, DOC)
+    bc, bs = _base(repo, 1)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        with pytest.raises(CiteInvalid):
+            _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
+                  evidence_quote="azure", quote_start=0, quote_end=999,
+                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+
+
+def test_invalid_chunk_index_on_owned_ref_raises_invalid(pg_session_factory, tmp_path):
+    """An owned reference whose requested chunk_index has no chunk fails the
+    chunk-is-None guard (spec §6: invalid chunk_index -> 422)."""
+    owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure sky")
+    repo = _init_repo(tmp_path, ws_id, DOC)
+    bc, bs = _base(repo, 1)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        with pytest.raises(CiteInvalid):
+            _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
+                  evidence_quote="azure", quote_start=0, quote_end=5, chunk_index=7,
+                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+
+
 def test_claim_context_falls_back_to_anchor(pg_session_factory, tmp_path, monkeypatch):
     """If the canonical sentence extractor degenerates to '', claim_context falls
     back to the bare anchor (so the row still carries a usable claim text/hash)."""
