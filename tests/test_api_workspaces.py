@@ -1092,3 +1092,31 @@ def test_reference_chunks_foreign_reference_is_404(
     r = c.get(f"/api/workspaces/{ws_id}/references/{uuid.uuid4()}/chunks")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+def test_reference_chunks_cross_workspace_reference_is_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """reference_id belongs to a DIFFERENT workspace — the ownership guard must
+    refuse it (proves the guard, not just routing: the ref EXISTS elsewhere)."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    with pg_session_factory() as s:
+        other = User(status="active", email="other@ki.se")
+        s.add(other)
+        s.flush()
+        ws_b = Workspace(title="B", owner_id=other.id, current_phase="spec")
+        s.add(ws_b)
+        s.commit()
+        ws_b_id = ws_b.id
+    foreign_rid = _seed_source_reference(
+        pg_session_factory, tmp_path, ws_id, rid_workspace_id=ws_b_id,
+        title="Cross-Workspace Secret", citekey="secret2099",
+    )
+    r = _client(app, owner_id).get(
+        f"/api/workspaces/{ws_id}/references/{foreign_rid}/chunks"
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
