@@ -4,7 +4,12 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import * as clientMod from "./client";
-import { useCitationSource } from "./citations";
+import {
+  useAddCitation,
+  useCitationSource,
+  useReferenceChunks,
+  useReferences,
+} from "./citations";
 
 function wrapper(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
@@ -50,5 +55,38 @@ describe("useCitationSource", () => {
     const { result } = renderHook(() => useCitationSource("ws-1", null), { wrapper: wrapper(qc) });
     expect(result.current.fetchStatus).toBe("idle");
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("useReferences / useReferenceChunks / useAddCitation", () => {
+  it("useReferences returns the unwrapped list", async () => {
+    const refs = [{ id: "r1", citekey: "smith2021", title: "Smith", kind: "paper", text_status: "done" }];
+    vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: refs, error: undefined } as never);
+    const qc = new QueryClient();
+    const { result } = renderHook(() => useReferences("ws-1"), { wrapper: wrapper(qc) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(refs);
+  });
+
+  it("useReferenceChunks is disabled until a reference id is chosen", () => {
+    const spy = vi.spyOn(clientMod.api, "GET");
+    const qc = new QueryClient();
+    const { result } = renderHook(() => useReferenceChunks("ws-1", null), { wrapper: wrapper(qc) });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("useAddCitation POSTs the body and resolves the result", async () => {
+    const out = { ev_id: "ev-1", citekey: "smith2021", commit_sha: "a".repeat(40) };
+    const spy = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: out, error: undefined } as never);
+    const qc = new QueryClient();
+    const { result } = renderHook(() => useAddCitation("ws-1"), { wrapper: wrapper(qc) });
+    const body = {
+      section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
+      anchor: "claim.", reference_id: "r1", chunk_index: 0,
+      evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
+    };
+    await expect(result.current.mutateAsync(body)).resolves.toEqual(out);
+    expect(spy).toHaveBeenCalledOnce();
   });
 });
