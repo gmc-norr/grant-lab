@@ -991,3 +991,37 @@ def test_post_citation_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_
     assert r.status_code == 429
     assert r.json()["error"]["code"] == "too_many_requests"
     assert r.headers.get("Retry-After") == "2"
+
+
+def test_post_citation_unknown_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # require_owner (proposal_assist/web/_perms.py:22-23) raises 404 for a workspace
+    # UUID that doesn't exist — distinct from the foreign-owner 403 path.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, _ = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    c = _client(app, owner_id)
+    r = c.post(
+        f"/api/workspaces/{uuid.uuid4()}/citations",
+        json=_cite_body("0" * 40, "s", uuid.uuid4()),
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Owner is valid (require_owner passes), but proposal.md is gone, so the FIRST
+    # precheck branch — `if not (repo_dir / PROPOSAL_FILENAME).exists()` — trips → 404.
+    # (.git is left intact, so current_head would still succeed; the exists() check
+    # fires first.)
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    (workspace_repo_dir(tmp_path, ws_id) / PROPOSAL_FILENAME).unlink()
+    c = _client(app, owner_id)
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"

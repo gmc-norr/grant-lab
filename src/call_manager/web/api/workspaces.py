@@ -425,6 +425,7 @@ def post_citation(
         try:
             current_head(repo_dir)
         except GitCommitError as e:
+            logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
         try:
             result = insert_citation_for_user(
