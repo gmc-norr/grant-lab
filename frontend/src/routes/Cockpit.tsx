@@ -2,8 +2,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 
+import { useCitationSource } from "../api/citations";
 import { ApiError } from "../api/client";
 import { useDraft, useSaveSection } from "../api/editor";
+import { SourceViewer } from "../cockpit/SourceViewer";
 import { CodeMirrorEditor } from "../editor/CodeMirrorEditor";
 
 type Tab = { kind: "section"; index: number } | { kind: "full" };
@@ -39,6 +41,13 @@ export function Cockpit() {
   // (edits kept); the user can fix and re-Save. Cleared on a new edit, a section
   // switch, or the start of the next save.
   const [saveError, setSaveError] = useState<string | null>(null);
+  // SP2a-4a citation peek: clicking a pill sets peekEv (center split); ⇱ Pin
+  // promotes it to pinnedEv (right pane). Both drive a useCitationSource query.
+  const [peekEv, setPeekEv] = useState<string | null>(null);
+  const [pinnedEv, setPinnedEv] = useState<string | null>(null);
+  // These hooks MUST run before the early returns below so hook order is stable.
+  const peek = useCitationSource(id, peekEv);
+  const pinned = useCitationSource(id, pinnedEv);
 
   if (draft.isLoading) return <main aria-busy="true">Loading cockpit…</main>;
   if (draft.isError || !draft.data) {
@@ -143,10 +152,9 @@ export function Cockpit() {
     }
   }
 
-  // select-to-cite is SP2a-4: wire the callback but no-op it here.
-  const onPillClick = (_citekey: string, _evId: string) => {
-    /* SP2a-4 */
-  };
+  // Clicking a citation pill opens the source peek (SP2a-4a). select-to-cite
+  // (writing a NEW citation) is SP2a-4b.
+  const onPillClick = (_citekey: string, evId: string) => setPeekEv(evId);
 
   return (
     <main className="cockpit">
@@ -231,6 +239,41 @@ export function Cockpit() {
           </button>
         )}
       </section>
+
+      {peekEv !== null && (
+        <section className="cockpit-peek" aria-label="Citation source peek">
+          {peek.isLoading && <p aria-busy="true">Loading source…</p>}
+          {peek.isError && <p role="alert">Could not load the cited source.</p>}
+          {peek.data && (
+            <SourceViewer
+              source={peek.data}
+              pinned={false}
+              onClose={() => setPeekEv(null)}
+              onPin={() => {
+                setPinnedEv(peekEv);
+                setPeekEv(null);
+              }}
+              onNavigate={(evId) => setPeekEv(evId)}
+            />
+          )}
+        </section>
+      )}
+
+      {pinnedEv !== null && (
+        <aside className="cockpit-pinned" aria-label="Pinned source">
+          {pinned.isLoading && <p aria-busy="true">Loading source…</p>}
+          {pinned.isError && <p role="alert">Could not load the cited source.</p>}
+          {pinned.data && (
+            <SourceViewer
+              source={pinned.data}
+              pinned
+              onClose={() => setPinnedEv(null)}
+              onPin={() => {}}
+              onNavigate={(evId) => setPinnedEv(evId)}
+            />
+          )}
+        </aside>
+      )}
     </main>
   );
 }

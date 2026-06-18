@@ -38,6 +38,64 @@ function renderCockpit() {
   );
 }
 
+const PEEK_EV = "ev-abc123def456";
+
+function draftWithPill() {
+  return {
+    data: {
+      head: "a".repeat(40),
+      can_edit: true,
+      sections: [
+        { index: 0, heading: "", text: "preamble\n", sha: "s0" },
+        {
+          index: 1,
+          heading: "Methods",
+          text: `## Methods\nSee [@smith2021]<!-- ev:${PEEK_EV} --> here.\n`,
+          sha: "s1",
+        },
+      ],
+      citations: {
+        [PEEK_EV]: { citekey: "smith2021", number: 1, stance: "supports", title: "Smith 2021" },
+      },
+    },
+    error: undefined,
+  };
+}
+
+function sourcePayload(over: Record<string, unknown> = {}) {
+  return {
+    data: {
+      evidence_id: PEEK_EV,
+      reference_id: "r1",
+      source_line: "smith2021 · The Smith 2021 Study",
+      claim: null,
+      stance: "supports",
+      confidence: null,
+      index: 1,
+      total: 1,
+      prev_ev: null,
+      next_ev: null,
+      tombstoned: false,
+      no_text: false,
+      note: null,
+      text: "The cat sat on the mat.",
+      highlight: [0, 23],
+      ...over,
+    },
+    error: undefined,
+  };
+}
+
+// Route GET by path: /draft -> draft, /source -> source. The whole impl is cast
+// `as never` because openapi-fetch's GET has a complex generic signature that a
+// plain (path: string) lambda doesn't structurally satisfy under tsc.
+function mockGetByPath(draft: unknown, source: unknown) {
+  return vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) =>
+    path.endsWith("/source")
+      ? Promise.resolve(source)
+      : Promise.resolve(draft)) as never);
+}
+
 it("renders the Outline from sections", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   renderCockpit();
@@ -287,4 +345,40 @@ it("a 409 keeps the buffer and shows a conflict prompt; Reload discards and relo
   await waitFor(() =>
     expect(document.querySelector(".cm-content")?.textContent).not.toContain("MINE"),
   );
+});
+
+it("clicking a citation pill opens the source peek", async () => {
+  mockGetByPath(draftWithPill(), sourcePayload());
+  const { container } = renderCockpit();
+  // Open the Methods section so its pill renders.
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const pill = container.querySelector(".cm-citation-pill");
+  expect(pill).not.toBeNull();
+  fireEvent.mouseDown(pill!);
+  expect(await screen.findByText(/The Smith 2021 Study/)).toBeInTheDocument();
+  expect(container.querySelector(".source-viewer mark")?.textContent).toBe(
+    "The cat sat on the mat.",
+  );
+});
+
+it("pinning moves the source to the pinned pane and closes the center peek", async () => {
+  mockGetByPath(draftWithPill(), sourcePayload());
+  const { container } = renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  fireEvent.mouseDown(container.querySelector(".cm-citation-pill")!);
+  await screen.findByText(/The Smith 2021 Study/);
+  fireEvent.click(screen.getByRole("button", { name: /pin source/i }));
+  // Pinned pane shows it; the Pin button is gone (only the pinned, unpinnable copy remains).
+  expect(container.querySelector(".cockpit-pinned .source-viewer")).not.toBeNull();
+  expect(screen.queryByRole("button", { name: /pin source/i })).toBeNull();
+});
+
+it("closing the peek removes the source pane", async () => {
+  mockGetByPath(draftWithPill(), sourcePayload());
+  const { container } = renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  fireEvent.mouseDown(container.querySelector(".cm-citation-pill")!);
+  await screen.findByText(/The Smith 2021 Study/);
+  fireEvent.click(screen.getByRole("button", { name: /close source/i }));
+  expect(container.querySelector(".cockpit-peek .source-viewer")).toBeNull();
 });
