@@ -774,3 +774,46 @@ def test_citation_source_prev_next_navigation(monkeypatch, pg_url, pg_session_fa
     b = r.json()
     assert b["index"] == 1 and b["total"] == 2
     assert b["prev_ev"] is None and b["next_ev"] == ev2
+
+
+def test_citation_source_corrupt_ledger_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """A corrupt citations.json must degrade to a clean 404, never a raw 500
+    (load_ledger raises ValueError -> caught -> 404). Mirrors the Jinja drawer's
+    fail-soft, but stricter: the JSON route turns it into a not_found envelope."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    owner_id, _, _, ws_id, _ = _source_setup(
+        app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
+    )
+    from call_manager.proposal_assist.citations.gitio import _git_env
+
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    (repo / CITATIONS_FILENAME).write_text("{ this is not valid json ")
+    subprocess.run(["git", "commit", "-aqm", "corrupt"], cwd=repo, check=True, env=_git_env())
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_citation_source_tombstoned_reference_returns_200(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """A tombstoned (removed) reference must still 200 with tombstoned=True so the
+    peek can show a 'removed' banner rather than erroring — the source bytes may
+    still be on disk and worth reading."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    ev_id = "ev-abc123def456"
+    owner_id, _, _, ws_id, rid = _source_setup(
+        app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
+    )
+    from datetime import UTC, datetime
+
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        ref.tombstoned_at = datetime.now(UTC)
+        s.commit()
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/citations/{ev_id}/source")
+    assert r.status_code == 200, r.text
+    assert r.json()["tombstoned"] is True
