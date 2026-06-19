@@ -33,7 +33,12 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
     new_ev_id,
 )
-from call_manager.proposal_assist.citations.markers import AnchorError, find_markers, insert_marker
+from call_manager.proposal_assist.citations.markers import (
+    AnchorError,
+    anchor_occurrences,
+    find_markers,
+    insert_marker,
+)
 from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
@@ -112,9 +117,16 @@ def insert_citation_for_user(
     # The anchor MUST belong to the validated section. insert_marker searches the
     # whole document, so without this a stale/forged (section_index,
     # base_section_sha) pair could land the marker in a DIFFERENT, unvalidated
-    # section. Requiring `anchor in live.text` + insert_marker's whole-doc
-    # uniqueness guarantees the single match is the one in this section.
-    if anchor not in live.text:
+    # section.
+    # Marker-overlap-aware: the anchor must occur as PLAIN TEXT (not inside an
+    # existing citation marker) within the VALIDATED section. A raw `in` would
+    # count a marker-internal occurrence, letting insert_marker's whole-doc search
+    # land the marker at the only PLAIN-TEXT occurrence — which could be in a
+    # DIFFERENT, unvalidated section. Requiring >=1 plain-text occurrence here,
+    # combined with insert_marker's whole-doc uniqueness, guarantees the insert
+    # lands in this section (if the doc had a 2nd plain-text occurrence elsewhere,
+    # insert_marker raises ambiguous -> CiteInvalid).
+    if not anchor_occurrences(live.text, anchor):
         raise CiteStale("this section changed — reopen and re-cite")
 
     # 3. Reference: workspace-scoped, not tombstoned.

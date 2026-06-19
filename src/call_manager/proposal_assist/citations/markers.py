@@ -55,16 +55,14 @@ def find_markers(text: str) -> list[dict]:
     ]
 
 
-def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
-    """Insert ``[@citekey]<!-- ev:ev_id -->`` immediately AFTER the unique ``anchor``
-    substring. Raises :class:`AnchorError` if ``anchor`` occurs 0 or >1 times.
-
-    Anchor occurrences that overlap an existing marker span are ignored, so that
-    a citekey substring appearing only inside ``[@citekey]<!-- ev:... -->`` does
-    not falsely match.
-    """
+def anchor_occurrences(text: str, anchor: str) -> list[int]:
+    """Start indices where ``anchor`` occurs as PLAIN TEXT — i.e. NOT overlapping
+    an existing marker span. This is the exact occurrence set ``insert_marker``
+    uses to decide not-found / unique / ambiguous. Callers that must prove an
+    anchor belongs to a given section MUST use this (a raw ``in`` would count a
+    marker-internal occurrence and mis-locate the insert)."""
     if not anchor:
-        raise AnchorError("anchor must be a non-empty string")
+        return []
     marker_spans = [(m["start"], m["end"]) for m in find_markers(text)]
 
     def _overlaps_marker(pos: int, end: int) -> bool:
@@ -79,6 +77,20 @@ def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
         if not _overlaps_marker(pos, pos + len(anchor)):
             occurrences.append(pos)
         start = pos + 1
+    return occurrences
+
+
+def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
+    """Insert ``[@citekey]<!-- ev:ev_id -->`` immediately AFTER the unique ``anchor``
+    substring. Raises :class:`AnchorError` if ``anchor`` occurs 0 or >1 times.
+
+    Anchor occurrences that overlap an existing marker span are ignored, so that
+    a citekey substring appearing only inside ``[@citekey]<!-- ev:... -->`` does
+    not falsely match.
+    """
+    if not anchor:
+        raise AnchorError("anchor must be a non-empty string")
+    occurrences = anchor_occurrences(text, anchor)
     if not occurrences:
         raise AnchorError("anchor not found")
     if len(occurrences) > 1:

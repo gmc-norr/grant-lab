@@ -251,6 +251,32 @@ def test_anchor_outside_validated_section_raises_stale(pg_session_factory, tmp_p
     assert "ev:" not in (repo / PROPOSAL_FILENAME).read_text()  # nothing committed
 
 
+def test_anchor_only_inside_marker_in_section_raises_stale(pg_session_factory, tmp_path):
+    """Security (Codex High): the anchor occurs in the VALIDATED section only
+    INSIDE an existing marker, but as PLAIN TEXT in another section. The raw
+    `anchor in live.text` guard would pass (marker-internal counts) and
+    insert_marker would land the new marker in the UNVALIDATED section. The
+    marker-overlap-aware guard must reject it (CiteStale), writing nothing."""
+    owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure sky")
+    # Section 1 (Claims): "smith2021" appears ONLY inside an existing marker.
+    # Section 2 (Other): "smith2021" appears as PLAIN TEXT.
+    doc = (
+        "preamble\n\n"
+        "## Claims\nBlue sky.[@smith2021]<!-- ev:ev-abc123def456 -->\n\n"
+        "## Other\nsmith2021 was here.\n"
+    )
+    repo = _init_repo(tmp_path, ws_id, doc)
+    bc, bs = _base(repo, 1)  # validate section 1 (Claims)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        with pytest.raises(CiteStale):
+            _call(s, ws, reference_id=ref_id, anchor="smith2021",
+                  evidence_quote="azure", quote_start=0, quote_end=5,
+                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+    after = (repo / PROPOSAL_FILENAME).read_text()
+    assert after == doc  # nothing inserted, no new marker in section 2
+
+
 def test_provenance_rows_added_but_not_committed(pg_session_factory, tmp_path):
     """The core adds ArtifactVersion + WorkspaceEvent rows to the session but does
     NOT commit (caller owns the transaction). Verify both, before any commit."""
