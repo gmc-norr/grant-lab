@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, unwrap } from "./client";
+import { ApiError, api, unwrap } from "./client";
 
 /** GET /api/workspaces/{id}/citations/{evId}/source — the cited source for the
  *  citation peek. Disabled until an evId is selected (clicking a pill sets it).
@@ -70,5 +70,14 @@ export function useAddCitation(id: string) {
         }),
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["draft", id] }),
+    onError: (err) => {
+      // 409 = the cited section's bytes changed underneath the user; refresh the
+      // draft so they re-select against current text (spec). A 422 (bad quote /
+      // anchor / chunk) leaves the section unchanged and the composer is preserved,
+      // so we do NOT refetch on it.
+      if (err instanceof ApiError && err.code === "conflict") {
+        qc.invalidateQueries({ queryKey: ["draft", id] });
+      }
+    },
   });
 }

@@ -118,4 +118,47 @@ describe("useReferences / useReferenceChunks / useAddCitation", () => {
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] }),
     );
   });
+
+  it("useAddCitation invalidates the draft on a 409 conflict", async () => {
+    // unwrap reads res.error.error.code (nested envelope) and throws an ApiError
+    // with .code === "conflict" for a 409. The onError handler refetches the draft
+    // so the user re-selects against fresh section bytes.
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+      data: undefined,
+      error: { error: { code: "conflict", message: "this section changed — reopen and re-cite" } },
+    } as never);
+    const qc = new QueryClient();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { result } = renderHook(() => useAddCitation("ws-1"), { wrapper: wrapper(qc) });
+    await expect(
+      result.current.mutateAsync({
+        section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
+        anchor: "claim.", reference_id: "r1", chunk_index: 0,
+        evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
+      }),
+    ).rejects.toBeTruthy();
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] }));
+  });
+
+  it("useAddCitation does NOT invalidate the draft on a 422 validation error", async () => {
+    // A 422 (bad quote / anchor / chunk) leaves the section bytes unchanged, so the
+    // composer is preserved and the draft must NOT refetch.
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+      data: undefined,
+      error: { error: { code: "validation_error", message: "select a longer, unique span" } },
+    } as never);
+    const qc = new QueryClient();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { result } = renderHook(() => useAddCitation("ws-1"), { wrapper: wrapper(qc) });
+    await expect(
+      result.current.mutateAsync({
+        section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
+        anchor: "claim.", reference_id: "r1", chunk_index: 0,
+        evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
+      }),
+    ).rejects.toBeTruthy();
+    // give any async onError a tick; assert it was NOT called with the draft key
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] });
+  });
 });
