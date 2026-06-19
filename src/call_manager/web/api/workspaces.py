@@ -538,7 +538,7 @@ def get_reference_chunks(
     with sf() as session:
         require_member(workspace_id=workspace_id, user=user, session=session)
         ref = session.get(Reference, reference_id)
-        if ref is None or ref.workspace_id != workspace_id:
+        if ref is None or ref.workspace_id != workspace_id or ref.tombstoned_at is not None:
             raise HTTPException(status_code=404, detail="reference not found")
         csl = ref.csl_json or ref.csl_json_extracted or {}
         csl_title = csl.get("title") if isinstance(csl, dict) else None

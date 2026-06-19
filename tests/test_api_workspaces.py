@@ -1120,3 +1120,22 @@ def test_reference_chunks_cross_workspace_reference_is_404(
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+def test_reference_chunks_tombstoned_reference_is_404(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(
+        pg_session_factory, tmp_path, ws_id, chunk_text="azure sky"
+    )
+    from datetime import UTC, datetime
+    with pg_session_factory() as s:
+        s.get(Reference, rid).tombstoned_at = datetime.now(UTC)
+        s.commit()
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/references/{rid}/chunks")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
