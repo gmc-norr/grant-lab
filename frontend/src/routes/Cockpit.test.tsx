@@ -500,13 +500,13 @@ it("select-to-cite gate: dirtying the section disables Cite (must save first)", 
   );
 });
 
-it("select-to-cite gate: a draft refetch whose text empties the held anchor disables Cite (stale anchor)", async () => {
-  // Regression for the empty-slice selection fix (CodeMirrorEditor): a held selection
+it("select-to-cite: retains the held selection across a background draft refetch (skips remote echoes)", async () => {
+  // Reconciled for the skip-remote selection fix (CodeMirrorEditor): a held selection
   // is mapped across a controlled `value` replace when a background draft refetch
-  // returns SHORTER section bytes. The mapped range is non-collapsed but its slice is
-  // empty; the editor now emits null, Cockpit clears `selection`, and Cite disables.
-  // Without the fix the listener would keep a {text:""} selection and leave Cite
-  // enabled with an empty anchor (the user only hits a 422 deep in the composer).
+  // returns SHORTER section bytes. The push is a Transaction.remote, which the editor
+  // now SKIPS — it does NOT re-derive (or empty) the held selection. So Cite stays
+  // ENABLED; the held anchor remains exactly what the user selected and staleness is
+  // caught server-side at cite time (a 409 invalidates the draft to re-select).
   const original = draftPayload(true);
   const shortened = {
     data: {
@@ -536,12 +536,13 @@ it("select-to-cite gate: a draft refetch whose text empties the held anchor disa
   const cite = await screen.findByRole("button", { name: /cite selection/i });
   expect(cite).toBeEnabled();
   // Drive a background refetch that returns the shortened section text. The controlled
-  // value-push maps the held selection to an empty-sliced range -> onSelectionChange(null).
+  // value-push is a Transaction.remote; the editor SKIPS it, so the held selection is
+  // retained (not cleared) and the section stays clean.
   await act(async () => {
     await qc.invalidateQueries({ queryKey: ["draft", "ws-1"] });
   });
-  // The section is still clean (no edit) but the anchor is gone, so Cite disables.
+  // The section is still clean and the held anchor was retained, so Cite stays enabled.
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: /cite selection/i })).toBeDisabled(),
+    expect(screen.getByRole("button", { name: /cite selection/i })).not.toBeDisabled(),
   );
 });

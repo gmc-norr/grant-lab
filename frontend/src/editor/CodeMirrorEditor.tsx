@@ -126,10 +126,19 @@ export function CodeMirrorEditor({
           EditorView.lineWrapping,
           readOnlyComp.current.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged && u.transactions.some((t) => !t.annotation(Transaction.remote))) {
+            const localDocChange =
+              u.docChanged && u.transactions.some((t) => !t.annotation(Transaction.remote));
+            if (localDocChange) {
               onChangeRef.current(u.state.doc.toString());
             }
-            if (u.selectionSet || u.docChanged) {
+            // Selection bridge: fire on a real selection change or a LOCAL edit,
+            // but SKIP Transaction.remote echoes (controlled value pushes from a
+            // draft refetch). Re-deriving the selection from a remote-mapped range
+            // would silently rewrite the user's selected anchor; skipping keeps the
+            // held selection equal to what the user actually selected (spec: "skip
+            // Transaction.remote echoes" — staleness is caught server-side on cite).
+            const remoteEcho = u.docChanged && !localDocChange;
+            if ((u.selectionSet || u.docChanged) && !remoteEcho) {
               const sel = u.state.selection.main;
               const text = u.state.sliceDoc(sel.from, sel.to);
               if (text && !u.state.facet(EditorState.readOnly)) {
