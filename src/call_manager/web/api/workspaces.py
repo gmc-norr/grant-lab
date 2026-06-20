@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Reference, ReferenceChunk, User
-from call_manager.proposal_assist.artifacts import SPEC_FILENAME
+from call_manager.proposal_assist.artifacts import SPEC_FILENAME, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.citations.human_cite import (
@@ -239,6 +239,78 @@ def get_spec(
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
         sections = _sections_out(spec.read_text())
     return SpecOut(head=head, can_edit=can_edit, sections=sections)
+
+
+@router.post("/workspaces/{workspace_id}/spec/sections/{index}", response_model=SaveResultOut)
+def post_save_spec_section(
+    workspace_id: uuid.UUID,
+    index: int,
+    body: SaveSectionIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SaveResultOut:
+    """Save one Spec section via the shared write path (artifact=spec). Owner-gated.
+
+    Same body + status mapping as post_save_section; the spec path skips
+    Tier-1/Tier-2 (no citation lint, no audit job)."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        # Authorize BEFORE touching repo state (mirrors post_save_section): a
+        # non-owner must not be able to distinguish "no proposal-spec.md yet" (404)
+        # from "owner only" (403) for any workspace UUID they can name.
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        if not (repo_dir / SPEC_FILENAME).exists():
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        try:
+            current_head(repo_dir)
+        except GitCommitError as e:
+            logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+        try:
+            result = save_section(
+                session=session,
+                workspace=ws,
+                user_id=user.id,
+                section_index=index,
+                new_text=body.content,
+                base_commit_sha=body.base_commit_sha,
+                base_section_sha=body.base_section_sha,
+                workspaces_dir=settings.workspaces_dir,
+                artifact=Artifact.SPEC,
+            )
+            session.commit()
+        except StaleSectionError as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="this section changed underneath you — reopen it",
+            ) from e
+        except SectionStructureError as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "keep the section's ## heading line — removing or "
+                    "merging sections is done via chat"
+                ),
+            ) from e
+        except CommitMutexTimeout as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=429,
+                detail=BUSY_ERROR_MESSAGE,
+                headers={"Retry-After": "2"},
+            ) from e
+        except GitCommitError as e:
+            session.rollback()
+            logger.exception("spec save failed for workspace %s section %s", workspace_id, index)
+            raise HTTPException(status_code=500, detail="save failed — nothing was written") from e
+        except IndexError as e:
+            session.rollback()
+            raise HTTPException(status_code=404, detail="no such section") from e
+    return SaveResultOut.from_result(result)
 
 
 @router.get(
