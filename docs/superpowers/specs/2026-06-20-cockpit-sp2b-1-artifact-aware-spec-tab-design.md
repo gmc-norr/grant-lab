@@ -154,11 +154,11 @@ return the seeded `SpecOut`. If it **has any non-whitespace content**, no-op →
 
 **Section count after seeding is 6, not 5.** `split_sections` always emits an `index=0` preamble
 (`sectionizer.py:44`), and the `SPEC_SKELETON` leads with `## Aims`, so the result is the empty
-preamble (index 0) + the five H2 sections (indices 1–5). `section.index === array position`
-because `split_sections` enumerates `0..n` in order, so the extracted editor keeps the draft's
-`sections[activeIndex]` indexing **unchanged** and renders the empty preamble exactly as the draft
-does (`s.heading || "preamble"`, `Cockpit.tsx:180`) — **no preamble-hiding, no index refactor.**
-Tests assert 6 sections.
+preamble (index 0) + the five H2 sections (indices 1–5). The empty preamble is **shown, not
+hidden** — exactly as the draft renders it (`s.heading || "preamble"`, `Cockpit.tsx:180`) — and
+this rendering rule is **uniform across both artifacts** (never spec-only). Section lookup keys on
+the stable `section.index` identity, not array position (§8) — so the count/order is robust and
+this contract is honest by construction. Tests assert 6 sections.
 This covers **new and existing** workspaces uniformly with no data migration, sidesteps the
 preamble-structure-guard problem (whole-doc seed, not a per-section save of a `##`-leading
 preamble), and is a POST (not a side-effecting GET). Concurrent double-init serializes on the
@@ -231,6 +231,16 @@ outline + View tablist + the `CodeMirrorEditor` mount):
   `citations?: boolean` prop (default `true`, preserving every current draft mount) that gates
   whether the `citationPills` extension — and the `onSelectionChange`/peek wiring — are included.
   The Spec mounts with `citations={false}`, so it renders **raw, fully editable** markdown text.
+
+**Identity-based section lookup (contract cleanup).** The active section/buffer is today resolved
+by **array position** (`sections[activeIndex]`, `buffers[activeIndex]`, `sections[idx]` —
+`Cockpit.tsx:75,79,82`), which equals `section.index` only because nothing filters or reorders the
+list — an invariant held by coincidence, not construction. As part of the extraction, resolve the
+active section by its **stable `section.index` identity** (`sections.find(s => s.index === active)`
+or a `byIndex` map; buffers keyed by `section.index`). This is **behavior-preserving today**
+(identical results, draft tests stay green) but removes the latent footgun Codex flagged and makes
+any future filter/collapse safe. It is a uniform improvement to the shared component — not a
+spec-only branch.
 - The extraction is **behavior-preserving for the draft**: `Cockpit.test.tsx` and the editor/
   citation tests **stay green** — that green suite is the load-bearing regression guard. This also
   improves an over-large file (the brainstorming "improve the code you're working in" principle).
@@ -282,6 +292,10 @@ re-prompt) — inherited from the shared `<ArtifactSectionEditor>`.
 - **`CodeMirrorEditor citations={false}`**: marker-like text (`[@k]<!-- ev:… -->`) renders as
   **raw editable characters** — assert **no `.cm-citation-pill`** widget and no peek/selection
   wiring; the default `citations` mount (draft) still shows pills (existing tests stay green).
+- **Identity-based lookup**: selecting/editing the active section resolves the correct section by
+  `section.index` even when the section list is **filtered or reordered** (a regression test that
+  passes a list whose array order ≠ `section.index` and asserts the right section is edited) —
+  locks the contract so a future filter can't silently mis-target.
 - Spec tab: empty spec → "Start spec from skeleton" → `useInitSpec` → editor shows skeleton
   sections (outline lists the empty `preamble` item + 5 H2s, matching the draft's preamble
   rendering); edit a spec section → save; dirty/staleness behavior (reused harness).
@@ -303,5 +317,5 @@ A natural task order: (1) `artifacts.py` + consolidate the constant; (2) general
 (incl. entry normalization) + tests; (3) the shared `SectionOut` builder + `GET /spec`;
 (4) `POST /spec/sections/{i}`; (5) `SPEC_SKELETON` + `POST /spec` init; (6) regen schema;
 (7) add the `CodeMirrorEditor citations` prop (default `true`, draft stays green) + extract
-`<ArtifactSectionEditor>`; (8) Spec hooks + Spec tab (`citations={false}`) + empty-state CTA;
-(9) full verification.
+`<ArtifactSectionEditor>` with **identity-based (`section.index`) section lookup**; (8) Spec hooks
++ Spec tab (`citations={false}`) + empty-state CTA; (9) full verification.
