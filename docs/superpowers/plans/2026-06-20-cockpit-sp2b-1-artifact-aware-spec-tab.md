@@ -15,7 +15,7 @@
 **Conventions every task follows:**
 - Backend tests: `uv run pytest <path>::<name> -v`. The **full** suite is testcontainer-flaky (connection-refused under load) — re-run any failure in isolation before treating it as real.
 - Frontend tests: from `frontend/`, `pnpm vitest run <path>` (single) / `pnpm test` (full). Run `pnpm install` after pulling if deps changed.
-- Lint: `uv run ruff check <changed.py>` + `uv run ruff format <changed.py>` for Python; `pnpm lint` for TS.
+- Lint: `uv run ruff check <changed.py>` + `uv run ruff format <changed.py>` for Python. **There is no TS linter** (no eslint/prettier in `frontend/package.json`); the TS static gate is `pnpm exec tsc --noEmit`. Frontend scripts are exactly `dev`, `build`, `test`, `gen:api`.
 - Commit trailer on every commit: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - TDD: write the failing test, watch it fail, implement minimally, watch it pass, commit.
 
@@ -49,6 +49,7 @@
 - `frontend/src/api/editor.ts` — add `useSpec` / `useSaveSpecSection` / `useInitSpec`.
 - `frontend/src/api/editor.test.tsx` — add the spec-hook tests.
 - `frontend/src/routes/Cockpit.tsx` — become the `[Draft | Spec]` artifact-tab shell rendering `<DraftPanel>` / `<SpecPanel>` (draft behavior unchanged; default tab = Draft).
+- `frontend/src/styles/cockpit.css` — add `.cockpit-shell` (tab strip) + `.spec-empty` styles (token-based; already imported by `main.tsx`).
 - `frontend/src/api/schema.gen.ts` — regenerated for the three `/spec` routes (Task 6).
 
 The Spec is an in-cockpit artifact tab (cockpit design's "center View tab"), so `router.tsx` and `routes.json` (`spa_routes`) are **untouched**.
@@ -781,12 +782,89 @@ def test_save_spec_section_member_forbidden(monkeypatch, pg_url, pg_session_fact
         },
     )
     assert r.status_code == 403
+
+
+def test_save_spec_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Mirror tests/test_api_workspaces.py::test_save_section_stale_is_409 for the
+    # spec route — proves the spec mapping is StaleSectionError -> 409 conflict
+    # (a duplicated route could otherwise carry a spec-specific mapping typo).
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
+    c = _client(app, owner_id)
+    spec = c.get(f"/api/workspaces/{ws_id}/spec").json()
+    aims = spec["sections"][1]
+    # Concurrent commit: move HEAD AND change the section bytes under the captured base.
+    repo = workspace_repo_dir(str(tmp_path), ws_id)
+    (repo / "proposal-spec.md").write_text("## Aims\nSOMEONE ELSE EDITED.\n")
+    subprocess.run(["git", "commit", "-aqm", "concurrent"], cwd=repo, check=True, env=_git_env())
+    r = c.post(
+        f"/api/workspaces/{ws_id}/spec/sections/1",
+        json={
+            "content": "## Aims\nmy late edit.\n",
+            "base_commit_sha": spec["head"],
+            "base_section_sha": aims["sha"],
+        },
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "conflict"
+
+
+def test_save_spec_section_bad_index_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
+    c = _client(app, owner_id)
+    spec = c.get(f"/api/workspaces/{ws_id}/spec").json()
+    r = c.post(
+        f"/api/workspaces/{ws_id}/spec/sections/99",
+        json={
+            "content": "## X\nbody.\n",
+            "base_commit_sha": spec["head"],
+            "base_section_sha": "0" * 64,
+        },
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_save_spec_section_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # CommitMutexTimeout -> 429 + Retry-After + busy message (NOT a sanitized 500).
+    # Mirror tests/test_api_workspaces.py::test_save_section_busy_is_retriable_429.
+    from call_manager.proposal_assist.drafting.locking import (
+        BUSY_ERROR_MESSAGE,
+        CommitMutexTimeout,
+    )
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
+    c = _client(app, owner_id)
+    spec = c.get(f"/api/workspaces/{ws_id}/spec").json()
+
+    def _boom(*args, **kwargs):
+        raise CommitMutexTimeout("busy")
+
+    # Both routes call the same imported save_section; patch the symbol, hit /spec.
+    monkeypatch.setattr("call_manager.web.api.workspaces.save_section", _boom)
+    r = c.post(
+        f"/api/workspaces/{ws_id}/spec/sections/1",
+        json={
+            "content": "## Aims\nrewritten.\n",
+            "base_commit_sha": spec["head"],
+            "base_section_sha": spec["sections"][1]["sha"],
+        },
+    )
+    assert r.status_code == 429
+    assert r.json()["error"]["code"] == "too_many_requests"
+    assert r.json()["error"]["message"] == BUSY_ERROR_MESSAGE
+    assert r.headers.get("Retry-After") == "2"
 ```
 
 - [ ] **Step 2: Run; verify they fail**
 
 Run: `uv run pytest tests/test_api_spec.py -k spec_section -v`
-Expected: FAIL — 404/405 (route not registered).
+Expected: FAIL — 404/405 (route not registered). (`busy` fails differently — the monkeypatched `_boom` raises before any route exists, surfacing as 404/405 until Step 3.)
 
 - [ ] **Step 3: Add the save route**
 
@@ -1257,8 +1335,8 @@ Expected: PASS (both new tests + every existing editor test — the default path
 - [ ] **Step 5: Lint + commit**
 
 ```bash
-# from frontend/
-pnpm lint
+# from frontend/  (no eslint/prettier is configured — tsc is the static gate)
+pnpm exec tsc --noEmit
 git add frontend/src/editor/CodeMirrorEditor.tsx frontend/src/editor/CodeMirrorEditor.test.tsx
 git commit -m "feat(editor): CodeMirrorEditor citations prop gates pills + selection bridge
 
@@ -1698,8 +1776,8 @@ Expected: PASS — `Cockpit.test.tsx` is the load-bearing regression guard; the 
 - [ ] **Step 7: Lint + commit**
 
 ```bash
-# from frontend/
-pnpm lint
+# from frontend/  (no eslint/prettier is configured — tsc is the static gate)
+pnpm exec tsc --noEmit
 git add frontend/src/editor/ArtifactSectionEditor.tsx frontend/src/editor/ArtifactSectionEditor.test.tsx frontend/src/routes/Cockpit.tsx
 git commit -m "refactor(editor): extract ArtifactSectionEditor with identity-based section lookup
 
@@ -1749,14 +1827,45 @@ it("useInitSpec invalidates ['spec', id] on success", async () => {
   await result.current.mutateAsync();
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
 });
+
+it("useSaveSpecSection posts content to the spec route + invalidates ['spec', id]", async () => {
+  const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: {
+      commit_sha: "b".repeat(40),
+      head: "b".repeat(40),
+      section_sha: "s1",
+      issues: [],
+      job_enqueued: false,
+      changed: true,
+    },
+    error: undefined,
+  } as never);
+  const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useSaveSpecSection("ws-1"), { wrapper: wrapper(qc) });
+  await result.current.mutateAsync({
+    index: 1,
+    content: "## Aims\nx\n",
+    base_commit_sha: "a".repeat(40),
+    base_section_sha: "s",
+  });
+  expect(post).toHaveBeenCalledWith(
+    "/api/workspaces/{workspace_id}/spec/sections/{index}",
+    expect.objectContaining({
+      params: { path: { workspace_id: "ws-1", index: 1 } },
+      body: { content: "## Aims\nx\n", base_commit_sha: "a".repeat(40), base_section_sha: "s" },
+    }),
+  );
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
+});
 ```
 
-Import the new hooks at the top of the test file: `import { useDraft, useSaveSection, useSpec, useInitSpec } from "./editor";`
+Import the new hooks at the top of the test file: `import { useDraft, useSaveSection, useSpec, useSaveSpecSection, useInitSpec } from "./editor";`
 
 - [ ] **Step 2: Run; verify fail**
 
 Run (from `frontend/`): `pnpm vitest run src/api/editor.test.tsx`
-Expected: FAIL — `useSpec`/`useInitSpec` are not exported.
+Expected: FAIL — `useSpec`/`useSaveSpecSection`/`useInitSpec` are not exported.
 
 - [ ] **Step 3: Add the hooks**
 
@@ -2005,17 +2114,56 @@ export function Cockpit() {
 }
 ```
 
-- [ ] **Step 9: Run; verify pass (incl. the draft regression guard)**
+- [ ] **Step 9: Style the artifact tab strip + Spec empty state**
+
+The plan introduces two new class names (`.cockpit-shell`, `.spec-empty`) that the existing `cockpit.css` does not cover. Append to `frontend/src/editor/`… no — to **`frontend/src/styles/cockpit.css`** (the plain-global, token-based stylesheet already imported by `frontend/src/main.tsx:6`; tokens like `--cm-*` are defined in `styles/tokens.css`). Add at the end of the file:
+
+```css
+/* SP2b-1: the artifact-level [Draft | Spec] tab strip + the Spec empty state. */
+.cockpit-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.cockpit-shell > [role="tablist"] {
+  display: flex;
+  gap: 0.25rem;
+}
+.cockpit-shell > [role="tablist"] button[role="tab"] {
+  border: 1px solid var(--cm-border);
+  background: var(--cm-surface-sunken);
+  border-radius: 6px 6px 0 0;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+  color: var(--cm-ink);
+}
+.cockpit-shell > [role="tablist"] button[role="tab"][aria-selected="true"] {
+  background: var(--cm-surface);
+  color: var(--cm-ink-strong);
+  font-weight: 600;
+}
+.spec-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 1rem;
+}
+```
+
+(Tokens `--cm-border`, `--cm-surface`, `--cm-surface-sunken`, `--cm-ink`, `--cm-ink-strong` are all already used elsewhere in `cockpit.css`, so they resolve. No new import is needed — `cockpit.css` is loaded globally.)
+
+- [ ] **Step 10: Run; verify pass (incl. the draft regression guard)**
 
 Run (from `frontend/`): `pnpm vitest run src/cockpit/SpecPanel.test.tsx src/api/editor.test.tsx src/routes/Cockpit.test.tsx`
 Expected: PASS. `Cockpit.test.tsx` stays green: the default tab is Draft, so `<DraftPanel>` renders the same UI; the new `Draft`/`Spec` tabs don't match the anchored `/^section$/i` or `/full draft/i` queries, and no test does an unnamed `getByRole("tab")` / `getByRole("tablist")`. (If a test asserted the literal root element type, point it at `main.cockpit`, which `DraftPanel` still renders — no such assertion is expected.)
 
-- [ ] **Step 10: Lint + commit**
+- [ ] **Step 11: Lint + commit**
 
 ```bash
-# from frontend/
-pnpm lint
-git add frontend/src/api/editor.ts frontend/src/api/editor.test.tsx frontend/src/cockpit/DraftPanel.tsx frontend/src/cockpit/SpecPanel.tsx frontend/src/cockpit/SpecPanel.test.tsx frontend/src/routes/Cockpit.tsx
+# from frontend/  (no eslint/prettier is configured — tsc is the static gate)
+pnpm exec tsc --noEmit
+git add frontend/src/api/editor.ts frontend/src/api/editor.test.tsx frontend/src/cockpit/DraftPanel.tsx frontend/src/cockpit/SpecPanel.tsx frontend/src/cockpit/SpecPanel.test.tsx frontend/src/routes/Cockpit.tsx frontend/src/styles/cockpit.css
 git commit -m "feat(spec): in-cockpit Spec tab + DraftPanel/SpecPanel + skeleton CTA
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -2052,8 +2200,7 @@ From `frontend/`:
 
 ```bash
 pnpm test
-pnpm lint
-pnpm exec tsc --noEmit
+pnpm exec tsc --noEmit   # the only static gate — no eslint/prettier is configured
 ```
 
 Expected: all PASS — especially `Cockpit.test.tsx` (draft regression guard), `CodeMirrorEditor.test.tsx`, `ArtifactSectionEditor.test.tsx`, `SpecPanel.test.tsx`, `editor.test.tsx`.
