@@ -58,6 +58,11 @@ class SectionStructureError(RuntimeError):
     Removing/merging/reordering sections is chat-only in this slice."""
 
 
+class SpecLockedError(RuntimeError):
+    """The spec is locked (workspace.spec_locked_at set); a spec write is
+    refused until it is unlocked. Web routes map this to 409."""
+
+
 @dataclass
 class SaveResult:
     commit_sha: str
@@ -161,7 +166,8 @@ def save_section(
     the commit mutex is released by the caller's COMMIT/ROLLBACK. Raises
     CommitMutexTimeout, StaleSectionError, SectionStructureError
     (pre-commit — no git side-effect), IndexError (section_index out of
-    range), GitCommitError.
+    range), GitCommitError, SpecLockedError (pre-commit — the spec
+    artifact is locked).
 
     SectionStructureError is raised when the first line of ``new_text`` is
     not an H2 heading for a non-preamble section, or IS an H2 heading for
@@ -173,6 +179,14 @@ def save_section(
     acquire_commit_mutex(session, workspace.id)
 
     artifact = Artifact(artifact)  # normalize a stringly-typed caller
+
+    # Spec-lock guard: a lock may have committed while we waited on the mutex,
+    # so re-read the row under the lock before deciding. Gated on SPEC so the
+    # draft path is unchanged (no extra query, no behavior change).
+    if artifact is Artifact.SPEC:
+        session.refresh(workspace, ["spec_locked_at"])
+        if workspace.spec_locked_at is not None:
+            raise SpecLockedError(str(workspace.id))
 
     # NOTE: save_section's workspace-wide turn-freeze hard guard was removed. In
     # SP2a the drafting agent's direct-commit tools are STILL LIVE (mechanism B's

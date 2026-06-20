@@ -4,6 +4,7 @@ Uses the production repo layout: <workspaces_dir>/<workspace_id>/repo.
 """
 
 import subprocess
+from datetime import UTC, datetime
 
 import pytest
 
@@ -15,15 +16,18 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
+from call_manager.proposal_assist.artifacts import Artifact
 from call_manager.proposal_assist.citations.gitio import _git_env, current_head
 from call_manager.proposal_assist.editing.save import (
     SaveResult,
     SectionStructureError,
+    SpecLockedError,
     StaleSectionError,
     save_section,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 DOC = "# T\nintro\n## Background\nold body [@x9]\n## Aims\naims\n"
 
@@ -300,3 +304,58 @@ def test_extra_heading_split_allowed(pg_session_factory, tmp_path):
         assert result.changed is True and result.job_enqueued is True
         job = s.query(ClaimAnalysisJob).one()
         assert job.section_heading == "Background"  # first chunk enqueued
+
+
+def _add_spec(repo, doc):
+    """Write + commit proposal-spec.md into the already-initialized repo
+    (mirrors tests/test_api_spec.py::_add_spec)."""
+    (repo / "proposal-spec.md").write_text(doc)
+    env = _git_env()
+    subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "seed spec"], cwd=repo, check=True, env=env)
+
+
+def test_save_section_blocks_locked_spec(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        ws.spec_locked_at = datetime.now(UTC)
+        ws.spec_locked_by = owner.id
+        s.commit()
+        repo = _init_repo(tmp_path, ws.id)
+        _add_spec(repo, "## Aims\nbody.\n")
+        with pytest.raises(SpecLockedError):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=owner.id,
+                section_index=1,
+                new_text="## Aims\nedited.\n",
+                base_commit_sha="0" * 40,
+                base_section_sha="0" * 64,
+                workspaces_dir=tmp_path,
+                artifact=Artifact.SPEC,
+            )
+
+
+def test_save_section_allows_draft_while_spec_locked(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        ws.spec_locked_at = datetime.now(UTC)
+        ws.spec_locked_by = owner.id
+        s.commit()
+        repo = _init_repo(tmp_path, ws.id, doc="preamble\n\n## Methods\nm.\n")
+        draft = save_section(
+            session=s,
+            workspace=ws,
+            user_id=owner.id,
+            section_index=1,
+            new_text="## Methods\nm2.\n",
+            base_commit_sha=current_head(repo),
+            base_section_sha=_section_sha(repo, 1),
+            workspaces_dir=tmp_path,
+            artifact=Artifact.DRAFT,
+        )
+        s.commit()
+        assert draft.changed is True  # draft is unaffected by a spec lock
