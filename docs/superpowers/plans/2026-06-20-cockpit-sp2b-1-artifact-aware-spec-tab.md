@@ -167,10 +167,10 @@ In `src/call_manager/proposal_assist/editing/save.py`, replace the literal defin
 
 ```python
 # was: PROPOSAL_FILENAME = "proposal.md"
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME  # noqa: F401  (re-export)
 ```
 
-Place that import in the existing import block (near line 29, after the `paths` import), and DELETE the `PROPOSAL_FILENAME = "proposal.md"` line. Keep `CITATIONS_FILENAME = "citations.json"` (not artifact-related). Importers of `save.PROPOSAL_FILENAME` (e.g. `web/api/workspaces.py:33`) keep working — the name is still bound in `save`'s namespace.
+Place that import in the existing import block (near line 29, after the `paths` import), and DELETE the `PROPOSAL_FILENAME = "proposal.md"` line. Keep `CITATIONS_FILENAME = "citations.json"` (not artifact-related). **The `# noqa: F401` is load-bearing:** in Task 1 the name is still used locally (save.py:172, :233), but Task 2 replaces those with `filename_for(artifact)`, leaving this a *pure re-export*. Four modules import `PROPOSAL_FILENAME` from `editing.save` (`citations/human_cite.py:44`, `web/annotations.py:47`, `tests/test_api_workspaces.py:21`, `tests/proposal_assist/citations/test_human_cite.py:19`), so the export must survive — without the noqa, ruff (`F` is selected) flags F401 and a worker "fixing" it would break all four. (`RUF100`/unused-noqa is not selected, so the noqa is harmless while the name is still used in Task 1.)
 
 In `src/call_manager/proposal_assist/tools/proposal.py`, replace line 23:
 
@@ -215,7 +215,7 @@ Create `tests/proposal_assist/test_save_section_artifact.py`:
 import subprocess
 from pathlib import Path
 
-from call_manager.db.models import ArtifactVersion, TurnJob, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, ClaimAnalysisJob, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import Artifact
 from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.editing.save import save_section
@@ -242,7 +242,7 @@ def test_spec_save_commits_spec_file_and_skips_tier1_tier2(pg_session_factory, t
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
-        # A queued turn would normally let Tier-2 enqueue; assert spec never enqueues.
+        # The draft path would enqueue a ClaimAnalysisJob (Tier-2); the spec path must enqueue none.
         repo = Path(tmp_path) / str(ws.id) / "repo"
         head = _init_spec_repo(repo, SPEC_DOC)
         sec_sha = split_sections(SPEC_DOC)[1].sha  # the "## Aims" section
@@ -267,7 +267,9 @@ def test_spec_save_commits_spec_file_and_skips_tier1_tier2(pg_session_factory, t
         assert result.issues == []
         assert result.job_enqueued is False
         assert result.changed is True
-        assert s.query(TurnJob).filter(TurnJob.workspace_id == ws.id).count() == 0
+        assert (
+            s.query(ClaimAnalysisJob).filter(ClaimAnalysisJob.workspace_id == ws.id).count() == 0
+        )
         # Provenance is tagged spec.
         av = s.query(ArtifactVersion).filter(ArtifactVersion.workspace_id == ws.id).one()
         assert av.message == "user spec edit: Aims"
@@ -330,7 +332,85 @@ def test_raw_draft_string_still_runs_draft_pipeline(pg_session_factory, tmp_path
             artifact="draft",  # raw string, not the enum member
         )
         assert any(i["type"] == "bare_marker" for i in result.issues)
+
+
+def test_spec_save_survives_cross_artifact_head_move(pg_session_factory, tmp_path):
+    # Spec §7/§10: a DRAFT-only commit advances repo HEAD but does NOT change the
+    # spec section's bytes, so a spec save with the pre-draft base_commit_sha + the
+    # still-current base_section_sha succeeds (shared predicate: head != base_commit
+    # AND live.sha != base_section -> stale; here the section sha is unchanged).
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        repo = Path(tmp_path) / str(ws.id) / "repo"
+        head0 = _init_spec_repo(repo, SPEC_DOC)
+        sec_sha = split_sections(SPEC_DOC)[1].sha
+        # Draft-only git commit -> HEAD moves, spec section bytes unchanged.
+        env = _git_env()
+        (repo / "proposal.md").write_text("draft body\n")
+        subprocess.run(["git", "add", "proposal.md"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "draft move"], cwd=repo, check=True, env=env)
+
+        result = save_section(
+            session=s,
+            workspace=ws,
+            user_id=ws.owner_id,
+            section_index=1,
+            new_text="## Aims\nrevised under a moved HEAD.\n",
+            base_commit_sha=head0,  # PRE-draft HEAD (now != current HEAD)
+            base_section_sha=sec_sha,  # spec section UNCHANGED -> not stale
+            workspaces_dir=str(tmp_path),
+            artifact=Artifact.SPEC,
+        )
+        assert result.changed is True
+
+
+def test_spec_save_stale_section_raises(pg_session_factory, tmp_path):
+    import pytest
+
+    from call_manager.proposal_assist.editing.save import StaleSectionError
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        repo = Path(tmp_path) / str(ws.id) / "repo"
+        head0 = _init_spec_repo(repo, SPEC_DOC)
+        sec_sha = split_sections(SPEC_DOC)[1].sha
+        # First spec save changes the section bytes (HEAD moves, section sha changes).
+        save_section(
+            session=s,
+            workspace=ws,
+            user_id=ws.owner_id,
+            section_index=1,
+            new_text="## Aims\nfirst change.\n",
+            base_commit_sha=head0,
+            base_section_sha=sec_sha,
+            workspaces_dir=str(tmp_path),
+            artifact=Artifact.SPEC,
+        )
+        s.flush()
+        # A second save with the ORIGINAL (now stale) base hits
+        # head != base_commit AND live.sha != base_section -> StaleSectionError.
+        with pytest.raises(StaleSectionError):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=ws.owner_id,
+                section_index=1,
+                new_text="## Aims\nconflicting change.\n",
+                base_commit_sha=head0,
+                base_section_sha=sec_sha,
+                workspaces_dir=str(tmp_path),
+                artifact=Artifact.SPEC,
+            )
 ```
+
+> **§6 reconcile-safety is structural, not separately tested.** Spec §6/§10 note that the
+> analysis/reconcile tick must ignore `proposal-spec.md`. That is guaranteed by construction:
+> `analysis/reconcile.py:46` and `analysis/invalidation.py:46` read `proposal.md` by hardcoded
+> literal and never touch `proposal-spec.md`. The `assert ... ClaimAnalysisJob ... == 0` above
+> proves a *spec save* enqueues no analysis work; it is **not** a stand-in for the reconcile
+> claim, which needs no test because no reconcile code path reads the spec file.
 
 - [ ] **Step 2: Run; verify they fail**
 
@@ -896,24 +976,20 @@ Expected: FAIL — 404/405 (init route absent).
 
 - [ ] **Step 3: Add the init route + imports**
 
-In `src/call_manager/web/api/workspaces.py`, extend imports:
+In `src/call_manager/web/api/workspaces.py`, **add only the NEW names to the EXISTING import lines** — do NOT paste fresh `from … import` lines (a duplicate would trip ruff F811). Concretely, edit four existing import lines so they read:
 
 ```python
-from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
+# db.models line (currently: `Reference, ReferenceChunk, User`) — add ArtifactVersion, WorkspaceEvent:
 from call_manager.db.models import ArtifactVersion, Reference, ReferenceChunk, User, WorkspaceEvent
-from call_manager.proposal_assist.citations.gitio import (
-    GitCommitError,
-    current_head,
-    write_and_commit_files,
-)
-from call_manager.proposal_assist.drafting.locking import (
-    BUSY_ERROR_MESSAGE,
-    CommitMutexTimeout,
-    acquire_commit_mutex,
-)
+# gitio line (currently: `GitCommitError, current_head`) — add write_and_commit_files:
+from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head, write_and_commit_files
+# locking line (currently: `BUSY_ERROR_MESSAGE, CommitMutexTimeout`) — add acquire_commit_mutex:
+from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout, acquire_commit_mutex
+# artifacts line (Task 4 made it `SPEC_FILENAME, Artifact`) — add SPEC_SKELETON:
+from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 ```
 
-(Merge these into the existing import lines — `ArtifactVersion`/`WorkspaceEvent` join the `db.models` import; `write_and_commit_files` joins the `gitio` import; `acquire_commit_mutex` joins the `locking` import.)
+(`current_head`, `GitCommitError`, `BUSY_ERROR_MESSAGE`, `CommitMutexTimeout` are already imported from Tasks 3-4 / the shipped file — only the bolded new names are additions.)
 
 Add the route after `post_save_spec_section`:
 
@@ -1078,7 +1154,7 @@ it("citations default (true) still renders the citation pill", async () => {
 });
 ```
 
-(If the existing suite imports `render`/`waitFor` differently, reuse that file's imports rather than re-adding them.)
+The existing test file imports only `import { render, cleanup } from "@testing-library/react";` (line 1) — **add `waitFor`** so it becomes `import { render, cleanup, waitFor } from "@testing-library/react";`. Both new tests use `render`'s returned `container` and `waitFor`.
 
 - [ ] **Step 2: Run; verify the first test fails**
 
@@ -1087,7 +1163,7 @@ Expected: the `citations={false}` test FAILS — a `.cm-citation-pill` is render
 
 - [ ] **Step 3: Add the prop and gate the extensions + bridge**
 
-In `frontend/src/editor/CodeMirrorEditor.tsx`, extend the props type (after line 43):
+In `frontend/src/editor/CodeMirrorEditor.tsx`, **replace the `CodeMirrorEditorProps` type (lines 34-44) in full** with (adds the `citations` field):
 
 ```tsx
 export type CodeMirrorEditorProps = {
@@ -1121,7 +1197,7 @@ export function CodeMirrorEditor({
 }: CodeMirrorEditorProps) {
 ```
 
-Build the extensions array conditionally. Replace the inline `extensions: [ … ]` (lines 119-151) so `citationPills` is only included when `citations`, and the selection-bridge block is gated:
+Build the extensions array conditionally. **Replace the ENTIRE `const view = new EditorView({ … })` statement (lines 116-154 — from `const view = new EditorView({` through its closing `});`)** with the block below. The provided block hoists the extensions into a `const extensions` array (so `citationPills` is included only when `citations`, and the selection-bridge block is gated) and then re-creates `const view`. Do NOT replace only the inner `extensions: [ … ]` array — that would leave a dangling/duplicate `new EditorView(...)` and break syntax. The `viewRef.current = view;`, the test-only `__cmView` exposure, the cleanup `return () => {...}`, and the separate value/readOnly effects below all stay UNCHANGED:
 
 ```tsx
     const extensions = [
@@ -1206,7 +1282,7 @@ Create `frontend/src/editor/ArtifactSectionEditor.test.tsx`:
 
 ```tsx
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ArtifactSectionEditor } from "./ArtifactSectionEditor";
@@ -1216,7 +1292,7 @@ afterEach(() => vi.restoreAllMocks());
 function renderEditor(sections: { index: number; heading: string; text: string; sha: string }[]) {
   const qc = new QueryClient();
   const save = { mutateAsync: vi.fn(), isPending: false };
-  render(
+  const { container } = render(
     <QueryClientProvider client={qc}>
       <ArtifactSectionEditor
         workspaceId="ws-1"
@@ -1230,26 +1306,30 @@ function renderEditor(sections: { index: number; heading: string; text: string; 
       />
     </QueryClientProvider>,
   );
-  return { save };
+  return { save, container };
 }
 
-it("resolves the active section by section.index, not array position", () => {
+it("resolves the active section by section.index, not array position", async () => {
   // Array order is REVERSED relative to section.index. Positional lookup would
   // open the wrong section; identity lookup opens the right one.
   const sections = [
     { index: 1, heading: "Approach", text: "## Approach\nB.\n", sha: "s1" },
     { index: 0, heading: "", text: "preamble.\n", sha: "s0" },
   ];
-  renderEditor(sections);
+  const { container } = renderEditor(sections);
   // Outline lists by section.index; click the "Approach" (index 1) item.
   fireEvent.click(screen.getByRole("button", { name: /Approach/ }));
-  // The editor shows section 1's text, even though it is array element 0.
-  expect(screen.getByText(/## Approach/)).toBeTruthy();
+  // The editor's .cm-content shows section 1's text, though it is array element 0.
+  // Assert via .cm-content textContent (the codebase idiom): the markdown() extension
+  // splits a heading into sibling spans, so getByText(/## Approach/) would not match.
+  await waitFor(() =>
+    expect(container.querySelector(".cm-content")?.textContent).toContain("## Approach"),
+  );
 });
 
 it("citations={false} renders no Cite control", () => {
   renderEditor([{ index: 0, heading: "", text: "x\n", sha: "s0" }]);
-  expect(screen.queryByText(/Cite selection/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /cite selection/i })).toBeNull();
 });
 ```
 
