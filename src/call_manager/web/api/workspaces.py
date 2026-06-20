@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Reference, ReferenceChunk, User
+from call_manager.proposal_assist.artifacts import SPEC_FILENAME
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.citations.human_cite import (
@@ -84,6 +85,12 @@ class DraftOut(BaseModel):
     sections: list[SectionOut]
     # ev_id -> citation display fields, computed over the WHOLE proposal.
     citations: dict[str, CitationOut]
+
+
+class SpecOut(BaseModel):
+    head: str
+    can_edit: bool
+    sections: list[SectionOut]  # no citations: the spec is citation-free
 
 
 class SaveSectionIn(BaseModel):
@@ -175,6 +182,15 @@ def _citation_map(session, settings, workspace_id: uuid.UUID, raw: str) -> dict[
     return out
 
 
+def _sections_out(raw: str) -> list[SectionOut]:
+    """Split a raw artifact document into the wire SectionOut list. Shared by
+    get_draft and get_spec so both produce identical section semantics."""
+    return [
+        SectionOut(index=s.index, heading=s.heading, text=s.text, sha=s.sha)
+        for s in split_sections(raw)
+    ]
+
+
 @router.get("/workspaces/{workspace_id}/draft", response_model=DraftOut)
 def get_draft(
     workspace_id: uuid.UUID,
@@ -196,12 +212,33 @@ def get_draft(
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
         raw = proposal.read_text()
-        sections = [
-            SectionOut(index=s.index, heading=s.heading, text=s.text, sha=s.sha)
-            for s in split_sections(raw)
-        ]
+        sections = _sections_out(raw)
         citations = _citation_map(session, settings, workspace_id, raw)
     return DraftOut(head=head, can_edit=can_edit, sections=sections, citations=citations)
+
+
+@router.get("/workspaces/{workspace_id}/spec", response_model=SpecOut)
+def get_spec(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SpecOut:
+    """Read the Spec artifact: outline + section bytes, no citations. Member-gated."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        can_edit = ws.owner_id == user.id
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        spec = repo_dir / SPEC_FILENAME
+        if not spec.exists():
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        try:
+            head = current_head(repo_dir)
+        except GitCommitError as e:
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+        sections = _sections_out(spec.read_text())
+    return SpecOut(head=head, can_edit=can_edit, sections=sections)
 
 
 @router.get(
@@ -265,9 +302,7 @@ def get_citation_source(
         text_path = storage.text_path_for(workspace_id=workspace_id, reference_id=ref.id)
         text_indexed = ref.text_status == "done"
         full_text = (
-            text_path.read_text(encoding="utf-8")
-            if text_indexed and text_path.exists()
-            else None
+            text_path.read_text(encoding="utf-8") if text_indexed and text_path.exists() else None
         )
         # Position among this reference's live cites (document order) for "i of N".
         proposal_path = repo_dir / PROPOSAL_FILENAME
@@ -476,9 +511,7 @@ class ReferenceListItemOut(BaseModel):
     text_status: str
 
 
-@router.get(
-    "/workspaces/{workspace_id}/references", response_model=list[ReferenceListItemOut]
-)
+@router.get("/workspaces/{workspace_id}/references", response_model=list[ReferenceListItemOut])
 def list_references(
     workspace_id: uuid.UUID,
     request: Request,
