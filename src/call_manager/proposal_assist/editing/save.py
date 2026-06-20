@@ -4,7 +4,9 @@ Order inside the per-workspace commit mutex (spec §1):
 stale-form check → structure guard → no-change
 short-circuit → git commit → ArtifactVersion('user') →
 WorkspaceEvent('user_edit') → Tier-1 deterministic validation → Tier-2
-job enqueue. The mutex is transaction-scoped; the caller's session.commit()
+job enqueue. The last two steps run for the DRAFT artifact only; the spec
+(proposal-spec.md) is citation-free and skips them. The mutex is
+transaction-scoped; the caller's session.commit()
 releases it. A DB failure AFTER the git commit is recovered by
 reconcile_workspace_git_drift + the analysis reconcile tick (spec §6).
 CommitMutexTimeout propagates to the caller (web maps it to 503).
@@ -20,7 +22,11 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import ArtifactVersion, TurnJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.analysis.queue import enqueue_section_job
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME  # noqa: F401  (re-export)
+from call_manager.proposal_assist.artifacts import (
+    PROPOSAL_FILENAME,  # noqa: F401  (re-export)
+    Artifact,
+    filename_for,
+)
 from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import empty_ledger, load_ledger
@@ -140,8 +146,16 @@ def save_section(
     base_commit_sha: str,
     base_section_sha: str,
     workspaces_dir: Path | str,
+    artifact: Artifact = Artifact.DRAFT,
 ) -> SaveResult:
-    """Save one user-edited section of the workspace's proposal.md.
+    """Save one user-edited section of the workspace's draft or spec artifact.
+
+    ``artifact`` selects the file (``proposal.md`` for the draft,
+    ``proposal-spec.md`` for the spec). The mutex, staleness check, structure
+    guard, git commit, and provenance rows are shared; the Tier-1 citation
+    validation and Tier-2 claim-analysis enqueue run for the DRAFT only (the
+    spec is citation-free), so a spec save always returns ``issues == []`` and
+    ``job_enqueued is False``.
 
     Caller owns the transaction: rows are added but NOT committed here, and
     the commit mutex is released by the caller's COMMIT/ROLLBACK. Raises
@@ -158,6 +172,8 @@ def save_section(
     # 1. Serialize against every other git mutation of this workspace.
     acquire_commit_mutex(session, workspace.id)
 
+    artifact = Artifact(artifact)  # normalize a stringly-typed caller
+
     # NOTE: save_section's workspace-wide turn-freeze hard guard was removed. In
     # SP2a the drafting agent's direct-commit tools are STILL LIVE (mechanism B's
     # allowlist swap lands in a later plan), so anti-clobber does NOT yet rest on
@@ -169,7 +185,8 @@ def save_section(
     # 3. Read the live document under the mutex.
     repo_dir = workspace_repo_dir(workspaces_dir, workspace.id)
     head = current_head(repo_dir)
-    doc = (repo_dir / PROPOSAL_FILENAME).read_text()
+    fname = filename_for(artifact)
+    doc = (repo_dir / fname).read_text()
     sections = split_sections(doc)
     if not 0 <= section_index < len(sections):
         raise IndexError(
@@ -212,8 +229,10 @@ def save_section(
     # 6. No-change short-circuit: write_and_commit_files would no-op anyway;
     #    skip provenance rows + enqueue but still report Tier-1 issues.
     if new_text == live.text:
-        issues = _tier1_issues(
-            doc=doc, repo_dir=repo_dir, session=session, workspace_id=workspace.id
+        issues = (
+            _tier1_issues(doc=doc, repo_dir=repo_dir, session=session, workspace_id=workspace.id)
+            if artifact is Artifact.DRAFT
+            else []
         )
         return SaveResult(
             commit_sha=head,
@@ -230,8 +249,8 @@ def save_section(
     heading = live.heading or "preamble"
     commit_sha = write_and_commit_files(
         repo_dir,
-        {PROPOSAL_FILENAME: new_doc},
-        f"user edit: {heading} (user:{user_id})",
+        {fname: new_doc},
+        f"user {artifact} edit: {heading} (user:{user_id})",
     )
 
     # 8. Provenance rows (committed by the caller, atomically with the mutex
@@ -241,7 +260,7 @@ def save_section(
             workspace_id=workspace.id,
             commit_sha=commit_sha,
             created_by="user",
-            message=f"user edit: {heading}",
+            message=f"user {artifact} edit: {heading}",
         )
     )
     session.add(
@@ -254,25 +273,30 @@ def save_section(
                 "heading": heading,
                 "commit_sha": commit_sha,
                 "byte_delta": len(new_doc.encode()) - len(doc.encode()),
+                "artifact": str(artifact),
             },
         )
     )
 
-    # 9. Tier-1 deterministic validation of the NEW document.
-    issues = _tier1_issues(
-        doc=new_doc, repo_dir=repo_dir, session=session, workspace_id=workspace.id
-    )
-
-    # 10. Tier-2: enqueue claim analysis for the saved section's new content.
     saved = split_sections(new_doc)[section_index]
-    job_enqueued = enqueue_section_job(
-        session,
-        workspace_id=workspace.id,
-        section_index=saved.index,
-        section_heading=saved.heading,
-        section_sha=saved.sha,
-        commit_sha=commit_sha,
-    )
+    if artifact is Artifact.DRAFT:
+        # 9. Tier-1 deterministic validation of the NEW document.
+        issues = _tier1_issues(
+            doc=new_doc, repo_dir=repo_dir, session=session, workspace_id=workspace.id
+        )
+        # 10. Tier-2: enqueue claim analysis for the saved section's new content.
+        job_enqueued = enqueue_section_job(
+            session,
+            workspace_id=workspace.id,
+            section_index=saved.index,
+            section_heading=saved.heading,
+            section_sha=saved.sha,
+            commit_sha=commit_sha,
+        )
+    else:
+        # Spec: no citation validation, no claim analysis (spec §3).
+        issues = []
+        job_enqueued = False
     return SaveResult(
         commit_sha=commit_sha,
         head=commit_sha,
