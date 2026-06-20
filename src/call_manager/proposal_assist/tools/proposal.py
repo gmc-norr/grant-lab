@@ -14,13 +14,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 logger = logging.getLogger(__name__)
-
-PROPOSAL_FILENAME = "proposal.md"
 
 # Spec 2026-06-10 §1 — shared error string for the pre-read guard.
 _NOT_READ_ERROR = "you haven't read the proposal yet — call read_proposal first"

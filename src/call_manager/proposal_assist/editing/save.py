@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import ArtifactVersion, TurnJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.analysis.queue import enqueue_section_job
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME  # noqa: F401  (re-export)
 from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import empty_ledger, load_ledger
@@ -30,7 +31,6 @@ from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
 
-PROPOSAL_FILENAME = "proposal.md"
 CITATIONS_FILENAME = "citations.json"
 
 # User-facing message for the turn-in-flight 409 (shared with insert.py and
