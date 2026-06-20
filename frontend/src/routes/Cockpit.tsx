@@ -1,32 +1,36 @@
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 
-import { useDraft, useSaveSection } from "../api/editor";
-import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
+import { DraftPanel } from "../cockpit/DraftPanel";
+import { SpecPanel } from "../cockpit/SpecPanel";
 
 export function Cockpit() {
   const { id = "" } = useParams();
-  const draft = useDraft(id);
-  const save = useSaveSection(id);
-
-  if (draft.isLoading) return <main aria-busy="true">Loading cockpit…</main>;
-  if (draft.isError || !draft.data) {
-    return (
-      <main role="alert">
-        <h1>Could not load this workspace</h1>
-      </main>
-    );
-  }
-  const { head, can_edit, sections } = draft.data;
+  // Artifact-level tab: the Spec is a "center View tab" of the cockpit, not a
+  // separate URL. Default to Draft so the existing draft UX (and Cockpit.test.tsx)
+  // is unchanged on open.
+  const [artifact, setArtifact] = useState<"draft" | "spec">("draft");
   return (
-    <ArtifactSectionEditor
-      workspaceId={id}
-      queryKey={["draft", id]}
-      head={head}
-      canEdit={can_edit}
-      sections={sections}
-      save={save}
-      refetch={draft.refetch}
-      citations
-    />
+    <div className="cockpit-shell">
+      <div role="tablist" aria-label="Artifact">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={artifact === "draft"}
+          onClick={() => setArtifact("draft")}
+        >
+          Draft
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={artifact === "spec"}
+          onClick={() => setArtifact("spec")}
+        >
+          Spec
+        </button>
+      </div>
+      {artifact === "draft" ? <DraftPanel id={id} /> : <SpecPanel id={id} />}
+    </div>
   );
 }

@@ -154,3 +154,34 @@
   border-radius: 4px;
   padding: 0.4rem;
 }
+
+/* SP2b-1: the artifact-level [Draft | Spec] tab strip + the Spec empty state. */
+.cockpit-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.cockpit-shell > [role="tablist"] {
+  display: flex;
+  gap: 0.25rem;
+}
+.cockpit-shell > [role="tablist"] button[role="tab"] {
+  border: 1px solid var(--cm-border);
+  background: var(--cm-surface-sunken);
+  border-radius: 6px 6px 0 0;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+  color: var(--cm-ink);
+}
+.cockpit-shell > [role="tablist"] button[role="tab"][aria-selected="true"] {
+  background: var(--cm-surface);
+  color: var(--cm-ink-strong);
+  font-weight: 600;
+}
+.spec-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 1rem;
+}
