@@ -255,3 +255,29 @@ def test_init_spec_member_forbidden(monkeypatch, pg_url, pg_session_factory, tmp
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "")
     assert _client(app, member_id).post(f"/api/workspaces/{ws_id}/spec").status_code == 403
+
+
+def test_get_spec_exposes_lock_fields(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nx\n")
+    c = _client(app, owner_id)
+    before = c.get(f"/api/workspaces/{ws_id}/spec").json()
+    assert before["locked"] is False
+    assert before["can_edit"] is True and before["can_manage_lock"] is True
+    c.post(f"/api/workspaces/{ws_id}/spec/lock")
+    after = c.get(f"/api/workspaces/{ws_id}/spec").json()
+    assert after["locked"] is True
+    assert after["can_edit"] is False  # locked -> read-only even for the owner
+    assert after["can_manage_lock"] is True  # owner can still unlock
+    assert after["locked_by"] == "owner@ki.se"
+
+
+def test_get_spec_member_cannot_manage_lock(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nx\n")
+    _client(app, owner_id).post(f"/api/workspaces/{ws_id}/spec/lock")
+    body = _client(app, member_id).get(f"/api/workspaces/{ws_id}/spec").json()
+    assert body["can_manage_lock"] is False
+    assert body["can_edit"] is False and body["locked"] is True

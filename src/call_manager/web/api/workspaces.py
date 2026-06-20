@@ -108,6 +108,10 @@ class SpecOut(BaseModel):
     head: str
     can_edit: bool
     sections: list[SectionOut]  # no citations: the spec is citation-free
+    locked: bool
+    locked_at: datetime | None = None
+    locked_by: str | None = None
+    can_manage_lock: bool
 
 
 class SpecLockOut(BaseModel):
@@ -260,7 +264,9 @@ def get_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
-        can_edit = ws.owner_id == user.id
+        is_owner = ws.owner_id == user.id
+        locked = ws.spec_locked_at is not None
+        can_edit = is_owner and not locked
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         spec = repo_dir / SPEC_FILENAME
         if not spec.exists():
@@ -270,7 +276,19 @@ def get_spec(
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
         sections = _sections_out(spec.read_text())
-    return SpecOut(head=head, can_edit=can_edit, sections=sections)
+        # Resolve the lock display fields WHILE the session is open: _locker_email
+        # queries it, so this must run before the `with` block closes.
+        locked_by = _locker_email(session, ws.spec_locked_by)
+        locked_at = ws.spec_locked_at
+    return SpecOut(
+        head=head,
+        can_edit=can_edit,
+        sections=sections,
+        locked=locked,
+        locked_at=locked_at,
+        locked_by=locked_by,
+        can_manage_lock=is_owner,
+    )
 
 
 @router.post("/workspaces/{workspace_id}/spec/sections/{index}", response_model=SaveResultOut)
@@ -425,7 +443,18 @@ def post_init_spec(
             raise HTTPException(
                 status_code=500, detail="spec init failed — nothing was written"
             ) from e
-    return SpecOut(head=head, can_edit=True, sections=sections)
+    # A successful init only runs on an UNLOCKED spec (locked -> SpecLockedError
+    # -> 409 above), so the lock fields are always unset here. can_manage_lock=True
+    # because require_owner above guarantees the caller owns the workspace.
+    return SpecOut(
+        head=head,
+        can_edit=True,
+        sections=sections,
+        locked=False,
+        locked_at=None,
+        locked_by=None,
+        can_manage_lock=True,
+    )
 
 
 @router.post("/workspaces/{workspace_id}/spec/lock", response_model=SpecLockOut)
