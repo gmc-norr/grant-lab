@@ -367,6 +367,15 @@ def post_init_spec(
                         payload={"artifact": "spec", "commit_sha": commit_sha},
                     )
                 )
+                # Snapshot the response WHILE STILL HOLDING the mutex: we just
+                # committed exactly SPEC_SKELETON at commit_sha.
+                head, sections = commit_sha, _sections_out(SPEC_SKELETON)
+            else:
+                # No-op: capture head + sections UNDER the lock too. Reading them
+                # after releasing the mutex (Codex Medium) would let a writer that
+                # grabs the lock the instant we release expose an uncommitted /
+                # rolled-back write, or a head/section snapshot from two moments.
+                head, sections = current_head(repo_dir), _sections_out(raw)
             session.commit()  # releases the mutex; persists rows iff we seeded
         except CommitMutexTimeout as e:
             session.rollback()
@@ -379,11 +388,6 @@ def post_init_spec(
             raise HTTPException(
                 status_code=500, detail="spec init failed — nothing was written"
             ) from e
-        try:
-            head = current_head(repo_dir)
-        except GitCommitError as e:
-            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
-        sections = _sections_out(spec.read_text())
     return SpecOut(head=head, can_edit=True, sections=sections)
 
 
