@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -20,6 +21,7 @@ from call_manager.db.models import (
     ArtifactVersion,
     Reference,
     ReferenceChunk,
+    SpecLockEvent,
     User,
     WorkspaceEvent,
 )
@@ -105,6 +107,12 @@ class SpecOut(BaseModel):
     head: str
     can_edit: bool
     sections: list[SectionOut]  # no citations: the spec is citation-free
+
+
+class SpecLockOut(BaseModel):
+    locked: bool
+    locked_at: datetime | None = None
+    locked_by: str | None = None
 
 
 class SaveSectionIn(BaseModel):
@@ -203,6 +211,15 @@ def _sections_out(raw: str) -> list[SectionOut]:
         SectionOut(index=s.index, heading=s.heading, text=s.text, sha=s.sha)
         for s in split_sections(raw)
     ]
+
+
+def _locker_email(session, user_id: int | None) -> str | None:
+    """Display string for a spec locker. user_id is non-null only while the row
+    is set, and the FK is SET NULL on user delete, so the lookup never dangles."""
+    if user_id is None:
+        return None
+    u = session.get(User, user_id)
+    return u.email if u is not None else None
 
 
 @router.get("/workspaces/{workspace_id}/draft", response_model=DraftOut)
@@ -389,6 +406,99 @@ def post_init_spec(
                 status_code=500, detail="spec init failed — nothing was written"
             ) from e
     return SpecOut(head=head, can_edit=True, sections=sections)
+
+
+@router.post("/workspaces/{workspace_id}/spec/lock", response_model=SpecLockOut)
+def post_lock_spec(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SpecLockOut:
+    """Lock the spec (owner-gated). Refuses an empty spec (409). Idempotent: a
+    re-lock returns the current state and writes no new audit row."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        spec_path = repo_dir / SPEC_FILENAME
+        if not spec_path.exists():
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        try:
+            acquire_commit_mutex(session, ws.id)
+            # Re-read under the lock: a concurrent toggle may have committed
+            # while we waited on the mutex.
+            session.refresh(ws, ["spec_locked_at", "spec_locked_by"])
+            if ws.spec_locked_at is None:
+                if spec_path.read_text().strip() == "":
+                    raise HTTPException(status_code=409, detail="cannot lock an empty spec")
+                ws.spec_locked_at = datetime.now(UTC)
+                ws.spec_locked_by = user.id
+                session.add(
+                    SpecLockEvent(
+                        workspace_id=ws.id,
+                        action="lock",
+                        actor_id=user.id,
+                        artifact_commit_sha=current_head(repo_dir),
+                    )
+                )
+            locked_at, locked_by_id = ws.spec_locked_at, ws.spec_locked_by
+            session.commit()
+        except CommitMutexTimeout as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        except GitCommitError as e:
+            # Spec file present but no committable HEAD (unborn branch): mirror
+            # the /spec read/save routes' 404 rather than a sanitized 500.
+            session.rollback()
+            logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+        locked_by = _locker_email(session, locked_by_id)
+    return SpecLockOut(locked=True, locked_at=locked_at, locked_by=locked_by)
+
+
+@router.post("/workspaces/{workspace_id}/spec/unlock", response_model=SpecLockOut)
+def post_unlock_spec(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SpecLockOut:
+    """Unlock the spec (owner-gated). Idempotent: unlocking an unlocked spec is
+    a no-op that writes no audit row."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        if not (repo_dir / SPEC_FILENAME).exists():
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        try:
+            acquire_commit_mutex(session, ws.id)
+            session.refresh(ws, ["spec_locked_at", "spec_locked_by"])
+            if ws.spec_locked_at is not None:
+                ws.spec_locked_at = None
+                ws.spec_locked_by = None
+                session.add(
+                    SpecLockEvent(
+                        workspace_id=ws.id,
+                        action="unlock",
+                        actor_id=user.id,
+                        artifact_commit_sha=current_head(repo_dir),
+                    )
+                )
+            session.commit()
+        except CommitMutexTimeout as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        except GitCommitError as e:
+            session.rollback()
+            logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+    return SpecLockOut(locked=False, locked_at=None, locked_by=None)
 
 
 @router.get(
