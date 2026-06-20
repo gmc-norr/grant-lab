@@ -97,3 +97,77 @@ def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/spec/lock")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
+    c = _client(app, owner_id)
+    spec = c.get(f"/api/workspaces/{ws_id}/spec").json()
+    aims = spec["sections"][1]
+    c.post(f"/api/workspaces/{ws_id}/spec/lock")
+    r = c.post(
+        f"/api/workspaces/{ws_id}/spec/sections/1",
+        json={
+            "content": "## Aims\nedited.\n",
+            "base_commit_sha": spec["head"],
+            "base_section_sha": aims["sha"],
+        },
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "conflict"
+    # Prove the 409 is the spec-lock guard, not a coincidental staleness
+    # conflict (both map to 409/conflict). The lock message is distinctive.
+    assert "spec is locked" in r.json()["error"]["message"].lower()
+
+
+def test_locked_spec_init_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Lock a seeded (non-empty) spec, then call init: post_init_spec bypasses
+    # save_section, so its OWN guard must fire. The guard runs before the
+    # whitespace/no-op check, so 409 regardless of file content.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nx\n")
+    c = _client(app, owner_id)
+    c.post(f"/api/workspaces/{ws_id}/spec/lock")
+    assert c.post(f"/api/workspaces/{ws_id}/spec").status_code == 409
+
+
+def test_draft_unaffected_by_spec_lock(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n\n## Methods\nm.\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nx\n")
+    c = _client(app, owner_id)
+    c.post(f"/api/workspaces/{ws_id}/spec/lock")
+    draft = c.get(f"/api/workspaces/{ws_id}/draft").json()
+    methods = draft["sections"][1]
+    r = c.post(
+        f"/api/workspaces/{ws_id}/sections/1",
+        json={
+            "content": "## Methods\nm2.\n",
+            "base_commit_sha": draft["head"],
+            "base_section_sha": methods["sha"],
+        },
+    )
+    assert r.status_code == 200 and r.json()["changed"] is True
+
+
+def test_unlock_reenables_spec_save(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
+    c = _client(app, owner_id)
+    c.post(f"/api/workspaces/{ws_id}/spec/lock")
+    c.post(f"/api/workspaces/{ws_id}/spec/unlock")
+    spec = c.get(f"/api/workspaces/{ws_id}/spec").json()
+    aims = spec["sections"][1]
+    r = c.post(
+        f"/api/workspaces/{ws_id}/spec/sections/1",
+        json={
+            "content": "## Aims\nedited after unlock.\n",
+            "base_commit_sha": spec["head"],
+            "base_section_sha": aims["sha"],
+        },
+    )
+    assert r.status_code == 200 and r.json()["changed"] is True

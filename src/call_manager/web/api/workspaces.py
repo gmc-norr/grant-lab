@@ -50,6 +50,7 @@ from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
     SaveResult,
     SectionStructureError,
+    SpecLockedError,
     StaleSectionError,
     save_section,
 )
@@ -318,6 +319,12 @@ def post_save_spec_section(
                 status_code=409,
                 detail="this section changed underneath you — reopen it",
             ) from e
+        except SpecLockedError as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="spec is locked — unlock to edit",
+            ) from e
         except SectionStructureError as e:
             session.rollback()
             raise HTTPException(
@@ -363,6 +370,13 @@ def post_init_spec(
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
             acquire_commit_mutex(session, ws.id)
+            # post_init_spec bypasses save_section, so it needs its OWN lock
+            # guard. Check under the mutex (like the lock/unlock routes) BEFORE
+            # the whitespace/no-op branch, so a locked spec is 409 regardless of
+            # file content.
+            session.refresh(ws, ["spec_locked_at"])
+            if ws.spec_locked_at is not None:
+                raise SpecLockedError(str(ws.id))
             raw = spec.read_text()  # read UNDER the mutex so a concurrent init serializes
             if raw.strip() == "":
                 commit_sha = write_and_commit_files(
@@ -394,6 +408,12 @@ def post_init_spec(
                 # rolled-back write, or a head/section snapshot from two moments.
                 head, sections = current_head(repo_dir), _sections_out(raw)
             session.commit()  # releases the mutex; persists rows iff we seeded
+        except SpecLockedError as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="spec is locked — unlock to edit",
+            ) from e
         except CommitMutexTimeout as e:
             session.rollback()
             raise HTTPException(
