@@ -659,6 +659,25 @@ def test_lock_member_forbidden(monkeypatch, pg_url, pg_session_factory, tmp_path
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
     assert _client(app, member_id).post(f"/api/workspaces/{ws_id}/spec/lock").status_code == 403
+
+
+def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # A GitCommitError from current_head (unborn HEAD) maps to 404, not a
+    # sanitized 500 — mirrors the /spec read/save routes. Patch current_head to
+    # raise so the test is independent of git's unborn-branch behaviour.
+    from call_manager.proposal_assist.citations.gitio import GitCommitError
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nx\n")  # file exists so the pre-check passes
+
+    def _boom(*args, **kwargs):
+        raise GitCommitError("no HEAD")
+
+    monkeypatch.setattr("call_manager.web.api.workspaces.current_head", _boom)
+    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/spec/lock")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -739,6 +758,11 @@ def post_lock_spec(
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
+        except GitCommitError as e:
+            # Spec file present but no committable HEAD (unborn branch): mirror
+            # the /spec read/save routes' 404 rather than a sanitized 500.
+            session.rollback()
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
         locked_by = _locker_email(session, locked_by_id)
     return SpecLockOut(locked=True, locked_at=locked_at, locked_by=locked_by)
 
@@ -778,10 +802,13 @@ def post_unlock_spec(
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
+        except GitCommitError as e:
+            session.rollback()
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
     return SpecLockOut(locked=False, locked_at=None, locked_by=None)
 ```
 
-Confirm `current_head`, `acquire_commit_mutex`, `CommitMutexTimeout`, `BUSY_ERROR_MESSAGE`, `SPEC_FILENAME`, `require_owner`, `User` are already imported (they are, per the existing spec routes); the only new imports this task adds are `UTC, datetime` and `SpecLockEvent` (Step 3).
+Confirm `current_head`, `GitCommitError`, `acquire_commit_mutex`, `CommitMutexTimeout`, `BUSY_ERROR_MESSAGE`, `SPEC_FILENAME`, `require_owner`, `User` are already imported (they are, per the existing spec routes); the only new imports this task adds are `UTC, datetime` and `SpecLockEvent` (Step 3).
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -835,8 +862,10 @@ def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_pa
 
 
 def test_locked_spec_init_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    # Lock a seeded spec, blank the file on disk, then re-init: the explicit
-    # guard must 409 even though init bypasses save_section.
+    # Lock a seeded (non-empty) spec, then call init: post_init_spec bypasses
+    # save_section, so its OWN guard must fire. The guard runs before the
+    # whitespace/no-op check, so 409 regardless of file content (no need to
+    # blank the file).
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
@@ -1158,7 +1187,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task 7: SpecPanel lock UI + CSS
 
-The minimal surface: a locked banner, the editor read-only (free, via `can_edit`), and an owner Lock/Unlock toggle. No lock control in the empty-spec branch (you can't lock an empty spec).
+The minimal surface: a locked banner, the editor read-only (free, via `can_edit`), and an owner Lock/Unlock toggle.
+
+> **Intentional deviation from the design spec (§3).** The design called for an owner Lock button *disabled with a hint* when the spec is whitespace-only. This plan instead shows **no lock control at all in the empty-spec branch** — that branch already renders only the "Start spec from skeleton" CTA (not the editor), so a disabled "Lock spec" button there would be locking nothing. Hiding it is cleaner UX and enforces the same invariant ("never lock an empty spec") more strictly; the backend 409 precondition remains the source of truth. The lock control therefore appears only once a spec has content (the non-empty editor branch), where it is always enabled. The SpecPanel test "the empty-spec view shows no lock control" pins this decision.
 
 **Files:**
 - Modify: `frontend/src/cockpit/SpecPanel.tsx`
