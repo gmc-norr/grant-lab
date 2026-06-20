@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import subprocess
 
+from call_manager.db.models import ArtifactVersion
 from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.test_api_workspaces import _app, _client, _seed
@@ -183,3 +184,74 @@ def test_save_spec_section_busy_is_429(monkeypatch, pg_url, pg_session_factory, 
     assert r.json()["error"]["code"] == "too_many_requests"
     assert r.json()["error"]["message"] == BUSY_ERROR_MESSAGE
     assert r.headers.get("Retry-After") == "2"
+
+
+def test_init_spec_seeds_six_sections_when_empty(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "")  # whitespace-only spec
+    c = _client(app, owner_id)
+    r = c.post(f"/api/workspaces/{ws_id}/spec")
+    assert r.status_code == 200
+    body = r.json()
+    # 6 sections: empty index-0 preamble + the 5 H2 sections.
+    assert [s["index"] for s in body["sections"]] == [0, 1, 2, 3, 4, 5]
+    assert [s["heading"] for s in body["sections"]] == [
+        "",
+        "Aims",
+        "Approach",
+        "Novelty & Significance",
+        "Expected Impact",
+        "Key Claims",
+    ]
+
+
+def test_init_spec_is_idempotent_noop_when_nonempty(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "## Aims\nmy own words.\n")
+    c = _client(app, owner_id)
+    r = c.post(f"/api/workspaces/{ws_id}/spec")
+    assert r.status_code == 200
+    # Did not clobber the user's content.
+    assert any("my own words." in s["text"] for s in r.json()["sections"])
+    # Calling twice on an already-seeded spec adds no new init commit.
+    c.post(f"/api/workspaces/{ws_id}/spec")
+    with pg_session_factory() as s:
+        n = (
+            s.query(ArtifactVersion)
+            .filter(
+                ArtifactVersion.workspace_id == ws_id,
+                ArtifactVersion.message == "user spec init",
+            )
+            .count()
+        )
+    assert n == 0  # non-empty -> never an init commit
+
+
+def test_init_spec_seeds_exactly_one_commit(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "")
+    c = _client(app, owner_id)
+    c.post(f"/api/workspaces/{ws_id}/spec")
+    c.post(f"/api/workspaces/{ws_id}/spec")  # second sees content -> no-op
+    with pg_session_factory() as s:
+        n = (
+            s.query(ArtifactVersion)
+            .filter(
+                ArtifactVersion.workspace_id == ws_id,
+                ArtifactVersion.message == "user spec init",
+            )
+            .count()
+        )
+    assert n == 1
+
+
+def test_init_spec_member_forbidden(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    _add_spec(tmp_path, ws_id, "")
+    assert _client(app, member_id).post(f"/api/workspaces/{ws_id}/spec").status_code == 403

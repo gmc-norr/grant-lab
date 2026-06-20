@@ -16,10 +16,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Reference, ReferenceChunk, User
-from call_manager.proposal_assist.artifacts import SPEC_FILENAME, Artifact
+from call_manager.db.models import (
+    ArtifactVersion,
+    Reference,
+    ReferenceChunk,
+    User,
+    WorkspaceEvent,
+)
+from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
-from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
+from call_manager.proposal_assist.citations.gitio import (
+    GitCommitError,
+    current_head,
+    write_and_commit_files,
+)
 from call_manager.proposal_assist.citations.human_cite import (
     CiteInvalid,
     CiteRefNotFound,
@@ -28,7 +38,11 @@ from call_manager.proposal_assist.citations.human_cite import (
 )
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    acquire_commit_mutex,
+)
 from call_manager.proposal_assist.editing.save import (
     CITATIONS_FILENAME,
     PROPOSAL_FILENAME,
@@ -311,6 +325,66 @@ def post_save_spec_section(
             session.rollback()
             raise HTTPException(status_code=404, detail="no such section") from e
     return SaveResultOut.from_result(result)
+
+
+@router.post("/workspaces/{workspace_id}/spec", response_model=SpecOut)
+def post_init_spec(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SpecOut:
+    """Idempotent Spec initialization (owner-gated). If proposal-spec.md is
+    whitespace-only, seed SPEC_SKELETON as ONE whole-doc commit (sidestepping the
+    preamble structure guard); otherwise no-op. Returns the SpecOut either way."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        spec = repo_dir / SPEC_FILENAME
+        if not spec.exists():
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        try:
+            acquire_commit_mutex(session, ws.id)
+            raw = spec.read_text()  # read UNDER the mutex so a concurrent init serializes
+            if raw.strip() == "":
+                commit_sha = write_and_commit_files(
+                    repo_dir, {SPEC_FILENAME: SPEC_SKELETON}, "user spec init"
+                )
+                session.add(
+                    ArtifactVersion(
+                        workspace_id=ws.id,
+                        commit_sha=commit_sha,
+                        created_by="user",
+                        message="user spec init",
+                    )
+                )
+                session.add(
+                    WorkspaceEvent(
+                        workspace_id=ws.id,
+                        kind="user_edit",
+                        actor_id=user.id,
+                        payload={"artifact": "spec", "commit_sha": commit_sha},
+                    )
+                )
+            session.commit()  # releases the mutex; persists rows iff we seeded
+        except CommitMutexTimeout as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        except GitCommitError as e:
+            session.rollback()
+            logger.exception("spec init failed for workspace %s", workspace_id)
+            raise HTTPException(
+                status_code=500, detail="spec init failed — nothing was written"
+            ) from e
+        try:
+            head = current_head(repo_dir)
+        except GitCommitError as e:
+            raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+        sections = _sections_out(spec.read_text())
+    return SpecOut(head=head, can_edit=True, sections=sections)
 
 
 @router.get(
