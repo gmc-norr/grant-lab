@@ -43,7 +43,7 @@ def test_post_turn_after_setup_proceeds(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user, ack_disclosure=True)  # spec phase
+        ws = make_workspace(s, owner=current_user, ack_disclosure=True)  # active phase
         s.commit()
         wsid = ws.id
 
@@ -231,14 +231,14 @@ def test_main_view_after_setup_shows_composer_not_card(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)  # spec phase
+        ws = make_workspace(s, owner=current_user)  # active phase
         s.commit()
         wsid = ws.id
     r = client_authed_owner.get(f"/workspaces/{wsid}")
     assert r.status_code == 200
     assert 'id="composer"' in r.text
     assert 'id="setup-status"' not in r.text
-    assert '<span class="phase-chip">Drafting</span>' in r.text
+    assert '<span class="phase-chip">Active</span>' in r.text
 
 
 def test_main_view_viewer_during_setup_sees_card_without_rubric_link(
@@ -391,7 +391,7 @@ def test_create_confirm_composer_closed_loop(client_authed_owner, pg_session_fac
     assert confirm.headers["location"] == f"/workspaces/{wsid}"
     with pg_session_factory() as s:
         ws = s.get(Workspace, wsid)
-        assert ws.current_phase == "spec"
+        assert ws.current_phase == "active"
         job = s.execute(
             select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == wsid)
         ).scalar_one()

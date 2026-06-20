@@ -79,21 +79,15 @@ def note_category_heading(value: str | None) -> str:
 
 
 def phase_label(value: str | None) -> str:
-    """Human-readable label for `Workspace.current_phase`. The stored values
-    are the lifecycle enum ('setup','spec','plan','draft','review'); the UI
-    chip should read as words, not a raw token.
-
-    Unknown values pass through unchanged so a future phase isn't swallowed
-    into a blank chip — it just looks slightly raw until added here.
-    """
+    """Human-readable label for `Workspace.current_phase`. Stored values are
+    the two-mode lifecycle ('setup','active'); the UI chip should read as
+    words. Unknown values pass through unchanged so a future mode isn't
+    swallowed into a blank chip."""
     if not value:
         return "—"
     return {
         "setup": "Setting up",
-        "spec": "Drafting",
-        "plan": "Planning",
-        "draft": "Revising",
-        "review": "Review",
+        "active": "Active",
     }.get(value, value)
 
 

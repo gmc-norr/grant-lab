@@ -33,7 +33,7 @@ def test_post_turn_returns_503_when_kill_switch_off(monkeypatch, pg_url, pg_sess
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="Test", current_phase="active")
         s.add(ws)
         s.commit()
         uid, wsid = owner.id, ws.id
@@ -62,7 +62,7 @@ def test_post_turn_works_when_kill_switch_on(monkeypatch, pg_url, pg_session_fac
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="Test", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="Test", current_phase="active")
         s.add(ws)
         s.commit()
         uid, wsid = owner.id, ws.id

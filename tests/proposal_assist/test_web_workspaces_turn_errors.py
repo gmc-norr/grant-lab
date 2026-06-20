@@ -16,7 +16,7 @@ def test_disclosure_gate_returns_json_403(client_authed_owner, pg_session_factor
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user, current_phase="spec")  # NO ack_disclosure
+        ws = make_workspace(s, owner=current_user, current_phase="active")  # NO ack_disclosure
         s.commit()
         wsid = ws.id
     resp = client_authed_owner.post(
@@ -36,7 +36,7 @@ def test_too_many_inclusions_returns_json_400(
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user, current_phase="spec", ack_disclosure=True)
+        ws = make_workspace(s, owner=current_user, current_phase="active", ack_disclosure=True)
         s.commit()
         wsid = ws.id
     # dict form with a list value for the repeated reference_ids field —

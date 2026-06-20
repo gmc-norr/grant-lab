@@ -660,7 +660,7 @@ def test_post_turn_error_returns_json_detail(monkeypatch, pg_url, pg_session_fac
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="Test ws", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="Test ws", current_phase="active")
         s.add(ws)
         s.commit()
         uid, wsid = owner.id, ws.id
@@ -714,7 +714,7 @@ def test_post_turn_with_reference_ids_form_field(monkeypatch, pg_url, pg_session
         owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="T", current_phase="active")
         s.add(ws)
         s.flush()
         ref = Reference(
@@ -793,7 +793,7 @@ def test_post_turn_with_reference_ids_only_echoes_reference_chip(
         owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="T", current_phase="active")
         s.add(ws)
         s.flush()
         ref = Reference(
@@ -858,7 +858,7 @@ def test_post_turn_with_reference_ids_returns_400_for_pending_reference(
         owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="T", current_phase="active")
         s.add(ws)
         s.flush()
         ref = Reference(
@@ -916,7 +916,7 @@ def test_workspace_main_context_includes_workspace_references(
         owner = User(status="active", email=f"o-{uuid.uuid4()}@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(owner_id=owner.id, title="T", current_phase="spec")
+        ws = Workspace(owner_id=owner.id, title="T", current_phase="active")
         s.add(ws)
         s.flush()
         # Two refs: one done (should appear in picker), one pending (filtered out)

@@ -369,7 +369,7 @@ class Phase0Worker:
         self._ensure_rubric_snapshot(job)
         # Step 6: yield to owner rubric review. The rubric-review endpoint
         # (Task 18) advances the job to 'done' and the workspace to
-        # current_phase='spec' when the owner confirms.
+        # current_phase='active' when the owner confirms.
         job.status = "waiting_for_rubric_review"
         # NOT setting completed_at — the job isn't terminal yet.
 

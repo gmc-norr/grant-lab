@@ -36,7 +36,7 @@ def _seed_ws_ref(pg_session_factory, *, chunk_text, chunk_index=0):
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
         s.add(ws)
         s.flush()
         ref = Reference(

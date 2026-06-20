@@ -5,7 +5,7 @@
   → Phase 0 worker run_one() drains the job through all 6 steps
   → job yields at waiting_for_rubric_review (workspace.current_phase='setup')
   → owner POSTs rubric review
-  → workspace advances to current_phase='spec', job=done
+  → workspace advances to current_phase='active', job=done
 
 LLM is mocked (AnthropicClient.chat returns canned section + rubric envelopes).
 Git operations run for real against a tmp_path repo root.
@@ -196,7 +196,7 @@ def test_phase0_happy_path_workspace_to_spec(
         job_final = s.scalar(
             select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == wsid)
         )
-        assert ws_final.current_phase == "spec"
+        assert ws_final.current_phase == "active"
         assert job_final.status == "done"
         assert job_final.completed_at is not None
         # No rubric_edited event because the owner posted the same content

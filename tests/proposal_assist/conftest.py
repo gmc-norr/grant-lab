@@ -202,7 +202,7 @@ def make_workspace(
     call_id: int | None = None,
     profile_id: int | None = None,
     ack_disclosure: bool = False,
-    current_phase: str = "spec",
+    current_phase: str = "active",
 ) -> "Workspace":  # noqa: F821
     """Build a Workspace row. If `owner` not provided, creates a fresh User.
 
@@ -211,7 +211,7 @@ def make_workspace(
     (spec 2026-06-10 §9). Default False preserves the un-acknowledged state the
     disclosure-modal tests rely on.
 
-    `current_phase` defaults to "spec" (post-setup): most tests simulate a
+    `current_phase` defaults to "active" (post-setup): most tests simulate a
     ready workspace where the composer is live and POST /turns is allowed.
     Pass current_phase="setup" to exercise the Phase-0 gate (status card
     instead of composer; turns rejected with 409). Tests that assert the

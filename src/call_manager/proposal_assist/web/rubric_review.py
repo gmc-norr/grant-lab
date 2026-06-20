@@ -2,7 +2,7 @@
 
 Workspace owners review the auto-extracted rubric (or edit it) and click
 Confirm. POST handler (Task 18) advances the workspace from current_phase
-'setup' to 'spec' and marks the workspace_setup_jobs row 'done'.
+'setup' to 'active' and marks the workspace_setup_jobs row 'done'.
 """
 
 from __future__ import annotations
@@ -144,13 +144,13 @@ async def post_rubric_review(
     if job is not None and job.status == "waiting_for_rubric_review":
         job.status = "done"
         job.completed_at = datetime.now(UTC)
-        ws.current_phase = "spec"
+        ws.current_phase = "active"
 
     session.commit()
 
     # After advancing, redirect the browser to the workspace's main view.
     # HTMX recognizes HX-Redirect; non-HTMX gets a normal 303.
-    if ws.current_phase == "spec":
+    if ws.current_phase == "active":
         target = f"/workspaces/{ws.id}"
         if "HX-Request" in request.headers:
             return Response(

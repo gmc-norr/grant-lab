@@ -589,7 +589,7 @@ class Workspace(Base):
             name="ck_workspaces_status",
         ),
         CheckConstraint(
-            "current_phase IN ('setup','spec','plan','draft','review')",
+            "current_phase IN ('setup','active')",
             name="ck_workspaces_current_phase",
         ),
         CheckConstraint(
@@ -658,6 +658,15 @@ class Workspace(Base):
         Text,
         nullable=False,
         server_default="setup",
+    )
+    spec_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    spec_locked_by: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     call_body_snapshot: Mapped[str] = mapped_column(
         Text,
@@ -1160,6 +1169,50 @@ class PhaseApproval(Base):
         nullable=False,
     )
     approved_artifact_sha: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class SpecLockEvent(Base):
+    """Append-only audit of spec lock/unlock toggles (cockpit SP2b-2a).
+
+    One row per real state transition (idempotent no-ops write nothing).
+    actor_id is SET NULL on user delete so the audit row survives.
+    """
+
+    __tablename__ = "spec_lock_events"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('lock','unlock')",
+            name="ck_spec_lock_events_action",
+        ),
+        Index(
+            "ix_spec_lock_events_ws_created",
+            "workspace_id",
+            text("created_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    artifact_commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class WorkspaceSetupJob(Base):

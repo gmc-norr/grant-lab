@@ -214,7 +214,7 @@ def test_rubric_review_post_writes_edited_event_and_advances_phase(
         ws = s.get(Workspace, wsid)
         assert ws.rubric_criteria[0]["name"] == "New"
         assert ws.rubric_funder_notes == "updated"
-        assert ws.current_phase == "spec"
+        assert ws.current_phase == "active"
         job = s.execute(
             select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == wsid)
         ).scalar_one()
@@ -284,7 +284,7 @@ def test_rubric_review_post_confirm_without_edits_still_advances_phase(
         job = s.execute(
             select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == wsid)
         ).scalar_one()
-        assert ws.current_phase == "spec"
+        assert ws.current_phase == "active"
         assert job.status == "done"
         # No rubric_edited event because content didn't change.
         edits = (

@@ -54,7 +54,7 @@ def _seed(app, pg_session_factory, tmp_path, content):
         stranger = User(status="active", email="stranger@ki.se")
         s.add_all([owner, member, stranger])
         s.flush()
-        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
         s.add(ws)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
@@ -141,7 +141,7 @@ def test_draft_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, 
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
         s.add(ws)
         s.commit()
         owner_id, ws_id = owner.id, ws.id
@@ -164,7 +164,7 @@ def test_draft_folds_whole_proposal_citation_map(monkeypatch, pg_url, pg_session
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
         s.add(ws)
         s.flush()
         ref = Reference(
@@ -225,9 +225,9 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
         s.add(owner)
         s.flush()
         # Workspace A: the one being read (has the proposal + marker).
-        ws_a = Workspace(title="A", owner_id=owner.id, current_phase="spec")
+        ws_a = Workspace(title="A", owner_id=owner.id, current_phase="active")
         # Workspace B: owns the Reference the ledger's reference_id points to.
-        ws_b = Workspace(title="B", owner_id=owner.id, current_phase="spec")
+        ws_b = Workspace(title="B", owner_id=owner.id, current_phase="active")
         s.add_all([ws_a, ws_b])
         s.flush()
         # The Reference belongs to workspace B, NOT workspace A.
@@ -438,7 +438,7 @@ def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_fa
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
         s.add(ws)
         s.commit()
         owner_id, ws_id = owner.id, ws.id
@@ -470,7 +470,7 @@ def test_save_section_non_owner_no_proposal_is_403_not_404(
         member = User(status="active", email="member@ki.se")
         s.add_all([owner, member])
         s.flush()
-        ws = Workspace(title="W", owner_id=owner.id, current_phase="spec")
+        ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
         s.add(ws)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
@@ -696,7 +696,7 @@ def test_citation_source_cross_workspace_reference_is_404(
         other_owner = User(status="active", email="other@ki.se")
         s.add(other_owner)
         s.flush()
-        ws_b = Workspace(title="B", owner_id=other_owner.id, current_phase="spec")
+        ws_b = Workspace(title="B", owner_id=other_owner.id, current_phase="active")
         s.add(ws_b)
         s.commit()
         ws_b_id = ws_b.id
@@ -1107,7 +1107,7 @@ def test_reference_chunks_cross_workspace_reference_is_404(
         other = User(status="active", email="other@ki.se")
         s.add(other)
         s.flush()
-        ws_b = Workspace(title="B", owner_id=other.id, current_phase="spec")
+        ws_b = Workspace(title="B", owner_id=other.id, current_phase="active")
         s.add(ws_b)
         s.commit()
         ws_b_id = ws_b.id
