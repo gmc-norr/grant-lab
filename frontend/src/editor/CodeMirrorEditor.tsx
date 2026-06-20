@@ -41,6 +41,10 @@ export type CodeMirrorEditorProps = {
   onPillClick?: (citekey: string, evId: string) => void;
   /** SP2a-4b: the current non-empty editor selection (or null when collapsed). */
   onSelectionChange?: (sel: { from: number; to: number; text: string } | null) => void;
+  /** Citation layer (pills + select-to-cite bridge). Default true preserves the
+   *  draft editor; the Spec passes false for raw, citation-free text. Read once
+   *  at mount — stable per editor instance. */
+  citations?: boolean;
 };
 
 // The `--cm-*` vars below are the existing call-manager (NOT CodeMirror) design
@@ -78,6 +82,7 @@ export function CodeMirrorEditor({
   readOnly = false,
   onPillClick = () => {},
   onSelectionChange = () => {},
+  citations = true,
 }: CodeMirrorEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -113,43 +118,49 @@ export function CodeMirrorEditor({
       }
       return tr;
     });
-    const view = new EditorView({
-      state: EditorState.create({
-        doc: value,
-        extensions: [
-          history(),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          markdown(),
-          citationPills((citekey, evId) => onPillClickRef.current?.(citekey, evId)),
-          guard,
-          cmTheme,
-          EditorView.lineWrapping,
-          readOnlyComp.current.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
-          EditorView.updateListener.of((u) => {
-            const localDocChange =
-              u.docChanged && u.transactions.some((t) => !t.annotation(Transaction.remote));
-            if (localDocChange) {
-              onChangeRef.current(u.state.doc.toString());
+    const extensions = [
+      history(),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
+      markdown(),
+    ];
+    if (citations) {
+      extensions.push(
+        citationPills((citekey, evId) => onPillClickRef.current?.(citekey, evId)),
+      );
+    }
+    extensions.push(
+      guard,
+      cmTheme,
+      EditorView.lineWrapping,
+      readOnlyComp.current.of([
+        EditorState.readOnly.of(readOnly),
+        EditorView.editable.of(!readOnly),
+      ]),
+      EditorView.updateListener.of((u) => {
+        const localDocChange =
+          u.docChanged && u.transactions.some((t) => !t.annotation(Transaction.remote));
+        if (localDocChange) {
+          onChangeRef.current(u.state.doc.toString());
+        }
+        // Selection bridge: only when the citation layer is on (select-to-cite is
+        // draft-only). Skip Transaction.remote echoes so a controlled value push
+        // never rewrites the held selection.
+        if (citations) {
+          const remoteEcho = u.docChanged && !localDocChange;
+          if ((u.selectionSet || u.docChanged) && !remoteEcho) {
+            const sel = u.state.selection.main;
+            const text = u.state.sliceDoc(sel.from, sel.to);
+            if (text && !u.state.facet(EditorState.readOnly)) {
+              onSelectionChangeRef.current?.({ from: sel.from, to: sel.to, text });
+            } else {
+              onSelectionChangeRef.current?.(null);
             }
-            // Selection bridge: fire on a real selection change or a LOCAL edit,
-            // but SKIP Transaction.remote echoes (controlled value pushes from a
-            // draft refetch). Re-deriving the selection from a remote-mapped range
-            // would silently rewrite the user's selected anchor; skipping keeps the
-            // held selection equal to what the user actually selected (spec: "skip
-            // Transaction.remote echoes" — staleness is caught server-side on cite).
-            const remoteEcho = u.docChanged && !localDocChange;
-            if ((u.selectionSet || u.docChanged) && !remoteEcho) {
-              const sel = u.state.selection.main;
-              const text = u.state.sliceDoc(sel.from, sel.to);
-              if (text && !u.state.facet(EditorState.readOnly)) {
-                onSelectionChangeRef.current?.({ from: sel.from, to: sel.to, text });
-              } else {
-                onSelectionChangeRef.current?.(null);
-              }
-            }
-          }),
-        ],
+          }
+        }
       }),
+    );
+    const view = new EditorView({
+      state: EditorState.create({ doc: value, extensions }),
       parent: hostRef.current,
     });
     viewRef.current = view;

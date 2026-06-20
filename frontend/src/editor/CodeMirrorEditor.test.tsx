@@ -1,4 +1,4 @@
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { CodeMirrorEditor } from "./CodeMirrorEditor";
@@ -233,4 +233,29 @@ it("does not fire onSelectionChange on a Transaction.remote echo (controlled val
     />,
   );
   expect(calls.length).toBe(lenBefore); // no new emission from the remote echo
+});
+
+it("citations={false} renders marker text raw with no citation pill", async () => {
+  const markerDoc = "## Aims\nSee [@smith2021]<!-- ev:ev-abc123 --> here.\n";
+  const { container } = render(
+    <CodeMirrorEditor
+      value={markerDoc}
+      onChange={() => {}}
+      requireHeading={true}
+      citations={false}
+    />,
+  );
+  await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+  // No atomic citation widget was built.
+  expect(container.querySelector(".cm-citation-pill")).toBeNull();
+  // The raw marker characters are present in the document text.
+  expect(container.querySelector(".cm-content")?.textContent).toContain("[@smith2021]");
+});
+
+it("citations default (true) still renders the citation pill", async () => {
+  const markerDoc = "## Aims\nSee [@smith2021]<!-- ev:ev-abc123 --> here.\n";
+  const { container } = render(
+    <CodeMirrorEditor value={markerDoc} onChange={() => {}} requireHeading={true} />,
+  );
+  await waitFor(() => expect(container.querySelector(".cm-citation-pill")).toBeTruthy());
 });
