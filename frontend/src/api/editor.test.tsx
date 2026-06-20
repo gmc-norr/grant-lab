@@ -4,7 +4,15 @@ import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "./client";
-import { useDraft, useSaveSection, useSpec, useSaveSpecSection, useInitSpec } from "./editor";
+import {
+  useDraft,
+  useSaveSection,
+  useSpec,
+  useSaveSpecSection,
+  useInitSpec,
+  useLockSpec,
+  useUnlockSpec,
+} from "./editor";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -108,6 +116,34 @@ it("useSaveSpecSection posts content to the spec route + invalidates ['spec', id
       body: { content: "## Aims\nx\n", base_commit_sha: "a".repeat(40), base_section_sha: "s" },
     }),
   );
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
+});
+
+it("useLockSpec POSTs /spec/lock and invalidates ['spec', id]", async () => {
+  const post = vi
+    .spyOn(clientMod.api, "POST")
+    .mockResolvedValue({ data: { locked: true }, error: undefined } as never);
+  const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useLockSpec("ws-1"), { wrapper: wrapper(qc) });
+  await result.current.mutateAsync();
+  expect(post).toHaveBeenCalledWith("/api/workspaces/{workspace_id}/spec/lock", {
+    params: { path: { workspace_id: "ws-1" } },
+  });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
+});
+
+it("useUnlockSpec POSTs /spec/unlock and invalidates ['spec', id]", async () => {
+  const post = vi
+    .spyOn(clientMod.api, "POST")
+    .mockResolvedValue({ data: { locked: false }, error: undefined } as never);
+  const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useUnlockSpec("ws-1"), { wrapper: wrapper(qc) });
+  await result.current.mutateAsync();
+  expect(post).toHaveBeenCalledWith("/api/workspaces/{workspace_id}/spec/unlock", {
+    params: { path: { workspace_id: "ws-1" } },
+  });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
 });
 

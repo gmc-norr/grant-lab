@@ -84,3 +84,23 @@ export function useInitSpec(id: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
   });
 }
+
+/** POST /api/workspaces/{id}/spec/lock — owner locks the spec. Invalidates ['spec', id]. */
+export function useLockSpec(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      unwrap(await api.POST("/api/workspaces/{workspace_id}/spec/lock", { params: { path: { workspace_id: id } } })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
+  });
+}
+
+/** POST /api/workspaces/{id}/spec/unlock — owner unlocks the spec. Invalidates ['spec', id]. */
+export function useUnlockSpec(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      unwrap(await api.POST("/api/workspaces/{workspace_id}/spec/unlock", { params: { path: { workspace_id: id } } })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
+  });
+}
