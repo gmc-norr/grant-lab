@@ -185,3 +185,24 @@
   gap: 0.5rem;
   padding: 1rem;
 }
+
+/* SP2b-2a: spec lock banner + owner toggle bar. */
+.spec-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.spec-lock-banner {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--cm-border);
+  border-left: 3px solid var(--cm-primary);
+  background: var(--cm-surface-sunken);
+  border-radius: 6px;
+  color: var(--cm-ink-strong);
+  font-weight: 600;
+}
+.spec-lock-bar {
+  display: flex;
+  gap: 0.5rem;
+}
