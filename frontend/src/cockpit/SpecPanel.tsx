@@ -29,6 +29,16 @@ export function SpecPanel({ id }: { id: string }) {
         <button type="button" disabled={!can_edit || init.isPending} onClick={() => init.mutate()}>
           Start spec from skeleton
         </button>
+        {/* SP2b-2b: a pending spec proposal (e.g. against a spec a member later
+            cleared to whitespace) must stay reviewable even in the empty state.
+            ProposalReview null-renders when there are no prose proposals, so this
+            adds nothing to the normal pre-skeleton CTA. */}
+        <ProposalReview
+          workspaceId={id}
+          artifact="spec"
+          currentSections={sections.map((s) => ({ index: s.index, text: s.text }))}
+          locked={locked}
+        />
       </main>
     );
   }

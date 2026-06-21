@@ -41,6 +41,21 @@ it("useAcceptProposal POSTs and invalidates spec + proposals", async () => {
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
 });
 
+it("useAcceptProposal invalidates spec + proposals on a 409 error too", async () => {
+  // A spec-lock race returns the /api conflict envelope; unwrap throws ApiError.
+  // The hook must still invalidate so `locked` refreshes and Accept re-disables.
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "conflict", message: "spec is locked — unlock to accept" } },
+  } as never);
+  const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useAcceptProposal("ws-1", "spec"), { wrapper: wrapper(qc) });
+  await expect(result.current.mutateAsync("pc-1")).rejects.toThrow(/conflict/);
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["proposed-changes", "ws-1", "spec"] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
+});
+
 it("useRejectProposal POSTs and invalidates the list", async () => {
   vi.spyOn(clientMod.api, "POST").mockResolvedValue({
     data: { status: "rejected" },

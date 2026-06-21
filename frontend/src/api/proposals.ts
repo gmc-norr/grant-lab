@@ -38,6 +38,15 @@ export function useProposedChanges(id: string, artifact: Artifact) {
 /** POST accept. Invalidates the proposals list AND the artifact content query. */
 export function useAcceptProposal(id: string, artifact: Artifact) {
   const qc = useQueryClient();
+  // Refresh both the proposals list and the artifact content query. The content
+  // query carries `locked`, so invalidating it after a 409 (spec locked, or row
+  // no longer pending) re-disables the Accept button instead of leaving the user
+  // re-clicking into the same conflict. Run on BOTH success and error: an accept
+  // that errored means our cached view is stale exactly the same way.
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
+    qc.invalidateQueries({ queryKey: [artifact, id] });
+  };
   return useMutation({
     mutationFn: async (pcId: string) =>
       unwrap(
@@ -45,10 +54,8 @@ export function useAcceptProposal(id: string, artifact: Artifact) {
           params: { path: { workspace_id: id, pc_id: pcId } },
         }),
       ) as ProposalRow,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
-      qc.invalidateQueries({ queryKey: [artifact, id] });
-    },
+    onSuccess: refresh,
+    onError: refresh,
   });
 }
 

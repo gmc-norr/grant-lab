@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
@@ -47,7 +48,7 @@ def _serialize(pc: ProposedChange) -> dict:
 def list_proposed_changes(
     workspace_id: uuid.UUID,
     request: Request,
-    target_artifact: str | None = None,
+    target_artifact: Literal["draft", "spec"] | None = None,
     session: Session = Depends(_session_dep),  # noqa: B008
     user=Depends(get_current_user),  # noqa: B008
 ) -> dict:

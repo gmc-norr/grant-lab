@@ -3906,7 +3906,7 @@ export interface operations {
     list_proposed_changes_api_workspaces__workspace_id__proposed_changes_get: {
         parameters: {
             query?: {
-                target_artifact?: string | null;
+                target_artifact?: ("draft" | "spec") | null;
             };
             header?: never;
             path: {
