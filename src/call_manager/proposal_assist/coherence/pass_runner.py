@@ -81,12 +81,19 @@ async def run_coherence_pass(
         done = await asyncio.wait_for(_drive(), timeout=settings.coherence_pass_timeout_seconds)
     except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
         logger.exception("coherence pass failed for job %s", job_id)
+        # Member-visible: surface only a sanitized, generic message (full detail
+        # already in the logs above); distinguish the expected timeout outcome.
+        message = (
+            "Coherence check timed out."
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+            else "Coherence check failed."
+        )
         with session_factory() as s:
             # Lock the row + guard on status=='running': the separate reaper may
             # have already failed this job during a hang; don't double-finalize.
             job = s.get(CoherenceJob, job_id, with_for_update=True)
             if job is not None and job.status == "running":
-                _fail(s, job, str(exc)[:500] or type(exc).__name__)
+                _fail(s, job, message)
                 supersede_own_coherence(s, workspace_id=workspace_id, job_id=job_id)
             s.commit()
         return
