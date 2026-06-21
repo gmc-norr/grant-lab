@@ -18,21 +18,27 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange
+from call_manager.proposal_assist.artifacts import Artifact, filename_for
 from call_manager.proposal_assist.citations.gitio import current_head
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
 
-def capture_base(repo_dir: Path, section_index: int) -> tuple[str, str]:
-    """Snapshot (head_commit_sha, section_sha) of the draft at READ time.
+def capture_base(
+    repo_dir: Path, section_index: int, *, artifact: Artifact = Artifact.DRAFT
+) -> tuple[str, str]:
+    """Snapshot (head_commit_sha, section_sha) of the artifact at READ time.
     Call this when the proposer *reads* the section, not when it proposes.
+
+    ``artifact`` selects the file (``proposal.md`` for the draft,
+    ``proposal-spec.md`` for the spec); it defaults to DRAFT so existing callers
+    are unchanged.
 
     Uses the house ``current_head`` helper (GIT_CEILING_DIRECTORIES-guarded) so a
     non-repo ``repo_dir`` can't silently capture an enclosing repo's HEAD as the base.
     """
     head = current_head(repo_dir)
-    proposal = (repo_dir / PROPOSAL_FILENAME).read_text()
-    return head, split_sections(proposal)[section_index].sha
+    doc = (repo_dir / filename_for(artifact)).read_text()
+    return head, split_sections(doc)[section_index].sha
 
 
 def propose_prose_edit(

@@ -253,20 +253,28 @@ def test_accept_noop_proposal_is_accepted_at_current_head(pg_session_factory, tm
         assert "original." in (repo / PROPOSAL_FILENAME).read_text()
 
 
-def test_accept_rejects_spec_target(pg_session_factory, tmp_path):
-    # SP2a accepts the draft path only; a spec-target row is deferred to SP2b.
+def test_accept_rejects_non_prose_spec_kind(pg_session_factory, tmp_path):
+    # The spec is citation-free: only prose proposals target it. A
+    # DB-permitted-but-unsupported kind (e.g. citation_insert with target spec)
+    # must be a clean NotImplementedError (the endpoint maps it to 400),
+    # never a silent 500 or a misdirected save_section replay.
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
         approver = make_user(s, email="approver@ki.se")
         s.flush()
+        rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
         base_commit, base_section = capture_base(repo, 1)
-        pc = propose_prose_edit(
+        pc = propose_citation_insert(
             session=s,
             workspace_id=ws.id,
             section_index=1,
-            new_text="## Methods\nx.\n",
             base_commit_sha=base_commit,
             base_section_sha=base_section,
+            reference_id=str(rid),
+            anchor="original.",
+            chunk_index=0,
+            evidence_quote="reduces recurrence by 30%",
+            stance="supports",
             origin_kind="interactive_turn",
         )
         pc.target_artifact = "spec"
@@ -662,3 +670,83 @@ def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_fact
             f"expected 'pending' (retryable), got {got.status!r} — "
             "transient git failure was mis-classified as terminal 'stale'"
         )
+
+
+def _spec_repo(tmp_path, ws_id, spec_text):
+    repo = Path(tmp_path) / str(ws_id) / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "proposal.md").write_text("preamble\n")
+    (repo / "proposal-spec.md").write_text(spec_text)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    return repo
+
+
+def test_accept_spec_prose_commits_to_spec(pg_session_factory, tmp_path):
+    from call_manager.proposal_assist.artifacts import Artifact
+
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        s.flush()
+        repo = _spec_repo(tmp_path, ws.id, "## Aims\norig.\n")
+        base_commit, base_section = capture_base(repo, 1, artifact=Artifact.SPEC)
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Aims\nagent spec.\n",
+            base_commit_sha=base_commit,
+            base_section_sha=base_section,
+            origin_kind="interactive_turn",
+            target_artifact="spec",
+        )
+        s.commit()
+        result = accept_proposed_change(
+            session=s,
+            proposed_change_id=pc.id,
+            workspace_id=ws.id,
+            approver=owner,
+            workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+        assert result.status == "accepted"
+        assert "agent spec." in (repo / "proposal-spec.md").read_text()
+
+
+def test_accept_spec_prose_blocked_when_locked(pg_session_factory, tmp_path):
+    from datetime import UTC, datetime
+
+    from call_manager.proposal_assist.artifacts import Artifact
+    from call_manager.proposal_assist.editing.save import SpecLockedError
+
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        ws.spec_locked_at = datetime.now(UTC)
+        ws.spec_locked_by = owner.id
+        s.flush()
+        repo = _spec_repo(tmp_path, ws.id, "## Aims\norig.\n")
+        base_commit, base_section = capture_base(repo, 1, artifact=Artifact.SPEC)
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Aims\nagent spec.\n",
+            base_commit_sha=base_commit,
+            base_section_sha=base_section,
+            origin_kind="interactive_turn",
+            target_artifact="spec",
+        )
+        s.commit()
+        with pytest.raises(SpecLockedError):
+            accept_proposed_change(
+                session=s,
+                proposed_change_id=pc.id,
+                workspace_id=ws.id,
+                approver=owner,
+                workspaces_dir=str(tmp_path),
+            )

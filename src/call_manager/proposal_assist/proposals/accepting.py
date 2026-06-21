@@ -12,9 +12,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange, User, Workspace
+from call_manager.proposal_assist.artifacts import Artifact
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE
-from call_manager.proposal_assist.editing.save import StaleSectionError, save_section
+from call_manager.proposal_assist.editing.save import (
+    SpecLockedError,  # noqa: F401  (propagates to endpoint -> 409; re-exported for callers)
+    StaleSectionError,
+    save_section,
+)
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.tools.citations import (
     _GIT_COMMIT_FAILED_ERROR,
@@ -71,9 +76,43 @@ def accept_proposed_change(
     if pc.status != "pending":
         raise ProposedChangeNotPending(pc.status)
 
-    # SP2a exercises the draft + prose path only; spec/citation land in later plans.
-    if pc.target_artifact != "draft":
-        raise NotImplementedError("spec target is SP2b")
+    if pc.target_artifact == "spec":
+        if pc.kind != "prose_edit":
+            # The spec is citation-free; only prose proposals target it. A
+            # DB-permitted-but-unsupported kind is a clean NotImplementedError
+            # (the endpoint maps it to 400), never a silent 500.
+            raise NotImplementedError(f"spec accept of kind {pc.kind!r} is not supported")
+        # ws cannot be None: workspace_id is a NOT NULL FK and _load_scoped just
+        # proved a row with this workspace_id exists.
+        ws = session.get(Workspace, pc.workspace_id)
+        try:
+            result = save_section(
+                session=session,
+                workspace=ws,
+                user_id=approver.id,
+                section_index=pc.section_index,
+                new_text=pc.payload["new_text"],
+                base_commit_sha=pc.base_commit_sha,
+                base_section_sha=pc.base_section_sha,
+                workspaces_dir=workspaces_dir,
+                artifact=Artifact.SPEC,
+            )
+        except StaleSectionError:
+            # A human spec edit landed between the proposer's read and this accept.
+            pc.status = "stale"
+            pc.resolved_by = approver.id
+            pc.resolved_at = datetime.now(UTC)
+            session.flush()
+            return pc
+        # SpecLockedError is NOT caught here: it propagates to the endpoint, which
+        # maps it to 409 and leaves the row pending (retryable after unlock).
+        pc.status = "accepted"
+        pc.resolved_by = approver.id
+        pc.resolved_at = datetime.now(UTC)
+        pc.resulting_commit_sha = result.commit_sha
+        session.flush()
+        return pc
+
     if pc.kind == "prose_edit":
         # ws cannot be None here: workspace_id is a NOT NULL FK (ON DELETE CASCADE)
         # and _load_scoped just proved a row with this workspace_id exists.
