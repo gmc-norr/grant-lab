@@ -254,6 +254,8 @@ class ClaudeAgentSDKAdapter:
             # (claude_agent_sdk/__init__.py:352 — "allowed_tools=['add','multiply']"
             # paired with mcp_servers={'calc': calculator}). The SDK forwards the
             # list verbatim to the CLI's --allowedTools flag.
+            # `or` falls back to the interactive default when None; callers must pass
+            # a NON-EMPTY list (an empty [] would collapse to the full default below).
             options_kwargs["allowed_tools"] = self._allowed_tools or [
                 "read_proposal",
                 # SP2a-2 — propose-only mutation (no direct repo writes)
