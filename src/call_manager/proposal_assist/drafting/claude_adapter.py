@@ -156,11 +156,16 @@ class ClaudeAgentSDKAdapter:
         permission_mode: str = "default",
         tools_factory: Callable[[Path, uuid.UUID], McpSdkServerConfig] | None = None,
         tool_context_sink: dict[uuid.UUID, Any] | None = None,
+        allowed_tools: list[str] | None = None,
     ) -> None:
         self._model = model
         self._workspaces_dir = Path(workspaces_dir)
         self._permission_mode = permission_mode  # type: ignore[assignment]
         self._tools_factory = tools_factory
+        # SP2b-2c: role-scoped allowlist override. None = the interactive default
+        # (the hardcoded list below). The coherence-keeper passes a smaller,
+        # lock-aware list so e.g. propose_spec_edit is unreachable when locked.
+        self._allowed_tools = allowed_tools
         # SP2a-2: the factory's tools_factory closure writes the per-workspace
         # ToolContext it builds into this sink (keyed by workspace_id) so
         # set_turn_provenance can stamp the live ctx the MCP closures captured.
@@ -249,7 +254,7 @@ class ClaudeAgentSDKAdapter:
             # (claude_agent_sdk/__init__.py:352 — "allowed_tools=['add','multiply']"
             # paired with mcp_servers={'calc': calculator}). The SDK forwards the
             # list verbatim to the CLI's --allowedTools flag.
-            options_kwargs["allowed_tools"] = [
+            options_kwargs["allowed_tools"] = self._allowed_tools or [
                 "read_proposal",
                 # SP2a-2 — propose-only mutation (no direct repo writes)
                 "propose_edit",
