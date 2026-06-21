@@ -130,6 +130,17 @@ _CITATION_INSTRUCTION = (
     "it."
 )
 
+# SP2b-2b: tells the agent the workspace has TWO artifacts (draft + Spec) and
+# which tool family addresses each. Rides in the same system-prompt append as
+# the reference-safety + citation instructions.
+_SPEC_TOOLS_INSTRUCTION = (
+    "There are two artifacts: the draft proposal (read_proposal / propose_edit) and "
+    "the Spec (read_spec / propose_spec_edit), a short citation-free statement of aims, "
+    "approach, novelty, impact, and key claims. When the user's request is about the "
+    "Spec, use the spec tools; otherwise use the draft tools. Both only PROPOSE changes "
+    "for a human to accept."
+)
+
 
 class ClaudeAgentSDKAdapter:
     """Wraps claude-agent-sdk in a per-workspace persistent client.
@@ -225,7 +236,11 @@ class ClaudeAgentSDKAdapter:
         options_kwargs["system_prompt"] = {
             "type": "preset",
             "preset": "claude_code",
-            "append": _REFERENCE_SAFETY_INSTRUCTION + "\n\n" + _CITATION_INSTRUCTION,
+            "append": _REFERENCE_SAFETY_INSTRUCTION
+            + "\n\n"
+            + _CITATION_INSTRUCTION
+            + "\n\n"
+            + _SPEC_TOOLS_INSTRUCTION,
         }
         if self._tools_factory is not None:
             mcp_server = self._tools_factory(repo_dir, workspace_id)
@@ -238,6 +253,9 @@ class ClaudeAgentSDKAdapter:
                 "read_proposal",
                 # SP2a-2 — propose-only mutation (no direct repo writes)
                 "propose_edit",
+                # SP2b-2b — spec artifact (read + propose-only)
+                "read_spec",
+                "propose_spec_edit",
                 "propose_citation",
                 "get_artifact_history",
                 "read_artifact_at",

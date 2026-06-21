@@ -51,11 +51,10 @@ def _make_ctx():
     )
 
 
-def test_collect_tools_returns_nineteen_named_tools():
-    """The post-SP2a-2 tool surface: the 6 mutating tools (edit_proposal,
-    replace_proposal, insert_citation, remove_citation, update_citation,
-    rename_citekey) are removed; propose_edit + propose_citation are added.
-    23 - 6 + 2 = 19."""
+def test_collect_tools_returns_twentyone_named_tools():
+    """The post-SP2b-2b tool surface: the post-SP2a-2 19 tools plus the two
+    Spec-artifact tools (read_spec + propose_spec_edit) added in SP2b-2b.
+    23 - 6 + 2 (SP2a-2) + 2 (SP2b-2b) = 21."""
     from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
@@ -80,8 +79,11 @@ def test_collect_tools_returns_nineteen_named_tools():
         "build_bibliography",
         "propose_edit",
         "propose_citation",
+        # SP2b-2b — spec artifact (read + propose-only)
+        "read_spec",
+        "propose_spec_edit",
     }
-    assert len(tools) == 19
+    assert len(tools) == 21
 
 
 @pytest.mark.asyncio
@@ -296,6 +298,17 @@ async def test_propose_citation_closure_returns_error_envelope_for_bad_ref():
     )
     assert result["is_error"] is True
     assert "reference_id" in result["content"][0]["text"]
+
+
+def test_spec_tools_registered():
+    """SP2b-2b: read_spec + propose_spec_edit are collected by the registry
+    (so they EXIST as MCP tools). Allowlisting them (claude_adapter) is a
+    separate guard checked by the wiring test."""
+    from call_manager.proposal_assist.tools.registry import _collect_tools
+
+    names = {t.name for t in _collect_tools(_make_ctx())}
+    assert "read_spec" in names
+    assert "propose_spec_edit" in names
 
 
 def test_no_tool_description_names_a_removed_mutating_tool():

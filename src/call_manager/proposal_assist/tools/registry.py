@@ -189,7 +189,9 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     from call_manager.proposal_assist.tools.proposal import (
         propose_edit_impl,
+        propose_spec_edit_impl,
         read_proposal_impl,
+        read_spec_impl,
     )
 
     @tool(
@@ -227,6 +229,46 @@ def _collect_tools(ctx: ToolContext) -> list:
             "propose_edit",
             ctx,
             propose_edit_impl,
+            ctx,
+            section_index=section_index,
+            new_text=args["new_text"],
+        )
+
+    @tool(
+        "read_spec",
+        "Return the current proposal-spec.md (the Spec artifact) content. Call this "
+        "before propose_spec_edit so the system knows which version you based your "
+        "edit on.",
+        {"type": "object", "properties": {}, "required": []},
+    )
+    async def read_spec(args):
+        return await _safe_tool("read_spec", ctx, read_spec_impl, ctx)
+
+    @tool(
+        "propose_spec_edit",
+        "Propose a full-text replacement of one section of the SPEC (proposal-spec.md) "
+        "as a PENDING change for a human to review and accept — this does NOT edit or "
+        "commit anything. `section_index` is the 0-based section (0 is the preamble); "
+        "call read_spec first. `new_text` is the WHOLE new section including its "
+        "`## heading` line. Returns a proposed_change_id and status 'pending'.",
+        {
+            "type": "object",
+            "properties": {
+                "section_index": {"type": "integer"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["section_index", "new_text"],
+        },
+    )
+    async def propose_spec_edit(args):
+        try:
+            section_index = int(args["section_index"])
+        except (TypeError, ValueError, KeyError):
+            return _mcp_error("section_index must be an integer")
+        return await _safe_tool(
+            "propose_spec_edit",
+            ctx,
+            propose_spec_edit_impl,
             ctx,
             section_index=section_index,
             new_text=args["new_text"],
@@ -624,6 +666,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         read_proposal,
         # SP2a-2 — propose-only mutation
         propose_edit,
+        # SP2b-2b — spec artifact (read + propose-only)
+        read_spec,
+        propose_spec_edit,
         get_artifact_history,
         read_artifact_at,
         diff_artifact,

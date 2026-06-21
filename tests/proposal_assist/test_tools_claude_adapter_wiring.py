@@ -97,6 +97,9 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         "read_proposal",
         # SP2a-2 — propose-only mutation
         "propose_edit",
+        # SP2b-2b — spec artifact (read + propose-only)
+        "read_spec",
+        "propose_spec_edit",
         "propose_citation",
         "get_artifact_history",
         "read_artifact_at",
@@ -190,4 +193,4 @@ def test_every_collected_tool_is_allowlisted(_settings_env):
     missing = collected - allowed
     assert missing == set(), f"collected tools not on the allowlist: {missing}"
     assert allowed == collected
-    assert len(allowed) == 19
+    assert len(allowed) == 21
