@@ -98,6 +98,13 @@ class ToolContext:
     # the read and the propose. None until the agent has read once.
     agent_view_proposal: str | None = field(default=None)
 
+    # SP2b-2b: the agent's read-time view of the SPEC artifact (parallel to the
+    # draft fields above). Populated by read_spec_impl; propose_spec_edit_impl
+    # reads its base from here (anti-clobber, read-time not live).
+    agent_view_spec_head: str | None = field(default=None)
+    agent_view_spec_sections: dict[int, str] = field(default_factory=dict)
+    agent_view_spec_proposal: str | None = field(default=None)
+
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap a plain-dict tool result in the MCP content-block envelope.
