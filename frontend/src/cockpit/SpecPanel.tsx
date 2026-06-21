@@ -1,5 +1,6 @@
 import { useInitSpec, useLockSpec, useSaveSpecSection, useSpec, useUnlockSpec } from "../api/editor";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
+import { ProposalReview } from "./ProposalReview";
 
 export function SpecPanel({ id }: { id: string }) {
   const spec = useSpec(id);
@@ -53,6 +54,13 @@ export function SpecPanel({ id }: { id: string }) {
           )}
         </div>
       )}
+      {/* SP2b-2b: pending spec proposals */}
+      <ProposalReview
+        workspaceId={id}
+        artifact="spec"
+        currentSections={sections.map((s) => ({ index: s.index, text: s.text }))}
+        locked={locked}
+      />
       <ArtifactSectionEditor
         workspaceId={id}
         queryKey={["spec", id]}

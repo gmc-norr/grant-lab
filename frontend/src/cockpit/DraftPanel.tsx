@@ -1,5 +1,6 @@
 import { useDraft, useSaveSection } from "../api/editor";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
+import { ProposalReview } from "./ProposalReview";
 
 export function DraftPanel({ id }: { id: string }) {
   const draft = useDraft(id);
@@ -14,15 +15,23 @@ export function DraftPanel({ id }: { id: string }) {
   }
   const { head, can_edit, sections } = draft.data;
   return (
-    <ArtifactSectionEditor
-      workspaceId={id}
-      queryKey={["draft", id]}
-      head={head}
-      canEdit={can_edit}
-      sections={sections}
-      save={save}
-      refetch={draft.refetch}
-      citations
-    />
+    <div className="draft-shell">
+      {/* SP2b-2b: pending draft proposals */}
+      <ProposalReview
+        workspaceId={id}
+        artifact="draft"
+        currentSections={sections.map((s) => ({ index: s.index, text: s.text }))}
+      />
+      <ArtifactSectionEditor
+        workspaceId={id}
+        queryKey={["draft", id]}
+        head={head}
+        canEdit={can_edit}
+        sections={sections}
+        save={save}
+        refetch={draft.refetch}
+        citations
+      />
+    </div>
   );
 }

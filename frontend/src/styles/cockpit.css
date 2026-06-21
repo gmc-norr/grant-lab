@@ -206,3 +206,22 @@
   display: flex;
   gap: 0.5rem;
 }
+
+/* SP2b-2b: inline pending-proposal review strip. */
+.proposal-review {
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  background: var(--cm-surface-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.proposal-review-title { margin: 0; font-size: 0.95rem; }
+.proposal-item { list-style: none; border-top: 1px solid var(--cm-border); padding-top: 0.5rem; }
+.proposal-meta { margin: 0 0 0.25rem; color: var(--cm-ink-muted, #667); font-size: 0.8rem; }
+.proposal-diff { margin: 0; white-space: pre-wrap; font-size: 0.85rem; }
+.proposal-diff .diff-add { background: rgba(46, 160, 67, 0.15); }
+.proposal-diff .diff-del { background: rgba(248, 81, 73, 0.15); }
+.proposal-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+.draft-shell { display: flex; flex-direction: column; gap: 0.5rem; }

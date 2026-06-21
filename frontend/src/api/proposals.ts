@@ -27,8 +27,10 @@ export function useProposedChanges(id: string, artifact: Artifact) {
         await api.GET("/api/workspaces/{workspace_id}/proposed-changes", {
           params: { path: { workspace_id: id }, query: { target_artifact: artifact } },
         }),
-      ) as { items: ProposalRow[] };
-      return data.items;
+      ) as { items?: ProposalRow[] } | undefined;
+      // Tolerate a missing/absent `items` (defensive: never let the query
+      // function return undefined, which React Query rejects).
+      return data?.items ?? [];
     },
   });
 }
