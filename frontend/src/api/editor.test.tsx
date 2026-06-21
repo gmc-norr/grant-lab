@@ -67,6 +67,10 @@ it("useSpec returns the unwrapped spec (no citations field)", async () => {
   const SPEC = {
     head: "a".repeat(40),
     can_edit: true,
+    locked: false,
+    locked_at: null,
+    locked_by: null,
+    can_manage_lock: true,
     sections: [{ index: 0, heading: "", text: "", sha: "x" }],
   };
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: SPEC, error: undefined } as never);

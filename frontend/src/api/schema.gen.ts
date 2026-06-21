@@ -2623,9 +2623,9 @@ export interface components {
             /** Locked */
             locked: boolean;
             /** Locked At */
-            locked_at?: string | null;
+            locked_at: string | null;
             /** Locked By */
-            locked_by?: string | null;
+            locked_by: string | null;
         };
         /** SpecOut */
         SpecOut: {
@@ -2638,9 +2638,9 @@ export interface components {
             /** Locked */
             locked: boolean;
             /** Locked At */
-            locked_at?: string | null;
+            locked_at: string | null;
             /** Locked By */
-            locked_by?: string | null;
+            locked_by: string | null;
             /** Sections */
             sections: components["schemas"]["SectionOut"][];
         };

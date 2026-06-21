@@ -108,16 +108,19 @@ class SpecOut(BaseModel):
     head: str
     can_edit: bool
     sections: list[SectionOut]  # no citations: the spec is citation-free
+    # Lock fields are required-nullable: every handler that builds a SpecOut
+    # passes them explicitly, so the OpenAPI contract should mark them present
+    # (and nullable), not optional.
     locked: bool
-    locked_at: datetime | None = None
-    locked_by: str | None = None
+    locked_at: datetime | None
+    locked_by: str | None
     can_manage_lock: bool
 
 
 class SpecLockOut(BaseModel):
     locked: bool
-    locked_at: datetime | None = None
-    locked_by: str | None = None
+    locked_at: datetime | None
+    locked_by: str | None
 
 
 class SaveSectionIn(BaseModel):

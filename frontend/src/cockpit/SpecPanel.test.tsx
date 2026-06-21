@@ -19,13 +19,25 @@ function renderPanel() {
 }
 
 const EMPTY = {
-  data: { head: "a".repeat(40), can_edit: true, sections: [{ index: 0, heading: "", text: "", sha: "x" }] },
+  data: {
+    head: "a".repeat(40),
+    can_edit: true,
+    locked: false,
+    locked_at: null,
+    locked_by: null,
+    can_manage_lock: true,
+    sections: [{ index: 0, heading: "", text: "", sha: "x" }],
+  },
   error: undefined,
 };
 const SEEDED = {
   data: {
     head: "b".repeat(40),
     can_edit: true,
+    locked: false,
+    locked_at: null,
+    locked_by: null,
+    can_manage_lock: true,
     sections: [
       { index: 0, heading: "", text: "", sha: "p" },
       { index: 1, heading: "Aims", text: "## Aims\n\n", sha: "a" },
