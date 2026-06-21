@@ -16,7 +16,6 @@ from call_manager.proposal_assist.artifacts import Artifact
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE
 from call_manager.proposal_assist.editing.save import (
-    SpecLockedError,  # noqa: F401  (propagates to endpoint -> 409; re-exported for callers)
     StaleSectionError,
     save_section,
 )
