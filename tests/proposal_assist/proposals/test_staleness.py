@@ -127,3 +127,34 @@ def test_refresh_returns_zero_when_proposal_missing(pg_session_factory, tmp_path
 
         assert n == 0
         assert s.get(ProposedChange, pc.id).status == "pending"
+
+
+def test_refresh_staleness_flips_stale_spec_row(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        repo = Path(tmp_path) / str(ws.id) / "repo"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        (repo / "proposal.md").write_text("preamble\n")
+        (repo / "proposal-spec.md").write_text("## Aims\nold.\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+        # Propose against section 1 of the SPEC with a base sha that no longer matches.
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Aims\nproposed.\n",
+            base_commit_sha="0" * 40,
+            base_section_sha="deadbeef" * 8,
+            origin_kind="interactive_turn",
+            target_artifact="spec",
+        )
+        s.flush()
+        n = refresh_staleness(session=s, workspace_id=ws.id, workspaces_dir=str(tmp_path))
+        s.flush()
+        assert n == 1
+        assert s.get(ProposedChange, pc.id).status == "stale"

@@ -1,5 +1,5 @@
 """Flip pending proposed_change rows to 'stale' when their targeted section's
-base_section_sha no longer matches the live draft. Called by the list endpoint
+base_section_sha no longer matches the live artifact. Called by the list endpoint
 (proactive UX) — accept-time StaleSectionError is the authoritative guard."""
 
 from __future__ import annotations
@@ -11,41 +11,42 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange
+from call_manager.proposal_assist.artifacts import Artifact, filename_for
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
 
 def refresh_staleness(
     *, session: Session, workspace_id: uuid.UUID, workspaces_dir: Path | str
 ) -> int:
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    proposal_path = repo_dir / PROPOSAL_FILENAME
-    if not proposal_path.exists():
-        # Workspace is still in setup (Phase-0 hasn't written proposal.md yet).
-        # There are no live sections to compare against — and no draft proposals
-        # could exist yet — so this best-effort sweep is a no-op. Returning early
-        # keeps callers (the list endpoint) from 500ing on an un-set-up workspace.
-        return 0
-    sections = split_sections(proposal_path.read_text())
-    live_sha = {i: sec.sha for i, sec in enumerate(sections)}
+    # Live section shas per artifact, read once. A missing artifact file (workspace
+    # still in setup, or no spec yet) contributes no live sections, so its pending
+    # rows simply aren't flipped here (accept-time staleness remains authoritative).
+    live: dict[str, dict[int, str]] = {}
+    for artifact in (Artifact.DRAFT, Artifact.SPEC):
+        path = repo_dir / filename_for(artifact)
+        if path.exists():
+            live[str(artifact)] = {
+                i: sec.sha for i, sec in enumerate(split_sections(path.read_text()))
+            }
 
-    # FOR UPDATE SKIP LOCKED: don't fight an in-flight accept/reject. A row whose
-    # resolve already holds its FOR UPDATE lock is skipped (that resolve decides
-    # its fate); rows we do lock stay pending until this sweep commits, so we
-    # never overwrite an accept's terminal status with "stale".
+    # FOR UPDATE SKIP LOCKED: don't fight an in-flight accept/reject (its row lock
+    # decides its fate); rows we lock stay pending until this sweep commits.
     rows = session.scalars(
         select(ProposedChange)
         .where(
             ProposedChange.workspace_id == workspace_id,
             ProposedChange.status == "pending",
-            ProposedChange.target_artifact == "draft",
         )
         .with_for_update(skip_locked=True)
     ).all()
     n = 0
     for pc in rows:
-        current = live_sha.get(pc.section_index)
+        sections = live.get(pc.target_artifact)
+        if sections is None:
+            continue  # artifact file absent -> leave pending
+        current = sections.get(pc.section_index)
         if current is None or current != pc.base_section_sha:
             pc.status = "stale"
             n += 1
