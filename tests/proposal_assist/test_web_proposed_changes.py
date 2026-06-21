@@ -1,4 +1,5 @@
 import subprocess
+import uuid
 from pathlib import Path
 
 from call_manager.db.models import Reference, ReferenceChunk, WorkspaceViewer
@@ -99,7 +100,7 @@ def test_accept_endpoint_applies_change(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 200
     assert resp.json()["status"] == "accepted"
     assert "new." in (Path(tmp_path) / ws_id / "repo" / PROPOSAL_FILENAME).read_text()
@@ -116,7 +117,7 @@ def test_list_endpoint_returns_pending(
         s.commit()
         ws_id = str(ws.id)
 
-    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    resp = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes")
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1
@@ -134,7 +135,7 @@ def test_reject_endpoint_flips_status(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/reject")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/reject")
     assert resp.status_code == 200
     assert resp.json()["status"] == "rejected"
 
@@ -153,7 +154,7 @@ def test_accept_endpoint_rejects_non_member(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 403
 
 
@@ -168,7 +169,7 @@ def test_list_returns_empty_for_unset_up_workspace(
         s.commit()
         ws_id = str(ws.id)
 
-    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    resp = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes")
     assert resp.status_code == 200
     assert resp.json()["items"] == []
 
@@ -206,7 +207,7 @@ def test_list_excludes_non_pending(
         s.commit()
         ws_id = str(ws.id)
 
-    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    resp = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes")
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1
@@ -225,9 +226,9 @@ def test_accept_already_resolved_returns_409(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    first = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    first = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert first.status_code == 200
-    second = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    second = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert second.status_code == 409
 
 
@@ -246,7 +247,7 @@ def test_accept_cross_workspace_returns_404(
         s.commit()
         pc_id, ws_b_id = str(pc.id), str(ws_b.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_b_id}/proposed-changes/{pc_id}/accept")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_b_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 404
 
 
@@ -265,7 +266,7 @@ def test_accept_endpoint_allows_viewer(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 200
     assert resp.json()["status"] == "accepted"
 
@@ -282,7 +283,7 @@ def test_reject_endpoint_rejects_non_member(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/reject")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/reject")
     assert resp.status_code == 403
 
 
@@ -298,7 +299,7 @@ def test_list_endpoint_rejects_non_member(
         s.commit()
         ws_id = str(ws.id)
 
-    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    resp = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes")
     assert resp.status_code == 403
 
 
@@ -343,7 +344,7 @@ def test_accept_endpoint_goes_stale_when_section_moved(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 200
     assert resp.json()["status"] == "stale"
     text = (Path(tmp_path) / ws_id / "repo" / PROPOSAL_FILENAME).read_text()
@@ -364,7 +365,7 @@ def test_list_omits_stale_after_section_moves(
         s.commit()
         ws_id = str(ws.id)
 
-    resp = client_authed_owner.get(f"/workspaces/{ws_id}/proposed-changes")
+    resp = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes")
     assert resp.status_code == 200
     assert resp.json()["items"] == []
 
@@ -380,7 +381,7 @@ def test_accept_citation_endpoint_applies_marker_and_ledger(
         s.commit()
         pc_id, ws_id = str(pc.id), str(ws.id)
 
-    resp = client_authed_owner.post(f"/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
     assert resp.status_code == 200
     assert resp.json()["status"] == "accepted"
 
@@ -391,3 +392,93 @@ def test_accept_citation_endpoint_applies_marker_and_ledger(
     assert markers[0]["citekey"] == "smith2021"
     ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())
     assert len(ledger["evidence"]) == 1
+
+
+def _seed_spec_pending(s, ws, tmp_path, locked=False):
+    from datetime import UTC, datetime
+
+    from call_manager.proposal_assist.artifacts import Artifact
+
+    repo = Path(tmp_path) / str(ws.id) / "repo"
+    if not (repo / ".git").exists():
+        # Standalone: create the repo + the draft file so the section-1 layout
+        # matches what capture_base(SPEC) expects.
+        repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        (repo / "proposal.md").write_text("preamble\n")
+    # Add the spec artifact to the (possibly pre-existing) repo and commit.
+    (repo / "proposal-spec.md").write_text("## Aims\norig.\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "spec init"], cwd=repo, check=True)
+    if locked:
+        ws.spec_locked_at = datetime.now(UTC)
+        ws.spec_locked_by = ws.owner_id
+        s.flush()
+    base_commit, base_section = capture_base(repo, 1, artifact=Artifact.SPEC)
+    return propose_prose_edit(
+        session=s,
+        workspace_id=ws.id,
+        section_index=1,
+        new_text="## Aims\nagent.\n",
+        base_commit_sha=base_commit,
+        base_section_sha=base_section,
+        origin_kind="interactive_turn",
+        target_artifact="spec",
+    )
+
+
+def test_accept_spec_endpoint_commits(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        pc = _seed_spec_pending(s, ws, tmp_path)
+        s.commit()
+        pc_id, ws_id = str(pc.id), str(ws.id)
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
+    assert "agent." in (Path(tmp_path) / ws_id / "repo" / "proposal-spec.md").read_text()
+
+
+def test_accept_spec_locked_returns_409(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        pc = _seed_spec_pending(s, ws, tmp_path, locked=True)
+        s.commit()
+        pc_id, ws_id = str(pc.id), str(ws.id)
+    resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/proposed-changes/{pc_id}/accept")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "conflict"
+    with pg_session_factory() as s:
+        from call_manager.db.models import ProposedChange
+
+        assert s.get(ProposedChange, uuid.UUID(pc_id)).status == "pending"
+
+
+def test_list_filters_by_target_artifact(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        _seed_pending(s, ws, tmp_path)  # draft (writes proposal.md repo)
+        _seed_spec_pending(s, ws, tmp_path)  # spec (adds proposal-spec.md)
+        s.commit()
+        ws_id = str(ws.id)
+    spec_only = client_authed_owner.get(
+        f"/api/workspaces/{ws_id}/proposed-changes?target_artifact=spec"
+    ).json()["items"]
+    assert [i["target_artifact"] for i in spec_only] == ["spec"]
+    assert spec_only[0]["new_text"] == "## Aims\nagent.\n"
+    all_items = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes").json()["items"]
+    assert {i["target_artifact"] for i in all_items} == {"draft", "spec"}

@@ -12,7 +12,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ProposedChange
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
-from call_manager.proposal_assist.editing.save import SectionStructureError
+from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.accepting import (
     CitationAcceptBusy,
     ProposedChangeNotFound,
@@ -24,7 +24,7 @@ from call_manager.proposal_assist.proposals.staleness import refresh_staleness
 from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web.workspaces import _session_dep
 
-router = APIRouter(prefix="/workspaces", tags=["proposed-changes"])
+router = APIRouter(prefix="/api/workspaces", tags=["proposed-changes"])
 
 
 def _serialize(pc: ProposedChange) -> dict:
@@ -35,6 +35,7 @@ def _serialize(pc: ProposedChange) -> dict:
         "section_index": pc.section_index,
         "kind": pc.kind,
         "origin_kind": pc.origin_kind,
+        "new_text": pc.payload.get("new_text") if pc.kind == "prose_edit" else None,
         "resulting_commit_sha": pc.resulting_commit_sha,
         "created_at": pc.created_at.isoformat() if pc.created_at else None,
         "resolved_by": pc.resolved_by,
@@ -46,20 +47,24 @@ def _serialize(pc: ProposedChange) -> dict:
 def list_proposed_changes(
     workspace_id: uuid.UUID,
     request: Request,
+    target_artifact: str | None = None,
     session: Session = Depends(_session_dep),  # noqa: B008
     user=Depends(get_current_user),  # noqa: B008
 ) -> dict:
     require_member(workspace_id=workspace_id, user=user, session=session)
     workspaces_dir = request.app.state.settings.workspaces_dir
     refresh_staleness(session=session, workspace_id=workspace_id, workspaces_dir=workspaces_dir)
-    rows = session.scalars(
+    stmt = (
         select(ProposedChange)
         .where(
             ProposedChange.workspace_id == workspace_id,
             ProposedChange.status == "pending",
         )
         .order_by(ProposedChange.created_at)
-    ).all()
+    )
+    if target_artifact is not None:
+        stmt = stmt.where(ProposedChange.target_artifact == target_artifact)
+    rows = session.scalars(stmt).all()
     session.commit()
     return {"items": [_serialize(pc) for pc in rows]}
 
@@ -92,6 +97,12 @@ def accept(
     except ProposedChangeNotPending as exc:
         session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SpecLockedError as exc:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="spec is locked — unlock to accept") from exc
+    except NotImplementedError as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail="unsupported proposal kind") from exc
     except SectionStructureError as exc:
         # 400 for parity with web/sections.py's handler of the same exception
         # (the proposal's new_text dropped its ## heading or merged sections).
@@ -102,7 +113,9 @@ def accept(
         raise HTTPException(status_code=409, detail="workspace busy; retry the accept") from exc
     except CommitMutexTimeout as exc:
         session.rollback()
-        raise HTTPException(status_code=503, detail="workspace busy; retry") from exc
+        raise HTTPException(
+            status_code=429, detail="workspace busy; retry", headers={"Retry-After": "2"}
+        ) from exc
     except GitCommitError as exc:
         session.rollback()
         raise HTTPException(status_code=500, detail="save failed — nothing was written") from exc
