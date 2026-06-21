@@ -42,8 +42,13 @@ Mirrors `turn_jobs` (`db/models.py:827`). One Alembic migration (head is the SP2
 | `queued_at` | timestamptz NOT NULL server_default now() | |
 | `started_at` | timestamptz nullable | |
 | `completed_at` | timestamptz nullable | |
-| `sdk_session_id` | TEXT nullable | the fresh pass's SDK session uuid (audit) |
+| `sdk_session_id` | TEXT nullable | the fresh pass's SDK session uuid (recorded at TurnDoneEvent) |
 | `n_proposals` | INT NOT NULL server_default `0` | proposals emitted by this pass (UI summary) |
+| `model` | TEXT nullable | the model used (audit) |
+| `input_tokens` | INT NOT NULL server_default `0` | from the pass's `ResultMessage` usage |
+| `output_tokens` | INT NOT NULL server_default `0` | from the pass's `ResultMessage` usage |
+
+Coherence is **token-accounted on this row** — the existing per-workspace daily cap (`turns/caps.py`) sums `ChatTurn` rows, and the keeper writes **no** `ChatTurn`, so it is invisible to that cap. See §2.5 for the separate coherence cap that reads these columns.
 
 Indexes:
 - `(workspace_id, queued_at)` — FIFO claim order (as `turn_jobs`).
@@ -55,7 +60,10 @@ Indexes:
 
 ### 1.3 Scheduler tick
 
-A new `_coherence_tick` registered in `build_scheduler()` beside `_phase0_tick` (`scheduler.py:370`), `IntervalTrigger(seconds=settings.coherence_tick_seconds)`, `id="proposal_assist_coherence_tick"`, `max_instances=1` — honoring the single-instance constraint. Backed by `run_coherence_tick(session_factory, client_factory, settings)` (mirrors `run_phase0_tick`), which drains **one** claimable job per tick: the oldest `queued` job whose workspace has no `running` job, claimed `FOR UPDATE SKIP LOCKED`, flipped to `running`, then handed to the pass handler.
+A new `_coherence_tick` registered in `build_scheduler()` beside `_phase0_tick` (`scheduler.py:370`), `IntervalTrigger(seconds=settings.coherence_tick_seconds)`, `id="proposal_assist_coherence_tick"`, `max_instances=1` — honoring the single-instance constraint. Backed by `run_coherence_tick(session_factory, client_factory, settings)` (mirrors `run_phase0_tick`), which each tick:
+
+1. **Reaps stuck jobs first** — flips any `running` job whose `started_at` is older than `settings.coherence_job_timeout_seconds` to `failed` (`error="timed out"`) and runs the §2.5 failure cleanup. **This is required**: because the active-unique index counts `running`, a process crash mid-pass would otherwise wedge the workspace forever (`create-or-return-active` keeps returning the dead job). The reaper is the liveness escape hatch.
+2. **Then claims one job** — the oldest `queued` job whose workspace has no `running` job, claimed `FOR UPDATE SKIP LOCKED`, flipped to `running` (sets `started_at`), then handed to the pass handler.
 
 ---
 
@@ -69,7 +77,9 @@ A new `_coherence_tick` registered in `build_scheduler()` beside `_phase0_tick` 
 
 ### 2.2 The agent turn + lock-aware toolset
 
-One fresh stateless turn via the existing adapter: `launch` with **no** `resume` (new session), then `send_turn` with the keeper instruction. The instruction frames the role (compare spec intent vs draft; propose conservative, per-section, full-text reconciliation edits; don't restate non-drift).
+One fresh stateless turn via the existing adapter `ClaudeAgentSDKAdapter`: `launch` with **no** `resume` (new session), then `send_turn` with the keeper instruction. The instruction frames the role (compare spec intent vs draft; propose conservative, per-section, full-text reconciliation edits; don't restate non-drift).
+
+**Isolation (do NOT reuse `WorkspaceController`).** The interactive `WorkspaceController` caches a per-workspace SDK client + a retained `ToolContext` and *resumes* the interactive session — routing the keeper through it would reuse the interactive subprocess + its provenance, breaking "fresh stateless" and corrupting `origin_kind`. The pass instead constructs its **own one-shot stack**: a dedicated adapter instance + its own in-process MCP `@tool` server + its own `ToolContext` (stamped with coherence provenance, §2.3), launched with no resume, and **terminated in a `finally`** (the SDK subprocess is closed even on error). Nothing touches `Workspace.last_sdk_session_id`.
 
 **Lock-aware toolset (structural, not just prompted):**
 - spec **unlocked** → allowlist `{read_proposal, read_spec, propose_edit, propose_spec_edit}`
@@ -84,7 +94,8 @@ The keeper must call `read_proposal`/`read_spec` first — that sets the read-ti
 `_propose_artifact_edit_impl` currently hardcodes `origin_kind="interactive_turn"` (`tools/proposal.py:140`). Change:
 - `ToolContext` gains `origin_kind: str = "interactive_turn"` and `origin_job_id: uuid.UUID | None = None` (`tools/registry.py`).
 - `_propose_artifact_edit_impl` passes `origin_kind=ctx.origin_kind`, `origin_job_id=ctx.origin_job_id`. Defaults preserve the interactive path exactly.
-- The keeper's tool-context factory sets `origin_kind="coherence_session"`, `origin_job_id=job.id`, `created_by=job.requested_by`, `triggering_turn_id=None`. (`origin_session_id` is the pass's SDK session uuid, as for interactive turns.)
+- The keeper's tool-context factory sets `origin_kind="coherence_session"`, `origin_job_id=job.id`, `created_by=job.requested_by`, `triggering_turn_id=None`.
+- **`origin_session_id` is left `NULL` on coherence rows.** Unlike a *resumed* interactive turn, a fresh session's SDK uuid is unknown until `TurnDoneEvent` (after the `propose_*` tools have already committed their rows), so it cannot be stamped at propose time. The durable session link is **`proposed_change.origin_job_id` → `coherence_jobs.sdk_session_id`** (the uuid recorded on the job when the turn completes). No post-hoc backfill of the proposal rows is needed.
 
 ### 2.4 Supersede + finalize (on success)
 
@@ -99,9 +110,18 @@ UPDATE proposed_changes
 ```
 then set `coherence_jobs.n_proposals` = count of this pass's rows, `completed_at`, status `completed`, and persist `sdk_session_id`. A clean pass that finds no drift legitimately clears prior stale coherence proposals.
 
-### 2.5 Failure & cost
+### 2.5 Failure cleanup
 
-Agent/API error, or the existing **per-workspace daily token cap** (`turns/caps.py`) being hit → job `failed` with the message; **prior proposals are left intact** (supersede is skipped). The pass is non-mutating to `proposal.md`/`proposal-spec.md` (it only writes `proposed_change` rows and reads), so it runs concurrently with an interactive turn with no locks — any race is resolved by `base_section_sha` staleness.
+On agent/API error (or timeout reap, §1.3) the job is marked `failed` with the message. Because the `propose_*` tools **commit each row as they run**, a pass that fails *after* emitting some proposals would otherwise leave orphaned half-assessment rows pending under a failed job. So failure cleanup is the **inverse** of the success path:
+
+- **On failure** — supersede **this job's own** still-pending rows (`origin_job_id = job.id AND status='pending'`); leave **prior** jobs' proposals **intact** (the user keeps the last good assessment).
+- **On success** (§2.4) — supersede **prior** jobs' rows (`origin_job_id <> job.id`); keep this job's rows.
+
+The pass is non-mutating to `proposal.md`/`proposal-spec.md` (it only writes `proposed_change` rows and reads), so it runs concurrently with an interactive turn with no locks — any race is resolved by `base_section_sha` staleness.
+
+### 2.6 Cost cap (separate coherence budget)
+
+The interactive cap (`turns/caps.py`) sums `ChatTurn` tokens and the keeper writes none, so coherence needs its **own** budget rather than retrofitting that query. **Before claiming/running a pass**, the tick checks a per-workspace **daily coherence token cap**: `SUM(input_tokens + output_tokens)` over today's (Stockholm-day, matching `caps.py`) `coherence_jobs` for the workspace `< settings.coherence_daily_token_cap`. Over budget → the job is marked `failed` with a clear "daily coherence budget reached" message (no LLM call made). Each completed pass records `model` / `input_tokens` / `output_tokens` from its `ResultMessage` usage. (A future unified cross-surface budget can combine chat + coherence; out of scope here.)
 
 ---
 
@@ -112,9 +132,11 @@ Agent/API error, or the existing **per-workspace daily token cap** (`turns/caps.
 Same envelope + `require_member` patterns as `web/proposals.py`.
 
 - **`POST /api/workspaces/{id}/coherence-runs`** — *create-or-return-active*: if a `queued`/`running` job already exists for the workspace, return it (no stacking); else insert a `queued` row (`requested_by`=current user) and return `{id, status}`. The §1.1 active-unique index makes this race-safe — on a concurrent-insert unique violation, catch and re-read the existing active job.
+
+  **Cloud-LLM hard gates (mirror the interactive turns route, `web/workspaces.py:790‑801`).** A pass calls a hosted Claude, so the POST enforces the *same* preconditions before enqueueing: `settings.drafting_enabled` (else 403/409 "drafting disabled"); the provider/API key configured (else 409 "AI drafting not configured"); and a prior **per-user `disclosure_acknowledged`** `WorkspaceEvent` for this workspace (else 409/428 prompting the disclosure modal — the SPA reuses the existing `POST .../disclosure` ack flow). Same gate set the chat turn submit uses; do not invent a weaker one.
 - **`GET /api/workspaces/{id}/coherence-runs/latest`** — the most recent job or `null`: `{id, status, n_proposals, error, started_at, completed_at}`. The SPA polls this while `status ∈ {queued, running}`; it also restores state on reload.
 
-Router mounted in `web/main.py` alongside the proposed-changes router.
+Router mounted in `src/call_manager/main.py` (≈`:530`) alongside the proposed-changes router.
 
 ### 3.2 Frontend
 
@@ -135,7 +157,11 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 - **Pass handler:** stub emits `propose_edit`/`propose_spec_edit` → rows land with `origin_kind="coherence_session"`, `origin_job_id=job.id`, `created_by=requested_by`; job → `completed`, `n_proposals` set, `sdk_session_id` persisted.
 - **Supersede:** seed a prior coherence-pending (old `origin_job_id`) + an interactive-pending + a human row; run a new pass → old coherence → `superseded`, **interactive/human untouched**, this pass's rows stay pending.
 - **Lock-aware toolset:** assert the assembled allowlist *excludes* `propose_spec_edit` when locked, *includes* it when unlocked.
-- **Failure:** stub raises (and token-cap-hit) → job `failed` + `error` set + **prior proposals NOT superseded**.
+- **Failure cleanup:** stub emits one proposal then raises → job `failed` + `error` set; **this job's** emitted row → `superseded`; a seeded **prior** coherence-pending row stays `pending` (inverse of the success path).
+- **Stuck-job reaper:** a `running` job with `started_at` older than `coherence_job_timeout_seconds` → flipped `failed` by the tick (+ its partial rows superseded), which frees a fresh enqueue for that workspace.
+- **Cost cap:** seed today's `coherence_jobs` token sum at/over `coherence_daily_token_cap` → the next pass is marked `failed` ("budget reached") with **no adapter call** (stub asserts it was never launched); a completed pass records `input_tokens`/`output_tokens`/`model`.
+- **POST hard gates:** `drafting_enabled=False` → blocked; missing per-user `disclosure_acknowledged` → blocked (mirrors the chat-turn gate); provider-unconfigured → blocked.
+- **Session isolation:** the pass does not resume/mutate `Workspace.last_sdk_session_id`; uses its own adapter/ToolContext (assert via the stub that no interactive session id is read/written).
 - **Provenance regression:** the interactive propose path still stamps `origin_kind="interactive_turn"` (ToolContext defaults unchanged).
 - **Endpoints:** POST create-or-return-active (2nd POST returns the same job); GET-latest shape + `null` when none; non-member → 403; `/api` envelope.
 - **Staleness interop (light):** a coherence proposal whose `base_section_sha` then moves flips `stale` on the next inbox list (existing machinery).
@@ -145,7 +171,10 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 ### 4.2 Risks
 
 - **Over-eager / low-value proposals** — deterministic supersede + a conservatism-instructed prompt; residual ones the user rejects. Acceptable v1.
-- **Cost/runaway** — manual-only + per-workspace daily token cap + one-pass-per-workspace guard. No auto-trigger.
+- **Cost/runaway** — manual-only + a **separate per-workspace daily coherence token cap** (§2.6, since the chat-turn cap can't see coherence) + one-pass-per-workspace guard. No auto-trigger.
+- **Wedged workspace** — the active-unique index counts `running`, so a crash mid-pass could block all future passes; the §1.3 **timeout reaper** is the required escape hatch (verified by the reaper test).
+- **Leaked partial proposals on failure** — addressed by §2.5 failure cleanup (supersede this job's own pending rows).
+- **Cross-session contamination** — the pass uses its **own** one-shot adapter/MCP/ToolContext, never `WorkspaceController`, and never touches `last_sdk_session_id` (§2.2).
 - **Proposals racing user edits** — existing `base_section_sha` staleness; born-stale surfaces as `stale` (§6 of the overarching design). No new mechanism.
 - **Holistic drift with no concrete edit** — **not surfaced in v1** (no Problems panel); deferred to SP2b-3. Known, accepted limitation.
 - **Single-instance scheduler** — the tick respects `max_instances=1`; no new multi-instance exposure.
@@ -157,7 +186,7 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 **Backend — create:**
 - `src/call_manager/proposal_assist/coherence/__init__.py`
 - `src/call_manager/proposal_assist/coherence/context.py` — `assemble_coherence_context`
-- `src/call_manager/proposal_assist/coherence/jobs.py` — enqueue (create-or-return-active), claim, status helpers, supersede
+- `src/call_manager/proposal_assist/coherence/jobs.py` — enqueue (create-or-return-active), claim, reaper (timeout→failed), daily-cap check, supersede (success + failure variants), status helpers
 - `src/call_manager/proposal_assist/coherence/pass.py` — `run_coherence_pass`, `run_coherence_tick`
 - `src/call_manager/proposal_assist/web/coherence.py` — the two endpoints
 - a new Alembic migration (down_rev `0052`) — the `coherence_jobs` table + indexes
@@ -167,9 +196,9 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 - `src/call_manager/scheduler.py` — register `_coherence_tick`
 - `src/call_manager/proposal_assist/tools/registry.py` — `ToolContext.origin_kind` + `origin_job_id`
 - `src/call_manager/proposal_assist/tools/proposal.py` — pass `ctx.origin_kind`/`ctx.origin_job_id`
-- `src/call_manager/proposal_assist/drafting/claude_adapter.py` (+ `factory.py`) — optional `allowed_tools` override; keeper tool-context factory
-- `src/call_manager/config` settings — `coherence_tick_seconds`
-- `src/call_manager/web/main.py` — mount the coherence router
+- `src/call_manager/proposal_assist/drafting/claude_adapter.py` (+ `factory.py`) — optional `allowed_tools` override; keeper one-shot adapter/MCP/ToolContext (NOT via `WorkspaceController`)
+- `src/call_manager/config.py` — `coherence_tick_seconds`, `coherence_job_timeout_seconds`, `coherence_daily_token_cap` settings (alongside `drafting_enabled:94`, `phase0_tick_seconds:122`)
+- `src/call_manager/main.py` (≈`:530`) — mount the coherence router
 
 **Frontend — create:** `frontend/src/api/coherence.ts` (+ `coherence.test.ts`).
 **Frontend — modify:** `frontend/src/cockpit/SpecPanel.tsx` (button + status); `frontend/src/api/schema.gen.ts` (regen); a small CSS add.
@@ -178,7 +207,7 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 
 ## 6. Build decomposition
 
-A single plan is appropriate; it is **backend-heavy** (substrate + pass + endpoints) with a thin frontend cap. The writing-plans step will sequence it TDD task-by-task. A natural ordering: (1) `coherence_jobs` model + migration; (2) `ToolContext` provenance fields + propose plumbing (with the interactive regression test); (3) context-assembly; (4) allowlist override; (5) pass handler + supersede (stub adapter); (6) tick + scheduler wiring; (7) endpoints; (8) frontend hooks + Spec-panel control + schema regen. No "no-green-intermediate" rewrites are anticipated (the provenance change is additive via defaults).
+A single plan is appropriate; it is **backend-heavy** (substrate + pass + endpoints) with a thin frontend cap. The writing-plans step will sequence it TDD task-by-task. A natural ordering: (1) `coherence_jobs` model + migration (incl. token/model columns + active-unique index); (2) `ToolContext` provenance fields + propose plumbing (with the interactive regression test); (3) context-assembly; (4) allowlist override + the keeper's one-shot adapter/ToolContext; (5) pass handler + success-supersede + **failure cleanup** (stub adapter); (6) jobs helpers — **reaper + daily-cap check**; (7) tick + scheduler wiring; (8) endpoints (incl. the **drafting_enabled / provider / disclosure-ack gates**); (9) frontend hooks + Spec-panel control + schema regen. No "no-green-intermediate" rewrites are anticipated (the provenance change is additive via defaults).
 
 ## 7. Out of scope (SP2b-3 and beyond)
 
