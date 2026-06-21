@@ -1,3 +1,7 @@
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+
+import { useLatestCoherence, useStartCoherence } from "../api/coherence";
 import { useInitSpec, useLockSpec, useSaveSpecSection, useSpec, useUnlockSpec } from "../api/editor";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
 import { ProposalReview } from "./ProposalReview";
@@ -8,6 +12,17 @@ export function SpecPanel({ id }: { id: string }) {
   const init = useInitSpec(id);
   const lock = useLockSpec(id);
   const unlock = useUnlockSpec(id);
+  const coherence = useLatestCoherence(id);
+  const startCoherence = useStartCoherence(id);
+  const runStatus = coherence.data?.status;
+  const checking = runStatus === "queued" || runStatus === "running";
+  const qc = useQueryClient();
+  useEffect(() => {
+    if (runStatus === "completed") {
+      qc.invalidateQueries({ queryKey: ["proposed-changes", id, "spec"] });
+      qc.invalidateQueries({ queryKey: ["proposed-changes", id, "draft"] });
+    }
+  }, [runStatus, id, qc]);
 
   if (spec.isLoading) return <main aria-busy="true">Loading spec…</main>;
   if (spec.isError || !spec.data) {
@@ -64,6 +79,25 @@ export function SpecPanel({ id }: { id: string }) {
           )}
         </div>
       )}
+      <div className="coherence-bar">
+        <button
+          type="button"
+          disabled={checking || startCoherence.isPending}
+          onClick={() => startCoherence.mutate()}
+        >
+          {checking ? "Checking coherence…" : "Check coherence"}
+        </button>
+        {runStatus === "completed" && coherence.data && (
+          <span className="coherence-status" role="status">
+            Last check: {coherence.data.n_proposals} proposal(s)
+          </span>
+        )}
+        {runStatus === "failed" && (
+          <span className="coherence-status coherence-error" role="status">
+            {coherence.data?.error ?? "Coherence check failed."}
+          </span>
+        )}
+      </div>
       {/* SP2b-2b: pending spec proposals */}
       <ProposalReview
         workspaceId={id}
