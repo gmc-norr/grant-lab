@@ -84,6 +84,13 @@ class ToolContext:
     created_by: int | None = field(default=None)
     origin_session_id: str | None = field(default=None)
 
+    # SP2b-2c: provenance for non-interactive (background) origins. Defaults keep
+    # the interactive path stamping "interactive_turn" with no origin_job_id. The
+    # coherence-keeper's tools_factory sets origin_kind="coherence_session" +
+    # origin_job_id=<coherence_jobs.id> at factory time (NOT via set_turn_provenance).
+    origin_kind: str = field(default="interactive_turn")
+    origin_job_id: uuid.UUID | None = field(default=None)
+
     # SP2a-2 §3 (Task 2): section_index -> section sha as the agent saw them at
     # read time (populated by read_proposal_impl, HEAD-first). propose_edit reads
     # base_section_sha from here; an unread section is rejected (_NOT_READ_ERROR).
