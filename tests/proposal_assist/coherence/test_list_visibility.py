@@ -34,17 +34,19 @@ def test_running_coherence_rows_hidden_completed_shown(
         s.flush()
         running = CoherenceJob(workspace_id=ws.id, status="running")
         completed = CoherenceJob(workspace_id=ws.id, status="completed")
-        s.add_all([running, completed])
+        failed = CoherenceJob(workspace_id=ws.id, status="failed")
+        s.add_all([running, completed, failed])
         s.flush()
         _coherence_row(s, ws.id, running.id)  # hidden (job running)
         _coherence_row(s, ws.id, completed.id)  # shown (job completed)
+        _coherence_row(s, ws.id, failed.id)  # hidden (job failed, not completed)
         s.commit()
         ws_id = str(ws.id)
 
     resp = client_authed_owner.get(f"/api/workspaces/{ws_id}/proposed-changes?target_artifact=spec")
     assert resp.status_code == 200
     items = resp.json()["items"]
-    assert len(items) == 1  # only the completed-job row
+    assert len(items) == 1  # only the completed-job row (running AND failed are both hidden)
 
 
 def test_interactive_rows_always_shown(
