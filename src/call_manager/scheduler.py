@@ -546,6 +546,9 @@ def build_scheduler(
         except Exception:
             _logger.exception("coherence reaper tick failed")
 
+    # Cadence == TTL: a job hung just after a fire waits up to ~2x the TTL to be
+    # reaped. Acceptable for a manual-trigger feature; the in-pass timeout is the
+    # primary bound and this reaper is crash/restart recovery.
     sched.add_job(
         _coherence_reaper_tick,
         trigger=IntervalTrigger(seconds=settings.coherence_job_timeout_seconds),
