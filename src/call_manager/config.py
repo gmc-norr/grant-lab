@@ -218,6 +218,12 @@ class Settings(BaseSettings):
             "this cap. The other coherence settings land in SP2b-2c Task 7."
         ),
     )
+    coherence_pass_timeout_seconds: int = Field(
+        default=180,
+        alias="COHERENCE_PASS_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the keeper SDK turn. On "
+        "timeout the one-shot adapter is terminated and the job is failed.",
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",
