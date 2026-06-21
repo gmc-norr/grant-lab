@@ -76,6 +76,15 @@ export function ProposalReview({
     }
   }
 
+  async function onReject(p: ProposalRow) {
+    setNotice(null);
+    try {
+      await reject.mutateAsync(p.id);
+    } catch (e) {
+      setNotice(e instanceof ApiError ? e.message.replace(/^[a-z_]+: /, "") : "Reject failed.");
+    }
+  }
+
   return (
     <section className="proposal-review" aria-label="Pending proposals">
       <h2 className="proposal-review-title">Pending proposals ({prose.length})</h2>
@@ -106,7 +115,7 @@ export function ProposalReview({
               >
                 Accept
               </button>
-              <button type="button" disabled={reject.isPending} onClick={() => reject.mutate(p.id)}>
+              <button type="button" disabled={reject.isPending} onClick={() => onReject(p)}>
                 Reject
               </button>
             </div>

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
@@ -62,4 +62,29 @@ it("disables Accept with a hint when the spec is locked", async () => {
   renderReview({ locked: true });
   const accept = await screen.findByRole("button", { name: /accept/i });
   expect(accept).toBeDisabled();
+});
+
+it("renders an add/del line diff of the proposed section", async () => {
+  // current section "## Aims\norig.\n" vs proposed "## Aims\nbetter.\n":
+  // the heading line is unchanged, "orig." is deleted, "better." is added.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: { items: [ROW] }, error: undefined } as never);
+  renderReview();
+  const del = await screen.findByText("- orig.");
+  expect(del).toHaveClass("diff-del");
+  expect(screen.getByText("+ better.")).toHaveClass("diff-add");
+});
+
+it("surfaces a reject error in the notice", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: { items: [ROW] }, error: undefined } as never);
+  // The /api error envelope is { error: { code, message } }; unwrap throws ApiError,
+  // and onReject strips the machine code prefix before showing the message.
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "conflict", message: "already resolved" } },
+  } as never);
+  renderReview();
+  fireEvent.click(await screen.findByRole("button", { name: /reject/i }));
+  const notice = await screen.findByRole("status");
+  expect(notice).toHaveTextContent("already resolved");
+  expect(notice).not.toHaveTextContent("conflict:");
 });
