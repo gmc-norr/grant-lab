@@ -1310,6 +1310,16 @@ def soft_delete(
         session=session,
     )
     ws.soft_deleted_at = datetime.now(UTC)
+    # Fail any active (queued|running) coherence pass so it can't claim and burn
+    # cloud tokens after the workspace is deleted (claim_next also excludes
+    # soft-deleted workspaces; this also unwedges the active-unique slot and
+    # supersedes any partial pending rows). Runs in this same transaction, before
+    # the commit below.
+    from call_manager.proposal_assist.coherence.jobs import (
+        cancel_coherence_jobs_for_workspace,
+    )
+
+    cancel_coherence_jobs_for_workspace(session, workspace_id=workspace_id)
     # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
     # through the helper for audit parity (closes each cloud_turn_sent chain),
     # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,

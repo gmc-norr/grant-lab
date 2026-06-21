@@ -34,6 +34,9 @@ from call_manager.proposal_assist.web.annotations import (
 from call_manager.proposal_assist.web.citations import (
     router as citations_router,
 )
+from call_manager.proposal_assist.web.coherence import (
+    router as coherence_router,
+)
 from call_manager.proposal_assist.web.files import (
     router as files_router,
 )
@@ -528,6 +531,7 @@ def create_app() -> FastAPI:
     app.include_router(workspaces_router)
     app.include_router(sections_router)
     app.include_router(proposals_router)
+    app.include_router(coherence_router)
     app.include_router(annotations_router)
     app.include_router(files_router)
     app.include_router(references_router)
