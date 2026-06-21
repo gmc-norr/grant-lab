@@ -33,7 +33,14 @@ async def run_coherence_pass(
     settings: Settings,
     adapter_builder=build_keeper_adapter,
 ) -> None:
-    """Run the pass for an already-claimed (running) job. Never raises."""
+    """Run the pass for an already-claimed (running) job.
+
+    The launch+drive portion is fully guarded (any error/timeout fails the job and
+    supersedes its own partial rows). The initial short read session (job/workspace
+    read, context assembly, cap check) runs before that guard, so a DB/file error
+    there can propagate; the scheduler tick wraps this call and the reaper reclaims a
+    job left 'running'.
+    """
     # 1. Read job + workspace state (lock, requested_by) in a short session.
     with session_factory() as s:
         job = s.get(CoherenceJob, job_id)
