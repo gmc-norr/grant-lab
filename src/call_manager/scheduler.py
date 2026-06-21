@@ -496,6 +496,64 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # SP2b-2c: coherence drain tick (async — runs one fresh-stateless keeper pass).
+    # Same app_loop dispatch pattern as _turn_drain_tick: the SDK client + asyncio
+    # primitives are bound to the FastAPI lifespan loop, so a worker-thread
+    # asyncio.run() would create a new loop and break them.
+    def _coherence_tick() -> None:
+        import asyncio
+
+        from call_manager.proposal_assist.coherence.pass_runner import drain_coherence_queue_tick
+
+        # Skip ONLY on the admin kill-switch (POST also 503s on it, so queued work
+        # waits for re-enable). Do NOT skip on a missing anthropic_api_key: the spec
+        # deliberately has no API-key HTTP gate, so a misconfigured provider must
+        # surface as a FAILED job at runtime (the pass errors → job failed), not a
+        # job stuck queued forever with the SPA polling indefinitely.
+        if not settings.drafting_enabled:
+            return
+        coro = drain_coherence_queue_tick(session_factory=session_factory, settings=settings)
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("coherence tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            fut.result(timeout=settings.coherence_pass_timeout_seconds + 60)
+        except Exception:
+            _logger.exception("coherence tick failed")
+
+    sched.add_job(
+        _coherence_tick,
+        trigger=IntervalTrigger(seconds=settings.coherence_tick_seconds),
+        id="coherence_drain",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # SP2b-2c: coherence reaper tick (sync, pure DB). Runs even while _coherence_tick
+    # is blocked inside a live pass, so a crashed/hung running job can't wedge the
+    # workspace's active-unique slot forever. Mirrors _turn_reaper_tick.
+    def _coherence_reaper_tick() -> None:
+        from call_manager.proposal_assist.coherence.jobs import reap_stuck_coherence_jobs
+
+        try:
+            with session_factory() as s:
+                reap_stuck_coherence_jobs(s, timeout_seconds=settings.coherence_job_timeout_seconds)
+                s.commit()
+        except Exception:
+            _logger.exception("coherence reaper tick failed")
+
+    sched.add_job(
+        _coherence_reaper_tick,
+        trigger=IntervalTrigger(seconds=settings.coherence_job_timeout_seconds),
+        id="coherence_reaper",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Stuck-turn reaper. A turn cancelled by _turn_drain_tick's
     # fut.result(timeout=300) keeps running on the app loop with the handle
     # cached and its turn_jobs row stuck status='running'. The drain query

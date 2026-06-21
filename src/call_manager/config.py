@@ -224,6 +224,18 @@ class Settings(BaseSettings):
         description="In-pass asyncio.wait_for bound on the keeper SDK turn. On "
         "timeout the one-shot adapter is terminated and the job is failed.",
     )
+    coherence_tick_seconds: int = Field(
+        default=20,
+        alias="COHERENCE_TICK_SECONDS",
+        description="How often the coherence drain tick claims+runs one queued "
+        "coherence pass. Manual-only, so this just bounds latency from click to run.",
+    )
+    coherence_job_timeout_seconds: int = Field(
+        default=300,
+        alias="COHERENCE_JOB_TIMEOUT_SECONDS",
+        description="Reaper TTL: a running coherence job older than this is failed "
+        "(crash/restart recovery), unwedging the workspace's active-unique slot.",
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",
