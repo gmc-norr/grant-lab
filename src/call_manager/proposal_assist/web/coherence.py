@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Workspace, WorkspaceEvent
+from call_manager.db.models import CoherenceJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.coherence.jobs import (
     enqueue_coherence_run,
     latest_coherence_job,
@@ -22,7 +22,7 @@ from call_manager.proposal_assist.web.workspaces import _session_dep
 router = APIRouter(prefix="/api/workspaces", tags=["coherence"])
 
 
-def _serialize(job) -> dict:
+def _serialize(job: CoherenceJob) -> dict:
     return {
         "id": str(job.id),
         "status": job.status,
@@ -89,5 +89,4 @@ def latest_coherence_run(
 ) -> dict | None:
     require_member(workspace_id=workspace_id, user=user, session=session)
     job = latest_coherence_job(session, workspace_id=workspace_id)
-    session.commit()
     return _serialize(job) if job is not None else None

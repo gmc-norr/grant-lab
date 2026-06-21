@@ -50,6 +50,9 @@ from call_manager.proposal_assist.attachments.tokens import estimate_image_token
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
 from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.coherence.jobs import (
+    cancel_coherence_jobs_for_workspace,
+)
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -1315,10 +1318,6 @@ def soft_delete(
     # soft-deleted workspaces; this also unwedges the active-unique slot and
     # supersedes any partial pending rows). Runs in this same transaction, before
     # the commit below.
-    from call_manager.proposal_assist.coherence.jobs import (
-        cancel_coherence_jobs_for_workspace,
-    )
-
     cancel_coherence_jobs_for_workspace(session, workspace_id=workspace_id)
     # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
     # through the helper for audit parity (closes each cloud_turn_sent chain),
