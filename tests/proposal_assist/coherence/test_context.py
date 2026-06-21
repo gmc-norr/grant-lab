@@ -43,3 +43,5 @@ def test_handles_missing_artifact_files(tmp_path, pg_session_factory):
             session=s, workspace_id=ws_id, workspaces_dir=str(tmp_path)
         )
     assert isinstance(text, str) and len(text) > 0  # no crash; empty artifacts noted
+    assert "(draft is empty)" in text  # degraded-path placeholder for missing draft
+    assert "(spec is empty)" in text  # degraded-path placeholder for missing spec
