@@ -62,8 +62,10 @@ Indexes:
 
 A new `_coherence_tick` registered in `build_scheduler()` beside `_phase0_tick` (`scheduler.py:370`), `IntervalTrigger(seconds=settings.coherence_tick_seconds)`, `id="proposal_assist_coherence_tick"`, `max_instances=1` — honoring the single-instance constraint. Backed by `run_coherence_tick(session_factory, client_factory, settings)` (mirrors `run_phase0_tick`), which each tick:
 
-1. **Reaps stuck jobs first** — flips any `running` job whose `started_at` is older than `settings.coherence_job_timeout_seconds` to `failed` (`error="timed out"`) and runs the §2.5 failure cleanup. **This is required**: because the active-unique index counts `running`, a process crash mid-pass would otherwise wedge the workspace forever (`create-or-return-active` keeps returning the dead job). The reaper is the liveness escape hatch.
+1. **Reaps crashed jobs first** — flips any `running` job whose `started_at` is older than `settings.coherence_job_timeout_seconds` to `failed` (`error="timed out"`) and runs the §2.5 failure cleanup. **This is required**: because the active-unique index counts `running`, a process crash/restart mid-pass would otherwise wedge the workspace forever (`create-or-return-active` keeps returning the dead job). The reaper covers **crash/restart recovery only** — a *live* hang inside the pass is bounded separately by the §2.2 in-pass timeout (the reaper can't fire during a live hang, since the single-instance tick is itself blocked inside that pass).
 2. **Then claims one job** — the oldest `queued` job whose workspace has no `running` job, claimed `FOR UPDATE SKIP LOCKED`, flipped to `running` (sets `started_at`), then handed to the pass handler.
+
+**Inline execution / global serialization.** Like `_phase0_tick`, the pass runs **inline inside the tick**, and the tick is `max_instances=1` — so passes are effectively serialized *globally* (one at a time across all workspaces), and a running pass delays the next claim/reap until it returns. Acceptable at single-hospital, manual-only scale; the §2.2 in-pass timeout bounds head-of-line blocking. (A future executor/worker split is out of scope.)
 
 ---
 
@@ -80,6 +82,8 @@ A new `_coherence_tick` registered in `build_scheduler()` beside `_phase0_tick` 
 One fresh stateless turn via the existing adapter `ClaudeAgentSDKAdapter`: `launch` with **no** `resume` (new session), then `send_turn` with the keeper instruction. The instruction frames the role (compare spec intent vs draft; propose conservative, per-section, full-text reconciliation edits; don't restate non-drift).
 
 **Isolation (do NOT reuse `WorkspaceController`).** The interactive `WorkspaceController` caches a per-workspace SDK client + a retained `ToolContext` and *resumes* the interactive session — routing the keeper through it would reuse the interactive subprocess + its provenance, breaking "fresh stateless" and corrupting `origin_kind`. The pass instead constructs its **own one-shot stack**: a dedicated adapter instance + its own in-process MCP `@tool` server + its own `ToolContext` (stamped with coherence provenance, §2.3), launched with no resume, and **terminated in a `finally`** (the SDK subprocess is closed even on error). Nothing touches `Workspace.last_sdk_session_id`.
+
+**In-pass timeout (bounds a live hang).** The SDK turn is wrapped in `settings.coherence_pass_timeout_seconds` (e.g. `asyncio.wait_for`). On timeout: the `finally` terminates the one-shot adapter, the job is marked `failed` (`error="timed out"`), and §2.5 failure cleanup runs. This is distinct from — and necessary alongside — the §1.3 reaper: because the tick is `max_instances=1` and runs the pass inline, a hang *inside* the pass blocks every later tick, so the reaper alone could never fire on a live hang. The reaper handles only the crash/restart case (no live code holding the job).
 
 **Lock-aware toolset (structural, not just prompted):**
 - spec **unlocked** → allowlist `{read_proposal, read_spec, propose_edit, propose_spec_edit}`
@@ -133,7 +137,12 @@ Same envelope + `require_member` patterns as `web/proposals.py`.
 
 - **`POST /api/workspaces/{id}/coherence-runs`** — *create-or-return-active*: if a `queued`/`running` job already exists for the workspace, return it (no stacking); else insert a `queued` row (`requested_by`=current user) and return `{id, status}`. The §1.1 active-unique index makes this race-safe — on a concurrent-insert unique violation, catch and re-read the existing active job.
 
-  **Cloud-LLM hard gates (mirror the interactive turns route, `web/workspaces.py:790‑801`).** A pass calls a hosted Claude, so the POST enforces the *same* preconditions before enqueueing: `settings.drafting_enabled` (else 403/409 "drafting disabled"); the provider/API key configured (else 409 "AI drafting not configured"); and a prior **per-user `disclosure_acknowledged`** `WorkspaceEvent` for this workspace (else 409/428 prompting the disclosure modal — the SPA reuses the existing `POST .../disclosure` ack flow). Same gate set the chat turn submit uses; do not invent a weaker one.
+  **Cloud-LLM hard gates — mirror the interactive turns route *exactly* (`web/workspaces.py:779‑814`), same status codes** (auth-first: `require_member` before these):
+  1. `ws.current_phase == "setup"` → **409** (no draft/spec exists yet — a pass would run against nothing). 
+  2. `not settings.drafting_enabled` → **503** (admin kill-switch). 
+  3. no prior per-user `disclosure_acknowledged` `WorkspaceEvent` for this workspace → **403** (the SPA surfaces the existing disclosure modal + `POST .../disclosure` ack flow). 
+
+  These are intentionally the *same codes* as the chat-turn submit, carried through the `/api` envelope (the global handler maps them to `{error:{code,message}}` with the status preserved). There is no separate API-key HTTP gate: like the interactive route, a provider that is enabled-but-misconfigured surfaces as a **failed job at runtime** (§2.5), not a pre-flight rejection.
 - **`GET /api/workspaces/{id}/coherence-runs/latest`** — the most recent job or `null`: `{id, status, n_proposals, error, started_at, completed_at}`. The SPA polls this while `status ∈ {queued, running}`; it also restores state on reload.
 
 Router mounted in `src/call_manager/main.py` (≈`:530`) alongside the proposed-changes router.
@@ -142,6 +151,12 @@ Router mounted in `src/call_manager/main.py` (≈`:530`) alongside the proposed-
 
 - `frontend/src/api/coherence.ts` (+ schema regen via `EMBEDDING_MODEL=bge-m3 pnpm gen:api`): `useStartCoherence(id)` (POST) and `useLatestCoherence(id)` (GET, `refetchInterval` while queued/running, else disabled). On a run transitioning to `completed`, invalidate **both** inbox queries `["proposed-changes", id, "spec"]` and `["proposed-changes", id, "draft"]` so the existing `<ProposalReview>` strips refresh in place.
 - A **"Check coherence" control in the Spec panel header** (`frontend/src/cockpit/SpecPanel.tsx`, next to the lock controls — the spec is the coherence anchor) with a compact status line: idle → button; `running` → disabled + "Checking coherence…"; `completed` → "Last check: N proposal(s)"; `failed` → error notice + retry. Resulting proposals appear in the Spec **and** Draft inboxes already built — no new review UI. (A cockpit-level placement can move it when the fuller cockpit chrome lands.)
+
+### 3.3 Inbox visibility — hide in-flight coherence rows
+
+The `propose_*` tools **commit each row as they run**, and the SP2b-2b list endpoint returns *every* pending row for the artifact (`web/proposals.py:58`). Without a guard, a half-complete pass's proposals would flash into `<ProposalReview>` mid-run, then some vanish when supersede/failure-cleanup fires — a jarring, inconsistent inbox.
+
+**Fix — gate coherence rows on job completion in the list query.** A `proposed_change` with `origin_kind='coherence_session'` is listed **only if** its `coherence_jobs` row (joined via `origin_job_id`) has `status='completed'`. Concretely, extend `list_proposed_changes` with a `NOT EXISTS`/anti-join: hide a coherence row whose job is `queued`/`running`/`failed` (a failed job's rows are already `superseded`, so this matters mainly for the `running` window; the completed pass flips its job to `completed` and supersedes the prior pass **atomically** (§2.4), so the new set appears all-at-once). **Non-coherence rows (`interactive_turn`/`human`) are unaffected** — the predicate only touches `coherence_session` rows. This is the one modification to the SP2b-2b endpoint.
 
 ---
 
@@ -159,8 +174,10 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 - **Lock-aware toolset:** assert the assembled allowlist *excludes* `propose_spec_edit` when locked, *includes* it when unlocked.
 - **Failure cleanup:** stub emits one proposal then raises → job `failed` + `error` set; **this job's** emitted row → `superseded`; a seeded **prior** coherence-pending row stays `pending` (inverse of the success path).
 - **Stuck-job reaper:** a `running` job with `started_at` older than `coherence_job_timeout_seconds` → flipped `failed` by the tick (+ its partial rows superseded), which frees a fresh enqueue for that workspace.
+- **In-pass timeout:** a stub turn that hangs past `coherence_pass_timeout_seconds` → job `failed` (`error="timed out"`), its partial rows superseded, and the one-shot adapter terminated (assert the `finally` close ran).
+- **In-flight visibility:** a `running` job's emitted rows are **not** returned by the list endpoint; once the job is `completed` they appear; `interactive_turn`/`human` rows are always returned regardless of any coherence job state.
 - **Cost cap:** seed today's `coherence_jobs` token sum at/over `coherence_daily_token_cap` → the next pass is marked `failed` ("budget reached") with **no adapter call** (stub asserts it was never launched); a completed pass records `input_tokens`/`output_tokens`/`model`.
-- **POST hard gates:** `drafting_enabled=False` → blocked; missing per-user `disclosure_acknowledged` → blocked (mirrors the chat-turn gate); provider-unconfigured → blocked.
+- **POST hard gates (exact codes):** `current_phase="setup"` → **409**; `drafting_enabled=False` → **503**; missing per-user `disclosure_acknowledged` → **403** — matching `web/workspaces.py:779‑814`, asserted through the `/api` envelope.
 - **Session isolation:** the pass does not resume/mutate `Workspace.last_sdk_session_id`; uses its own adapter/ToolContext (assert via the stub that no interactive session id is read/written).
 - **Provenance regression:** the interactive propose path still stamps `origin_kind="interactive_turn"` (ToolContext defaults unchanged).
 - **Endpoints:** POST create-or-return-active (2nd POST returns the same job); GET-latest shape + `null` when none; non-member → 403; `/api` envelope.
@@ -174,6 +191,8 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 - **Cost/runaway** — manual-only + a **separate per-workspace daily coherence token cap** (§2.6, since the chat-turn cap can't see coherence) + one-pass-per-workspace guard. No auto-trigger.
 - **Wedged workspace** — the active-unique index counts `running`, so a crash mid-pass could block all future passes; the §1.3 **timeout reaper** is the required escape hatch (verified by the reaper test).
 - **Leaked partial proposals on failure** — addressed by §2.5 failure cleanup (supersede this job's own pending rows).
+- **In-flight rows flashing into the inbox** — the §3.3 list-visibility gate hides `coherence_session` rows until their job is `completed` (per-row commits would otherwise show a half-done pass mid-run).
+- **Live hang inside a pass** — bounded by the §2.2 in-pass timeout (the §1.3 reaper can't fire during a live hang, since the single-instance tick is blocked in the pass).
 - **Cross-session contamination** — the pass uses its **own** one-shot adapter/MCP/ToolContext, never `WorkspaceController`, and never touches `last_sdk_session_id` (§2.2).
 - **Proposals racing user edits** — existing `base_section_sha` staleness; born-stale surfaces as `stale` (§6 of the overarching design). No new mechanism.
 - **Holistic drift with no concrete edit** — **not surfaced in v1** (no Problems panel); deferred to SP2b-3. Known, accepted limitation.
@@ -197,7 +216,8 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 - `src/call_manager/proposal_assist/tools/registry.py` — `ToolContext.origin_kind` + `origin_job_id`
 - `src/call_manager/proposal_assist/tools/proposal.py` — pass `ctx.origin_kind`/`ctx.origin_job_id`
 - `src/call_manager/proposal_assist/drafting/claude_adapter.py` (+ `factory.py`) — optional `allowed_tools` override; keeper one-shot adapter/MCP/ToolContext (NOT via `WorkspaceController`)
-- `src/call_manager/config.py` — `coherence_tick_seconds`, `coherence_job_timeout_seconds`, `coherence_daily_token_cap` settings (alongside `drafting_enabled:94`, `phase0_tick_seconds:122`)
+- `src/call_manager/proposal_assist/web/proposals.py` — `list_proposed_changes` (≈`:47‑69`) gains the §3.3 coherence-visibility gate (hide `coherence_session` rows whose job isn't `completed`)
+- `src/call_manager/config.py` — `coherence_tick_seconds`, `coherence_job_timeout_seconds`, `coherence_pass_timeout_seconds`, `coherence_daily_token_cap` settings (alongside `drafting_enabled:94`, `phase0_tick_seconds:122`)
 - `src/call_manager/main.py` (≈`:530`) — mount the coherence router
 
 **Frontend — create:** `frontend/src/api/coherence.ts` (+ `coherence.test.ts`).
@@ -207,7 +227,7 @@ All agent-pass tests use a **stub adapter** that emits scripted tool calls — n
 
 ## 6. Build decomposition
 
-A single plan is appropriate; it is **backend-heavy** (substrate + pass + endpoints) with a thin frontend cap. The writing-plans step will sequence it TDD task-by-task. A natural ordering: (1) `coherence_jobs` model + migration (incl. token/model columns + active-unique index); (2) `ToolContext` provenance fields + propose plumbing (with the interactive regression test); (3) context-assembly; (4) allowlist override + the keeper's one-shot adapter/ToolContext; (5) pass handler + success-supersede + **failure cleanup** (stub adapter); (6) jobs helpers — **reaper + daily-cap check**; (7) tick + scheduler wiring; (8) endpoints (incl. the **drafting_enabled / provider / disclosure-ack gates**); (9) frontend hooks + Spec-panel control + schema regen. No "no-green-intermediate" rewrites are anticipated (the provenance change is additive via defaults).
+A single plan is appropriate; it is **backend-heavy** (substrate + pass + endpoints) with a thin frontend cap. The writing-plans step will sequence it TDD task-by-task. A natural ordering: (1) `coherence_jobs` model + migration (incl. token/model columns + active-unique index); (2) `ToolContext` provenance fields + propose plumbing (with the interactive regression test); (3) context-assembly; (4) allowlist override + the keeper's one-shot adapter/ToolContext; (5) pass handler + **in-pass timeout** + success-supersede + **failure cleanup** (stub adapter); (6) jobs helpers — **reaper + daily-cap check**; (7) tick + scheduler wiring; (8) the §3.3 **list-visibility gate** in `web/proposals.py` (+ its tests); (9) endpoints (incl. the **setup/drafting_enabled/disclosure gates** with exact codes); (10) frontend hooks + Spec-panel control + schema regen. No "no-green-intermediate" rewrites are anticipated (the provenance change is additive via defaults; the list-visibility gate only adds a predicate for `coherence_session` rows, so existing SP2b-2b inbox tests stay green).
 
 ## 7. Out of scope (SP2b-3 and beyond)
 
