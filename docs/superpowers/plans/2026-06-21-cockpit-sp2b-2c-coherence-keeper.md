@@ -38,6 +38,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 - `src/call_manager/proposal_assist/tools/proposal.py` — propose plumbing reads `ctx.origin_kind`/`ctx.origin_job_id`
 - `src/call_manager/proposal_assist/drafting/claude_adapter.py` — optional `allowed_tools` constructor override
 - `src/call_manager/proposal_assist/web/proposals.py` — `list_proposed_changes` visibility gate
+- `src/call_manager/proposal_assist/web/workspaces.py` — `soft_delete` (~:1312) cancels active coherence jobs
 - `src/call_manager/scheduler.py` — register `_coherence_tick` (async drain) + `_coherence_reaper_tick` (sync)
 - `src/call_manager/config.py` — 4 coherence settings
 - `src/call_manager/main.py` — mount the coherence router
@@ -280,7 +281,10 @@ def _init_repo(repo_dir: Path) -> None:
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo_dir, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo_dir, check=True)
-    (repo_dir / PROPOSAL_FILENAME).write_text("## Aims\n\nOriginal.\n")
+    # split_sections: index 0 is the PREAMBLE (text before the first ##), index 1
+    # is "## Aims". Editing the preamble with heading text trips save_section's
+    # structure guard, so the tests below edit section_index=1.
+    (repo_dir / PROPOSAL_FILENAME).write_text("Intro preamble.\n\n## Aims\n\nOriginal.\n")
     subprocess.run(["git", "add", PROPOSAL_FILENAME], cwd=repo_dir, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo_dir, check=True)
 
@@ -297,7 +301,7 @@ async def test_propose_defaults_to_interactive(tmp_path, pg_session_factory, _se
     _init_repo(repo)
     ctx = _ctx(repo, pg_session_factory, workspace_id=ws_id)
     await read_proposal_impl(ctx)
-    await propose_edit_impl(ctx, section_index=0, new_text="## Aims\n\nReworded.\n")
+    await propose_edit_impl(ctx, section_index=1, new_text="## Aims\n\nReworded.\n")
 
     from call_manager.db.models import ProposedChange
 
@@ -326,7 +330,7 @@ async def test_propose_stamps_coherence_provenance(tmp_path, pg_session_factory,
         origin_job_id=job_id,
     )
     await read_proposal_impl(ctx)
-    await propose_edit_impl(ctx, section_index=0, new_text="## Aims\n\nReworded.\n")
+    await propose_edit_impl(ctx, section_index=1, new_text="## Aims\n\nReworded.\n")
 
     from call_manager.db.models import ProposedChange
 
@@ -678,8 +682,10 @@ from sqlalchemy.orm import sessionmaker
 
 from call_manager.config import Settings
 from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-from call_manager.proposal_assist.tools.factory_helpers import build_proposal_assist_mcp_server
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import (
+    ToolContext,
+    build_proposal_assist_mcp_server,
+)
 
 # Lock-aware: when the spec is locked, propose_spec_edit is removed so a spec edit
 # is structurally unreachable. read_* are required to set the anti-clobber snapshot.
@@ -719,7 +725,7 @@ def build_keeper_adapter(
     )
 ```
 
-(Confirm the import path of `build_proposal_assist_mcp_server` — the grounding read it from `drafting/factory.py`; import it from wherever it is defined. If it lives in `drafting/factory.py`, use `from call_manager.proposal_assist.drafting.factory import build_proposal_assist_mcp_server`. The MCP server registers ALL collected tools; the allowlist is what gates which the model may call — so removing `propose_spec_edit` from the allowlist makes it unreachable even though it is registered.)
+(`build_proposal_assist_mcp_server` is defined in `tools/registry.py:132` and re-exported by `tools/__init__.py`. The MCP server registers ALL collected tools; the allowlist is what gates which the model may call — so removing `propose_spec_edit` from the allowlist makes it unreachable even though it is registered.)
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -870,6 +876,33 @@ def test_reaper_fails_stale_running_and_supersedes_its_rows(pg_session_factory):
         s.refresh(partial)
         assert n == 1 and stale.status == "failed"
         assert partial.status == "superseded"
+
+
+def test_claim_skips_soft_deleted_workspace(pg_session_factory):
+    from datetime import UTC, datetime as _dt
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        ws.soft_deleted_at = _dt.now(UTC)
+        s.flush()
+        s.add(CoherenceJob(workspace_id=ws.id, status="queued"))
+        s.flush()
+        assert jobs.claim_next_coherence_job(s) is None  # deleted ws not claimable
+
+
+def test_cancel_for_workspace_fails_active_and_supersedes(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        q = CoherenceJob(workspace_id=ws.id, status="queued")
+        s.add(q)
+        s.flush()
+        partial = _pending_coherence(s, ws.id, q.id)
+        n = jobs.cancel_coherence_jobs_for_workspace(s, workspace_id=ws.id)
+        s.refresh(q)
+        s.refresh(partial)
+        assert n == 1 and q.status == "failed"
+        assert partial.status == "superseded"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -895,7 +928,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
-from call_manager.db.models import CoherenceJob, ProposedChange
+from call_manager.db.models import CoherenceJob, ProposedChange, Workspace
 from call_manager.proposal_assist.turns.caps import _stockholm_day_start_utc
 
 
@@ -904,8 +937,11 @@ def enqueue_coherence_run(
 ) -> CoherenceJob:
     """Create a queued job, or return the existing active (queued|running) one.
 
-    Race-safe against the uq_coherence_jobs_active partial-unique index: on a
-    concurrent-insert violation, roll back to a SAVEPOINT and re-read the winner.
+    Race-safe against the uq_coherence_jobs_active partial-unique index: the INSERT
+    happens INSIDE the SAVEPOINT (add + flush both inside begin_nested) so a
+    unique-violation rolls back ONLY the savepoint, leaving the outer transaction
+    usable for the re-read. (Adding before begin_nested risks the INSERT flushing
+    outside the savepoint and poisoning the whole transaction.)
     """
     existing = session.scalar(
         select(CoherenceJob).where(
@@ -916,12 +952,16 @@ def enqueue_coherence_run(
     if existing is not None:
         return existing
     job = CoherenceJob(workspace_id=workspace_id, status="queued", requested_by=requested_by)
-    session.add(job)
     try:
         with session.begin_nested():
+            session.add(job)
             session.flush()
     except IntegrityError:
-        # Lost the race: another request inserted the active row first.
+        # Lost the race: another request inserted the active row first. The
+        # savepoint rolled back, but `job` is restored to pending — expunge it so
+        # the re-read's autoflush doesn't retry the doomed INSERT.
+        if job in session:
+            session.expunge(job)
         return session.scalar(
             select(CoherenceJob).where(
                 CoherenceJob.workspace_id == workspace_id,
@@ -932,14 +972,18 @@ def enqueue_coherence_run(
 
 
 def claim_next_coherence_job(session: Session) -> CoherenceJob | None:
-    """Claim the oldest queued job whose workspace has no running job. Flips it to
-    running + stamps started_at. FOR UPDATE SKIP LOCKED so parallel ticks don't fight."""
+    """Claim the oldest queued job whose workspace is LIVE and has no running job.
+    Flips it to running + stamps started_at. FOR UPDATE SKIP LOCKED so parallel
+    ticks don't fight. Soft-deleted workspaces are excluded so a pass can't burn
+    tokens after deletion (the delete handler also cancels existing jobs)."""
     running_ws = select(CoherenceJob.workspace_id).where(CoherenceJob.status == "running")
+    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
     job = session.scalar(
         select(CoherenceJob)
         .where(
             CoherenceJob.status == "queued",
             CoherenceJob.workspace_id.not_in(running_ws),
+            CoherenceJob.workspace_id.in_(live_ws),
         )
         .order_by(CoherenceJob.queued_at)
         .limit(1)
@@ -953,11 +997,33 @@ def claim_next_coherence_job(session: Session) -> CoherenceJob | None:
     return job
 
 
+def cancel_coherence_jobs_for_workspace(session: Session, *, workspace_id: uuid.UUID) -> int:
+    """Fail any active (queued|running) coherence job for a workspace — called from
+    the soft-delete handler so a queued/running pass can't spend tokens after the
+    workspace is deleted. Also supersedes each job's partial pending rows."""
+    rows = session.scalars(
+        select(CoherenceJob).where(
+            CoherenceJob.workspace_id == workspace_id,
+            CoherenceJob.status.in_(("queued", "running")),
+        )
+    ).all()
+    for job in rows:
+        job.status = "failed"
+        job.error = "workspace deleted"
+        job.completed_at = datetime.now(UTC)
+        supersede_own_coherence(session, workspace_id=workspace_id, job_id=job.id)
+    session.flush()
+    return len(rows)
+
+
 def _supersede(session: Session, *, workspace_id: uuid.UUID, where_job, equals: bool) -> int:
+    # equals=True (own/failure): origin_job_id == this job. equals=False (prior/success):
+    # IS DISTINCT FROM, which also supersedes any NULL-origin_job_id coherence rows
+    # (a plain `!=` would skip NULLs — spec §2.4).
     cond = (
         ProposedChange.origin_job_id == where_job
         if equals
-        else ProposedChange.origin_job_id != where_job
+        else ProposedChange.origin_job_id.is_distinct_from(where_job)
     )
     result = session.execute(
         update(ProposedChange)
@@ -1029,7 +1095,7 @@ def latest_coherence_job(session: Session, *, workspace_id: uuid.UUID) -> Cohere
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/coherence/test_jobs.py -q`
-Expected: PASS (6 passed). (`_stockholm_day_start_utc` is imported from `turns/caps.py` — confirm the name; the grounding shows it defined there.)
+Expected: PASS (8 passed). (`_stockholm_day_start_utc` is imported from `turns/caps.py` — confirmed defined there in the grounding read.)
 
 - [ ] **Step 5: Commit**
 
@@ -1262,8 +1328,10 @@ async def run_coherence_pass(
     except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
         logger.exception("coherence pass failed for job %s", job_id)
         with session_factory() as s:
-            job = s.get(CoherenceJob, job_id)
-            if job is not None:
+            # Lock the row + guard on status=='running': the separate reaper may
+            # have already failed this job during a hang; don't double-finalize.
+            job = s.get(CoherenceJob, job_id, with_for_update=True)
+            if job is not None and job.status == "running":
                 _fail(s, job, str(exc)[:500] or type(exc).__name__)
                 supersede_own_coherence(s, workspace_id=workspace_id, job_id=job_id)
             s.commit()
@@ -1275,12 +1343,18 @@ async def run_coherence_pass(
             except Exception:  # noqa: BLE001
                 logger.exception("coherence adapter terminate failed for job %s", job_id)
 
-    # 2. Success: supersede prior + record telemetry + count this pass's rows.
+    # 2. Success: claim the terminal transition under a row lock; ONLY finalize if
+    #    the job is still 'running' (the reaper may have failed it during a hang —
+    #    in which case its own cleanup already ran and we must not resurrect it).
     with session_factory() as s:
         from sqlalchemy import func, select
 
         from call_manager.db.models import ProposedChange
 
+        job = s.get(CoherenceJob, job_id, with_for_update=True)
+        if job is None or job.status != "running":
+            s.commit()
+            return
         supersede_prior_coherence(s, workspace_id=workspace_id, job_id=job_id)
         n = s.scalar(
             select(func.count())
@@ -1291,16 +1365,14 @@ async def run_coherence_pass(
                 ProposedChange.status == "pending",
             )
         )
-        job = s.get(CoherenceJob, job_id)
-        if job is not None:
-            job.status = "completed"
-            job.completed_at = datetime.now(UTC)
-            job.n_proposals = int(n or 0)
-            if done is not None:
-                job.input_tokens = done.tokens_in or 0
-                job.output_tokens = done.tokens_out or 0
-                job.model = done.model
-                job.sdk_session_id = done.session_id
+        job.status = "completed"
+        job.completed_at = datetime.now(UTC)
+        job.n_proposals = int(n or 0)
+        if done is not None:
+            job.input_tokens = done.tokens_in or 0
+            job.output_tokens = done.tokens_out or 0
+            job.model = done.model
+            job.sdk_session_id = done.session_id
         s.commit()
 
 
@@ -1483,7 +1555,12 @@ In `src/call_manager/scheduler.py`, after the `_turn_drain_tick` registration bl
 
         from call_manager.proposal_assist.coherence.pass_runner import drain_coherence_queue_tick
 
-        if not settings.drafting_enabled or not settings.anthropic_api_key:
+        # Skip ONLY on the admin kill-switch (POST also 503s on it, so queued work
+        # waits for re-enable). Do NOT skip on a missing anthropic_api_key: the spec
+        # deliberately has no API-key HTTP gate, so a misconfigured provider must
+        # surface as a FAILED job at runtime (the pass errors → job failed), not a
+        # job stuck queued forever with the SPA polling indefinitely.
+        if not settings.drafting_enabled:
             return
         coro = drain_coherence_queue_tick(session_factory=session_factory, settings=settings)
         if app_loop is None:
@@ -1874,11 +1951,53 @@ app.include_router(coherence_router)
 Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/coherence/test_web_coherence.py -q`
 Expected: PASS (6 passed). (Confirm `require_member` import path is `proposal_assist/web/_perms.py` and `_session_dep` is in `web/workspaces.py` — both used by `web/proposals.py`.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Wire coherence-job cancellation into soft-delete**
+
+A workspace soft-delete (`soft_delete`, `web/workspaces.py:1287`, `@router.post("/{workspace_id}/delete")`) already cancels queued `TurnJob`s but leaves coherence jobs claimable — which would spend tokens after deletion. (`claim_next_coherence_job` already excludes soft-deleted workspaces from Task 5; this also actively cancels any already-queued/running job so the active slot is freed.)
+
+Add a test `tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py`:
+
+```python
+from call_manager.db.models import CoherenceJob
+from tests.proposal_assist.conftest import make_workspace
+
+
+def test_soft_delete_cancels_active_coherence_jobs(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        s.add(CoherenceJob(workspace_id=ws.id, status="queued"))
+        s.commit()
+        ws_id = str(ws.id)
+    r = client_authed_owner.post(f"/api/workspaces/{ws_id}/delete")
+    assert r.status_code in (200, 204)
+    with pg_session_factory() as s:
+        job = s.query(CoherenceJob).filter_by(workspace_id=ws_id).one()
+        assert job.status == "failed"  # cancelled on delete
+```
+
+(Confirm the soft-delete route path — the grounding shows `@router.post("/{workspace_id}/delete")` mounted under the workspaces router; the SPA may call it under `/api/...`. Match whatever `test_web` soft-delete tests use, or adjust the path/status.)
+
+Run to verify it fails: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py -q` → the job is still `queued`.
+
+In `src/call_manager/proposal_assist/web/workspaces.py`, in `soft_delete`, immediately after `ws.soft_deleted_at = datetime.now(UTC)` (~:1312), add:
+
+```python
+    from call_manager.proposal_assist.coherence.jobs import cancel_coherence_jobs_for_workspace
+
+    cancel_coherence_jobs_for_workspace(session, workspace_id=workspace_id)
+```
+
+Run again → PASS.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/call_manager/proposal_assist/web/coherence.py src/call_manager/main.py tests/proposal_assist/coherence/test_web_coherence.py
-git commit -m "feat(coherence): POST coherence-runs (gated) + GET latest endpoints
+git add src/call_manager/proposal_assist/web/coherence.py src/call_manager/main.py src/call_manager/proposal_assist/web/workspaces.py tests/proposal_assist/coherence/test_web_coherence.py tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py
+git commit -m "feat(coherence): POST coherence-runs (gated) + GET latest + soft-delete cancellation
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
