@@ -91,8 +91,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     # Bare names per SDK docstring example (see Task 7 Step 0).
     # NO mcp__ prefix — confirm we're using the bare form.
     assert not any(t.startswith("mcp__") for t in allowed)
-    # Full allowlist coverage: 19 tools post-SP2a-2 (6 mutating tools removed,
-    # propose_edit + propose_citation added).
+    # Full allowlist coverage: 21 tools — 19 post-SP2a-2 (6 mutating tools removed,
+    # propose_edit + propose_citation added) plus SP2b-2b's read_spec + propose_spec_edit.
     expected_tools = {
         "read_proposal",
         # SP2a-2 — propose-only mutation
