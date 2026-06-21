@@ -43,6 +43,7 @@ def propose_prose_edit(
     new_text: str,
     base_commit_sha: str,
     base_section_sha: str,
+    target_artifact: str = "draft",
     origin_kind: str,
     origin_session_id: str | None = None,
     origin_job_id: uuid.UUID | None = None,
@@ -52,7 +53,7 @@ def propose_prose_edit(
 ) -> ProposedChange:
     pc = ProposedChange(
         workspace_id=workspace_id,
-        target_artifact="draft",
+        target_artifact=target_artifact,
         section_index=section_index,
         base_commit_sha=base_commit_sha,
         base_section_sha=base_section_sha,

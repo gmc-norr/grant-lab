@@ -93,3 +93,48 @@ def test_propose_citation_insert_writes_row(pg_session_factory, tmp_path):
             "stance": "supports",
             "confidence": "high",
         }
+
+
+def test_propose_prose_edit_targets_spec_when_requested(pg_session_factory):
+    from call_manager.db.models import ProposedChange
+    from call_manager.proposal_assist.proposals.proposing import propose_prose_edit
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Aims\nspec text.\n",
+            base_commit_sha="0" * 40,
+            base_section_sha="0" * 64,
+            origin_kind="interactive_turn",
+            target_artifact="spec",
+        )
+        s.flush()
+        row = s.get(ProposedChange, pc.id)
+        assert row.target_artifact == "spec"
+        assert row.kind == "prose_edit"
+
+
+def test_propose_prose_edit_defaults_to_draft(pg_session_factory):
+    from call_manager.db.models import ProposedChange
+    from call_manager.proposal_assist.proposals.proposing import propose_prose_edit
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        pc = propose_prose_edit(
+            session=s,
+            workspace_id=ws.id,
+            section_index=1,
+            new_text="## Methods\nx.\n",
+            base_commit_sha="0" * 40,
+            base_section_sha="0" * 64,
+            origin_kind="interactive_turn",
+        )
+        s.flush()
+        assert s.get(ProposedChange, pc.id).target_artifact == "draft"
