@@ -6,11 +6,11 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import ProposedChange
+from call_manager.db.models import CoherenceJob, ProposedChange
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
@@ -62,6 +62,16 @@ def list_proposed_changes(
             ProposedChange.status == "pending",
         )
         .order_by(ProposedChange.created_at)
+    )
+    # §3.3 visibility gate: a coherence_session row surfaces only once its job is
+    # 'completed' — otherwise a half-finished pass flashes partial proposals into
+    # <ProposalReview>. Non-coherence rows pass the left disjunct unchanged.
+    stmt = stmt.where(
+        (ProposedChange.origin_kind != "coherence_session")
+        | exists().where(
+            CoherenceJob.id == ProposedChange.origin_job_id,
+            CoherenceJob.status == "completed",
+        )
     )
     if target_artifact is not None:
         stmt = stmt.where(ProposedChange.target_artifact == target_artifact)
