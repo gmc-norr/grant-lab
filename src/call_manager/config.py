@@ -208,6 +208,16 @@ class Settings(BaseSettings):
             "per-workspace cap."
         ),
     )
+    coherence_daily_token_cap: int = Field(
+        default=200_000,
+        alias="COHERENCE_DAILY_TOKEN_CAP",
+        description=(
+            "Per-workspace daily ceiling on combined input+output tokens "
+            "spent by coherence-keeper passes (Europe/Stockholm day). A pass "
+            "is blocked pre-run once today's coherence_jobs token sum reaches "
+            "this cap. The other coherence settings land in SP2b-2c Task 7."
+        ),
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",
