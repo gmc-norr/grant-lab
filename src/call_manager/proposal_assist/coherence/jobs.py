@@ -45,12 +45,19 @@ def enqueue_coherence_run(
         # the re-read's autoflush doesn't retry the doomed INSERT.
         if job in session:
             session.expunge(job)
-        return session.scalar(
+        winner = session.scalar(
             select(CoherenceJob).where(
                 CoherenceJob.workspace_id == workspace_id,
                 CoherenceJob.status.in_(("queued", "running")),
             )
         )
+        # Under READ COMMITTED the racer's active row is visible on re-read, so this
+        # is unreachable in practice; guard anyway to keep the -> CoherenceJob contract honest.
+        if winner is None:
+            raise RuntimeError(
+                "coherence enqueue lost the active-unique race but found no active job"
+            ) from None
+        return winner
     return job
 
 
@@ -129,9 +136,7 @@ def supersede_prior_coherence(
     return _supersede(session, workspace_id=workspace_id, where_job=job_id, equals=False)
 
 
-def supersede_own_coherence(
-    session: Session, *, workspace_id: uuid.UUID, job_id: uuid.UUID
-) -> int:
+def supersede_own_coherence(session: Session, *, workspace_id: uuid.UUID, job_id: uuid.UUID) -> int:
     """On failure: supersede THIS job's partial pending rows (origin_job_id == job_id)."""
     return _supersede(session, workspace_id=workspace_id, where_job=job_id, equals=True)
 

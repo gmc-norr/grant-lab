@@ -91,9 +91,7 @@ def test_daily_cap_blocks_over_budget(pg_session_factory, _settings_env):
         ws = make_workspace(s)
         s.flush()
         s.add(
-            CoherenceJob(
-                workspace_id=ws.id, status="completed", input_tokens=80, output_tokens=40
-            )
+            CoherenceJob(workspace_id=ws.id, status="completed", input_tokens=80, output_tokens=40)
         )
         s.flush()
         assert jobs.coherence_cap_exceeded(s, workspace_id=ws.id, settings=settings) is True
