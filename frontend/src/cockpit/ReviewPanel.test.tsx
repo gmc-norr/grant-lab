@@ -28,21 +28,24 @@ vi.mock("../api/review", () => ({
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-const BUDGET_OK = { runs_used: 1, runs_cap: 10, dollars_used: 0.12, dollars_cap: 5.0 };
-const BUDGET_EXHAUSTED = { runs_used: 10, runs_cap: 10, dollars_used: 5.0, dollars_cap: 5.0 };
+// Dollar fields use the real wire shape: strings (decimal) or null.
+const BUDGET_OK = { runs_used: 1, runs_cap: 10, dollars_used: "0.12", dollars_cap: "5.000" };
+const BUDGET_EXHAUSTED = { runs_used: 10, runs_cap: 10, dollars_used: "5.000", dollars_cap: "5.000" };
 
 const ITEMS_DONE = [
-  { kind: "fit_check", status: "done", error_message: null, estimated_dollars: 0.01 },
-  { kind: "persona_domain_skeptic", status: "done", error_message: null, estimated_dollars: 0.02 },
-  { kind: "persona_methodology_critic", status: "done", error_message: null, estimated_dollars: 0.02 },
-  { kind: "persona_translation_skeptic", status: "done", error_message: null, estimated_dollars: 0.01 },
-  { kind: "persona_devils_advocate", status: "done", error_message: null, estimated_dollars: 0.01 },
-  { kind: "consolidation", status: "done", error_message: null, estimated_dollars: 0.02 },
+  { kind: "fit_check", status: "done", error_message: null, estimated_dollars: "0.010" },
+  { kind: "persona_domain_skeptic", status: "done", error_message: null, estimated_dollars: "0.020" },
+  { kind: "persona_methodology_critic", status: "done", error_message: null, estimated_dollars: "0.020" },
+  { kind: "persona_translation_skeptic", status: "done", error_message: null, estimated_dollars: "0.010" },
+  { kind: "persona_devils_advocate", status: "done", error_message: null, estimated_dollars: "0.010" },
+  { kind: "consolidation", status: "done", error_message: null, estimated_dollars: "0.020" },
 ];
 
 const ITEMS_RUNNING = ITEMS_DONE.map((item, i) => ({
   ...item,
   status: i < 2 ? ("done" as const) : ("queued" as const),
+  // Queued items have no cost yet — real wire shape sends null.
+  estimated_dollars: i < 2 ? item.estimated_dollars : null,
 }));
 
 function makeRun(over: Record<string, unknown> = {}) {
@@ -54,7 +57,7 @@ function makeRun(over: Record<string, unknown> = {}) {
     draft_sha: "abc123",
     fit_check_sha: "fc-sha",
     rubric_review_sha: "rr-sha",
-    estimated_dollars: 0.09,
+    estimated_dollars: "0.090",
     items: ITEMS_DONE,
     stale: false,
     budget: BUDGET_OK,
@@ -156,18 +159,37 @@ describe("ReviewPanel", () => {
     expect(screen.getByText(/stale/i)).toBeInTheDocument();
   });
 
-  it("shows estimated cost and triggered_at timestamp for a completed run", () => {
+  it("shows estimated cost (parsed from string) and triggered_at timestamp for a completed run", () => {
     h.latestRun = { data: makeRun(), isLoading: false };
     wrap(<ReviewPanel id="ws1" />);
-    // Cost is shown
+    // Cost is shown — the string "0.090" formats to "$0.09".
     expect(screen.getByText(/\$0\.09/)).toBeInTheDocument();
     // Triggered timestamp rendered
     expect(screen.getByText(/2026/)).toBeInTheDocument();
   });
 
-  it("shows budget usage line", () => {
+  it("does NOT crash and does NOT show cost when estimated_dollars is null (in-progress run)", () => {
+    h.latestRun = {
+      data: makeRun({
+        status: "running",
+        completed_at: null,
+        estimated_dollars: null,
+        items: ITEMS_RUNNING,
+      }),
+      isLoading: false,
+    };
+    wrap(<ReviewPanel id="ws1" />);
+    // Should not throw; no cost element shown.
+    expect(screen.queryByText(/Est\. cost/i)).not.toBeInTheDocument();
+    // Button still present.
+    expect(screen.getByRole("button", { name: /run full mock-panel review/i })).toBeInTheDocument();
+  });
+
+  it("shows budget usage line with dollar strings formatted as decimals", () => {
     h.latestRun = { data: makeRun(), isLoading: false };
     wrap(<ReviewPanel id="ws1" />);
     expect(screen.getByText(/1.*\/.*10/)).toBeInTheDocument();
+    // Budget dollars from string "0.12" and "5.000" → "0.12" and "5.00"
+    expect(screen.getByText(/\$0\.12.*\/.*\$5\.00/)).toBeInTheDocument();
   });
 });

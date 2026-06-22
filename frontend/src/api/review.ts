@@ -27,14 +27,14 @@ export type ReviewRunItem = {
   kind: ReviewItemKind;
   status: ReviewItemStatus;
   error_message: string | null;
-  estimated_dollars: number;
+  estimated_dollars: string | null;
 };
 
 export type ReviewRunBudget = {
   runs_used: number;
   runs_cap: number;
-  dollars_used: number;
-  dollars_cap: number;
+  dollars_used: string;
+  dollars_cap: string;
 };
 
 export type ReviewRunStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "partial";
@@ -47,7 +47,7 @@ export type ReviewRunDTO = {
   draft_sha: string | null;
   fit_check_sha: string | null;
   rubric_review_sha: string | null;
-  estimated_dollars: number;
+  estimated_dollars: string | null;
   items: ReviewRunItem[];
   stale: boolean;
   budget: ReviewRunBudget;

@@ -138,7 +138,7 @@ export function ReviewPanel({ id }: { id: string }) {
       {run && (
         <p className="review-budget">
           Budget: {run.budget.runs_used}/{run.budget.runs_cap} runs · $
-          {run.budget.dollars_used.toFixed(2)} / ${run.budget.dollars_cap.toFixed(2)}
+          {Number(run.budget.dollars_used).toFixed(2)} / ${Number(run.budget.dollars_cap).toFixed(2)}
         </p>
       )}
 
@@ -167,10 +167,12 @@ export function ReviewPanel({ id }: { id: string }) {
       {/* Cost + timestamps */}
       {run && (
         <p className="review-meta">
-          Est. cost: ${run.estimated_dollars.toFixed(2)}
+          {run.estimated_dollars != null && (
+            <span>Est. cost: ${Number(run.estimated_dollars).toFixed(2)}</span>
+          )}
           {run.triggered_at && (
             <>
-              {" · "}
+              {run.estimated_dollars != null ? " · " : ""}
               started {new Date(run.triggered_at).toLocaleString()}
             </>
           )}

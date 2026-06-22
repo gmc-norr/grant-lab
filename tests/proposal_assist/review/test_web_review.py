@@ -162,6 +162,20 @@ def test_latest_serializes_items_budget_staleness(
     assert "budget" in body
     assert "stale" in body
     assert isinstance(body["items"], list)
+    # Dollar fields must be strings (or None) on the wire — not JSON numbers.
+    # A freshly-triggered run has estimated_dollars=None (not yet finalized).
+    assert isinstance(body["estimated_dollars"], (str, type(None))), (
+        f"estimated_dollars must be str|None, got {type(body['estimated_dollars'])!r}"
+    )
+    assert isinstance(body["budget"]["dollars_used"], str), (
+        f"budget.dollars_used must be str, got {type(body['budget']['dollars_used'])!r}"
+    )
+    assert isinstance(body["budget"]["dollars_cap"], str), (
+        f"budget.dollars_cap must be str, got {type(body['budget']['dollars_cap'])!r}"
+    )
+    # runs_used / runs_cap must be real JSON numbers.
+    assert isinstance(body["budget"]["runs_used"], int)
+    assert isinstance(body["budget"]["runs_cap"], int)
 
 
 def test_latest_unauth_rejected(
