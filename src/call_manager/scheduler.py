@@ -618,6 +618,53 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # SP2b-3c: review drain tick (async — one fresh-stateless mock-panel fan-out).
+    def _review_tick() -> None:
+        import asyncio
+
+        from call_manager.proposal_assist.review.pass_runner import drain_review_queue_tick
+
+        if not settings.drafting_enabled:
+            return
+        coro = drain_review_queue_tick(session_factory=session_factory, settings=settings)
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("review tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            fut.result(timeout=settings.review_job_timeout_seconds + 60)
+        except Exception:
+            _logger.exception("review tick failed")
+
+    sched.add_job(
+        _review_tick,
+        trigger=IntervalTrigger(seconds=settings.review_tick_seconds),
+        id="review_drain",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    def _review_reaper_tick() -> None:
+        from call_manager.proposal_assist.review.jobs import reap_stuck_review_runs
+
+        try:
+            with session_factory() as s:
+                reap_stuck_review_runs(s, timeout_seconds=settings.review_job_timeout_seconds)
+                s.commit()
+        except Exception:
+            _logger.exception("review reaper tick failed")
+
+    sched.add_job(
+        _review_reaper_tick,
+        trigger=IntervalTrigger(seconds=settings.review_reaper_tick_seconds),
+        id="review_reaper",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Stuck-turn reaper. A turn cancelled by _turn_drain_tick's
     # fut.result(timeout=300) keeps running on the app loop with the handle
     # cached and its turn_jobs row stuck status='running'. The drain query

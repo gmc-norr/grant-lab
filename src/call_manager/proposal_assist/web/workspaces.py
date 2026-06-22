@@ -60,6 +60,9 @@ from call_manager.proposal_assist.evaluator.jobs import (
 )
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.storage import ReferenceStorage
+from call_manager.proposal_assist.review.jobs import (
+    cancel_review_runs_for_workspace,
+)
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
@@ -1327,6 +1330,8 @@ def soft_delete(
     # workspace is deleted (claim_next_evaluator_job also excludes soft-deleted
     # workspaces; this unwedges the active-unique slot). Same transaction.
     cancel_evaluator_jobs_for_workspace(session, workspace_id=workspace_id)
+    # SP2b-3c: same rationale for the review queue — cancel any active mock-panel run.
+    cancel_review_runs_for_workspace(session, workspace_id=workspace_id)
     # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
     # through the helper for audit parity (closes each cloud_turn_sent chain),
     # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,
