@@ -233,8 +233,15 @@ class Settings(BaseSettings):
     coherence_job_timeout_seconds: int = Field(
         default=300,
         alias="COHERENCE_JOB_TIMEOUT_SECONDS",
-        description="Reaper TTL: a running coherence job older than this is failed "
-        "(crash/restart recovery), unwedging the workspace's active-unique slot.",
+        description="Reaper TTL (age cutoff): a running coherence job older than this is "
+        "failed (crash/restart recovery), unwedging the workspace's active-unique slot.",
+    )
+    coherence_reaper_tick_seconds: int = Field(
+        default=60,
+        alias="COHERENCE_REAPER_TICK_SECONDS",
+        description="How often the reaper sweep RUNS (decoupled from the TTL age cutoff "
+        "above). Keeping this below coherence_job_timeout_seconds caps worst-case unwedge "
+        "after a crash at ~TTL + this interval, rather than ~2x TTL when the two are equal.",
     )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(

@@ -95,9 +95,10 @@ async def test_build_scheduler_registers_coherence_drain_and_reaper_ticks(
             assert drain_job.trigger.interval.total_seconds() == settings.coherence_tick_seconds
             reaper_job = sched.get_job("coherence_reaper")
             assert reaper_job is not None
+            # Sweep cadence is decoupled from the TTL age cutoff (coherence_job_timeout_seconds).
             assert (
                 reaper_job.trigger.interval.total_seconds()
-                == settings.coherence_job_timeout_seconds
+                == settings.coherence_reaper_tick_seconds
             )
         finally:
             sched.shutdown(wait=False)
