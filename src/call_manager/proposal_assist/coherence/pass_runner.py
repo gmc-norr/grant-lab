@@ -69,16 +69,20 @@ async def run_coherence_pass(
     handle = None
     done: TurnDoneEvent | None = None
     try:
-        handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
 
-        async def _drive() -> TurnDoneEvent | None:
+        async def _run() -> TurnDoneEvent | None:
+            nonlocal handle
+            # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
+            # just the streaming turn. wait_for cancels this coroutine on timeout,
+            # raising CancelledError at whichever await is live (launch or the loop).
+            handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
             last = None
             async for event in adapter.send_turn(handle, instruction):
                 if isinstance(event, TurnDoneEvent):
                     last = event
             return last
 
-        done = await asyncio.wait_for(_drive(), timeout=settings.coherence_pass_timeout_seconds)
+        done = await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
     except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
         logger.exception("coherence pass failed for job %s", job_id)
         # Member-visible: surface only a sanitized, generic message (full detail
@@ -100,7 +104,13 @@ async def run_coherence_pass(
     finally:
         if handle is not None:
             try:
-                await adapter.terminate(handle)
+                # Bound cleanup too: a hung SDK disconnect must not leak the pass
+                # coroutine (the scheduler has already stopped awaiting it). Kept well
+                # under the scheduler's coherence_pass_timeout_seconds+60 future grace.
+                await asyncio.wait_for(
+                    adapter.terminate(handle),
+                    timeout=settings.coherence_terminate_timeout_seconds,
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("coherence adapter terminate failed for job %s", job_id)
 

@@ -142,3 +142,30 @@ def test_cancel_for_workspace_fails_active_and_supersedes(pg_session_factory):
         s.refresh(partial)
         assert n == 1 and q.status == "failed"
         assert partial.status == "superseded"
+
+
+def test_cancel_leaves_completed_job_and_its_proposals_untouched(pg_session_factory):
+    # The atomic UPDATE ... WHERE status IN ('queued','running') guard is what makes
+    # cancel race-safe against the success finalizer: a job already 'completed' must
+    # NOT be flipped to failed nor have its (now-pending, member-visible) proposals
+    # superseded. (A plain ORM load-then-write keyed on id would clobber it.)
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        done = CoherenceJob(workspace_id=ws.id, status="completed")
+        running = CoherenceJob(workspace_id=ws.id, status="running")
+        s.add_all([done, running])
+        s.flush()
+        done_row = _pending_coherence(s, ws.id, done.id, section=0)
+        running_row = _pending_coherence(s, ws.id, running.id, section=1)
+        n = jobs.cancel_coherence_jobs_for_workspace(s, workspace_id=ws.id)
+        s.refresh(done)
+        s.refresh(running)
+        s.refresh(done_row)
+        s.refresh(running_row)
+        # only the running job is cancelled; the completed one and its proposals survive
+        assert n == 1
+        assert done.status == "completed"
+        assert done_row.status == "pending"
+        assert running.status == "failed"
+        assert running_row.status == "superseded"

@@ -90,20 +90,32 @@ def claim_next_coherence_job(session: Session) -> CoherenceJob | None:
 def cancel_coherence_jobs_for_workspace(session: Session, *, workspace_id: uuid.UUID) -> int:
     """Fail any active (queued|running) coherence job for a workspace — called from
     the soft-delete handler so a queued/running pass can't spend tokens after the
-    workspace is deleted. Also supersedes each job's partial pending rows."""
-    rows = session.scalars(
-        select(CoherenceJob).where(
-            CoherenceJob.workspace_id == workspace_id,
-            CoherenceJob.status.in_(("queued", "running")),
+    workspace is deleted. Also supersedes each cancelled job's partial pending rows.
+
+    The transition is ONE atomic UPDATE ... WHERE status IN (...) RETURNING (not an
+    ORM load-then-write keyed on id) so it can't clobber a job the success finalizer
+    is concurrently committing to 'completed': the UPDATE blocks on that row's
+    FOR UPDATE lock, then re-evaluates the WHERE against the committed 'completed'
+    state under READ COMMITTED and skips it. Only rows it actually flipped are
+    superseded, so a just-completed pass keeps its member-visible proposals."""
+    cancelled_ids = (
+        session.execute(
+            update(CoherenceJob)
+            .where(
+                CoherenceJob.workspace_id == workspace_id,
+                CoherenceJob.status.in_(("queued", "running")),
+            )
+            .values(status="failed", error="workspace deleted", completed_at=datetime.now(UTC))
+            .returning(CoherenceJob.id)
+            .execution_options(synchronize_session=False)
         )
-    ).all()
-    for job in rows:
-        job.status = "failed"
-        job.error = "workspace deleted"
-        job.completed_at = datetime.now(UTC)
-        supersede_own_coherence(session, workspace_id=workspace_id, job_id=job.id)
+        .scalars()
+        .all()
+    )
+    for job_id in cancelled_ids:
+        supersede_own_coherence(session, workspace_id=workspace_id, job_id=job_id)
     session.flush()
-    return len(rows)
+    return len(cancelled_ids)
 
 
 def _supersede(session: Session, *, workspace_id: uuid.UUID, where_job, equals: bool) -> int:

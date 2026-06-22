@@ -166,3 +166,40 @@ async def test_in_pass_timeout_fails_and_terminates(tmp_path, pg_session_factory
         failed = s.get(CoherenceJob, job_id)
         assert failed.status == "failed" and failed.error
     assert len(fake.terminations) == 1  # adapter terminated in finally on timeout
+
+
+@pytest.mark.asyncio
+async def test_in_pass_timeout_on_launch_fails(tmp_path, pg_session_factory, _settings_env):
+    # A hung SDK *connect* (launch) must also be bounded by the pass timeout — not just
+    # the streaming turn. Before the fix only _drive() was wrapped in wait_for, so a
+    # hung launch returned eventually and the job COMPLETED instead of failing.
+    import asyncio
+
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    settings.coherence_pass_timeout_seconds = 0.1
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        job = _make_job(s, ws.id)
+        s.commit()
+        ws_id, job_id = ws.id, job.id
+    _seed_repo(tmp_path, ws_id)
+
+    class _HangLaunch(FakeAgentAdapter):
+        async def launch(self, context):
+            await asyncio.sleep(2)  # longer than the 0.1s pass timeout
+            return await super().launch(context)
+
+    fake = _HangLaunch()
+    await run_coherence_pass(
+        job_id=job_id,
+        session_factory=pg_session_factory,
+        settings=settings,
+        adapter_builder=lambda **kw: fake,
+    )
+    with pg_session_factory() as s:
+        failed = s.get(CoherenceJob, job_id)
+        assert failed.status == "failed" and failed.error
+    # launch never returned a handle, so there is nothing to terminate
+    assert len(fake.terminations) == 0

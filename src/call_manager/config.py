@@ -243,6 +243,13 @@ class Settings(BaseSettings):
         "above). Keeping this below coherence_job_timeout_seconds caps worst-case unwedge "
         "after a crash at ~TTL + this interval, rather than ~2x TTL when the two are equal.",
     )
+    coherence_terminate_timeout_seconds: int = Field(
+        default=30,
+        alias="COHERENCE_TERMINATE_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the one-shot keeper adapter's "
+        "terminate() cleanup. A hung SDK disconnect must not leak the pass coroutine; "
+        "kept well under the scheduler's coherence_pass_timeout_seconds+60 future grace.",
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",
