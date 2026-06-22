@@ -51,10 +51,17 @@ def _make_ctx():
     )
 
 
-def test_collect_tools_returns_twentyone_named_tools():
-    """The post-SP2b-2b tool surface: the post-SP2a-2 19 tools plus the two
-    Spec-artifact tools (read_spec + propose_spec_edit) added in SP2b-2b.
-    23 - 6 + 2 (SP2a-2) + 2 (SP2b-2b) = 21."""
+def test_collect_tools_returns_expected_named_tools():
+    """The full collected tool surface: 21 interactive tools (post-SP2a-2 19 +
+    SP2b-2b's read_spec + propose_spec_edit) PLUS the two background-only submit
+    tools that share the MCP server but are not interactively allowlisted —
+    submit_scorecard (SP2b-3a) and submit_review (SP2b-3c). 21 + 2 = 23.
+
+    `_collect_tools` builds the shared MCP server consumed by EVERY adapter
+    (interactive + each background adapter), so the background submit tools must
+    be collected here even though only their own background adapter allows them
+    (the interactive default allowlist deliberately excludes them — see the
+    adapter wiring test)."""
     from call_manager.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
@@ -82,8 +89,12 @@ def test_collect_tools_returns_twentyone_named_tools():
         # SP2b-2b — spec artifact (read + propose-only)
         "read_spec",
         "propose_spec_edit",
+        # background-only submit tools (collected, allowed only by their own
+        # background adapter — never interactively)
+        "submit_scorecard",  # SP2b-3a evaluator
+        "submit_review",  # SP2b-3c mock-panel
     }
-    assert len(tools) == 21
+    assert len(tools) == 23
 
 
 @pytest.mark.asyncio

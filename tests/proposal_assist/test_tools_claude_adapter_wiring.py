@@ -158,20 +158,36 @@ def test_options_strip_builtin_tools_even_without_tools_factory():
 
 
 def test_every_collected_tool_is_allowlisted(_settings_env):
-    """permission_mode='default' blocks any non-allowlisted tool. Every tool the
-    registry collects must therefore be on the adapter's allowed_tools, or a
-    background turn would hang on a blocked call with no UI to approve."""
+    """permission_mode='default' blocks any non-allowlisted tool, so every tool
+    the registry collects must be reachable by the adapter that is supposed to
+    call it — or a turn would hang on a blocked call with no UI to approve.
+
+    The interactive adapter's default allowlist covers every collected tool
+    EXCEPT the background-only submit tools (submit_scorecard, submit_review),
+    which share the MCP server but are allowed ONLY by their own background
+    adapter (evaluator / review). The invariant is therefore:
+    interactive allowlist == collected − background-only submit tools, and the
+    background-only set is exactly the union of the background adapters'
+    allowlists.
+    """
     import uuid as _uuid
 
     from call_manager.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
     from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from call_manager.proposal_assist.evaluator.agent import evaluator_allowed_tools
+    from call_manager.proposal_assist.review.agent import review_allowed_tools
     from call_manager.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
         build_proposal_assist_mcp_server,
     )
+
+    # Background-only submit tools, sourced from the background adapters that own
+    # them (not a hand-maintained literal — so a new background tool that forgets
+    # to update this set trips the assertions below).
+    background_only = set(evaluator_allowed_tools()) | set(review_allowed_tools())
 
     wsid = _uuid.uuid4()
     ctx = ToolContext(
@@ -190,7 +206,14 @@ def test_every_collected_tool_is_allowlisted(_settings_env):
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=wsid))
     allowed = set(kwargs["allowed_tools"])
 
-    missing = collected - allowed
-    assert missing == set(), f"collected tools not on the allowlist: {missing}"
-    assert allowed == collected
+    # The background-only tools really are in the shared MCP server (so the
+    # background adapters can call them) ...
+    assert background_only <= collected, (
+        f"background submit tools not collected: {background_only - collected}"
+    )
+    # ... and the interactive default allowlist is exactly the rest. No collected
+    # tool is silently unreachable.
+    assert allowed == collected - background_only
+    missing = collected - allowed - background_only
+    assert missing == set(), f"collected tools reachable by no adapter: {missing}"
     assert len(allowed) == 21
