@@ -250,6 +250,42 @@ class Settings(BaseSettings):
         "terminate() cleanup. A hung SDK disconnect must not leak the pass coroutine; "
         "kept well under the scheduler's coherence_pass_timeout_seconds+60 future grace.",
     )
+    evaluator_tick_seconds: int = Field(
+        default=20,
+        alias="EVALUATOR_TICK_SECONDS",
+        description="How often the evaluator drain tick claims+runs one queued evaluator "
+        "pass. Manual-only, so this just bounds latency from click to run.",
+    )
+    evaluator_pass_timeout_seconds: int = Field(
+        default=180,
+        alias="EVALUATOR_PASS_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the evaluator SDK turn (launch+drive). "
+        "On timeout the one-shot adapter is terminated and the job is failed.",
+    )
+    evaluator_job_timeout_seconds: int = Field(
+        default=300,
+        alias="EVALUATOR_JOB_TIMEOUT_SECONDS",
+        description="Reaper TTL (age cutoff): a running evaluator job older than this is failed "
+        "(crash/restart recovery), unwedging the workspace's active-unique slot.",
+    )
+    evaluator_reaper_tick_seconds: int = Field(
+        default=60,
+        alias="EVALUATOR_REAPER_TICK_SECONDS",
+        description="How often the evaluator reaper sweep RUNS (decoupled from the TTL age "
+        "cutoff above), capping worst-case unwedge at ~TTL + this interval.",
+    )
+    evaluator_terminate_timeout_seconds: int = Field(
+        default=30,
+        alias="EVALUATOR_TERMINATE_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the one-shot evaluator adapter's "
+        "terminate() cleanup. A hung SDK disconnect must not leak the pass coroutine.",
+    )
+    evaluator_daily_token_cap: int = Field(
+        default=200_000,
+        alias="EVALUATOR_DAILY_TOKEN_CAP",
+        description="Per-workspace daily ceiling on combined input+output tokens spent by "
+        "evaluator passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",
