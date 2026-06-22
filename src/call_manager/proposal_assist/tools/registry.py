@@ -101,6 +101,11 @@ class ToolContext:
     # judged — never a live workspace rubric edited mid-run.
     eval_rubric_criteria: list[dict] | None = field(default=None)
 
+    # SP2b-3c: the mock-panel sub-call's target ReviewRunItem. submit_review writes
+    # the produced markdown onto this row. origin_kind="review_session",
+    # origin_job_id=<review_runs.id>.
+    review_run_item_id: uuid.UUID | None = field(default=None)
+
     # SP2a-2 §3 (Task 2): section_index -> section sha as the agent saw them at
     # read time (populated by read_proposal_impl, HEAD-first). propose_edit reads
     # base_section_sha from here; an unread section is rejected (_NOT_READ_ERROR).
@@ -623,6 +628,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         list_unsupported_claims_impl,
         validate_citations_impl,
     )
+    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
     from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
 
     @tool(
@@ -729,6 +735,24 @@ def _collect_tools(ctx: ToolContext) -> list:
             summary=args.get("summary", ""),
         )
 
+    @tool(
+        "submit_review",
+        "Submit your mock-panel review markdown exactly once.",
+        {
+            "type": "object",
+            "properties": {"markdown": {"type": "string"}},
+            "required": ["markdown"],
+        },
+    )
+    async def submit_review(args):
+        return await _safe_tool(
+            "submit_review",
+            ctx,
+            submit_review_impl,
+            ctx,
+            markdown=args.get("markdown", ""),
+        )
+
     return [
         read_proposal,
         # SP2a-2 — propose-only mutation
@@ -762,4 +786,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         build_bibliography,
         # SP2b-3a — evaluator scorecard (the evaluator agent's ONLY tool)
         submit_scorecard,
+        # SP2b-3c — mock-panel review (the review sub-call's ONLY tool)
+        submit_review,
     ]
