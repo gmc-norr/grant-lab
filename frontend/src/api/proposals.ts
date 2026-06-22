@@ -60,9 +60,16 @@ export function useAcceptProposal(id: string, artifact: Artifact) {
   });
 }
 
-/** POST reject. Invalidates the proposals list. */
+/** POST reject. Invalidates the proposals list + problems on BOTH success and error:
+ *  a reject that 409/404s (the row was already resolved elsewhere) leaves our cached
+ *  inbox + drift count stale the same way, so re-fetch instead of stranding a dead
+ *  row. Mirrors useAcceptProposal's onError: refresh. */
 export function useRejectProposal(id: string, artifact: Artifact) {
   const qc = useQueryClient();
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
+    qc.invalidateQueries({ queryKey: ["problems", id] });
+  };
   return useMutation({
     mutationFn: async (pcId: string) =>
       unwrap(
@@ -70,10 +77,8 @@ export function useRejectProposal(id: string, artifact: Artifact) {
           params: { path: { workspace_id: id, pc_id: pcId } },
         }),
       ) as ProposalRow,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
-      qc.invalidateQueries({ queryKey: ["problems", id] });
-    },
+    onSuccess: refresh,
+    onError: refresh,
   });
 }
 

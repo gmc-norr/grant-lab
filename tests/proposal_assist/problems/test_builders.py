@@ -180,3 +180,37 @@ def test_count_by_severity():
         {"severity": "warning"},
     ]
     assert count_by_severity(rows) == {"error": 2, "warning": 1}
+
+
+def test_row_coerces_malformed_scorecard_fields_so_ordering_cannot_500():
+    # A completed scorecard's JSONB can carry null/str fields (hand-edited DB, future
+    # bug). null note -> "" and a string section_index -> None, so the sort key never
+    # compares None/str (the bug Codex reproduced).
+    scorecard = {
+        "criteria": [
+            {
+                "index": 0,
+                "name": "A",
+                "band": "gap",
+                "note": None,
+                "deep_link": {"artifact": "draft", "section_index": "2"},
+                "weight": 1,
+                "effective_weight": 1,
+            },
+            {
+                "index": 1,
+                "name": "B",
+                "band": "at_risk",
+                "note": "ok",
+                "deep_link": None,
+                "weight": 1,
+                "effective_weight": 1,
+            },
+        ],
+    }
+    rows = criterion_gap_problems(scorecard)
+    assert rows[0]["detail"] == ""  # null note coerced
+    assert rows[0]["target"]["section_index"] is None  # string "2" coerced to None
+    # The real regression: ordering these rows must NOT raise.
+    ordered = order_problems(rows)
+    assert len(ordered) == 2

@@ -160,3 +160,67 @@ def test_count_pending_coherence_excludes_incomplete_jobs(pg_session_factory, tm
         s.commit()
         # the proposal's job is still running -> not yet visible -> count 0
         assert count_pending_coherence_proposals(s, ws.id) == 0
+
+
+def test_assemble_malformed_scorecard_does_not_500(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        wid = ws.id
+        _seed_repo(str(tmp_path), wid, proposal="## M\nbody\n")
+        s.add(
+            EvaluatorJob(
+                workspace_id=wid,
+                status="completed",
+                scorecard={
+                    "criteria": [
+                        {
+                            "index": 0,
+                            "name": "A",
+                            "band": "gap",
+                            "note": None,
+                            "deep_link": {"artifact": "draft", "section_index": "2"},
+                            "weight": 1,
+                            "effective_weight": 1,
+                        }
+                    ],
+                    "overall_band": "gap",
+                    "summary": "",
+                },
+                evaluated_draft_sha="",
+                evaluated_spec_sha="",
+                evaluated_rubric_updated_at=ws.rubric_updated_at,
+            )
+        )
+        s.commit()
+        # A null note + string section_index must NOT raise (the row coercion + the
+        # guarded final ordering keep the never-500 contract).
+        out = assemble_problems(
+            session=s,
+            workspace_id=wid,
+            repo_dir=workspace_repo_dir(str(tmp_path), wid),
+            ws_rubric_updated_at=ws.rubric_updated_at,
+            budget=6000,
+        )
+    assert any(p["category"] == "criterion_gap" for p in out["problems"])
+
+
+def test_assemble_unreadable_citations_path_is_one_error_row(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wid = ws.id
+        repo = workspace_repo_dir(str(tmp_path), wid)
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / "proposal.md").write_text("## M\nbody\n")
+        (repo / "citations.json").mkdir()  # a DIRECTORY where the ledger file belongs
+        out = assemble_problems(
+            session=s,
+            workspace_id=wid,
+            repo_dir=repo,
+            ws_rubric_updated_at=ws.rubric_updated_at,
+            budget=6000,
+        )
+    broken = [p for p in out["problems"] if p["category"] == "broken_citation"]
+    assert len(broken) == 1
+    assert broken[0]["title"] == "Citations ledger unreadable"

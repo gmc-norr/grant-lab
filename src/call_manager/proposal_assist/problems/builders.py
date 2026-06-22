@@ -30,14 +30,24 @@ def _row(
     bottom_tab: str | None = None,
     section_index: int | None = None,
 ) -> dict:
+    # Coerce untrusted inputs (a completed scorecard's JSONB can carry null/str
+    # fields) so a malformed row can never break order_problems' sort key, which
+    # compares title/detail/section_index. title/detail -> str; section_index ->
+    # int|None (bool excluded — bool is an int subclass). Preserves the never-500
+    # contract even for a hand-corrupted scorecard.
+    si = (
+        section_index
+        if isinstance(section_index, int) and not isinstance(section_index, bool)
+        else None
+    )
     target = None
-    if top_tab is not None or bottom_tab is not None or section_index is not None:
-        target = {"top_tab": top_tab, "bottom_tab": bottom_tab, "section_index": section_index}
+    if top_tab is not None or bottom_tab is not None or si is not None:
+        target = {"top_tab": top_tab, "bottom_tab": bottom_tab, "section_index": si}
     return {
         "category": category,
         "severity": severity,
-        "title": title,
-        "detail": detail,
+        "title": "" if title is None else str(title),
+        "detail": "" if detail is None else str(detail),
         "target": target,
     }
 

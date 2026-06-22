@@ -90,7 +90,11 @@ def assemble_problems(
             workspace_id=workspace_id,
         )
         rows += broken_citation_problems(issues, draft_text)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        # ValueError = corrupt/wrong-version JSON (load_ledger). OSError = the ledger
+        # path is unreadable (a directory, permissions) — surface it as the SAME
+        # "ledger unreadable" error row rather than silently dropping it (which would
+        # also hide the draft's orphan markers).
         rows.append(ledger_unreadable_problem(str(exc)))
     except Exception:
         logger.exception("problems: broken_citation signal failed")
@@ -125,9 +129,17 @@ def assemble_problems(
     except Exception:
         logger.exception("problems: coherence_drift signal failed")
 
-    ordered = order_problems(rows)
+    # Final ordering is the one step outside the per-signal try-blocks; guard it too
+    # so the never-500 contract holds even against an un-coerced row (counts are a
+    # total tally over the same set, so they're computed regardless of sort order).
+    counts = count_by_severity(rows)
+    try:
+        ordered = order_problems(rows)
+    except Exception:
+        logger.exception("problems: ordering failed; returning rows unordered")
+        ordered = rows
     return {
         "problems": ordered,
-        "counts": count_by_severity(ordered),
+        "counts": counts,
         "scorecard_stale": scorecard_stale,
     }
