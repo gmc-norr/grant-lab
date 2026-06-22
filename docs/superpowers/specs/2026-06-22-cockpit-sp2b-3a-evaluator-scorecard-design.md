@@ -63,8 +63,9 @@ and **adding** the scorecard + staleness columns:
 | `requested_by` | BigInteger | FK → `users.id` **ON DELETE SET NULL**, nullable |
 | `error` | Text | nullable; sanitized member-visible message on failure |
 | `scorecard` | JSONB | nullable; written by `submit_scorecard` while running; read only when `status='completed'` |
-| `evaluated_draft_sha` | Text | nullable; draft head at run time (staleness display) |
-| `evaluated_spec_sha` | Text | nullable; spec head at run time |
+| `evaluated_draft_sha` | Text | nullable; draft head at run time (staleness) |
+| `evaluated_spec_sha` | Text | nullable; spec head at run time (staleness) |
+| `evaluated_rubric_updated_at` | DateTime(tz) | nullable; `Workspace.rubric_updated_at` at run time (staleness — a rubric edit also stales the scorecard) |
 | `queued_at` | DateTime(tz) | server-default `now()` |
 | `started_at` | DateTime(tz) | nullable; stamped on claim |
 | `completed_at` | DateTime(tz) | nullable; stamped on terminal state |
@@ -89,21 +90,25 @@ disjoint outputs.
 {
   "criteria": [
     {
-      "name": "<exact name from rubric_criteria>",
+      "index": 0,                      // 0-based position in rubric_criteria (identity)
+      "name": "<rubric_criteria[index].name>",   // cross-checked, not the identity
       "band": "strong" | "adequate" | "at_risk" | "gap",
-      "gap": "<one specific paragraph: what is missing or weak for THIS criterion>",
+      "note": "<one paragraph: rationale for the band; for at_risk/gap, the specific deficiency>",
       "deep_link": { "artifact": "draft" | "spec", "section_index": <int> } | null,
-      "weight": <float>                // echoed verbatim from the rubric criterion
+      "weight": <float>,               // echoed verbatim from the rubric criterion
+      "effective_weight": <float>      // weight if > 0 else 1.0 (used by the roll-up §2.4)
     }
-    // ... one entry per rubric criterion, in rubric order
+    // ... one entry per rubric criterion, in rubric order (index 0..n-1)
   ],
   "overall_band": "strong" | "adequate" | "at_risk" | "gap",   // SERVER-computed (§2.4)
   "summary": "<short overall readiness note authored by the agent>"
 }
 ```
 
-The agent supplies `name`, `band`, `gap`, `deep_link`, and `summary`. The server fills `weight`
-(echoed from the rubric) and computes `overall_band`. Persisted shape is the union above.
+The agent supplies `index`, `name`, `band`, `note`, `deep_link`, and `summary`. The server
+cross-checks `name` against `rubric_criteria[index]`, fills `weight` + `effective_weight` from
+the rubric, and computes `overall_band`. Persisted shape is the union above. (`index` is the
+robust identity — name-only is ambiguous when two criteria share a name.)
 
 ## 2. The evaluator pass — `proposal_assist/evaluator/` package
 
@@ -114,20 +119,28 @@ A near-copy of `proposal_assist/coherence/`. Five modules: `__init__`, `context`
 
 ```python
 def assemble_evaluator_context(*, session: Session, workspace_id: uuid.UUID,
-                               workspaces_dir: Path | str) -> str: ...
+                               workspaces_dir: Path | str) -> EvaluatorContext: ...
+# EvaluatorContext = { instruction: str, draft_section_count: int, spec_section_count: int }
 ```
 
-Mirrors `assemble_coherence_context` (`coherence/context.py:38`). Reads `ws.rubric_criteria`
-(names **and weights** — the agent must cover each criterion exactly once and is told the
-weights so it understands relative importance), `ws.rubric_funder_notes`, the full
-`proposal-spec.md`, and the full `proposal.md`. Assembles a single instruction string:
+Mirrors `assemble_coherence_context` (`coherence/context.py:38`) but returns a small struct, not
+just the string, so the captured section counts can pin `deep_link` validation (§2.3). Reads
+`ws.rubric_criteria`, `ws.rubric_funder_notes`, and the full `proposal-spec.md` / `proposal.md`
+**at the current repo HEAD captured at run start** (the same read that records
+`evaluated_draft_sha`/`evaluated_spec_sha`). Assembles a single instruction string:
 
 1. **Role preamble** — "You are the chair of a mock review panel. Assess this proposal against
-   each funder criterion below and call `submit_scorecard` exactly once."
-2. The funder criteria (name + description + weight + subcriteria) as readable text.
+   each funder criterion below and call `submit_scorecard` exactly once. You have no other
+   tools; everything you need is below."
+2. The funder criteria as readable text, **numbered with their 0-based `index`** plus name +
+   description + weight + subcriteria (so the agent returns the right `index` per criterion).
 3. Funder notes.
-4. Full spec (or "(spec is empty)").
-5. Full draft (or "(draft is empty)").
+4. Full spec, **rendered with explicit `[§0] [§1] …` section-index labels** (or "(spec is
+   empty)") — so `deep_link.section_index` is grounded and not miscounted.
+5. Full draft, likewise labelled (or "(draft is empty)").
+
+All evaluated content is pinned in this one assembly; the agent has **no live-read tools**
+(§2.2), so it cannot judge against bytes other than the recorded `evaluated_*_sha`.
 
 Edge: if `rubric_criteria` is empty, the instruction states there are no criteria; the agent
 calls `submit_scorecard` with an empty `criteria` list (handled in §2.3 / §2.4 / §4).
@@ -136,17 +149,23 @@ calls `submit_scorecard` with an empty `criteria` list (handled in §2.3 / §2.4
 
 ```python
 def evaluator_allowed_tools() -> list[str]:
-    return ["read_proposal", "read_spec", "get_call_details", "submit_scorecard"]
+    return ["submit_scorecard"]          # the ONLY tool — no live reads, no propose_*
 
 def build_evaluator_adapter(*, settings, session_factory, workspace_id, requested_by,
-                            job_id) -> ClaudeAgentSDKAdapter: ...
+                            job_id, draft_section_count, spec_section_count
+                            ) -> ClaudeAgentSDKAdapter: ...
 ```
 
 Mirrors `coherence/agent.py:32`. A dedicated one-shot `ClaudeAgentSDKAdapter` (never the shared
 `WorkspaceController`), no resume. `tools_factory` builds a `ToolContext` with
-`origin_kind="evaluator_session"` and `origin_job_id=job_id` so `submit_scorecard` can write to
-the right job row. Allowlist is **read tools + `submit_scorecard` only** — no `propose_*`
-(the evaluator produces a scorecard, never proposals, in 3a). Uses the optional `allowed_tools`
+`origin_kind="evaluator_session"`, `origin_job_id=job_id`, and the captured
+`draft_section_count`/`spec_section_count` so `submit_scorecard` can write to the right job row
+and validate `deep_link` ranges against the **pinned** section counts.
+
+**Allowlist is `submit_scorecard` ONLY** — deliberately no `read_proposal`/`read_spec`/
+`get_call_details`/`propose_*`. Removing live reads closes a consistency hole: the agent
+otherwise could read bytes at a HEAD newer than the recorded `evaluated_*_sha`. Everything it
+needs is in the assembled context (§2.1), pinned at run start. Uses the optional `allowed_tools`
 constructor override on `ClaudeAgentSDKAdapter` (added in SP2b-2c).
 
 ### 2.3 `submit_scorecard` tool
@@ -156,21 +175,26 @@ Lives with the other proposal-assist tools (alongside `propose_edit` in
 (`tools/registry.build_proposal_assist_mcp_server`). Allowlisted **only** for the evaluator
 adapter.
 
-Signature the agent sees: `submit_scorecard(criteria: list[{name, band, gap, deep_link?}],
-summary: str)`.
+Signature the agent sees: `submit_scorecard(criteria: list[{index, name, band, note,
+deep_link?}], summary: str)`.
 
 Server-side `_submit_scorecard_impl(ctx: ToolContext, *, criteria, summary)`:
 
-1. **Load** the workspace's `rubric_criteria` (the authoritative criterion set + weights).
-2. **Validate:**
-   - Every rubric criterion name is present **exactly once**; no extra/unknown names. (Empty
-     rubric → `criteria` must be empty.) On mismatch → return a tool error telling the agent
-     which names are missing/extra (the agent can retry within the turn).
-   - Each `band ∈ {strong, adequate, at_risk, gap}`.
-   - Each `deep_link`, if present, has `artifact ∈ {draft, spec}` and an in-range
-     `section_index` for that artifact's current section count.
-3. **Echo** each criterion's `weight` from the rubric into the stored entry.
-4. **Compute** `overall_band` deterministically (§2.4).
+1. **Load** the workspace's `rubric_criteria` (the authoritative ordered criterion set +
+   weights).
+2. **Validate (index-based identity, name as cross-check):**
+   - The supplied `index` values are exactly `{0 .. n-1}`, **each once** (`n =
+     len(rubric_criteria)`). (Empty rubric → `criteria` must be empty.) On mismatch → return a
+     tool error naming the missing/duplicate/out-of-range indexes (the agent retries in-turn).
+   - For each entry, `name == rubric_criteria[index]["name"]` (cross-check; reject on mismatch —
+     catches the agent referencing the wrong criterion).
+   - Each `band ∈ {strong, adequate, at_risk, gap}`; `note` non-empty.
+   - Each `deep_link`, if present, has `artifact ∈ {draft, spec}` and `0 <= section_index <`
+     the **pinned** `ctx.draft_section_count` / `ctx.spec_section_count` (captured at run
+     start, §2.1 — consistent with `evaluated_*_sha`).
+3. **Fill** each stored entry's `weight` (raw, echoed from the rubric) and `effective_weight`
+   (`weight if weight > 0 else 1.0`).
+4. **Compute** `overall_band` deterministically (§2.4) using `effective_weight`.
 5. **Write** the assembled `scorecard` JSONB onto the **running** `evaluator_jobs` row
    (`ctx.origin_job_id`), overwriting any prior partial write (last-call-wins). Does **not**
    flip status — `pass_runner` finalize owns that.
@@ -182,21 +206,29 @@ fragile.)
 
 ### 2.4 Deterministic overall roll-up
 
-Pure function, unit-tested in isolation:
+Pure function, unit-tested in isolation. **Weighted average, then a gap floor** (a pure
+average can read "Strong" while a meaningful criterion is a Gap — the floor prevents that):
 
 ```
 ordinal = {gap: 0, at_risk: 1, adequate: 2, strong: 3}
-weight_i = criterion weight, or 1.0 if missing / <= 0
-score   = Σ(weight_i * ordinal[band_i]) / Σ(weight_i)
-overall = gap      if score ∈ [0.00, 0.75)
-          at_risk  if score ∈ [0.75, 1.75)
-          adequate if score ∈ [1.75, 2.50)
-          strong   if score ∈ [2.50, 3.00]
+w_i     = effective_weight (= weight if weight > 0 else 1.0)     # §2.3
+score   = Σ(w_i * ordinal[band_i]) / Σ(w_i)
+provisional = gap      if score ∈ [0.00, 0.75)
+              at_risk  if score ∈ [0.75, 1.75)
+              adequate if score ∈ [1.75, 2.50)
+              strong   if score ∈ [2.50, 3.00]
+
+# Deterministic gap floor (norm_w_i = w_i / Σw_j, the normalized effective weight):
+cap = strong
+if any band_i == gap:                          cap = adequate
+if any (band_i == gap and norm_w_i >= 0.25):   cap = at_risk
+overall = min(provisional, cap)                # min on the ordinal scale (lower band wins)
 ```
 
 Empty `criteria` → `overall_band = "gap"` and the UI shows the empty-criteria state (§4). The
-thresholds are tunable; they live in one constant block and are covered by table-driven tests
-(including the exact boundary values 0.75 / 1.75 / 2.50).
+thresholds **and the 0.25 floor cutoff** are tunable, live in one constant block, and are
+covered by table-driven tests (boundary scores 0.75 / 1.75 / 2.50; a single low-weight Gap
+capping at `adequate`; a high-weight Gap capping at `at_risk`).
 
 ### 2.5 `jobs.py`
 
@@ -231,9 +263,12 @@ Copy `coherence/pass_runner.py` skeleton with all SP2b-2c hardening intact:
 
 `run_evaluator_pass(*, job_id, session_factory, settings, adapter_builder=build_evaluator_adapter)`:
 
-1. **Short read-session:** load job (return if not `running`); read `requested_by`; compute and
-   store `evaluated_draft_sha` / `evaluated_spec_sha` (the artifact heads now); check
-   `evaluator_cap_exceeded` (fail pre-run if over); assemble the instruction.
+1. **Short read-session:** load job (return if not `running`); read `requested_by`; capture and
+   store the staleness markers `evaluated_draft_sha` / `evaluated_spec_sha` (artifact heads now)
+   and `evaluated_rubric_updated_at` (`ws.rubric_updated_at` now); check `evaluator_cap_exceeded`
+   (fail pre-run if over); call `assemble_evaluator_context` → keep the `instruction` **and** the
+   `draft_section_count` / `spec_section_count` to pass into `build_evaluator_adapter` (so the
+   tool validates `deep_link` against the same pinned HEAD).
 2. **Launch + drive bounded together** in one `asyncio.wait_for(_run(), timeout=
    settings.evaluator_pass_timeout_seconds)` — `_run()` does `launch` then streams `send_turn`
    (SP2b-2c fix #2: launch is INSIDE the wait_for). Any exception → fail the job with a
@@ -260,8 +295,13 @@ in a short session + commit, then `run_evaluator_pass`. (Reaper is the separate 
   serialized (or `null`). Drives the run-status chip + polling.
 - `GET /api/workspaces/{workspace_id}/scorecard` — member-gated; serializes
   `latest_completed_evaluator_job` as `{ scorecard, evaluated_draft_sha, evaluated_spec_sha,
-  completed_at }` (or `null` when no completed run exists). Separate from `/latest` so a
-  *failed* re-run keeps showing the last good scorecard.
+  completed_at, stale, stale_reasons }` (or `null` when no completed run exists). The endpoint
+  computes staleness server-side by comparing the evaluated markers to the **current** state:
+  `"draft"` if `evaluated_draft_sha != current draft head`, `"spec"` if `evaluated_spec_sha !=
+  current spec head`, `"rubric"` if `evaluated_rubric_updated_at != ws.rubric_updated_at`;
+  `stale = len(stale_reasons) > 0`. (Staleness covers all three inputs — rubric + spec + draft —
+  not just the draft.) Separate from `/latest` so a *failed* re-run keeps showing the last good
+  scorecard.
 
 The two reads are split so the frontend can poll run status on an interval while caching the
 (heavier, change-rarely) scorecard separately.
@@ -316,10 +356,11 @@ view selector (`"draft" | "spec" | "scorecard"`). When `scorecard` is selected, 
 
 - **Header:** overall readiness band pill + `[ Re-evaluate ]` button + run-status chip
   (idle / running… / failed: <msg>). While running, poll; on completion, refetch scorecard.
-- **Staleness line:** "evaluated <completed_at>"; if `evaluated_draft_sha !== useDraft(id).head`,
-  append a "⚠ draft changed since" hint.
-- **Criteria list:** sorted by `weight` desc; each row = band pill + criterion name + weight +
-  optional "Go to §" deep-link; the `gap` paragraph under the row.
+- **Staleness line:** "evaluated <completed_at>"; if `stale`, append a "⚠ changed since:
+  <reasons>" hint built from the server's `stale_reasons` (e.g. "draft, rubric"). (Uses the
+  server-computed flags — covers spec + rubric + draft, not just the draft.)
+- **Criteria list:** sorted by `effective_weight` desc; each row = band pill + criterion name +
+  weight + optional "Go to §" deep-link; the `note` paragraph under the row.
 - **Band → token mapping:** strong → `--cm-good-*` (green), adequate → `--cm-neutral-*`,
   at_risk → `--cm-warn-*` (amber), gap → `--cm-bad-*` (red). Reuse the existing pill style from
   `.source-viewer-stance` (`styles/cockpit.css:94`).
@@ -343,23 +384,30 @@ planning — `ArtifactSectionEditor`.)
 - **Model/migration:** `uq_evaluator_jobs_active` rejects a second active row.
 - **Context:** assembles criteria (with weights) + funder notes + spec + draft; handles missing
   artifact files + empty rubric.
-- **`submit_scorecard` tool:** rejects missing criterion / extra-unknown criterion / bad band /
-  out-of-range deep-link; echoes weights; writes the JSONB onto the running job; last-call-wins.
+- **`submit_scorecard` tool:** rejects missing/duplicate/out-of-range `index`, a `name` that
+  doesn't match `rubric_criteria[index]`, bad band, empty note, and a `deep_link.section_index`
+  outside the pinned section counts; echoes `weight` + `effective_weight`; writes the JSONB onto
+  the running job; last-call-wins.
 - **Roll-up:** table-driven band/weight combinations → expected overall, including the exact
-  threshold boundaries (0.75 / 1.75 / 2.50) and the all-equal-weight and missing-weight cases.
+  threshold boundaries (0.75 / 1.75 / 2.50), all-equal-weight, `weight<=0` → `effective_weight`
+  fallback, **a single low-weight Gap capping at `adequate`**, and **a high-weight (norm ≥ 0.25)
+  Gap capping at `at_risk`**.
 - **Jobs:** enqueue create-or-return-active; claim skips running + soft-deleted; cap blocks
   over budget; reaper fails stale; cancel atomic-update leaves a completed job untouched
   (the SP2b-2c race test, ported).
 - **Pass runner:** success writes scorecard + completes + records tokens; missing-scorecard →
   failed; failure path; in-pass timeout on launch and on drive both fail + terminate.
 - **Endpoints:** POST gates (409/503/403) + create-or-return-active + non-member 403; latest
-  null-then-job; scorecard null-then-value; a failed re-run still returns the prior scorecard.
+  null-then-job; scorecard null-then-value; a failed re-run still returns the prior scorecard;
+  `stale`/`stale_reasons` flips after a draft edit, a spec edit, and a rubric edit (each
+  independently).
 - **Scheduler wiring:** drain + reaper registered with the right intervals; drain respects
   `drafting_enabled`.
 - **Soft-delete:** cancels active evaluator jobs.
-- **Frontend (vitest/jsdom):** ScorecardPanel renders bands from a fixture, sorts by weight,
-  shows empty + empty-rubric states, Re-evaluate fires the POST, deep-link switches the view,
-  staleness hint appears when shas differ. `pnpm exec tsc --noEmit` is the type gate.
+- **Frontend (vitest/jsdom):** ScorecardPanel renders bands from a fixture, sorts by
+  `effective_weight`, shows empty + empty-rubric states, Re-evaluate fires the POST, deep-link
+  switches the view, the staleness hint lists the server `stale_reasons` when `stale` is true.
+  `pnpm exec tsc --noEmit` is the type gate.
 
 ### 5.2 Risks & mitigations
 
@@ -368,8 +416,11 @@ planning — `ArtifactSectionEditor`.)
   within the turn. A pass that never produces a valid scorecard ends `failed` (finalize guard).
 - **Empty rubric** → empty scorecard + dedicated empty-criteria UI state (not an error).
 - **Cost** → manual-only + per-workspace Stockholm-day token cap (`evaluator_daily_token_cap`).
-- **Scorecard staleness** → store + display `evaluated_draft_sha`/`completed_at`; "changed
-  since" hint compares to the live draft head.
+- **Scorecard staleness** → the scorecard depends on rubric + spec + draft, so all three
+  markers (`evaluated_draft_sha`, `evaluated_spec_sha`, `evaluated_rubric_updated_at`) are
+  captured and the `/scorecard` endpoint emits `stale` + per-input `stale_reasons`; the UI
+  shows which inputs changed since. (Comparing only the draft would present a spec/rubric-stale
+  scorecard as current.)
 - **Concurrency** → evaluator and coherence have independent active-unique slots; they may run
   together with disjoint outputs. The drain runs one evaluator pass per tick (sequential).
 - **Determinism** → LLM bands vary run-to-run; acceptable (the scorecard is advisory, and the
