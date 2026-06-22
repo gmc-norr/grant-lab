@@ -254,7 +254,9 @@ def blob_sha(repo_dir: Path, ref: str, path: str) -> str:
 
 
 def read_blob(repo_dir: Path, sha: str) -> str:
-    """Return the decoded content of a git blob by SHA (`git cat-file -p`).
+    """Return the content of a git blob by SHA (`git cat-file -p`), decoded with
+    errors="replace" so a corrupt or binary blob can never raise UnicodeDecodeError
+    up into the endpoint (review files are text, but be defensive — Codex Low).
     GIT_CEILING_DIRECTORIES pinned like current_head(). Caller validates the SHA
     shape before passing it."""
     env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(repo_dir).resolve().parent))
@@ -262,15 +264,16 @@ def read_blob(repo_dir: Path, sha: str) -> str:
         proc = subprocess.run(
             ["git", "cat-file", "-p", sha],
             cwd=Path(repo_dir),
-            capture_output=True,
-            text=True,
+            capture_output=True,  # bytes (NO text=True) so WE control decoding
             env=env,
         )
     except OSError as exc:
         raise GitCommitError(f"cat-file {sha} failed: {exc}") from exc
     if proc.returncode != 0:
-        raise GitCommitError(f"cat-file {sha} failed: {proc.stderr.strip()}")
-    return proc.stdout
+        raise GitCommitError(
+            f"cat-file {sha} failed: {proc.stderr.decode(errors='replace').strip()}"
+        )
+    return proc.stdout.decode(errors="replace")
 ```
 
 - [ ] **Step 9: Run the git-helper test; expect PASS**
@@ -709,6 +712,16 @@ async def test_submit_rejects_empty(review_run_with_item):
     session_factory, ws_id, run_id, item_id = review_run_with_item
     out = await submit_review_impl(_ctx(session_factory, ws_id, run_id, item_id), markdown="  ")
     assert "error" in out
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_foreign_workspace(review_run_with_item):
+    # A ctx stamped with a DIFFERENT workspace_id than the run's must be rejected.
+    session_factory, ws_id, run_id, item_id = review_run_with_item
+    other_ws = uuid.uuid4()
+    ctx = _ctx(session_factory, other_ws, run_id, item_id)
+    out = await submit_review_impl(ctx, markdown="# x")
+    assert "error" in out
 ```
 Add a `review_run_with_item` fixture to `conftest.py` that creates a `ReviewRun(status="running", draft_sha="x"*64)` and one `ReviewRunItem(kind="fit_check", status="running")`, yielding `(session_factory, ws_id, run_id, item_id)`.
 
@@ -731,7 +744,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from call_manager.db.models import ReviewRunItem
+from call_manager.db.models import ReviewRun, ReviewRunItem
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 
@@ -747,6 +760,12 @@ async def submit_review_impl(ctx: ToolContext, *, markdown: str) -> dict[str, An
             or item.status != "running"
         ):
             return {"error": "submit_review target is not a running item for this run"}
+        # Verify workspace ownership of the parent run (mirrors submit_scorecard's
+        # job.workspace_id == ctx.workspace_id guard) — a stale/mismatched ctx must
+        # never write into another workspace's run.
+        run = session.get(ReviewRun, item.review_run_id)
+        if run is None or run.workspace_id != ctx.workspace_id or run.status != "running":
+            return {"error": "submit_review target run is not active for this workspace"}
         if item.raw_response_json is not None:
             return {"error": "a review has already been submitted for this item"}
         item.raw_response_json = {"markdown": body}
@@ -1294,6 +1313,72 @@ async def test_all_personas_fail_is_failed(review_active_workspace):
     with session_factory() as s:
         run = s.get(ReviewRun, run_id)
         assert run.status == "failed" and run.rubric_review_sha is None
+
+
+@pytest.mark.asyncio
+async def test_subcall_skips_when_run_no_longer_running(review_active_workspace):
+    # Codex High: a queued-behind-the-semaphore sub-call must NOT launch (spend
+    # tokens / send workspace content) once the run has been cancelled/reaped.
+    from call_manager.proposal_assist.review import pass_runner as pr
+
+    session_factory, ws_id, wdir, repo, draft_sha = review_active_workspace
+    with session_factory() as s:
+        run = enqueue_review_run(s, workspace_id=ws_id, draft_sha=draft_sha)
+        run.status = "running"
+        s.flush()
+        s.add(ReviewRunItem(review_run_id=run.id, kind="fit_check", status="queued"))
+        run_id = run.id
+        s.commit()
+    with session_factory() as s:  # cancel between the read session and the sub-call
+        s.get(ReviewRun, run_id).status = "cancelled"
+        s.commit()
+
+    launched = {"v": False}
+
+    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind):
+        class _Fake:
+            async def launch(self, ctx):
+                launched["v"] = True
+                return _Handle(workspace_id)
+
+            async def send_turn(self, handle, instruction):
+                yield TurnDoneEvent(tokens_in=1, tokens_out=1, model="m")
+
+            async def terminate(self, handle):
+                return None
+
+        return _Fake()
+
+    await pr._run_one_call(
+        kind="fit_check", instruction="x", run_id=run_id, workspace_id=ws_id,
+        session_factory=session_factory, settings=Settings(), adapter_builder=builder,
+    )
+    assert launched["v"] is False
+    with session_factory() as s:
+        item = s.query(ReviewRunItem).filter_by(review_run_id=run_id, kind="fit_check").one()
+        assert item.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_artifact_commit_failure_fails_run(review_active_workspace, monkeypatch):
+    # Codex Medium: a git failure in finalize must fail the run immediately, not
+    # leave it 'running' until the reaper TTL.
+    from call_manager.proposal_assist.citations.gitio import GitCommitError
+    from call_manager.proposal_assist.review import pass_runner as pr
+
+    session_factory, ws_id, wdir, repo, draft_sha = review_active_workspace
+    run_id = _claim_running(session_factory, ws_id, draft_sha)
+
+    def boom(*a, **k):
+        raise GitCommitError("disk full")
+
+    monkeypatch.setattr(pr, "write_and_commit_files", boom)
+    await run_review_pass(
+        run_id=run_id, session_factory=session_factory, settings=Settings(),
+        adapter_builder=make_fake_builder(session_factory, {}),
+    )
+    with session_factory() as s:
+        assert s.get(ReviewRun, run_id).status == "failed"
 ```
 Add a `review_active_workspace` fixture to `conftest.py` yielding `(session_factory, ws_id, wdir, repo_path, draft_sha)` — an active workspace with an initialized repo containing committed `proposal.md`/`proposal-spec.md`; `draft_sha` is the sha256 of the proposal bytes.
 
@@ -1327,7 +1412,11 @@ from sqlalchemy.orm import sessionmaker
 
 from call_manager.config import Settings
 from call_manager.db.models import ReviewRun, ReviewRunItem, Workspace
-from call_manager.proposal_assist.citations.gitio import blob_sha, write_and_commit_files
+from call_manager.proposal_assist.citations.gitio import (
+    GitCommitError,
+    blob_sha,
+    write_and_commit_files,
+)
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.review.agent import build_review_adapter
@@ -1366,12 +1455,25 @@ async def _run_one_call(
     """Run a single sub-call against its (already 'running') item. Records tokens +
     dollars and flips the item to done/failed. Never raises — failure is recorded."""
     with session_factory() as s:
+        run = s.get(ReviewRun, run_id)
         item = s.scalar(
             select(ReviewRunItem).where(
                 ReviewRunItem.review_run_id == run_id, ReviewRunItem.kind == kind
             )
         )
         item_id = item.id
+        # Pre-launch live recheck (mirrors evaluator/pass_runner.py:92): a soft-delete
+        # cancel or reaper may have flipped the run between step-1's read session and
+        # now — and with the wave-1 semaphore, a queued sub-call can START long after
+        # wave-1 began. Don't spend tokens or send workspace content for a run that is
+        # no longer running. Full prevention would need task cancellation; this narrows
+        # the window the way the evaluator does.
+        if run is None or run.status != "running":
+            item.status = "cancelled"
+            item.error_message = "run no longer active"
+            item.completed_at = _now()
+            s.commit()
+            return
         item.status = "running"
         item.started_at = _now()
         item.model = settings.proposal_assist_llm_model
@@ -1550,12 +1652,24 @@ async def run_review_pass(
             files[_FIT_CHECK_FILE] = fit_md
         if cons_md:
             files[_RUBRIC_REVIEW_FILE] = cons_md
+        commit_failed = False
         if files:
-            write_and_commit_files(repo_dir, files, f"mock-panel review {run_id}")
-            if _FIT_CHECK_FILE in files:
-                run.fit_check_sha = blob_sha(repo_dir, "HEAD", _FIT_CHECK_FILE)
-            if _RUBRIC_REVIEW_FILE in files:
-                run.rubric_review_sha = blob_sha(repo_dir, "HEAD", _RUBRIC_REVIEW_FILE)
+            try:
+                write_and_commit_files(repo_dir, files, f"mock-panel review {run_id}")
+                if _FIT_CHECK_FILE in files:
+                    run.fit_check_sha = blob_sha(repo_dir, "HEAD", _FIT_CHECK_FILE)
+                if _RUBRIC_REVIEW_FILE in files:
+                    run.rubric_review_sha = blob_sha(repo_dir, "HEAD", _RUBRIC_REVIEW_FILE)
+            except GitCommitError:
+                # Don't let a git failure escape the finalize and wedge the active
+                # slot until the reaper TTL — fail the run NOW, surface it on the item.
+                logger.exception("review artifact commit failed for run %s", run_id)
+                commit_failed = True
+                cons = items.get("consolidation")
+                if cons is not None:
+                    cons.error_message = (
+                        (cons.error_message or "") + " [artifact commit failed]"
+                    ).strip()
         run.input_tokens = sum((i.input_tokens or 0) for i in items.values())
         run.output_tokens = sum((i.output_tokens or 0) for i in items.values())
         dollars = sum((i.estimated_dollars or 0) for i in items.values())
@@ -1564,7 +1678,9 @@ async def run_review_pass(
         ).quantize(__import__("decimal").Decimal("0.001"))
         all_done = all(items[k].status == "done" for k in REVIEW_KINDS if k in items)
         cons_done = items.get("consolidation") and items["consolidation"].status == "done"
-        if all_done:
+        if commit_failed:
+            run.status = "failed"
+        elif all_done:
             run.status = "done"
         elif cons_done:
             run.status = "partial"
@@ -1987,7 +2103,7 @@ Confirm: alembic head still `0054` (`uv run alembic heads`); no edits under the 
 
 ## Self-Review (completed by plan author)
 
-- **Spec coverage:** §1 data model → Tasks 3/4 (reuse, no migration). §2 personas → Task 2. §3.1–3.6 → Tasks 2 (context/agent/submit) + 3 (jobs) + 4 (pass_runner). §4 gate → Task 1. §5 endpoints/scheduler/config/git-helpers → Tasks 5 (endpoints) + 4 (scheduler) + 1 (config/gitio). §6 artifacts → Task 4 (write rule). §7 frontend → Task 6. §8 tests → every task's test step + final verification. No spec section is unmapped.
+- **Spec coverage:** §1 data model → Tasks 3/4 (reuse, no migration). §2 personas → Task 2. §3.1–3.6 → Tasks 2 (context/agent/submit) + 3 (jobs) + 4 (pass_runner). §4 gate → Task 1. §5 endpoints/scheduler/config/git-helpers → Tasks 5 (endpoints) + 4 (scheduler) + 1 (config/gitio). §6 artifacts → Task 4 (write rule). §7 frontend → Task 6. §8 tests → every task's test step + final verification. No spec section is unmapped. **Pricing note:** `estimate_dollars` prices `tokens_in + tokens_out` only — this is the conservative deviation the spec itself documents in §3.5 (the adapter bundles cache-read into `tokens_in`; the contract exposes no separate cache-read telemetry, and we deliberately do not change `drafting/contract.py`). The plan matches the *revised* spec, not the original cache-read sketch.
 - **Placeholder scan:** every code step has complete code; the one intentionally-illegal fake-builder snippet is immediately followed by the corrected version with an explicit callout. The `__import__("decimal")` inline in pass_runner is flagged for cleanup to a top-level import.
 - **Type consistency:** `ReviewContext` fields, `persona_instruction`/`consolidation_instruction` signatures, `estimate_dollars(tokens_in, tokens_out, settings)`, `build_review_adapter(...)` kwargs, and `_serialize`/budget keys are used identically across Tasks 2→4→5. `review_run_item_id` is defined in Task 2 and consumed by the submit tool + adapter.
 - **Known executor cross-checks (called out inline, not gaps):** the exact MCP tool-registration call for `submit_review` (mirror `submit_scorecard`); importability of `evaluator/context.py` helpers (`_read_artifact`/`_render_*`/`content_sha`) — copy bodies if cross-import is disallowed; the exact `WorkspaceEvent(...)` constructor fields (grep an existing disclosure-ack write); the Scorecard-tab wiring in `Cockpit.tsx` to mirror.
