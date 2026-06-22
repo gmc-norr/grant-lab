@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import ReviewRun, ReviewRunItem
+from call_manager.db.models import ReviewRunItem
 from call_manager.proposal_assist.tools.registry import ToolContext
 from call_manager.proposal_assist.tools.review_submit import submit_review_impl
 

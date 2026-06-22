@@ -1,5 +1,4 @@
 import hashlib
-import uuid
 
 from call_manager.proposal_assist.review.context import (
     assemble_review_context,

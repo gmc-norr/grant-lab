@@ -46,7 +46,9 @@ def test_cancel_and_reap(review_workspace):
     # force triggered_at into the past
     session.execute(
         ReviewRun.__table__.update().where(ReviewRun.id == r.id).values(
-            triggered_at=__import__("datetime").datetime(2000, 1, 1, tzinfo=__import__("datetime").UTC)
+            triggered_at=__import__("datetime").datetime(
+                2000, 1, 1, tzinfo=__import__("datetime").UTC
+            )
         )
     )
     assert reap_stuck_review_runs(session, timeout_seconds=10) == 1

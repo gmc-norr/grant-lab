@@ -1,5 +1,4 @@
 import asyncio
-import uuid
 
 import pytest
 
@@ -183,7 +182,9 @@ async def test_subcall_skips_when_run_no_longer_running(review_active_workspace,
 
 
 @pytest.mark.asyncio
-async def test_artifact_commit_failure_fails_run(review_active_workspace, monkeypatch, _settings_env):
+async def test_artifact_commit_failure_fails_run(
+    review_active_workspace, monkeypatch, _settings_env
+):
     # Codex Medium: a git failure in finalize must fail the run immediately, not
     # leave it 'running' until the reaper TTL.
     from call_manager.proposal_assist.citations.gitio import GitCommitError
