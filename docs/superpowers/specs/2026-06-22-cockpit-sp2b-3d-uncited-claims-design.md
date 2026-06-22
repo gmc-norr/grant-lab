@@ -171,13 +171,36 @@ It writes the validated raw list to `job.claims`; the **verbatim-substring filte
 hashing, and dedupe happen in the runner** (§3, which holds the pinned section
 texts). Returns an MCP ok/error envelope via the existing `_safe_tool` wrapper.
 
+**`job.claims` has two shapes by lifecycle.** Between this tool's write and the
+runner's finalize the row holds the **raw** list — no `claim_hash`, not yet
+substring-filtered or deduped. After finalize it holds the **final** list (§3:
+hashed, filtered, deduped). The endpoint contract (§6) gates `claims` on
+`status=="completed"` so no consumer ever sees the raw shape.
+
+**Registration is background-only (mirror `submit_scorecard`).**
+`submit_uncited_claims` is appended to the `_collect_tools` return list in
+`tools/registry.py` (so the shared MCP server built by
+`build_proposal_assist_mcp_server` exposes it) — exactly where `submit_scorecard`
+and `submit_review` already sit. It is added to the new uncited adapter's
+`allowed_tools=["submit_uncited_claims"]` (§3 `agent.py`) **only** — it is **NOT**
+added to the interactive default allowlist in
+`drafting/claude_adapter.py:259-288`, so the interactive agent can never call it.
+This is the same collected-but-not-interactively-allowed shape the two background
+siblings already use. (`claude_adapter.py` itself is therefore **not** modified —
+only its allowlist is left as-is.) The two registry/adapter wiring assertion
+tests must be updated for the new tool — see §9.
+
 ---
 
 ## §5 Problems integration — the 5th signal
 
 - **`problems/builders.py`**: new pure builder
   `uncited_claim_problems(claims: list[dict], dismissed: set[str], *,
-  stale: bool, cap: int = 10) -> list[dict]`. Filters out claims whose
+  cap: int = 10) -> list[dict]`. It takes **no `stale` parameter** — staleness is
+  a group-level render flag carried by the separate top-level
+  `uncited_claims_stale` field (below), never baked into a row, exactly as
+  SP2b-3b keeps `scorecard_stale` out of `criterion_gap` rows. The builder
+  filters out claims whose
   `claim_hash ∈ dismissed`; emits up to `cap` **warning** rows
   (`category="uncited_claim"`), each:
   ```json
@@ -192,7 +215,8 @@ texts). Returns an MCP ok/error envelope via the existing `_safe_tool` wrapper.
 - **`problems/aggregate.py`**: in its own `try` block (never-500), read the
   latest **completed** `uncited_claims_jobs` row + `dismissed_claim_hashes`,
   compute `stale = job.evaluated_draft_sha != current draft content_sha`, call the
-  builder, and surface staleness as a **separate** top-level boolean
+  builder (**rows only — `stale` is not a builder input**), and surface staleness
+  as a **separate** top-level boolean
   `uncited_claims_stale` on the `/problems` response. It MUST NOT be folded into
   `scorecard_stale`: the panel reads `scorecard_stale` only to flag the
   `criterion_gap` group ([ProblemsPanel.tsx:41]), so reusing it would falsely age
@@ -211,8 +235,16 @@ from SP2b-3c: bare-dict endpoints emit no schema and hide client/server drift):
   "checking for uncited claims")`; **active-first** (return the active job if one
   exists, else cap-check then enqueue + write a `WorkspaceEvent`); 429 on cap.
   Returns the run DTO.
-- `GET /{id}/uncited-claims-runs/latest` → latest job state + `claims` +
-  `stale` flag (drives the panel's run button + status). Returns DTO or `null`.
+- `GET /{id}/uncited-claims-runs/latest` → latest job state + `stale` flag
+  (drives the panel's run button + status). **`claims` is returned only when
+  `status=="completed"`** — the finalized hashed/filtered shape from §3; for any
+  non-completed job `claims` is `null`. This gate is required because `job.claims`
+  holds the **raw** tool output (no `claim_hash`, unfiltered) in the window
+  between `submit_uncited_claims` (§4) and finalize (§3): a `response_model` whose
+  claim items type `claim_hash` would otherwise 500 (missing field) or leak
+  unfiltered claims when serializing a running job. The panel reads its rows from
+  `/problems` anyway — never from this `claims` field — so completed-only is no
+  loss. Returns DTO or `null`.
 - `POST /{id}/uncited-claims/{claim_hash}/dismiss` → writes
   `WorkspaceEvent(kind="uncited_claim_dismissed", actor_id=user.id,
   payload={"claim_hash": claim_hash})`. Idempotent (dismissing an unknown hash is
@@ -278,6 +310,20 @@ No new bottom-panel tab (uncited claims live inside Problems). `nav.ts` unchange
 - **soft-delete**: deleting a workspace fails its active uncited-claims job.
 - **endpoints**: run (gating 403/409, cap 429, active-first), latest (shape +
   null), dismiss (writes event, idempotent); `response_model` drift-guard test.
+  **latest returns `claims:null` for a running job whose `job.claims` holds the
+  raw (unhashed) tool output** — the two-shape guard from §6 (no 500, no leak).
+- **registry/adapter wiring** (`tests/proposal_assist/test_tools_registry.py`,
+  `tests/proposal_assist/test_tools_claude_adapter_wiring.py`): updated so the
+  collected-tool-set assertion includes `submit_uncited_claims` (count + names)
+  and the "every collected tool is allowlisted" invariant accounts for the
+  background-only submit tools (they are collected but intentionally absent from
+  the interactive default allowlist; each is allowed only by its own background
+  adapter). **NOTE: these two tests are already red on master `ff1defb`** — they
+  were not updated when SP2b-3a (`submit_scorecard`) and SP2b-3c (`submit_review`)
+  added their tools to `_collect_tools`, so they currently assert 21 against an
+  actual 23. SP2b-3d's update must reconcile all three background tools, not just
+  its own (or the pre-existing breakage be fixed first — see the build note in
+  §11).
 - **frontend (vitest)**: ProblemsPanel renders uncited rows, dismiss invalidates,
   run button disabled-while-running + retryable-on-error; hook tests. `tsc` gate.
 
@@ -306,10 +352,18 @@ in isolation.
   `uncited_claims_stale` + `claim_hash` on uncited rows; update its `response_model`)
 - `src/call_manager/proposal_assist/web/workspaces.py` (soft-delete: call
   `cancel_uncited_claims_jobs_for_workspace` next to the evaluator/review cancels)
-- `src/call_manager/proposal_assist/tools/registry.py` (register
-  `submit_uncited_claims`; `ToolContext` gains `uncited_draft_section_count`)
+- `src/call_manager/proposal_assist/tools/registry.py` (append
+  `submit_uncited_claims` to `_collect_tools`; `ToolContext` gains
+  `uncited_draft_section_count`)
+- `tests/proposal_assist/test_tools_registry.py`,
+  `tests/proposal_assist/test_tools_claude_adapter_wiring.py` (update the
+  collected-set count/names + the allowlist invariant for the background-only
+  submit tools — see §9; these are already red on master)
 - `src/call_manager/config.py`, `src/call_manager/scheduler.py`, `src/call_manager/main.py`
 - `frontend/src/cockpit/ProblemsPanel.tsx`, `frontend/src/api/schema.gen.ts` (regen)
+
+`drafting/claude_adapter.py` is **NOT** modified — its interactive default
+allowlist intentionally excludes background-only submit tools (§4).
 
 **Must NOT touch:** `drafting/claude_adapter.py`, `drafting/contract.py`, the
 evaluator/coherence/review packages (copy from them, don't edit them).
@@ -322,6 +376,11 @@ evaluator/coherence/review packages (copy from them, don't edit them).
 2. `jobs.py` (queue/caps/reap/**cancel-for-workspace**/dismissed-set) + tests.
 3. `submit_uncited_claims` tool + `ToolContext.uncited_draft_section_count` +
    registry (row-lock, workspace+running, exactly-once, pinned range) + tests.
+   Also reconcile the two registry/adapter wiring assertion tests (§9) — they are
+   **already red on master** (assert 21 vs. an actual 23 collected tools), so this
+   task updates them to cover all three background submit tools, leaving them
+   green. (Alternatively the master breakage is fixed as a standalone pre-req
+   before SP2b-3d starts, on a green baseline.)
 4. `context.py` (per-section texts) + `agent.py` + `pass_runner.py` (hardening +
    **verbatim-substring filter** + hashing/dedupe) + tests.
 5. Problems builder + aggregate wiring (`uncited_claims_stale`) + `web/problems.py`
