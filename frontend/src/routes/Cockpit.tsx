@@ -4,6 +4,7 @@ import { useParams } from "react-router-dom";
 import { BottomPanel } from "../cockpit/BottomPanel";
 import { DraftPanel } from "../cockpit/DraftPanel";
 import type { BottomTab, NavTarget, TopTab } from "../cockpit/nav";
+import { ReviewPanel } from "../cockpit/ReviewPanel";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { SpecPanel } from "../cockpit/SpecPanel";
 
@@ -53,10 +54,19 @@ export function Cockpit() {
         >
           Scorecard
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={topTab === "review"}
+          onClick={() => setTopTab("review")}
+        >
+          Panel review
+        </button>
       </div>
       {topTab === "draft" && <DraftPanel id={id} />}
       {topTab === "spec" && <SpecPanel id={id} />}
       {topTab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
+      {topTab === "review" && <ReviewPanel id={id} />}
       <BottomPanel
         id={id}
         activeTab={bottomTab}
