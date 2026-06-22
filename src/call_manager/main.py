@@ -43,6 +43,9 @@ from call_manager.proposal_assist.web.evaluator import (
 from call_manager.proposal_assist.web.files import (
     router as files_router,
 )
+from call_manager.proposal_assist.web.problems import (
+    router as problems_router,
+)
 from call_manager.proposal_assist.web.proposals import (
     router as proposals_router,
 )
@@ -536,6 +539,7 @@ def create_app() -> FastAPI:
     app.include_router(proposals_router)
     app.include_router(coherence_router)
     app.include_router(evaluator_router)
+    app.include_router(problems_router)
     app.include_router(annotations_router)
     app.include_router(files_router)
     app.include_router(references_router)
