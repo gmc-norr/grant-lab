@@ -131,8 +131,11 @@ locatable and gives a stable hash), the `section_index`, and a one-line
 - **`agent.py`** — `build_uncited_claims_adapter`: `ClaudeAgentSDKAdapter` with a
   `ToolContext` carrying `origin_job_id`/`workspace_id` and the **pinned draft
   section count** (a new `ToolContext` field, e.g. `uncited_draft_section_count`,
-  mirroring evaluator's `eval_draft_section_count`) for the tool's range check;
-  `allowed_tools=["submit_uncited_claims"]`.
+  mirroring evaluator's `eval_draft_section_count`) for the tool's range check.
+  Expose a `uncited_claims_allowed_tools() -> ["submit_uncited_claims"]` helper
+  (mirroring `evaluator_allowed_tools()` / `review_allowed_tools()`) that feeds
+  `allowed_tools` — the wiring test (§9) unions it into its `background-only` set
+  so a forgotten allowlist update trips the assertion.
 - **`pass_runner.py`** — `run_uncited_claims_pass`: short read session (guard
   running, pin `evaluated_draft_sha`, cap recheck) → build instruction → launch +
   drive inside `asyncio.wait_for` → bounded `terminate` in `finally` → row-locked
@@ -318,12 +321,15 @@ No new bottom-panel tab (uncited claims live inside Problems). `nav.ts` unchange
   and the "every collected tool is allowlisted" invariant accounts for the
   background-only submit tools (they are collected but intentionally absent from
   the interactive default allowlist; each is allowed only by its own background
-  adapter). **NOTE: these two tests are already red on master `ff1defb`** — they
-  were not updated when SP2b-3a (`submit_scorecard`) and SP2b-3c (`submit_review`)
-  added their tools to `_collect_tools`, so they currently assert 21 against an
-  actual 23. SP2b-3d's update must reconcile all three background tools, not just
-  its own (or the pre-existing breakage be fixed first — see the build note in
-  §11).
+  adapter). **Baseline:** these two tests were red through master `ff1defb`
+  (SP2b-3a/3c added `submit_scorecard`/`submit_review` to `_collect_tools` without
+  updating them — 21 asserted vs. 23 actual) and were **fixed on master
+  `17bebde`**: the collected set now asserts the full 23 and the allowlist
+  invariant is `interactive == collected − background-only`, with
+  `background-only = evaluator_allowed_tools() | review_allowed_tools()`. On that
+  green baseline SP2b-3d only **adds `submit_uncited_claims`**: bump the collected
+  set to 24 and add `uncited_claims_allowed_tools()` to the `background-only`
+  union.
 - **frontend (vitest)**: ProblemsPanel renders uncited rows, dismiss invalidates,
   run button disabled-while-running + retryable-on-error; hook tests. `tsc` gate.
 
@@ -376,11 +382,11 @@ evaluator/coherence/review packages (copy from them, don't edit them).
 2. `jobs.py` (queue/caps/reap/**cancel-for-workspace**/dismissed-set) + tests.
 3. `submit_uncited_claims` tool + `ToolContext.uncited_draft_section_count` +
    registry (row-lock, workspace+running, exactly-once, pinned range) + tests.
-   Also reconcile the two registry/adapter wiring assertion tests (§9) — they are
-   **already red on master** (assert 21 vs. an actual 23 collected tools), so this
-   task updates them to cover all three background submit tools, leaving them
-   green. (Alternatively the master breakage is fixed as a standalone pre-req
-   before SP2b-3d starts, on a green baseline.)
+   Also update the two registry/adapter wiring assertion tests (§9): bump the
+   collected set to 24 (add `submit_uncited_claims`) and add
+   `uncited_claims_allowed_tools()` to the `background-only` union. The
+   pre-existing master breakage was already fixed (master `17bebde`), so this task
+   starts green and only adds the third background tool.
 4. `context.py` (per-section texts) + `agent.py` + `pass_runner.py` (hardening +
    **verbatim-substring filter** + hashing/dedupe) + tests.
 5. Problems builder + aggregate wiring (`uncited_claims_stale`) + `web/problems.py`
