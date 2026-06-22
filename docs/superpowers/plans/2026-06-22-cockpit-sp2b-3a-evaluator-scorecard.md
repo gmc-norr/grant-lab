@@ -30,7 +30,7 @@
 - `alembic/versions/0054_evaluator_jobs.py` — the table migration.
 - `src/call_manager/proposal_assist/evaluator/__init__.py` — empty package marker.
 - `src/call_manager/proposal_assist/evaluator/scoring.py` — pure deterministic roll-up (band ordinals, thresholds, gap floor).
-- `src/call_manager/proposal_assist/evaluator/context.py` — instruction assembly (criteria+spec+draft, indexed) + `_content_sha` helper.
+- `src/call_manager/proposal_assist/evaluator/context.py` — instruction assembly (criteria+spec+draft, indexed; reads each artifact once and returns its content `content_sha`).
 - `src/call_manager/proposal_assist/evaluator/jobs.py` — queue helpers (enqueue/claim/cancel/reap/cap/latest).
 - `src/call_manager/proposal_assist/evaluator/agent.py` — one-shot adapter factory.
 - `src/call_manager/proposal_assist/evaluator/pass_runner.py` — run one pass + async drain tick.
@@ -350,6 +350,8 @@ git commit -m "feat(evaluator): evaluator_* config settings"
 
 ```python
 # tests/proposal_assist/evaluator/test_context.py
+from pathlib import Path
+
 from call_manager.proposal_assist.evaluator.context import (
     assemble_evaluator_context,
     content_sha,
@@ -375,16 +377,20 @@ def test_assembles_criteria_sections_and_counts(tmp_path, pg_session_factory):
         ws.rubric_funder_notes = "Single-PI only."
         s.flush()
         ws_id = ws.id
-        _seed(tmp_path, ws_id, "## Aims\n\nA draft.\n", "## Aims\n\nThe spec.\n")
+        repo = _seed(tmp_path, ws_id, "## Aims\n\nA draft.\n", "## Aims\n\nThe spec.\n")
         ctx = assemble_evaluator_context(
             session=s, workspace_id=ws_id, workspaces_dir=str(tmp_path)
         )
     assert "[0] Scientific quality" in ctx.instruction
     assert "[1] Impact" in ctx.instruction
     assert "Single-PI only." in ctx.instruction
-    assert "[§0]" in ctx.instruction  # section-index labels present
+    assert "[§0]" in ctx.instruction and "[§1]" in ctx.instruction  # index labels
     assert "A draft." in ctx.instruction and "The spec." in ctx.instruction
-    assert ctx.draft_section_count == 1 and ctx.spec_section_count == 1
+    # split_sections yields section 0 (empty preamble) + section 1 (## Aims): count 2.
+    assert ctx.draft_section_count == 2 and ctx.spec_section_count == 2
+    # The returned sha hashes the SAME bytes the endpoint will re-hash.
+    assert ctx.draft_sha == content_sha(repo / "proposal.md")
+    assert ctx.spec_sha == content_sha(repo / "proposal-spec.md")
 
 
 def test_empty_rubric_and_missing_files(tmp_path, pg_session_factory):
@@ -397,7 +403,9 @@ def test_empty_rubric_and_missing_files(tmp_path, pg_session_factory):
         )
     assert "no criteria" in ctx.instruction.lower()
     assert "(draft is empty)" in ctx.instruction
+    # missing files -> 0 sections, '' hashes
     assert ctx.draft_section_count == 0 and ctx.spec_section_count == 0
+    assert ctx.draft_sha == "" and ctx.spec_sha == ""
 
 
 def test_content_sha_changes_with_content(tmp_path):
@@ -450,20 +458,32 @@ class EvaluatorContext:
     instruction: str
     draft_section_count: int
     spec_section_count: int
+    # Hashes of the EXACT bytes assembled into the instruction (read once — no
+    # TOCTOU re-read), so the job's evaluated_*_sha matches what the model saw.
+    draft_sha: str
+    spec_sha: str
 
 
 def content_sha(path: Path) -> str:
     """sha256 of a file's bytes, or '' if it does not exist. Per-artifact content
     identity (the draft and spec share one git repo HEAD, which can't distinguish
-    a draft-only edit from a spec-only edit)."""
+    a draft-only edit from a spec-only edit). Used by the /scorecard endpoint to
+    recompute current hashes — must match _read_artifact's hashing exactly."""
     if not path.exists():
         return ""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _read(repo_dir: Path, filename: str) -> str:
+def _read_artifact(repo_dir: Path, filename: str) -> tuple[str, str]:
+    """Read the file's bytes EXACTLY ONCE; return (decoded_text, content_sha).
+    Reading once closes the TOCTOU gap where a concurrent edit between hashing and
+    re-reading would make the recorded sha disagree with the assembled bytes.
+    Missing file -> ('', '') so '' marks 'no artifact' on both sides of staleness."""
     path = repo_dir / filename
-    return path.read_text() if path.exists() else ""
+    if not path.exists():
+        return "", ""
+    raw = path.read_bytes()
+    return raw.decode(), hashlib.sha256(raw).hexdigest()
 
 
 def _render_criteria(rubric: list[dict]) -> str:
@@ -490,14 +510,16 @@ def assemble_evaluator_context(
     rubric = list(ws.rubric_criteria) if ws and ws.rubric_criteria else []
     funder_notes = (ws.rubric_funder_notes if ws else None) or "(none)"
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    draft_sections = split_sections(_read(repo_dir, PROPOSAL_FILENAME)) if _read(
-        repo_dir, PROPOSAL_FILENAME
-    ) else []
-    spec_sections = split_sections(_read(repo_dir, SPEC_FILENAME)) if _read(
-        repo_dir, SPEC_FILENAME
-    ) else []
-    draft_block = _render_sections(draft_sections) or "(draft is empty)"
-    spec_block = _render_sections(spec_sections) or "(spec is empty)"
+    draft_text, draft_sha = _read_artifact(repo_dir, PROPOSAL_FILENAME)
+    spec_text, spec_sha = _read_artifact(repo_dir, SPEC_FILENAME)
+    # split_sections ALWAYS returns >=1 section (section 0 is the preamble, possibly
+    # empty). For an empty/whitespace artifact we render the "(empty)" placeholder and
+    # count 0 (nothing to deep-link); for real content we keep the sectionizer's exact
+    # indexes so deep_link.section_index lines up with the editor.
+    draft_sections = split_sections(draft_text) if draft_text.strip() else []
+    spec_sections = split_sections(spec_text) if spec_text.strip() else []
+    draft_block = _render_sections(draft_sections) if draft_sections else "(draft is empty)"
+    spec_block = _render_sections(spec_sections) if spec_sections else "(spec is empty)"
     instruction = (
         f"{_ROLE}"
         f"\n# Funder criteria\n{_render_criteria(rubric)}\n"
@@ -509,6 +531,8 @@ def assemble_evaluator_context(
         instruction=instruction,
         draft_section_count=len(draft_sections),
         spec_section_count=len(spec_sections),
+        draft_sha=draft_sha,
+        spec_sha=spec_sha,
     )
 ```
 
@@ -550,11 +574,28 @@ def test_all_strong_is_strong():
     assert compute_overall_band([("strong", 1.0), ("strong", 1.0)]) == "strong"
 
 
-def test_threshold_boundaries():
-    # score exactly 2.50 -> strong (lower bound inclusive)
-    assert compute_overall_band([("adequate", 1.0), ("strong", 1.0)]) == "adequate"  # 2.0
-    # score 1.75 -> adequate (boundary)
-    assert compute_overall_band([("at_risk", 1.0), ("strong", 1.0)]) == "adequate"  # 2.0
+def test_all_gap_is_gap():
+    assert compute_overall_band([("gap", 1.0)]) == "gap"  # score 0 (< 0.75)
+
+
+def test_threshold_2_50_inclusive_is_strong():
+    # (2 + 3)/2 = 2.50 -> strong (>= 2.50). No gap, so the floor is inert.
+    assert compute_overall_band([("adequate", 1.0), ("strong", 1.0)]) == "strong"
+
+
+def test_just_below_2_50_is_adequate():
+    # (2*3 + 3*1)/4 = 2.25 -> adequate
+    assert compute_overall_band([("adequate", 3.0), ("strong", 1.0)]) == "adequate"
+
+
+def test_threshold_1_75_inclusive_is_adequate():
+    # 1*0.25 + 2*0.75 = 1.75 -> adequate (>= 1.75). Fractional weights, no gap.
+    assert compute_overall_band([("at_risk", 0.25), ("adequate", 0.75)]) == "adequate"
+
+
+def test_just_below_1_75_is_at_risk():
+    # (1 + 2)/2 = 1.50 -> at_risk
+    assert compute_overall_band([("at_risk", 1.0), ("adequate", 1.0)]) == "at_risk"
 
 
 def test_low_weight_gap_caps_at_adequate():
@@ -882,9 +923,15 @@ async def submit_scorecard_impl(
         overall = compute_overall_band([(c["band"], c["effective_weight"]) for c in out])
         scorecard = {"criteria": out, "overall_band": overall, "summary": (summary or "").strip()}
 
-        job = session.get(EvaluatorJob, ctx.origin_job_id)
-        if job is None:
-            return {"error": "evaluator job not found"}
+        # Guard the write: row-lock the target and require it is THIS workspace's
+        # still-running evaluator job, so a stale/mismatched ctx.origin_job_id (or a
+        # job the reaper/cancel already failed) can never have a scorecard written
+        # onto it. (origin_kind isn't a job column; ctx.origin_kind is fixed to
+        # 'evaluator_session' by build_evaluator_adapter — the enforceable guards are
+        # workspace identity + running status.)
+        job = session.get(EvaluatorJob, ctx.origin_job_id, with_for_update=True)
+        if job is None or job.workspace_id != ctx.workspace_id or job.status != "running":
+            return {"error": "scorecard target is not an active evaluator run for this workspace"}
         job.scorecard = scorecard
         session.commit()
     return {"stored": True, "overall_band": overall}
@@ -984,7 +1031,7 @@ from datetime import UTC, datetime, timedelta
 from call_manager.config import Settings
 from call_manager.db.models import EvaluatorJob, Workspace
 from call_manager.proposal_assist.evaluator import jobs
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def test_enqueue_create_or_return_active(pg_session_factory):
@@ -998,12 +1045,27 @@ def test_enqueue_create_or_return_active(pg_session_factory):
         assert a.id == b.id  # returns the existing active job
 
 
-def test_claim_skips_workspace_with_running(pg_session_factory):
+def test_claim_skips_running_and_picks_a_queued_in_another_workspace(pg_session_factory):
+    # The active-unique index forbids queued+running in ONE workspace, so use two:
+    # ws has only a running job (not claimable); ws2 has a queued job (claimable).
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
         s.add(EvaluatorJob(workspace_id=ws.id, status="running"))
-        s.add(EvaluatorJob(workspace_id=ws.id, status="queued"))
+        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@ki.se"))
+        s.flush()
+        s.add(EvaluatorJob(workspace_id=ws2.id, status="queued"))
+        s.commit()
+        claimed = jobs.claim_next_evaluator_job(s)
+        assert claimed is not None and claimed.workspace_id == ws2.id
+        assert claimed.status == "running" and claimed.started_at is not None
+
+
+def test_claim_returns_none_when_only_running(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        s.add(EvaluatorJob(workspace_id=ws.id, status="running"))
         s.commit()
         assert jobs.claim_next_evaluator_job(s) is None
 
@@ -1539,18 +1601,13 @@ from sqlalchemy.orm import sessionmaker
 
 from call_manager.config import Settings
 from call_manager.db.models import EvaluatorJob, Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.evaluator.agent import build_evaluator_adapter
-from call_manager.proposal_assist.evaluator.context import (
-    assemble_evaluator_context,
-    content_sha,
-)
+from call_manager.proposal_assist.evaluator.context import assemble_evaluator_context
 from call_manager.proposal_assist.evaluator.jobs import (
     claim_next_evaluator_job,
     evaluator_cap_exceeded,
 )
-from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
 
@@ -1581,13 +1638,14 @@ async def run_evaluator_pass(
             _fail(s, job, "daily evaluation budget reached")
             s.commit()
             return
-        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        job.evaluated_draft_sha = content_sha(repo_dir / PROPOSAL_FILENAME)
-        job.evaluated_spec_sha = content_sha(repo_dir / SPEC_FILENAME)
-        job.evaluated_rubric_updated_at = ws.rubric_updated_at if ws else None
         ctx = assemble_evaluator_context(
             session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
         )
+        # The context hashed the EXACT bytes it assembled (single read) — use those so
+        # the staleness markers match what the model actually evaluated.
+        job.evaluated_draft_sha = ctx.draft_sha
+        job.evaluated_spec_sha = ctx.spec_sha
+        job.evaluated_rubric_updated_at = ws.rubric_updated_at if ws else None
         instruction = ctx.instruction
         draft_n, spec_n = ctx.draft_section_count, ctx.spec_section_count
         s.commit()
@@ -1706,9 +1764,11 @@ git commit -m "feat(evaluator): pass runner + drain tick (require-scorecard fina
 
 ```python
 # tests/proposal_assist/evaluator/test_web_evaluator.py
+import uuid
+
 import pytest
 
-from call_manager.db.models import EvaluatorJob
+from call_manager.db.models import EvaluatorJob, Workspace
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -1718,7 +1778,8 @@ def _ws(_app, current_user, pg_session_factory, tmp_path, *, phase="active", ack
         ws = make_workspace(s, owner=current_user, ack_disclosure=ack, current_phase=phase)
         s.flush()
         ws.rubric_criteria = []
-        ws.rubric_updated_at = None
+        # NOTE: do NOT set rubric_updated_at — it's a non-null column with a server
+        # default; the staleness test reads the real value to seed a matching marker.
         s.commit()
         return str(ws.id)
 
@@ -1761,16 +1822,20 @@ def test_scorecard_null_then_value_with_stale_flags(
 ):
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
     assert client_authed_owner.get(f"/api/workspaces/{ws_id}/scorecard").json() is None
-    # seed a completed job whose evaluated markers match the current (empty) state
+    wid = uuid.UUID(ws_id)
+    # seed a completed job whose evaluated markers MATCH the current state: the repo
+    # has no proposal.md/proposal-spec.md (content_sha == "") and the rubric marker is
+    # the workspace's real rubric_updated_at -> stale must be False.
     with pg_session_factory() as s:
+        rubric_ts = s.get(Workspace, wid).rubric_updated_at
         s.add(
             EvaluatorJob(
-                workspace_id=ws_id,
+                workspace_id=wid,
                 status="completed",
                 scorecard={"criteria": [], "overall_band": "gap", "summary": "x"},
-                evaluated_draft_sha="",  # repo has no proposal.md -> content_sha == ""
+                evaluated_draft_sha="",
                 evaluated_spec_sha="",
-                evaluated_rubric_updated_at=None,
+                evaluated_rubric_updated_at=rubric_ts,
             )
         )
         s.commit()
@@ -2471,3 +2536,4 @@ Expected: all pass (exit 0). Re-run any `connection refused` failures in isolati
 - **Staleness implementation note:** the spec calls the markers `evaluated_draft_sha`/`evaluated_spec_sha`; this plan defines them as **per-artifact content hashes** (sha256 of file bytes) rather than the shared repo HEAD, because both artifacts share one git repo and the repo HEAD can't distinguish a draft-only edit from a spec-only edit — which is exactly the per-input staleness Codex's review required. Same column names, faithful to the spec's intent.
 - **Type consistency:** `EvaluatorJob`, `submit_scorecard_impl`, `compute_overall_band`, `assemble_evaluator_context`/`EvaluatorContext`, `evaluator_allowed_tools`, `build_evaluator_adapter(..., draft_section_count, spec_section_count)`, `run_evaluator_pass`/`drain_evaluator_queue_tick`, the `ToolContext.eval_draft_section_count`/`eval_spec_section_count` fields, and the frontend `EvaluatorRun`/`ScorecardResponse` types are used consistently across tasks.
 - **Verify-against-codebase notes** are flagged inline (Section attr name, `JSONB` import, adapter ctor/attrs, `_stockholm_day_start_utc` import, `main.py` mount site, the `cancel_coherence_jobs_for_workspace` call site).
+- **Codex plan-review fixes applied (2026-06-22):** (1) `submit_scorecard_impl` row-locks the target and requires it to be THIS workspace's still-`running` job before writing; (2) the context reads each artifact's bytes ONCE and returns `draft_sha`/`spec_sha`, which the pass runner records as the staleness markers — no TOCTOU re-read; (3) Task 3 counts corrected for the sectionizer's always-present section-0 preamble (`## Aims…` → 2 sections); (4) Task 4 threshold tests corrected (score 2.50 → `strong`) with true fractional-weight boundary cases; (5) the claim test uses two workspaces (the active-unique index forbids queued+running in one); (6) the web test no longer nulls the non-null `rubric_updated_at` and seeds the job's rubric marker from the workspace's real value.
