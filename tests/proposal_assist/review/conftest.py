@@ -28,6 +28,7 @@ def review_workspace(tmp_path, pg_session_factory):
         ws.rubric_funder_notes = "Swedish university-hospital context."
         s.flush()
         ws_id = ws.id
+        s.commit()
 
     repo = tmp_path / str(ws_id) / "repo"
     repo.mkdir(parents=True, exist_ok=True)
