@@ -10,8 +10,6 @@ from __future__ import annotations
 import subprocess
 import uuid
 
-import pytest
-
 from call_manager.db.models import ReviewRun, WorkspaceEvent
 from call_manager.proposal_assist.citations.gitio import blob_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -253,3 +251,49 @@ def test_files_endpoint_by_sha_and_404s(
         f"{url_base}/review-runs/{run_id}/files/rubric-review.md"
     )
     assert r_no_sha.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI contract — drift protection
+# ---------------------------------------------------------------------------
+
+
+def _option_types(prop: dict) -> set[str | None]:
+    """The JSON-Schema `type`s a property may take (handles 3.1 anyOf-null)."""
+    if "anyOf" in prop:
+        return {o.get("type") for o in prop["anyOf"]}
+    return {prop.get("type")}
+
+
+def test_review_runs_declare_response_models_with_string_dollars(client_unauth):
+    """The /review-runs endpoints MUST carry a response_model so the generated
+    TS client is type-checked against the wire contract. The original crash
+    (a number-typed frontend DTO calling .toFixed() on a string dollar value)
+    was invisible precisely because the endpoints returned a bare ``dict`` and
+    emitted no response schema. Pin the schema here so codegen stays honest:
+    the three decimal dollar fields are JSON *strings*, never numbers.
+    """
+    schema = client_unauth.get("/openapi.json").json()
+    comps = schema["components"]["schemas"]
+    for name in ("ReviewRunOut", "ReviewRunItemOut", "ReviewBudgetOut", "ReviewFileOut"):
+        assert name in comps, f"{name} missing from OpenAPI components"
+
+    run_props = comps["ReviewRunOut"]["properties"]
+    # Decimal-on-the-wire: nullable string, never number.
+    assert _option_types(run_props["estimated_dollars"]) == {"string", "null"}, (
+        f"estimated_dollars must be nullable string, got {run_props['estimated_dollars']}"
+    )
+
+    budget_props = comps["ReviewBudgetOut"]["properties"]
+    assert budget_props["dollars_used"]["type"] == "string"
+    assert budget_props["dollars_cap"]["type"] == "string"
+    # Counts stay integers (regression guard against over-stringifying).
+    assert budget_props["runs_used"]["type"] == "integer"
+    assert budget_props["runs_cap"]["type"] == "integer"
+
+    item_props = comps["ReviewRunItemOut"]["properties"]
+    assert _option_types(item_props["estimated_dollars"]) == {"string", "null"}
+    # Item status enum matches the DB CHECK (skipped, not the run-level partial).
+    assert set(item_props["status"]["enum"]) == {
+        "queued", "running", "done", "failed", "skipped", "cancelled",
+    }

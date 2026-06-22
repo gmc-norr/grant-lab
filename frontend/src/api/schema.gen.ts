@@ -2727,6 +2727,70 @@ export interface components {
             /** Title */
             title: string;
         };
+        /** ReviewBudgetOut */
+        ReviewBudgetOut: {
+            /** Dollars Cap */
+            dollars_cap: string;
+            /** Dollars Used */
+            dollars_used: string;
+            /** Runs Cap */
+            runs_cap: number;
+            /** Runs Used */
+            runs_used: number;
+        };
+        /** ReviewFileOut */
+        ReviewFileOut: {
+            /** Markdown */
+            markdown: string;
+            /** Name */
+            name: string;
+            /** Sha */
+            sha: string;
+        };
+        /** ReviewRunItemOut */
+        ReviewRunItemOut: {
+            /** Error Message */
+            error_message: string | null;
+            /** Estimated Dollars */
+            estimated_dollars: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "fit_check" | "persona_domain_skeptic" | "persona_methodology_critic" | "persona_translation_skeptic" | "persona_devils_advocate" | "consolidation";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "done" | "failed" | "skipped" | "cancelled";
+        };
+        /** ReviewRunOut */
+        ReviewRunOut: {
+            budget: components["schemas"]["ReviewBudgetOut"];
+            /** Completed At */
+            completed_at: string | null;
+            /** Draft Sha */
+            draft_sha: string;
+            /** Estimated Dollars */
+            estimated_dollars: string | null;
+            /** Fit Check Sha */
+            fit_check_sha: string | null;
+            /** Id */
+            id: string;
+            /** Items */
+            items: components["schemas"]["ReviewRunItemOut"][];
+            /** Rubric Review Sha */
+            rubric_review_sha: string | null;
+            /** Stale */
+            stale: boolean;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "done" | "failed" | "cancelled" | "partial";
+            /** Triggered At */
+            triggered_at: string | null;
+        };
         /** SaveResultOut */
         SaveResultOut: {
             /** Changed */
@@ -4566,9 +4630,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ReviewRunOut"];
                 };
             };
             /** @description Validation Error */
@@ -4599,9 +4661,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    } | null;
+                    "application/json": components["schemas"]["ReviewRunOut"] | null;
                 };
             };
             /** @description Validation Error */
@@ -4634,9 +4694,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ReviewFileOut"];
                 };
             };
             /** @description Validation Error */

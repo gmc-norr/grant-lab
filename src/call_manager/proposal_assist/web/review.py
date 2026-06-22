@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import re
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
@@ -33,6 +35,63 @@ router = APIRouter(prefix="/api/workspaces", tags=["review"])
 
 _FILES = {"fit-check.md": "fit_check_sha", "rubric-review.md": "rubric_review_sha"}
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+# ---------------------------------------------------------------------------
+# Response models. These pin the wire contract into the OpenAPI schema so the
+# generated TS client is type-checked against it (the prior bare-``dict`` return
+# emitted no response schema, which is what hid the dollar-string crash). The
+# three Numeric dollar columns are serialized as JSON *strings* (see `str(...)`
+# in `_serialize`/`_budget`); declaring them `str` keeps the wire bytes
+# identical while making "string, not number" explicit to codegen. The enums
+# mirror the DB CHECK constraints verbatim — note item status carries `skipped`
+# (an item-only state) and run status carries `partial` (a run-only state).
+# ---------------------------------------------------------------------------
+
+ReviewItemKind = Literal[
+    "fit_check",
+    "persona_domain_skeptic",
+    "persona_methodology_critic",
+    "persona_translation_skeptic",
+    "persona_devils_advocate",
+    "consolidation",
+]
+ReviewItemStatus = Literal["queued", "running", "done", "failed", "skipped", "cancelled"]
+ReviewRunStatus = Literal["queued", "running", "done", "failed", "cancelled", "partial"]
+
+
+class ReviewRunItemOut(BaseModel):
+    kind: ReviewItemKind
+    status: ReviewItemStatus
+    error_message: str | None
+    estimated_dollars: str | None
+
+
+class ReviewBudgetOut(BaseModel):
+    runs_used: int
+    runs_cap: int
+    dollars_used: str
+    dollars_cap: str
+
+
+class ReviewRunOut(BaseModel):
+    id: str
+    status: ReviewRunStatus
+    triggered_at: str | None
+    completed_at: str | None
+    draft_sha: str
+    fit_check_sha: str | None
+    rubric_review_sha: str | None
+    estimated_dollars: str | None
+    items: list[ReviewRunItemOut]
+    stale: bool
+    budget: ReviewBudgetOut
+
+
+class ReviewFileOut(BaseModel):
+    name: str
+    sha: str
+    markdown: str
 
 
 def _serialize(run: ReviewRun, items: list[ReviewRunItem], *, stale: bool, budget: dict) -> dict:
@@ -74,7 +133,7 @@ def _budget(session, ws, settings, *, workspace_id) -> dict:
     }
 
 
-@router.post("/{workspace_id}/review-runs")
+@router.post("/{workspace_id}/review-runs", response_model=ReviewRunOut)
 def start_review_run(
     workspace_id: uuid.UUID,
     request: Request,
@@ -119,7 +178,7 @@ def start_review_run(
     )
 
 
-@router.get("/{workspace_id}/review-runs/latest")
+@router.get("/{workspace_id}/review-runs/latest", response_model=ReviewRunOut | None)
 def latest_review(
     workspace_id: uuid.UUID,
     request: Request,
@@ -139,7 +198,10 @@ def latest_review(
     )
 
 
-@router.get("/{workspace_id}/review-runs/{run_id}/files/{name}")
+@router.get(
+    "/{workspace_id}/review-runs/{run_id}/files/{name}",
+    response_model=ReviewFileOut,
+)
 def review_file(
     workspace_id: uuid.UUID,
     run_id: uuid.UUID,
