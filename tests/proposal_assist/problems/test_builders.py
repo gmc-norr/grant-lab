@@ -1,5 +1,10 @@
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.problems.builders import over_length_problems
+from call_manager.proposal_assist.problems.builders import (
+    broken_citation_problems,
+    ledger_unreadable_problem,
+    over_length_problems,
+    section_index_for_offset,
+)
 
 
 def test_over_length_flags_only_sections_above_budget():
@@ -19,3 +24,48 @@ def test_over_length_budget_zero_or_negative_disables():
     sections = split_sections("## A\n" + "x" * 999 + "\n")
     assert over_length_problems(sections, budget=0) == []
     assert over_length_problems(sections, budget=-1) == []
+
+
+def test_section_index_for_offset_maps_offset_to_section():
+    doc = "preamble\n## Methods\nblah [@x] more\n"  # preamble=§0 (9 chars), §1 from 9
+    assert section_index_for_offset(doc, 0) == 0
+    assert section_index_for_offset(doc, doc.index("[@x]")) == 1
+    assert section_index_for_offset(doc, None) is None
+
+
+def test_broken_citation_maps_orphan_marker_with_section_and_orphan_row_unplaced():
+    doc = "preamble\n## Methods\nblah [@x] more\n"
+    issues = [
+        {
+            "type": "orphan_marker",
+            "severity": "error",
+            "citekey": "x",
+            "evidence_id": "e1",
+            "location": f"char {doc.index('[@x]')}",
+            "detail": "inline citation marker has no matching ledger row",
+        },
+        {
+            "type": "orphan_row",
+            "severity": "error",
+            "citekey": "y",
+            "evidence_id": "e2",
+            "location": "citekey y",
+            "detail": "ledger row has no inline marker in proposal.md",
+        },
+    ]
+    rows = broken_citation_problems(issues, doc)
+    assert len(rows) == 2
+    marker, orphan = rows
+    assert marker["category"] == "broken_citation" and marker["severity"] == "error"
+    assert marker["title"] == "Broken citation in §1"
+    assert marker["target"] == {"top_tab": "draft", "bottom_tab": None, "section_index": 1}
+    assert orphan["title"] == "Broken citation in (unplaced)"
+    assert orphan["target"] == {"top_tab": "draft", "bottom_tab": None, "section_index": None}
+
+
+def test_ledger_unreadable_is_one_error_row():
+    r = ledger_unreadable_problem("citations.json is not valid JSON")
+    assert r["category"] == "broken_citation" and r["severity"] == "error"
+    assert r["title"] == "Citations ledger unreadable"
+    assert r["detail"] == "citations.json is not valid JSON"
+    assert r["target"] == {"top_tab": "draft", "bottom_tab": None, "section_index": None}
