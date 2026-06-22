@@ -286,6 +286,13 @@ class Settings(BaseSettings):
         description="Per-workspace daily ceiling on combined input+output tokens spent by "
         "evaluator passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
     )
+    problem_section_char_budget: int = Field(
+        default=6000,
+        alias="PROBLEM_SECTION_CHAR_BUDGET",
+        description="Per-section character budget for the Problems panel's over-length "
+        "heuristic (draft sections only). A loose guardrail, not a hard funder limit; "
+        "a value <= 0 disables the over-length check.",
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",

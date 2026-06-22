@@ -9,3 +9,7 @@ def test_evaluator_settings_defaults(_settings_env):
     assert s.evaluator_reaper_tick_seconds == 60
     assert s.evaluator_terminate_timeout_seconds == 30
     assert s.evaluator_daily_token_cap == 200_000
+
+
+def test_problem_section_char_budget_default(_settings_env):
+    assert Settings().problem_section_char_budget == 6000
