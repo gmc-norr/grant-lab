@@ -123,15 +123,13 @@ In `src/call_manager/config.py`, immediately after the `evaluator_daily_token_ca
 
 - [ ] **Step 4: Create the builders module with `_row` + `over_length_problems`**
 
-Create `src/call_manager/proposal_assist/problems/__init__.py`:
+Create `src/call_manager/proposal_assist/problems/__init__.py` as an **empty file** (just the module docstring — do NOT re-export `assemble_problems` yet; `aggregate.py` does not exist until Task 5, and a re-export here would make importing `problems.builders` run the package init and fail):
 
 ```python
 """SP2b-3b Problems panel: read-only aggregation of cheap quality signals."""
-
-from call_manager.proposal_assist.problems.aggregate import assemble_problems
-
-__all__ = ["assemble_problems"]
 ```
+
+(The `assemble_problems` re-export is added in Task 5, once `aggregate.py` exists.)
 
 Create `src/call_manager/proposal_assist/problems/builders.py`:
 
@@ -854,9 +852,16 @@ def assemble_problems(
 ) -> dict:
     rows: list[dict] = []
 
-    draft_path = repo_dir / PROPOSAL_FILENAME
-    draft_text = draft_path.read_text() if draft_path.exists() else ""
-    sections = split_sections(draft_text)
+    # Read+split the draft DEFENSIVELY too: an unreadable path (permissions, a
+    # directory) or invalid UTF-8 must not 500 the endpoint. On failure the draft is
+    # treated as empty (the citation + over-length signals then contribute nothing).
+    try:
+        draft_path = repo_dir / PROPOSAL_FILENAME
+        draft_text = draft_path.read_text() if draft_path.exists() else ""
+    except Exception:
+        logger.exception("problems: draft read failed")
+        draft_text = ""
+    sections = split_sections(draft_text)  # pure/total over a str (cannot raise)
 
     # 1. broken citations — absent ledger STILL runs the validator (orphan markers
     #    surface); a corrupt ledger becomes ONE error row. Neither is silenced.
@@ -913,6 +918,16 @@ def assemble_problems(
     }
 ```
 
+Now that `aggregate.py` exists, add the public re-export to `src/call_manager/proposal_assist/problems/__init__.py` (it was left empty in Task 1):
+
+```python
+"""SP2b-3b Problems panel: read-only aggregation of cheap quality signals."""
+
+from call_manager.proposal_assist.problems.aggregate import assemble_problems
+
+__all__ = ["assemble_problems"]
+```
+
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run pytest tests/proposal_assist/problems/test_aggregate.py -q ; echo $?`
@@ -921,9 +936,9 @@ Expected: PASS (6 tests). If a `connection refused` appears, re-run the file alo
 - [ ] **Step 5: Lint, format, commit**
 
 ```bash
-uv run ruff check src/call_manager/proposal_assist/problems/aggregate.py tests/proposal_assist/problems/test_aggregate.py
-uv run ruff format src/call_manager/proposal_assist/problems/aggregate.py tests/proposal_assist/problems/test_aggregate.py
-git add src/call_manager/proposal_assist/problems/aggregate.py tests/proposal_assist/problems/test_aggregate.py
+uv run ruff check src/call_manager/proposal_assist/problems/aggregate.py src/call_manager/proposal_assist/problems/__init__.py tests/proposal_assist/problems/test_aggregate.py
+uv run ruff format src/call_manager/proposal_assist/problems/aggregate.py src/call_manager/proposal_assist/problems/__init__.py tests/proposal_assist/problems/test_aggregate.py
+git add src/call_manager/proposal_assist/problems/aggregate.py src/call_manager/proposal_assist/problems/__init__.py tests/proposal_assist/problems/test_aggregate.py
 git commit -m "feat(problems): defensive aggregate orchestrator (4 signals + staleness)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1227,8 +1242,12 @@ export type ProblemsResponse = {
   scorecard_stale: string[];
 };
 
-/** GET /api/workspaces/{id}/problems — the read-only health dashboard. Refetches
- *  on mount/focus; resolving a proposal also invalidates ["problems", id]. */
+/** GET /api/workspaces/{id}/problems — the read-only health dashboard.
+ *  POLLED every 15s (refetchInterval) + on window focus, so the badge/panel
+ *  self-heal after background coherence/evaluator completion and draft/spec edits
+ *  without wiring every write path. Accept/reject ALSO invalidate ["problems", id]
+ *  (api/proposals.ts) for immediate feedback on the most common action. The endpoint
+ *  recomputes from scratch on each GET; at single-proposal scale this is cheap. */
 export function useProblems(id: string) {
   return useQuery({
     queryKey: ["problems", id],
@@ -1238,6 +1257,7 @@ export function useProblems(id: string) {
           params: { path: { workspace_id: id } },
         }),
       ) as ProblemsResponse,
+    refetchInterval: 15000,
   });
 }
 ```
@@ -1357,7 +1377,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `frontend/src/api/proposals.ts` (add `useInboxCount`; invalidate `["problems", id]`)
 - Modify: `frontend/src/cockpit/DraftPanel.tsx`, `frontend/src/cockpit/SpecPanel.tsx` (remove inline `<ProposalReview>`)
 
-**Context:** `ProposalReview` stays unchanged and is reused inside `InboxPanel` for both artifacts (it already null-renders when an artifact has no prose proposals). `InboxPanel` reads `useDraft`/`useSpec` for `currentSections` + spec `locked`. The Inbox badge counts visible `prose_edit` rows via a new `useInboxCount`.
+**Context:** `ProposalReview` stays unchanged and is reused inside `InboxPanel` for both artifacts (it already null-renders when an artifact has no prose proposals). `InboxPanel` reads `useDraft`/`useSpec` for `currentSections` + spec `locked`. The Inbox count is computed ONCE by a new `useInboxCount` in `BottomPanel` (the badge) and passed down to `InboxPanel` as a prop — single-sourced, so the badge and the panel's empty-state agree. `ProposalReview`'s own `useProposedChanges` reads the same React Query cache keys (deduped — no divergence). We deliberately do NOT refactor the shipped `ProposalReview` into a presentational/props-driven component this slice (spec: reuse as-is; RQ dedup makes the current shape correct).
 
 - [ ] **Step 1: Add `useInboxCount` + problems invalidation to `api/proposals.ts`**
 
@@ -1400,21 +1420,19 @@ Create `frontend/src/cockpit/InboxPanel.test.tsx`:
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { InboxPanel } from "./InboxPanel";
 
 const h = vi.hoisted(() => ({
   draft: { data: { sections: [{ index: 1, heading: "M", text: "## M\nold\n", sha: "s" }] } },
   spec: { data: { sections: [{ index: 0, heading: "", text: "", sha: "s" }], locked: false } },
-  count: 0,
 }));
 
 vi.mock("../api/editor", () => ({
   useDraft: () => h.draft,
   useSpec: () => h.spec,
 }));
-vi.mock("../api/proposals", () => ({ useInboxCount: () => h.count }));
 // ProposalReview is reused as-is; stub it to a recognizable marker per artifact.
 vi.mock("./ProposalReview", () => ({
   ProposalReview: ({ artifact }: { artifact: string }) => <div>review:{artifact}</div>,
@@ -1424,20 +1442,14 @@ function wrap(ui: ReactNode) {
   return render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
 }
 
-afterEach(() => {
-  h.count = 0;
-});
-
 describe("InboxPanel", () => {
-  it("shows an empty message when no prose proposals are pending", () => {
-    h.count = 0;
-    wrap(<InboxPanel id="ws1" />);
+  it("shows an empty message when count is 0", () => {
+    wrap(<InboxPanel id="ws1" count={0} />);
     expect(screen.getByText(/nothing pending/i)).toBeInTheDocument();
   });
 
-  it("renders both artifact groups when proposals are pending", () => {
-    h.count = 2;
-    wrap(<InboxPanel id="ws1" />);
+  it("renders both artifact groups when count > 0", () => {
+    wrap(<InboxPanel id="ws1" count={2} />);
     expect(screen.getByText("review:draft")).toBeInTheDocument();
     expect(screen.getByText("review:spec")).toBeInTheDocument();
   });
@@ -1455,15 +1467,18 @@ Create `frontend/src/cockpit/InboxPanel.tsx`:
 
 ```tsx
 import { useDraft, useSpec } from "../api/editor";
-import { useInboxCount } from "../api/proposals";
 import { ProposalReview } from "./ProposalReview";
 
 type Section = { index: number; text: string };
 
-export function InboxPanel({ id }: { id: string }) {
+// `count` is single-sourced from BottomPanel's useInboxCount (the badge), so the
+// badge and this panel's empty-state are driven by the SAME number. The two
+// <ProposalReview> below self-fetch the same ["proposed-changes", id, artifact]
+// query keys the badge reads — React Query dedupes them to one network call per
+// artifact, so the rows shown here cannot diverge from the badge count.
+export function InboxPanel({ id, count }: { id: string; count: number }) {
   const draft = useDraft(id);
   const spec = useSpec(id);
-  const count = useInboxCount(id);
 
   const draftSections: Section[] = (draft.data?.sections ?? []).map((s) => ({
     index: s.index,
@@ -1627,7 +1642,7 @@ export function BottomPanel({
       {!collapsed && (
         <div className="bottom-panel-body">
           {activeTab === "inbox" ? (
-            <InboxPanel id={id} />
+            <InboxPanel id={id} count={inboxCount} />
           ) : (
             <ProblemsPanel id={id} onNavigate={onNavigate} />
           )}
@@ -1950,4 +1965,4 @@ Then dispatch the final whole-implementation code-review subagent over `git diff
 - Drag-resize / height persistence of the bottom region.
 - Deep-link section-scroll (act switches the top-tab only, matching the Scorecard today).
 - Citation proposals in the inbox (still `prose_edit`-only).
-- Invalidating `["problems", id]` on every draft save (today it refreshes on focus/mount + on accept/reject) — a documented freshness enhancement.
+- Precise per-write-path `["problems", id]` invalidation (today the panel polls every 15s + refetches on focus, and accept/reject invalidate immediately) — a documented freshness enhancement, deferred in favour of the simpler interval.
