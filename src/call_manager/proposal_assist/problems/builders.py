@@ -155,3 +155,51 @@ def criterion_gap_problems(scorecard: dict | None) -> list[dict]:
             )
         )
     return rows
+
+
+def coherence_drift_problem(count: int) -> dict | None:
+    """A single warning roll-up pointing at the Inbox; None when count <= 0."""
+    if count <= 0:
+        return None
+    return _row(
+        "coherence_drift",
+        "warning",
+        f"Coherence: {count} spec↔draft item(s) pending",
+        "Open the Inbox to review.",
+        bottom_tab="inbox",
+    )
+
+
+_SEVERITY_RANK = {"error": 0, "warning": 1}
+_CATEGORY_RANK = {
+    "broken_citation": 0,
+    "criterion_gap": 1,
+    "over_length": 2,
+    "coherence_drift": 3,
+}
+
+
+def _sort_key(row: dict) -> tuple:
+    target = row.get("target") or {}
+    si = target.get("section_index")
+    # Never compare None: the `si is None` term partitions nulls last; `si or 0` is
+    # only meaningful for the non-null group (0 is a safe filler for the null group).
+    return (
+        _SEVERITY_RANK.get(row["severity"], 9),
+        _CATEGORY_RANK.get(row["category"], 9),
+        si is None,
+        si or 0,
+        row["title"],
+        row["detail"],
+    )
+
+
+def order_problems(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=_sort_key)
+
+
+def count_by_severity(rows: list[dict]) -> dict:
+    return {
+        "error": sum(1 for r in rows if r["severity"] == "error"),
+        "warning": sum(1 for r in rows if r["severity"] == "warning"),
+    }

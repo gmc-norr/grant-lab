@@ -1,8 +1,11 @@
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.problems.builders import (
     broken_citation_problems,
+    coherence_drift_problem,
+    count_by_severity,
     criterion_gap_problems,
     ledger_unreadable_problem,
+    order_problems,
     over_length_problems,
     section_index_for_offset,
 )
@@ -122,3 +125,58 @@ def test_criterion_gap_only_gap_and_at_risk_with_targets():
 def test_criterion_gap_no_scorecard_is_empty():
     assert criterion_gap_problems(None) == []
     assert criterion_gap_problems({"criteria": []}) == []
+
+
+def test_coherence_drift_single_rollup_or_none():
+    assert coherence_drift_problem(0) is None
+    r = coherence_drift_problem(3)
+    assert r["category"] == "coherence_drift" and r["severity"] == "warning"
+    assert r["title"] == "Coherence: 3 spec↔draft item(s) pending"
+    assert r["target"] == {"top_tab": None, "bottom_tab": "inbox", "section_index": None}
+
+
+def test_order_problems_errors_first_then_category_nulls_last_no_crash():
+    rows = [
+        coherence_drift_problem(2),  # warning, category 3
+        {
+            "category": "criterion_gap",
+            "severity": "error",
+            "title": "b",
+            "detail": "",
+            "target": {"top_tab": "scorecard", "bottom_tab": None, "section_index": None},
+        },
+        {
+            "category": "broken_citation",
+            "severity": "error",
+            "title": "a",
+            "detail": "",
+            "target": {"top_tab": "draft", "bottom_tab": None, "section_index": 5},
+        },
+        {
+            "category": "broken_citation",
+            "severity": "error",
+            "title": "a",
+            "detail": "",
+            "target": {"top_tab": "draft", "bottom_tab": None, "section_index": None},
+        },
+    ]
+    ordered = order_problems(rows)  # must NOT raise on mixed int/None section_index
+    # errors first; within errors, category order (broken_citation < criterion_gap);
+    # within broken_citation, the int section_index sorts before the null one.
+    assert [r["category"] for r in ordered] == [
+        "broken_citation",
+        "broken_citation",
+        "criterion_gap",
+        "coherence_drift",
+    ]
+    assert ordered[0]["target"]["section_index"] == 5
+    assert ordered[1]["target"]["section_index"] is None
+
+
+def test_count_by_severity():
+    rows = [
+        {"severity": "error"},
+        {"severity": "error"},
+        {"severity": "warning"},
+    ]
+    assert count_by_severity(rows) == {"error": 2, "warning": 1}
