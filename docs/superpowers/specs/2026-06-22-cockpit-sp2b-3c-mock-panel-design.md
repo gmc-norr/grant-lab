@@ -41,8 +41,9 @@ the SP2b-3b Problems read-model/defensive style.
   history, which `tools/history.py` deliberately scopes to `proposal.md`). Each run is versioned by
   its `ReviewRun` row.
 - **Caps → run-count AND dollar, enforced synchronously at the trigger endpoint** (429 if exceeded,
-  no run row created). `estimated_dollars` computed from config-driven per-MTok rates seeded from
-  current `claude-opus-4-7` pricing ($5 in / $25 out / $0.50 cache-read).
+  no run row created — but only when there is no active run to return; see §5.1). `estimated_dollars`
+  from config-driven per-MTok rates seeded from current `claude-opus-4-7` pricing ($5 in / $25 out);
+  cache-read is folded into `tokens_in` by the adapter and priced at the input rate (§3.5).
 - **Trigger gating → any workspace member** (`require_member` + `_gate_cloud_llm`), consistent with
   coherence/evaluator. Cost is bounded by the caps.
 - **Model → `settings.proposal_assist_llm_model`** (`config.py:116`, currently `claude-opus-4-7`),
@@ -71,7 +72,7 @@ Columns and how this slice uses each (no changes to the table):
 | `draft_sha` (NOT NULL) | **sha256 of `proposal.md` bytes** the panel reviewed (staleness marker; mirrors `evaluator.context.content_sha`). Set at enqueue (NOT NULL), re-pinned to the exact assembled bytes at pass start. |
 | `fit_check_sha` / `rubric_review_sha` (nullable) | git **blob** SHAs of the two written files (set on success/partial) |
 | `waived_from_review_run_id` (self-FK) | unused this slice (left null) |
-| `input_tokens` / `output_tokens` / `cache_read_input_tokens` | summed across the run's items at finalize |
+| `input_tokens` / `output_tokens` | summed across the run's items at finalize. `cache_read_input_tokens` left null (the contract bundles cache-read into `tokens_in`; see §3.5 pricing) |
 | `estimated_dollars` (`Numeric(6,3)`) | summed across items at finalize |
 
 No `requested_by` and no run-level `error` column exist. We do not add them (would need a
@@ -117,8 +118,11 @@ the CHECK-constraint set (fail fast on drift). Each entry: `{role: <system promp
 - **consolidation** — The panel chair. Synthesize the four persona critiques (plus the fit-check
   verdict) into one prioritized, de-duplicated review against the funder rubric → `rubric-review.md`.
 
-Prompts instruct: judge ONLY the SPEC/DRAFT/rubric provided in the instruction (no other tools),
-call `submit_review` EXACTLY ONCE with a markdown body, and keep within a length budget.
+Prompts instruct: judge ONLY the SPEC/DRAFT/rubric provided in the instruction, call `submit_review`
+EXACTLY ONCE with a markdown body, keep within a length budget, and end with the evaluator's
+"you have no other tools; everything you need is below" line. The prompt text is the **leading
+paragraph of each sub-call's instruction** (§3.1) — it is NOT passed as a system prompt (the adapter
+has no such parameter; see §3.3).
 
 ---
 
@@ -144,9 +148,10 @@ class ReviewContext:
 ```
 
 A pure renderer builds each sub-call's instruction: `_persona_instruction(kind, ctx)` =
-persona role (from yaml) + rendered rubric + funder notes + SPEC block + DRAFT block. The
-consolidation instruction additionally appends the completed persona critiques + fit-check verdict
-(assembled by `pass_runner` from the done items), so consolidation is sequenced after Wave 1.
+`persona_prompt(kind)` (the leading role paragraph — this is where the persona prompt is delivered,
+NOT a system prompt) + rendered rubric + funder notes + SPEC block + DRAFT block. The consolidation
+instruction additionally appends the completed persona critiques + fit-check verdict (assembled by
+`pass_runner` from the done items), so consolidation is sequenced after Wave 1.
 
 ### 3.2 `personas.py`
 
@@ -159,9 +164,19 @@ keys == the kind set, exposes `persona_prompt(kind)`. `REVIEW_KINDS`, `PERSONA_K
 `build_review_adapter(*, settings, session_factory, workspace_id, review_run_id, item_id, kind) ->
 ClaudeAgentSDKAdapter`. Identical shape to `evaluator/agent.py`: a dedicated one-shot adapter, MCP
 server with a `ToolContext` stamped `origin_kind="review_session"`, `origin_job_id=review_run_id`,
-and a new `review_run_item_id=item_id` field; system prompt = `persona_prompt(kind)`; **allowed
-tools = `["submit_review"]` only** (no live reads — same safety posture as the evaluator). One
-adapter per sub-call (each persona needs its own system prompt).
+and a new `review_run_item_id=item_id` field; **allowed tools = `["submit_review"]` only** (no live
+reads — same safety posture as the evaluator). One adapter per sub-call.
+
+**The persona role is NOT a system prompt — it goes in the instruction text.** `ClaudeAgentSDKAdapter`
+has no `system_prompt` constructor parameter; it unconditionally installs the `claude_code` preset +
+the standing drafting/citation/spec append (`claude_adapter.py:241`). This is exactly the evaluator's
+situation — the evaluator's CHAIR role lives in its *instruction* (`evaluator/context.py` `_ROLE`),
+not a system prompt, and the inherited append is inert because the only allowed tool is the submit
+tool (the citation/spec tool guidance references tools not in the allowlist). The mock-panel mirrors
+this precisely: `persona_prompt(kind)` is the **leading paragraph of the instruction** built in §3.1,
+and every persona prompt ends with the evaluator's belt-and-suspenders line — "Call `submit_review`
+EXACTLY ONCE; you have no other tools; everything you need is below." **No change to the adapter or
+the drafting contract is required.**
 
 `ToolContext` gains one field: `review_run_item_id: uuid.UUID | None = None` (additive, defaulted —
 no behavior change for existing callers).
@@ -202,23 +217,33 @@ Pure-DB helpers (flush, never commit; caller owns the txn), bespoke but structur
     those rows (NULL-coalesced; in-flight runs contribute 0 until finalized).
   - `review_run_cap(ws, settings) -> int` = `ws.review_runs_per_day_override ?? settings.review_runs_per_day_default`.
   - `review_dollar_cap(ws, settings) -> Decimal` = `ws.review_dollar_cap_override ?? settings.review_dollar_cap_default`.
-- **Pricing:** `estimate_dollars(input_tokens, output_tokens, cache_read_tokens, settings) -> Decimal`
-  = `in/1e6*rate_in + out/1e6*rate_out + cache_read/1e6*rate_cache_read`, quantized to the column
-  scale. Used per item and summed onto the run.
+- **Pricing:** `estimate_dollars(tokens_in, tokens_out, settings) -> Decimal`
+  = `tokens_in/1e6*rate_in + tokens_out/1e6*rate_out`, quantized to the column scale. **Cache-read is
+  NOT priced separately** — the drafting contract (`TurnDoneEvent`, `contract.py:82`) exposes only
+  `tokens_in`/`tokens_out`, and the adapter already *sums* base+cache_creation+cache_read into one
+  `tokens_in` (`claude_adapter.py:408`). Pricing that bundled `tokens_in` at the input rate is a
+  reasonable estimate (slightly over-prices the cache-read fraction, slightly under-prices the
+  cache-creation fraction); the run-count cap is the hard backstop. The `cache_read_input_tokens`
+  columns are left null and no cache-read rate is configured — keeping the contract untouched.
+  `tokens_in`/`tokens_out` come from each item's `TurnDoneEvent`. Used per item and summed onto the run.
 
 ### 3.6 `pass_runner.py` — the fan-out (bespoke)
 
 `run_review_pass(*, run_id, session_factory, settings, adapter_builder=build_review_adapter)` and
 `drain_review_queue_tick(...)` (claim one + run), mirroring the evaluator tick. The pass:
 
-1. **Short read session** — load the run (guard `status=='running'`); re-assemble context from
-   current `proposal.md`/`proposal-spec.md`/rubric (pinned for the whole pass); UPDATE
-   `run.draft_sha` to the exact assembled bytes' sha256. Re-check the daily caps here too (cheap
-   defense against a long queue wait pushing the workspace over budget); if exceeded, fail the run.
-   Pre-create the 6 `ReviewRunItem` rows `queued`.
+1. **Short read session** — load the run (guard `status=='running'`); **pre-create the 6
+   `ReviewRunItem` rows `queued` FIRST** (so any pass-start failure has rows to carry a reason — there
+   is no run-level error column). Re-assemble context from current `proposal.md`/`proposal-spec.md`/
+   rubric (pinned for the whole pass); UPDATE `run.draft_sha = ctx.draft_sha` (the sha256 of the
+   `proposal.md` bytes from `ReviewContext`, NOT a hash of the assembled prompt). Re-check the daily
+   caps here too (cheap defense against a long queue wait pushing the workspace over budget); **if
+   exceeded, mark all 6 items `skipped` with the reason on the consolidation item's `error_message`
+   and fail the run** (the `latest` endpoint renders items, so the reason surfaces).
 2. **Wave 1 (concurrent)** — `asyncio.gather` over `WAVE1_KINDS` (fit_check + 4 personas), bounded
    by an `asyncio.Semaphore(settings.review_persona_concurrency)`. For each: mark item `running`;
-   build the one-shot adapter (system prompt = persona, instruction = pinned context); launch+drive
+   build the one-shot adapter; send the `_persona_instruction(kind, ctx)` turn (persona role +
+   pinned context — §3.1); launch+drive
    inside `asyncio.wait_for(..., settings.review_persona_timeout_seconds)`; terminate the adapter in
    `finally` (bounded by `review_terminate_timeout_seconds`); on the turn's `TurnDoneEvent` record
    tokens + `estimate_dollars` and mark the item `done` (the `submit_review` tool already wrote
@@ -231,21 +256,24 @@ Pure-DB helpers (flush, never commit; caller owns the txn), bespoke but structur
    If all personas failed → skip consolidation; if consolidation itself fails → its item `failed`.
 4. **Write artifacts + finalize** (single short session, run row-locked, `status=='running'`
    guard — the reaper may have failed it during a hang):
-   - `fit_check_md` = the fit_check item's markdown (or a placeholder note if it failed);
-     `rubric_review_md` = the consolidation item's markdown.
-   - One `write_and_commit_files(repo_dir, {"fit-check.md": ..., "rubric-review.md": ...},
-     "mock-panel review <run_id>")`; capture each file's blob SHA (`blob_sha(repo_dir, "HEAD", name)`)
-     into `fit_check_sha` / `rubric_review_sha`.
-   - Sum item tokens + dollars onto the run.
-   - **Artifact write rule (unambiguous):** always write whichever files were produced and set only
-     those SHAs — write `fit-check.md` + set `fit_check_sha` iff the fit_check item is `done`; write
-     `rubric-review.md` + set `rubric_review_sha` iff the consolidation item is `done`; leave the
-     other SHA null. (So a `failed` run with a successful fit-check still exposes `fit-check.md`.)
-   - Terminal status: `done` if all six items `done`; `partial` if ≥1 persona failed but
-     consolidation is `done` (a usable `rubric-review.md` exists); `failed` if consolidation did not
-     complete (consolidation failed, or all personas failed so it was skipped) — no usable
-     `rubric-review.md`. A run failed at the pass-start cap recheck (before any item is created) is
-     `failed` with the reason logged server-side (no run-level error column to surface it).
+   - **Artifact write rule (unambiguous):** write whichever files were produced and set only those
+     SHAs — write `fit-check.md` + set `fit_check_sha` **iff** the fit_check item is `done`; write
+     `rubric-review.md` + set `rubric_review_sha` **iff** the consolidation item is `done`; leave the
+     other SHA null. (No placeholder bodies — a failed sub-call simply yields no file/SHA.) Issue one
+     `write_and_commit_files(repo_dir, {<produced files>}, "mock-panel review <run_id>")`; capture
+     each written file's blob SHA via `blob_sha(repo_dir, "HEAD", name)`. (If neither file was
+     produced, no commit.)
+   - Sum item `tokens_in`/`tokens_out`/dollars onto the run.
+   - **Terminal status (covers every combination of the 6 items):**
+     - `done` — all six items `done`.
+     - `partial` — consolidation is `done` (a usable `rubric-review.md` exists) **but** at least one
+       of {`fit_check`, the four personas} is `failed`. This is the catch-all for any non-total
+       success that still produced the consolidated review — **including a failed `fit_check` with
+       all personas + consolidation `done`** (the gap Codex flagged).
+     - `failed` — consolidation is not `done` (it failed, or was skipped because all personas
+       failed) → no usable `rubric-review.md`; **also** the pass-start cap-recheck failure (items
+       pre-created then marked `skipped`, per step 1). Reason for the latter lives on the
+       consolidation item's `error_message`; other failures live on their own item's `error_message`.
    - `completed_at=now()`.
 
 Hardening carried from the evaluator/coherence runners: launch INSIDE `wait_for` (bounds a hung SDK
@@ -257,11 +285,16 @@ separate sync reaper for crash recovery. Concurrency lives entirely within one d
 
 ## 4. Shared gate extraction — `proposal_assist/web/_cloud_gate.py`
 
-Move the identical `_gate_cloud_llm(*, ws, request, session, user)` (currently duplicated at
-`web/coherence.py:36` and `web/evaluator.py:39`) into a new `web/_cloud_gate.py` and import it from
-all three (`coherence`, `evaluator`, `review`). Behavior is byte-identical (setup→409,
-`drafting_enabled` false→503, missing per-actor `disclosure_acknowledged`→403). The two existing
-call sites switch to the import; their tests continue to pass unchanged (same status codes/messages).
+Move `_gate_cloud_llm` into a new `web/_cloud_gate.py` and import it from all three (`coherence`,
+`evaluator`, `review`). The 409 (setup) and 503 (drafting-disabled) messages are already
+byte-identical across the two siblings, but the **403 disclosure message is NOT** — coherence says
+"…before starting a coherence pass." (`coherence.py:63`) and evaluator says "…before running an
+evaluation." (`evaluator.py:65`). So the shared helper takes a **`disclosure_action: str`** parameter
+woven into the 403 detail (`"Please acknowledge the data-disclosure notice before {disclosure_action}."`):
+coherence passes `"starting a coherence pass"`, evaluator `"running an evaluation"`, review
+`"running a mock-panel review"`. The 409/503 details and the check order/status codes are unchanged,
+so each sibling's 403 message stays byte-identical and **their existing gate tests pass unchanged**.
+Signature: `_gate_cloud_llm(*, ws, request, session, user, disclosure_action: str)`.
 
 ---
 
@@ -269,11 +302,16 @@ call sites switch to the import; their tests continue to pass unchanged (same st
 
 ### 5.1 Endpoints — `proposal_assist/web/review.py` (router `prefix="/api/workspaces"`, mounted in `main.py`)
 
-- `POST /{workspace_id}/review-runs` → member-gated (`require_member`) + `_gate_cloud_llm` + cap
-  check. Cap check (synchronous): if `review_runs_today >= review_run_cap` **or**
-  `review_dollars_today >= review_dollar_cap` → **429** with a clear message (no row created). Else
-  read `draft_sha = content_sha(proposal.md)`, `enqueue_review_run(...)`, write the
-  `review_run_triggered` `WorkspaceEvent`, commit. Returns the serialized run.
+- `POST /{workspace_id}/review-runs` → member-gated (`require_member`) + `_gate_cloud_llm`. **Order
+  matters (Codex): active-run check FIRST, cap-check only when creating a NEW run** — otherwise a
+  repeat click while a run is active 429s instead of returning the active run (with `review_runs_per_day=1`
+  the active run already counts toward the cap). So: (1) if an active (`queued`/`running`) run exists,
+  return it serialized (200, no cap check) — create-or-return-active; (2) else cap-check synchronously:
+  if `review_runs_today >= review_run_cap` **or** `review_dollars_today >= review_dollar_cap` → **429**
+  with a clear message (no row created); (3) else read `draft_sha = content_sha(proposal.md)`,
+  `enqueue_review_run(...)`, write the `review_run_triggered` `WorkspaceEvent`, commit, return the run.
+  `enqueue_review_run` keeps its own create-or-return-active SAVEPOINT as the race backstop for the
+  TOCTOU window between the active-check and the insert.
 - `GET /{workspace_id}/review-runs/latest` → member-gated. Serializes the latest run + its items
   (per-persona progress) + cost + **staleness** (`run.draft_sha != content_sha(current proposal.md)`)
   + the two output SHAs + remaining daily budget (`cap - used` for both run-count and dollars). The
@@ -309,11 +347,11 @@ review_runs_per_day_default: int = 5          # global default; per-ws override 
 review_dollar_cap_default: Decimal = Decimal("5.000")   # global default; per-ws override
 review_price_input_per_mtok: Decimal = Decimal("5.00")        # claude-opus-4-7
 review_price_output_per_mtok: Decimal = Decimal("25.00")
-review_price_cache_read_per_mtok: Decimal = Decimal("0.50")
 ```
 
 All with `REVIEW_*` aliases. Pricing/caps are config so a model/price change is a config edit. (The
-model id itself is `proposal_assist_llm_model`, shared with coherence/evaluator.)
+model id itself is `proposal_assist_llm_model`, shared with coherence/evaluator.) No cache-read rate —
+the adapter bundles cache-read into `tokens_in`, so it's priced at the input rate (§3.5).
 
 ### 5.4 Git helpers — `citations/gitio.py`
 
@@ -373,15 +411,21 @@ always shows exactly the bytes that run produced, immune to a later run overwrit
   call errors); rejects a mismatched/non-running target.
 - **pass_runner (adapter stubbed)**: happy path → all 6 items `done`, both files committed, SHAs +
   tokens + dollars on the run, status `done`; one persona fails → item `failed`, consolidation runs,
-  status `partial`; all personas fail → consolidation skipped, status `failed`, no
-  `rubric-review.md` SHA; consolidation fails → status `failed`; per-call timeout path; the
-  pass-start cap recheck fails the run.
-- **endpoints**: gate paths (409 setup / 503 drafting-disabled / 403 no-disclosure); 429 when over
-  run-count cap and when over dollar cap (no row created); create-or-return-active; `latest`
-  serialization incl. staleness + budget; `files/{name}` returns bytes at the stored SHA, 404s on
-  null SHA / non-allowlisted name; `WorkspaceEvent` written on trigger.
-- **shared gate**: `_cloud_gate` extraction — the existing coherence/evaluator gate tests still pass
-  against the imported helper; one direct test of the helper.
+  status `partial`, `fit-check.md` + `rubric-review.md` both written; **fit_check fails but the 4
+  personas + consolidation succeed → status `partial`, no `fit_check_sha`, `rubric-review.md`
+  written** (the boundary Codex flagged); all personas fail → consolidation skipped, status `failed`,
+  no `rubric-review.md` SHA (and `fit-check.md` written iff fit_check succeeded); consolidation fails
+  → status `failed`; per-call timeout path; the pass-start cap recheck → all 6 items `skipped`, reason
+  on the consolidation item, status `failed`.
+- **endpoints**: gate paths (409 setup / 503 drafting-disabled / 403 no-disclosure with the
+  review-specific phrase); **repeat trigger while a run is active returns the SAME active run (200),
+  NOT 429, even at `review_runs_per_day=1`** (active-check precedes cap-check); 429 when over
+  run-count cap and when over dollar cap with no active run (no row created); `latest` serialization
+  incl. staleness + budget; `files/{name}` returns bytes at the stored SHA, 404s on null SHA /
+  non-allowlisted name; `WorkspaceEvent` written on trigger.
+- **shared gate**: `_cloud_gate` extraction with `disclosure_action` — the existing coherence/evaluator
+  gate tests (incl. their exact 403 messages) still pass against the imported helper; one direct test
+  of the helper per `disclosure_action`.
 - **frontend**: the ReviewPanel specs above.
 
 Run only affected files with `; echo $?` (full `uv run pytest` is testcontainer-flaky); re-run any
@@ -422,14 +466,19 @@ connection-refused failure in isolation.
 **Edited:**
 - `src/call_manager/proposal_assist/tools/registry.py` — `ToolContext.review_run_item_id` field;
   register `submit_review`.
-- `src/call_manager/proposal_assist/web/coherence.py` + `web/evaluator.py` — import the extracted
-  `_gate_cloud_llm`.
+- `src/call_manager/proposal_assist/web/coherence.py` + `web/evaluator.py` — replace the local
+  `_gate_cloud_llm` with the imported helper, passing `disclosure_action=` (their exact prior phrase).
 - `src/call_manager/proposal_assist/citations/gitio.py` — `blob_sha` + `read_blob`.
 - `src/call_manager/config.py` — `review_*` block.
 - `src/call_manager/scheduler.py` — `review_drain` + `review_reaper` ticks.
 - `src/call_manager/main.py` — mount the review router.
 - the workspace soft-delete handler — call `cancel_review_runs_for_workspace`.
 - `frontend/src/routes/Cockpit.tsx` — add the Panel-review top tab; regenerate `schema.gen.ts`.
+
+**Explicitly NOT touched** (Codex confirmed the original omission was correct, not a gap): the
+drafting **adapter** (`drafting/claude_adapter.py`) and **contract** (`drafting/contract.py`). The
+personas use the adapter as-is — role in the instruction, no `system_prompt` param, cache-read folded
+into `tokens_in`. No new SDK plumbing.
 
 **NO migration** (alembic head stays `0054`).
 
