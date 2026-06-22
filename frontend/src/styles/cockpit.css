@@ -228,3 +228,40 @@
 .coherence-bar { display: flex; align-items: center; gap: 0.75rem; margin: 0.5rem 0; }
 .coherence-status { font-size: 0.85rem; color: var(--cm-muted, #555); }
 .coherence-error { color: var(--cm-bad-text); }
+
+/* SP2b-3a: Scorecard tab — band pills (base mirrors .source-viewer-stance) +
+   readiness/staleness meta + criteria rows. */
+.scorecard-shell { display: flex; flex-direction: column; gap: 0.5rem; }
+.scorecard-header { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.scorecard-header h1 { margin: 0; }
+.scorecard-meta { margin: 0; font-size: 0.85rem; color: var(--cm-muted, #555); }
+.scorecard-summary { margin: 0.25rem 0 0; color: var(--cm-muted, #555); }
+.scorecard-empty { margin: 0.5rem 0; color: var(--cm-ink-muted, #667); }
+.scorecard-list { list-style: none; padding: 0; margin: 0; }
+.scorecard-name { font-weight: 600; }
+.scorecard-weight { font-size: 0.8rem; color: var(--cm-muted, #555); }
+.scorecard-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--cm-primary);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.band-pill {
+  display: inline-block;
+  font-size: 0.75em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.band-strong   { background: var(--cm-good-bg);    color: var(--cm-good-text);    border-color: var(--cm-good-border); }
+.band-adequate { background: var(--cm-neutral-bg); color: var(--cm-neutral-text); border-color: var(--cm-neutral-border); }
+.band-at-risk  { background: var(--cm-warn-bg);    color: var(--cm-warn-text);    border-color: var(--cm-warn-border); }
+.band-gap      { background: var(--cm-bad-bg);     color: var(--cm-bad-text);     border-color: var(--cm-bad-border); }
+.scorecard-row { list-style: none; border-top: 1px solid var(--cm-border); padding-top: 0.5rem; margin-top: 0.5rem; }
+.scorecard-note { margin: 0.25rem 0 0; white-space: pre-wrap; }
+.scorecard-stale { color: var(--cm-warn-text); }
+.scorecard-error { color: var(--cm-bad-text); }
