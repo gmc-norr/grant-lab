@@ -52,6 +52,9 @@ from call_manager.proposal_assist.web.proposals import (
 from call_manager.proposal_assist.web.references import (
     router as references_router,
 )
+from call_manager.proposal_assist.web.review import (
+    router as review_router,
+)
 from call_manager.proposal_assist.web.rubric_review import (
     router as rubric_review_router,
 )
@@ -539,6 +542,7 @@ def create_app() -> FastAPI:
     app.include_router(proposals_router)
     app.include_router(coherence_router)
     app.include_router(evaluator_router)
+    app.include_router(review_router)
     app.include_router(problems_router)
     app.include_router(annotations_router)
     app.include_router(files_router)
