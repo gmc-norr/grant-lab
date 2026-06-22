@@ -60,6 +60,11 @@ export function ScorecardPanel({
             {latest.data?.error ?? "Evaluation failed."}
           </span>
         )}
+        {start.isError && (
+          <span className="scorecard-error" role="status">
+            {(start.error as Error)?.message ?? "Could not start evaluation."}
+          </span>
+        )}
       </div>
 
       {data && (

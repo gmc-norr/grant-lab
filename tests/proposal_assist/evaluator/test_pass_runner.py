@@ -112,3 +112,40 @@ async def test_timeout_on_launch_fails(tmp_path, pg_session_factory, _settings_e
     )
     with pg_session_factory() as s:
         assert s.get(EvaluatorJob, job_id).status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_before_launch_skips_the_llm(tmp_path, pg_session_factory, _settings_env):
+    # Med (Codex): a soft-delete/cancel landing AFTER the read session but BEFORE launch
+    # must short-circuit the pre-launch live-status recheck — no LLM call, job stays failed.
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        job = _make_running_job(s, ws.id)
+        s.commit()
+        ws_id, job_id = ws.id, job.id
+    _seed_repo(tmp_path, ws_id)
+
+    fake = FakeAgentAdapter()
+
+    def builder(**kw):
+        # Simulate the cancel committing between step-1 and _run's recheck.
+        with pg_session_factory() as s:
+            j = s.get(EvaluatorJob, job_id)
+            j.status = "failed"
+            j.error = "workspace deleted"
+            s.commit()
+        return fake
+
+    await run_evaluator_pass(
+        job_id=job_id,
+        session_factory=pg_session_factory,
+        settings=settings,
+        adapter_builder=builder,
+    )
+    assert fake.launches == []  # pre-launch recheck short-circuited — no LLM spend
+    with pg_session_factory() as s:
+        job = s.get(EvaluatorJob, job_id)
+        assert job.status == "failed" and job.scorecard is None

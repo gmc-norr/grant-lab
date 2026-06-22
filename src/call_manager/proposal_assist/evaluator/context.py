@@ -35,6 +35,10 @@ class EvaluatorContext:
     # TOCTOU re-read), so the job's evaluated_*_sha matches what the model saw.
     draft_sha: str
     spec_sha: str
+    # The rubric criteria snapshot rendered into the instruction — PINNED so the
+    # submit_scorecard tool validates/weights against exactly what the model was
+    # shown, not a live workspace rubric that may be edited mid-run.
+    rubric: list[dict]
 
 
 def content_sha(path: Path) -> str:
@@ -106,4 +110,5 @@ def assemble_evaluator_context(
         spec_section_count=len(spec_sections),
         draft_sha=draft_sha,
         spec_sha=spec_sha,
+        rubric=rubric,
     )

@@ -70,6 +70,7 @@ async def run_evaluator_pass(
         job.evaluated_rubric_updated_at = ws.rubric_updated_at if ws else None
         instruction = ctx.instruction
         draft_n, spec_n = ctx.draft_section_count, ctx.spec_section_count
+        rubric_snapshot = ctx.rubric
         s.commit()
 
     adapter = adapter_builder(
@@ -80,6 +81,7 @@ async def run_evaluator_pass(
         job_id=job_id,
         draft_section_count=draft_n,
         spec_section_count=spec_n,
+        rubric_criteria=rubric_snapshot,
     )
     handle = None
     done: TurnDoneEvent | None = None
@@ -87,6 +89,15 @@ async def run_evaluator_pass(
 
         async def _run() -> TurnDoneEvent | None:
             nonlocal handle
+            # Pre-launch live-status recheck: a soft-delete/cancel may have flipped the
+            # job to 'failed' between the read session and here. Don't spend tokens (or
+            # send deleted-workspace content) on a job that's no longer running — this
+            # narrows the delete-races-launch window. (Full prevention would need task
+            # cancellation/signalling; finalize already won't resurrect a failed job.)
+            with session_factory() as s2:
+                live = s2.get(EvaluatorJob, job_id)
+                if live is None or live.status != "running":
+                    return None
             # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
             # just the streaming turn. wait_for cancels this coroutine on timeout,
             # raising CancelledError at whichever await is live (launch or the loop).

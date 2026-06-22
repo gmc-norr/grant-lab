@@ -96,6 +96,10 @@ class ToolContext:
     # validates deep_link.section_index against the SAME HEAD it evaluated.
     eval_draft_section_count: int | None = field(default=None)
     eval_spec_section_count: int | None = field(default=None)
+    # SP2b-3a: the rubric criteria snapshot the evaluator was SHOWN at run start,
+    # pinned so submit_scorecard validates/weights against exactly what the model
+    # judged — never a live workspace rubric edited mid-run.
+    eval_rubric_criteria: list[dict] | None = field(default=None)
 
     # SP2a-2 §3 (Task 2): section_index -> section sha as the agent saw them at
     # read time (populated by read_proposal_impl, HEAD-first). propose_edit reads

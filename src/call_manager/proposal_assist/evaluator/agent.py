@@ -35,6 +35,7 @@ def build_evaluator_adapter(
     job_id: uuid.UUID,
     draft_section_count: int,
     spec_section_count: int,
+    rubric_criteria: list[dict],
 ) -> ClaudeAgentSDKAdapter:
     def tools_factory(repo_dir: Path, ws_id: uuid.UUID):
         ctx = ToolContext(
@@ -47,6 +48,7 @@ def build_evaluator_adapter(
             created_by=requested_by,
             eval_draft_section_count=draft_section_count,
             eval_spec_section_count=spec_section_count,
+            eval_rubric_criteria=rubric_criteria,
         )
         return build_proposal_assist_mcp_server(ctx)
 
