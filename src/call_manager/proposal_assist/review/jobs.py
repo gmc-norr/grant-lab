@@ -6,6 +6,7 @@ triggered_at; queue latency is bounded by the 20s drain tick)."""
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -97,20 +98,37 @@ def cancel_review_runs_for_workspace(session: Session, *, workspace_id: uuid.UUI
     return len(ids)
 
 
+def rollup_run_totals(run: ReviewRun, items: Iterable[ReviewRunItem]) -> None:
+    """Set a run's token/dollar totals from its items (idempotent; pure compute).
+
+    Shared by finalize (pass_runner), the reaper, and the post-reaper late-write
+    guard so the run-level totals — which ``review_dollars_today`` sums for the
+    daily cap — reflect every item's recorded spend no matter which path finalizes
+    the run. Keeping this in one place stops the three rollups from drifting."""
+    items = list(items)
+    run.input_tokens = sum((i.input_tokens or 0) for i in items)
+    run.output_tokens = sum((i.output_tokens or 0) for i in items)
+    dollars = sum((i.estimated_dollars or 0) for i in items)
+    run.estimated_dollars = (dollars or None) and Decimal(dollars).quantize(
+        Decimal("0.001")
+    )
+
+
 def reap_stuck_review_runs(session: Session, *, timeout_seconds: int) -> int:
     """Crash/restart recovery: fail any running run whose triggered_at is older than
     the TTL (ReviewRun has no started_at — queue latency is bounded by the drain
     tick, so triggered_at ~= run start). Pure DB. FOR UPDATE SKIP LOCKED.
 
     Before flipping the run to ``failed`` it rolls the run's item token/dollar
-    totals onto the run, mirroring the finalize step in pass_runner. Finalize
+    totals onto the run (``rollup_run_totals``), mirroring finalize. Finalize
     early-returns once the run is no longer ``running`` (the reaper got there
     first), so without this the run total stays null and ``review_dollars_today``
     — which sums run-level estimated_dollars — silently undercounts spend the
     items already incurred, letting the daily cap be exceeded. It also fails any
     still-queued/running item so the panel never shows stale rows under a failed
     run. SKIP LOCKED means an in-flight finalize holding the row lock is left to
-    finish normally, so the rollup happens exactly once."""
+    finish normally. A sub-call that records its tokens AFTER this rollup re-rolls
+    the run total under the parent-row lock (see pass_runner._run_one_call)."""
     cutoff = datetime.now(UTC) - timedelta(seconds=timeout_seconds)
     rows = session.scalars(
         select(ReviewRun)
@@ -122,12 +140,7 @@ def reap_stuck_review_runs(session: Session, *, timeout_seconds: int) -> int:
         items = session.scalars(
             select(ReviewRunItem).where(ReviewRunItem.review_run_id == run.id)
         ).all()
-        run.input_tokens = sum((i.input_tokens or 0) for i in items)
-        run.output_tokens = sum((i.output_tokens or 0) for i in items)
-        dollars = sum((i.estimated_dollars or 0) for i in items)
-        run.estimated_dollars = (dollars or None) and Decimal(dollars).quantize(
-            Decimal("0.001")
-        )
+        rollup_run_totals(run, items)
         for it in items:
             if it.status in ("queued", "running"):
                 it.status = "failed"

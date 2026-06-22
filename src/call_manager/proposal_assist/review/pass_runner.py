@@ -13,7 +13,6 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -40,6 +39,7 @@ from call_manager.proposal_assist.review.jobs import (
     review_dollars_today,
     review_run_cap,
     review_runs_today,
+    rollup_run_totals,
 )
 from call_manager.proposal_assist.review.personas import (
     PERSONA_KINDS,
@@ -131,6 +131,12 @@ async def _run_one_call(
         item = s.get(ReviewRunItem, item_id, with_for_update=True)
         if item is None:
             return
+        # Lock the parent run too: the "is the run still running?" check below and
+        # this write must be atomic w.r.t. a concurrent reaper/cancel. Otherwise a
+        # sub-call finishing just after the reaper failed the run would resurrect
+        # its item to done AND leave its tokens out of the run total (the reaper
+        # already rolled up without them), undercounting the daily dollar cap.
+        run = s.get(ReviewRun, run_id, with_for_update=True)
         item.completed_at = _now()
         if done is not None:
             item.input_tokens = done.tokens_in or 0
@@ -138,7 +144,23 @@ async def _run_one_call(
             item.estimated_dollars = estimate_dollars(
                 done.tokens_in or 0, done.tokens_out or 0, settings
             )
-        if error is None and item.raw_response_json and item.raw_response_json.get("markdown"):
+        if run is None or run.status != "running":
+            # The reaper (TTL) or a soft-delete cancel finalized the run mid-call.
+            # Mirror the pre-launch recheck — don't resurrect the run's item to done
+            # — but keep the tokens this sub-call spent and re-roll the run total so
+            # the late cost is still counted by review_dollars_today.
+            item.status = "cancelled"
+            item.error_message = "run no longer active"
+            if run is not None:
+                rollup_run_totals(
+                    run,
+                    s.scalars(
+                        select(ReviewRunItem).where(
+                            ReviewRunItem.review_run_id == run_id
+                        )
+                    ).all(),
+                )
+        elif error is None and item.raw_response_json and item.raw_response_json.get("markdown"):
             item.status = "done"
         else:
             item.status = "failed"
@@ -289,12 +311,7 @@ async def run_review_pass(
                     cons.error_message = (
                         (cons.error_message or "") + " [artifact commit failed]"
                     ).strip()
-        run.input_tokens = sum((i.input_tokens or 0) for i in items.values())
-        run.output_tokens = sum((i.output_tokens or 0) for i in items.values())
-        dollars = sum((i.estimated_dollars or 0) for i in items.values())
-        run.estimated_dollars = (dollars or None) and Decimal(dollars).quantize(
-            Decimal("0.001")
-        )
+        rollup_run_totals(run, items.values())
         all_done = all(items[k].status == "done" for k in REVIEW_KINDS if k in items)
         cons_done = items.get("consolidation") and items["consolidation"].status == "done"
         if commit_failed:
