@@ -156,7 +156,13 @@ def test_outsider_cannot_read_sections(client_outsider, ws_with_repo):
     assert r.status_code == 403
 
 
-def test_save_during_turn_409(client_owner, ws_with_repo, pg_session_factory):
+def test_save_during_turn_allowed_but_edit_form_blocks(
+    client_owner, ws_with_repo, pg_session_factory
+):
+    """A direct save POST no longer hard-blocks while a turn is in flight: SP2a removed
+    the save-time turn-freeze guard (`save_section` no longer consults `_turn_in_flight`),
+    so the save succeeds (200). Only the edit-form GET still soft-refuses, returning JSON
+    detail (HTTPException → same JSON+listener path as POST errors)."""
     edit = client_owner.get(f"/workspaces/{ws_with_repo}/sections/1/edit")
     base_commit_sha = _extract_hidden(edit.text, "base_commit_sha")
     base_section_sha = _extract_hidden(edit.text, "base_section_sha")
@@ -171,9 +177,8 @@ def test_save_during_turn_409(client_owner, ws_with_repo, pg_session_factory):
             "base_section_sha": base_section_sha,
         },
     )
-    assert r.status_code == 409
-    # The edit GET also refuses while the turn is in flight — now returns JSON
-    # detail (Fix 1: HTTPException → same JSON+listener path as POST errors).
+    assert r.status_code == 200
+    # The edit-form GET still refuses while the turn is in flight — returns JSON detail.
     r = client_owner.get(f"/workspaces/{ws_with_repo}/sections/1/edit")
     assert r.status_code == 409
     assert r.json()["detail"] == "assistant is working — try again when the turn finishes"
