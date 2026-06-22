@@ -72,7 +72,7 @@ _CHAR_RE = re.compile(r"char (\d+)")
 def section_index_for_offset(proposal_text: str, offset: int | None) -> int | None:
     """Map a char offset in the draft to its section index, or None if offset is None.
 
-    Uses split_sections cumulative spans (the byte-exact join invariant). An offset
+    Uses split_sections cumulative spans (the character-exact join invariant). An offset
     at/after the document end clamps to the last section; None offset -> None.
     """
     if offset is None:
@@ -124,3 +124,34 @@ def ledger_unreadable_problem(message: str) -> dict:
         message,
         top_tab="draft",
     )
+
+
+_GAP_SEVERITY = {"gap": "error", "at_risk": "warning"}
+_GAP_LABEL = {"gap": "gap", "at_risk": "at-risk"}
+
+
+def criterion_gap_problems(scorecard: dict | None) -> list[dict]:
+    """One row per scorecard criterion banded gap (error) or at_risk (warning)."""
+    if not scorecard:
+        return []
+    rows: list[dict] = []
+    for c in scorecard.get("criteria") or []:
+        band = c.get("band")
+        if band not in _GAP_SEVERITY:
+            continue
+        dl = c.get("deep_link")
+        if dl and dl.get("artifact"):
+            top_tab, section_index = dl.get("artifact"), dl.get("section_index")
+        else:
+            top_tab, section_index = "scorecard", None
+        rows.append(
+            _row(
+                "criterion_gap",
+                _GAP_SEVERITY[band],
+                f"Criterion {_GAP_LABEL[band]}: {c.get('name', '')}",
+                c.get("note", ""),
+                top_tab=top_tab,
+                section_index=section_index,
+            )
+        )
+    return rows

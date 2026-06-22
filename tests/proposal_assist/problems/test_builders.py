@@ -1,6 +1,7 @@
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.problems.builders import (
     broken_citation_problems,
+    criterion_gap_problems,
     ledger_unreadable_problem,
     over_length_problems,
     section_index_for_offset,
@@ -69,3 +70,55 @@ def test_ledger_unreadable_is_one_error_row():
     assert r["title"] == "Citations ledger unreadable"
     assert r["detail"] == "citations.json is not valid JSON"
     assert r["target"] == {"top_tab": "draft", "bottom_tab": None, "section_index": None}
+
+
+def test_criterion_gap_only_gap_and_at_risk_with_targets():
+    scorecard = {
+        "criteria": [
+            {
+                "index": 0,
+                "name": "Quality",
+                "band": "strong",
+                "note": "ok",
+                "deep_link": None,
+                "weight": 0.5,
+                "effective_weight": 0.5,
+            },
+            {
+                "index": 1,
+                "name": "Impact",
+                "band": "gap",
+                "note": "No KPIs.",
+                "deep_link": {"artifact": "draft", "section_index": 2},
+                "weight": 0.3,
+                "effective_weight": 0.3,
+            },
+            {
+                "index": 2,
+                "name": "Feasibility",
+                "band": "at_risk",
+                "note": "Thin plan.",
+                "deep_link": None,
+                "weight": 0.2,
+                "effective_weight": 0.2,
+            },
+        ],
+        "overall_band": "at_risk",
+        "summary": "",
+    }
+    rows = criterion_gap_problems(scorecard)
+    assert len(rows) == 2
+    gap, at_risk = rows
+    assert gap["severity"] == "error"
+    assert gap["title"] == "Criterion gap: Impact"
+    assert gap["detail"] == "No KPIs."
+    assert gap["target"] == {"top_tab": "draft", "bottom_tab": None, "section_index": 2}
+    assert at_risk["severity"] == "warning"
+    assert at_risk["title"] == "Criterion at-risk: Feasibility"
+    # no deep_link -> Scorecard tab fallback, never top_tab None
+    assert at_risk["target"] == {"top_tab": "scorecard", "bottom_tab": None, "section_index": None}
+
+
+def test_criterion_gap_no_scorecard_is_empty():
+    assert criterion_gap_problems(None) == []
+    assert criterion_gap_problems({"criteria": []}) == []
