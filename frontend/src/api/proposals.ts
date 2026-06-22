@@ -46,6 +46,7 @@ export function useAcceptProposal(id: string, artifact: Artifact) {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
     qc.invalidateQueries({ queryKey: [artifact, id] });
+    qc.invalidateQueries({ queryKey: ["problems", id] });
   };
   return useMutation({
     mutationFn: async (pcId: string) =>
@@ -69,6 +70,17 @@ export function useRejectProposal(id: string, artifact: Artifact) {
           params: { path: { workspace_id: id, pc_id: pcId } },
         }),
       ) as ProposalRow,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
+      qc.invalidateQueries({ queryKey: ["problems", id] });
+    },
   });
+}
+
+/** Visible prose_edit proposals across both artifacts — the Inbox tab badge. */
+export function useInboxCount(id: string): number {
+  const draft = useProposedChanges(id, "draft");
+  const spec = useProposedChanges(id, "spec");
+  const n = (rows?: ProposalRow[]) => (rows ?? []).filter((p) => p.kind === "prose_edit").length;
+  return n(draft.data) + n(spec.data);
 }

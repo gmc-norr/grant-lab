@@ -4,7 +4,6 @@ import { useEffect } from "react";
 import { useLatestCoherence, useStartCoherence } from "../api/coherence";
 import { useInitSpec, useLockSpec, useSaveSpecSection, useSpec, useUnlockSpec } from "../api/editor";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
-import { ProposalReview } from "./ProposalReview";
 
 export function SpecPanel({ id }: { id: string }) {
   const spec = useSpec(id);
@@ -44,16 +43,6 @@ export function SpecPanel({ id }: { id: string }) {
         <button type="button" disabled={!can_edit || init.isPending} onClick={() => init.mutate()}>
           Start spec from skeleton
         </button>
-        {/* SP2b-2b: a pending spec proposal (e.g. against a spec a member later
-            cleared to whitespace) must stay reviewable even in the empty state.
-            ProposalReview null-renders when there are no prose proposals, so this
-            adds nothing to the normal pre-skeleton CTA. */}
-        <ProposalReview
-          workspaceId={id}
-          artifact="spec"
-          currentSections={sections.map((s) => ({ index: s.index, text: s.text }))}
-          locked={locked}
-        />
       </main>
     );
   }
@@ -98,13 +87,6 @@ export function SpecPanel({ id }: { id: string }) {
           </span>
         )}
       </div>
-      {/* SP2b-2b: pending spec proposals */}
-      <ProposalReview
-        workspaceId={id}
-        artifact="spec"
-        currentSections={sections.map((s) => ({ index: s.index, text: s.text }))}
-        locked={locked}
-      />
       <ArtifactSectionEditor
         workspaceId={id}
         queryKey={["spec", id]}
