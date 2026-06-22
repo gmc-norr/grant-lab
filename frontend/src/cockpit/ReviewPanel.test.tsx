@@ -106,18 +106,22 @@ describe("ReviewPanel", () => {
     expect(btn).toBeDisabled();
   });
 
-  it("(a) POST error: disabled button with surfaced reason", () => {
+  it("(a) POST error stays retryable: button enabled, detail surfaced", () => {
+    // A transient failure must not wedge the button — the user can retry without
+    // remounting. The backend detail still surfaces (via the {error:{message}}
+    // envelope that unwrap() reads), it just no longer disables the control.
     h.latestRun = { data: null, isLoading: false };
     h.start = {
       mutate: () => {},
       isPending: false,
       isError: true,
-      error: new Error("workspace is still setting up"),
+      error: new Error("Drafting is currently disabled by an administrator."),
     };
     wrap(<ReviewPanel id="ws1" />);
     const btn = screen.getByRole("button", { name: /run full mock-panel review/i });
-    expect(btn).toBeDisabled();
-    expect(screen.getByText(/still setting up/i)).toBeInTheDocument();
+    expect(btn).toBeEnabled();
+    expect(screen.getByText(/disabled by an administrator/i)).toBeInTheDocument();
+    expect(screen.getByText(/try again/i)).toBeInTheDocument();
   });
 
   it("(b) running run: shows all six per-item progress rows with status pills", () => {
@@ -151,6 +155,31 @@ describe("ReviewPanel", () => {
     // Both documents rendered
     expect(screen.getByText(/Some analysis\./)).toBeInTheDocument();
     expect(screen.getByText(/Detailed feedback\./)).toBeInTheDocument();
+  });
+
+  it("(c) failed run with a produced fit-check still renders that doc", () => {
+    // All personas failed -> consolidation skipped -> run ends `failed`, but the
+    // fit-check was produced and committed. It must remain visible (docs key off
+    // artifact presence, not just done/partial status).
+    h.latestRun = {
+      data: makeRun({
+        status: "failed",
+        fit_check_sha: "fc-sha",
+        rubric_review_sha: null,
+        items: ITEMS_DONE.map((i) =>
+          i.kind === "consolidation"
+            ? { ...i, status: "skipped", error_message: "all personas failed" }
+            : i,
+        ),
+      }),
+      isLoading: false,
+    };
+    h.fitCheckFile = {
+      data: { name: "fit-check.md", sha: "fc-sha", markdown: "# Fit Check\nUseful even on failure." },
+      isLoading: false,
+    };
+    wrap(<ReviewPanel id="ws1" />);
+    expect(screen.getByText(/Useful even on failure\./)).toBeInTheDocument();
   });
 
   it("(d) stale run: shows staleness badge", () => {

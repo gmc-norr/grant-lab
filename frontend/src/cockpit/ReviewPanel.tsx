@@ -79,15 +79,22 @@ export function ReviewPanel({ id }: { id: string }) {
   const budgetExhausted =
     run != null && run.budget.runs_used >= run.budget.runs_cap;
 
-  // Determine disabled reason for the run button
+  // A review already in progress, or the daily cap being hit, genuinely blocks a
+  // new run and disables the button. A failed POST does NOT — it must stay
+  // retryable (a transient 503/network error would otherwise wedge the button
+  // until the component remounts), so it surfaces as a separate, non-disabling
+  // message. The backend detail is already surfaced via the {error:{message}}
+  // envelope, so this string is specific (e.g. the budget/disclosure reason).
   let disabledReason: string | null = null;
-  if (start.isError) {
-    disabledReason = (start.error as Error)?.message ?? "Could not start review.";
-  } else if (isActive) {
+  if (isActive) {
     disabledReason = "A review is already in progress.";
   } else if (budgetExhausted) {
     disabledReason = `Budget cap reached (${run!.budget.runs_used}/${run!.budget.runs_cap} runs).`;
   }
+
+  const startError = start.isError
+    ? ((start.error as Error)?.message ?? "Could not start review.")
+    : null;
 
   const btnDisabled = disabledReason !== null || start.isPending;
 
@@ -103,8 +110,12 @@ export function ReviewPanel({ id }: { id: string }) {
     "rubric-review.md",
   );
 
+  // Show whatever artifacts were produced, regardless of terminal status — a
+  // run that ends `failed` (e.g. all personas failed) can still have committed a
+  // useful fit-check.md. SHAs are only set in finalize, so their presence implies
+  // a terminal run; an in-progress run has null SHAs and shows nothing.
   const showDocs =
-    run != null && (run.status === "done" || run.status === "partial");
+    run != null && (run.fit_check_sha != null || run.rubric_review_sha != null);
 
   return (
     <main className="review-shell">
@@ -130,6 +141,11 @@ export function ReviewPanel({ id }: { id: string }) {
         {disabledReason && (
           <span className="review-disabled-reason" role="status">
             {disabledReason}
+          </span>
+        )}
+        {startError && (
+          <span className="review-start-error" role="alert">
+            {startError} — you can try again.
           </span>
         )}
       </div>
