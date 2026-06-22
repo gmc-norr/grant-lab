@@ -1,53 +1,70 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 
+import { BottomPanel } from "../cockpit/BottomPanel";
 import { DraftPanel } from "../cockpit/DraftPanel";
+import type { BottomTab, NavTarget, TopTab } from "../cockpit/nav";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { SpecPanel } from "../cockpit/SpecPanel";
-
-type Artifact = "draft" | "spec" | "scorecard";
 
 export function Cockpit() {
   const { id = "" } = useParams();
   // Artifact-level tab: the Spec and Scorecard are "center View tabs" of the
   // cockpit, not separate URLs. Default to Draft so the existing draft UX (and
   // Cockpit.test.tsx) is unchanged on open.
-  const [artifact, setArtifact] = useState<Artifact>("draft");
-  // Scorecard deep-link floor: switch the view tab to the criterion's target
-  // artifact. The callback accepts sectionIndex so scroll-to-section is a
-  // non-breaking future enhancement.
-  const onNavigate = (target: "draft" | "spec") => setArtifact(target);
+  const [topTab, setTopTab] = useState<TopTab>("draft");
+  const [bottomTab, setBottomTab] = useState<BottomTab>("inbox");
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Two-axis navigation: a Problems/Scorecard "act" can switch the artifact tab
+  // (incl. Scorecard) and/or focus a bottom-region tab (expanding it if collapsed).
+  const onNavigate = (target: NavTarget) => {
+    if (target.top_tab) setTopTab(target.top_tab);
+    if (target.bottom_tab) {
+      setBottomTab(target.bottom_tab);
+      setCollapsed(false);
+    }
+  };
+
   return (
     <div className="cockpit-shell">
       <div role="tablist" aria-label="Artifact">
         <button
           type="button"
           role="tab"
-          aria-selected={artifact === "draft"}
-          onClick={() => setArtifact("draft")}
+          aria-selected={topTab === "draft"}
+          onClick={() => setTopTab("draft")}
         >
           Draft
         </button>
         <button
           type="button"
           role="tab"
-          aria-selected={artifact === "spec"}
-          onClick={() => setArtifact("spec")}
+          aria-selected={topTab === "spec"}
+          onClick={() => setTopTab("spec")}
         >
           Spec
         </button>
         <button
           type="button"
           role="tab"
-          aria-selected={artifact === "scorecard"}
-          onClick={() => setArtifact("scorecard")}
+          aria-selected={topTab === "scorecard"}
+          onClick={() => setTopTab("scorecard")}
         >
           Scorecard
         </button>
       </div>
-      {artifact === "draft" && <DraftPanel id={id} />}
-      {artifact === "spec" && <SpecPanel id={id} />}
-      {artifact === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
+      {topTab === "draft" && <DraftPanel id={id} />}
+      {topTab === "spec" && <SpecPanel id={id} />}
+      {topTab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
+      <BottomPanel
+        id={id}
+        activeTab={bottomTab}
+        onTab={setBottomTab}
+        collapsed={collapsed}
+        onToggleCollapsed={() => setCollapsed((c) => !c)}
+        onNavigate={onNavigate}
+      />
     </div>
   );
 }

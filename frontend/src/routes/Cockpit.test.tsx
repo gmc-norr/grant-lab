@@ -115,6 +115,43 @@ function mockGetByEv(draft: unknown, sourceByEv: Record<string, unknown>) {
   }) as never);
 }
 
+// Route GET by path with a DRAFT-ONLY sequence (first /draft -> firstDraft, rest ->
+// restDraft). The always-mounted BottomPanel also fires /proposed-changes, /problems
+// (InboxPanel + badges) and /spec (InboxPanel.useSpec) — give each a fixed payload so
+// they NEVER consume a draft-sequence slot. Only the /draft counter advances, so the
+// draft sequence the test depends on is fully decoupled from the bottom-panel calls.
+function mockDraftSequenceByPath(firstDraft: unknown, restDraft: unknown) {
+  let draftCalls = 0;
+  return vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/proposed-changes")) {
+      return Promise.resolve({ data: { items: [] }, error: undefined });
+    }
+    if (path.endsWith("/problems")) {
+      return Promise.resolve({
+        data: { problems: [], counts: { error: 0, warning: 0 }, scorecard_stale: [] },
+        error: undefined,
+      });
+    }
+    if (path.endsWith("/spec")) {
+      return Promise.resolve({
+        data: {
+          head: "a".repeat(40),
+          can_edit: false,
+          sections: [{ index: 0, heading: "", text: "", sha: "s0" }],
+          locked: false,
+        },
+        error: undefined,
+      });
+    }
+    if (path.endsWith("/draft")) {
+      const payload = draftCalls === 0 ? firstDraft : restDraft;
+      draftCalls += 1;
+      return Promise.resolve(payload);
+    }
+    return Promise.resolve(firstDraft); // no other GET paths in these two tests
+  }) as never);
+}
+
 it("renders the Outline from sections", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   renderCockpit();
@@ -255,9 +292,7 @@ it("a successful save clears the dirty buffer (Save disables) and keeps the save
   // ORIGINAL for the initial load; COMMITTED for the post-save invalidate-refetch
   // (mockResolvedValueOnce -> mockResolvedValue, so the refetch returns committed
   // bytes — realistic prod behavior).
-  vi.spyOn(clientMod.api, "GET")
-    .mockResolvedValueOnce(original as never)
-    .mockResolvedValue(committed as never);
+  mockDraftSequenceByPath(original, committed);
   // POST resolves a success SaveResultOut (head/section_sha advance to the commit).
   vi.spyOn(clientMod.api, "POST").mockResolvedValue({
     data: {
@@ -521,9 +556,7 @@ it("select-to-cite: retains the held selection across a background draft refetch
     },
     error: undefined,
   };
-  vi.spyOn(clientMod.api, "GET")
-    .mockResolvedValueOnce(original as never)
-    .mockResolvedValue(shortened as never);
+  mockDraftSequenceByPath(original, shortened);
   const { qc } = renderCockpit();
   fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
   const view = (document.querySelector(".cm-editor") as HTMLElement & {

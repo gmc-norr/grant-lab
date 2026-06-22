@@ -7,6 +7,7 @@ import {
   useScorecard,
   useStartEvaluator,
 } from "../api/evaluator";
+import type { OnNavigate } from "./nav";
 
 const BAND_CLASS: Record<ScorecardCriterion["band"], string> = {
   strong: "band-strong",
@@ -26,7 +27,7 @@ export function ScorecardPanel({
   onNavigate,
 }: {
   id: string;
-  onNavigate: (artifact: "draft" | "spec", sectionIndex: number) => void;
+  onNavigate: OnNavigate;
 }) {
   const latest = useLatestEvaluator(id);
   const start = useStartEvaluator(id);
@@ -100,7 +101,7 @@ export function ScorecardPanel({
               <button
                 type="button"
                 className="scorecard-link"
-                onClick={() => onNavigate(c.deep_link!.artifact, c.deep_link!.section_index)}
+                onClick={() => onNavigate({ top_tab: c.deep_link!.artifact })}
               >
                 Go to §{c.deep_link.section_index}
               </button>
