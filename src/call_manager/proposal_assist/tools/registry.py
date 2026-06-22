@@ -91,6 +91,12 @@ class ToolContext:
     origin_kind: str = field(default="interactive_turn")
     origin_job_id: uuid.UUID | None = field(default=None)
 
+    # SP2b-3a: the evaluator pass pins the section counts of the artifacts it
+    # assembled into the instruction (captured at run start), so submit_scorecard
+    # validates deep_link.section_index against the SAME HEAD it evaluated.
+    eval_draft_section_count: int | None = field(default=None)
+    eval_spec_section_count: int | None = field(default=None)
+
     # SP2a-2 §3 (Task 2): section_index -> section sha as the agent saw them at
     # read time (populated by read_proposal_impl, HEAD-first). propose_edit reads
     # base_section_sha from here; an unread section is rejected (_NOT_READ_ERROR).
@@ -613,6 +619,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         list_unsupported_claims_impl,
         validate_citations_impl,
     )
+    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
 
     @tool(
         "validate_citations",
@@ -669,6 +676,55 @@ def _collect_tools(ctx: ToolContext) -> list:
             style=args.get("style"),
         )
 
+    @tool(
+        "submit_scorecard",
+        "Submit the COMPLETE evaluation scorecard exactly once. `criteria` MUST contain "
+        "one entry per funder criterion, each with `index` (the 0-based [index] shown in the "
+        "criteria list), the matching `name`, a `band` (strong|adequate|at_risk|gap), a one-"
+        "paragraph `note`, and an optional `deep_link` {artifact:'draft'|'spec', section_index}. "
+        "`summary` is a short overall readiness note. The overall band is computed server-side.",
+        {
+            "type": "object",
+            "properties": {
+                "criteria": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "band": {
+                                "type": "string",
+                                "enum": ["strong", "adequate", "at_risk", "gap"],
+                            },
+                            "note": {"type": "string"},
+                            "deep_link": {
+                                "type": "object",
+                                "properties": {
+                                    "artifact": {"type": "string", "enum": ["draft", "spec"]},
+                                    "section_index": {"type": "integer"},
+                                },
+                                "required": ["artifact", "section_index"],
+                            },
+                        },
+                        "required": ["index", "name", "band", "note"],
+                    },
+                },
+                "summary": {"type": "string"},
+            },
+            "required": ["criteria", "summary"],
+        },
+    )
+    async def submit_scorecard(args):
+        return await _safe_tool(
+            "submit_scorecard",
+            ctx,
+            submit_scorecard_impl,
+            ctx,
+            criteria=args.get("criteria") or [],
+            summary=args.get("summary", ""),
+        )
+
     return [
         read_proposal,
         # SP2a-2 — propose-only mutation
@@ -700,4 +756,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         list_unsupported_claims,
         # Slice 4 — bibliography rendering
         build_bibliography,
+        # SP2b-3a — evaluator scorecard (the evaluator agent's ONLY tool)
+        submit_scorecard,
     ]
