@@ -6,16 +6,16 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import CoherenceJob, Workspace, WorkspaceEvent
+from call_manager.db.models import CoherenceJob, Workspace
 from call_manager.proposal_assist.coherence.jobs import (
     enqueue_coherence_run,
     latest_coherence_job,
 )
+from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web.workspaces import _session_dep
 
@@ -34,35 +34,10 @@ def _serialize(job: CoherenceJob) -> dict:
 
 
 def _gate_cloud_llm(*, ws: Workspace, request: Request, session: Session, user) -> None:
-    # Auth-first: require_member already ran. Then mirror web/workspaces.py:779-814
-    # (interactive turns route) — SAME order + status codes: setup -> 409,
-    # drafting disabled -> 503, missing per-actor disclosure ack -> 403.
-    if ws.current_phase == "setup":
-        raise HTTPException(
-            status_code=409,
-            detail="Workspace is still setting up — review the rubric to start drafting.",
-        )
-    if not request.app.state.settings.drafting_enabled:
-        raise HTTPException(
-            status_code=503,
-            detail="Drafting is currently disabled by an administrator. Please try again later.",
-        )
-    prior_ack = session.scalar(
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == ws.id,
-            WorkspaceEvent.kind == "disclosure_acknowledged",
-            WorkspaceEvent.actor_id == user.id,
-        )
-        .limit(1)
+    gate_cloud_llm(
+        ws=ws, request=request, session=session, user=user,
+        disclosure_action="starting a coherence pass",
     )
-    if prior_ack is None:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Please acknowledge the data-disclosure notice before starting a coherence pass."
-            ),
-        )
 
 
 @router.post("/{workspace_id}/coherence-runs")

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import Field, computed_field, field_validator, model_validator
@@ -285,6 +286,63 @@ class Settings(BaseSettings):
         alias="EVALUATOR_DAILY_TOKEN_CAP",
         description="Per-workspace daily ceiling on combined input+output tokens spent by "
         "evaluator passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
+    )
+    # SP2b-3c: on-demand mock-panel review (the 6-call fan-out background job).
+    review_tick_seconds: int = Field(
+        default=20,
+        alias="REVIEW_TICK_SECONDS",
+        description="How often the review drain tick claims+runs one queued mock-panel run.",
+    )
+    review_persona_timeout_seconds: int = Field(
+        default=180,
+        alias="REVIEW_PERSONA_TIMEOUT_SECONDS",
+        description="Per sub-call asyncio.wait_for bound (launch+drive) on each persona / "
+        "fit-check / consolidation SDK turn.",
+    )
+    review_job_timeout_seconds: int = Field(
+        default=900,
+        alias="REVIEW_JOB_TIMEOUT_SECONDS",
+        description="Reaper TTL: a running review run older than this (by triggered_at) is "
+        "failed (crash recovery), unwedging the active-unique slot. The whole 6-call fan-out "
+        "must fit well under this.",
+    )
+    review_reaper_tick_seconds: int = Field(
+        default=60,
+        alias="REVIEW_REAPER_TICK_SECONDS",
+        description="How often the review reaper sweep runs (decoupled from the TTL above).",
+    )
+    review_terminate_timeout_seconds: int = Field(
+        default=30,
+        alias="REVIEW_TERMINATE_TIMEOUT_SECONDS",
+        description="Per sub-call asyncio.wait_for bound on each one-shot adapter's terminate().",
+    )
+    review_persona_concurrency: int = Field(
+        default=3,
+        alias="REVIEW_PERSONA_CONCURRENCY",
+        description="Max simultaneous wave-1 sub-calls (fit-check + 4 personas) within one run.",
+    )
+    review_runs_per_day_default: int = Field(
+        default=5,
+        alias="REVIEW_RUNS_PER_DAY_DEFAULT",
+        description="Global per-workspace daily cap on mock-panel runs (Europe/Stockholm day); "
+        "overridable per workspace via Workspace.review_runs_per_day_override.",
+    )
+    review_dollar_cap_default: Decimal = Field(
+        default=Decimal("5.000"),
+        alias="REVIEW_DOLLAR_CAP_DEFAULT",
+        description="Global per-workspace daily $ cap on mock-panel runs; overridable per "
+        "workspace via Workspace.review_dollar_cap_override.",
+    )
+    review_price_input_per_mtok: Decimal = Field(
+        default=Decimal("5.00"),
+        alias="REVIEW_PRICE_INPUT_PER_MTOK",
+        description="claude-opus-4-7 input price per 1M tokens (cache-read is bundled into "
+        "tokens_in by the adapter and priced at this rate).",
+    )
+    review_price_output_per_mtok: Decimal = Field(
+        default=Decimal("25.00"),
+        alias="REVIEW_PRICE_OUTPUT_PER_MTOK",
+        description="claude-opus-4-7 output price per 1M tokens.",
     )
     problem_section_char_budget: int = Field(
         default=6000,

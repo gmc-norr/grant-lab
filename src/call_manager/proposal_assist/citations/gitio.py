@@ -187,3 +187,46 @@ def current_head(repo_dir: Path) -> str:
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse HEAD failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def blob_sha(repo_dir: Path, ref: str, path: str) -> str:
+    """Return the git blob SHA of *path* at *ref* (e.g. 'HEAD'). Used to pin the
+    exact bytes of a committed review file so the read endpoint can fetch them by
+    SHA. GIT_CEILING_DIRECTORIES pins discovery exactly like current_head()."""
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(repo_dir).resolve().parent))
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", f"{ref}:{path}"],
+            cwd=Path(repo_dir),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except OSError as exc:
+        raise GitCommitError(f"rev-parse {ref}:{path} failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise GitCommitError(f"rev-parse {ref}:{path} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def read_blob(repo_dir: Path, sha: str) -> str:
+    """Return the content of a git blob by SHA (`git cat-file -p`), decoded with
+    errors="replace" so a corrupt or binary blob can never raise UnicodeDecodeError
+    up into the endpoint (review files are text, but be defensive — Codex Low).
+    GIT_CEILING_DIRECTORIES pinned like current_head(). Caller validates the SHA
+    shape before passing it."""
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(Path(repo_dir).resolve().parent))
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-p", sha],
+            cwd=Path(repo_dir),
+            capture_output=True,  # bytes (NO text=True) so WE control decoding
+            env=env,
+        )
+    except OSError as exc:
+        raise GitCommitError(f"cat-file {sha} failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise GitCommitError(
+            f"cat-file {sha} failed: {proc.stderr.decode(errors='replace').strip()}"
+        )
+    return proc.stdout.decode(errors="replace")

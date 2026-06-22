@@ -6,12 +6,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import EvaluatorJob, Workspace, WorkspaceEvent
+from call_manager.db.models import EvaluatorJob, Workspace
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
 from call_manager.proposal_assist.evaluator.context import content_sha
 from call_manager.proposal_assist.evaluator.jobs import (
@@ -20,6 +19,7 @@ from call_manager.proposal_assist.evaluator.jobs import (
     latest_evaluator_job,
 )
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web.workspaces import _session_dep
 
@@ -37,33 +37,10 @@ def _serialize(job: EvaluatorJob) -> dict:
 
 
 def _gate_cloud_llm(*, ws: Workspace, request: Request, session: Session, user) -> None:
-    # Auth-first: require_member already ran. Then mirror the coherence/turns gates
-    # (web/coherence.py:_gate_cloud_llm) — SAME order + status codes: setup -> 409,
-    # drafting disabled -> 503, missing per-actor disclosure ack -> 403.
-    if ws.current_phase == "setup":
-        raise HTTPException(
-            status_code=409,
-            detail="Workspace is still setting up — review the rubric to start drafting.",
-        )
-    if not request.app.state.settings.drafting_enabled:
-        raise HTTPException(
-            status_code=503,
-            detail="Drafting is currently disabled by an administrator. Please try again later.",
-        )
-    prior_ack = session.scalar(
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == ws.id,
-            WorkspaceEvent.kind == "disclosure_acknowledged",
-            WorkspaceEvent.actor_id == user.id,
-        )
-        .limit(1)
+    gate_cloud_llm(
+        ws=ws, request=request, session=session, user=user,
+        disclosure_action="running an evaluation",
     )
-    if prior_ack is None:
-        raise HTTPException(
-            status_code=403,
-            detail="Please acknowledge the data-disclosure notice before running an evaluation.",
-        )
 
 
 @router.post("/{workspace_id}/evaluator-runs")
