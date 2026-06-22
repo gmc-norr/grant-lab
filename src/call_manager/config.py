@@ -318,8 +318,10 @@ class Settings(BaseSettings):
     )
     review_persona_concurrency: int = Field(
         default=3,
+        ge=1,
         alias="REVIEW_PERSONA_CONCURRENCY",
-        description="Max simultaneous wave-1 sub-calls (fit-check + 4 personas) within one run.",
+        description="Max simultaneous wave-1 sub-calls (fit-check + 4 personas) within one run. "
+        "Must be >= 1: asyncio.Semaphore(0) would deadlock the fan-out until the reaper TTL.",
     )
     review_runs_per_day_default: int = Field(
         default=5,

@@ -1,7 +1,8 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from call_manager.config import Settings
-from call_manager.db.models import ReviewRun, Workspace
+from call_manager.db.models import ReviewRun, ReviewRunItem, Workspace
 from call_manager.proposal_assist.review.jobs import (
     active_review_run,
     cancel_review_runs_for_workspace,
@@ -45,13 +46,62 @@ def test_cancel_and_reap(review_workspace):
     session.flush()
     # force triggered_at into the past
     session.execute(
-        ReviewRun.__table__.update().where(ReviewRun.id == r.id).values(
-            triggered_at=__import__("datetime").datetime(
-                2000, 1, 1, tzinfo=__import__("datetime").UTC
-            )
-        )
+        ReviewRun.__table__.update()
+        .where(ReviewRun.id == r.id)
+        .values(triggered_at=datetime(2000, 1, 1, tzinfo=UTC))
     )
     assert reap_stuck_review_runs(session, timeout_seconds=10) == 1
+
+
+def test_reap_rolls_up_item_spend_and_fails_stale_items(review_workspace):
+    """A reaped run must (a) carry the spend its items already incurred so the
+    daily dollar cap doesn't undercount, and (b) fail any unfinished items
+    instead of leaving them stale. Otherwise the run total stays null and
+    review_dollars_today (which sums run totals) silently loses real spend."""
+    session, ws_id, *_ = review_workspace
+    r = ReviewRun(workspace_id=ws_id, status="running", draft_sha="a" * 64)
+    session.add(r)
+    session.flush()
+    session.add_all([
+        ReviewRunItem(
+            review_run_id=r.id, kind="fit_check", status="done",
+            input_tokens=600, output_tokens=200, estimated_dollars=Decimal("0.0050"),
+        ),
+        ReviewRunItem(
+            review_run_id=r.id, kind="persona_domain_skeptic", status="done",
+            input_tokens=400, output_tokens=300, estimated_dollars=Decimal("0.0030"),
+        ),
+        # still in-flight when the reaper fires
+        ReviewRunItem(review_run_id=r.id, kind="consolidation", status="running"),
+    ])
+    session.flush()
+    # Stale enough to be reaped (older than the 10s TTL below) but still "today"
+    # so review_dollars_today's day-window includes it — a real reaped run is
+    # ~minutes old, not the year-2000 sentinel the cancel/reap test uses.
+    session.execute(
+        ReviewRun.__table__.update()
+        .where(ReviewRun.id == r.id)
+        .values(triggered_at=datetime.now(UTC) - timedelta(minutes=2))
+    )
+
+    assert reap_stuck_review_runs(session, timeout_seconds=10) == 1
+    session.expire_all()
+
+    r = session.get(ReviewRun, r.id)
+    assert r.status == "failed"
+    # spend rolled up from items (0.0050 + 0.0030 -> 0.008 at run precision)
+    assert r.estimated_dollars == Decimal("0.008")
+    assert r.input_tokens == 1000 and r.output_tokens == 500
+    # the in-flight item is now failed with a reaper note; finished items untouched
+    items = {
+        i.kind: i
+        for i in session.query(ReviewRunItem).filter_by(review_run_id=r.id).all()
+    }
+    assert items["consolidation"].status == "failed"
+    assert "timed out" in (items["consolidation"].error_message or "")
+    assert items["fit_check"].status == "done"
+    # the daily dollar accounting now reflects the reaped spend
+    assert review_dollars_today(session, workspace_id=ws_id) == Decimal("0.008")
 
 
 def test_caps_and_pricing(review_workspace, _settings_env):

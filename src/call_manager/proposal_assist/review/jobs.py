@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
-from call_manager.db.models import ReviewRun, Workspace
+from call_manager.db.models import ReviewRun, ReviewRunItem, Workspace
 from call_manager.proposal_assist.turns.caps import _stockholm_day_start_utc
 
 
@@ -100,16 +100,44 @@ def cancel_review_runs_for_workspace(session: Session, *, workspace_id: uuid.UUI
 def reap_stuck_review_runs(session: Session, *, timeout_seconds: int) -> int:
     """Crash/restart recovery: fail any running run whose triggered_at is older than
     the TTL (ReviewRun has no started_at — queue latency is bounded by the drain
-    tick, so triggered_at ~= run start). Pure DB. FOR UPDATE SKIP LOCKED."""
+    tick, so triggered_at ~= run start). Pure DB. FOR UPDATE SKIP LOCKED.
+
+    Before flipping the run to ``failed`` it rolls the run's item token/dollar
+    totals onto the run, mirroring the finalize step in pass_runner. Finalize
+    early-returns once the run is no longer ``running`` (the reaper got there
+    first), so without this the run total stays null and ``review_dollars_today``
+    — which sums run-level estimated_dollars — silently undercounts spend the
+    items already incurred, letting the daily cap be exceeded. It also fails any
+    still-queued/running item so the panel never shows stale rows under a failed
+    run. SKIP LOCKED means an in-flight finalize holding the row lock is left to
+    finish normally, so the rollup happens exactly once."""
     cutoff = datetime.now(UTC) - timedelta(seconds=timeout_seconds)
     rows = session.scalars(
         select(ReviewRun)
         .where(ReviewRun.status == "running", ReviewRun.triggered_at < cutoff)
         .with_for_update(skip_locked=True)
     ).all()
+    now = datetime.now(UTC)
     for run in rows:
+        items = session.scalars(
+            select(ReviewRunItem).where(ReviewRunItem.review_run_id == run.id)
+        ).all()
+        run.input_tokens = sum((i.input_tokens or 0) for i in items)
+        run.output_tokens = sum((i.output_tokens or 0) for i in items)
+        dollars = sum((i.estimated_dollars or 0) for i in items)
+        run.estimated_dollars = (dollars or None) and Decimal(dollars).quantize(
+            Decimal("0.001")
+        )
+        for it in items:
+            if it.status in ("queued", "running"):
+                it.status = "failed"
+                it.error_message = (
+                    (it.error_message or "") + " [reaper: run timed out]"
+                ).strip()
+                if it.completed_at is None:
+                    it.completed_at = now
         run.status = "failed"
-        run.completed_at = datetime.now(UTC)
+        run.completed_at = now
     session.flush()
     return len(rows)
 
