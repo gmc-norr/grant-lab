@@ -559,6 +559,65 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # SP2b-3a: evaluator drain tick (async — one fresh-stateless scorecard pass).
+    # Same app_loop dispatch pattern as _coherence_tick: the SDK client + asyncio
+    # primitives are bound to the FastAPI lifespan loop, so a worker-thread
+    # asyncio.run() would create a new loop and break them.
+    def _evaluator_tick() -> None:
+        import asyncio
+
+        from call_manager.proposal_assist.evaluator.pass_runner import (
+            drain_evaluator_queue_tick,
+        )
+
+        # Skip ONLY on the admin kill-switch (mirrors _coherence_tick): do NOT skip
+        # on a missing anthropic_api_key so a misconfigured provider surfaces as a
+        # FAILED job rather than a job stuck queued forever.
+        if not settings.drafting_enabled:
+            return
+        coro = drain_evaluator_queue_tick(session_factory=session_factory, settings=settings)
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("evaluator tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            fut.result(timeout=settings.evaluator_pass_timeout_seconds + 60)
+        except Exception:
+            _logger.exception("evaluator tick failed")
+
+    sched.add_job(
+        _evaluator_tick,
+        trigger=IntervalTrigger(seconds=settings.evaluator_tick_seconds),
+        id="evaluator_drain",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # SP2b-3a: evaluator reaper tick (sync, pure DB). Crash/hung-job recovery.
+    # Runs even while _evaluator_tick is blocked inside a live pass, so a
+    # crashed/hung running job can't wedge the workspace's active-unique slot
+    # forever. Mirrors _coherence_reaper_tick.
+    def _evaluator_reaper_tick() -> None:
+        from call_manager.proposal_assist.evaluator.jobs import reap_stuck_evaluator_jobs
+
+        try:
+            with session_factory() as s:
+                reap_stuck_evaluator_jobs(s, timeout_seconds=settings.evaluator_job_timeout_seconds)
+                s.commit()
+        except Exception:
+            _logger.exception("evaluator reaper tick failed")
+
+    sched.add_job(
+        _evaluator_reaper_tick,
+        trigger=IntervalTrigger(seconds=settings.evaluator_reaper_tick_seconds),
+        id="evaluator_reaper",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Stuck-turn reaper. A turn cancelled by _turn_drain_tick's
     # fut.result(timeout=300) keeps running on the app loop with the handle
     # cached and its turn_jobs row stuck status='running'. The drain query

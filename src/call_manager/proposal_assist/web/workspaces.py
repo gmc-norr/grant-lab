@@ -55,6 +55,9 @@ from call_manager.proposal_assist.coherence.jobs import (
 )
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.evaluator.jobs import (
+    cancel_evaluator_jobs_for_workspace,
+)
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
@@ -1319,6 +1322,11 @@ def soft_delete(
     # supersedes any partial pending rows). Runs in this same transaction, before
     # the commit below.
     cancel_coherence_jobs_for_workspace(session, workspace_id=workspace_id)
+    # SP2b-3a: same rationale for the evaluator queue — fail any active
+    # (queued|running) scorecard pass so it can't burn cloud tokens after the
+    # workspace is deleted (claim_next_evaluator_job also excludes soft-deleted
+    # workspaces; this unwedges the active-unique slot). Same transaction.
+    cancel_evaluator_jobs_for_workspace(session, workspace_id=workspace_id)
     # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
     # through the helper for audit parity (closes each cloud_turn_sent chain),
     # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,
