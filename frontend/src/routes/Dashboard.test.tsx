@@ -12,27 +12,6 @@ function LocationProbe() {
   return <output data-testid="search">{loc.search}</output>;
 }
 
-function dashData(effectiveProfileId: number | null) {
-  return {
-    data: {
-      items: [],
-      summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
-      pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: 0 },
-      ranking: { pending: 0, failed: 0 },
-      effective: { profile_id: effectiveProfileId },
-      facets: {
-        sources: [],
-        profiles: [
-          { id: 7, name: "G" },
-          { id: 9, name: "H" },
-        ],
-      },
-    },
-    error: undefined,
-    response: new Response(),
-  };
-}
-
 function renderAt(url: string) {
   const qc = new QueryClient();
   return render(
@@ -44,62 +23,6 @@ function renderAt(url: string) {
     </QueryClientProvider>,
   );
 }
-
-it("deep link is read-only: the select reflects the SERVER-resolved profile, no POST on load", async () => {
-  // Bare load whose stored default resolves to profile 7 server-side (effective.profile_id).
-  const GET = vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData(7) as never);
-  const POST = vi.spyOn(clientMod.api, "POST").mockResolvedValue({
-    data: { ok: true },
-    error: undefined,
-    response: new Response(),
-  } as never);
-
-  renderAt("/");
-  // Select shows the RESOLVED id (7) — Jinja parity — NOT the (absent) URL param.
-  const select = (await screen.findByLabelText(/profile/i)) as HTMLSelectElement;
-  expect(select.value).toBe("7");
-  await waitFor(() => expect(GET).toHaveBeenCalled());
-  expect(POST).not.toHaveBeenCalled(); // a load/deep-link never persists a default
-});
-
-it("selecting a profile persists FIRST, then reflects the URL only after the POST resolves", async () => {
-  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData(null) as never);
-  let resolvePost: (v: unknown) => void = () => {};
-  const POST = vi
-    .spyOn(clientMod.api, "POST")
-    .mockReturnValue(new Promise((res) => (resolvePost = res)) as never);
-
-  renderAt("/");
-  const select = (await screen.findByLabelText(/profile/i)) as HTMLSelectElement;
-  expect(select.value).toBe(""); // no resolved profile yet
-  fireEvent.change(select, { target: { value: "9" } }); // a REAL change (differs from "")
-
-  await waitFor(() =>
-    expect(POST).toHaveBeenCalledWith("/api/me/default-profile", { body: { profile_id: 9 } }),
-  );
-  // URL must NOT update until the POST resolves (persist-first contract).
-  expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
-  resolvePost({ data: { ok: true }, error: undefined, response: new Response() });
-  await waitFor(() =>
-    expect(screen.getByTestId("search").textContent).toContain("profile=9"),
-  );
-});
-
-it("a failed persist leaves the URL unchanged and surfaces an error", async () => {
-  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData(null) as never);
-  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
-    data: undefined,
-    error: { error: { code: "x", message: "no" } },
-    response: new Response(),
-  } as never);
-
-  renderAt("/");
-  const select = (await screen.findByLabelText(/profile/i)) as HTMLSelectElement;
-  fireEvent.change(select, { target: { value: "9" } });
-
-  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/default profile/i));
-  expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
-});
 
 // --- row rendering + filter-state reflection (ported from the retired Jinja
 // GET-/ tests: deadline label, show_closed checkbox state, pagination preserves
@@ -147,18 +70,6 @@ it("renders a DISTINCT deadline affordance: past -> grey 'Closed', near -> urgen
   const soon = document.querySelector('[data-deadline-state="soon"]');
   expect(soon).not.toBeNull();
   expect(soon?.textContent ?? "").not.toMatch(/Closed/);
-});
-
-it("the show_closed checkbox reflects the URL: checked with ?show_closed=1", async () => {
-  vi.spyOn(clientMod.api, "GET").mockResolvedValue(itemsBody([]) as never);
-  renderAt("/?show_closed=1");
-  expect(await screen.findByRole("checkbox")).toBeChecked();
-});
-
-it("the show_closed checkbox is unchecked by default", async () => {
-  vi.spyOn(clientMod.api, "GET").mockResolvedValue(itemsBody([]) as never);
-  renderAt("/");
-  expect(await screen.findByRole("checkbox")).not.toBeChecked();
 });
 
 it("paginating preserves the show_closed toggle in the URL", async () => {

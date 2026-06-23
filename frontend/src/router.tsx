@@ -1,5 +1,6 @@
 import { createBrowserRouter } from "react-router-dom";
 
+import { CallsFilters } from "./routes/CallsFilters";
 import { Cockpit } from "./routes/Cockpit";
 import { Dashboard } from "./routes/Dashboard";
 import { AppShell } from "./shell/AppShell";
@@ -12,7 +13,7 @@ export const router = createBrowserRouter([
     // (the router.test drift guard enforces it).
     element: <AppShell />,
     children: [
-      { index: true, element: <Dashboard /> },
+      { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters } },
       { path: "cockpit/:id", element: <Cockpit /> },
       // In-app soft 404 ONLY (client-side reached). NOT the route authority —
       // the server returns index.html only for manifest SPA routes, so an

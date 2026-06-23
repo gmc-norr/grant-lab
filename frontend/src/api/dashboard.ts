@@ -16,6 +16,16 @@ export type DashboardParams = {
   show_closed?: boolean;
 };
 
+export function dashboardParamsFrom(sp: URLSearchParams): DashboardParams {
+  return {
+    source: sp.get("source") ?? undefined,
+    sort: (sp.get("sort") as "newest" | "deadline" | null) ?? undefined,
+    profile: sp.get("profile") ?? undefined,
+    page: sp.get("page") ? Number(sp.get("page")) : 1,
+    show_closed: sp.get("show_closed") === "1",
+  };
+}
+
 export function useDashboard(params: DashboardParams) {
   const qc = useQueryClient();
   const prevPending = useRef<number | null>(null);
