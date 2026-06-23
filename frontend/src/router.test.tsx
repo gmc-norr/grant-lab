@@ -1,22 +1,34 @@
+import type { RouteObject } from "react-router-dom";
 import { expect, it } from "vitest";
 
 import { router } from "./router";
 import { SPA_ROUTES } from "./routes.gen";
 
-// router.tsx is the 5th consumer of the route-ownership manifest (alongside
-// spa_routes.py, routes.gen.ts, dev-proxy.ts, spa_serving.py) but is the only
-// HAND-maintained one — the gen_routes CI drift gate doesn't cover it. This
-// pins it: the router's CONCRETE page paths (excluding the in-app "*" soft-404)
-// must equal SPA_ROUTES, so a manifest change that isn't mirrored here fails CI.
+// Collect every concrete LEAF page path the router can match, as an absolute
+// path. A pathless layout route (no `path`) contributes nothing itself; its
+// children inherit the parent base. An index route resolves to the parent base.
+function leafPaths(routes: RouteObject[], base = ""): string[] {
+  const out: string[] = [];
+  for (const r of routes) {
+    const here =
+      r.path == null
+        ? base
+        : r.path.startsWith("/")
+          ? r.path
+          : `${base.replace(/\/$/, "")}/${r.path}`;
+    if (r.children?.length) out.push(...leafPaths(r.children, here));
+    else out.push(r.index ? base || "/" : here);
+  }
+  return out;
+}
+
+// router.tsx is the only HAND-maintained consumer of the route-ownership
+// manifest. Pin its concrete page paths (excluding the in-app "*" soft-404) to
+// SPA_ROUTES, reducing each ":param" path to its static ownership prefix
+// ("/cockpit/:id" -> "/cockpit") the way is_spa_route matches subtrees.
 it("router concrete paths match the SPA_ROUTES manifest (drift guard)", () => {
-  const concrete = router.routes
-    .map((r) => r.path)
-    .filter((p): p is string => !!p && p !== "*")
-    // The manifest carries the static OWNERSHIP PREFIX, not the concrete client
-    // path: is_spa_route lets "/cockpit" own "/cockpit/123" via the subtree
-    // match, so a parameterized router path like "/cockpit/:id" maps to
-    // "/cockpit". Reduce each path to that prefix before comparing — otherwise
-    // any route that gains a ":param" spuriously fails this guard.
+  const concrete = leafPaths(router.routes as RouteObject[])
+    .filter((p) => !p.includes("*"))
     .map((p) => {
       const i = p.indexOf("/:");
       return i === -1 ? p : p.slice(0, i) || "/";

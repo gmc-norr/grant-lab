@@ -1,0 +1,17 @@
+.shell {
+  display: grid;
+  grid-template-rows: 30px 1fr 22px;
+  height: 100vh;
+  background: var(--app-editor);
+  color: var(--app-text);
+  overflow: hidden;
+}
+.body {
+  display: flex;
+  min-height: 0;
+}
+.main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}

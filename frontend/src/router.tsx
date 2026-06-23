@@ -2,24 +2,30 @@ import { createBrowserRouter } from "react-router-dom";
 
 import { Cockpit } from "./routes/Cockpit";
 import { Dashboard } from "./routes/Dashboard";
+import { AppShell } from "./shell/AppShell";
 
 export const router = createBrowserRouter([
-  // SPA-owned page route. Task 9 flipped this from the temporary `/app` scaffold
-  // to `/` (the React dashboard now owns the root; the Jinja calls_index was
-  // retired). Keep this in sync with `routes.json` `spa_routes` — the SERVER
-  // (manifest) is authoritative for what gets index.html.
-  { path: "/", element: <Dashboard /> },
-  { path: "/cockpit/:id", element: <Cockpit /> },
-  // In-app catch-all ONLY: a soft 404 for paths the SPA reached client-side via
-  // React Router navigation. It is NOT the route authority — the server returns
-  // index.html only for manifest SPA routes, so a typed/unknown URL never loads
-  // the SPA (it hits FastAPI's real 404). This MUST NOT turn unknown paths into 200s.
   {
-    path: "*",
-    element: (
-      <main role="alert">
-        <h1>Not found</h1>
-      </main>
-    ),
+    // Persistent IDE shell wraps every SPA route via <Outlet/>. This pathless
+    // layout route keeps the shell mounted across navigations. Child page paths
+    // are relative to "/" and MUST stay in sync with routes.json `spa_routes`
+    // (the router.test drift guard enforces it).
+    element: <AppShell />,
+    children: [
+      { index: true, element: <Dashboard /> },
+      { path: "cockpit/:id", element: <Cockpit /> },
+      // In-app soft 404 ONLY (client-side reached). NOT the route authority —
+      // the server returns index.html only for manifest SPA routes, so an
+      // unknown typed URL hits FastAPI's real 404, never this. Must not turn
+      // unknown paths into 200s.
+      {
+        path: "*",
+        element: (
+          <main role="alert">
+            <h1>Not found</h1>
+          </main>
+        ),
+      },
+    ],
   },
 ]);
