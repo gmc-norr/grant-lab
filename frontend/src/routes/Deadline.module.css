@@ -1,0 +1,4 @@
+.closed { color: var(--app-dim); }
+.soon { color: var(--app-bad); font-weight: 600; }
+.watch { color: var(--app-warn); }
+.open { color: var(--app-muted); }

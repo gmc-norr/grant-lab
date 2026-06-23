@@ -1,20 +1,3 @@
-/* Deadline-label parity with the retired Jinja `deadline_label` macro:
-   past = grey "Closed", <=14d = urgent red, <=30d = amber watch, else plain.
-   Colours come from the shared --cm-deadline-* / --cm-muted design tokens. */
-.closed {
-  color: var(--cm-muted);
-}
-.soon {
-  color: var(--cm-deadline-soon);
-  font-weight: 600;
-}
-.watch {
-  color: var(--cm-deadline-watch);
-}
-.open {
-  color: inherit;
-}
-
 /* Summary badge row (Jinja-parity): open / top-matches / soon-deadline counts. */
 .summary {
   display: flex;
