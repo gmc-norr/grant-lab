@@ -1,6 +1,11 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
+import type { components } from "./schema.gen";
+
+export type DashboardOut = components["schemas"]["DashboardOut"];
+export type CallItem = components["schemas"]["CallOut"];
+
 import { api, unwrap } from "./client";
 
 export type DashboardParams = {

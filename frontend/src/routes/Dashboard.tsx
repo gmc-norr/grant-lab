@@ -2,7 +2,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { Pagination } from "../components/Pagination";
 import { useDashboard, useSetDefaultProfile, type DashboardParams } from "../api/dashboard";
-import { Deadline } from "./Deadline";
+import { CallRow } from "./CallRow";
 import styles from "./Dashboard.module.css";
 
 export function Dashboard() {
@@ -141,20 +141,9 @@ export function Dashboard() {
         <p>{data.ranking.failed} calls couldn&apos;t be scored automatically.</p>
       )}
 
-      <ul>
+      <ul className={styles.list}>
         {data.items.map((c) => (
-          <li key={c.id}>
-            {/* plain anchor to the un-ported call-detail HTML page (coexistence) */}
-            <a href={`/calls/${c.id}`}>{c.title}</a>
-            {c.source_name && <span> · {c.source_name}</span>}
-            {c.deadline && (
-              <span>
-                {" · "}
-                <Deadline iso={c.deadline} />
-              </span>
-            )}
-            {c.aggregate_score != null && <span> · {Math.round(c.aggregate_score)}</span>}
-          </li>
+          <CallRow key={c.id} call={c} />
         ))}
       </ul>
 
