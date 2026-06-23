@@ -287,8 +287,38 @@ class Settings(BaseSettings):
         description="Per-workspace daily ceiling on combined input+output tokens spent by "
         "evaluator passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
     )
+    # SP2b-3d: on-demand uncited-claims (LLM) check (a single background pass).
+    uncited_claims_tick_seconds: int = Field(
+        default=20,
+        alias="UNCITED_CLAIMS_TICK_SECONDS",
+        description="How often the uncited-claims drain tick claims+runs one queued pass. "
+        "Manual-only, so this just bounds latency from click to run.",
+    )
+    uncited_claims_pass_timeout_seconds: int = Field(
+        default=180,
+        alias="UNCITED_CLAIMS_PASS_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the uncited-claims SDK turn "
+        "(launch+drive). On timeout the one-shot adapter is terminated and the job is failed.",
+    )
+    uncited_claims_job_timeout_seconds: int = Field(
+        default=300,
+        alias="UNCITED_CLAIMS_JOB_TIMEOUT_SECONDS",
+        description="Reaper TTL: a running uncited-claims job older than this is failed "
+        "(crash/restart recovery), unwedging the workspace's active-unique slot.",
+    )
+    uncited_claims_reaper_tick_seconds: int = Field(
+        default=60,
+        alias="UNCITED_CLAIMS_REAPER_TICK_SECONDS",
+        description="How often the uncited-claims reaper sweep RUNS (decoupled from the TTL).",
+    )
+    uncited_claims_terminate_timeout_seconds: int = Field(
+        default=30,
+        alias="UNCITED_CLAIMS_TERMINATE_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the one-shot adapter's terminate() "
+        "cleanup. A hung SDK disconnect must not leak the pass coroutine.",
+    )
     uncited_claims_daily_token_cap: int = Field(
-        default=100_000,
+        default=200_000,
         alias="UNCITED_CLAIMS_DAILY_TOKEN_CAP",
         description="Per-workspace daily ceiling on combined input+output tokens spent by "
         "uncited-claims passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
