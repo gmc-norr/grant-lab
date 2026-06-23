@@ -287,6 +287,12 @@ class Settings(BaseSettings):
         description="Per-workspace daily ceiling on combined input+output tokens spent by "
         "evaluator passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
     )
+    uncited_claims_daily_token_cap: int = Field(
+        default=100_000,
+        alias="UNCITED_CLAIMS_DAILY_TOKEN_CAP",
+        description="Per-workspace daily ceiling on combined input+output tokens spent by "
+        "uncited-claims passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
+    )
     # SP2b-3c: on-demand mock-panel review (the 6-call fan-out background job).
     review_tick_seconds: int = Field(
         default=20,
