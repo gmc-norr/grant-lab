@@ -9,11 +9,18 @@
 // too — never Vite's HTML 404 and never index.html.
 import { SPA_ROUTES } from "./routes.gen";
 
-// Vite's own dev-asset prefixes — these must NEVER be forwarded to uvicorn
-// (proxying them would break HMR and source loading).
-export const VITE_DEV_PREFIXES = ["/@vite", "/@id", "/@fs", "/src", "/node_modules"];
+// Non-namespaced Vite dev-asset prefixes that must NEVER be forwarded to uvicorn
+// (proxying them would break source loading). Vite's "/@…" namespace is handled
+// separately in isViteAsset (see below).
+export const VITE_DEV_PREFIXES = ["/src", "/node_modules"];
 
 export function isViteAsset(url: string): boolean {
+  // Vite owns its entire "/@…" namespace — the HMR client (/@vite), virtual
+  // modules (/@id), fs access (/@fs), and plugin-injected runtimes like
+  // plugin-react's /@react-refresh. No backend route lives under /@, so serve
+  // the whole namespace via Vite; enumerating individual /@ prefixes risked
+  // omitting a plugin runtime (it did — /@react-refresh — blanking the SPA in dev).
+  if (url.startsWith("/@")) return true;
   return VITE_DEV_PREFIXES.some((p) => url === p || url.startsWith(p + "/"));
 }
 

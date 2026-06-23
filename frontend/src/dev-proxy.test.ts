@@ -42,6 +42,17 @@ describe("isViteAsset", () => {
     expect(isViteAsset("/api/me")).toBe(false);
     expect(isViteAsset("/login")).toBe(false);
   });
+
+  it("serves Vite's /@-namespaced runtime modules (e.g. plugin-react's /@react-refresh) via Vite", () => {
+    // Regression: @vitejs/plugin-react injects `import "/@react-refresh"` into the
+    // dev HTML. The carve-out listed /@vite + /@id + /@fs but omitted it, so the
+    // proxy forwarded /@react-refresh to uvicorn and the SPA never mounted (blank
+    // page in SPA_MODE=dev). No backend route lives under /@, so the whole Vite
+    // namespace must be served by Vite — including future plugin-injected runtimes.
+    expect(isViteAsset("/@react-refresh")).toBe(true);
+    expect(isViteAsset("/@vite-plugin-whatever/x")).toBe(true);
+    expect(shouldServeViaVite("/@react-refresh")).toBe(true);
+  });
 });
 
 describe("shouldServeViaVite (the proxy bypass decision)", () => {
