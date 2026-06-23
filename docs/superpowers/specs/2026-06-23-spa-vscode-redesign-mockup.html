@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Call Manager — VS Code-dark mockup</title>
+<style>
+  :root {
+    --editor:        #1e1e1e;
+    --sidebar:       #252526;
+    --activitybar:   #333333;
+    --tabbar:        #2d2d2d;
+    --tab-inactive:  #2d2d2d;
+    --panel:         #1e1e1e;
+    --titlebar:      #3c3c3c;
+    --statusbar:     #007acc;
+    --accent:        #007acc;
+    --accent-2:      #0098ff;
+    --link:          #4daafc;
+    --text:          #cccccc;
+    --text-strong:   #ffffff;
+    --muted:         #858585;
+    --muted-2:       #6e7681;
+    --border:        #1b1b1b;
+    --border-soft:   #2b2b2b;
+    --hover:         #2a2d2e;
+    --selected:      #094771;
+    --selected-soft: #37373d;
+    --badge-bg:      #4d4d4d;
+    --good:          #4ec9b0;
+    --good-dim:      #2ea043;
+    --warn:          #cca700;
+    --bad:           #f14c4c;
+    --heading:       #569cd6;
+    --md-emph:       #ce9178;
+    --ui-font: -apple-system, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", "Consolas", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #101010; }
+  body { font-family: var(--ui-font); }
+  .screen {
+    width: 1440px; height: 880px; background: var(--editor); color: var(--text);
+    display: grid; grid-template-rows: 30px 1fr 22px;
+    overflow: hidden; font-size: 13px; margin: 0 auto 28px; position: relative;
+    box-shadow: 0 0 0 1px #000;
+  }
+  /* title bar */
+  .titlebar { background: var(--titlebar); display: flex; align-items: center; gap: 14px;
+    padding: 0 12px; color: #cfcfcf; font-size: 12px; }
+  .titlebar .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .traffic { display: flex; gap: 8px; }
+  .titlebar .menus { display: flex; gap: 14px; color: #c5c5c5; }
+  .titlebar .title { margin: 0 auto; color: #b0b0b0; font-size: 12px; }
+  /* body grid: activitybar | sidebar | main */
+  .body { display: grid; grid-template-columns: 48px 256px 1fr; min-height: 0; }
+  /* activity bar */
+  .activitybar { background: var(--activitybar); display: flex; flex-direction: column;
+    align-items: center; padding-top: 6px; gap: 2px; }
+  .ab-item { width: 48px; height: 48px; display: grid; place-items: center; color: var(--muted);
+    border-left: 2px solid transparent; cursor: default; position: relative; }
+  .ab-item.active { color: #fff; border-left-color: #fff; }
+  .ab-item svg { width: 24px; height: 24px; }
+  .ab-spacer { flex: 1; }
+  .ab-badge { position: absolute; right: 6px; bottom: 8px; background: var(--accent); color: #fff;
+    border-radius: 8px; font-size: 9px; padding: 0 4px; line-height: 14px; font-weight: 600; }
+  /* sidebar */
+  .sidebar { background: var(--sidebar); border-right: 1px solid var(--border); display: flex;
+    flex-direction: column; min-height: 0; }
+  .side-title { padding: 10px 16px 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); display:flex; justify-content: space-between; align-items:center;}
+  .side-section { padding: 4px 0 8px; }
+  .side-group { padding: 8px 16px 2px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-2); }
+  .tree-row { display: flex; align-items: center; gap: 7px; padding: 3px 16px 3px 22px; color: var(--text); cursor: default; }
+  .tree-row:hover { background: var(--hover); }
+  .tree-row.active { background: var(--selected); color: #fff; }
+  .tree-row .ico { width: 16px; height: 16px; color: var(--muted); display:grid;place-items:center;}
+  .tree-row.active .ico { color: #fff; }
+  .chev { color: var(--muted); width: 14px; display:inline-block; }
+  /* filters (dashboard sidebar) */
+  .filter { padding: 8px 16px; }
+  .filter label { display:block; font-size: 11px; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .05em;}
+  .control { background: #3c3c3c; border: 1px solid #3c3c3c; color: var(--text); border-radius: 4px;
+    padding: 5px 8px; width: 100%; font-size: 12px; display:flex; justify-content:space-between; align-items:center;}
+  .control:focus-within, .control.focus { border-color: var(--accent); }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; padding: 6px 16px 12px; }
+  .chip { background: #2d2d2d; border:1px solid var(--border-soft); color: var(--muted); border-radius: 10px; padding: 1px 9px; font-size: 11px; }
+  .chip.soon { color: var(--bad); border-color:#5a2a2a; }
+  /* main column */
+  .main { display: grid; min-height: 0; background: var(--editor); }
+  .main.cockpit { grid-template-rows: 35px 1fr 210px; }
+  .main.dash { grid-template-rows: 35px 1fr; }
+  /* editor tabs */
+  .tabs { background: var(--tabbar); display: flex; align-items: stretch; }
+  .tab { display:flex; align-items:center; gap:8px; padding: 0 14px; color: var(--muted);
+    background: var(--tab-inactive); border-right: 1px solid var(--border); cursor: default; font-size: 13px; }
+  .tab.active { background: var(--editor); color: #fff; box-shadow: inset 0 1px 0 var(--accent); }
+  .tab .x { color: var(--muted-2); margin-left: 4px; }
+  .tab .ico { color: var(--heading); display:grid;place-items:center; width:16px;height:16px;}
+  .tabs .grow { flex:1; }
+  .tabs .editor-actions { display:flex; align-items:center; gap:14px; padding-right:14px; color: var(--muted); }
+  /* editor content */
+  .editor { overflow: hidden; display:flex; min-height:0; }
+  .gutter { background: var(--editor); color: #6e7681; text-align: right; padding: 12px 10px 12px 0;
+    font-family: var(--mono); font-size: 12.5px; line-height: 21px; user-select:none; min-width: 44px; }
+  .code { padding: 12px 0 12px 14px; font-family: var(--mono); font-size: 12.5px; line-height: 21px;
+    color: #d4d4d4; white-space: pre; overflow:hidden; }
+  .code .h1 { color: var(--heading); font-weight: 600; }
+  .code .h2 { color: #4ec9b0; }
+  .code .num { color: #b5cea8; }
+  .code .em { color: var(--md-emph); }
+  /* breadcrumb */
+  .breadcrumb { padding: 5px 16px; color: var(--muted); font-size: 12px; background: var(--editor); border-bottom: 1px solid var(--border-soft); display:flex; gap:6px; align-items:center;}
+  /* bottom panel */
+  .panelwrap { border-top: 1px solid var(--border-soft); background: var(--panel); display:flex; flex-direction: column; min-height:0;}
+  .panel-tabs { display:flex; align-items:center; gap: 18px; padding: 0 16px; height: 34px; border-bottom: 1px solid var(--border-soft); }
+  .panel-tab { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); padding: 9px 0; border-bottom: 1px solid transparent; }
+  .panel-tab.active { color: #fff; border-bottom-color: var(--text); }
+  .panel-tab .count { color: var(--muted-2); }
+  .panel-tab .count.warn { color: var(--warn); }
+  .panel-actions { margin-left:auto; color: var(--muted); display:flex; gap:14px; }
+  .panel-body { overflow:hidden; padding: 4px 0; }
+  .act-row { display:flex; align-items:center; gap: 9px; padding: 4px 16px; color: var(--text); }
+  .act-row:hover { background: var(--hover); }
+  .act-row .ico { color: var(--muted); width:16px;height:16px;display:grid;place-items:center;}
+  .act-actor { color: #fff; font-weight: 600; }
+  .act-sum { color: var(--text); }
+  .act-time { color: var(--muted-2); margin-left: 6px; }
+  .act-go { margin-left:auto; color: var(--link); font-size: 12px; }
+  /* status bar */
+  .statusbar { background: var(--statusbar); color: #fff; display:flex; align-items:center; gap: 16px; padding: 0 12px; font-size: 12px; }
+  .statusbar .sb-item { display:flex; align-items:center; gap:5px; }
+  .statusbar .right { margin-left:auto; display:flex; gap:16px; }
+  /* dashboard list */
+  .dash-head { display:flex; align-items:center; gap:14px; padding: 14px 22px 10px; }
+  .dash-head h1 { font-size: 20px; color:#fff; margin:0; font-weight:600; }
+  .dash-head .meta { color: var(--muted); font-size: 12px; display:flex; gap:14px; }
+  .dash-head .meta b { color:#fff; font-weight:600; }
+  .calls { padding: 4px 12px; }
+  .call { display:grid; grid-template-columns: 22px 1fr auto; align-items:center; gap: 12px;
+    padding: 11px 12px; border-bottom: 1px solid var(--border-soft); }
+  .call:hover { background: var(--hover); }
+  .call .star { color: var(--muted-2); }
+  .call .title { color: var(--link); font-size: 14px; }
+  .call .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .call .right { text-align:right; display:flex; align-items:center; gap: 12px; }
+  .deadline { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .deadline.soon { color: var(--bad); font-weight:600; }
+  .deadline.watch { color: var(--warn); }
+  .deadline.ok { color: var(--muted); }
+  .match { background: rgba(78,201,176,.14); color: var(--good); border:1px solid rgba(78,201,176,.3);
+    border-radius: 10px; padding: 1px 9px; font-size: 11px; }
+  .match.low { background: #2d2d2d; color: var(--muted); border-color: var(--border-soft); }
+  /* scorecard (alt cockpit editor body, shown small inline) */
+  .pill { border-radius: 9px; padding: 1px 8px; font-size: 10.5px; letter-spacing:.04em; text-transform:uppercase; font-weight:600; }
+  .pill.strong { background: rgba(78,201,176,.16); color: var(--good); }
+  .pill.adequate { background:#2d2d2d; color:#9cdcfe; }
+  .pill.atrisk { background: rgba(204,167,0,.16); color: var(--warn); }
+  .pill.gap { background: rgba(241,76,76,.16); color: var(--bad); }
+  .legend { position:absolute; top: 6px; left: 50%; transform: translateX(-50%); color:#777; font-size:11px;}
+</style>
+</head>
+<body>
+
+<!-- ============ SCREEN 1: CALLS (dashboard) ============ -->
+<div class="screen" id="screen-dashboard">
+  <div class="titlebar">
+    <div class="traffic"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+    <div class="menus"><span>Call Manager</span></div>
+    <div class="title">Funding calls — Call Manager</div>
+  </div>
+  <div class="body">
+    <!-- activity bar -->
+    <div class="activitybar">
+      <div class="ab-item active" title="Calls">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h10l4 4v12H4z"/><path d="M14 4v4h4"/><path d="M7 12h8M7 15h8M7 9h3"/></svg>
+      </div>
+      <div class="ab-item" title="Workspaces">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4M3 17l9 4 9-4"/></svg>
+        <span class="ab-badge">3</span>
+      </div>
+      <div class="ab-item" title="References">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"/><path d="M9 4v12"/></svg>
+      </div>
+      <div class="ab-spacer"></div>
+      <div class="ab-item" title="Profile">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>
+      </div>
+      <div class="ab-item" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.5 5.5l2 2M16.5 16.5l2 2M18.5 5.5l-2 2M7.5 16.5l-2 2"/></svg>
+      </div>
+    </div>
+    <!-- sidebar: filters -->
+    <div class="sidebar">
+      <div class="side-title">Calls</div>
+      <div class="filter"><label>Profile</label><div class="control">Digital Pathology &amp; Imaging AI <span style="color:var(--muted)">▾</span></div></div>
+      <div class="filter"><label>Source</label><div class="control">All sources <span style="color:var(--muted)">▾</span></div></div>
+      <div class="filter"><label>Sort</label><div class="control">Best match <span style="color:var(--muted)">▾</span></div></div>
+      <div class="chips">
+        <span class="chip">8 open</span>
+        <span class="chip">3 top matches</span>
+        <span class="chip soon">2 closing soon</span>
+      </div>
+      <div class="side-group">Saved views</div>
+      <div class="tree-row"><span class="ico">★</span> Pathology · open</div>
+      <div class="tree-row"><span class="ico">★</span> Closing ≤ 30 days</div>
+    </div>
+    <!-- main -->
+    <div class="main dash">
+      <div class="breadcrumb">Calls <span style="color:var(--muted-2)">›</span> All sources <span style="color:var(--muted-2)">›</span> Best match</div>
+      <div style="overflow:hidden;">
+        <div class="dash-head">
+          <h1>Funding calls</h1>
+          <div class="meta"><span><b>8</b> open</span><span><b>3</b> top matches</span><span><b>2</b> closing within 30 days</span></div>
+        </div>
+        <div class="calls">
+          <div class="call"><span class="star">★</span><div><div class="title">AI for early cancer detection from digital pathology slides</div><div class="sub">Vinnova · programme · TRL 4–6</div></div><div class="right"><span class="match">92% match</span><span class="deadline watch">2026-08-22</span></div></div>
+          <div class="call"><span class="star">★</span><div><div class="title">Klinisk validering av AI för digital patologi</div><div class="sub">Vinnova · call</div></div><div class="right"><span class="match">88% match</span><span class="deadline ok">2026-08-07</span></div></div>
+          <div class="call"><span class="star" style="color:var(--warn)">★</span><div><div class="title">HORIZON: Federated AI for cross-border cancer diagnostics</div><div class="sub">EU Funding &amp; Tenders Portal · RIA</div></div><div class="right"><span class="match">84% match</span><span class="deadline ok">2026-09-21</span></div></div>
+          <div class="call"><span class="star">☆</span><div><div class="title">Rapid response: AI tools for pathology training datasets</div><div class="sub">EU Funding &amp; Tenders Portal · CSA</div></div><div class="right"><span class="match low">must-include</span><span class="deadline soon">2026-07-03</span></div></div>
+          <div class="call"><span class="star">☆</span><div><div class="title">Marknadsintroduktion av AI-diagnostik i primärvården</div><div class="sub">Vinnova · innovation</div></div><div class="right"><span class="match low">61% match</span><span class="deadline ok">2026-09-01</span></div></div>
+          <div class="call"><span class="star">☆</span><div><div class="title">Strategisk forskningsinfrastruktur för AI-modeller</div><div class="sub">Vinnova · infrastructure</div></div><div class="right"><span class="match low">58% match</span><span class="deadline ok">2026-10-21</span></div></div>
+          <div class="call"><span class="star">☆</span><div><div class="title">Quantum sensing for environmental monitoring</div><div class="sub">EU Funding &amp; Tenders Portal · RIA</div></div><div class="right"><span class="match low">low</span><span class="deadline soon">2026-07-01</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="statusbar">
+    <span class="sb-item">◴ rank-drain · idle</span>
+    <span class="sb-item">⟳ synced 2m ago</span>
+    <span class="right"><span class="sb-item">8 calls</span><span class="sb-item">Profile: Digital Pathology AI</span><span class="sb-item">par.larsson</span></span>
+  </div>
+</div>
+
+<!-- ============ SCREEN 2: COCKPIT (workspace) ============ -->
+<div class="screen" id="screen-cockpit">
+  <div class="titlebar">
+    <div class="traffic"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span></div>
+    <div class="menus"><span>Call Manager</span></div>
+    <div class="title">proposal.md — Digital Pathology AI — Vinnova 2026</div>
+  </div>
+  <div class="body">
+    <!-- activity bar -->
+    <div class="activitybar">
+      <div class="ab-item" title="Calls">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h10l4 4v12H4z"/><path d="M14 4v4h4"/><path d="M7 12h8M7 15h8M7 9h3"/></svg>
+      </div>
+      <div class="ab-item active" title="Workspace">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4M3 17l9 4 9-4"/></svg>
+      </div>
+      <div class="ab-item" title="References">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"/><path d="M9 4v12"/></svg>
+      </div>
+      <div class="ab-spacer"></div>
+      <div class="ab-item" title="Profile">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>
+      </div>
+      <div class="ab-item" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.5 5.5l2 2M16.5 16.5l2 2M18.5 5.5l-2 2M7.5 16.5l-2 2"/></svg>
+      </div>
+    </div>
+    <!-- sidebar: outline + sections -->
+    <div class="sidebar">
+      <div class="side-title">Workspace <span style="color:var(--muted-2)">⋯</span></div>
+      <div class="side-group">▾ Outline · proposal.md</div>
+      <div class="side-section">
+        <div class="tree-row"><span class="ico">#</span> Summary</div>
+        <div class="tree-row"><span class="ico">#</span> Background</div>
+        <div class="tree-row"><span class="ico">#</span> Aims</div>
+        <div class="tree-row active"><span class="ico">#</span> Methods</div>
+        <div class="tree-row"><span class="ico">#</span> Expected Impact</div>
+        <div class="tree-row"><span class="ico">#</span> Budget &amp; Timeline</div>
+      </div>
+      <div class="side-group">▾ Workspace</div>
+      <div class="tree-row"><span class="ico">📚</span> References <span style="color:var(--muted-2);margin-left:auto">7</span></div>
+      <div class="tree-row"><span class="ico">✓</span> Criteria <span style="color:var(--muted-2);margin-left:auto">5</span></div>
+      <div class="tree-row"><span class="ico">⎇</span> Versions</div>
+      <div class="tree-row"><span class="ico">◷</span> Members <span style="color:var(--muted-2);margin-left:auto">2</span></div>
+    </div>
+    <!-- main: tabs + editor + panel -->
+    <div class="main cockpit">
+      <div class="tabs">
+        <div class="tab active"><span class="ico">✎</span> Draft <span class="x">×</span></div>
+        <div class="tab"><span class="ico" style="color:var(--muted)">❡</span> Spec</div>
+        <div class="tab"><span class="ico" style="color:var(--muted)">▤</span> Scorecard <span class="pill adequate" style="margin-left:2px">adequate</span></div>
+        <div class="tab"><span class="ico" style="color:var(--muted)">☷</span> Panel review</div>
+        <div class="grow"></div>
+        <div class="editor-actions"><span>Section</span><span style="color:#fff">¦</span><span>Full draft</span><span style="margin-left:6px;color:var(--accent-2)">⤓ Cite selection</span></div>
+      </div>
+      <div class="editor">
+        <div class="gutter">1
+2
+3
+4
+5
+6
+7
+8
+9
+10</div>
+        <div class="code"><span class="h1"># AI-Assisted Digital Pathology for Earlier Cancer Detection</span>
+
+<span class="h2">## Methods</span>
+We will fine-tune a vision transformer on <span class="num">40,000</span> annotated slides, then
+deploy behind a FastAPI service inside the hospital network. A prospective
+cohort of <span class="num">1,200</span> cases will be double-read (model-assisted vs. standard)
+to measure sensitivity, specificity, and time-to-diagnosis with
+pre-registered endpoints. <span class="em">[cite: Smith 2024]</span>
+</div>
+      </div>
+      <!-- bottom panel -->
+      <div class="panelwrap">
+        <div class="panel-tabs">
+          <div class="panel-tab">Inbox <span class="count">0</span></div>
+          <div class="panel-tab">Problems <span class="count warn">3</span></div>
+          <div class="panel-tab active">Activity</div>
+          <div class="panel-actions"><span>⟳</span><span>⤢</span><span>✕</span></div>
+        </div>
+        <div class="panel-body">
+          <div class="act-row"><span class="ico">⊘</span><span class="act-actor">par.larsson</span><span class="act-sum">dismissed an uncited claim</span><span class="act-time">· 3h ago</span><span class="act-go">Go to</span></div>
+          <div class="act-row"><span class="ico">✓</span><span class="act-actor">par.larsson</span><span class="act-sum">edited the funder criteria</span><span class="act-time">· 3h ago</span><span class="act-go">Go to</span></div>
+          <div class="act-row"><span class="ico">＋</span><span class="act-actor">par.larsson</span><span class="act-sum">added a citation</span><span class="act-time">· 3h ago</span><span class="act-go">Go to</span></div>
+          <div class="act-row"><span class="ico">✦</span><span class="act-actor">par.larsson</span><span class="act-sum">ran the assistant</span><span class="act-time">· 3h ago</span></div>
+          <div class="act-row"><span class="ico">✎</span><span class="act-actor">par.larsson</span><span class="act-sum">edited Methods ×3</span><span class="act-time">· 4h ago</span><span class="act-go">Go to</span></div>
+          <div class="act-row"><span class="ico">⚙</span><span class="act-actor">System</span><span class="act-sum">set up the funder criteria</span><span class="act-time">· 4h ago</span><span class="act-go">Go to</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="statusbar">
+    <span class="sb-item">⎇ main</span>
+    <span class="sb-item">Digital Pathology AI</span>
+    <span class="sb-item">⚠ Deadline 2026-08-07 (45d)</span>
+    <span class="sb-item">🔓 Spec: unlocked</span>
+    <span class="right"><span class="sb-item">Scorecard: adequate</span><span class="sb-item">✓ Saved</span><span class="sb-item">Ln 12, Col 1</span><span class="sb-item">Markdown</span></span>
+  </div>
+</div>
+
+</body>
+</html>
