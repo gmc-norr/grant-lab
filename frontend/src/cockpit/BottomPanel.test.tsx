@@ -12,6 +12,7 @@ vi.mock("../api/proposals", () => ({ useInboxCount: () => h.count }));
 vi.mock("../api/problems", () => ({ useProblems: () => h.problems }));
 vi.mock("./InboxPanel", () => ({ InboxPanel: () => <div>inbox-body</div> }));
 vi.mock("./ProblemsPanel", () => ({ ProblemsPanel: () => <div>problems-body</div> }));
+vi.mock("./ActivityPanel", () => ({ ActivityPanel: () => <div>activity-body</div> }));
 
 describe("BottomPanel", () => {
   it("renders badges and switches tabs", () => {
@@ -50,5 +51,34 @@ describe("BottomPanel", () => {
     expect(screen.queryByText("inbox-body")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /expand panel/i }));
     expect(onToggle).toHaveBeenCalled();
+  });
+
+  it("exposes the Activity tab and shows its body when active", () => {
+    const onTab = vi.fn();
+    const { rerender } = render(
+      <BottomPanel
+        id="ws1"
+        activeTab="inbox"
+        onTab={onTab}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+    const tab = screen.getByRole("tab", { name: /^activity$/i });
+    expect(tab).toBeInTheDocument();
+    fireEvent.click(tab);
+    expect(onTab).toHaveBeenCalledWith("activity");
+    rerender(
+      <BottomPanel
+        id="ws1"
+        activeTab="activity"
+        onTab={onTab}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("activity-body")).toBeInTheDocument();
   });
 });
