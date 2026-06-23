@@ -1,0 +1,75 @@
+/* frontend/src/theme/theme.css
+ * Custom dark "VS Code-style, our identity" palette. Imported AFTER
+ * @mantine/core/styles.css and AFTER the legacy styles/tokens.css so these
+ * declarations win the cascade. Two jobs:
+ *  1. Define the --app-* chrome variables the IDE shell uses.
+ *  2. Remap the legacy light --cm-* tokens (styles/tokens.css) to dark values
+ *     so the not-yet-reskinned Dashboard/Cockpit bodies read as a dark IDE
+ *     instead of light panels on a dark shell. Phases 2-3 rewrite those rules
+ *     onto --app-* and this remap block goes away. */
+
+:root {
+  --app-editor: #1a1b1e;
+  --app-sidebar: #202327;
+  --app-activitybar: #2a2d33;
+  --app-tabbar: #25282d;
+  --app-titlebar: #30343b;
+  --app-statusbar: #0f766e;
+  --app-accent: #14b8a6;
+  --app-accent-bright: #2dd4bf;
+  --app-link: #2dd4bf;
+  --app-text: #cdd2d8;
+  --app-muted: #969ca6; /* AA on editor/sidebar/activity-bar */
+  --app-muted-chrome: #9da3ad; /* lighter, for the title-bar surface */
+  --app-dim: #6e7681; /* timestamps / tertiary, dark surfaces only */
+  --app-border: #2c2f35;
+  --app-border-strong: #343941;
+  --app-hover: #25282e;
+  --app-selected: #0d3b38;
+  --app-good: #4ec9b0;
+  --app-warn: #cca700;
+  --app-bad: #f14c4c;
+  --app-heading: #4dc4d9;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--app-editor);
+  color: var(--app-text);
+  font-family:
+    -apple-system, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Phase-1 dark compatibility remap of the legacy --cm-* tokens. Specificity
+   :root[...] (0,2,0) matches styles/tokens.css's :root:not([data-theme=dark])
+   (0,2,0); this file is imported later, so it wins on source order. */
+:root[data-mantine-color-scheme="dark"] {
+  --cm-primary: #2dd4bf;
+  --cm-primary-hover: #5fe0d0;
+  --cm-primary-soft: #14302e;
+  --cm-primary-border: #1f4a46;
+  --cm-ink: #cdd2d8;
+  --cm-ink-strong: #ffffff;
+  --cm-ink-muted: #969ca6;
+  --cm-muted: #969ca6;
+  --cm-canvas: #1a1b1e;
+  --cm-surface: #202327;
+  --cm-surface-sunken: #1d2024;
+  --cm-border: #2c2f35;
+  --cm-border-soft: #25282d;
+
+  --cm-good-text: #4ec9b0;
+  --cm-good-bg: #11302b;
+  --cm-good-border: #1f5048;
+  --cm-warn-text: #e0b341;
+  --cm-warn-bg: #322a12;
+  --cm-warn-border: #5a4a1c;
+  --cm-bad-text: #f4807f;
+  --cm-bad-bg: #3a1f1f;
+  --cm-bad-border: #5e2e2e;
+  --cm-neutral-text: #969ca6;
+  --cm-neutral-bg: #25282d;
+  --cm-neutral-border: #2c2f35;
+  --cm-deadline-soon: #f14c4c;
+  --cm-deadline-watch: #e0b341;
+}
