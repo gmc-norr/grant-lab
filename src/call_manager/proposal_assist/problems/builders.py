@@ -29,6 +29,7 @@ def _row(
     top_tab: str | None = None,
     bottom_tab: str | None = None,
     section_index: int | None = None,
+    claim_hash: str | None = None,
 ) -> dict:
     # Coerce untrusted inputs (a completed scorecard's JSONB can carry null/str
     # fields) so a malformed row can never break order_problems' sort key, which
@@ -43,13 +44,18 @@ def _row(
     target = None
     if top_tab is not None or bottom_tab is not None or si is not None:
         target = {"top_tab": top_tab, "bottom_tab": bottom_tab, "section_index": si}
-    return {
+    row = {
         "category": category,
         "severity": severity,
         "title": "" if title is None else str(title),
         "detail": "" if detail is None else str(detail),
         "target": target,
     }
+    # Additive: only uncited_claim rows carry a claim_hash (so the panel can dismiss them).
+    # Existing rows omit the key entirely.
+    if claim_hash is not None:
+        row["claim_hash"] = claim_hash
+    return row
 
 
 def over_length_problems(sections: list[Section], budget: int) -> list[dict]:
@@ -180,12 +186,50 @@ def coherence_drift_problem(count: int) -> dict | None:
     )
 
 
+def _truncate(text: str, n: int = 80) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def uncited_claim_problems(claims: list[dict], dismissed: set[str], *, cap: int = 10) -> list[dict]:
+    """Up to `cap` warning rows for the latest completed uncited-claims result, filtering
+    out dismissed claim_hashes; if more remain, one '+ N more' roll-up tail row. Pure — no
+    `stale` parameter (staleness is the separate top-level uncited_claims_stale flag)."""
+    kept = [c for c in (claims or []) if c.get("claim_hash") not in dismissed]
+    rows: list[dict] = []
+    for c in kept[:cap]:
+        rows.append(
+            _row(
+                "uncited_claim",
+                "warning",
+                _truncate(c.get("claim_text") or ""),
+                c.get("reason") or "",
+                top_tab="draft",
+                bottom_tab="problems",
+                section_index=c.get("section_index"),
+                claim_hash=c.get("claim_hash"),
+            )
+        )
+    extra = len(kept) - cap
+    if extra > 0:
+        rows.append(
+            _row(
+                "uncited_claim",
+                "warning",
+                f"+ {extra} more uncited claims",
+                "",
+            )
+        )
+    return rows
+
+
 _SEVERITY_RANK = {"error": 0, "warning": 1}
 _CATEGORY_RANK = {
     "broken_citation": 0,
     "criterion_gap": 1,
     "over_length": 2,
     "coherence_drift": 3,
+    "uncited_claim": 4,
 }
 
 

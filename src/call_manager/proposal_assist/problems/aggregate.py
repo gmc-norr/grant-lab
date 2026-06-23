@@ -31,6 +31,11 @@ from call_manager.proposal_assist.problems.builders import (
     ledger_unreadable_problem,
     order_problems,
     over_length_problems,
+    uncited_claim_problems,
+)
+from call_manager.proposal_assist.uncited_claims.jobs import (
+    dismissed_claim_hashes,
+    latest_completed_uncited_claims_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,6 +134,19 @@ def assemble_problems(
     except Exception:
         logger.exception("problems: coherence_drift signal failed")
 
+    # 5. uncited claims (LLM) — latest completed pass; dismissed hashes filtered out.
+    uncited_claims_stale = False
+    try:
+        uc_job = latest_completed_uncited_claims_job(session, workspace_id=workspace_id)
+        if uc_job is not None:
+            dismissed = dismissed_claim_hashes(session, workspace_id=workspace_id)
+            uncited_claims_stale = uc_job.evaluated_draft_sha != content_sha(
+                repo_dir / PROPOSAL_FILENAME
+            )
+            rows += uncited_claim_problems(uc_job.claims or [], dismissed)
+    except Exception:
+        logger.exception("problems: uncited_claim signal failed")
+
     # Final ordering is the one step outside the per-signal try-blocks; guard it too
     # so the never-500 contract holds even against an un-coerced row (counts are a
     # total tally over the same set, so they're computed regardless of sort order).
@@ -142,4 +160,5 @@ def assemble_problems(
         "problems": ordered,
         "counts": counts,
         "scorecard_stale": scorecard_stale,
+        "uncited_claims_stale": uncited_claims_stale,
     }
