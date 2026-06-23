@@ -1,6 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import type { RouteObject } from "react-router-dom";
 import { expect, it } from "vitest";
 
 import { theme } from "../theme/theme";
@@ -31,4 +32,31 @@ it("renders the chrome regions and the routed outlet content", () => {
   expect(screen.getByLabelText("Primary")).toBeInTheDocument(); // activity bar
   expect(screen.getByLabelText("Status bar")).toBeInTheDocument(); // status bar
   expect(screen.getByText("ROUTED BODY")).toBeInTheDocument(); // <Outlet/>
+});
+
+function renderShellWithRoutes(route: string, children: RouteObject[]) {
+  const router = createMemoryRouter([{ element: <AppShell />, children }], {
+    initialEntries: [route],
+  });
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <RouterProvider router={router} />
+    </MantineProvider>,
+  );
+}
+
+it("renders the sidebar region when the active route declares handle.Sidebar", () => {
+  function TestSidebar() {
+    return <p>SIDEBAR CONTENT</p>;
+  }
+  renderShellWithRoutes("/", [
+    { index: true, element: <p>BODY</p>, handle: { Sidebar: TestSidebar } },
+  ]);
+  expect(screen.getByLabelText("Sidebar")).toBeInTheDocument();
+  expect(screen.getByText("SIDEBAR CONTENT")).toBeInTheDocument();
+});
+
+it("omits the sidebar region when no matched route declares one", () => {
+  renderShellWithRoutes("/", [{ index: true, element: <p>BODY</p> }]);
+  expect(screen.queryByLabelText("Sidebar")).toBeNull();
 });

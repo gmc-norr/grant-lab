@@ -1,0 +1,7 @@
+.sidebar {
+  flex: 0 0 240px;
+  min-height: 0;
+  overflow: auto;
+  background: var(--app-sidebar);
+  border-right: 1px solid var(--app-border);
+}
