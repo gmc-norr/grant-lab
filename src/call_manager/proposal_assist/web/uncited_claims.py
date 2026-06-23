@@ -100,17 +100,22 @@ def start_uncited_claims_run(
         session, workspace_id=workspace_id, settings=request.app.state.settings
     ):
         raise HTTPException(status_code=429, detail="daily uncited-claims budget reached")
-    job = enqueue_uncited_claims_run(session, workspace_id=workspace_id, requested_by=user.id)
-    # Trigger event on NEWLY-created runs only (mirrors review_run_triggered) — never when
-    # the active-first branch above returns an existing run, so a second POST can't duplicate.
-    session.add(
-        WorkspaceEvent(
-            workspace_id=workspace_id,
-            kind="uncited_claims_run_triggered",
-            actor_id=user.id,
-            payload={"job_id": str(job.id)},
-        )
+    job, created = enqueue_uncited_claims_run(
+        session, workspace_id=workspace_id, requested_by=user.id
     )
+    # Trigger event on NEWLY-created runs ONLY (mirrors review_run_triggered). `created`
+    # is True only when this call inserted the job, so neither the active-first branch
+    # above NOR a concurrent POST that lost the active-unique race (re-reading the winner)
+    # can emit a duplicate event for one job.
+    if created:
+        session.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="uncited_claims_run_triggered",
+                actor_id=user.id,
+                payload={"job_id": str(job.id)},
+            )
+        )
     session.commit()
     return _serialize_run(job)
 

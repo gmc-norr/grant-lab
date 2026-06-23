@@ -18,9 +18,14 @@ from call_manager.proposal_assist.turns.caps import _stockholm_day_start_utc
 
 def enqueue_uncited_claims_run(
     session: Session, *, workspace_id: uuid.UUID, requested_by: int | None
-) -> UncitedClaimsJob:
+) -> tuple[UncitedClaimsJob, bool]:
     """Create a queued job, or return the existing active (queued|running) one.
-    Race-safe against uq_uncited_claims_jobs_active via a SAVEPOINT."""
+
+    Returns (job, created): ``created`` is True ONLY when this call inserted a new
+    job. The caller uses it to write the one-shot trigger event exactly once — even
+    when two concurrent POSTs both pass an active pre-check, the loser of the
+    partial-unique race re-reads the winner and gets created=False, so no duplicate
+    event. Race-safe against uq_uncited_claims_jobs_active via a SAVEPOINT."""
     existing = session.scalar(
         select(UncitedClaimsJob).where(
             UncitedClaimsJob.workspace_id == workspace_id,
@@ -28,7 +33,7 @@ def enqueue_uncited_claims_run(
         )
     )
     if existing is not None:
-        return existing
+        return existing, False
     job = UncitedClaimsJob(workspace_id=workspace_id, status="queued", requested_by=requested_by)
     try:
         with session.begin_nested():
@@ -47,8 +52,8 @@ def enqueue_uncited_claims_run(
             raise RuntimeError(
                 "uncited-claims enqueue lost the active-unique race but found no active job"
             ) from None
-        return winner
-    return job
+        return winner, False
+    return job, True
 
 
 def claim_next_uncited_claims_job(session: Session) -> UncitedClaimsJob | None:

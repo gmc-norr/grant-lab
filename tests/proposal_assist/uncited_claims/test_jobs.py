@@ -10,11 +10,14 @@ def test_enqueue_create_or_return_active(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
-        a = jobs.enqueue_uncited_claims_run(s, workspace_id=ws.id, requested_by=None)
+        a, a_created = jobs.enqueue_uncited_claims_run(s, workspace_id=ws.id, requested_by=None)
         s.commit()
-        b = jobs.enqueue_uncited_claims_run(s, workspace_id=ws.id, requested_by=None)
+        b, b_created = jobs.enqueue_uncited_claims_run(s, workspace_id=ws.id, requested_by=None)
         s.commit()
-        assert a.id == b.id
+        assert a.id == b.id  # returns the existing active job
+        # created is True only on the insert; the dedup return is False, so the endpoint
+        # writes the one-shot trigger event exactly once even under concurrent POSTs.
+        assert a_created is True and b_created is False
 
 
 def test_claim_picks_queued_skips_running(pg_session_factory):
