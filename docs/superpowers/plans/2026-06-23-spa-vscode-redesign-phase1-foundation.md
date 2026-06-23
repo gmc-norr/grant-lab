@@ -72,9 +72,9 @@
 
 Run (in `frontend/`):
 ```bash
-pnpm add @mantine/core@^9 @mantine/hooks@^9 @vscode/codicons @uiw/codemirror-theme-vscode@^4
+pnpm add @mantine/core@9.4.0 @mantine/hooks@9.4.0 @vscode/codicons@0.0.45 @uiw/codemirror-theme-vscode@4.25.10
 ```
-This writes exact versions to `package.json` + `pnpm-lock.yaml`. (`@uiw/codemirror-theme-vscode` is installed now per the spec; it is wired into the editor in Phase 3 — unused in P1 is fine, it is a dependency, not an import.)
+Pin exact versions on the command line — `.npmrc`'s `save-exact=true` does **not** override an explicit `^`/`~` range passed on the CLI (pnpm 10.16 writes the range verbatim), so an `@^9` here would land a caret in `package.json` and violate the repo's exact-pin policy. With the exact versions above, `package.json` + `pnpm-lock.yaml` both get exact pins. (`@uiw/codemirror-theme-vscode` is installed now per the spec; it is wired into the editor in Phase 3 — unused in P1 is fine, it is a dependency, not an import.)
 
 Expected: `package.json` `dependencies` now contains the four packages; `pnpm install` completes without error.
 
@@ -691,10 +691,15 @@ it("Workspaces, Profiles and Settings deep-link to their Jinja pages", () => {
   );
 });
 
-it("the current-workspace item appears only inside a cockpit", () => {
+it("hides the current-workspace item outside a cockpit", () => {
   renderWithProviders(<ActivityBar />, { route: "/" });
   expect(screen.queryByRole("link", { name: "Current workspace" })).toBeNull();
+});
 
+// Separate test: a second render in the same test would leave two ActivityBars
+// mounted (RTL only cleans up between tests), so `getByRole("link", { name:
+// "Calls" })` would throw on the duplicate. Each test does a single render.
+it("shows the current-workspace item inside a cockpit and deactivates Calls", () => {
   renderWithProviders(<ActivityBar />, { route: "/cockpit/abc" });
   const ws = screen.getByRole("link", { name: "Current workspace" });
   expect(ws).toHaveAttribute("href", "/cockpit/abc");
