@@ -13,14 +13,19 @@
 ## Global Constraints
 
 - **Package manager pnpm 10.16 (Node ≥ 20).** Run `pnpm install` after any `package.json` change.
-- **Gate after every task, both green, from `frontend/`:** `pnpm exec tsc --noEmit` AND `pnpm vitest run`. There is no TS linter — `tsc` is the gate (`strict`, `noUnusedLocals`, `noUnusedParameters`: no unused imports/params).
+- **Gate after every task, all green, from `frontend/`:** `pnpm exec tsc --noEmit` AND `pnpm vitest run` AND `pnpm build`. There is no TS linter — `tsc` is the gate (`strict`, `noUnusedLocals`, `noUnusedParameters`: no unused imports/params); `pnpm build` (`tsc && vite build`) additionally catches bundle/import regressions. (Every task — Tasks 1–6 — runs all three.)
 - **No backend, API, or DB changes.** `/api/calls` and `POST /api/me/default-profile` are consumed as-is. No new SPA routes; `router.test.tsx` drift guard stays green.
 - **Re-skin, not rewrite.** Preserve behavior + component contracts (spec §6). The exact behaviors to keep: read-only URL filter state; Profile selection persists the default (`POST /api/me/default-profile`) **awaited first**, then reflects via a **functional** `setSearchParams` updater; selects bind to **server-resolved** `effective.*`; `useDashboard` poll-while-pending + drain-refetch; `unwrap` 401→`/login`; titles are plain `/calls/{id}` anchors.
 - **Theme tokens only, dark-first.** Use the `--app-*` variables from `frontend/src/theme/theme.css`; no hardcoded hex in component CSS. Key tokens: `--app-link #2dd4bf`, `--app-good #4ec9b0`, `--app-warn #cca700`, `--app-bad #f14c4c`, `--app-muted #969ca6`, `--app-dim #6e7681`, `--app-sidebar #202327`, `--app-border #2c2f35`, `--app-hover #25282e`.
 - **MatchBadge bands** (frontend map on `aggregate_score`, rounded): strong ≥ 80 → `--app-good`; good 60–79 → `--app-muted`; < 60 → `--app-dim`; all share one chip surface (`--app-hover`); a null score renders no badge. **Deadline** (keep `deadlineView` logic): closed → `--app-dim`; soon ≤ 14d → `--app-bad`; watch ≤ 30d → `--app-warn`; open → `--app-muted`.
 - **Header "top matches" count is `summary.high_score` displayed verbatim** (server: open, profile-scoped, `aggregate_score ≥ 70`) — NOT recomputed from badge bands.
-- **Git:** work in the worktree `.worktrees/spa-vscode-redesign-phase2` on branch `feat/spa-vscode-redesign-phase2` (off `master`). Subagents must `git -C <abs-worktree-path>` and verify the branch before committing. Commit with `git -c commit.gpgsign=false`; end every message with:
-  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+- **Git — every commit uses THIS exact form** (the per-task snippets below show the same form; do not substitute a bare `git commit`). All work is in the worktree `WT=/home/parlar_ai/dev/call-monitor/.worktrees/spa-vscode-redesign-phase2` on branch `feat/spa-vscode-redesign-phase2` (off `master`). Dispatched subagents default git/cwd to the MAIN tree (the WRONG branch), so **before any commit** run `git -C "$WT" branch --show-current` and confirm it prints exactly `feat/spa-vscode-redesign-phase2`. Then:
+  ```bash
+  git -C "$WT" add <paths>
+  git -C "$WT" -c commit.gpgsign=false commit -m "<message>
+
+  Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+  ```
 
 ---
 
@@ -173,14 +178,16 @@ export function AppShell() {
 
 - [ ] **Step 5: Run the full suite + tsc**
 
-Run: `pnpm exec tsc --noEmit && pnpm vitest run`
+Run: `pnpm exec tsc --noEmit && pnpm vitest run && pnpm build`
 Expected: PASS — the two new AppShell tests pass; the existing "renders the chrome regions" test still passes (its route declares no handle → no sidebar); all other suites green.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/src/shell/AppShell.tsx frontend/src/shell/Sidebar.tsx frontend/src/shell/Sidebar.module.css frontend/src/shell/AppShell.test.tsx
-git commit -m "feat(spa): route-driven sidebar region in the AppShell"
+git -C "$WT" add frontend/src/shell/AppShell.tsx frontend/src/shell/Sidebar.tsx frontend/src/shell/Sidebar.module.css frontend/src/shell/AppShell.test.tsx
+git -C "$WT" -c commit.gpgsign=false commit -m "feat(spa): route-driven sidebar region in the AppShell
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
@@ -266,14 +273,16 @@ export function MatchBadge({ score }: { score: number | null }) {
 
 - [ ] **Step 4: Run to verify pass + gate**
 
-Run: `pnpm exec tsc --noEmit && pnpm vitest run`
+Run: `pnpm exec tsc --noEmit && pnpm vitest run && pnpm build`
 Expected: PASS — both MatchBadge tests green; suite green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/components/MatchBadge.tsx frontend/src/components/MatchBadge.module.css frontend/src/components/MatchBadge.test.tsx
-git commit -m "feat(spa): banded MatchBadge score pill"
+git -C "$WT" add frontend/src/components/MatchBadge.tsx frontend/src/components/MatchBadge.module.css frontend/src/components/MatchBadge.test.tsx
+git -C "$WT" -c commit.gpgsign=false commit -m "feat(spa): banded MatchBadge score pill
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
@@ -374,14 +383,16 @@ In `frontend/src/routes/Dashboard.module.css`: delete the `.closed`, `.soon`, `.
 
 - [ ] **Step 5: Run the suite + tsc**
 
-Run: `pnpm exec tsc --noEmit && pnpm vitest run`
+Run: `pnpm exec tsc --noEmit && pnpm vitest run && pnpm build`
 Expected: PASS — `Deadline.test.tsx` green; `Dashboard.test.tsx` still green (Dashboard renders the imported `<Deadline>` identically); no unused-symbol tsc errors.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/src/routes/Deadline.tsx frontend/src/routes/Deadline.module.css frontend/src/routes/Deadline.test.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.module.css
-git commit -m "refactor(spa): extract + reskin Deadline out of Dashboard"
+git -C "$WT" add frontend/src/routes/Deadline.tsx frontend/src/routes/Deadline.module.css frontend/src/routes/Deadline.test.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.module.css
+git -C "$WT" -c commit.gpgsign=false commit -m "refactor(spa): extract + reskin Deadline out of Dashboard
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
@@ -529,15 +540,17 @@ In `frontend/src/routes/Dashboard.module.css`, add:
 
 - [ ] **Step 6: Update Dashboard.test list expectations (if any) + run**
 
-Run: `pnpm exec tsc --noEmit && pnpm vitest run`
+Run: `pnpm exec tsc --noEmit && pnpm vitest run && pnpm build`
 If `Dashboard.test.tsx` asserts on the old `<li>` inner structure, update those assertions to the `CallRow` output (title is a `link` to `/calls/{id}`; score is a `data-band` badge). The filter/profile tests are unaffected.
 Expected: PASS — CallRow tests green; Dashboard suite green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add frontend/src/api/dashboard.ts frontend/src/routes/CallRow.tsx frontend/src/routes/CallRow.module.css frontend/src/routes/CallRow.test.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.module.css
-git commit -m "feat(spa): reskin the calls list with CallRow + MatchBadge"
+git -C "$WT" add frontend/src/api/dashboard.ts frontend/src/routes/CallRow.tsx frontend/src/routes/CallRow.module.css frontend/src/routes/CallRow.test.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.module.css
+git -C "$WT" -c commit.gpgsign=false commit -m "feat(spa): reskin the calls list with CallRow + MatchBadge
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
@@ -657,11 +670,14 @@ it("selecting a Source writes ?source= and resets the page", async () => {
   });
 });
 
-it("selecting a Profile persists the default FIRST, then reflects it in the URL", async () => {
+it("selecting a Profile persists FIRST: the URL updates only after the POST resolves", async () => {
+  // Hold the POST unresolved so the test PROVES the URL doesn't change before
+  // persistence (a resolved-immediately mock would pass even if order were wrong).
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData() as never);
+  let resolvePost: (v: unknown) => void = () => {};
   const POST = vi
     .spyOn(clientMod.api, "POST")
-    .mockResolvedValue({ data: { ok: true }, error: undefined, response: new Response() } as never);
+    .mockReturnValue(new Promise((res) => (resolvePost = res)) as never);
   const user = userEvent.setup();
   renderWithProviders(
     <>
@@ -672,9 +688,34 @@ it("selecting a Profile persists the default FIRST, then reflects it in the URL"
   );
   await user.click(await screen.findByLabelText("Profile"));
   await user.click(await screen.findByRole("option", { name: "Group H" }));
-  await waitFor(() => expect(POST).toHaveBeenCalled());
-  expect(POST.mock.calls[0][1]).toMatchObject({ body: { profile_id: 9 } });
+  await waitFor(() =>
+    expect(POST).toHaveBeenCalledWith("/api/me/default-profile", { body: { profile_id: 9 } }),
+  );
+  // URL must NOT reflect the selection until the POST resolves (persist-first).
+  expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
+  resolvePost({ data: { ok: true }, error: undefined, response: new Response() });
   await waitFor(() => expect(screen.getByTestId("search").textContent).toContain("profile=9"));
+});
+
+it("a failed persist leaves the URL unchanged and surfaces an error", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData() as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "x", message: "no" } },
+    response: new Response(),
+  } as never);
+  const user = userEvent.setup();
+  renderWithProviders(
+    <>
+      <CallsFilters />
+      <LocationProbe />
+    </>,
+    { route: "/" },
+  );
+  await user.click(await screen.findByLabelText("Profile"));
+  await user.click(await screen.findByRole("option", { name: "Group H" }));
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/default profile/i));
+  expect(screen.getByTestId("search").textContent).not.toContain("profile=9");
 });
 
 it("renders without crashing while the query is loading (facet selects disabled)", async () => {
@@ -684,6 +725,19 @@ it("renders without crashing while the query is loading (facet selects disabled)
   expect((await screen.findByLabelText("Profile")) as HTMLInputElement).toBeDisabled();
   expect((screen.getByLabelText("Source")) as HTMLInputElement).toBeDisabled();
   // Sort + Show-closed bind to the URL and stay usable.
+  expect(screen.getByLabelText("Sort")).not.toBeDisabled();
+  expect(screen.getByLabelText("Show closed")).toBeInTheDocument();
+});
+
+it("renders without crashing when /api/calls errors before any data exists", async () => {
+  // No-prior-data error path (the other half of the loading/error contract).
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+    data: undefined,
+    error: { error: { code: "x", message: "boom" } },
+    response: new Response(null, { status: 500 }),
+  } as never);
+  renderWithProviders(<CallsFilters />, { route: "/" });
+  expect((await screen.findByLabelText("Profile")) as HTMLInputElement).toBeDisabled();
   expect(screen.getByLabelText("Sort")).not.toBeDisabled();
   expect(screen.getByLabelText("Show closed")).toBeInTheDocument();
 });
@@ -850,8 +904,10 @@ Expected: PASS — CallsFilters green; Dashboard green (no unused `useSetDefault
 - [ ] **Step 10: Commit**
 
 ```bash
-git add frontend/package.json frontend/pnpm-lock.yaml frontend/src/test-setup.ts frontend/src/api/dashboard.ts frontend/src/routes/CallsFilters.tsx frontend/src/routes/CallsFilters.module.css frontend/src/routes/CallsFilters.test.tsx frontend/src/router.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.test.tsx
-git commit -m "feat(spa): move calls filters into the sidebar (CallsFilters)"
+git -C "$WT" add frontend/package.json frontend/pnpm-lock.yaml frontend/src/test-setup.ts frontend/src/api/dashboard.ts frontend/src/routes/CallsFilters.tsx frontend/src/routes/CallsFilters.module.css frontend/src/routes/CallsFilters.test.tsx frontend/src/router.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.test.tsx
+git -C "$WT" -c commit.gpgsign=false commit -m "feat(spa): move calls filters into the sidebar (CallsFilters)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
@@ -998,8 +1054,10 @@ Expected: PASS — DashboardHeader green; Dashboard green; `pnpm build` succeeds
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/src/routes/DashboardHeader.tsx frontend/src/routes/DashboardHeader.module.css frontend/src/routes/DashboardHeader.test.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.module.css
-git commit -m "feat(spa): dashboard header strip (breadcrumb + counts + sign-out)"
+git -C "$WT" add frontend/src/routes/DashboardHeader.tsx frontend/src/routes/DashboardHeader.module.css frontend/src/routes/DashboardHeader.test.tsx frontend/src/routes/Dashboard.tsx frontend/src/routes/Dashboard.module.css
+git -C "$WT" -c commit.gpgsign=false commit -m "feat(spa): dashboard header strip (breadcrumb + counts + sign-out)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
