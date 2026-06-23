@@ -106,6 +106,10 @@ class ToolContext:
     # origin_job_id=<review_runs.id>.
     review_run_item_id: uuid.UUID | None = field(default=None)
 
+    # SP2b-3d: the uncited-claims pass pins the draft section count it scanned, so
+    # submit_uncited_claims validates each claim's section_index against the SAME draft.
+    uncited_draft_section_count: int | None = field(default=None)
+
     # SP2a-2 §3 (Task 2): section_index -> section sha as the agent saw them at
     # read time (populated by read_proposal_impl, HEAD-first). propose_edit reads
     # base_section_sha from here; an unread section is rejected (_NOT_READ_ERROR).
@@ -630,6 +634,7 @@ def _collect_tools(ctx: ToolContext) -> list:
     )
     from call_manager.proposal_assist.tools.review_submit import submit_review_impl
     from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+    from call_manager.proposal_assist.tools.uncited_claims import submit_uncited_claims_impl
 
     @tool(
         "validate_citations",
@@ -753,6 +758,43 @@ def _collect_tools(ctx: ToolContext) -> list:
             markdown=args.get("markdown", ""),
         )
 
+    @tool(
+        "submit_uncited_claims",
+        "Submit the COMPLETE list of uncited factual claims found in the DRAFT, exactly "
+        "once. Each entry needs `claim_text` (the VERBATIM assertion text, copied from the "
+        "section so it is locatable), `section_index` (the 0-based [§index] it appears in), "
+        "and a one-line `reason` (why it needs a citation). Flag only factual/empirical "
+        "assertions lacking an adjacent citation marker; EXCLUDE the applicant's own "
+        "proposed work, common knowledge, and already-cited statements. Submit an empty "
+        "list if the draft has no uncited claims. You have no other tools.",
+        {
+            "type": "object",
+            "properties": {
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "claim_text": {"type": "string"},
+                            "section_index": {"type": "integer"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["claim_text", "section_index", "reason"],
+                    },
+                }
+            },
+            "required": ["claims"],
+        },
+    )
+    async def submit_uncited_claims(args):
+        return await _safe_tool(
+            "submit_uncited_claims",
+            ctx,
+            submit_uncited_claims_impl,
+            ctx,
+            claims=args.get("claims") or [],
+        )
+
     return [
         read_proposal,
         # SP2a-2 — propose-only mutation
@@ -788,4 +830,6 @@ def _collect_tools(ctx: ToolContext) -> list:
         submit_scorecard,
         # SP2b-3c — mock-panel review (the review sub-call's ONLY tool)
         submit_review,
+        # SP2b-3d — uncited-claims (the uncited-claims pass's ONLY tool)
+        submit_uncited_claims,
     ]

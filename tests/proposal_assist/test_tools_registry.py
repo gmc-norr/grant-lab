@@ -53,9 +53,10 @@ def _make_ctx():
 
 def test_collect_tools_returns_expected_named_tools():
     """The full collected tool surface: 21 interactive tools (post-SP2a-2 19 +
-    SP2b-2b's read_spec + propose_spec_edit) PLUS the two background-only submit
+    SP2b-2b's read_spec + propose_spec_edit) PLUS the three background-only submit
     tools that share the MCP server but are not interactively allowlisted —
-    submit_scorecard (SP2b-3a) and submit_review (SP2b-3c). 21 + 2 = 23.
+    submit_scorecard (SP2b-3a), submit_review (SP2b-3c), and
+    submit_uncited_claims (SP2b-3d). 21 + 3 = 24.
 
     `_collect_tools` builds the shared MCP server consumed by EVERY adapter
     (interactive + each background adapter), so the background submit tools must
@@ -93,8 +94,9 @@ def test_collect_tools_returns_expected_named_tools():
         # background adapter — never interactively)
         "submit_scorecard",  # SP2b-3a evaluator
         "submit_review",  # SP2b-3c mock-panel
+        "submit_uncited_claims",  # SP2b-3d uncited-claims
     }
-    assert len(tools) == 23
+    assert len(tools) == 24
 
 
 @pytest.mark.asyncio

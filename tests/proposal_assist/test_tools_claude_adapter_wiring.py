@@ -183,11 +183,16 @@ def test_every_collected_tool_is_allowlisted(_settings_env):
         _collect_tools,
         build_proposal_assist_mcp_server,
     )
+    from call_manager.proposal_assist.uncited_claims.agent import uncited_claims_allowed_tools
 
     # Background-only submit tools, sourced from the background adapters that own
     # them (not a hand-maintained literal — so a new background tool that forgets
     # to update this set trips the assertions below).
-    background_only = set(evaluator_allowed_tools()) | set(review_allowed_tools())
+    background_only = (
+        set(evaluator_allowed_tools())
+        | set(review_allowed_tools())
+        | set(uncited_claims_allowed_tools())
+    )
 
     wsid = _uuid.uuid4()
     ctx = ToolContext(
