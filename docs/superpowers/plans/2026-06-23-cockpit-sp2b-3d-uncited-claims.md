@@ -563,7 +563,7 @@ def dismissed_claim_hashes(session: Session, *, workspace_id: uuid.UUID) -> set[
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest tests/proposal_assist/uncited_claims/test_jobs.py -p no:cacheprovider -q`
-Expected: `7 passed`.
+Expected: `8 passed`.
 
 - [ ] **Step 5: Lint + commit**
 
@@ -935,6 +935,66 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   - `assemble_uncited_claims_context(*, session, workspace_id, workspaces_dir) -> UncitedClaimsContext` with fields `instruction: str`, `draft_section_count: int`, `section_texts: dict[int, str]`, `draft_sha: str`.
   - `run_uncited_claims_pass(*, job_id, session_factory, settings, adapter_builder=build_uncited_claims_adapter) -> None`
   - `drain_uncited_claims_queue_tick(*, session_factory, settings, adapter_builder=build_uncited_claims_adapter) -> None`
+- Produces: the six `Settings.uncited_claims_*` fields (added here so this task is independently runnable; the scheduler in Task 6 reuses them).
+
+- [ ] **Step 0: Add the six config fields** (this task's `pass_runner` reads them via `Settings()`, so they land here, not in Task 6). In `src/call_manager/config.py`, after the evaluator block (after `evaluator_daily_token_cap`, ~line 289, before the `# SP2b-3c` review block):
+
+```python
+    # SP2b-3d: on-demand uncited-claims (LLM) check (a single background pass).
+    uncited_claims_tick_seconds: int = Field(
+        default=20,
+        alias="UNCITED_CLAIMS_TICK_SECONDS",
+        description="How often the uncited-claims drain tick claims+runs one queued pass. "
+        "Manual-only, so this just bounds latency from click to run.",
+    )
+    uncited_claims_pass_timeout_seconds: int = Field(
+        default=180,
+        alias="UNCITED_CLAIMS_PASS_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the uncited-claims SDK turn "
+        "(launch+drive). On timeout the one-shot adapter is terminated and the job is failed.",
+    )
+    uncited_claims_job_timeout_seconds: int = Field(
+        default=300,
+        alias="UNCITED_CLAIMS_JOB_TIMEOUT_SECONDS",
+        description="Reaper TTL: a running uncited-claims job older than this is failed "
+        "(crash/restart recovery), unwedging the workspace's active-unique slot.",
+    )
+    uncited_claims_reaper_tick_seconds: int = Field(
+        default=60,
+        alias="UNCITED_CLAIMS_REAPER_TICK_SECONDS",
+        description="How often the uncited-claims reaper sweep RUNS (decoupled from the TTL).",
+    )
+    uncited_claims_terminate_timeout_seconds: int = Field(
+        default=30,
+        alias="UNCITED_CLAIMS_TERMINATE_TIMEOUT_SECONDS",
+        description="In-pass asyncio.wait_for bound on the one-shot adapter's terminate() "
+        "cleanup. A hung SDK disconnect must not leak the pass coroutine.",
+    )
+    uncited_claims_daily_token_cap: int = Field(
+        default=200_000,
+        alias="UNCITED_CLAIMS_DAILY_TOKEN_CAP",
+        description="Per-workspace daily ceiling on combined input+output tokens spent by "
+        "uncited-claims passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
+    )
+```
+
+Then add the config smoke test — `tests/proposal_assist/uncited_claims/test_config.py`:
+
+```python
+from call_manager.config import Settings
+
+
+def test_uncited_claims_config_defaults(_settings_env):
+    s = Settings()
+    assert s.uncited_claims_tick_seconds == 20
+    assert s.uncited_claims_pass_timeout_seconds == 180
+    assert s.uncited_claims_job_timeout_seconds == 300
+    assert s.uncited_claims_reaper_tick_seconds == 60
+    assert s.uncited_claims_terminate_timeout_seconds == 30
+    assert s.uncited_claims_daily_token_cap == 200_000
+```
+
+Run: `uv run pytest tests/proposal_assist/uncited_claims/test_config.py -p no:cacheprovider -q` → `1 passed`.
 
 - [ ] **Step 1: Write the context test** — `tests/proposal_assist/uncited_claims/test_context.py`:
 
@@ -1183,6 +1243,43 @@ async def test_no_submission_fails(tmp_path, pg_session_factory, _settings_env):
 
 
 @pytest.mark.asyncio
+async def test_late_finalize_records_tokens_without_resurrecting(
+    tmp_path, pg_session_factory, _settings_env
+):
+    # spec §3: if the reaper/cancel failed the job between the turn and finalize, DON'T
+    # resurrect it — but still record the tokens it spent so the daily cap stays honest.
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        job = _running_job(s, ws.id)
+        s.commit()
+        ws_id, job_id = ws.id, job.id
+    _seed_repo(tmp_path, ws_id)
+
+    class _Adapter(FakeAgentAdapter):
+        async def send_turn(self, handle, user_message):
+            # simulate the reaper/cancel finalizing the job DURING the turn, after spend
+            with pg_session_factory() as s:
+                j = s.get(UncitedClaimsJob, job_id)
+                j.claims = [{"claim_text": "30% relapse", "section_index": 1, "reason": "r"}]
+                j.status = "failed"
+                j.error = "timed out"
+                s.commit()
+            yield TurnDoneEvent(tokens_in=42, tokens_out=7, model="m", session_id="s")
+
+    await run_uncited_claims_pass(
+        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        adapter_builder=lambda **kw: _Adapter(),
+    )
+    with pg_session_factory() as s:
+        job = s.get(UncitedClaimsJob, job_id)
+        assert job.status == "failed"  # not resurrected to completed
+        assert job.input_tokens == 42 and job.output_tokens == 7  # late spend still counted
+
+
+@pytest.mark.asyncio
 async def test_timeout_on_launch_fails(tmp_path, pg_session_factory, _settings_env):
     settings = Settings()
     settings.workspaces_dir = str(tmp_path)
@@ -1393,11 +1490,24 @@ async def run_uncited_claims_pass(
             except Exception:  # noqa: BLE001
                 logger.exception("uncited-claims adapter terminate failed for job %s", job_id)
 
-    # 2. Finalize under a row lock; ONLY if still running AND the tool wrote a list (None ->
-    #    the model never submitted). Apply the substring filter + hash + dedupe over the raw.
+    # 2. Finalize under a row lock. ALWAYS record token/session accounting when a
+    #    TurnDoneEvent arrived — even if the reaper/cancel already failed the job
+    #    mid-pass — so late spend still counts toward the daily cap (spec §3: "don't
+    #    resurrect it; still roll up tokens", mirroring review/pass_runner.py). Only
+    #    status/claims/completed_at are gated on the job still running.
     with session_factory() as s:
         job = s.get(UncitedClaimsJob, job_id, with_for_update=True)
-        if job is None or job.status != "running":
+        if job is None:
+            s.commit()
+            return
+        if done is not None:
+            job.input_tokens = done.tokens_in or 0
+            job.output_tokens = done.tokens_out or 0
+            job.model = done.model
+            job.sdk_session_id = done.session_id
+        if job.status != "running":
+            # The reaper (TTL) or a soft-delete cancel finalized the job mid-pass. Don't
+            # resurrect it (no status/claims change) — but keep the tokens recorded above.
             s.commit()
             return
         if job.claims is None:
@@ -1407,11 +1517,6 @@ async def run_uncited_claims_pass(
         job.claims = _finalize_claims(job.claims, section_texts)
         job.status = "completed"
         job.completed_at = datetime.now(UTC)
-        if done is not None:
-            job.input_tokens = done.tokens_in or 0
-            job.output_tokens = done.tokens_out or 0
-            job.model = done.model
-            job.sdk_session_id = done.session_id
         s.commit()
 
 
@@ -1438,15 +1543,15 @@ async def drain_uncited_claims_queue_tick(
 
 > The `section_texts` JSONB keys come back as Python `int`s (the tool validated `section_index` as an int and SQLAlchemy round-trips JSON numbers to int), so `section_texts.get(si, "")` matches. Note `section_texts` is built in the read session and held as a local across the `await` — it is plain data (a dict), not a DB object, so it is safe to use after the session closes.
 
-- [ ] **Step 6: Run the pass_runner test** (note: Task 4's `Settings()` reads the six `uncited_claims_*` fields — they are added in Task 6. To run Task 4 in isolation BEFORE Task 6, temporarily reference `settings.evaluator_pass_timeout_seconds`/`evaluator_terminate_timeout_seconds`/`evaluator_daily_token_cap`; OR sequence Task 6's config field addition before this run. **Recommended: do Task 6 Step "config fields" first, then run.** If executing strictly in order, add the six config fields now as a prerequisite — they are listed verbatim in Task 6 Step C.)
+- [ ] **Step 6: Run the pass_runner test** (the six `uncited_claims_*` config fields were added in Step 0, so this task is self-contained):
 
 Run: `uv run pytest tests/proposal_assist/uncited_claims/test_pass_runner.py -p no:cacheprovider -q`
-Expected: `5 passed`.
+Expected: `6 passed`.
 
 - [ ] **Step 7: Lint + commit**
 
 ```bash
-uv run ruff check src/call_manager/proposal_assist/uncited_claims/context.py src/call_manager/proposal_assist/uncited_claims/pass_runner.py tests/proposal_assist/uncited_claims/test_context.py tests/proposal_assist/uncited_claims/test_pass_runner.py
+uv run ruff check src/call_manager/config.py src/call_manager/proposal_assist/uncited_claims/context.py src/call_manager/proposal_assist/uncited_claims/pass_runner.py tests/proposal_assist/uncited_claims/test_config.py tests/proposal_assist/uncited_claims/test_context.py tests/proposal_assist/uncited_claims/test_pass_runner.py
 uv run ruff format src/call_manager/proposal_assist/uncited_claims/context.py src/call_manager/proposal_assist/uncited_claims/pass_runner.py
 git -C .worktrees/sp2b-3d-uncited-claims add -A
 git -C .worktrees/sp2b-3d-uncited-claims -c commit.gpgsign=false commit -m "feat(uncited-claims): context + pass_runner (substring filter + hash/dedupe)
@@ -1734,69 +1839,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Files:**
 - Create: `src/call_manager/proposal_assist/web/uncited_claims.py`
 - Modify: `src/call_manager/config.py`, `src/call_manager/scheduler.py`, `src/call_manager/main.py`, `src/call_manager/proposal_assist/web/workspaces.py`
-- Test: `tests/proposal_assist/uncited_claims/test_web.py`, `tests/proposal_assist/uncited_claims/test_soft_delete.py`, `tests/proposal_assist/uncited_claims/test_scheduler_wiring.py`, `tests/proposal_assist/uncited_claims/test_config.py`
+- Test: `tests/proposal_assist/uncited_claims/test_web.py`, `tests/proposal_assist/uncited_claims/test_soft_delete.py`, `tests/proposal_assist/uncited_claims/test_scheduler_wiring.py` (config + `test_config.py` landed in Task 4 Step 0)
 
 **Interfaces:**
 - Produces: `POST /api/workspaces/{id}/uncited-claims-runs` (response_model `UncitedClaimsRunOut`), `GET .../uncited-claims-runs/latest` (response_model `UncitedClaimsLatestOut | None`), `POST .../uncited-claims/{claim_hash}/dismiss` (response_model `OkOut`); six `Settings.uncited_claims_*` fields; scheduler jobs `uncited_claims_drain` + `uncited_claims_reaper`.
 
-- [ ] **Step A: Add the six config fields** — in `src/call_manager/config.py`, after the evaluator block (after `evaluator_daily_token_cap`, ~line 289, before the `# SP2b-3c` review block):
-
-```python
-    # SP2b-3d: on-demand uncited-claims (LLM) check (a single background pass).
-    uncited_claims_tick_seconds: int = Field(
-        default=20,
-        alias="UNCITED_CLAIMS_TICK_SECONDS",
-        description="How often the uncited-claims drain tick claims+runs one queued pass. "
-        "Manual-only, so this just bounds latency from click to run.",
-    )
-    uncited_claims_pass_timeout_seconds: int = Field(
-        default=180,
-        alias="UNCITED_CLAIMS_PASS_TIMEOUT_SECONDS",
-        description="In-pass asyncio.wait_for bound on the uncited-claims SDK turn "
-        "(launch+drive). On timeout the one-shot adapter is terminated and the job is failed.",
-    )
-    uncited_claims_job_timeout_seconds: int = Field(
-        default=300,
-        alias="UNCITED_CLAIMS_JOB_TIMEOUT_SECONDS",
-        description="Reaper TTL: a running uncited-claims job older than this is failed "
-        "(crash/restart recovery), unwedging the workspace's active-unique slot.",
-    )
-    uncited_claims_reaper_tick_seconds: int = Field(
-        default=60,
-        alias="UNCITED_CLAIMS_REAPER_TICK_SECONDS",
-        description="How often the uncited-claims reaper sweep RUNS (decoupled from the TTL).",
-    )
-    uncited_claims_terminate_timeout_seconds: int = Field(
-        default=30,
-        alias="UNCITED_CLAIMS_TERMINATE_TIMEOUT_SECONDS",
-        description="In-pass asyncio.wait_for bound on the one-shot adapter's terminate() "
-        "cleanup. A hung SDK disconnect must not leak the pass coroutine.",
-    )
-    uncited_claims_daily_token_cap: int = Field(
-        default=200_000,
-        alias="UNCITED_CLAIMS_DAILY_TOKEN_CAP",
-        description="Per-workspace daily ceiling on combined input+output tokens spent by "
-        "uncited-claims passes (Europe/Stockholm day). A pass is blocked pre-run once reached.",
-    )
-```
-
-- [ ] **Step B: Config smoke test** — `tests/proposal_assist/uncited_claims/test_config.py`:
-
-```python
-from call_manager.config import Settings
-
-
-def test_uncited_claims_config_defaults(_settings_env):
-    s = Settings()
-    assert s.uncited_claims_tick_seconds == 20
-    assert s.uncited_claims_pass_timeout_seconds == 180
-    assert s.uncited_claims_job_timeout_seconds == 300
-    assert s.uncited_claims_reaper_tick_seconds == 60
-    assert s.uncited_claims_terminate_timeout_seconds == 30
-    assert s.uncited_claims_daily_token_cap == 200_000
-```
-
-Run: `uv run pytest tests/proposal_assist/uncited_claims/test_config.py -p no:cacheprovider -q` → `1 passed`.
+- [ ] **Steps A–B (config): already done in Task 4 Step 0.** The six `Settings.uncited_claims_*` fields + `test_config.py` landed there so Task 4 was self-contained. Nothing to add here — just confirm `Settings().uncited_claims_tick_seconds == 20` resolves (it does if Task 4 Step 0 was applied).
 
 - [ ] **Step C: Write the endpoint test** — `tests/proposal_assist/uncited_claims/test_web.py`. Mirrors `evaluator/test_web_evaluator.py`:
 
@@ -1835,6 +1883,22 @@ def test_post_create_or_return_active(
     b = client_authed_owner.post(f"/api/workspaces/{ws_id}/uncited-claims-runs")
     assert a.status_code == 200 and b.status_code == 200
     assert a.json()["id"] == b.json()["id"]
+
+
+def test_trigger_event_written_once_on_new_run_only(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
+    client_authed_owner.post(f"/api/workspaces/{ws_id}/uncited-claims-runs")  # creates a run
+    client_authed_owner.post(f"/api/workspaces/{ws_id}/uncited-claims-runs")  # returns active
+    with pg_session_factory() as s:
+        events = (
+            s.query(WorkspaceEvent)
+            .filter_by(workspace_id=uuid.UUID(ws_id), kind="uncited_claims_run_triggered")
+            .all()
+        )
+        assert len(events) == 1  # only the first POST (new run) wrote the trigger event
+        assert events[0].payload["job_id"]
 
 
 def test_latest_null_then_running_claims_null(
@@ -2002,6 +2066,16 @@ def start_uncited_claims_run(
     ):
         raise HTTPException(status_code=429, detail="daily uncited-claims budget reached")
     job = enqueue_uncited_claims_run(session, workspace_id=workspace_id, requested_by=user.id)
+    # Trigger event on NEWLY-created runs only (mirrors review_run_triggered) — never when
+    # the active-first branch above returns an existing run, so a second POST can't duplicate.
+    session.add(
+        WorkspaceEvent(
+            workspace_id=workspace_id,
+            kind="uncited_claims_run_triggered",
+            actor_id=user.id,
+            payload={"job_id": str(job.id)},
+        )
+    )
     session.commit()
     return _serialize_run(job)
 
@@ -2207,13 +2281,13 @@ async def test_build_scheduler_registers_uncited_claims_ticks(monkeypatch, pg_ur
 
 - [ ] **Step J: Run all Task-6 tests**
 
-Run: `uv run pytest tests/proposal_assist/uncited_claims/test_web.py tests/proposal_assist/uncited_claims/test_soft_delete.py tests/proposal_assist/uncited_claims/test_scheduler_wiring.py tests/proposal_assist/uncited_claims/test_config.py -p no:cacheprovider -q`
-Expected: all pass. (Re-run any `connection refused` in isolation.)
+Run: `uv run pytest tests/proposal_assist/uncited_claims/test_web.py tests/proposal_assist/uncited_claims/test_soft_delete.py tests/proposal_assist/uncited_claims/test_scheduler_wiring.py -p no:cacheprovider -q`
+Expected: all pass (test_web has 8 cases incl. the trigger-event-once + claims-null-while-running guards). (Re-run any `connection refused` in isolation.)
 
 - [ ] **Step K: Lint + commit**
 
 ```bash
-uv run ruff check src/call_manager/proposal_assist/web/uncited_claims.py src/call_manager/config.py src/call_manager/scheduler.py src/call_manager/main.py src/call_manager/proposal_assist/web/workspaces.py tests/proposal_assist/uncited_claims/test_web.py tests/proposal_assist/uncited_claims/test_soft_delete.py tests/proposal_assist/uncited_claims/test_scheduler_wiring.py tests/proposal_assist/uncited_claims/test_config.py
+uv run ruff check src/call_manager/proposal_assist/web/uncited_claims.py src/call_manager/scheduler.py src/call_manager/main.py src/call_manager/proposal_assist/web/workspaces.py tests/proposal_assist/uncited_claims/test_web.py tests/proposal_assist/uncited_claims/test_soft_delete.py tests/proposal_assist/uncited_claims/test_scheduler_wiring.py
 uv run ruff format src/call_manager/proposal_assist/web/uncited_claims.py
 git -C .worktrees/sp2b-3d-uncited-claims add -A
 git -C .worktrees/sp2b-3d-uncited-claims -c commit.gpgsign=false commit -m "feat(uncited-claims): endpoints + soft-delete cancel + config + scheduler
@@ -2549,12 +2623,11 @@ Expected: all green. Re-run any `connection refused` file in isolation.
 
 **1. Spec coverage** — every spec section maps to a task:
 - §0 locked decisions → enforced across Tasks 1–7 (distinct event kind §0.3 → Tasks 2/6; soft-delete §0.6 → Tasks 2/6; per-claim cap+tail §0.2 → Task 5; JSONB §0.5 → Task 1; section-level deep-link §0.4 → Task 5 builder target).
-- §1 migration+model → Task 1. §2 prompt contract → Task 4 `_ROLE`. §3 package → Tasks 2/4 (+ agent helper in Task 3). §4 submit tool → Task 3. §5 Problems integration → Task 5. §6 endpoints → Task 6. §7 config+scheduler → Task 6. §8 frontend → Task 7. §9 testing → tests in every task. §10 file map → File Structure section. §11 build decomposition → the 7 tasks (note: agent.py moved into Task 3 so the wiring-test union can source `uncited_claims_allowed_tools()`). §12 out-of-scope → not built (Activity feed = SP2b-3e).
+- §1 migration+model → Task 1. §2 prompt contract → Task 4 `_ROLE`. §3 package → Tasks 2/4 (+ agent helper in Task 3); late-write token roll-up (don't resurrect; still roll up tokens) → Task 4 finalize. §4 submit tool → Task 3. §5 Problems integration → Task 5. §6 endpoints (incl. `uncited_claims_run_triggered` WorkspaceEvent on new runs only) → Task 6. §7 config → Task 4 Step 0; scheduler → Task 6. §8 frontend → Task 7. §9 testing → tests in every task. §10 file map → File Structure section. §11 build decomposition → the 7 tasks (note: agent.py moved into Task 3 so the wiring-test union can source `uncited_claims_allowed_tools()`; config moved into Task 4 Step 0 so each task is independently runnable). §12 out-of-scope → not built (Activity feed = SP2b-3e).
 
 **2. Placeholder scan** — no TBD/TODO/"handle errors"; every code step shows complete code; every test step shows real assertions.
 
 **3. Type consistency** — `claim_hash` (str), `section_index` (int), `claims` (list), `uncited_claims_stale` (bool top-level), `evaluated_draft_sha` (str). `submit_uncited_claims_impl(ctx, *, claims)`, `uncited_claim_problems(claims, dismissed, *, cap=10)` (no `stale`), `build_uncited_claims_adapter(..., draft_section_count)`, `uncited_claims_allowed_tools()`, `assemble_uncited_claims_context(...) -> {instruction, draft_section_count, section_texts, draft_sha}` — names consistent across tasks and matched to the spec.
 
-**Two cross-task sequencing notes for the executor:**
-- Task 4's `pass_runner` test constructs `Settings()` and reads `uncited_claims_*` fields — those land in Task 6 Step A. If executing strictly task-by-task, do Task 6 Step A (the six config fields) before Task 4 Step 6, or run Task 4's pass_runner test after Task 6 Step A.
-- Task 7 Step 1 (regen) requires Task 6's response_models to be on disk.
+**One cross-task sequencing note for the executor:**
+- Task 7 Step 1 (regen) requires Task 6's response_models to be on disk. (Config now lands in Task 4 Step 0, so every other task is independently runnable as written.)

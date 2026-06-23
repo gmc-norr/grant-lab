@@ -236,8 +236,11 @@ from SP2b-3c: bare-dict endpoints emit no schema and hide client/server drift):
 
 - `POST /{id}/uncited-claims-runs` → enqueue. `gate_cloud_llm(disclosure_action=
   "checking for uncited claims")`; **active-first** (return the active job if one
-  exists, else cap-check then enqueue + write a `WorkspaceEvent`); 429 on cap.
-  Returns the run DTO.
+  exists, else cap-check then enqueue + write a
+  `WorkspaceEvent(kind="uncited_claims_run_triggered", payload={"job_id": …})`) — the
+  event is written on the **NEW run only**, never when returning an active one, so a
+  second POST can't duplicate it (mirrors the sibling `review_run_triggered`); 429 on
+  cap. Returns the run DTO.
 - `GET /{id}/uncited-claims-runs/latest` → latest job state + `stale` flag
   (drives the panel's run button + status). **`claims` is returned only when
   `status=="completed"`** — the finalized hashed/filtered shape from §3; for any
