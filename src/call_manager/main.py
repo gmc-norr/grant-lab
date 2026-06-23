@@ -64,6 +64,9 @@ from call_manager.proposal_assist.web.sections import (
 from call_manager.proposal_assist.web.uncited_claims import (
     router as uncited_claims_router,
 )
+from call_manager.proposal_assist.web.activity import (
+    router as activity_router,
+)
 from call_manager.proposal_assist.web.workspaces import (
     router as workspaces_router,
 )
@@ -555,6 +558,7 @@ def create_app() -> FastAPI:
     app.include_router(review_router)
     app.include_router(problems_router)
     app.include_router(uncited_claims_router)
+    app.include_router(activity_router)
     app.include_router(annotations_router)
     app.include_router(files_router)
     app.include_router(references_router)
