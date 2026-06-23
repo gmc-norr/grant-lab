@@ -43,6 +43,7 @@
 - `frontend/src/api/activity.ts` (new) — `useActivity` hook + generated types.
 - `frontend/src/cockpit/ActivityPanel.tsx` (new) — the panel + local `toNav` + `formatRelativeTime`.
 - `frontend/src/cockpit/ActivityPanel.test.tsx` (new).
+- `frontend/src/styles/cockpit.css` (modify) — add `.activity-*` styles (the panel uses them; no styles exist yet).
 - `frontend/src/cockpit/BottomPanel.tsx` (modify) — third tab button + body branch.
 - `frontend/src/cockpit/BottomPanel.test.tsx` (modify) — assert the third tab.
 
@@ -482,10 +483,10 @@ Create `tests/proposal_assist/activity/test_web.py`:
 
 ```python
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from call_manager.db.models import User, WorkspaceEvent
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _ws(_app, current_user, pg_session_factory, tmp_path):
@@ -567,6 +568,44 @@ def test_activity_tiebreak_is_deterministic(
     body = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity").json()
     # equal created_at -> id DESC, so the larger uuid (hi) comes first
     assert body["items"][0]["id"] == str(hi)
+
+
+def test_activity_non_member_403(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    # A workspace owned by a stranger: current_user is authed but is neither
+    # owner nor a viewer, so require_member returns 403 (the workspace EXISTS,
+    # so this is distinct from the 404 path).
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        stranger = make_user(s, email="stranger@ki.se")
+        other = make_workspace(s, owner=stranger, current_phase="active")
+        s.commit()
+        other_id = other.id
+    r = client_authed_owner.get(f"/api/workspaces/{other_id}/activity")
+    assert r.status_code == 403
+
+
+def test_activity_limit_window_caps_at_100(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
+    base = datetime(2026, 6, 23, 12, 0, 0, tzinfo=UTC)
+    with pg_session_factory() as s:
+        # 105 non-collapsing events (only user_edit collapses) at distinct times.
+        for i in range(105):
+            s.add(
+                WorkspaceEvent(
+                    workspace_id=ws_id,
+                    kind="created",
+                    actor_id=current_user.id,
+                    created_at=base + timedelta(seconds=i),
+                )
+            )
+        s.commit()
+    body = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity").json()
+    # Only the newest 100 raw events are considered; each renders one row.
+    assert len(body["items"]) == 100
 
 
 def test_activity_unknown_workspace_404(
@@ -695,7 +734,7 @@ And register it immediately after the `uncited_claims_router` include (after lin
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/proposal_assist/activity/test_web.py -v`
-Expected: PASS — 6 passed. (If any test reports `connection refused`, re-run that file alone before treating it as a real failure — the testcontainer Postgres is flaky under load.)
+Expected: PASS — 8 passed. (If any test reports `connection refused`, re-run that file alone before treating it as a real failure — the testcontainer Postgres is flaky under load.)
 
 - [ ] **Step 6: Commit**
 
@@ -718,6 +757,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Regenerate: `frontend/src/api/schema.gen.ts`
 - Create: `frontend/src/api/activity.ts`
 - Create: `frontend/src/cockpit/ActivityPanel.tsx`
+- Modify: `frontend/src/styles/cockpit.css` (append `.activity-*` rules)
 - Test: `frontend/src/cockpit/ActivityPanel.test.tsx`
 
 **Interfaces:**
@@ -941,7 +981,46 @@ export function ActivityPanel({ id, onNavigate }: { id: string; onNavigate: OnNa
 }
 ```
 
-- [ ] **Step 7: Run the test + type-check to verify they pass**
+- [ ] **Step 7: Add the panel's styles**
+
+Append to `frontend/src/styles/cockpit.css` (the file currently styles only the bottom-panel/inbox/problems classes; the panel's `activity-*` classes have no rules yet, so without this the actor is not emphasized and the `<ul>` renders with default bullets/margins). Match the existing calm-clinical `--cm-*` variable conventions:
+
+```css
+/* SP2b-3e — Activity feed */
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.activity-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.25rem 0;
+  font-size: 0.9rem;
+}
+.activity-actor {
+  font-weight: 600;
+}
+.activity-time {
+  color: var(--cm-muted, #5b6b73);
+}
+.activity-act {
+  margin-left: auto;
+}
+.activity-empty,
+.activity-loading {
+  color: var(--cm-muted, #5b6b73);
+  padding: 0.75rem;
+}
+.activity-error {
+  color: var(--cm-error, #c53030);
+  padding: 0.5rem;
+}
+```
+
+- [ ] **Step 8: Run the test + type-check to verify they pass**
 
 From `frontend/`:
 Run: `pnpm vitest run src/cockpit/ActivityPanel.test.tsx`
@@ -949,7 +1028,7 @@ Expected: PASS — 3 passed.
 Run: `pnpm exec tsc --noEmit`
 Expected: no output (exit 0).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git -C .worktrees/sp2b-3e-activity-feed add \
@@ -957,8 +1036,9 @@ git -C .worktrees/sp2b-3e-activity-feed add \
   frontend/src/api/schema.gen.ts \
   frontend/src/api/activity.ts \
   frontend/src/cockpit/ActivityPanel.tsx \
-  frontend/src/cockpit/ActivityPanel.test.tsx
-git -C .worktrees/sp2b-3e-activity-feed -c commit.gpgsign=false commit -m "feat(activity): ActivityPanel + useActivity hook + nav/types
+  frontend/src/cockpit/ActivityPanel.test.tsx \
+  frontend/src/styles/cockpit.css
+git -C .worktrees/sp2b-3e-activity-feed -c commit.gpgsign=false commit -m "feat(activity): ActivityPanel + useActivity hook + nav/types/styles
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
