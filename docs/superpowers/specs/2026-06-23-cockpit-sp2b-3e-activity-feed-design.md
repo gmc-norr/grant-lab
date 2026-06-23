@@ -68,9 +68,15 @@ Walking the newest-first event stream, a **maximal run of consecutive `user_edit
 the same actor** becomes a single row:
 
 - `count` = the number of events in the run.
-- Summary: if every event in the run shares the same `payload["heading"]` →
-  `edited {heading}`, with ` ×N` appended when `count > 1`; if the headings differ →
-  `made N edits`.
+- Summary (heading is `payload.get("heading")`, which may be missing or blank — the spec-init
+  `user_edit` emits no heading, see `web/api/workspaces.py`):
+  - exactly one distinct **non-blank** heading across the run, and no blank/missing ones →
+    `edited {heading}`;
+  - otherwise, if all events share one artifact → `edited the spec` / `edited the draft`
+    (by artifact);
+  - otherwise (blank heading on a mixed-artifact run) → `made N edits`.
+
+  ` ×N` is appended to the first two forms when `count > 1` (the third already carries N).
 - Target: derived from the run's `payload["artifact"]` — if all events share one artifact,
   `spec`-valued artifact → `top_tab="spec"`, otherwise `top_tab="draft"`; on a mixed run,
   default `top_tab="draft"`. (Artifact matching is case-insensitive: an artifact string
@@ -85,10 +91,16 @@ every other kind renders one row per event (`count == 1`).
 
 ### 2.3 Render + target map
 
-`actor` = `actor_id` resolved to the user's email, or `None` (frontend renders "System") when
-`actor_id` is null or absent from the resolved names map. Targets are constrained to the
-existing `TopTab` (`draft|spec|scorecard|review`) and `BottomTab` (`inbox|problems|activity`)
-values — no new navigation plumbing is introduced.
+**Actor resolution.** Each event resolves to a single "actor user id" via `actor_user_id(event)`:
+`event.actor_id` when set, else a per-kind `payload` fallback. The only kind needing the
+fallback is **`rubric_edited`**, which leaves `actor_id` null and stores the editor in
+`payload["edited_by_user_id"]` (`web/rubric_review.py`). `actor` is that id resolved to the
+user's email, or `None` (frontend renders "System") when no id is available or the id is absent
+from the resolved names map. **`rubric_initialized` always renders as "System"** — it carries
+no user id in `actor_id` or payload (it is templated seeding from the call's extracted rubrics),
+so this is intentional, not a gap. Targets are constrained to the existing `TopTab`
+(`draft|spec|scorecard|review`) and `BottomTab` (`inbox|problems|activity`) values — no new
+navigation plumbing is introduced.
 
 | kind(s) | category | summary | target |
 |---|---|---|---|
@@ -128,9 +140,14 @@ list** (unlike Problems, which groups by category).
 1. `require_member(workspace_id=…, user=…, session=…)`.
 2. Fetch the most recent 100 events:
    `select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == workspace_id)
-   .order_by(WorkspaceEvent.created_at.desc()).limit(100)` (uses
-   `ix_workspace_events_ws_created`).
-3. Resolve actor names in one batched query over the distinct non-null `actor_id`s:
+   .order_by(WorkspaceEvent.created_at.desc(), WorkspaceEvent.id.desc()).limit(100)` (uses
+   `ix_workspace_events_ws_created`). The `id desc` tie-breaker makes ordering — and therefore
+   edit-collapse boundaries — deterministic when `created_at` ties (it is a DB default, and
+   same-transaction inserts can share a timestamp). `id` is a random UUID, so the tie-break is
+   deterministic, not semantically chronological — acceptable for stable rendering.
+3. Resolve actor names in one batched query over the distinct actor user ids — i.e.
+   `{actor_user_id(e) for e in events}` minus `None`, which folds in the `rubric_edited`
+   `payload["edited_by_user_id"]` fallback as well as plain `actor_id`s:
    `select(User.id, User.email).where(User.id.in_(actor_ids))` → `{id: email}` (no N+1).
 4. `rows = build_activity_feed(events, actor_names)`.
 5. `return {"items": [row.as_dict() for row in rows]}`.
@@ -211,17 +228,24 @@ tab label is simply "Activity".
 - **Collapse:** three consecutive same-actor same-`heading` edits → one row `edited Methods ×3`
   with `count == 3`; mixed headings → `made 3 edits`; a turn or other-actor event between two
   edits → two separate edit rows (chronology preserved); an actor boundary splits a run.
+- **Missing/blank heading:** a lone spec-init `user_edit` (payload `{artifact: "spec"}`, no
+  `heading`) → `edited the spec` (not `edited None`); a run mixing a headed draft edit and a
+  blank-heading draft edit → `edited the draft ×2`; a run mixing blank headings across draft
+  and spec artifacts → `made N edits`.
 - **Render/target table:** one assertion per category — e.g. `review_run_triggered` →
   `summary == "started a panel review"` and `target.top_tab == "review"`;
   `uncited_claim_dismissed` → `target.bottom_tab == "problems"`; `reference.added` →
   `target is None`; `user_edit` with a spec vs draft artifact → correct `top_tab`.
 - **Actor:** `actor_id` resolves to email; null `actor_id` → `actor is None`; an id absent from
-  the names map → `None` (defensive). Output is newest-first; a collapsed row's `id`/
-  `created_at` come from its most-recent event.
+  the names map → `None` (defensive). **`rubric_edited`** (no `actor_id`) resolves via
+  `payload["edited_by_user_id"]`; **`rubric_initialized`** → `actor is None` ("System"). Output
+  is newest-first; a collapsed row's `id`/`created_at` come from its most-recent event.
 
 **Endpoint tests (testcontainer Postgres):** non-member → 403; missing workspace → 404; happy
 path seeds a few `WorkspaceEvent`s and asserts ordered `items` and expected summaries; the
-actor join resolves email vs `None`; the `limit 100` window is honored. (Run these files in
+actor join resolves email vs `None` and folds in the `rubric_edited`
+`payload["edited_by_user_id"]` fallback; two events sharing one `created_at` come back in
+`id desc` order deterministically; the `limit 100` window is honored. (Run these files in
 isolation — full `uv run pytest` is testcontainer-flaky.)
 
 **Frontend (vitest):** `ActivityPanel` renders actor/summary/relative-time, shows "Go to" only
