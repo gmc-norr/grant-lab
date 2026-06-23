@@ -1,16 +1,19 @@
 # SPA Redesign — VS Code-style UI on Mantine — Design
 
 **Status:** design approved (look signed off via mockup) 2026-06-23
-**Visual reference:** `docs/superpowers/specs/2026-06-23-spa-vscode-redesign-mockup.html` (static HTML mockup of both surfaces, approved)
+**Visual reference:** `docs/superpowers/specs/2026-06-23-spa-vscode-redesign-mockup.html` (static HTML mockup of both surfaces, **teal/slate palette, approved**)
 
 ## 0. Summary
 
 Redesign the **React SPA** (the funding-calls dashboard + the proposal cockpit) into a
 cohesive **VS Code-style** application: one persistent IDE shell (activity bar, sidebar,
-editor tabs, bottom panel, status bar), a **dark-first** VS Code theme, built on the
-**Mantine v9** component library plus **Codicons** (VS Code's icon font) and a VS Code
-**CodeMirror** theme. This is a deliberate new visual direction — we are **not** matching
-the existing calm-clinical look; the old `--cm-*` teal system is superseded for the SPA.
+editor tabs, bottom panel, status bar), **dark-first**, built on the **Mantine v9**
+component library plus **Codicons** (VS Code's icon font) and a VS Code **CodeMirror**
+editor theme. We adopt VS Code's *structure and chrome* but **our own dark palette** — a
+teal/cyan accent that carries the hospital's calm-clinical teal heritage forward, on cooler
+slate surfaces — so the app reads as our own tool, **not a VS Code clone**. The old *light*
+calm-clinical `--cm-*` UI system is superseded for the SPA (we are dark now); its teal hue
+lives on as the accent.
 
 The work is the whole SPA, executed in three independently-shippable phases:
 **① Foundation → ② Dashboard → ③ Cockpit.** Light theme, a command palette, and restyling
@@ -24,21 +27,22 @@ the server-rendered **Jinja pages** (login/profile/admin) are explicit follow-on
 - The SPA already carries design **tokens** (`frontend/src/styles/tokens.css`, the `--cm-*`
   palette) and a partial `cockpit.css`, but lacks the layers that *use* them: base
   typography, an app shell, and styled components.
-- Rather than finish the calm-clinical look, we are changing direction to a VS Code
-  aesthetic — a natural fit, because the cockpit is **already architected like VS Code**
+- Rather than finish the light calm-clinical look, we change direction to a VS Code-style
+  dark IDE — a natural fit, because the cockpit is **already architected like VS Code**
   (CodeMirror editor center, outline rail = sidebar, Inbox/Problems/Activity = panel,
-  Draft/Spec/Scorecard = editor tabs).
+  Draft/Spec/Scorecard = editor tabs). We keep VS Code's chrome but recolor to our own
+  teal/slate palette, carrying the calm-clinical teal forward as the accent.
 
 ## 2. Decisions (locked)
 
 | Decision | Choice |
 |---|---|
-| Visual language | **VS Code** (new direction; calm-clinical superseded for the SPA) |
+| Visual language | **VS Code-style IDE shell + our own dark palette** (teal heritage accent on slate surfaces; *not* a VS Code clone). Old *light* calm-clinical UI superseded for the SPA |
 | Component kit | **Mantine v9** (CSS-modules, no CSS-in-JS runtime, 120+ components, CSS-variable theming) |
 | Styling paradigm | Mantine theme + CSS modules + plain CSS. **No Tailwind**, no second UI kit |
 | Icons | **`@vscode/codicons`** (VS Code's official icon font; CC-BY-4.0) |
-| Editor theme | **`@uiw/codemirror-theme-vscode`** (ships dark + light; matches the cockpit's CodeMirror) |
-| Color scheme | **Dark-first**; light is a fast-follow (Mantine + the CM theme + the palette already support both) |
+| Editor theme | **`@uiw/codemirror-theme-vscode`** as the dark base (ships dark + light), **with headings/accents recolored toward the teal palette** (a small theme extension) so the editor coheres with the chrome |
+| Color scheme | **Dark-first**, **custom teal/slate palette** (see §4); light is a fast-follow (Mantine + the CM theme + the palette support both) |
 | IDE chrome | Visual style everywhere **+ core chrome**: activity bar, sidebar, editor tabs, bottom panel, status bar, slim title bar. **Command palette deferred** |
 | Shell model | **One unified shell** wrapping the whole SPA; the activity bar switches top-level views. v1 SPA-native views are **Calls** (`/`) and the **active Workspace / cockpit** (`/cockpit/:id`) — the only routes the SPA owns today; other activity-bar items deep-link to existing Jinja pages until migrated |
 | Scope | Whole SPA, phased Foundation → Dashboard → Cockpit. **Jinja pages = separate follow-on** (restyle or migrate) |
@@ -56,32 +60,35 @@ Code-splitting the cockpit route from the dashboard route is a candidate optimiz
 
 ## 4. Theme system
 
-A single **Mantine theme object** is the source of truth, encoding the VS Code Dark palette
+A single **Mantine theme object** is the source of truth, encoding our **custom dark palette**
 as CSS variables. The legacy `tokens.css` `--cm-*` variables are **retired for the SPA** (or
 remapped onto the new theme where `cockpit.css` still references them, until those rules are
-rewritten in Phase 3). Reference palette (VS Code Dark+):
+rewritten in Phase 3). Palette — VS Code-style structure, our teal/slate identity (the
+approved teal mockup is the reference):
 
 | Role | Value |
 |---|---|
-| editor background | `#1e1e1e` |
-| sidebar background | `#252526` |
-| activity bar | `#333333` |
-| tab bar / inactive tab | `#2d2d2d` |
-| title bar | `#3c3c3c` |
-| status bar | `#007acc` (accent) |
-| primary accent | `#007acc` |
-| link | `#4daafc` |
-| text / muted (editor) / muted (chrome) | `#cccccc` / `#858585` / ~`#9d9d9d` (see §8) |
-| list hover / selected | `#2a2d2e` / `#094771` |
+| editor background | `#1a1b1e` |
+| sidebar background | `#202327` |
+| activity bar | `#2a2d33` |
+| tab bar / inactive tab | `#25282d` |
+| title bar | `#30343b` |
+| status bar | `#0f766e` (heritage teal) |
+| primary accent | `#14b8a6` (teal); bright accent `#2dd4bf` |
+| link | `#2dd4bf` |
+| text / muted / dim | `#cdd2d8` / `#969ca6` / `#6e7681` (per-surface notes in §8) |
+| list hover / selected | `#25282e` / `#0d3b38` (teal-tinted) |
 | good / warn / bad | `#4ec9b0` / `#cca700` / `#f14c4c` |
-| editor heading / string | `#569cd6` / `#ce9178` |
+| editor heading / string | `#4dc4d9` (cyan) / `#ce9178` |
 
 - **Type:** UI font `-apple-system, "Segoe UI", system-ui, …`; editor/monospace
   `"Cascadia Code", "Consolas", ui-monospace, …`. Dense IDE spacing; small radii (~4px).
 - **Codicons** replace the mockup's placeholder glyphs (activity bar, tree rows, tabs, panel,
   status bar).
-- **Favicon/identity:** a VS Code-dark favicon has already been prototyped
-  (`src/call_manager/web/static/favicon.svg` + `frontend/index.html` link); fold it in.
+- **Favicon/identity:** a dark **proposal-doc + compass** mark (the metaphor: navigate to the
+  right funding call), on the dark tile with the teal accent — wired at
+  `src/call_manager/web/static/favicon.svg` + the `frontend/index.html` link. Foundation folds
+  in the finalized mark.
 
 ## 5. The unified shell (information architecture)
 
@@ -169,14 +176,15 @@ Each phase ends green (tsc + vitest) and is independently mergeable.
 ## 8. Accessibility
 
 Mantine primitives are accessible by default (focus management, ARIA). Maintain: visible
-focus rings (VS Code uses a clear focus outline); and **per-surface contrast**. Body text
-`#cccccc` clears AA (≥ 4.5:1) on every surface, but the muted `#858585` clears 4.5:1 **only
-on the editor `#1e1e1e`** (~4.5:1) and **falls below AA on the darker chrome** — `#252526`
-(~4.2:1), `#333333` (~3.4:1), `#3c3c3c` (~3.0:1). Therefore the **Foundation phase defines a
-per-surface muted token** and bumps muted text lighter (toward ~`#9d9d9d`) on the
-sidebar / activity-bar / title surfaces, verifying each muted/background pair ≥ 4.5:1; reserve
-`#858585` for the editor surface only. Also maintain keyboard navigation of the activity bar /
-tabs / tree, and `role`/`aria-selected` on tabs (already present). Light theme (fast-follow)
+focus rings (VS Code uses a clear focus outline); and **per-surface contrast** on the custom
+dark palette. Body text `#cdd2d8` clears AA (≥ 4.5:1) on every surface. The muted `#969ca6`
+clears AA on the editor `#1a1b1e` (~5.6:1), sidebar `#202327` (~5.0:1) and activity bar
+`#2a2d33` (~4.5:1), but only ~4.1:1 on the lightest chrome (title bar `#30343b`); the
+**Foundation phase bumps muted toward ~`#9da3ad` on the title-bar surface** and verifies each
+muted/background pair ≥ 4.5:1. The dim `#6e7681` (timestamps / tertiary) is reserved for the
+dark editor/panel surfaces and treated as incidental text. Also maintain keyboard navigation
+of the activity bar / tabs / tree, and `role`/`aria-selected` on tabs (already present). Light
+theme (fast-follow)
 will be the high-contrast daytime option.
 
 ## 9. Out of scope / deferred

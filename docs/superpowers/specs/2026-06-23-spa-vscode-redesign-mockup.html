@@ -2,35 +2,35 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Call Manager — VS Code-dark mockup</title>
+<title>Call Manager — teal dark mockup</title>
 <style>
   :root {
-    --editor:        #1e1e1e;
-    --sidebar:       #252526;
-    --activitybar:   #333333;
-    --tabbar:        #2d2d2d;
-    --tab-inactive:  #2d2d2d;
-    --panel:         #1e1e1e;
-    --titlebar:      #3c3c3c;
-    --statusbar:     #007acc;
-    --accent:        #007acc;
-    --accent-2:      #0098ff;
-    --link:          #4daafc;
-    --text:          #cccccc;
+    --editor:        #1a1b1e;
+    --sidebar:       #202327;
+    --activitybar:   #2a2d33;
+    --tabbar:        #25282d;
+    --tab-inactive:  #25282d;
+    --panel:         #1a1b1e;
+    --titlebar:      #30343b;
+    --statusbar:     #0f766e;
+    --accent:        #14b8a6;
+    --accent-2:      #2dd4bf;
+    --link:          #2dd4bf;
+    --text:          #cdd2d8;
     --text-strong:   #ffffff;
-    --muted:         #858585;
+    --muted:         #969ca6;
     --muted-2:       #6e7681;
     --border:        #1b1b1b;
     --border-soft:   #2b2b2b;
     --hover:         #2a2d2e;
-    --selected:      #094771;
-    --selected-soft: #37373d;
-    --badge-bg:      #4d4d4d;
+    --selected:      #0d3b38;
+    --selected-soft: #2c2f35;
+    --badge-bg:      #14b8a6;
     --good:          #4ec9b0;
     --good-dim:      #2ea043;
     --warn:          #cca700;
     --bad:           #f14c4c;
-    --heading:       #569cd6;
+    --heading:       #4dc4d9;
     --md-emph:       #ce9178;
     --ui-font: -apple-system, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
     --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", "Consolas", ui-monospace, monospace;
@@ -79,11 +79,11 @@
   /* filters (dashboard sidebar) */
   .filter { padding: 8px 16px; }
   .filter label { display:block; font-size: 11px; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .05em;}
-  .control { background: #3c3c3c; border: 1px solid #3c3c3c; color: var(--text); border-radius: 4px;
+  .control { background: #30343b; border: 1px solid #30343b; color: var(--text); border-radius: 4px;
     padding: 5px 8px; width: 100%; font-size: 12px; display:flex; justify-content:space-between; align-items:center;}
   .control:focus-within, .control.focus { border-color: var(--accent); }
   .chips { display:flex; gap:6px; flex-wrap:wrap; padding: 6px 16px 12px; }
-  .chip { background: #2d2d2d; border:1px solid var(--border-soft); color: var(--muted); border-radius: 10px; padding: 1px 9px; font-size: 11px; }
+  .chip { background: #25282d; border:1px solid var(--border-soft); color: var(--muted); border-radius: 10px; padding: 1px 9px; font-size: 11px; }
   .chip.soon { color: var(--bad); border-color:#5a2a2a; }
   /* main column */
   .main { display: grid; min-height: 0; background: var(--editor); }
@@ -149,11 +149,11 @@
   .deadline.ok { color: var(--muted); }
   .match { background: rgba(78,201,176,.14); color: var(--good); border:1px solid rgba(78,201,176,.3);
     border-radius: 10px; padding: 1px 9px; font-size: 11px; }
-  .match.low { background: #2d2d2d; color: var(--muted); border-color: var(--border-soft); }
+  .match.low { background: #25282d; color: var(--muted); border-color: var(--border-soft); }
   /* scorecard (alt cockpit editor body, shown small inline) */
   .pill { border-radius: 9px; padding: 1px 8px; font-size: 10.5px; letter-spacing:.04em; text-transform:uppercase; font-weight:600; }
   .pill.strong { background: rgba(78,201,176,.16); color: var(--good); }
-  .pill.adequate { background:#2d2d2d; color:#9cdcfe; }
+  .pill.adequate { background:#25282d; color:#9cdcfe; }
   .pill.atrisk { background: rgba(204,167,0,.16); color: var(--warn); }
   .pill.gap { background: rgba(241,76,76,.16); color: var(--bad); }
   .legend { position:absolute; top: 6px; left: 50%; transform: translateX(-50%); color:#777; font-size:11px;}
