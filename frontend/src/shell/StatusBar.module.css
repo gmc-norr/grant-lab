@@ -1,0 +1,18 @@
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 22px;
+  padding: 0 12px;
+  background: var(--app-statusbar);
+  color: #fff; /* white on #0f766e ~ 4.7:1, clears AA */
+  font-size: 12px;
+}
+.item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.spacer {
+  flex: 1;
+}
