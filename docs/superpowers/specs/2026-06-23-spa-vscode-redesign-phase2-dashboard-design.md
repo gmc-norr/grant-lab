@@ -9,12 +9,14 @@
 `frontend/src/routes/Dashboard.tsx` is a single `<main>`: a `<header>` with the sign-out form + four **native** controls (Profile/Source/Sort selects, Show-closed checkbox), a summary-counts `<section>`, ranking-status lines, a `<ul>` of call rows (title→`/calls/{id}`, source, color-coded `<Deadline>`, rounded score), and `<Pagination>`. The `AppShell` grid is `title (30px) / body (activity-bar + main) / status (22px)` — **no sidebar column**. Filter/data plumbing lives in `frontend/src/api/dashboard.ts` (`useDashboard`, `useSetDefaultProfile`).
 
 The `/api/calls` read-model response (unchanged by this phase):
-- `effective: { profile_id, source }` — server-resolved filter state (an unknown/inactive id degrades to null / "all").
+- `effective: { source, sort, profile_id, show_closed }` — server-resolved filter state (an unknown/inactive `profile_id` degrades to null; an unknown `source` degrades to "all").
 - `facets: { profiles: [{id,name}], sources: [{slug,name}] }`
 - `summary: { open_count, high_score, soon_deadline }`
 - `ranking: { pending, failed }`
-- `items: [{ id, title, source_name, deadline, aggregate_score }]`
-- `pagination: { page, has_prev, has_next }`
+- `items: [{ id, title, source_name, source_slug, deadline, published_at, aggregate_score (int | null) }]`
+- `pagination: { page, limit, has_prev, has_next, total }`
+
+The TS types are **generated** from the OpenAPI schema (`frontend/src/api/schema.gen.ts`, consumed via `openapi-fetch`). Components consume the generated `paths` types — never a hand-typed, narrower shape. (Above is the full contract for reference; the dashboard renders a subset.)
 
 ## 2. Decisions (locked in brainstorm)
 
@@ -39,8 +41,8 @@ The `/api/calls` read-model response (unchanged by this phase):
 |---|---|---|
 | `AppShell` (modify) | Add the sidebar grid column + a `useMatches`-driven `<Sidebar>` region; omit the column when no `handle.Sidebar`. | Grid: body `activity-bar | sidebar? | main`. |
 | `Sidebar` (new) | Thin shell wrapper: sidebar chrome (bg `--app-sidebar`, right border, scroll) around arbitrary route-supplied content. | Presentational only. |
-| `CallsFilters` (new) | The Profile/Source/Sort/Show-closed controls; sidebar-resident; reads `useDashboard`+`useSearchParams`; declared via the Calls route `handle`. | Owns the filter logic moved out of `Dashboard`. |
-| `DashboardHeader` (new) | Header strip: breadcrumb ("Calls") · the 3 counts · Sign-out (right). | Counts from `summary`. |
+| `CallsFilters` (new) | The Profile/Source/Sort/Show-closed controls; sidebar-resident; reads `useDashboard`+`useSearchParams`; declared via the Calls route `handle`. | Owns the filter logic moved out of `Dashboard`. **Must not assume `data` is present** — see §6 loading/error contract. |
+| `DashboardHeader` (new) | Header strip: breadcrumb ("Calls") · the 3 counts · Sign-out (right). | Counts from `summary`, displayed verbatim (see §5). |
 | `CallRow` (new) | One call row: title link + muted meta (`source · deadline`) + `MatchBadge`. The list-row primitive (spec deferred it to its first consumer = here). | |
 | `MatchBadge` (new) | Banded score pill from `aggregate_score`. | Thresholds in §5. |
 | `Deadline` (modify) | Reskin to theme colors; keep the existing state logic. | Thresholds in §5. |
@@ -68,11 +70,13 @@ The `/api/calls` read-model response (unchanged by this phase):
 - **`MatchBadge` bands** (frontend threshold map on `aggregate_score`, rounded): all bands share one pill surface (a subtle tinted chip, e.g. `--app-hover`) and differ by **foreground/accent color** — **strong ≥ 80** → good `#4ec9b0`; **good 60–79** → muted `#969ca6`; **< 60** → dim `#6e7681`. A null score renders no badge.
 - **`Deadline` states → color** (keep current `deadlineView` logic): **closed** (past) → dim `#6e7681` ("Closed · date"); **soon ≤ 14d** → bad `#f14c4c`; **watch ≤ 30d** → warn `#cca700`; **open > 30d** → muted `#969ca6`.
 - **Sidebar:** bg `--app-sidebar` `#202327`, right border `--app-border` `#2c2f35`.
+- **Header counts = `summary` verbatim.** "top matches" is `summary.high_score` as the server computes it (open, profile-scoped, `aggregate_score ≥ 70` — `dashboard.py:318`), shown as-is. It is **independent of** the `MatchBadge` band thresholds (80/60) — do **not** recompute the count from badge bands.
 
 ## 6. Behavior contracts preserved exactly (re-skin, not rewrite)
 
 - Filter state is **read-only in the URL**; only an explicit Profile selection persists a default (`POST /api/me/default-profile`), **awaited first**, then reflected via a **functional** `setSearchParams` updater (never clobbers a Source/Sort/Show-closed change made while the POST is in flight).
 - Selects **bind to server-resolved** `effective.profile_id` / `effective.source`, not the raw URL params (an unknown/inactive value degrades server-side and the control must reflect that).
+- **`CallsFilters` loading/error contract (NEW — it now renders independently).** Today `Dashboard`'s loading guard ([Dashboard.tsx:75](../../../frontend/src/routes/Dashboard.tsx#L75)) runs *before* the filters render, so they never see `data === undefined`. As a sidebar component it mounts independently and CAN render while the query is loading (first load) or errored. Contract: Sort + Show-closed bind to the URL (`useSearchParams`) and **always render**; the facet-driven Profile + Source selects render **disabled with empty options** until `data` is present; **never dereference `data.facets` / `data.effective` unguarded**. The sidebar shows no error UI — the main panel already surfaces "Couldn't load calls." (`useDashboard` sets `keepPreviousData`, so `data` is undefined only before the first success or on a no-prior-data error.)
 - `useDashboard` poll-while-`ranking.pending` + drain-refetch on pending→0, `<Pagination>`, and the `unwrap` 401→`/login` redirect are **unchanged**.
 - Call titles remain plain `/calls/{id}` anchors (coexistence with the un-ported Jinja detail page) — **no** workspace-open behavior added.
 
@@ -92,7 +96,7 @@ Mantine `Select` is a div-based combobox (not a native `<select>`), rendering it
 
 ## 9. Testing & validation
 
-- **New:** `CallsFilters` (Select rendering + URL update + Profile persist-then-reflect + bind-to-`effective`), `CallRow`/`MatchBadge` (band thresholds 80/60, null→no badge), `Deadline` (cutoffs 14/30 → state class), `AppShell` (renders `handle.Sidebar` when present; omits the column when absent).
+- **New:** `CallsFilters` (Select rendering + URL update + Profile persist-then-reflect + bind-to-`effective`; **plus a no-crash test that it renders while the query is loading and when it errors** — facet selects disabled, Sort/Show-closed still functional), `CallRow`/`MatchBadge` (band thresholds 80/60, null→no badge), `Deadline` (cutoffs 14/30 → state class), `AppShell` (renders `handle.Sidebar` when present; omits the column when absent).
 - **Update:** `Dashboard.test.tsx` for the new DOM + Mantine-Select interaction; `router.test.tsx` stays green (handle added, routes unchanged).
 - **Gate every task:** `pnpm exec tsc --noEmit` + `pnpm vitest run` green; `pnpm build` succeeds.
 - **Finish:** a dev-mode screenshot (now that `pnpm dev` works) confirming the reskinned dashboard renders inside the shell.
