@@ -9,17 +9,20 @@ export type ProblemTarget = {
 };
 
 export type ProblemRow = {
-  category: "broken_citation" | "over_length" | "criterion_gap" | "coherence_drift";
+  category: "broken_citation" | "over_length" | "criterion_gap" | "coherence_drift" | "uncited_claim";
   severity: "error" | "warning";
   title: string;
   detail: string;
   target: ProblemTarget | null;
+  /** Present only on uncited_claim rows — the dismiss key. */
+  claim_hash?: string;
 };
 
 export type ProblemsResponse = {
   problems: ProblemRow[];
   counts: { error: number; warning: number };
   scorecard_stale: string[];
+  uncited_claims_stale: boolean;
 };
 
 /** GET /api/workspaces/{id}/problems — the read-only health dashboard.

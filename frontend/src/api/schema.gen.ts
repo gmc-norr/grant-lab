@@ -801,6 +801,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/uncited-claims-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Uncited Claims Run */
+        post: operations["start_uncited_claims_run_api_workspaces__workspace_id__uncited_claims_runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/uncited-claims-runs/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Latest Uncited Claims Run */
+        get: operations["latest_uncited_claims_run_api_workspaces__workspace_id__uncited_claims_runs_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/uncited-claims/{claim_hash}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss Uncited Claim */
+        post: operations["dismiss_uncited_claim_api_workspaces__workspace_id__uncited_claims__claim_hash__dismiss_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/error": {
         parameters: {
             query?: never;
@@ -2591,6 +2642,17 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** ClaimOut */
+        ClaimOut: {
+            /** Claim Hash */
+            claim_hash: string;
+            /** Claim Text */
+            claim_text: string;
+            /** Reason */
+            reason: string;
+            /** Section Index */
+            section_index: number;
+        };
         /** DashboardOut */
         DashboardOut: {
             effective: components["schemas"]["EffectiveOut"];
@@ -2660,6 +2722,11 @@ export interface components {
                 [key: string]: boolean;
             };
             user: components["schemas"]["UserOut"];
+        };
+        /** OkOut */
+        OkOut: {
+            /** Ok */
+            ok: boolean;
         };
         /** PaginationOut */
         PaginationOut: {
@@ -2852,6 +2919,42 @@ export interface components {
             open_count: number;
             /** Soon Deadline */
             soon_deadline: number;
+        };
+        /** UncitedClaimsLatestOut */
+        UncitedClaimsLatestOut: {
+            /** Claims */
+            claims: components["schemas"]["ClaimOut"][] | null;
+            /** Completed At */
+            completed_at: string | null;
+            /** Error */
+            error: string | null;
+            /** Id */
+            id: string;
+            /** Stale */
+            stale: boolean;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "completed" | "failed";
+        };
+        /** UncitedClaimsRunOut */
+        UncitedClaimsRunOut: {
+            /** Completed At */
+            completed_at: string | null;
+            /** Error */
+            error: string | null;
+            /** Id */
+            id: string;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "completed" | "failed";
         };
         /** UserOut */
         UserOut: {
@@ -5402,6 +5505,100 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    start_uncited_claims_run_api_workspaces__workspace_id__uncited_claims_runs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UncitedClaimsRunOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    latest_uncited_claims_run_api_workspaces__workspace_id__uncited_claims_runs_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UncitedClaimsLatestOut"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dismiss_uncited_claim_api_workspaces__workspace_id__uncited_claims__claim_hash__dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                claim_hash: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

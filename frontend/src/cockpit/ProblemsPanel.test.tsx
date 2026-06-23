@@ -6,10 +6,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProblemsPanel } from "./ProblemsPanel";
 
 const h = vi.hoisted(
-  (): { problems: { data: unknown; isError?: boolean } } => ({ problems: { data: undefined } }),
+  (): { problems: { data: unknown; isError?: boolean }; dismiss: { mutate: ReturnType<typeof vi.fn>; isPending: boolean } } => ({
+    problems: { data: undefined },
+    dismiss: { mutate: vi.fn(), isPending: false },
+  }),
 );
 
 vi.mock("../api/problems", () => ({ useProblems: () => h.problems }));
+
+vi.mock("../api/uncitedClaims", () => ({
+  useLatestUncitedClaimsRun: () => ({ data: undefined }),
+  useStartUncitedClaimsRun: () => ({ mutate: vi.fn(), isPending: false }),
+  useDismissClaim: () => h.dismiss,
+}));
 
 function wrap(ui: ReactNode) {
   return render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
@@ -17,11 +26,12 @@ function wrap(ui: ReactNode) {
 
 afterEach(() => {
   h.problems = { data: undefined };
+  h.dismiss = { mutate: vi.fn(), isPending: false };
 });
 
 describe("ProblemsPanel", () => {
   it("shows a calm empty state when there are no problems", () => {
-    h.problems = { data: { problems: [], counts: { error: 0, warning: 0 }, scorecard_stale: [] } };
+    h.problems = { data: { problems: [], counts: { error: 0, warning: 0 }, scorecard_stale: [], uncited_claims_stale: false } };
     wrap(<ProblemsPanel id="ws1" onNavigate={vi.fn()} />);
     expect(screen.getByText(/no problems detected/i)).toBeInTheDocument();
   });
@@ -37,6 +47,7 @@ describe("ProblemsPanel", () => {
         ],
         counts: { error: 1, warning: 1 },
         scorecard_stale: ["draft"],
+        uncited_claims_stale: false,
       },
     };
     const onNavigate = vi.fn();
@@ -53,5 +64,30 @@ describe("ProblemsPanel", () => {
     h.problems = { data: undefined, isError: true };
     wrap(<ProblemsPanel id="ws1" onNavigate={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/could not load problems/i);
+  });
+
+  it("renders uncited rows with a dismiss action and a run button", () => {
+    h.problems = {
+      data: {
+        problems: [
+          {
+            category: "uncited_claim",
+            severity: "warning",
+            title: "30% relapse",
+            detail: "statistic",
+            target: { top_tab: "draft", bottom_tab: "problems", section_index: 1 },
+            claim_hash: "h1",
+          },
+        ],
+        counts: { error: 0, warning: 1 },
+        scorecard_stale: [],
+        uncited_claims_stale: true,
+      },
+    };
+    wrap(<ProblemsPanel id="ws1" onNavigate={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /check uncited claims/i })).toBeInTheDocument();
+    expect(screen.getByText(/may be outdated/i)).toBeInTheDocument(); // uncited stale badge
+    fireEvent.click(screen.getByRole("button", { name: /^dismiss$/i }));
+    expect(h.dismiss.mutate).toHaveBeenCalledWith("h1");
   });
 });
