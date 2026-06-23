@@ -1,12 +1,14 @@
 import { type ActivityRow, useActivity } from "../api/activity";
-import type { BottomTab, NavTarget, OnNavigate, TopTab } from "./nav";
+import type { NavTarget, OnNavigate } from "./nav";
 
-// The generated target Literals match TopTab/BottomTab exactly, so this is a
-// null -> undefined normalization (same shape as ProblemsPanel's toNav).
+// null -> undefined normalization. The param stays nullable and uses `?.` because
+// TS drops the `r.target &&` narrowing inside the onClick closure at the call site
+// below. The generated target Literals already match TopTab/BottomTab, so the
+// previous `as TopTab | undefined` casts were redundant and are gone.
 function toNav(target: ActivityRow["target"]): NavTarget {
   return {
-    top_tab: (target?.top_tab ?? undefined) as TopTab | undefined,
-    bottom_tab: (target?.bottom_tab ?? undefined) as BottomTab | undefined,
+    top_tab: target?.top_tab ?? undefined,
+    bottom_tab: target?.bottom_tab ?? undefined,
   };
 }
 
@@ -55,7 +57,7 @@ export function ActivityPanel({ id, onNavigate }: { id: string; onNavigate: OnNa
       <ul className="activity-list">
         {rows.map((r) => (
           <li key={r.id} className={`activity-row category-${r.category}`}>
-            <span className="activity-actor">{r.actor ?? "System"}</span>{" "}
+            <span className="activity-actor">{r.actor ?? "System"}</span>
             <span className="activity-summary">{r.summary}</span>
             <span className="activity-time"> · {formatRelativeTime(r.created_at)}</span>
             {r.target && (

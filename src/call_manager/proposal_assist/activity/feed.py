@@ -102,7 +102,11 @@ def _resolve_actor(event: WorkspaceEvent, actor_names: dict[int, str]) -> str | 
 
 
 def _artifact_tab(artifact: object) -> str:
-    return "spec" if "spec" in str(artifact or "").lower() else "draft"
+    # The payload "artifact" is always the StrEnum value "spec" or "draft" (Artifact
+    # is a StrEnum; the spec-init site stores the literal "spec"). Exact-match "spec"
+    # rather than substring so a future artifact name containing "spec" can't be
+    # misclassified; anything else (incl. "draft", blank, unknown) maps to draft.
+    return "spec" if str(artifact or "").strip().lower() == "spec" else "draft"
 
 
 def _edit_row(run: list[WorkspaceEvent], actor_names: dict[int, str]) -> ActivityRow:

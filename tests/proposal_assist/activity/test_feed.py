@@ -122,6 +122,9 @@ def test_render_and_target_table():
         "reference.tombstoned": ("removed a reference", None),
         "reference.deleted": ("deleted a reference", None),
         "rubric_initialized": ("set up the funder criteria", {"top_tab": "spec", "bottom_tab": None}),
+        # rubric_edited with actor_id set (the payload edited_by_user_id fallback is
+        # exercised separately by test_actor_resolution_variants + the endpoint test).
+        "rubric_edited": ("edited the funder criteria", {"top_tab": "spec", "bottom_tab": None}),
     }
     for kind, (summary, target) in cases.items():
         rows = build_activity_feed([_ev(kind, actor_id=1)], {1: "a@ki.se"})
