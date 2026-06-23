@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Research Crystal">
+  <rect width="256" height="256" rx="56" fill="#1a1b1e"/>
+  <g fill="none" stroke="#c9cfd6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 18 222 72v112l-94 54-94-54V72z" stroke-width="12"/>
+    <path d="M128 48v160M78 80v96M178 80v96M78 80l50-32 50 32M78 176l50 32 50-32M78 80l50 48 50-48M78 176l50-48 50 48" stroke-width="8" stroke="#7e8794"/>
+  </g>
+  <g fill="#c9cfd6">
+    <circle cx="128" cy="48" r="15"/><circle cx="78" cy="80" r="15"/><circle cx="178" cy="80" r="15"/>
+    <circle cx="78" cy="176" r="15"/><circle cx="178" cy="176" r="15"/><circle cx="128" cy="208" r="15"/>
+  </g>
+  <circle cx="128" cy="128" r="19" fill="#2dd4bf" stroke="#1a1b1e" stroke-width="6"/>
+</svg>

@@ -85,10 +85,16 @@ approved teal mockup is the reference):
   `"Cascadia Code", "Consolas", ui-monospace, …`. Dense IDE spacing; small radii (~4px).
 - **Codicons** replace the mockup's placeholder glyphs (activity bar, tree rows, tabs, panel,
   status bar).
-- **Favicon/identity:** a dark **proposal-doc + compass** mark (the metaphor: navigate to the
-  right funding call), on the dark tile with the teal accent — wired at
-  `src/call_manager/web/static/favicon.svg` + the `frontend/index.html` link. Foundation folds
-  in the finalized mark.
+- **Brand mark / favicon — "research crystal":** a hexagonal knowledge-network with a **teal
+  center node** (`#2dd4bf`; metaphor: connected funding intelligence). **Two tiers**, both
+  teal/slate on the dark tile: the **full lattice** as the large brand logo (login / sidebar
+  header / app icon, ≥48px) and a **simplified radial** reduction as the favicon (≤32px — the
+  full lattice muddies in a browser tab). A themeable `currentColor` variant (`--icon-accent` =
+  the teal accent) serves inline use and adapts to light/dark. Reference assets:
+  `docs/superpowers/specs/assets/research-crystal-{full,favicon}.svg`. **Foundation** finalizes
+  them, installs the favicon at `src/call_manager/web/static/favicon.svg` (wired via the
+  `frontend/index.html` link) and the brand mark as a static asset; the exploration SVGs in the
+  repo root get relocated/removed.
 
 ## 5. The unified shell (information architecture)
 
