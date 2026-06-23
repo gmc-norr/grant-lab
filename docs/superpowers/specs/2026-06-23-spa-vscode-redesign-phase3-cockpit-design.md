@@ -48,9 +48,9 @@ AppShell
 
 ### 3.1 Active tab + section → URL search params
 A new `useCockpitNav()` hook wraps `useSearchParams`, exposing `{ tab, sec, setTab, setSec, navigate(target) }` over `?tab=draft|spec|scorecard|review` and `?sec=<int>`. It **replaces** Cockpit's local `topTab` and the active-section `tab` inside `ArtifactSectionEditor`.
-- The two-axis `onNavigate(NavTarget)` (Problems/Scorecard "jump") now sets `?tab` (and still sets the local bottom-panel tab + expands it).
+- The two-axis `navigate(NavTarget)` (Problems/Scorecard "jump") sets `?tab` **and `?sec`**, and still sets the local bottom-panel tab + expands it. **`NavTarget` gains `section_index?: number`** — today it is `{ top_tab?, bottom_tab? }` (`cockpit/nav.ts`) and silently drops the section, so "Go to §" only switches tabs. The source data already carries the index — `ProblemTarget.section_index` (`api/problems.ts`) and `ScorecardCriterion.deep_link.{artifact, section_index}` (`api/evaluator.ts`) — so the scorecard's `artifact` maps to `?tab` and `section_index` to `?sec`. `ProblemsPanel`/`ScorecardPanel` are updated to pass `section_index`; a test asserts a jump writes `?sec`.
 - **Tabs/sections become deep-linkable** and survive refresh — a deliberate improvement.
-- **`?sec` is a single index applied to the active artifact**, clamped to a valid section on artifact switch (preamble `0` always exists). This simplifies the prior per-artifact "remember last section" nicety into one clamped index — an accepted, minor behavior change in exchange for sidebar↔editor↔deep-link sync.
+- **`?sec` is a single index applied to the active artifact.** On an artifact switch (or a deep-link that arrives before sections load), the editor clamps it to a valid section (preamble `0` always exists) and **history-`replace`s** the URL to the clamped value once `useDraft`/`useSpec` resolves — so an out-of-range `?sec` self-corrects without polluting back/forward history. This simplifies the prior per-artifact "remember last section" nicety into one clamped index — an accepted, minor behavior change in exchange for sidebar↔editor↔deep-link sync.
 - **Bottom-panel tab + `collapsed` stay Cockpit-local** (they never cross the sidebar boundary). The `Section ↔ Full` view toggle stays **local to the editor**; selecting a section (sidebar row or `?sec` change) forces Section view for that index.
 
 ### 3.2 Sections → React Query cache
@@ -78,17 +78,17 @@ A singleton module `frontend/src/cockpit/editorStore.ts` built on **`useSyncExte
 
 ## 5. Backend additions (additive, read-only, no migration)
 
-All under `src/call_manager/web/api/workspaces.py`, member-gated (`require_member`), mirroring the existing endpoints' auth/ownership-guard patterns. Frontend hooks added to `frontend/src/api/` and types regenerated into `schema.gen.ts` (see the OpenAPI-codegen note in §9).
+All under `src/call_manager/web/api/workspaces.py`, mirroring the existing endpoints' auth/ownership-guard patterns — `cockpit-meta` and `versions` are member-gated (`require_member`); `members` is **owner-gated** (`require_owner`, see #3). Frontend hooks added to `frontend/src/api/` and types regenerated into `schema.gen.ts` (see the OpenAPI-codegen note in §9).
 
-1. **`GET /api/workspaces/{id}/cockpit-meta` → `CockpitMetaOut`**
-   `{ call_title: str | null, call_deadline: date | null, current_phase: "setup"|"active", role: "owner"|"member", spec_locked: bool }`.
-   Resolved from the `Workspace` (+ its `Call`) row. Feeds the status bar (deadline, spec-lock fallback), the title-bar breadcrumb, and the Members "your role" hint. Hook: `useCockpitMeta(id)`.
+1. **`GET /api/workspaces/{id}/cockpit-meta` → `CockpitMetaOut`** — member-gated
+   `{ workspace_title: str, workspace_deadline: datetime | null, current_phase: "setup"|"active", role: "owner"|"member", spec_locked: bool, member_count: int }`.
+   **Reads the workspace-level `Workspace.title` / `Workspace.deadline`** (the editable fields shown in workspace settings) — NOT the linked `Call` row, which is an optional FK (`call_id` is `SET NULL`-nullable) and would ignore workspace overrides and degrade when null. Feeds the status-bar deadline + spec-lock, the title-bar breadcrumb, the owner-only UI gating (`role`), and the **non-PII** `member_count` shown to every member as "Members (n)". Hook: `useCockpitMeta(id)`.
 
-2. **`GET /api/workspaces/{id}/versions` → `list[VersionOut]`**
+2. **`GET /api/workspaces/{id}/versions` → `list[VersionOut]`** — member-gated
    `[{ commit_sha: str, message: str, created_by: str, created_at: datetime }]`, newest-first, capped (≈50). From the `ArtifactVersion` table. Hook: `useVersions(id)`. Powers the **Versions** group (count + recent-commit list).
 
-3. **`GET /api/workspaces/{id}/members` → `list[MemberOut]`**
-   `[{ email: str, display_name: str | null, role: "owner"|"member" }]`, owner first. From the workspace owner + membership rows (the same source `require_member`/`require_owner` authorize against). Hook: `useMembers(id)`. Powers the **Members** group.
+3. **`GET /api/workspaces/{id}/members` → `list[MemberOut]`** — **owner-gated** (`require_owner`)
+   `[{ email: str, role: "owner"|"member" }]`, owner first. From the workspace owner + `WorkspaceViewer` rows — the SAME owner-only surface as the existing workspace-settings viewer list (`proposal_assist/web/workspaces.py` `get_settings`, `_require_owner`), so this **adds no new PII exposure**: member emails stay visible to the owner only. Hook: `useMembers(id)`. The **Members** sidebar group renders the named list for owners; non-owner members see only the non-PII `member_count` (from `cockpit-meta`) as "Members (n)" — no names/emails.
 
 **Criteria** needs **no** new endpoint: the **Scorecard** read-model (`useScorecard`) already returns per-criterion entries (name, weight, band, deep-link). The Criteria group renders those with their band pills and jumps to the Scorecard tab.
 
@@ -113,9 +113,9 @@ Backend tests (pytest, testcontainers Postgres) cover each endpoint: member-gati
 
 ## 8. Decomposition — two shippable plans
 
-**Plan 3a — Relocation & reskin (frontend).** `useCockpitNav` + `editorStore`; relocate the **Outline** into `CockpitSidebar` (Outline group only); CodeMirror VS Code theme + teal recolor + gutter + cursor publish; editor-tab + bottom-panel reskin; rewrite `cockpit.css` onto `--app-*` and **retire the `theme.css` `--cm-*` remap block** (grep-verify nothing in the SPA still reads `--cm-*`, retiring the legacy `tokens.css` for the SPA); **minimal status bar** (Ln/Col · language · save). Ends green (tsc + vitest + build), independently mergeable.
+**Plan 3a — Relocation & reskin (frontend).** `useCockpitNav` (incl. `NavTarget.section_index` + history-`replace` clamp) + `editorStore`; relocate the **Outline** into `CockpitSidebar` (Outline group only); CodeMirror VS Code theme + teal recolor + gutter + cursor publish; editor-tab + bottom-panel reskin; rewrite `cockpit.css` onto `--app-*` **and migrate the shared Phase-1 modules that still read `--cm-*` — `components/Button.module.css`, `components/Select.module.css`, `components/Card.module.css`, and `CodeMirrorEditor`'s theme** — then **delete the `theme.css` `--cm-*` remap block and drop the `styles/tokens.css` import from `main.tsx`** (grep-verify zero `var(--cm-` consumers remain in the SPA, fully retiring the legacy token system); **minimal status bar** (Ln/Col · language · save). Ends green (tsc + vitest + build), independently mergeable.
 
-**Plan 3b — Workspace groups & rich status bar (backend + frontend).** The three read-only endpoints (`cockpit-meta`, `versions`, `members`) + pytest + regenerated types + hooks; the **References · Criteria · Versions · Members** sidebar groups; the **full status bar** (deadline · spec-lock · scorecard band · branch indicator) + the title-bar breadcrumb. Ends green (tsc + vitest + build + backend pytest), independently mergeable.
+**Plan 3b — Workspace groups & rich status bar (backend + frontend).** The three read-only endpoints (`cockpit-meta` + `versions` member-gated, `members` **owner-gated**) + pytest + regenerated types + hooks; the **References · Criteria · Versions · Members** sidebar groups (Members shows the named list to owners and the non-PII `member_count` to non-owners); the **full status bar** (deadline · spec-lock · scorecard band · branch indicator) + the title-bar breadcrumb. Ends green (tsc + vitest + build + backend pytest), independently mergeable.
 
 ## 9. Scope / non-goals
 
@@ -128,8 +128,8 @@ Backend tests (pytest, testcontainers Postgres) cover each endpoint: member-gati
 
 ## 10. Testing & validation
 
-- **Frontend new:** `useCockpitNav` (URL read/write + clamp), `editorStore` (subscribe/snapshot/clear-on-unmount), `CockpitSidebar` (each group renders; loading/empty/error guards; Outline reflects `?tab`/`?sec`/dirty and writes `?sec` on click), the reskinned `StatusBar` (cockpit vs off-cockpit; cursor/save/band/deadline), editor-tab + bottom-panel restyle.
-- **Frontend updated:** `Cockpit.test.tsx` (URL-driven tabs; Outline no longer in the editor), `ArtifactSectionEditor` tests (section from `?sec`; outline removed), `router.test.tsx` stays green. Resolve the pre-existing `Cockpit.test` `act()` warnings as part of the editor refactor.
-- **Backend new:** pytest for the three endpoints (auth-gating, shape, edge cases).
+- **Frontend new:** `useCockpitNav` (URL read/write; `navigate()` writes `?tab`+`?sec` from a `NavTarget`/scorecard `deep_link`; **out-of-range `?sec` history-`replace`-clamps after `useDraft`/`useSpec` resolve**), `editorStore` (subscribe/snapshot/clear-on-unmount), `CockpitSidebar` (each group renders; loading/empty/error guards; Outline reflects `?tab`/`?sec`/dirty and writes `?sec` on click; Members shows names for owner vs count for non-owner), the reskinned `StatusBar` (cockpit vs off-cockpit; cursor/save/band/deadline), editor-tab + bottom-panel restyle.
+- **Frontend updated:** `Cockpit.test.tsx` (URL-driven tabs; Outline no longer in the editor), `ArtifactSectionEditor` tests (section from `?sec`; outline removed), `ProblemsPanel`/`ScorecardPanel` (a jump now lands on the section — asserts `?sec`), `router.test.tsx` stays green. Resolve the pre-existing `Cockpit.test` `act()` warnings as part of the editor refactor.
+- **Backend new:** pytest for the three endpoints — shape + edge cases (no versions yet; solo owner); **gating: `cockpit-meta`/`versions` 403 for a non-member, `members` 403 for a non-owner _member_ (not just a stranger)**; cross-tenant/unknown id → 404; `cockpit-meta` reads `Workspace.title`/`deadline` and is correct when `call_id` is null.
 - **Gate every task:** `pnpm exec tsc --noEmit` + `pnpm vitest run` + `pnpm build` green; 3b also `uv run pytest` for the new endpoints (verify any flagged failure in isolation).
 - **Visual QA:** headless screenshot of the reskinned cockpit (editor + sidebar groups + bottom panel + status bar) against the approved teal mockup, per the visual-check recipe.
