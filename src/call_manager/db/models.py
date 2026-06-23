@@ -970,6 +970,51 @@ class EvaluatorJob(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class UncitedClaimsJob(Base):
+    __tablename__ = "uncited_claims_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','completed','failed')",
+            name="ck_uncited_claims_jobs_status",
+        ),
+        Index("ix_uncited_claims_jobs_ws_queued", "workspace_id", "queued_at"),
+        # At most ONE active (queued OR running) uncited-claims job per workspace —
+        # makes POST "create-or-return-active" race-safe. Independent of the
+        # evaluator/coherence/review slots (separate tables).
+        Index(
+            "uq_uncited_claims_jobs_active",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued','running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    requested_by: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Raw list written by the submit_uncited_claims tool while running; OVERWRITTEN by
+    # the pass runner at finalize with the hashed/substring-filtered/deduped final list.
+    # Read only when status == 'completed'.
+    claims: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Draft CONTENT sha captured at run start (this check depends only on the draft).
+    evaluated_draft_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sdk_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class ChatSummary(Base):
     __tablename__ = "chat_summaries"
     __table_args__ = (
