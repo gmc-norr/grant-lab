@@ -40,7 +40,7 @@ the server-rendered **Jinja pages** (login/profile/admin) are explicit follow-on
 | Editor theme | **`@uiw/codemirror-theme-vscode`** (ships dark + light; matches the cockpit's CodeMirror) |
 | Color scheme | **Dark-first**; light is a fast-follow (Mantine + the CM theme + the palette already support both) |
 | IDE chrome | Visual style everywhere **+ core chrome**: activity bar, sidebar, editor tabs, bottom panel, status bar, slim title bar. **Command palette deferred** |
-| Shell model | **One unified shell** wrapping the whole SPA; the activity bar switches top-level views; opening a call opens its workspace into the editor area |
+| Shell model | **One unified shell** wrapping the whole SPA; the activity bar switches top-level views. v1 SPA-native views are **Calls** (`/`) and the **active Workspace / cockpit** (`/cockpit/:id`) — the only routes the SPA owns today; other activity-bar items deep-link to existing Jinja pages until migrated |
 | Scope | Whole SPA, phased Foundation → Dashboard → Cockpit. **Jinja pages = separate follow-on** (restyle or migrate) |
 
 ## 3. Tooling & dependencies
@@ -71,7 +71,7 @@ rewritten in Phase 3). Reference palette (VS Code Dark+):
 | status bar | `#007acc` (accent) |
 | primary accent | `#007acc` |
 | link | `#4daafc` |
-| text / muted | `#cccccc` / `#858585` |
+| text / muted (editor) / muted (chrome) | `#cccccc` / `#858585` / ~`#9d9d9d` (see §8) |
 | list hover / selected | `#2a2d2e` / `#094771` |
 | good / warn / bad | `#4ec9b0` / `#cca700` / `#f14c4c` |
 | editor heading / string | `#569cd6` / `#ce9178` |
@@ -100,17 +100,27 @@ One persistent layout wraps every SPA route. Regions (see mockup):
 ```
 
 - **Title bar** (30px): app name + active-document/breadcrumb title.
-- **Activity bar** (48px): top-level destinations — **Calls** (dashboard), **Workspaces**,
-  the **active Workspace** (cockpit), **References**; **Profile** + **Settings** pinned at
-  the bottom (Settings/Profile may deep-link to the Jinja pages until those migrate). Badges
-  (e.g. workspace count) supported. Active item: white icon + left accent border.
+- **Activity bar** (48px): top-level destinations. **SPA-native in v1** — **Calls**
+  (dashboard `/`, Phase 2) and the **active Workspace / cockpit** (`/cockpit/:id`, Phase 3).
+  **Deep-links to existing pages until migrated** — **Workspaces** (the server-rendered
+  workspace list at `/workspaces`), plus **Profile** + **Settings** pinned at the bottom.
+  **References is *not* a top-level destination** — it is a per-workspace concern and lives
+  in the cockpit sidebar (below). Badges (e.g. workspace count) supported. Active item:
+  white icon + left accent border. (Today the SPA owns only `/` and `/cockpit`
+  — see [routes.json](../../../frontend/routes.json); the activity bar must visually
+  distinguish SPA-native views from Jinja deep-links and must not imply SPA routes that
+  don't exist yet.)
 - **Sidebar** (contextual to the active activity-bar item):
   - *Calls view* → filters (Profile / Source / Sort + count chips + saved views).
   - *Workspace view* → the proposal **Outline** (section list, active section highlighted)
     + Workspace groups (References / Criteria / Versions / Members) with counts.
 - **Editor area + tabs:**
   - *Calls view* → the funding-calls list (link-blue titles, match badges, color-coded
-    deadlines), with a breadcrumb.
+    deadlines), with a breadcrumb. **A call title keeps its current behavior in v1 — a plain
+    link to the server-rendered call-detail page (`/calls/{id}`), where a workspace is
+    started** ([Dashboard.tsx](../../../frontend/src/routes/Dashboard.tsx)). Opening a
+    workspace directly from the list into the cockpit is a future enhancement, out of
+    Phase 2 scope (this redesign makes no backend/routing change).
   - *Workspace view* → editor tabs **Draft · Spec · Scorecard · Panel review**; the body is
     the CodeMirror editor (VS Code theme) with a line gutter, or the Scorecard/Review views.
 - **Bottom panel** (cockpit only): **Inbox · Problems · Activity** tabs (the SP2b-3b region,
@@ -135,7 +145,9 @@ render *inside* the shell (even if their bodies are not yet reskinned).
 
 **Phase 2 — Dashboard** onto the shell: filters → sidebar, the calls list reskinned
 (link titles, match badges, deadline coloring), breadcrumb, counts. Replace native selects
-with themed Mantine `Select`s.
+with themed Mantine `Select`s. Call titles keep their existing `/calls/{id}` link (no
+workspace-open behavior added). The **Workspaces** activity-bar item deep-links to the
+existing `/workspaces` Jinja page in this phase.
 
 **Phase 3 — Cockpit** onto the shell (the largest): editor tabs, the outline sidebar, the
 CodeMirror VS Code theme wired into the existing editor, the bottom panel (Inbox/Problems/
@@ -157,10 +169,15 @@ Each phase ends green (tsc + vitest) and is independently mergeable.
 ## 8. Accessibility
 
 Mantine primitives are accessible by default (focus management, ARIA). Maintain: visible
-focus rings (VS Code uses a clear focus outline), color contrast on the dark palette
-(verify text/`#1e1e1e` ≥ 4.5:1; the chosen `#cccccc`/`#858585` pass for body/secondary),
-keyboard navigation of the activity bar / tabs / tree, and `role`/`aria-selected` on tabs
-(already present). Light theme (fast-follow) will be the high-contrast daytime option.
+focus rings (VS Code uses a clear focus outline); and **per-surface contrast**. Body text
+`#cccccc` clears AA (≥ 4.5:1) on every surface, but the muted `#858585` clears 4.5:1 **only
+on the editor `#1e1e1e`** (~4.5:1) and **falls below AA on the darker chrome** — `#252526`
+(~4.2:1), `#333333` (~3.4:1), `#3c3c3c` (~3.0:1). Therefore the **Foundation phase defines a
+per-surface muted token** and bumps muted text lighter (toward ~`#9d9d9d`) on the
+sidebar / activity-bar / title surfaces, verifying each muted/background pair ≥ 4.5:1; reserve
+`#858585` for the editor surface only. Also maintain keyboard navigation of the activity bar /
+tabs / tree, and `role`/`aria-selected` on tabs (already present). Light theme (fast-follow)
+will be the high-contrast daytime option.
 
 ## 9. Out of scope / deferred
 
