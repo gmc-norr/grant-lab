@@ -665,6 +665,60 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # SP2b-3d: uncited-claims drain tick (async — one fresh-stateless pass).
+    def _uncited_claims_tick() -> None:
+        import asyncio
+
+        from call_manager.proposal_assist.uncited_claims.pass_runner import (
+            drain_uncited_claims_queue_tick,
+        )
+
+        if not settings.drafting_enabled:
+            return
+        coro = drain_uncited_claims_queue_tick(session_factory=session_factory, settings=settings)
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("uncited-claims tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            fut.result(timeout=settings.uncited_claims_pass_timeout_seconds + 60)
+        except Exception:
+            _logger.exception("uncited-claims tick failed")
+
+    sched.add_job(
+        _uncited_claims_tick,
+        trigger=IntervalTrigger(seconds=settings.uncited_claims_tick_seconds),
+        id="uncited_claims_drain",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # SP2b-3d: uncited-claims reaper tick (sync, pure DB). Crash/hung-job recovery.
+    def _uncited_claims_reaper_tick() -> None:
+        from call_manager.proposal_assist.uncited_claims.jobs import (
+            reap_stuck_uncited_claims_jobs,
+        )
+
+        try:
+            with session_factory() as s:
+                reap_stuck_uncited_claims_jobs(
+                    s, timeout_seconds=settings.uncited_claims_job_timeout_seconds
+                )
+                s.commit()
+        except Exception:
+            _logger.exception("uncited-claims reaper tick failed")
+
+    sched.add_job(
+        _uncited_claims_reaper_tick,
+        trigger=IntervalTrigger(seconds=settings.uncited_claims_reaper_tick_seconds),
+        id="uncited_claims_reaper",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Stuck-turn reaper. A turn cancelled by _turn_drain_tick's
     # fut.result(timeout=300) keeps running on the app loop with the handle
     # cached and its turn_jobs row stuck status='running'. The drain query

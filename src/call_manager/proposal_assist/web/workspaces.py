@@ -77,6 +77,9 @@ from call_manager.proposal_assist.turns.submit import (
     MAX_TURN_INCLUSIONS,
     submit_user_turn,
 )
+from call_manager.proposal_assist.uncited_claims.jobs import (
+    cancel_uncited_claims_jobs_for_workspace,
+)
 from call_manager.proposal_assist.web._perms import (
     require_member as _require_owner_or_viewer,
 )
@@ -1332,6 +1335,8 @@ def soft_delete(
     cancel_evaluator_jobs_for_workspace(session, workspace_id=workspace_id)
     # SP2b-3c: same rationale for the review queue — cancel any active mock-panel run.
     cancel_review_runs_for_workspace(session, workspace_id=workspace_id)
+    # SP2b-3d: same rationale for the uncited-claims queue — cancel any active run.
+    cancel_uncited_claims_jobs_for_workspace(session, workspace_id=workspace_id)
     # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
     # through the helper for audit parity (closes each cloud_turn_sent chain),
     # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,
