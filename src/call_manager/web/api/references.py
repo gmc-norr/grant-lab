@@ -137,3 +137,90 @@ async def api_upload_reference(
         ) from None
     except _BadUpload as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+class FetchIn(BaseModel):
+    input: str
+    kind: str = "paper"
+
+
+@router.post("/workspaces/{workspace_id}/references/fetch", response_model=IngestResultOut)
+async def api_fetch_reference(
+    workspace_id: uuid.UUID,
+    body: FetchIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> IngestResultOut:
+    from call_manager.proposal_assist.references.dispatcher import (
+        detect_source_type,
+        dispatch_fetch,
+    )
+    from call_manager.proposal_assist.references.fetcher import FetchError, SSRFError
+
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+    if body.kind not in ALLOWED_KINDS:
+        raise HTTPException(status_code=400, detail=f"invalid kind: {body.kind!r}")
+    try:
+        detect_source_type(body.input)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+    factory = request.app.state.session_factory
+    storage = _storage_for(request)
+    embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
+    limiter = request.app.state.reference_ingest_limiter
+    citation_service = request.app.state.citation_service
+    timeout = request.app.state.settings.reference_extract_timeout_seconds
+
+    def _run():
+        with limiter.slot():
+            fetch_data, filename, mime_type, source_meta = dispatch_fetch(body.input)
+            with factory() as own:
+                result = ingest_bytes(
+                    session_factory=factory,
+                    session=own,
+                    storage=storage,
+                    embedder=embedder,
+                    workspace_id=workspace_id,
+                    kind=body.kind,
+                    source_type=source_meta["source"],
+                    source_uri=body.input,
+                    filename=_sanitize_filename(filename),
+                    mime_type=mime_type,
+                    data=fetch_data,
+                    uploaded_by=user.id,
+                    source_meta=source_meta,
+                    citation_service=citation_service,
+                    extract_timeout_seconds=timeout,
+                )
+        with factory() as sev:
+            sev.add(
+                WorkspaceEvent(
+                    workspace_id=workspace_id,
+                    kind="reference.added",
+                    actor_id=user.id,
+                    payload={"reference_id": str(result.reference_id)},
+                )
+            )
+            sev.commit()
+        return result
+
+    try:
+        result = await run_in_threadpool(_run)
+    except OverCapacity:
+        raise HTTPException(
+            status_code=429, detail="server busy", headers={"Retry-After": "2"}
+        ) from None
+    except SSRFError as e:  # subclass of FetchError — must precede the FetchError arm
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    except FetchError as e:
+        raise HTTPException(status_code=502, detail=f"fetch failed: {e}") from None
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    return IngestResultOut(
+        reference_id=str(result.reference_id),
+        text_status=result.text_status,
+        text_error=result.text_error,
+    )

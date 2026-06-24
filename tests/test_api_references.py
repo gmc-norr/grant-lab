@@ -124,3 +124,40 @@ def test_api_upload_dragdrop_dedup(monkeypatch, pg_url, tmp_path, pg_session_fac
             select(func.count()).select_from(Reference).where(Reference.workspace_id == ws_id)
         )
     assert n == 1
+
+
+def test_api_fetch_invalid_source_is_400(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/fetch",
+        json={"input": "not a doi or url", "kind": "paper"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "bad_request"
+
+
+def test_api_fetch_success_audits(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    pdf = _real_pdf_bytes()
+
+    def _fake_dispatch(_input):
+        return pdf, "fetched.pdf", "application/pdf", {"source": "crossref"}
+
+    monkeypatch.setattr(
+        "call_manager.proposal_assist.references.dispatcher.dispatch_fetch", _fake_dispatch
+    )
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/fetch",
+        json={"input": "10.1000/xyz123", "kind": "paper"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["text_status"] == "done"
+    with pg_session_factory() as s:
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "reference.added"
+            )
+        )
+        assert ev is not None
