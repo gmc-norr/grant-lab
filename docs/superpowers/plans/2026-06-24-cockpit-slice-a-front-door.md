@@ -735,6 +735,16 @@ it("a setup workspace links to the Jinja setup flow and is marked 'Setting up'",
   expect(screen.getByText("Shared")).toBeInTheDocument(); // viewer-of badge
 });
 
+it("shows the lifecycle status badge and a last-activity date", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+    data: [wsItem({ status: "submitted", updated_at: "2026-06-20T09:00:00Z" })],
+    error: undefined,
+  } as never);
+  renderWithProviders(<WorkspaceList />, { route: "/cockpit" });
+  expect(await screen.findByText("Submitted")).toBeInTheDocument();
+  expect(screen.getByText(/Updated 2026-06-20/)).toBeInTheDocument();
+});
+
 it("shows an empty state that points back to the dashboard", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: [], error: undefined } as never);
   renderWithProviders(<WorkspaceList />, { route: "/cockpit" });
@@ -805,6 +815,14 @@ import styles from "./WorkspaceList.module.css";
 
 type WsItem = components["schemas"]["WorkspaceListItemOut"];
 
+const STATUS_LABEL: Record<string, string> = {
+  drafting: "Drafting",
+  submitted: "Submitted",
+  awarded: "Awarded",
+  rejected: "Rejected",
+  abandoned: "Abandoned",
+};
+
 function WorkspaceRow({ ws }: { ws: WsItem }) {
   // Setup-phase workspaces aren't cockpit-ready (no repo yet); the setup + rubric
   // flow is still Jinja (Slice E) — full-page hand-off via <a>. Active workspaces
@@ -823,9 +841,22 @@ function WorkspaceRow({ ws }: { ws: WsItem }) {
           </Link>
         )}
         <div className={styles.meta}>
-          {ws.linked_call_title && <span>{ws.linked_call_title}</span>}
-          {ws.linked_call_title && ws.deadline && <span aria-hidden> · </span>}
-          {ws.deadline && <Deadline iso={ws.deadline} />}
+          <span className={styles.status}>{STATUS_LABEL[ws.status] ?? ws.status}</span>
+          {ws.linked_call_title && (
+            <>
+              <span aria-hidden> · </span>
+              <span>{ws.linked_call_title}</span>
+            </>
+          )}
+          {ws.deadline && (
+            <>
+              <span aria-hidden> · </span>
+              <Deadline iso={ws.deadline} />
+            </>
+          )}
+          <span aria-hidden> · </span>
+          {/* updated_at is an ISO string; slice to YYYY-MM-DD for a stable label. */}
+          <span className={styles.activity}>Updated {ws.updated_at.slice(0, 10)}</span>
           {!ws.is_owner && <span className={styles.badge}>Shared</span>}
           {setup && <span className={styles.setup}>Setting up</span>}
         </div>
@@ -930,6 +961,15 @@ Create `frontend/src/routes/WorkspaceList.module.css`:
   border: 1px solid var(--app-border);
   border-radius: 4px;
   padding: 0 0.3rem;
+}
+.status {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--app-link);
+}
+.activity {
+  color: var(--app-muted);
 }
 .empty {
   color: var(--app-muted);
@@ -1280,7 +1320,18 @@ it("cockpitIdFromPath returns the id only for the editor route", () => {
 });
 ```
 
-Append to `frontend/src/shell/TitleBar.test.tsx`:
+In `frontend/src/shell/TitleBar.test.tsx`, first add a cleanup hook — the file
+has persistent `api.GET` spies and no teardown, and Vitest's config does not
+clear mocks globally, so the new "does not fetch" assertions need a clean spy.
+Add `afterEach` to the vitest import and a hook below the imports:
+
+```tsx
+import { expect, it, vi, afterEach } from "vitest";
+
+afterEach(() => vi.restoreAllMocks());
+```
+
+Then append the tests:
 
 ```tsx
 it("shows 'Workspaces' on the cockpit list and does not fetch", () => {
@@ -1442,11 +1493,12 @@ git commit -m "fix(spa): shell chrome handles the non-editor cockpit routes"
 - Modify: `frontend/src/router.tsx` (add the two routes)
 - Modify: `frontend/src/router.test.tsx` (generalize the drift-guard reduction)
 - Modify: `frontend/src/shell/nav-items.ts` (flip "workspaces" to SPA `/cockpit`)
-- Modify: `frontend/src/shell/ActivityBar.test.tsx` (update the now-stale "deep-link to Jinja" assertion)
+- Modify: `frontend/src/shell/ActivityBar.tsx` (caller-controlled active state for the flipped Workspaces item)
+- Modify: `frontend/src/shell/ActivityBar.test.tsx` (update the now-stale "deep-link to Jinja" assertion; add active-state tests)
 
 **Interfaces:**
-- Consumes: `WorkspaceList`, `WorkspacesFilters` (Task 5), `WorkspaceCreate` (Task 6).
-- Produces: live `/cockpit` (list) and `/cockpit/new` (create) routes; "Workspaces" nav → `/cockpit`.
+- Consumes: `WorkspaceList`, `WorkspacesFilters` (Task 5), `WorkspaceCreate` (Task 6); `cockpitIdFromPath` (Task 7).
+- Produces: live `/cockpit` (list) and `/cockpit/new` (create) routes; "Workspaces" nav → `/cockpit`, active on the non-editor cockpit routes only.
 
 - [ ] **Step 1: Update the router and generalize the drift guard (failing first)**
 
@@ -1501,7 +1553,7 @@ it("router concrete paths are all owned by the SPA_ROUTES manifest (drift guard)
 Run: `pnpm vitest run src/router.test.tsx`
 Expected: PASS — `/cockpit`, `/cockpit/new`, `/cockpit/:id` all collapse to `/cockpit`; `/` maps to `/`; the set equals `SPA_ROUTES`.
 
-- [ ] **Step 5: Flip the nav item (failing first)**
+- [ ] **Step 5: Flip the nav item**
 
 In `frontend/src/shell/nav-items.ts`, change the "workspaces" item:
 
@@ -1515,14 +1567,9 @@ In `frontend/src/shell/nav-items.ts`, change the "workspaces" item:
 },
 ```
 
-- [ ] **Step 6: Run the ActivityBar test to verify the stale assertion FAILS**
+- [ ] **Step 6: Update the ActivityBar tests (failing first)**
 
-Run: `pnpm vitest run src/shell/ActivityBar.test.tsx`
-Expected: FAIL — the "Workspaces, Profiles and Settings deep-link to their Jinja pages" test still asserts `Workspaces` → `/workspaces`.
-
-- [ ] **Step 7: Update the stale ActivityBar assertion**
-
-In `frontend/src/shell/ActivityBar.test.tsx`, replace the "deep-link to their Jinja pages" test with a split that reflects the flip (Workspaces is now an in-app SPA link; Profiles/Settings stay external):
+Two things change in `frontend/src/shell/ActivityBar.test.tsx`. (a) Replace the now-stale "Workspaces, Profiles and Settings deep-link to their Jinja pages" test (Workspaces is now an in-app SPA link). (b) Add active-state tests: after the flip, a plain prefix-matching NavLink would mark Workspaces active across the whole `/cockpit` subtree, so on `/cockpit/:id` both it AND the Current-workspace chip would read active — the fix makes Workspaces active on the list/create routes only.
 
 ```tsx
 it("Workspaces is an SPA link to the cockpit front door", () => {
@@ -1535,19 +1582,131 @@ it("Profiles and Settings still deep-link to their Jinja pages", () => {
   expect(screen.getByRole("link", { name: "Profiles" })).toHaveAttribute("href", "/profiles");
   expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/me");
 });
+
+it("Workspaces is the active nav item on the cockpit list and create routes", () => {
+  renderWithProviders(<ActivityBar />, { route: "/cockpit" });
+  expect(screen.getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
+});
+
+it("on the editor route the Current-workspace chip is active, Workspaces is not", () => {
+  renderWithProviders(<ActivityBar />, { route: "/cockpit/abc" });
+  expect(screen.getByRole("link", { name: "Current workspace" })).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("link", { name: "Workspaces" })).not.toHaveAttribute("aria-current", "page");
+});
+```
+
+Run: `pnpm vitest run src/shell/ActivityBar.test.tsx`
+Expected: FAIL — the old deep-link test is gone/replaced, and the active-state tests fail because Workspaces currently prefix-matches `/cockpit/abc`.
+
+- [ ] **Step 7: Caller-controlled active state for the Workspaces item**
+
+In `frontend/src/shell/ActivityBar.tsx`, add `Link` to the react-router import and let `Item` accept an optional caller-controlled `active` (used only for the flipped Workspaces item; everything else keeps NavLink's own matching):
+
+```tsx
+import { Link, NavLink, useLocation } from "react-router-dom";
+```
+
+```tsx
+function Item({ item, active }: { item: ActivityItem; active?: boolean }) {
+  const glyph = <Glyph icon={item.icon} />;
+  let body;
+  if (item.kind !== "spa") {
+    body = (
+      <a href={item.to} aria-label={item.label} className={styles.item}>
+        {glyph}
+      </a>
+    );
+  } else if (active !== undefined) {
+    // Caller-controlled active state: a plain prefix-matching NavLink would mark
+    // Workspaces active across the whole /cockpit subtree, double-lighting it with
+    // the Current-workspace chip on /cockpit/:id. Drive it explicitly instead.
+    const cls = active ? `${styles.item} ${styles.active}` : styles.item;
+    body = (
+      <Link
+        to={item.to}
+        aria-label={item.label}
+        aria-current={active ? "page" : undefined}
+        className={cls}
+      >
+        {glyph}
+      </Link>
+    );
+  } else {
+    body = (
+      <NavLink
+        to={item.to}
+        end={item.to === "/"}
+        aria-label={item.label}
+        className={({ isActive }) =>
+          isActive ? `${styles.item} ${styles.active}` : styles.item
+        }
+      >
+        {glyph}
+      </NavLink>
+    );
+  }
+  return (
+    <Tooltip label={item.label} position="right" withArrow>
+      {body}
+    </Tooltip>
+  );
+}
+```
+
+and pass the computed active state to the Workspaces item in `ActivityBar` (the
+`wsId`/chip block from Task 7 stays):
+
+```tsx
+export function ActivityBar() {
+  const { pathname } = useLocation();
+  const wsId = cockpitIdFromPath(pathname);
+  // Workspaces (the list) is active on the non-editor cockpit routes; on the
+  // editor the Current-workspace chip is the active item instead.
+  const onCockpitList = pathname.startsWith("/cockpit") && !wsId;
+  return (
+    <nav className={styles.activitybar} aria-label="Primary">
+      <div className={styles.group}>
+        {ACTIVITY_TOP.map((it) =>
+          it.id === "workspaces" ? (
+            <Item key={it.id} item={it} active={onCockpitList} />
+          ) : (
+            <Item key={it.id} item={it} />
+          ),
+        )}
+        {wsId && (
+          <Item
+            item={{
+              id: "active-ws",
+              label: "Current workspace",
+              icon: "edit",
+              kind: "spa",
+              to: `/cockpit/${wsId}`,
+            }}
+          />
+        )}
+      </div>
+      <div className={styles.spacer} />
+      <div className={styles.group}>
+        {ACTIVITY_BOTTOM.map((it) => (
+          <Item key={it.id} item={it} />
+        ))}
+      </div>
+    </nav>
+  );
+}
 ```
 
 - [ ] **Step 8: Run the affected tests to verify they pass**
 
 Run: `pnpm vitest run src/router.test.tsx src/shell/ActivityBar.test.tsx src/shell/AppShell.test.tsx`
-Expected: PASS (AppShell.test uses its own synthetic router and is unaffected; included as a guard).
+Expected: PASS — `/cockpit` & `/cockpit/new` light Workspaces; `/cockpit/abc` lights only the chip; the existing "Calls active on /" and "deactivates Calls in a cockpit" tests stay green. (AppShell.test uses its own synthetic router and is unaffected; included as a guard.)
 
 - [ ] **Step 9: Type-check + commit**
 
 ```bash
 pnpm exec tsc --noEmit
-git add frontend/src/router.tsx frontend/src/router.test.tsx frontend/src/shell/nav-items.ts frontend/src/shell/ActivityBar.test.tsx
-git commit -m "feat(spa): wire /cockpit list + /cockpit/new, flip Workspaces nav, generalize drift guard"
+git add frontend/src/router.tsx frontend/src/router.test.tsx frontend/src/shell/nav-items.ts frontend/src/shell/ActivityBar.tsx frontend/src/shell/ActivityBar.test.tsx
+git commit -m "feat(spa): wire /cockpit list + /cockpit/new, flip Workspaces nav (single active item), generalize drift guard"
 ```
 
 ---

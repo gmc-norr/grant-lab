@@ -165,8 +165,13 @@ we in a workspace editor?" from the URL. Today that derivation assumes every
                         icon: "edit", kind: "spa", to: `/cockpit/${id}` }} />}
   ```
 
-  The "Workspaces" item itself (`to:"/cockpit"`, `end=false`) stays highlighted
-  across the whole cockpit subtree — that's correct.
+  After the nav flip (§4.2), the "Workspaces" item must NOT rely on plain NavLink
+  prefix-matching: that marks it active across the whole `/cockpit` subtree, so on
+  `/cockpit/:id` BOTH it and the Current-workspace chip read active (two
+  `aria-current="page"` items). Drive its active state explicitly instead — active
+  on the non-editor cockpit routes (`pathname.startsWith("/cockpit") &&
+  cockpitIdFromPath(pathname) === ""`), inactive on the editor (where the chip owns
+  it).
 
 - **Drift guard** (`frontend/src/router.test.tsx`): the manifest (`routes.gen.ts`)
   is **unchanged**, but the guard's reduction only collapses `/:param` paths, so
