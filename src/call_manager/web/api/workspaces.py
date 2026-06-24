@@ -928,6 +928,11 @@ class ReferenceListItemOut(BaseModel):
     title: str
     kind: str
     text_status: str
+    # Slice C (Library) additive fields — sidebar useReferences ignores these.
+    metadata_status: str
+    metadata_waiver: bool
+    text_error: str | None = None
+    filename: str
 
 
 @router.get("/workspaces/{workspace_id}/references", response_model=list[ReferenceListItemOut])
@@ -957,6 +962,10 @@ def list_references(
                     title=str(title),
                     kind=ref.kind,
                     text_status=ref.text_status,
+                    metadata_status=ref.metadata_status,
+                    metadata_waiver=ref.metadata_waiver,
+                    text_error=ref.text_error,
+                    filename=ref.filename,
                 )
             )
     return out

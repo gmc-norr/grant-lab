@@ -1447,3 +1447,33 @@ def test_create_workspace_stores_profile_and_deadline(
         ws = s.get(Workspace, uuid.UUID(r.json()["id"]))
         assert ws.profile_id == prof_id
         assert ws.deadline is not None and ws.deadline.year == 2099
+
+
+def test_references_list_includes_library_fields(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    from call_manager.db.models import Reference
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+    with pg_session_factory() as s:
+        s.add(
+            Reference(
+                workspace_id=ws_id,
+                kind="paper",
+                source_type="uploaded",
+                filename="seed.pdf",
+                storage_path="seed/seed.pdf",
+                mime_type="application/pdf",
+                text_status="failed",
+                text_error="Boom: bad pdf",
+                metadata_status="pending",
+            )
+        )
+        s.commit()
+    c = _client(app, owner_id)
+    r = c.get(f"/api/workspaces/{ws_id}/references")
+    assert r.status_code == 200
+    row = r.json()[0]
+    assert row["metadata_status"] == "pending"
+    assert row["metadata_waiver"] is False
+    assert row["text_error"] == "Boom: bad pdf"
+    assert row["filename"] == "seed.pdf"
