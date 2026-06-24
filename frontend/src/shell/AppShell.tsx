@@ -11,8 +11,9 @@ type SidebarHandle = { Sidebar?: ComponentType };
 
 // The persistent IDE shell: title / activity / [sidebar] / main / status. A
 // route opts into the contextual sidebar by declaring `handle: { Sidebar }` (a
-// component). AppShell renders the deepest matched route that declares one;
-// routes without one (Cockpit, the 404) render full-width.
+// component). AppShell renders the deepest matched route that declares one (the
+// Calls list -> CallsFilters, the Cockpit -> CockpitSidebar); routes without one
+// (the 404) render full-width.
 export function AppShell() {
   const matches = useMatches();
   const SidebarContent = [...matches]

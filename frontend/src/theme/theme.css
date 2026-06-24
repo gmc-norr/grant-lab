@@ -1,12 +1,9 @@
 /* frontend/src/theme/theme.css
  * Custom dark "VS Code-style, our identity" palette. Imported AFTER
- * @mantine/core/styles.css and AFTER the legacy styles/tokens.css so these
- * declarations win the cascade. Two jobs:
- *  1. Define the --app-* chrome variables the IDE shell uses.
- *  2. Remap the legacy light --cm-* tokens (styles/tokens.css) to dark values
- *     so the not-yet-reskinned Dashboard/Cockpit bodies read as a dark IDE
- *     instead of light panels on a dark shell. Phases 2-3 rewrite those rules
- *     onto --app-* and this remap block goes away. */
+ * @mantine/core/styles.css so these declarations win the cascade. Defines the
+ * --app-* chrome + semantic variables the IDE shell, dashboard, and cockpit use.
+ * (The legacy light --cm-* token system / styles/tokens.css was fully retired in
+ * Phase 3a.) */
 
 :root {
   --app-editor: #1a1b1e;
