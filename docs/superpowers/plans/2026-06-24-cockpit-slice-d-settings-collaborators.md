@@ -99,10 +99,23 @@ And in `list_members`, the two `out.append`/`out.extend` lines:
         return out
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 3b: Update the EXISTING members test for the additive field**
 
-Run: `uv run pytest tests/test_api_workspaces.py::test_members_list_includes_user_id -q`
-Expected: PASS.
+`tests/test_api_workspaces.py` already contains `test_members_owner_sees_named_list`, which asserts **exact 2-key dict equality** on the rows (`assert b[0] == {"email": ..., "role": ...}` and `assert {"email": ..., "role": ...} in b`). Adding `user_id` makes every row a 3-key dict, so BOTH assertions break. Read the live test and relax those exact-dict assertions to key-subset checks that tolerate the new `user_id`, e.g.:
+
+```python
+    # was: assert b[0] == {"email": "owner@ki.se", "role": "owner"}
+    assert b[0]["email"] == "owner@ki.se" and b[0]["role"] == "owner"  # owner first
+    # was: assert {"email": "member@ki.se", "role": "member"} in b
+    assert any(m["email"] == "member@ki.se" and m["role"] == "member" for m in b)
+```
+
+> Match whatever emails/shape that test actually asserts; the point is to drop exact-dict equality so the additive `user_id` key doesn't fail the pre-existing test.
+
+- [ ] **Step 4: Run BOTH members tests to verify they pass**
+
+Run: `uv run pytest tests/test_api_workspaces.py -k members -q`
+Expected: PASS — both `test_members_owner_sees_named_list` (updated) and `test_members_list_includes_user_id` (new) green before committing.
 
 - [ ] **Step 5: Lint + commit**
 
@@ -732,32 +745,20 @@ git commit -m "feat(api): TurnsResponse is_owner + disabled_reason (fixes footer
 **Files:**
 - Modify: `src/call_manager/proposal_assist/activity/feed.py` (`_RENDER` :63, `build_activity_feed` render branch :172)
 - Modify: `src/call_manager/proposal_assist/web/activity.py` (`ActivityRowOut.category` :39, `get_activity` :54)
-- Test: `tests/proposal_assist/test_activity_feed.py` (append unit) + `tests/proposal_assist/` activity-endpoint test (append PII test — find the existing activity endpoint test file and append there; if none, create `tests/test_api_activity_members.py` using the `build_app` harness)
+- Test: `tests/proposal_assist/activity/test_feed.py` (append the `member`-category unit test, using its existing `_ev(...)` builder) + `tests/proposal_assist/activity/test_web.py` (append the owner-only PII endpoint test — this file already hits `GET /api/workspaces/{id}/activity` via the conftest fixtures `client_authed_owner`/`_app`/`current_user`). Do NOT create a new top-level test file (`tests/proposal_assist/test_activity_feed.py` does NOT exist).
 
 **Interfaces:**
 - Produces: `member_added`/`member_removed` render as category `"member"` with summary `"added collaborator <email>"` / `"removed collaborator <email>"`; the `/activity` endpoint excludes these kinds for non-owner viewers.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append a feed unit test to `tests/proposal_assist/test_activity_feed.py` (match the file's existing event-builder helper; the pattern below constructs a `WorkspaceEvent` directly — adapt to the file's fixture style):
+Append a feed unit test to `tests/proposal_assist/activity/test_feed.py`. That file already defines an `_ev(kind, *, actor_id=None, payload=None, secs_ago=0, ev_id=None)` builder that sets `id`/`created_at` — use it (don't hand-roll a `WorkspaceEvent`):
 
 ```python
 def test_member_added_renders_under_member_category_with_email():
-    from call_manager.db.models import WorkspaceEvent
     from call_manager.proposal_assist.activity.feed import build_activity_feed
 
-    ev = WorkspaceEvent(
-        workspace_id=__import__("uuid").uuid4(),
-        kind="member_added",
-        actor_id=1,
-        payload={"target_user_id": 2, "target_email": "alice@ki.se"},
-    )
-    # created_at + id are normally DB-assigned; set them for the pure builder.
-    import datetime as _dt
-    import uuid as _uuid
-
-    ev.id = _uuid.uuid4()
-    ev.created_at = _dt.datetime(2026, 6, 24, tzinfo=_dt.timezone.utc)
+    ev = _ev("member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@ki.se"})
     rows = build_activity_feed([ev], {1: "owner@ki.se"})
     assert len(rows) == 1
     assert rows[0].category == "member"
@@ -765,38 +766,27 @@ def test_member_added_renders_under_member_category_with_email():
     assert rows[0].actor == "owner@ki.se"
 ```
 
-For the PII test, append to the existing activity-endpoint test (search `tests/` for the file that hits `GET /api/workspaces/{id}/activity`; it is the one importing/using `build_app` or `_app` and asserting on `/activity`). If you must create one, use the `build_app` harness:
+> If `_ev`'s real signature differs, match it from the live file; the only requirements are `kind="member_added"`, a payload carrying `target_email`, and an `actor_id` resolvable via the `actor_names` dict.
+
+For the PII test, append to `tests/proposal_assist/activity/test_web.py` using **its conftest fixture style** (`client_authed_owner` / `_app` / `current_user` / `pg_session_factory` / `tmp_path` + `make_user`/`make_workspace`), NOT the `build_app`/`authed_client` harness — model it on the existing `test_activity_non_member_403` in that file (it shows how this file builds a workspace + a non-owner user and how to mint an authed client; the canonical signed-session-cookie client pattern is in `tests/proposal_assist/conftest.py`). The contract to assert:
 
 ```python
-def test_activity_excludes_member_events_for_non_owner(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from call_manager.db.models import WorkspaceEvent
-    from tests.proposal_assist._refs_helpers import add_member, authed_client, build_app
-    from tests.proposal_assist.conftest import make_user, make_workspace
-
-    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    with pg_session_factory() as s:
-        owner = make_user(s, email="o@ki.se")
-        member = make_user(s, email="m@ki.se")
-        ws = make_workspace(s, owner=owner)
-        s.commit()
-        add_member(s, workspace_id=ws.id, user=member)
-        s.add(WorkspaceEvent(
-            workspace_id=ws.id, kind="member_added", actor_id=owner.id,
-            payload={"target_user_id": member.id, "target_email": "m@ki.se"},
-        ))
-        s.commit()
-        ws_id, owner_id, member_id = ws.id, owner.id, member.id
-
-    owner_items = authed_client(app, user_id=owner_id).get(f"/api/workspaces/{ws_id}/activity").json()["items"]
-    assert any(it["category"] == "member" and "m@ki.se" in it["summary"] for it in owner_items)
-
-    member_items = authed_client(app, user_id=member_id).get(f"/api/workspaces/{ws_id}/activity").json()["items"]
-    assert all(it["category"] != "member" for it in member_items)
+# In tests/proposal_assist/activity/test_web.py, mirroring test_activity_non_member_403's
+# fixtures + client-minting. Setup: an owner workspace with a non-owner viewer (WorkspaceViewer)
+# and a member_added WorkspaceEvent(actor_id=owner, payload target_email=<member email>).
+#
+#   owner_items  = <owner-authed client>.get(f"/api/workspaces/{ws_id}/activity").json()["items"]
+#   member_items = <member-authed client>.get(f"/api/workspaces/{ws_id}/activity").json()["items"]
+#
+# assert any(it["category"] == "member" and "<member_email>" in it["summary"] for it in owner_items)
+# assert all(it["category"] != "member" for it in member_items)   # PII invariant
 ```
+
+> The load-bearing assertions are the two `category == "member"` checks (owner sees the row WITH the email; the non-owner member does NOT). Use the live file's fixtures to obtain BOTH an owner-authed and a member-authed client — `test_activity_non_member_403` is the template.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/proposal_assist/test_activity_feed.py -k member -x -q` (and the PII test file)
+Run: `uv run pytest tests/proposal_assist/activity/test_feed.py -k member -x -q` (and the PII test: `tests/proposal_assist/activity/test_web.py -k member`)
 Expected: FAIL — `member_added` is an unmapped kind (dropped), so no row / no `member` category.
 
 - [ ] **Step 3a: Implement — feed render**
@@ -862,7 +852,7 @@ And in `get_activity`, capture the workspace from the guard and exclude the coll
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/proposal_assist/test_activity_feed.py -k member tests/test_api_activity_members.py -q` (adjust paths to where you placed the tests)
+Run: `uv run pytest tests/proposal_assist/activity/test_feed.py tests/proposal_assist/activity/test_web.py -k "member or non_member" -q`
 Expected: PASS.
 
 - [ ] **Step 5: Lint + commit**
@@ -1078,8 +1068,9 @@ git commit -m "feat(spa): settings + collaborator hooks (useSettings/useUpdateSe
 Create `frontend/src/cockpit/WorkspaceSettingsModal.test.tsx`:
 
 ```tsx
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithProviders } from "../test-utils";
 import { WorkspaceSettingsModal } from "./WorkspaceSettingsModal";
 
 const h = vi.hoisted(() => ({ update: vi.fn(), settings: vi.fn() }));
@@ -1098,7 +1089,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 describe("WorkspaceSettingsModal", () => {
   it("renders current values and saves a PATCH", async () => {
-    render(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByLabelText(/title/i)).toHaveValue("Proj"));
     fireEvent.change(screen.getByLabelText(/title/i), { target: { value: "Renamed" } });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
@@ -1110,7 +1101,7 @@ describe("WorkspaceSettingsModal", () => {
 });
 ```
 
-> Mantine `Modal` renders into a portal; `@testing-library` queries find portal content via `screen`. If the existing test setup needs a `MantineProvider` wrapper for portals/styles, mirror whatever `MetadataModal`'s test (if any) or other Mantine component tests use — check `frontend/src/test/` setup. Mantine `Select` renders an input with the label as its accessible name.
+> Mantine v9 components THROW at render without a `MantineProvider` in the tree, and `test-setup.ts` provides no global one — so all Mantine component tests in this repo render via `renderWithProviders` from `frontend/src/test-utils.tsx` (it supplies MantineProvider + QueryClient + MemoryRouter; see `CallsFilters.test.tsx` / `ActivityBar.test.tsx`). There is NO `MetadataModal` test to mirror. The Modal renders into a portal, but `screen` queries find portal content. Mantine `Select` renders an input whose accessible name is its label.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1231,23 +1222,26 @@ export function TitleBar() {
           ⚙
         </button>
       )}
-      {isOwner && (
-        <WorkspaceSettingsModal id={id} opened={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {isOwner && settingsOpen && (
+        <WorkspaceSettingsModal id={id} opened onClose={() => setSettingsOpen(false)} />
       )}
     </header>
   );
 }
 ```
 
-> Add a `.settingsGear` class to `TitleBar.module.css` (small, transparent button, pushed to the right — e.g. `margin-left:auto; background:none; border:0; cursor:pointer; color:var(--app-text); font-size:14px;`). Keep the existing `title` element; if the layout already uses `margin-left:auto` somewhere, place the gear so it sits at the right without disturbing the title.
+> **Gate the modal with `settingsOpen` (not just `isOwner`).** A Mantine `Modal` calls `useProps`→`useMantineTheme` on render even when `opened={false}`, which throws if no `MantineProvider` is above it. In production the shell wraps everything in `MantineProvider` (Phase 1), so this is fine at runtime — but the existing `frontend/src/shell/TitleBar.test.tsx` renders `<TitleBar/>` with NO provider and mocks `role:"owner"` at `/cockpit/ws-1`. Gating with `settingsOpen` means the closed modal never mounts, so that pre-existing test keeps passing without a provider. (Only a test that actually clicks the gear would need `renderWithProviders`.)
+>
+> Add a `.settingsGear` class to `TitleBar.module.css` (small, transparent button, pushed right — e.g. `margin-left:auto; background:none; border:0; cursor:pointer; color:var(--app-text); font-size:14px;`). Keep the existing `title` element; if the layout already uses `margin-left:auto`, place the gear so it sits right without disturbing the title.
 
-- [ ] **Step 5: Run test + type-check**
+- [ ] **Step 5: Run test + type-check + the shell regression**
 
 ```bash
 pnpm vitest run src/cockpit/WorkspaceSettingsModal.test.tsx
+pnpm vitest run src/shell/
 pnpm exec tsc --noEmit
 ```
-Expected: PASS + exit 0. (If any existing TitleBar test exists, run it too: `pnpm vitest run src/shell/`.)
+Expected: PASS + exit 0. The `src/shell/` run is a REQUIRED regression check — `TitleBar.test.tsx` must stay green (the `settingsOpen` gate keeps the closed modal from mounting under its provider-less render).
 
 - [ ] **Step 6: Commit**
 
@@ -1271,27 +1265,46 @@ git commit -m "feat(spa): workspace settings modal + owner-only TitleBar gear"
 
 - [ ] **Step 1: Write the failing test**
 
-Append to (or create) `frontend/src/cockpit/CockpitSidebar.test.tsx`. Read the live file first to match its existing mock setup (it mocks the `../api/workspace` + `../api/editor` + `../api/citations` + `../api/evaluator` hooks). Add a `../api/settings` mock and a test:
+Append to `frontend/src/cockpit/CockpitSidebar.test.tsx`. **Read the live file first** — it mocks the TRANSPORT via `vi.spyOn(clientMod.api, "GET").mockImplementation((path) => ...)` and renders through a local `renderSidebar(url)` (wrapping `QueryClientProvider` + `MemoryRouter`); there is NO hoisted `h` hook-mock object. `useMembers` is a real `../api/workspace` hook fed by the `/members` GET, so keep the `api.GET` spy for the READ side (seed rows WITH `user_id`); only the new WRITE hooks need a module mock:
 
 ```tsx
-it("owner can remove a viewer (confirm-gated) from the Members group", () => {
-  // h.members returns rows incl. user_id; meta role owner; settings hooks mocked.
-  h.members.mockReturnValue({
-    data: [
-      { user_id: 1, email: "owner@ki.se", role: "owner" },
-      { user_id: 2, email: "viewer@ki.se", role: "member" },
-    ],
-  });
-  const remove = vi.fn();
-  h.removeMember.mockReturnValue({ mutate: remove, isPending: false });
+const removeMutate = vi.fn();
+const addMutate = vi.fn();
+vi.mock("../api/settings", () => ({
+  useAddMember: () => ({ mutate: addMutate, isPending: false, isError: false }),
+  useRemoveMember: () => ({ mutate: removeMutate, isPending: false }),
+}));
+
+it("owner can remove a viewer (confirm-gated) from the Members group", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/members"))
+      return Promise.resolve({
+        data: [
+          { user_id: 1, email: "owner@ki.se", role: "owner" },
+          { user_id: 2, email: "viewer@ki.se", role: "member" },
+        ],
+        error: undefined,
+      });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({
+        data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 },
+        error: undefined,
+      });
+    // Preserve the live file's draft/references/scorecard/versions stubs:
+    return Promise.resolve({ data: [], error: undefined });
+  }) as never);
   vi.spyOn(window, "confirm").mockReturnValue(true);
-  renderSidebar(); // however the file renders CockpitSidebar within the router/QueryClient
-  fireEvent.click(screen.getByRole("button", { name: /remove viewer@ki\.se/i }));
-  expect(remove).toHaveBeenCalledWith(2);
+  renderSidebar();
+  // The Members group is defaultOpen={false} — open it before the rows render:
+  fireEvent.click(await screen.findByRole("button", { name: /members/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /remove viewer@ki\.se/i }));
+  expect(removeMutate).toHaveBeenCalledWith(2);
+  // owner row has NO remove control:
+  expect(screen.queryByRole("button", { name: /remove owner@ki\.se/i })).toBeNull();
 });
 ```
 
-> Match the existing test file's mock-hoisting style. You must add to the hoisted mock object: `members`, `removeMember`, `addMember` (plus seed defaults in `beforeEach`), and a `vi.mock("../api/settings", () => ({ useAddMember: () => h.addMember(), useRemoveMember: () => h.removeMember() }))`. The owner row (`role==="owner"`) must NOT render a remove button — add an assertion `expect(screen.queryByRole("button", { name: /remove owner@ki\.se/i })).toBeNull();` if convenient.
+> Match the live file's exact `api.GET` mock shape + `renderSidebar` helper (the catch-all `return { data: [] }` above is a sketch — preserve whatever draft/references/scorecard/versions responses the existing tests return so the rest of the sidebar still renders). The `/members` rows MUST carry `user_id` (the impl reads `m.user_id`; the assertion expects `2`). Module-mock only `../api/settings` (the write hooks); `useMembers`/`useCockpitMeta` stay fed by the `api.GET` spy.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1396,23 +1409,39 @@ git commit -m "feat(spa): owner add/remove collaborators in the Members sidebar 
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `frontend/src/cockpit/chat/CockpitChat.test.tsx` (read the live file to match its existing `useTurns` mock). Add a test that mocks `useTurns` returning `disabled_reason: "drafting_disabled"` and asserts "Drafting is currently disabled." renders, and one with `disabled_reason: null` (+ `can_send: true`) asserting the Composer (the message is absent / the textarea is present):
+**Read the live file first** — it does NOT mock `useTurns`; it spies the transport via `vi.spyOn(clientMod.api, "GET")` inside a `mockTurns(over)` helper (there is NO hoisted `h.turns`). Two edits:
+
+(a) **Extend the `mockTurns` helper** so its `over` type AND its `/turns` payload carry `is_owner` + `disabled_reason`, **deriving** `disabled_reason` from the over-values in the backend's canonical order — the existing four footer tests pass different `over` values, and the setup case must resolve `"setup"` from `phase` (the old fields alone can't):
 
 ```tsx
-it("footer shows the drafting-disabled message via disabled_reason", () => {
-  h.turns.mockReturnValue({
-    data: {
-      turns: [], can_send: false, is_owner: true, disabled_reason: "drafting_disabled",
-      needs_disclosure: false, phase: "active", running_job_id: null,
-    },
-    isLoading: false,
-  });
-  renderChat();
-  expect(screen.getByText(/drafting is currently disabled/i)).toBeInTheDocument();
-});
+function mockTurns(over: Partial<{ can_send: boolean; needs_disclosure: boolean; phase: string; is_owner: boolean; disabled_reason: string | null }>) {
+  const can_send = over.can_send ?? true;
+  const needs_disclosure = over.needs_disclosure ?? false;
+  const phase = over.phase ?? "active";
+  const disabled_reason =
+    over.disabled_reason !== undefined
+      ? over.disabled_reason
+      : phase === "setup" ? "setup" : !can_send ? "not_owner" : needs_disclosure ? "needs_disclosure" : null;
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/turns"))
+      return Promise.resolve({ data: { turns: [], can_send, needs_disclosure, phase, is_owner: over.is_owner ?? true, disabled_reason, running_job_id: null }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    return Promise.resolve({ data: null, error: undefined });
+  }) as never);
+}
 ```
 
-> Match the existing CockpitChat test's mock shape exactly (it already stubs `useTurns`/`useReferences`/`useAckDisclosure`/`useEventStream`). Add `is_owner`/`disabled_reason` to whatever default `turns.data` the existing tests use so they keep passing.
+> Preserve the live helper's existing body (it may already branch on `/references` etc.) — only ADD `is_owner`/`disabled_reason` to the `over` type + the `/turns` payload, plus the derivation. This keeps the existing setup → "setup" → "Finish setup", disclosure → "needs_disclosure", read-only → "not_owner", and composer → null cases asserting the right branch. Do NOT introduce `h.turns`.
+
+(b) **Add the new drafting-disabled test** using that helper:
+
+```tsx
+it("footer shows the drafting-disabled message via disabled_reason", async () => {
+  mockTurns({ disabled_reason: "drafting_disabled", can_send: false, phase: "active" });
+  renderChat();
+  expect(await screen.findByText(/drafting is currently disabled/i)).toBeInTheDocument();
+});
+```
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1429,7 +1458,13 @@ In `frontend/src/cockpit/chat/CockpitChat.tsx`, replace the footer branch chain.
           {(() => {
             const reason =
               d.disabled_reason ??
-              (!d.can_send ? "not_owner" : d.needs_disclosure ? "needs_disclosure" : null);
+              (d.phase === "setup"
+                ? "setup"
+                : !d.can_send
+                  ? "not_owner"
+                  : d.needs_disclosure
+                    ? "needs_disclosure"
+                    : null);
             if (reason === "not_owner")
               return <p className={styles.note}>Read-only — only the owner can message the agent.</p>;
             if (reason === "setup")
@@ -1487,7 +1522,7 @@ git commit -m "feat(spa): chat footer keys off disabled_reason (fixes owner draf
 ## Task 11: ActivityPanel — `member` category styling + render test
 
 **Files:**
-- Modify: the activity CSS (find where `.category-reference` / `.category-*` rules live — likely `frontend/src/cockpit/ActivityPanel.css` or a global cockpit stylesheet)
+- Modify: `frontend/src/styles/cockpit.css` — the GLOBAL cockpit stylesheet holding the `.activity-row`/`.activity-list`/`.activity-*` block (imported once at `main.tsx`; `ActivityPanel.tsx` imports no local CSS). There is NO `ActivityPanel.css` and currently NO `.category-*` rule anywhere — you are adding the first one.
 - Test: `frontend/src/cockpit/ActivityPanel.test.tsx` (append)
 
 **Interfaces:**
@@ -1495,26 +1530,24 @@ git commit -m "feat(spa): chat footer keys off disabled_reason (fixes owner draf
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `frontend/src/cockpit/ActivityPanel.test.tsx` (match the existing `useActivity` mock). Add:
+Append to `frontend/src/cockpit/ActivityPanel.test.tsx`. **The live file's `h` is a plain hoisted object** (`vi.hoisted(() => ({ activity: { data: undefined } }))`) that `useActivity` returns directly — tests **reassign** `h.activity = { data: {...} }` (it is NOT a `vi.fn()`, so `h.activity.mockReturnValue` would throw). Render via the file's existing `wrap(...)` helper with the required `id` + `onNavigate` props:
 
 ```tsx
 it("renders a member-category row", () => {
-  h.activity.mockReturnValue({
+  h.activity = {
     data: {
       items: [
         { id: "e1", category: "member", actor: "owner@ki.se", summary: "added collaborator a@ki.se", count: 1, created_at: new Date().toISOString(), target: null },
       ],
     },
-    isLoading: false,
-    isError: false,
-  });
-  renderPanel(); // however the file renders ActivityPanel
+  };
+  wrap(<ActivityPanel id="ws1" onNavigate={vi.fn()} />);
   expect(screen.getByText(/added collaborator a@ki\.se/i)).toBeInTheDocument();
   expect(document.querySelector(".category-member")).not.toBeNull();
 });
 ```
 
-> Match the existing ActivityPanel test's render + mock style (it mocks `../api/activity`'s `useActivity` and passes `onNavigate`). Reuse its helpers.
+> Read the live file to confirm the `h.activity = {...}` reassignment pattern and the `wrap`/render helper name (mirror its existing tests at the top of the file). Drop `isLoading`/`isError` keys — the existing tests omit them.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1523,13 +1556,19 @@ Expected: FAIL initially only if the mock/category wiring is new; if the generic
 
 - [ ] **Step 3: Implement — add the CSS class**
 
-Find the existing `.category-reference { … }` (or equivalent per-category) rule and add a sibling:
+Categories are currently unstyled (no `.category-*` rule exists). In `frontend/src/styles/cockpit.css`, just after the `.activity-row` block (in the `/* Activity feed */` section), add the first per-category rule:
 
 ```css
-.category-member { /* match the visual treatment of the other categories */ }
+.activity-row.category-member {
+  /* member-management events (collaborator add/remove); match neighboring
+     activity tokens, e.g. a subtle accent. A near-no-op rule is acceptable —
+     the point is the class exists for future styling. */
+  border-left: 2px solid var(--app-accent);
+  padding-left: 0.4rem;
+}
 ```
 
-(Use the same property pattern the neighboring `.category-*` rules use — e.g. a left-border/accent color. If categories are otherwise unstyled, a no-op rule is acceptable; the point is the class exists for future styling and the test asserts the contract.)
+> The render test passes from `ActivityPanel.tsx`'s generic `category-${r.category}` className regardless of CSS, so this rule is a styling reservation, not what makes the test green. Match neighboring token names (`--app-accent`/`--app-muted` etc.) actually used in `cockpit.css`.
 
 - [ ] **Step 4: Run test + type-check + build**
 
@@ -1543,7 +1582,7 @@ Expected: PASS + exit 0 + build exit 0.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/cockpit/ActivityPanel.test.tsx frontend/src/cockpit/ActivityPanel.css
+git add frontend/src/cockpit/ActivityPanel.test.tsx frontend/src/styles/cockpit.css
 git commit -m "feat(spa): activity member-category styling + render test"
 ```
 
@@ -1552,7 +1591,7 @@ git commit -m "feat(spa): activity member-category styling + render test"
 ## Final verification (before the whole-branch review)
 
 - [ ] Backend (targeted): `uv run pytest tests/test_api_settings.py tests/test_api_turns.py tests/test_api_workspaces.py -q` — all green.
-- [ ] Activity: `uv run pytest tests/proposal_assist/test_activity_feed.py <activity-endpoint-test> -q` — green (incl. the PII test).
+- [ ] Activity: `uv run pytest tests/proposal_assist/activity/test_feed.py tests/proposal_assist/activity/test_web.py -q` — green (incl. the member-category unit test + the owner-only PII test).
 - [ ] Regression — Jinja settings/viewer/activity routes UNCHANGED: `uv run pytest tests/proposal_assist/ -k "settings or viewer or activity" -q`.
 - [ ] Lint: `uv run ruff check src/call_manager/web/api/ src/call_manager/proposal_assist/activity/ src/call_manager/proposal_assist/web/activity.py` — clean.
 - [ ] Frontend: `cd frontend && pnpm exec tsc --noEmit && pnpm vitest run && pnpm build` — tsc 0, all vitest green, build exit 0.
