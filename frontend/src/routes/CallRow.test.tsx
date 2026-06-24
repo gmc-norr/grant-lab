@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { expect, it } from "vitest";
 
 import type { CallItem } from "../api/dashboard";
@@ -17,14 +18,33 @@ function call(over: Partial<CallItem> = {}): CallItem {
   } as CallItem;
 }
 
+function renderRow(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
 it("links the title to the Jinja call-detail page, shows source + match badge", () => {
-  render(<CallRow call={call()} />);
+  renderRow(<CallRow call={call()} />);
   expect(screen.getByRole("link", { name: "Grant X" })).toHaveAttribute("href", "/calls/3");
   expect(screen.getByText("Vinnova")).toBeInTheDocument();
   expect(screen.getByText("82")).toHaveAttribute("data-band", "strong");
 });
 
 it("omits the match badge when the score is null", () => {
-  render(<CallRow call={call({ aggregate_score: null })} />);
+  renderRow(<CallRow call={call({ aggregate_score: null })} />);
   expect(screen.queryByText("82")).toBeNull();
+});
+
+it("Start drafting links to /cockpit/new with the call prefilled + profile", () => {
+  renderRow(<CallRow call={call()} profileId={7} />);
+  const href = screen.getByRole("link", { name: "Start drafting" }).getAttribute("href") ?? "";
+  expect(href).toContain("/cockpit/new?");
+  expect(href).toContain("call_id=3");
+  expect(href).toContain("call_title=Grant+X"); // URLSearchParams encodes space as +
+  expect(href).toContain("profile_id=7");
+});
+
+it("omits profile_id from the Start-drafting link when there is no resolved profile", () => {
+  renderRow(<CallRow call={call()} />);
+  const href = screen.getByRole("link", { name: "Start drafting" }).getAttribute("href") ?? "";
+  expect(href).not.toContain("profile_id");
 });

@@ -1,12 +1,18 @@
+import { Link } from "react-router-dom";
+
 import type { CallItem } from "../api/dashboard";
 import { MatchBadge } from "../components/MatchBadge";
 import { Deadline } from "./Deadline";
 import styles from "./CallRow.module.css";
 
 // One call in the list: title link (to the un-ported Jinja detail page), a muted
-// meta line (source · deadline), and the banded match pill. Plain <a>, not a
-// router link — coexistence with the un-ported /calls/{id} HTML page.
-export function CallRow({ call }: { call: CallItem }) {
+// meta line (source · deadline), the banded match pill, and a "Start drafting"
+// action that opens the React from-call create form. profileId is the dashboard's
+// resolved effective profile (carried so Phase-0 can snapshot it).
+export function CallRow({ call, profileId }: { call: CallItem; profileId?: number | null }) {
+  const params = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
+  if (profileId != null) params.set("profile_id", String(profileId));
+  const startHref = `/cockpit/new?${params.toString()}`;
   return (
     <li className={styles.row}>
       <div className={styles.body}>
@@ -19,7 +25,12 @@ export function CallRow({ call }: { call: CallItem }) {
           {call.deadline && <Deadline iso={call.deadline} />}
         </div>
       </div>
-      <MatchBadge score={call.aggregate_score} />
+      <div className={styles.actions}>
+        <MatchBadge score={call.aggregate_score} />
+        <Link className={styles.start} to={startHref}>
+          Start drafting
+        </Link>
+      </div>
     </li>
   );
 }

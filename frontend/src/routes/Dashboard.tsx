@@ -25,7 +25,7 @@ export function Dashboard() {
 
       <ul className={styles.list}>
         {data.items.map((c) => (
-          <CallRow key={c.id} call={c} />
+          <CallRow key={c.id} call={c} profileId={data.effective.profile_id} />
         ))}
       </ul>
 

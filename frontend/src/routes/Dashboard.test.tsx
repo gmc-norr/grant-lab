@@ -87,6 +87,17 @@ it("paginating preserves the show_closed toggle in the URL", async () => {
   });
 });
 
+it("threads the dashboard's effective profile into the Start-drafting links", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(
+    itemsBody([row(1, "Call one", null)], {
+      effective: { profile_id: 5, source: null, sort: "newest", show_closed: false },
+    }) as never,
+  );
+  renderAt("/");
+  const start = await screen.findByRole("link", { name: "Start drafting" });
+  expect(start.getAttribute("href")).toContain("profile_id=5");
+});
+
 it("a 401 (session expired) redirects to /login instead of dead-ending on an error", async () => {
   // Replace window.location so the full-page nav is observable (jsdom's
   // assign is a warning no-op).
