@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import subprocess
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import Reference, User, Workspace, WorkspaceViewer
+from call_manager.db.models import ArtifactVersion, Reference, User, Workspace, WorkspaceViewer
 from call_manager.main import create_app
 from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
@@ -1198,3 +1198,51 @@ def test_cockpit_meta_reads_workspace_deadline(monkeypatch, pg_url, pg_session_f
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
     assert r.status_code == 200
     assert r.json()["workspace_deadline"].startswith("2099-01-01")
+
+
+# --- Task 2: GET /versions ---------------------------------------------------
+def test_versions_newest_first(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        s.add_all(
+            [
+                ArtifactVersion(
+                    workspace_id=ws_id,
+                    commit_sha="a" * 40,
+                    created_by="user",
+                    message="older",
+                    created_at=now - timedelta(hours=1),
+                ),
+                ArtifactVersion(
+                    workspace_id=ws_id,
+                    commit_sha="b" * 40,
+                    created_by="agent",
+                    message="newer",
+                    created_at=now,
+                ),
+            ]
+        )
+        s.commit()
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/versions")
+    assert r.status_code == 200
+    b = r.json()
+    assert [v["message"] for v in b] == ["newer", "older"]
+    assert b[0]["created_by"] == "agent"
+    assert b[0]["commit_sha"] == "b" * 40
+
+
+def test_versions_empty_ok(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/versions")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_versions_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/versions")
+    assert r.status_code == 403

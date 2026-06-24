@@ -852,6 +852,41 @@ def get_cockpit_meta(
         )
 
 
+class VersionOut(BaseModel):
+    commit_sha: str
+    message: str
+    created_by: str
+    created_at: datetime
+
+
+@router.get("/workspaces/{workspace_id}/versions", response_model=list[VersionOut])
+def list_versions(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> list[VersionOut]:
+    """Recent artifact versions (git commits) for the Versions sidebar group.
+    Member-gated, newest-first, capped at 50."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        rows = session.scalars(
+            select(ArtifactVersion)
+            .where(ArtifactVersion.workspace_id == workspace_id)
+            .order_by(ArtifactVersion.created_at.desc())
+            .limit(50)
+        ).all()
+        return [
+            VersionOut(
+                commit_sha=v.commit_sha,
+                message=v.message,
+                created_by=v.created_by,
+                created_at=v.created_at,
+            )
+            for v in rows
+        ]
+
+
 class ReferenceListItemOut(BaseModel):
     id: str
     citekey: str | None = None
