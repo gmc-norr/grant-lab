@@ -59,7 +59,7 @@
 - Produces: `CockpitMetaOut { workspace_title: str, workspace_deadline: datetime|None, current_phase: str, role: str, spec_locked: bool, member_count: int }`; route `GET /api/workspaces/{workspace_id}/cockpit-meta` (member-gated).
 - Consumes: `require_member` (returns the `Workspace`), `WorkspaceViewer`, `func` (sqlalchemy).
 
-- [ ] **Step 1: Write the failing tests** — append to `tests/test_api_workspaces.py`:
+- [ ] **Step 1: Write the failing tests** — add `from datetime import UTC, datetime` near the top imports of `tests/test_api_workspaces.py` (Task 2 later extends this same line with `timedelta`), then append:
 
 ```python
 def test_cockpit_meta_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -90,11 +90,26 @@ def test_cockpit_meta_non_member_403(monkeypatch, pg_url, pg_session_factory, tm
     r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_cockpit_meta_reads_workspace_deadline(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Pins the contract: cockpit-meta reads Workspace.deadline (NOT the optional
+    # linked Call.deadline). Seed a deadline directly on the workspace and assert
+    # it round-trips, so a future "read it off the Call" regression fails here.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.deadline = datetime(2099, 1, 1, tzinfo=UTC)
+        s.commit()
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
+    assert r.status_code == 200
+    assert r.json()["workspace_deadline"].startswith("2099-01-01")
 ```
 
 - [ ] **Step 2: Run — Expected: FAIL** (404 route-not-found / no handler).
 
-Run: `uv run pytest tests/test_api_workspaces.py::test_cockpit_meta_owner tests/test_api_workspaces.py::test_cockpit_meta_member_sees_member_role tests/test_api_workspaces.py::test_cockpit_meta_non_member_403 -v`
+Run: `uv run pytest tests/test_api_workspaces.py::test_cockpit_meta_owner tests/test_api_workspaces.py::test_cockpit_meta_member_sees_member_role tests/test_api_workspaces.py::test_cockpit_meta_non_member_403 tests/test_api_workspaces.py::test_cockpit_meta_reads_workspace_deadline -v`
 
 - [ ] **Step 3: Implement.** In `src/call_manager/web/api/workspaces.py`:
 
@@ -177,7 +192,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Produces: `VersionOut { commit_sha: str, message: str, created_by: str, created_at: datetime }`; route `GET /api/workspaces/{workspace_id}/versions` (member-gated, newest-first, ≤50).
 - Consumes: `ArtifactVersion` (already imported), `require_member`.
 
-- [ ] **Step 1: Write the failing tests** — append to `tests/test_api_workspaces.py` (add `ArtifactVersion` to the `call_manager.db.models` import at the top, and `from datetime import UTC, datetime, timedelta` near the top imports):
+- [ ] **Step 1: Write the failing tests** — append to `tests/test_api_workspaces.py` (add `ArtifactVersion` to the `call_manager.db.models` import at the top, and extend the `from datetime import UTC, datetime` line Task 1 added with `timedelta` → `from datetime import UTC, datetime, timedelta`):
 
 ```python
 def test_versions_newest_first(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -860,7 +875,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 }
 ```
 
-- [ ] **Step 2a: Wrap `renderAt` in a QueryClientProvider.** `StatusBar` now calls `useQuery` (via `useCockpitMeta`/`useScorecard`), so the existing `renderAt` helper in `frontend/src/shell/StatusBar.test.tsx` MUST provide a QueryClient or every test throws "No QueryClient set". Add the imports `import { QueryClient, QueryClientProvider } from "@tanstack/react-query";`, `import * as clientMod from "../api/client";`, and `vi` (from vitest), and replace `renderAt` with (retry off so a failing/unmocked query doesn't retry-spam):
+- [ ] **Step 2a: Wrap `renderAt` in a QueryClientProvider + add a default no-network mock.** `StatusBar` now calls `useQuery` (via `useCockpitMeta`/`useScorecard`), so the existing `renderAt` helper in `frontend/src/shell/StatusBar.test.tsx` MUST provide a QueryClient or every test throws "No QueryClient set". Add the imports `import { QueryClient, QueryClientProvider } from "@tanstack/react-query";`, `import * as clientMod from "../api/client";`, and `beforeEach`/`vi` (from vitest), and replace `renderAt` with (retry off so a failing/unmocked query doesn't retry-spam):
 ```tsx
 function renderAt(path: string) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -873,7 +888,19 @@ function renderAt(path: string) {
   );
 }
 ```
-The existing 3a tests stay green: off-cockpit the gated queries don't fire; the cockpit Ln/Col test leaves `meta`/`scorecard` undefined (deadline/lock/band simply absent) while the asserted save/Markdown/Ln-Col items still render.
+Critically, the existing 3a Ln/Col test renders at `/cockpit/ws-1` — where the gated queries now DO fire — so without a mock it would hit `fetch` (network noise / an async rejection in jsdom). Extend the existing `afterEach` to restore mocks, and add a `beforeEach` that resolves both queries to null data so no real request is made:
+```tsx
+afterEach(() => {
+  resetEditorStore();
+  vi.restoreAllMocks();
+});
+beforeEach(() => {
+  // Default no-network stub: both gated queries resolve to null → deadline/lock/band
+  // absent. The "deadline/spec-lock/band" test below overrides this via mockImplementation.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: null, error: undefined } as never);
+});
+```
+The existing 3a tests stay green: off-cockpit the gated queries don't fire (the `not.toHaveBeenCalled()` test below still passes — the stub is never invoked at `/`); the cockpit Ln/Col test resolves `meta`/`scorecard` to null (deadline/lock/band simply absent) while the asserted save/Markdown/Ln-Col items still render — with no real network call.
 
 ALSO fix `frontend/src/shell/AppShell.test.tsx` the same way — it renders the whole shell (so it now mounts a `useQuery`-calling `StatusBar`/`TitleBar`) but wraps only `MantineProvider`+`RouterProvider`. Add `import { QueryClient, QueryClientProvider } from "@tanstack/react-query";` and wrap BOTH render helpers' `<MantineProvider>…</MantineProvider>` trees in `<QueryClientProvider client={new QueryClient()}>…</QueryClientProvider>`. (It renders at `/`, so the gated queries never fire — but `useQuery` still requires the provider.) This is part of Task 7 so the gate stays green; Task 8's `TitleBar` change is then already covered.
 
@@ -945,7 +972,7 @@ export function StatusBar() {
   const meta = useCockpitMeta(id).data;
   const scorecard = useScorecard(id).data;
   const dl = meta?.workspace_deadline ? deadlineView(meta.workspace_deadline) : null;
-  const band = scorecard?.scorecard.overall_band;
+  const band = scorecard?.scorecard?.overall_band;
 
   return (
     <footer className={styles.statusbar} aria-label="Status bar">
