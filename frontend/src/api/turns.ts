@@ -14,11 +14,11 @@ export function useTurns(id: string) {
 export function useSubmitTurn(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { content: string; reference_ids?: string[] }) =>
+    mutationFn: async (vars: { content: string; reference_ids?: string[]; attachment_ids?: string[] }) =>
       unwrap(
         await api.POST("/api/workspaces/{workspace_id}/turns", {
           params: { path: { workspace_id: id } },
-          body: { content: vars.content, reference_ids: vars.reference_ids ?? [] },
+          body: { content: vars.content, reference_ids: vars.reference_ids ?? [], attachment_ids: vars.attachment_ids ?? [] },
         }),
       ),
     // onSettled (not onSuccess): a backstop 4xx/5xx (drafting-disabled race,
