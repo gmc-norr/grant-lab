@@ -39,20 +39,21 @@ function useUploadQueue(id: string) {
         const file = q.shift()!;
         activeRef.current += 1;
         setUploading(true);
+        // mutateAsync gives each concurrent worker its OWN awaited settle path.
+        // A single mutation observer's per-call mutate() callbacks are unreliable
+        // under concurrency (TanStack reassigns the observer to the newest call),
+        // which would skip retries and leak activeRef.
         const run = (attempt: number) =>
-          upload.mutate(
-            { file, kind, autoClassify: true },
-            {
-              onError: (err) => {
-                if (err instanceof ApiError && err.code === "too_many_requests" && attempt < 4) {
-                  window.setTimeout(() => run(attempt + 1), 2000 * (attempt + 1));
-                  return; // keep the slot held during backoff; do NOT settle
-                }
-                settle();
-              },
-              onSuccess: () => settle(),
-            },
-          );
+          upload
+            .mutateAsync({ file, kind, autoClassify: true })
+            .then(() => settle())
+            .catch((err) => {
+              if (err instanceof ApiError && err.code === "too_many_requests" && attempt < 4) {
+                window.setTimeout(() => run(attempt + 1), 2000 * (attempt + 1));
+                return; // keep the slot held during backoff; do NOT settle
+              }
+              settle();
+            });
         run(0);
       }
     };

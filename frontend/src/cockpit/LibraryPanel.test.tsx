@@ -106,16 +106,16 @@ describe("LibraryPanel actions", () => {
   });
 
   it("drop queue starts at most MAX (2) uploads concurrently", () => {
-    // mutate never invokes onSuccess/onError, so each upload stays 'in flight'
-    // and the queue must hold the remaining files until a settle.
-    const mutate = vi.fn();
-    h.useUploadReference.mockReturnValue({ mutate, isPending: false });
+    // mutateAsync returns a never-settling promise, so each worker stays 'in
+    // flight' and the queue must hold the remaining files until a settle.
+    const mutateAsync = vi.fn(() => new Promise<never>(() => {}));
+    h.useUploadReference.mockReturnValue({ mutate: vi.fn(), mutateAsync, isPending: false });
     wrap(<LibraryPanel id="ws1" />);
     const dz = screen.getByText(/drop pdfs here/i);
     const files = [0, 1, 2, 3, 4].map(
       (i) => new File([new Uint8Array([i])], `f${i}.pdf`, { type: "application/pdf" }),
     );
     fireEvent.drop(dz, { dataTransfer: { files } });
-    expect(mutate).toHaveBeenCalledTimes(2); // MAX=2; the other 3 wait
+    expect(mutateAsync).toHaveBeenCalledTimes(2); // MAX=2; the other 3 wait
   });
 });

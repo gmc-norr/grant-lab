@@ -72,9 +72,6 @@ async def api_upload_reference(
     if not auto_classify and kind not in ALLOWED_KINDS:
         raise HTTPException(status_code=400, detail=f"invalid kind: {kind!r}")
 
-    data = await _read_capped(file, _MAX_BYTES)  # raises HTTPException(400) over the 50 MB cap
-    filename = _sanitize_filename(file.filename or f"reference{suffix_for_mime(content_type)}")
-
     factory = request.app.state.session_factory
     storage = _storage_for(request)
     embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
@@ -82,8 +79,16 @@ async def api_upload_reference(
     citation_service = request.app.state.citation_service
     timeout = request.app.state.settings.reference_extract_timeout_seconds
 
-    def _run() -> IngestResultOut:
+    try:
+        # Acquire the ingest slot BEFORE buffering the upload (mirrors the Jinja
+        # path): an over-capacity request returns 429 immediately, without first
+        # reading up to 50 MB into memory. The threading-semaphore slot is held
+        # across the async read AND the threadpool ingest.
         with limiter.slot():
+            data = await _read_capped(file, _MAX_BYTES)  # HTTPException(400) over the 50 MB cap
+            filename = _sanitize_filename(
+                file.filename or f"reference{suffix_for_mime(content_type)}"
+            )
             if auto_classify:
                 if not data.startswith(b"%PDF-"):
                     raise _BadUpload("drag-drop accepts real PDF files only.")
@@ -100,50 +105,54 @@ async def api_upload_reference(
                     )
                     if dup is not None:
                         return IngestResultOut(
-                            reference_id=str(dup.id), text_status=dup.text_status, text_error=None
+                            reference_id=str(dup.id),
+                            text_status=dup.text_status,
+                            text_error=None,
                         )
-            with factory() as own:
-                result = ingest_bytes(
-                    session_factory=factory,
-                    session=own,
-                    storage=storage,
-                    embedder=embedder,
-                    workspace_id=workspace_id,
-                    kind="paper" if auto_classify else kind,
-                    source_type="uploaded",
-                    source_uri=None,
-                    filename=filename,
-                    mime_type=content_type,
-                    data=data,
-                    uploaded_by=user.id,
-                    citation_service=citation_service,
-                    extract_timeout_seconds=timeout,
-                    auto_classify_kind=auto_classify,
-                )
-        with factory() as sev:
-            sev.add(
-                WorkspaceEvent(
-                    workspace_id=workspace_id,
-                    kind="reference.added",
-                    actor_id=user.id,
-                    payload={"reference_id": str(result.reference_id)},
-                )
-            )
-            sev.commit()
-        return IngestResultOut(
-            reference_id=str(result.reference_id),
-            text_status=result.text_status,
-            text_error=result.text_error,
-        )
 
-    try:
-        return await run_in_threadpool(_run)
+            def _ingest():
+                with factory() as own:
+                    return ingest_bytes(
+                        session_factory=factory,
+                        session=own,
+                        storage=storage,
+                        embedder=embedder,
+                        workspace_id=workspace_id,
+                        kind="paper" if auto_classify else kind,
+                        source_type="uploaded",
+                        source_uri=None,
+                        filename=filename,
+                        mime_type=content_type,
+                        data=data,
+                        uploaded_by=user.id,
+                        citation_service=citation_service,
+                        extract_timeout_seconds=timeout,
+                        auto_classify_kind=auto_classify,
+                    )
+
+            result = await run_in_threadpool(_ingest)
     except OverCapacity:
         raise HTTPException(
             status_code=429, detail="server busy", headers={"Retry-After": "2"}
         ) from None
     except _BadUpload as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+
+    with factory() as sev:
+        sev.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="reference.added",
+                actor_id=user.id,
+                payload={"reference_id": str(result.reference_id)},
+            )
+        )
+        sev.commit()
+    return IngestResultOut(
+        reference_id=str(result.reference_id),
+        text_status=result.text_status,
+        text_error=result.text_error,
+    )
 
 
 class FetchIn(BaseModel):

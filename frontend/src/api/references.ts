@@ -1,11 +1,17 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ApiError, api, unwrap } from "./client";
+import { ApiError, api, redirectToLogin, unwrap } from "./client";
 import type { components } from "./schema.gen";
 
 type IngestResult = components["schemas"]["IngestResultOut"];
 
 async function postMultipart(url: string, fd: FormData): Promise<IngestResult> {
   const res = await fetch(url, { method: "POST", body: fd, credentials: "same-origin" });
+  if (res.status === 401) {
+    // Mirror unwrap(): a session that expired mid-upload redirects to login
+    // rather than failing silently in the UI.
+    redirectToLogin();
+    throw new ApiError("unauthorized", "session expired");
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as
       | { error?: { code?: string; message?: string } }

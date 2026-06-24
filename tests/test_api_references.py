@@ -126,6 +126,38 @@ def test_api_upload_dragdrop_dedup(monkeypatch, pg_url, tmp_path, pg_session_fac
     assert n == 1
 
 
+def test_api_upload_acquires_slot_before_reading(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    """Over-capacity upload returns 429 WITHOUT buffering the file: the limiter
+    slot is acquired before _read_capped runs (parity with the Jinja path)."""
+    import call_manager.web.api.references as refmod
+    from call_manager.proposal_assist.references.admission import IngestLimiter
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+
+    lim = IngestLimiter(capacity=1)
+    assert lim.try_acquire()  # hold the only slot so the request is over capacity
+    app.state.reference_ingest_limiter = lim
+
+    reads = {"n": 0}
+    real_read = refmod._read_capped
+
+    async def _spy_read(upload, max_bytes):
+        reads["n"] += 1
+        return await real_read(upload, max_bytes)
+
+    monkeypatch.setattr(refmod, "_read_capped", _spy_read)
+
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references",
+        data={"kind": "paper", "auto_classify": "false"},
+        files={"file": ("p.pdf", _real_pdf_bytes(), "application/pdf")},
+    )
+    assert r.status_code == 429
+    assert r.headers.get("Retry-After") == "2"
+    assert reads["n"] == 0  # slot rejected the request before the file was read
+
+
 def test_api_fetch_invalid_source_is_400(monkeypatch, pg_url, tmp_path, pg_session_factory):
     app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
