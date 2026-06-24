@@ -108,3 +108,44 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.memberRemove {
+  border: none;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+  font-size: 0.9rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.memberRemove:hover {
+  color: var(--app-warn);
+}
+.memberAdd {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.25rem 0.5rem 0.25rem 1.25rem;
+}
+.memberAdd input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--app-border, #444);
+  background: var(--app-surface, #222);
+  color: var(--app-text);
+  border-radius: 3px;
+}
+.memberAdd button {
+  border: none;
+  background: var(--app-accent, teal);
+  color: #fff;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.memberAdd button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

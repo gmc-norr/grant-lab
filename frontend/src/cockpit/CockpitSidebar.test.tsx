@@ -1,11 +1,25 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+// vi.mock is hoisted above top-level consts, so the factory must reference a
+// vi.hoisted() object (a plain `const addMutate = vi.fn()` here trips
+// "cannot access before initialization"). Reset these in beforeEach.
+const m = vi.hoisted(() => ({ addMutate: vi.fn(), removeMutate: vi.fn() }));
+vi.mock("../api/settings", () => ({
+  useAddMember: () => ({ mutate: m.addMutate, isPending: false, isError: false }),
+  useRemoveMember: () => ({ mutate: m.removeMutate, isPending: false }),
+}));
 
 import * as clientMod from "../api/client";
 import { CockpitSidebar } from "./CockpitSidebar";
 import { resetEditorStore, setDirty } from "./editorStore";
+
+beforeEach(() => {
+  m.addMutate.mockReset();
+  m.removeMutate.mockReset();
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -142,4 +156,34 @@ it("a non-owner member sees the member count only (no emails)", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /members/i }));
   expect(await screen.findByText(/3 members/)).toBeInTheDocument();
   expect(screen.queryByText("owner@ki.se")).toBeNull();
+});
+
+it("owner can remove a viewer (confirm-gated) from the Members group", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/members"))
+      return Promise.resolve({
+        data: [
+          { user_id: 1, email: "owner@ki.se", role: "owner" },
+          { user_id: 2, email: "viewer@ki.se", role: "member" },
+        ],
+        error: undefined,
+      });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({
+        data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 },
+        error: undefined,
+      });
+    if (path.endsWith("/versions")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  renderSidebar();
+  // The Members group is defaultOpen={false} — open it before the rows render:
+  fireEvent.click(await screen.findByRole("button", { name: /members/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /remove viewer@ki\.se/i }));
+  expect(m.removeMutate).toHaveBeenCalledWith(2);
+  // owner row has NO remove control:
+  expect(screen.queryByRole("button", { name: /remove owner@ki\.se/i })).toBeNull();
 });

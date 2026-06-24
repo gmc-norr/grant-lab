@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { useReferences } from "../api/citations";
 import { useDraft, useSpec } from "../api/editor";
 import { type ScorecardCriterion, useScorecard } from "../api/evaluator";
+import { useAddMember, useRemoveMember } from "../api/settings";
 import { useCockpitMeta, useMembers, useVersions } from "../api/workspace";
 import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
@@ -53,6 +55,9 @@ export function CockpitSidebar() {
   // 3a draft-fixture mock → memberRows=null → the count branch, never a .map crash).
   const memberRows = Array.isArray(members.data) ? members.data : null;
   const memberCount = meta.data?.member_count;
+  const addMember = useAddMember(id);
+  const removeMember = useRemoveMember(id);
+  const [newEmail, setNewEmail] = useState("");
 
   return (
     <div className={styles.sidebar}>
@@ -124,14 +129,47 @@ export function CockpitSidebar() {
 
       <SidebarGroup title="Members" count={memberCount} defaultOpen={false}>
         {memberRows ? (
-          <ul className={styles.outline} aria-label="Members">
-            {memberRows.map((m) => (
-              <li key={m.email} className={styles.metaRow}>
-                <span className={styles.rowLabel}>{m.email}</span>
-                <span className={styles.metaSub}>{m.role}</span>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className={styles.outline} aria-label="Members">
+              {memberRows.map((mbr) => (
+                <li key={mbr.email} className={styles.metaRow}>
+                  <span className={styles.rowLabel}>{mbr.email}</span>
+                  <span className={styles.metaSub}>{mbr.role}</span>
+                  {mbr.role === "member" && (
+                    <button
+                      type="button"
+                      className={styles.memberRemove}
+                      aria-label={`Remove ${mbr.email}`}
+                      disabled={removeMember.isPending}
+                      onClick={() => {
+                        if (window.confirm(`Remove ${mbr.email}?`)) removeMember.mutate(mbr.user_id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className={styles.memberAdd}>
+              <input
+                aria-label="Add collaborator by email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                placeholder="email…"
+              />
+              <button
+                type="button"
+                disabled={addMember.isPending || !newEmail.trim()}
+                onClick={() =>
+                  addMember.mutate(newEmail.trim(), { onSuccess: () => setNewEmail("") })
+                }
+              >
+                Add
+              </button>
+            </div>
+            {addMember.isError && <p className={styles.note}>Could not add collaborator.</p>}
+          </>
         ) : (
           <p className={styles.note}>
             {memberCount != null ? `${memberCount} member${memberCount === 1 ? "" : "s"}` : "—"}
