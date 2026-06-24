@@ -1332,9 +1332,9 @@ export function useUploadReference(id: string) {
 export function useFetchReference(id: string) {
   const onSettled = invalidateRefs(id);
   return useMutation({
-    mutationFn: ({ input, kind }: { input: string; kind: string }) =>
+    mutationFn: async ({ input, kind }: { input: string; kind: string }) =>
       unwrap(
-        api.POST("/api/workspaces/{workspace_id}/references/fetch", {
+        await api.POST("/api/workspaces/{workspace_id}/references/fetch", {
           params: { path: { workspace_id: id } },
           body: { input, kind },
         }),
@@ -1346,7 +1346,7 @@ export function useFetchReference(id: string) {
 export function useApproveMetadata(id: string) {
   const onSettled = invalidateRefs(id);
   return useMutation({
-    mutationFn: (v: {
+    mutationFn: async (v: {
       referenceId: string;
       title: string;
       authors: string[];
@@ -1355,7 +1355,7 @@ export function useApproveMetadata(id: string) {
       doi?: string | null;
     }) =>
       unwrap(
-        api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/metadata", {
+        await api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/metadata", {
           params: { path: { workspace_id: id, reference_id: v.referenceId } },
           body: {
             title: v.title,
@@ -1373,9 +1373,9 @@ export function useApproveMetadata(id: string) {
 export function useToggleWaiver(id: string) {
   const onSettled = invalidateRefs(id);
   return useMutation({
-    mutationFn: (v: { referenceId: string; waiver: boolean; reason?: string | null }) =>
+    mutationFn: async (v: { referenceId: string; waiver: boolean; reason?: string | null }) =>
       unwrap(
-        api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/waiver", {
+        await api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/waiver", {
           params: { path: { workspace_id: id, reference_id: v.referenceId } },
           body: { waiver: v.waiver, reason: v.reason ?? null },
         }),
@@ -1387,9 +1387,9 @@ export function useToggleWaiver(id: string) {
 export function useUpdateKind(id: string) {
   const onSettled = invalidateRefs(id);
   return useMutation({
-    mutationFn: (v: { referenceId: string; kind: string }) =>
+    mutationFn: async (v: { referenceId: string; kind: string }) =>
       unwrap(
-        api.PATCH("/api/workspaces/{workspace_id}/references/{reference_id}/kind", {
+        await api.PATCH("/api/workspaces/{workspace_id}/references/{reference_id}/kind", {
           params: { path: { workspace_id: id, reference_id: v.referenceId } },
           body: { kind: v.kind },
         }),
@@ -1401,9 +1401,9 @@ export function useUpdateKind(id: string) {
 export function useDeleteReference(id: string) {
   const onSettled = invalidateRefs(id);
   return useMutation({
-    mutationFn: (referenceId: string) =>
+    mutationFn: async (referenceId: string) =>
       unwrap(
-        api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/delete", {
+        await api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/delete", {
           params: { path: { workspace_id: id, reference_id: referenceId } },
         }),
       ),
@@ -1414,9 +1414,9 @@ export function useDeleteReference(id: string) {
 export function useReprocessReference(id: string) {
   const onSettled = invalidateRefs(id);
   return useMutation({
-    mutationFn: (referenceId: string) =>
+    mutationFn: async (referenceId: string) =>
       unwrap(
-        api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/reprocess", {
+        await api.POST("/api/workspaces/{workspace_id}/references/{reference_id}/reprocess", {
           params: { path: { workspace_id: id, reference_id: referenceId } },
         }),
       ),
@@ -1425,7 +1425,7 @@ export function useReprocessReference(id: string) {
 }
 ```
 
-> **Implementer:** `invalidateRefs` calls `useQueryClient()` so it MUST be invoked at the top of each hook (Rules of Hooks) — it is, above. If `tsc` rejects any `api.POST`/`api.PATCH` path-string or `body` shape, the Task 7 regen is stale or the path string is mistyped; fix the call, not the schema. Confirm `ApiError`/`unwrap`/`api` are exported from `./client` (they are: `client.ts:6/8/34`).
+> **Implementer:** every generated-client mutation is `async` and `await`s `api.POST`/`api.PATCH` before `unwrap` — `unwrap` is synchronous and expects the resolved `{data,error}` envelope; without the `await` the mutation resolves with `undefined` (matches the existing `unwrap(await api.GET(...))` read-hook pattern). `invalidateRefs` calls `useQueryClient()` so it MUST be invoked at the top of each hook (Rules of Hooks) — it is, above. If `tsc` rejects any `api.POST`/`api.PATCH` path-string or `body` shape, the Task 7 regen is stale or the path string is mistyped; fix the call, not the schema. Confirm `ApiError`/`unwrap`/`api` are exported from `./client` (they are: `client.ts:6/8/34`).
 
 - [ ] **Step 4: Run test + type-check**
 
@@ -1464,9 +1464,11 @@ Create `frontend/src/cockpit/LibraryPanel.test.tsx`:
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LibraryPanel } from "./LibraryPanel";
 
+// Hoisted mock fns (NOT plain factories) so a single Task-10 test can override
+// one hook's return via h.useX.mockReturnValue(...). ESM-safe: no require().
 const h = vi.hoisted(() => ({
   refs: {
     data: [
@@ -1483,18 +1485,41 @@ const h = vi.hoisted(() => ({
       },
     ],
   },
+  useReferences: vi.fn(),
+  useUpdateKind: vi.fn(),
+  useDeleteReference: vi.fn(),
+  useReprocessReference: vi.fn(),
+  useToggleWaiver: vi.fn(),
+  useApproveMetadata: vi.fn(),
+  useUploadReference: vi.fn(),
+  useFetchReference: vi.fn(),
 }));
 
-vi.mock("../api/citations", () => ({ useReferences: () => h.refs }));
+vi.mock("../api/citations", () => ({ useReferences: h.useReferences }));
 vi.mock("../api/references", () => ({
-  useUpdateKind: () => ({ mutate: vi.fn(), isPending: false }),
-  useDeleteReference: () => ({ mutate: vi.fn(), isPending: false }),
-  useReprocessReference: () => ({ mutate: vi.fn(), isPending: false }),
-  useToggleWaiver: () => ({ mutate: vi.fn(), isPending: false }),
-  useApproveMetadata: () => ({ mutate: vi.fn(), isPending: false }),
-  useUploadReference: () => ({ mutate: vi.fn(), isPending: false }),
-  useFetchReference: () => ({ mutate: vi.fn(), isPending: false }),
+  useUpdateKind: h.useUpdateKind,
+  useDeleteReference: h.useDeleteReference,
+  useReprocessReference: h.useReprocessReference,
+  useToggleWaiver: h.useToggleWaiver,
+  useApproveMetadata: h.useApproveMetadata,
+  useUploadReference: h.useUploadReference,
+  useFetchReference: h.useFetchReference,
 }));
+
+beforeEach(() => {
+  h.useReferences.mockReturnValue(h.refs);
+  for (const fn of [
+    h.useUpdateKind,
+    h.useDeleteReference,
+    h.useReprocessReference,
+    h.useToggleWaiver,
+    h.useApproveMetadata,
+    h.useUploadReference,
+    h.useFetchReference,
+  ]) {
+    fn.mockReturnValue({ mutate: vi.fn(), isPending: false });
+  }
+});
 
 function wrap(ui: ReactNode) {
   return render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
@@ -1648,10 +1673,7 @@ import { fireEvent } from "@testing-library/react";
 describe("LibraryPanel actions", () => {
   it("uploads a chosen file via the picker", () => {
     const upload = vi.fn();
-    vi.mocked(require("../api/references").useUploadReference).mockReturnValue({
-      mutate: upload,
-      isPending: false,
-    });
+    h.useUploadReference.mockReturnValue({ mutate: upload, isPending: false });
     wrap(<LibraryPanel id="ws1" />);
     const input = screen.getByLabelText(/add reference file/i) as HTMLInputElement;
     const file = new File([new Uint8Array([1, 2, 3])], "a.pdf", { type: "application/pdf" });
@@ -1661,10 +1683,7 @@ describe("LibraryPanel actions", () => {
 
   it("fetches a reference by identifier", () => {
     const fetchRef = vi.fn();
-    vi.mocked(require("../api/references").useFetchReference).mockReturnValue({
-      mutate: fetchRef,
-      isPending: false,
-    });
+    h.useFetchReference.mockReturnValue({ mutate: fetchRef, isPending: false });
     wrap(<LibraryPanel id="ws1" />);
     fireEvent.change(screen.getByLabelText(/doi.*pmid.*url/i), { target: { value: "10.1/x" } });
     fireEvent.click(screen.getByRole("button", { name: /^fetch$/i }));
@@ -1673,18 +1692,29 @@ describe("LibraryPanel actions", () => {
 
   it("reprocesses a failed reference", () => {
     const reprocess = vi.fn();
-    vi.mocked(require("../api/references").useReprocessReference).mockReturnValue({
-      mutate: reprocess,
-      isPending: false,
-    });
+    h.useReprocessReference.mockReturnValue({ mutate: reprocess, isPending: false });
     wrap(<LibraryPanel id="ws1" />);
     fireEvent.click(screen.getByRole("button", { name: /reprocess/i }));
     expect(reprocess).toHaveBeenCalledWith("r1");
   });
+
+  it("drop queue starts at most MAX (2) uploads concurrently", () => {
+    // mutate never invokes onSuccess/onError, so each upload stays 'in flight'
+    // and the queue must hold the remaining files until a settle.
+    const mutate = vi.fn();
+    h.useUploadReference.mockReturnValue({ mutate, isPending: false });
+    wrap(<LibraryPanel id="ws1" />);
+    const dz = screen.getByText(/drop pdfs here/i);
+    const files = [0, 1, 2, 3, 4].map(
+      (i) => new File([new Uint8Array([i])], `f${i}.pdf`, { type: "application/pdf" }),
+    );
+    fireEvent.drop(dz, { dataTransfer: { files } });
+    expect(mutate).toHaveBeenCalledTimes(2); // MAX=2; the other 3 wait
+  });
 });
 ```
 
-> The existing `vi.mock("../api/references", …)` factory at the top of the file returns stable objects; switch those entries to `vi.fn()` wrappers so `vi.mocked(...).mockReturnValue(...)` works per-test. Convert the mock factory to use `vi.hoisted` mock fns (mirror `ProblemsPanel.test.tsx`'s mutable-`h` pattern) so each test can override a single hook's return value.
+> Per-test overrides use `h.useX.mockReturnValue(...)` against the hoisted mock fns declared in the Task-9 header (ESM-safe — no `require()`). `beforeEach` re-seeds defaults so an override only affects its own test. The drop-queue test pins the concurrency cap and is the test the Task-3 note promised; with the ref-based queue (next step) it passes.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1758,7 +1788,7 @@ export function MetadataModal({
 Add an add-area above the table and per-row actions. Key pieces (compose into the existing component):
 
 ```tsx
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError } from "../api/client";
 import {
   useDeleteReference,
@@ -1771,41 +1801,46 @@ import { MetadataModal } from "./MetadataModal";
 
 // Bounded-concurrency + 429-backoff upload queue (ports the Jinja app.js behavior,
 // not the code) so a multi-file drop can't hammer the ingest limiter.
+// The in-flight counter is a REF (not state) so pump() reads the live value, not
+// a stale render closure; `uploading` state only drives the disabled affordance.
 function useUploadQueue(id: string) {
   const upload = useUploadReference(id);
-  const [active, setActive] = useState(0);
+  const activeRef = useRef(0);
+  const [uploading, setUploading] = useState(false);
   const MAX = 2;
 
   function enqueue(files: File[], kind: string) {
     const q = [...files];
-    const pump = () => {
-      if (active >= MAX || q.length === 0) return;
-      const file = q.shift()!;
-      setActive((n) => n + 1);
-      const run = (attempt: number) =>
-        upload.mutate(
-          { file, kind, autoClassify: true },
-          {
-            onError: (err) => {
-              if (err instanceof ApiError && err.code === "too_many_requests" && attempt < 4) {
-                window.setTimeout(() => run(attempt + 1), 2000 * (attempt + 1));
-                return;
-              }
-              setActive((n) => n - 1);
-              pump();
-            },
-            onSuccess: () => {
-              setActive((n) => n - 1);
-              pump();
-            },
-          },
-        );
-      run(0);
+    const settle = () => {
+      activeRef.current -= 1;
+      if (activeRef.current === 0 && q.length === 0) setUploading(false);
       pump();
+    };
+    const pump = () => {
+      while (activeRef.current < MAX && q.length > 0) {
+        const file = q.shift()!;
+        activeRef.current += 1;
+        setUploading(true);
+        const run = (attempt: number) =>
+          upload.mutate(
+            { file, kind, autoClassify: true },
+            {
+              onError: (err) => {
+                if (err instanceof ApiError && err.code === "too_many_requests" && attempt < 4) {
+                  window.setTimeout(() => run(attempt + 1), 2000 * (attempt + 1));
+                  return; // keep the slot held during backoff; do NOT settle
+                }
+                settle();
+              },
+              onSuccess: () => settle(),
+            },
+          );
+        run(0);
+      }
     };
     pump();
   }
-  return { enqueue, isUploading: active > 0 || upload.isPending };
+  return { enqueue, isUploading: uploading || upload.isPending };
 }
 ```
 
@@ -1875,7 +1910,7 @@ Delete handler:
 
 Render `{editing && <MetadataModal id={id} referenceId={editing} opened onClose={() => setEditing(null)} />}` and a `{note && <p className="library-note">{note}</p>}` line.
 
-> **Implementer:** keep the table markup from Task 9; only ADD the add-area, actions, modal mount, and note. The `reprocess` conflict handling: pass `{ onError }` to `reprocess.mutate` and, when `err instanceof ApiError && err.code === "conflict"`, `setNote("Already processing.")`. The `useUploadQueue` in-flight counter must use a `useRef` (not `useState`) so `pump()` reads the live count rather than a stale render closure — the `setActive` shown above is illustrative of intent; track concurrency in a ref and re-render only to toggle the disabled/uploading affordance. The drop-queue test (multi-file drop respects the cap + retries on 429) is what pins this; harden the counter until it passes.
+> **Implementer:** keep the table markup from Task 9; only ADD the add-area, actions, modal mount, and note. The `reprocess` conflict handling: pass `{ onError }` to `reprocess.mutate` and, when `err instanceof ApiError && err.code === "conflict"`, `setNote("Already processing.")`. Keep `useUploadQueue`'s in-flight counter in the `useRef` shown above (not state) so `pump()` reads the live count, never a stale render closure; the drop-queue cap test is what pins this — keep it green.
 
 - [ ] **Step 5: Run test + type-check + build**
 
