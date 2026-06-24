@@ -136,3 +136,49 @@ def test_activity_unauth_rejected(client_unauth, _app, current_user, pg_session_
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
     r = client_unauth.get(f"/api/workspaces/{ws_id}/activity")
     assert r.status_code in (401, 403)
+
+
+def test_activity_member_category_owner_only_pii(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    """Owner sees member_added rows (with email); non-owner members do not."""
+    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+    from fastapi.testclient import TestClient
+    from call_manager.auth.session_cookie import SessionSigner
+
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    member_email = "viewer@ki.se"
+    with pg_session_factory() as s:
+        viewer = make_user(s, email=member_email)
+        ws = make_workspace(s, owner=current_user, current_phase="active")
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=viewer.id))
+        s.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="member_added",
+                actor_id=current_user.id,
+                payload={"target_user_id": viewer.id, "target_email": member_email},
+            )
+        )
+        s.commit()
+        ws_id = ws.id
+        viewer_id = viewer.id
+
+    # Owner client already provided by client_authed_owner fixture.
+    owner_items = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity").json()["items"]
+
+    # Mint a member-authed client (same pattern as client_authed_owner fixture).
+    member_client = TestClient(_app, raise_server_exceptions=True)
+    member_client.__enter__()
+    signer: SessionSigner = _app.state.session_signer
+    member_client.cookies.set("session", signer.make(user_id=viewer_id))
+    member_items = member_client.get(f"/api/workspaces/{ws_id}/activity").json()["items"]
+    member_client.__exit__(None, None, None)
+
+    assert any(
+        it["category"] == "member" and member_email in it["summary"]
+        for it in owner_items
+    ), f"owner should see member row with email; got: {owner_items}"
+    assert all(
+        it["category"] != "member" for it in member_items
+    ), f"member should not see any member-category rows; got: {member_items}"

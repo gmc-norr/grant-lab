@@ -80,6 +80,8 @@ _RENDER: dict[str, tuple[str, str, ActivityTarget | None]] = {
     "reference.deleted": ("reference", "deleted a reference", None),
     "rubric_initialized": ("rubric", "set up the funder criteria", _SPEC),
     "rubric_edited": ("rubric", "edited the funder criteria", _SPEC),
+    "member_added": ("member", "added collaborator", None),
+    "member_removed": ("member", "removed collaborator", None),
 }
 
 
@@ -159,11 +161,7 @@ def build_activity_feed(
             actor = actor_user_id(e)
             j = i
             run: list[WorkspaceEvent] = []
-            while (
-                j < n
-                and events[j].kind == "user_edit"
-                and actor_user_id(events[j]) == actor
-            ):
+            while j < n and events[j].kind == "user_edit" and actor_user_id(events[j]) == actor:
                 run.append(events[j])
                 j += 1
             rows.append(_edit_row(run, actor_names))
@@ -174,6 +172,10 @@ def build_activity_feed(
             i += 1  # unknown/unmapped kind -> drop (fail-safe)
             continue
         category, summary, target = spec
+        if e.kind in ("member_added", "member_removed"):
+            email = (e.payload or {}).get("target_email")
+            if email:
+                summary = f"{summary} {email}"
         rows.append(
             ActivityRow(
                 id=str(e.id),

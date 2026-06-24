@@ -159,3 +159,14 @@ def test_collapsed_row_id_and_time_come_from_most_recent():
     row = build_activity_feed(events, {1: "a@ki.se"})[0]
     assert row.id == str(newest)
     assert row.created_at == (_BASE).isoformat()
+
+
+def test_member_added_renders_under_member_category_with_email():
+    from call_manager.proposal_assist.activity.feed import build_activity_feed
+
+    ev = _ev("member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@ki.se"})
+    rows = build_activity_feed([ev], {1: "owner@ki.se"})
+    assert len(rows) == 1
+    assert rows[0].category == "member"
+    assert "alice@ki.se" in rows[0].summary
+    assert rows[0].actor == "owner@ki.se"

@@ -37,8 +37,16 @@ class ActivityTargetOut(BaseModel):
 class ActivityRowOut(BaseModel):
     id: str
     category: Literal[
-        "created", "edit", "citation", "turn", "review",
-        "uncited", "dismissal", "reference", "rubric",
+        "created",
+        "edit",
+        "citation",
+        "turn",
+        "review",
+        "uncited",
+        "dismissal",
+        "reference",
+        "rubric",
+        "member",
     ]
     actor: str | None
     summary: str
@@ -57,13 +65,16 @@ def get_activity(
     session: Session = Depends(_session_dep),  # noqa: B008
     user=Depends(get_current_user),  # noqa: B008
 ) -> dict:
-    require_member(workspace_id=workspace_id, user=user, session=session)
+    ws = require_member(workspace_id=workspace_id, user=user, session=session)
+    is_owner = ws.owner_id == user.id
+    q = select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == workspace_id)
+    if not is_owner:
+        q = q.where(WorkspaceEvent.kind.notin_(("member_added", "member_removed")))
     events = list(
         session.scalars(
-            select(WorkspaceEvent)
-            .where(WorkspaceEvent.workspace_id == workspace_id)
-            .order_by(WorkspaceEvent.created_at.desc(), WorkspaceEvent.id.desc())
-            .limit(_ACTIVITY_WINDOW)
+            q.order_by(WorkspaceEvent.created_at.desc(), WorkspaceEvent.id.desc()).limit(
+                _ACTIVITY_WINDOW
+            )
         )
     )
     actor_ids = {uid for uid in (actor_user_id(e) for e in events) if uid is not None}
