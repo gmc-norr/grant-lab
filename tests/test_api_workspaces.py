@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -1041,6 +1042,7 @@ def test_references_list_member_gated_excludes_tombstoned(
         pg_session_factory, tmp_path, ws_id, chunk_text="grey", citekey="jones2022"
     )
     from datetime import UTC, datetime
+
     with pg_session_factory() as s:
         s.get(Reference, dead).tombstoned_at = datetime.now(UTC)
         s.commit()
@@ -1064,10 +1066,17 @@ def test_reference_chunks_ordered_and_guarded(monkeypatch, pg_url, pg_session_fa
     # Seed a reference with two chunks (chunk_index 1 added after 0 to test ordering).
     rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="chunk zero")
     with pg_session_factory() as s:
-        s.add(ReferenceChunk(
-            reference_id=rid, workspace_id=ws_id, chunk_index=1, section_path="## B",
-            text="chunk one", embedding=[0.0] * 1024, embedding_model="fake",
-        ))
+        s.add(
+            ReferenceChunk(
+                reference_id=rid,
+                workspace_id=ws_id,
+                chunk_index=1,
+                section_path="## B",
+                text="chunk one",
+                embedding=[0.0] * 1024,
+                embedding_model="fake",
+            )
+        )
         s.commit()
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/references/{rid}/chunks")
     assert r.status_code == 200, r.text
@@ -1076,9 +1085,12 @@ def test_reference_chunks_ordered_and_guarded(monkeypatch, pg_url, pg_session_fa
     assert [c["chunk_index"] for c in body["chunks"]] == [0, 1]
     assert body["chunks"][0]["text"] == "chunk zero"
     # stranger forbidden
-    assert _client(app, stranger_id).get(
-        f"/api/workspaces/{ws_id}/references/{rid}/chunks"
-    ).status_code == 403
+    assert (
+        _client(app, stranger_id)
+        .get(f"/api/workspaces/{ws_id}/references/{rid}/chunks")
+        .status_code
+        == 403
+    )
 
 
 def test_reference_chunks_foreign_reference_is_404(
@@ -1112,12 +1124,14 @@ def test_reference_chunks_cross_workspace_reference_is_404(
         s.commit()
         ws_b_id = ws_b.id
     foreign_rid = _seed_source_reference(
-        pg_session_factory, tmp_path, ws_id, rid_workspace_id=ws_b_id,
-        title="Cross-Workspace Secret", citekey="secret2099",
+        pg_session_factory,
+        tmp_path,
+        ws_id,
+        rid_workspace_id=ws_b_id,
+        title="Cross-Workspace Secret",
+        citekey="secret2099",
     )
-    r = _client(app, owner_id).get(
-        f"/api/workspaces/{ws_id}/references/{foreign_rid}/chunks"
-    )
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/references/{foreign_rid}/chunks")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
 
@@ -1129,13 +1143,58 @@ def test_reference_chunks_tombstoned_reference_is_404(
     owner_id, _, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
-    rid = _seed_source_reference(
-        pg_session_factory, tmp_path, ws_id, chunk_text="azure sky"
-    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
     from datetime import UTC, datetime
+
     with pg_session_factory() as s:
         s.get(Reference, rid).tombstoned_at = datetime.now(UTC)
         s.commit()
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/references/{rid}/chunks")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+# --- Task 1: GET /cockpit-meta -----------------------------------------------
+def test_cockpit_meta_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
+    assert r.status_code == 200
+    b = r.json()
+    assert b["workspace_title"] == "W"
+    assert b["current_phase"] == "active"
+    assert b["role"] == "owner"
+    assert b["spec_locked"] is False
+    assert b["member_count"] == 2  # owner + 1 viewer
+    assert b["workspace_deadline"] is None
+
+
+def test_cockpit_meta_member_sees_member_role(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
+    assert r.status_code == 200
+    assert r.json()["role"] == "member"
+
+
+def test_cockpit_meta_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
+
+
+def test_cockpit_meta_reads_workspace_deadline(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Pins the contract: cockpit-meta reads Workspace.deadline (NOT the optional
+    # linked Call.deadline). Seed a deadline directly on the workspace and assert
+    # it round-trips, so a future "read it off the Call" regression fails here.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.deadline = datetime(2099, 1, 1, tzinfo=UTC)
+        s.commit()
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/cockpit-meta")
+    assert r.status_code == 200
+    assert r.json()["workspace_deadline"].startswith("2099-01-01")

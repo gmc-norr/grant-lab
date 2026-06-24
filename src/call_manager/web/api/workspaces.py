@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
@@ -24,6 +24,7 @@ from call_manager.db.models import (
     SpecLockEvent,
     User,
     WorkspaceEvent,
+    WorkspaceViewer,
 )
 from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
@@ -813,6 +814,42 @@ def post_citation(
                 status_code=500, detail="citation failed — nothing was written"
             ) from e
     return AddCitationOut(**result)
+
+
+class CockpitMetaOut(BaseModel):
+    workspace_title: str
+    workspace_deadline: datetime | None
+    current_phase: str  # "setup" | "active"
+    role: str  # "owner" | "member"
+    spec_locked: bool
+    member_count: int
+
+
+@router.get("/workspaces/{workspace_id}/cockpit-meta", response_model=CockpitMetaOut)
+def get_cockpit_meta(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> CockpitMetaOut:
+    """Workspace header read-model for the cockpit status bar + title breadcrumb.
+    Member-gated. Reads the workspace-level title/deadline (NOT the optional linked
+    Call). member_count = owner + viewers (a non-PII aggregate shown to every member)."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        viewer_count = session.scalar(
+            select(func.count())
+            .select_from(WorkspaceViewer)
+            .where(WorkspaceViewer.workspace_id == workspace_id)
+        )
+        return CockpitMetaOut(
+            workspace_title=ws.title,
+            workspace_deadline=ws.deadline,
+            current_phase=ws.current_phase,
+            role="owner" if ws.owner_id == user.id else "member",
+            spec_locked=ws.spec_locked_at is not None,
+            member_count=1 + int(viewer_count or 0),
+        )
 
 
 class ReferenceListItemOut(BaseModel):
