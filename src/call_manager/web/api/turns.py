@@ -183,6 +183,37 @@ def list_turns(
         )
 
 
+class DisclosureResponse(BaseModel):
+    acknowledged: bool
+
+
+@router.post("/workspaces/{workspace_id}/disclosure", response_model=DisclosureResponse)
+def ack_disclosure(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> DisclosureResponse:
+    """Record the per-actor cloud-LLM disclosure acknowledgment (idempotent)."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        prior = session.scalar(
+            select(WorkspaceEvent.id).where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.kind == "disclosure_acknowledged",
+                WorkspaceEvent.actor_id == user.id,
+            ).limit(1)
+        )
+        if prior is None:
+            session.add(WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="disclosure_acknowledged",
+                actor_id=user.id,
+            ))
+            session.commit()
+    return DisclosureResponse(acknowledged=True)
+
+
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 
 

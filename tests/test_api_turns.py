@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from sqlalchemy import select
+
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
 from tests.test_api_workspaces import _app, _client, _seed
 
@@ -160,3 +162,26 @@ def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_
     assert '"role": "assistant"' in joined or '"role":"assistant"' in joined
     assert "event: done" in joined
     assert "completed" in joined
+
+
+def test_disclosure_ack_idempotent_and_flips_flag(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    c = _client(app, owner_id)
+    assert c.get(f"/api/workspaces/{ws_id}/turns").json()["needs_disclosure"] is True
+    r1 = c.post(f"/api/workspaces/{ws_id}/disclosure")
+    assert r1.status_code == 200 and r1.json()["acknowledged"] is True
+    r2 = c.post(f"/api/workspaces/{ws_id}/disclosure")  # idempotent
+    assert r2.status_code == 200
+    assert c.get(f"/api/workspaces/{ws_id}/turns").json()["needs_disclosure"] is False
+    with pg_session_factory() as s:
+        n = len(list(s.scalars(
+            select(WorkspaceEvent.id).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "disclosure_acknowledged",
+                WorkspaceEvent.actor_id == owner_id,
+            )
+        )))
+        assert n == 1  # not duplicated
