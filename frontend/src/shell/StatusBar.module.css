@@ -16,3 +16,15 @@
 .spacer {
   flex: 1;
 }
+.deadlineSoon {
+  background: var(--app-bad);
+  color: #fff;
+  border-radius: 3px;
+  padding: 0 6px;
+}
+.deadlineWatch {
+  background: var(--app-warn);
+  color: #1a1b1e;
+  border-radius: 3px;
+  padding: 0 6px;
+}

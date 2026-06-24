@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
@@ -18,9 +19,11 @@ function renderShellAt(route: string) {
     { initialEntries: [route] },
   );
   return render(
-    <MantineProvider theme={theme} defaultColorScheme="dark">
-      <RouterProvider router={router} />
-    </MantineProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <RouterProvider router={router} />
+      </MantineProvider>
+    </QueryClientProvider>,
   );
 }
 
@@ -39,9 +42,11 @@ function renderShellWithRoutes(route: string, children: RouteObject[]) {
     initialEntries: [route],
   });
   return render(
-    <MantineProvider theme={theme} defaultColorScheme="dark">
-      <RouterProvider router={router} />
-    </MantineProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <RouterProvider router={router} />
+      </MantineProvider>
+    </QueryClientProvider>,
   );
 }
 
