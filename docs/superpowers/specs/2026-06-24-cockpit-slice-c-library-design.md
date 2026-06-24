@@ -107,7 +107,7 @@ itself.
 |---|---|---|---|---|
 | `POST .../references` | multipart `file`, `kind`, `auto_classify` | `ingest_bytes` (under `limiter.slot()`, in `run_in_threadpool`) | `IngestResultOut {reference_id, text_status, text_error}` | bad MIME/size→400, `OverCapacity`→429+Retry-After |
 | `POST .../references/fetch` | `{input, kind}` | `detect_source_type` dispatch → `ingest_bytes` | `IngestResultOut` | invalid/unresolvable source→400, `SSRFError`→400, `FetchError`→502, `OverCapacity`→429 |
-| `POST .../references/{rid}/metadata` | `{title, authors: list[str], year?, venue?, doi?}` | the Jinja approve path (`_parse_authors`, CSL build, citekey regen, **both IntegrityError-retries preserved** — see Notes) | `MetadataOut {citekey, metadata_status, csl_json}` | missing title→400, not-found→404 |
+| `POST .../references/{rid}/metadata` | `{title, authors: list[str], year?, venue?, doi?}` | `_parse_authors` + `generate_citekey` (service fns); CSL build + citekey upgrade + **both IntegrityError-retries inlined in the handler**, mirroring the Jinja route — see Notes | `MetadataOut {citekey, metadata_status, csl_json}` | missing title→400, not-found→404 |
 | `POST .../references/{rid}/waiver` | `{waiver: bool, reason?}` | the waiver setter | `WaiverOut {metadata_waiver, reason}` | not-found→404 |
 | `PATCH .../references/{rid}/kind` | `{kind}` | kind update | `KindOut {kind}` | bad kind→400, not-found→404 |
 | `POST .../references/{rid}/delete` | — | `delete_or_tombstone_reference` | `DeleteResultOut {outcome: "deleted"｜"tombstoned"}` | `ValueError` (not-found/cross-workspace)→404 |
@@ -119,15 +119,30 @@ Notes:
   newlines internally (`references.py:447/459`), so the handler must
   `"\n".join(authors)` **before** calling it: `authors: list[str] → "\n".join →
   _parse_authors(str)`. No new author/CSL parsing.
-- **`ingest_bytes` reuse:** wrap the *whole* Jinja pre-ingest flow (content-type
-  validation, dedup, `auto_classify`, the limiter slot, the 50 MB cap) — do NOT
-  cherry-pick; factor/reuse the shared pre-ingest helper rather than reimplement,
-  or overload paths the Jinja layer guards reappear.
-- **Two IntegrityError-retries (both inherited by reusing the approve path):**
-  (1) the **citekey-collision** retry in `generate_citekey`/`ingest.py:249-279`
-  (author-year suffix fallback); (2) the **metadata_approved audit-commit** retry
-  in the Jinja approve route (`references.py:579-604`). Reusing the approve path
-  + `generate_citekey` inherits both; don't conflate them.
+- **Reuse boundary = the existing service functions; Slice C touches ZERO Jinja
+  routes and extracts NO new shared helper.** The complex/risky logic already
+  lives in service functions (`ingest_bytes`, `detect_source_type` +
+  `dispatch_fetch`, `delete_or_tombstone_reference`, `reprocess_reference`,
+  `generate_citekey`, `_parse_authors`, `_read_capped`) — each `/api` handler
+  calls those directly. The thin per-route orchestration around them (acquire
+  `limiter.slot()`, the drag-drop PDF-magic + SHA-256 dedup SELECT, the 50 MB
+  cap via `_read_capped`, the one-line audit write) is *wiring, not logic*, and
+  is written inline in the handler, mirroring the proven Jinja flow step-for-step
+  — do NOT skip a step (a thin wrapper that drops the slot/dedup/cap reintroduces
+  the overload/abuse paths the Jinja layer guards). The whole web app is being
+  retired to React (Jinja deleted route-by-route; these reference routes go at
+  **Slice G**), so refactoring the working Jinja routes to share a helper would
+  be throwaway churn — the short-lived Jinja↔`/api` duplication collapses to a
+  single copy when Slice G deletes the Jinja routes.
+- **Two IntegrityError-retries (both must appear in the `/api` metadata handler,
+  copied from the Jinja route):** (1) the **citekey-collision** retry *inside*
+  `generate_citekey`/`ingest.py:249-279` (author-year suffix fallback) — inherited
+  for free by calling `generate_citekey`; (2) the **metadata_approved audit-commit**
+  retry the Jinja route wraps around `session.commit()` (`references.py:579-605`)
+  — the `/api` handler must include this same `try/except IntegrityError →
+  rollback → re-fetch → re-apply → commit` loop, or concurrent author-year
+  approvals 500. The handler builds the CSL dict from the body (reusing
+  `_parse_authors` on `"\n".join(authors)`), so the two retries stay distinct.
 - **Audit (exact parity strings):** each write emits the *exact* `WorkspaceEvent`
   kind the reused route writes — verified against the code:
   `reference.added`, `reference.metadata_approved`,
@@ -325,10 +340,15 @@ TurnList image-block render. Type gate `tsc --noEmit`; build.
 
 ## 15. Risks
 
-- **Service-reuse drift:** `ingest_bytes` has many params and the Jinja routes
-  encode real flow (validation, dedup, limiter slot, caps). A thin wrapper that
-  skips any of it reintroduces overload/abuse paths — factor the shared pre-ingest
-  helper, don't reimplement (the §4 note).
+- **Service-reuse drift:** the `/api` handlers must reproduce the Jinja routes'
+  full flow around the shared service functions (limiter slot, dedup, 50 MB cap,
+  the metadata IntegrityError retry) — a thin wrapper that *skips* a step
+  reintroduces overload/abuse paths or the citekey-collision 500. The orchestration
+  is inlined (NOT factored — Jinja is deleted at Slice G, so a shared helper would
+  be throwaway); the audit-`kind` literals are therefore duplicated across the
+  Jinja and `/api` paths during coexistence and are pinned by tests on BOTH sides
+  (§14) — which is what actually guards against drift until Slice G collapses them
+  to one copy.
 - **Two live write paths to one corpus** during coexistence: both Jinja and `/api`
   mutate the same tables; audit-event parity + React Query invalidation must both
   fire or the views diverge.
@@ -343,7 +363,12 @@ TurnList image-block render. Type gate `tsc --noEmit`; build.
 
 ## 16. Global constraints / gotchas (for the plans)
 
-- **No DB schema change**; alembic head untouched; reuse services, do not reimplement.
+- **No DB schema change**; alembic head untouched. **Touch ZERO Jinja routes and
+  extract NO new shared helper** — reuse the existing service functions directly
+  and inline the thin per-route orchestration (mirroring the proven Jinja flow).
+  The whole web app is being retired to React; these Jinja reference routes are
+  deleted at Slice G, so the short-lived Jinja↔`/api` duplication is intentional
+  and self-resolving.
 - **New `/api` modules** (`web/api/references.py`, `web/api/files.py`) mounted via
   `web/api/__init__.py`; do NOT append to the already-large `workspaces.py`. The
   **read** `list_references` + `ReferenceListItemOut` stay in `workspaces.py` and
