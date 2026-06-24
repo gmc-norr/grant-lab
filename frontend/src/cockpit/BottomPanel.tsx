@@ -2,6 +2,7 @@ import { useProblems } from "../api/problems";
 import { useInboxCount } from "../api/proposals";
 import { ActivityPanel } from "./ActivityPanel";
 import { InboxPanel } from "./InboxPanel";
+import { LibraryPanel } from "./LibraryPanel";
 import type { BottomTab, OnNavigate } from "./nav";
 import { ProblemsPanel } from "./ProblemsPanel";
 
@@ -53,6 +54,14 @@ export function BottomPanel({
           >
             Activity
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "library"}
+            onClick={() => onTab("library")}
+          >
+            Library
+          </button>
         </div>
         <button
           type="button"
@@ -68,6 +77,7 @@ export function BottomPanel({
           {activeTab === "inbox" && <InboxPanel id={id} count={inboxCount} />}
           {activeTab === "problems" && <ProblemsPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "activity" && <ActivityPanel id={id} onNavigate={onNavigate} />}
+          {activeTab === "library" && <LibraryPanel id={id} />}
         </div>
       )}
     </section>
