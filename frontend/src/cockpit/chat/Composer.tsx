@@ -5,7 +5,7 @@ import styles from "./CockpitChat.module.css";
 
 type Ref = { id: string; citekey?: string | null; title: string; text_status?: string };
 
-export function Composer({ id, refs, disabled }: { id: string; refs: Ref[]; disabled: boolean }) {
+export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs: Ref[]; disabled: boolean; onSubmitted?: (jobId: string) => void }) {
   const [text, setText] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const submit = useSubmitTurn(id);
@@ -17,9 +17,10 @@ export function Composer({ id, refs, disabled }: { id: string; refs: Ref[]; disa
     submit.mutate(
       { content: text, reference_ids: picked },
       {
-        onSuccess: () => {
+        onSuccess: (result) => {
           setText("");
           setPicked([]);
+          onSubmitted?.(result.job_id);
         },
       },
     );

@@ -15,6 +15,11 @@ export function useEventStream(url: string, handlers: Handlers, opts?: Opts) {
   const backoff = useRef(1000); // capped exponential backoff
 
   useEffect(() => {
+    // Guard: empty url means "no active stream" (e.g. no running job yet).
+    // Keep the hook call unconditional (Rules of Hooks) but bail here before
+    // opening any EventSource — new URL("", origin) would point at the SPA root.
+    if (!url) return;
+
     let es: EventSource | null = null;
     // Opt-in: the chat streams a distinct job per url, so a url change must NOT
     // carry the prior job's cursor. The /api/events feed does NOT opt in — it

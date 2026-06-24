@@ -1,24 +1,72 @@
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { useReferences } from "../../api/citations";
-import { useAckDisclosure, useTurns } from "../../api/turns";
+import { useEventStream } from "../../api/events";
+import { turnStreamUrl, useAckDisclosure, useTurns } from "../../api/turns";
 import styles from "./CockpitChat.module.css";
 import { Composer } from "./Composer";
 import { TurnList } from "./TurnList";
 
+type Turn = {
+  id: string;
+  role: string;
+  position: number;
+  created_at: string;
+  content: unknown;
+};
+
 export function CockpitChat() {
   const { id = "" } = useParams();
+  const qc = useQueryClient();
   const turns = useTurns(id);
   const references = useReferences(id);
   const refs = Array.isArray(references.data) ? references.data : [];
   const ack = useAckDisclosure(id);
   const d = turns.data;
+
+  const [jobId, setJobId] = useState<string | null>(null);
+  // keyed by position for deduplication with history turns
+  const [streamed, setStreamed] = useState<Record<number, Turn>>({});
+
+  // Re-attach to an in-flight turn after a reload.
+  useEffect(() => {
+    if (turns.data?.running_job_id) setJobId(turns.data.running_job_id);
+  }, [turns.data?.running_job_id]);
+
+  useEventStream(
+    jobId ? turnStreamUrl(id, jobId) : "",
+    {
+      turn: (data) => {
+        const t = data as Turn;
+        setStreamed((m) => ({ ...m, [t.position]: t }));
+      },
+      done: () => {
+        setJobId(null);
+        setStreamed({});
+        qc.invalidateQueries({ queryKey: ["turns", id] });
+        qc.invalidateQueries({ queryKey: ["proposed-changes", id, "draft"] });
+        qc.invalidateQueries({ queryKey: ["proposed-changes", id, "spec"] });
+        qc.invalidateQueries({ queryKey: ["draft", id] });
+      },
+    },
+    { resetCursorOnUrlChange: true },
+  );
+
+  const merged = useMemo(() => {
+    const byPos = new Map<number, Turn>();
+    for (const t of turns.data?.turns ?? []) byPos.set(t.position, t as Turn);
+    for (const t of Object.values(streamed)) byPos.set(t.position, t);
+    return [...byPos.values()].sort((a, b) => a.position - b.position);
+  }, [turns.data?.turns, streamed]);
+
   return (
     <aside className={styles.chat} aria-label="Chat">
       <header className={styles.header}>Chat</header>
       <div className={styles.body}>
         {turns.isLoading && <p className={styles.note}>Loading…</p>}
-        {d && <TurnList turns={d.turns} refs={refs} />}
+        {d && <TurnList turns={merged} refs={refs} />}
       </div>
       {d && (
         <footer className={styles.footer}>
@@ -38,7 +86,7 @@ export function CockpitChat() {
               </button>
             </div>
           ) : (
-            <Composer id={id} refs={refs} disabled={!!d.running_job_id} />
+            <Composer id={id} refs={refs} disabled={!!jobId || !!d.running_job_id} onSubmitted={setJobId} />
           )}
         </footer>
       )}

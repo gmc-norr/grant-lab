@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -64,4 +64,32 @@ it("read-only for a non-owner (can_send false, phase active)", async () => {
   mockTurns({ can_send: false, needs_disclosure: false, phase: "active" });
   renderChat();
   expect(await screen.findByText(/read-only/i)).toBeInTheDocument();
+});
+
+it("streams turns from a running job and invalidates on done", async () => {
+  const captured: { turn?: (e: MessageEvent) => void; done?: (e: MessageEvent) => void } = {};
+  class FakeES {
+    onerror = null; onopen: (() => void) | null = null; close = vi.fn();
+    addEventListener(type: string, fn: (e: MessageEvent) => void) {
+      if (type === "turn") captured.turn = fn;
+      if (type === "done") captured.done = fn;
+    }
+    constructor(_u: string) {}
+  }
+  vi.stubGlobal("EventSource", FakeES as unknown as typeof EventSource);
+  // running_job_id set → CockpitChat re-attaches the stream on mount.
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/turns"))
+      return Promise.resolve({ data: { turns: [], can_send: true, needs_disclosure: false, phase: "active", running_job_id: "job-1" }, error: undefined });
+    return Promise.resolve({ data: [], error: undefined });
+  }) as never);
+  renderChat();
+  // Wait for the data fetch to resolve and the FakeES to be instantiated with the
+  // job-1 stream URL (the effect runs after running_job_id is set).
+  await waitFor(() => expect(captured.turn).toBeDefined());
+  // Stream one assistant turn → it appears in the transcript.
+  captured.turn!({ data: JSON.stringify({ id: "a1", role: "assistant", position: 5, created_at: "", content: { type: "text", text: "streamed!" } }) } as MessageEvent);
+  expect(await screen.findByText("streamed!")).toBeInTheDocument();
+  // done closes cleanly (no throw).
+  captured.done?.({ data: JSON.stringify({ status: "completed" }) } as MessageEvent);
 });
