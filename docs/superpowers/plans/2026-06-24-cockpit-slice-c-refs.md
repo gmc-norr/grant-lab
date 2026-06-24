@@ -1910,7 +1910,7 @@ Delete handler:
 
 Render `{editing && <MetadataModal id={id} referenceId={editing} opened onClose={() => setEditing(null)} />}` and a `{note && <p className="library-note">{note}</p>}` line.
 
-> **Implementer:** keep the table markup from Task 9; only ADD the add-area, actions, modal mount, and note. The `reprocess` conflict handling: pass `{ onError }` to `reprocess.mutate` and, when `err instanceof ApiError && err.code === "conflict"`, `setNote("Already processing.")`. Keep `useUploadQueue`'s in-flight counter in the `useRef` shown above (not state) so `pump()` reads the live count, never a stale render closure; the drop-queue cap test is what pins this — keep it green.
+> **Implementer:** keep the table markup from Task 9; only ADD the add-area, actions, modal mount, and note. The `reprocess` conflict handling: call `reprocess.mutate(r.id)` **single-arg** (the Step-1 test asserts `toHaveBeenCalledWith("r1")`, so do NOT pass an options object as a 2nd arg), and surface the conflict from a `useEffect` watching `reprocess.isError`/`reprocess.error` — when the error is an `ApiError` with `code === "conflict"`, `setNote("Already processing.")`. Keep `useUploadQueue`'s in-flight counter in the `useRef` shown above (not state) so `pump()` reads the live count, never a stale render closure; the drop-queue cap test is what pins this — keep it green.
 
 - [ ] **Step 5: Run test + type-check + build**
 
