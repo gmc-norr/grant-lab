@@ -181,8 +181,8 @@ it("an owner gets an editable editor; the Full-draft tab is read-only", async ()
     const full = document.querySelector(".cm-content");
     expect(full?.getAttribute("contenteditable")).toBe("false");
   });
-  // Switch back via the Section tab -> editable again (lastSectionIndex restore,
-  // not a reset to section 0).
+  // Switch back via the Section tab -> editable again (?sec persists across the Full tab,
+  // so switching back to Section view restores the same section).
   fireEvent.click(screen.getByRole("tab", { name: /^section$/i }));
   await waitFor(() => {
     const back = document.querySelector(".cm-content");

@@ -4,10 +4,12 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { resetEditorStore } from "./editorStore";
 import { SpecPanel } from "./SpecPanel";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  resetEditorStore();
 });
 
 function renderPanel() {

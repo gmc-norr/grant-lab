@@ -3,10 +3,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
+import { resetEditorStore } from "../cockpit/editorStore";
 import { ArtifactSectionEditor } from "./ArtifactSectionEditor";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  resetEditorStore();
 });
 
 function renderEditor(sections: { index: number; heading: string; text: string; sha: string }[]) {
