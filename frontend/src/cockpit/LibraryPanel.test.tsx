@@ -30,6 +30,9 @@ const h = vi.hoisted(() => ({
   useApproveMetadata: vi.fn(),
   useUploadReference: vi.fn(),
   useFetchReference: vi.fn(),
+  useFiles: vi.fn(),
+  useUploadFileLib: vi.fn(),
+  useDeleteFile: vi.fn(),
 }));
 
 vi.mock("../api/citations", () => ({ useReferences: h.useReferences }));
@@ -42,6 +45,11 @@ vi.mock("../api/references", () => ({
   useUploadReference: h.useUploadReference,
   useFetchReference: h.useFetchReference,
 }));
+vi.mock("../api/files", () => ({
+  useFiles: h.useFiles,
+  useUploadFile: h.useUploadFileLib,
+  useDeleteFile: h.useDeleteFile,
+}));
 
 beforeEach(() => {
   h.useReferences.mockReturnValue(h.refs);
@@ -53,9 +61,14 @@ beforeEach(() => {
     h.useApproveMetadata,
     h.useUploadReference,
     h.useFetchReference,
+    h.useUploadFileLib,
+    h.useDeleteFile,
   ]) {
     fn.mockReturnValue({ mutate: vi.fn(), isPending: false });
   }
+  h.useFiles.mockReturnValue({
+    data: [{ id: "a1", filename: "fig.png", mime_type: "image/png", uploaded_at: "x" }],
+  });
 });
 
 function wrap(ui: ReactNode) {
@@ -117,5 +130,23 @@ describe("LibraryPanel actions", () => {
     );
     fireEvent.drop(dz, { dataTransfer: { files } });
     expect(mutateAsync).toHaveBeenCalledTimes(2); // MAX=2; the other 3 wait
+  });
+});
+
+describe("LibraryPanel Files section", () => {
+  it("renders the Files section with a thumbnail and filename", () => {
+    wrap(<LibraryPanel id="ws1" />);
+    expect(screen.getByText("fig.png")).toBeInTheDocument();
+    const img = screen.getByRole("img", { name: /fig\.png/i }) as HTMLImageElement;
+    expect(img.getAttribute("src")).toBe("/workspaces/ws1/files/a1");
+  });
+
+  it("deletes a file after confirm", () => {
+    const del = vi.fn();
+    h.useDeleteFile.mockReturnValue({ mutate: del, isPending: false });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    wrap(<LibraryPanel id="ws1" />);
+    fireEvent.click(screen.getByRole("button", { name: /delete fig\.png/i }));
+    expect(del).toHaveBeenCalledWith("a1");
   });
 });

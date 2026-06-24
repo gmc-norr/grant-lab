@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useReferences } from "../api/citations";
 import { ApiError } from "../api/client";
+import { useDeleteFile, useFiles, useUploadFile } from "../api/files";
 import {
   useDeleteReference,
   useFetchReference,
@@ -71,6 +72,10 @@ export function LibraryPanel({ id }: { id: string }) {
   const toggleWaiver = useToggleWaiver(id);
   const reprocess = useReprocessReference(id);
   const del = useDeleteReference(id);
+  const files = useFiles(id);
+  const uploadFile = useUploadFile(id);
+  const deleteFile = useDeleteFile(id);
+  const fileRows = Array.isArray(files.data) ? files.data : [];
   const [pickerKind, setPickerKind] = useState("paper");
   const [fetchInput, setFetchInput] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
@@ -186,6 +191,46 @@ export function LibraryPanel({ id }: { id: string }) {
                   </button>
                 )}
                 <button onClick={() => onDelete(r.id)}>Delete</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section aria-label="Files">
+        <h3 className="library-section-title">Files</h3>
+        <input
+          aria-label="Add image file"
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          disabled={uploadFile.isPending}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) uploadFile.mutate(f);
+            e.target.value = "";
+          }}
+        />
+        {fileRows.length === 0 ? (
+          <p className="library-msg">No files yet.</p>
+        ) : (
+          <ul className="library-file-list">
+            {fileRows.map((f) => (
+              <li key={f.id} className="library-file-row">
+                <img
+                  className="library-thumb"
+                  src={`/workspaces/${id}/files/${f.id}`}
+                  alt={f.filename}
+                />
+                <span className="library-file-name">{f.filename}</span>
+                <button
+                  aria-label={`Delete ${f.filename}`}
+                  disabled={deleteFile.isPending}
+                  onClick={() => {
+                    if (window.confirm(`Delete ${f.filename}?`)) deleteFile.mutate(f.id);
+                  }}
+                >
+                  delete
+                </button>
               </li>
             ))}
           </ul>
