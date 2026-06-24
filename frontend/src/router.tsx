@@ -5,6 +5,9 @@ import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { CallsFilters } from "./routes/CallsFilters";
 import { Cockpit } from "./routes/Cockpit";
 import { Dashboard } from "./routes/Dashboard";
+import { WorkspaceCreate } from "./routes/WorkspaceCreate";
+import { WorkspaceList } from "./routes/WorkspaceList";
+import { WorkspacesFilters } from "./routes/WorkspacesFilters";
 import { AppShell } from "./shell/AppShell";
 
 export const router = createBrowserRouter([
@@ -16,6 +19,8 @@ export const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters } },
+      { path: "cockpit", element: <WorkspaceList />, handle: { Sidebar: WorkspacesFilters } },
+      { path: "cockpit/new", element: <WorkspaceCreate /> },
       { path: "cockpit/:id", element: <Cockpit />, handle: { Sidebar: CockpitSidebar, RightPane: CockpitChat } },
       // In-app soft 404 ONLY (client-side reached). NOT the route authority —
       // the server returns index.html only for manifest SPA routes, so an

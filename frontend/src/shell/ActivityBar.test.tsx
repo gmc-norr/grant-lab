@@ -13,20 +13,26 @@ it("Calls is an SPA link to / and is active on the dashboard route", () => {
   expect(calls).toHaveAttribute("aria-current", "page");
 });
 
-it("Workspaces, Profiles and Settings deep-link to their Jinja pages", () => {
+it("Workspaces is an SPA link to the cockpit front door", () => {
   renderWithProviders(<ActivityBar />, { route: "/" });
-  expect(screen.getByRole("link", { name: "Workspaces" })).toHaveAttribute(
-    "href",
-    "/workspaces",
-  );
-  expect(screen.getByRole("link", { name: "Profiles" })).toHaveAttribute(
-    "href",
-    "/profiles",
-  );
-  expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute(
-    "href",
-    "/me",
-  );
+  expect(screen.getByRole("link", { name: "Workspaces" })).toHaveAttribute("href", "/cockpit");
+});
+
+it("Profiles and Settings still deep-link to their Jinja pages", () => {
+  renderWithProviders(<ActivityBar />, { route: "/" });
+  expect(screen.getByRole("link", { name: "Profiles" })).toHaveAttribute("href", "/profiles");
+  expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/me");
+});
+
+it("Workspaces is the active nav item on the cockpit list and create routes", () => {
+  renderWithProviders(<ActivityBar />, { route: "/cockpit" });
+  expect(screen.getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
+});
+
+it("on the editor route the Current-workspace chip is active, Workspaces is not", () => {
+  renderWithProviders(<ActivityBar />, { route: "/cockpit/abc" });
+  expect(screen.getByRole("link", { name: "Current workspace" })).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("link", { name: "Workspaces" })).not.toHaveAttribute("aria-current", "page");
 });
 
 it("hides the current-workspace item outside a cockpit", () => {

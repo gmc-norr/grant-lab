@@ -24,14 +24,19 @@ function leafPaths(routes: RouteObject[], base = ""): string[] {
 
 // router.tsx is the only HAND-maintained consumer of the route-ownership
 // manifest. Pin its concrete page paths (excluding the in-app "*" soft-404) to
-// SPA_ROUTES, reducing each ":param" path to its static ownership prefix
-// ("/cockpit/:id" -> "/cockpit") the way is_spa_route matches subtrees.
-it("router concrete paths match the SPA_ROUTES manifest (drift guard)", () => {
+// SPA_ROUTES by collapsing each concrete leaf to the manifest entry that OWNS it
+// (the way is_spa_route matches a subtree: "/cockpit" owns "/cockpit/new" and
+// "/cockpit/:id"; "/" owns only itself).
+function toOwningPrefix(p: string): string {
+  const owner = SPA_ROUTES.filter((r) =>
+    r === "/" ? p === "/" : p === r || p.startsWith(r + "/"),
+  ).sort((a, b) => b.length - a.length)[0];
+  return owner ?? p; // unowned -> stays itself -> set mismatch -> guard fails
+}
+
+it("router concrete paths are all owned by the SPA_ROUTES manifest (drift guard)", () => {
   const concrete = leafPaths(router.routes as RouteObject[])
     .filter((p) => !p.includes("*"))
-    .map((p) => {
-      const i = p.indexOf("/:");
-      return i === -1 ? p : p.slice(0, i) || "/";
-    });
+    .map(toOwningPrefix);
   expect(new Set(concrete)).toEqual(new Set(SPA_ROUTES));
 });

@@ -17,8 +17,8 @@ export const ACTIVITY_TOP: ActivityItem[] = [
     id: "workspaces",
     label: "Workspaces",
     icon: "folder",
-    kind: "external",
-    to: "/workspaces",
+    kind: "spa",
+    to: "/cockpit",
   },
 ];
 
