@@ -101,7 +101,12 @@ export function ScorecardPanel({
               <button
                 type="button"
                 className="scorecard-link"
-                onClick={() => onNavigate({ top_tab: c.deep_link!.artifact })}
+                onClick={() =>
+                  onNavigate({
+                    top_tab: c.deep_link!.artifact,
+                    section_index: c.deep_link!.section_index,
+                  })
+                }
               >
                 Go to §{c.deep_link.section_index}
               </button>

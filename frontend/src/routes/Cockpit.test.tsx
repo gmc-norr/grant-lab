@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { Cockpit } from "./Cockpit";
 
 afterEach(() => {
@@ -533,6 +534,55 @@ it("select-to-cite gate: dirtying the section disables Cite (must save first)", 
     "title",
     "Save this section first",
   );
+});
+
+it("clicking the Spec tab switches the artifact view and sets ?tab=spec", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/spec")) {
+      return Promise.resolve({
+        data: { head: "a".repeat(40), can_edit: true, sections: [{ index: 0, heading: "", text: "", sha: "s0" }], locked: false },
+        error: undefined,
+      });
+    }
+    if (path.endsWith("/proposed-changes")) return Promise.resolve({ data: { items: [] }, error: undefined });
+    if (path.endsWith("/problems")) return Promise.resolve({ data: { problems: [], counts: { error: 0, warning: 0 }, scorecard_stale: [] }, error: undefined });
+    return Promise.resolve(draftPayload(true)); // /draft
+  }) as never);
+  renderCockpit();
+  await screen.findByRole("button", { name: /Methods/ });
+  fireEvent.click(screen.getByRole("tab", { name: /^spec$/i }));
+  // The empty-spec CTA proves SpecPanel mounted from ?tab=spec.
+  expect(await screen.findByRole("button", { name: /start spec from skeleton/i })).toBeInTheDocument();
+});
+
+it("ScorecardPanel 'Go to §' passes section_index to onNavigate", async () => {
+  const onNavigate = vi.fn();
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/scorecard")) {
+      return Promise.resolve({
+        data: {
+          scorecard: {
+            criteria: [
+              { index: 0, name: "Impact", band: "gap", note: "", deep_link: { artifact: "draft", section_index: 2 }, weight: 1, effective_weight: 1 },
+            ],
+            overall_band: "gap",
+            summary: "",
+          },
+          evaluated_draft_sha: null, evaluated_spec_sha: null, completed_at: null, stale: false, stale_reasons: [],
+        },
+        error: undefined,
+      });
+    }
+    return Promise.resolve({ data: null, error: undefined }); // /evaluator-runs/latest
+  }) as never);
+  const qc = new QueryClient();
+  render(
+    <QueryClientProvider client={qc}>
+      <ScorecardPanel id="ws-1" onNavigate={onNavigate} />
+    </QueryClientProvider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /go to §2/i }));
+  expect(onNavigate).toHaveBeenCalledWith({ top_tab: "draft", section_index: 2 });
 });
 
 it("select-to-cite: retains the held selection across a background draft refetch (skips remote echoes)", async () => {

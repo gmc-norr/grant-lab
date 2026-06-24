@@ -2,25 +2,24 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { BottomPanel } from "../cockpit/BottomPanel";
+import { useCockpitNav } from "../cockpit/cockpitNav";
 import { DraftPanel } from "../cockpit/DraftPanel";
-import type { BottomTab, NavTarget, TopTab } from "../cockpit/nav";
+import type { BottomTab, NavTarget } from "../cockpit/nav";
 import { ReviewPanel } from "../cockpit/ReviewPanel";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { SpecPanel } from "../cockpit/SpecPanel";
 
 export function Cockpit() {
   const { id = "" } = useParams();
-  // Artifact-level tab: the Spec and Scorecard are "center View tabs" of the
-  // cockpit, not separate URLs. Default to Draft so the existing draft UX (and
-  // Cockpit.test.tsx) is unchanged on open.
-  const [topTab, setTopTab] = useState<TopTab>("draft");
+  // Artifact tab + active section live in the URL (?tab/?sec) so the shell sidebar
+  // Outline and the editor stay in sync across the AppShell boundary. The bottom
+  // region (tab + collapse) stays local — it never crosses that boundary.
+  const { tab, setTab, navigate } = useCockpitNav();
   const [bottomTab, setBottomTab] = useState<BottomTab>("inbox");
   const [collapsed, setCollapsed] = useState(false);
 
-  // Two-axis navigation: a Problems/Scorecard "act" can switch the artifact tab
-  // (incl. Scorecard) and/or focus a bottom-region tab (expanding it if collapsed).
   const onNavigate = (target: NavTarget) => {
-    if (target.top_tab) setTopTab(target.top_tab);
+    navigate(target); // ?tab + ?sec
     if (target.bottom_tab) {
       setBottomTab(target.bottom_tab);
       setCollapsed(false);
@@ -30,43 +29,23 @@ export function Cockpit() {
   return (
     <div className="cockpit-shell">
       <div role="tablist" aria-label="Artifact">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={topTab === "draft"}
-          onClick={() => setTopTab("draft")}
-        >
+        <button type="button" role="tab" aria-selected={tab === "draft"} onClick={() => setTab("draft")}>
           Draft
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={topTab === "spec"}
-          onClick={() => setTopTab("spec")}
-        >
+        <button type="button" role="tab" aria-selected={tab === "spec"} onClick={() => setTab("spec")}>
           Spec
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={topTab === "scorecard"}
-          onClick={() => setTopTab("scorecard")}
-        >
+        <button type="button" role="tab" aria-selected={tab === "scorecard"} onClick={() => setTab("scorecard")}>
           Scorecard
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={topTab === "review"}
-          onClick={() => setTopTab("review")}
-        >
+        <button type="button" role="tab" aria-selected={tab === "review"} onClick={() => setTab("review")}>
           Panel review
         </button>
       </div>
-      {topTab === "draft" && <DraftPanel id={id} />}
-      {topTab === "spec" && <SpecPanel id={id} />}
-      {topTab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
-      {topTab === "review" && <ReviewPanel id={id} />}
+      {tab === "draft" && <DraftPanel id={id} />}
+      {tab === "spec" && <SpecPanel id={id} />}
+      {tab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
+      {tab === "review" && <ReviewPanel id={id} />}
       <BottomPanel
         id={id}
         activeTab={bottomTab}

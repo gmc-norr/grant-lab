@@ -25,6 +25,7 @@ function toNav(target: ProblemRow["target"]): NavTarget {
   return {
     top_tab: target?.top_tab ?? undefined,
     bottom_tab: target?.bottom_tab ?? undefined,
+    section_index: target?.section_index ?? undefined,
   };
 }
 
