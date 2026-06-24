@@ -224,3 +224,103 @@ async def api_fetch_reference(
         text_status=result.text_status,
         text_error=result.text_error,
     )
+
+
+class MetadataIn(BaseModel):
+    title: str
+    authors: list[str] = []
+    year: str | None = None
+    venue: str | None = None
+    doi: str | None = None
+
+
+class MetadataOut(BaseModel):
+    citekey: str | None
+    metadata_status: str
+    csl_json: dict
+
+
+@router.post(
+    "/workspaces/{workspace_id}/references/{reference_id}/metadata", response_model=MetadataOut
+)
+def api_approve_metadata(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    body: MetadataIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> MetadataOut:
+    import contextlib
+
+    from sqlalchemy.exc import IntegrityError
+
+    from call_manager.proposal_assist.references.csl import generate_citekey
+    from call_manager.proposal_assist.web.references import _parse_authors
+
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+        if ref is None or ref.workspace_id != workspace_id or ref.tombstoned_at is not None:
+            raise HTTPException(status_code=404, detail="reference not found")
+
+        csl: dict = {}
+        title = (body.title or "").strip()
+        if title:
+            csl["title"] = title
+        parsed_authors = _parse_authors("\n".join(body.authors))
+        if parsed_authors:
+            csl["author"] = parsed_authors
+        year_raw = (body.year or "").strip()
+        if year_raw:
+            with contextlib.suppress(ValueError):
+                csl["issued"] = {"date-parts": [[int(year_raw)]]}
+        venue = (body.venue or "").strip()
+        if venue:
+            csl["container-title"] = venue
+        doi = (body.doi or "").strip()
+        if doi:
+            csl["DOI"] = doi
+
+        if not csl or not csl.get("title"):
+            raise HTTPException(
+                status_code=400, detail="provide at least a title before approving."
+            )
+
+        ref.csl_json = csl
+        if isinstance(csl.get("title"), str) and csl["title"]:
+            ref.title = csl["title"]
+        ref.metadata_status = "approved"
+        if ref.citekey is None or ref.citekey.startswith("ref-"):
+            new_key = generate_citekey(csl, workspace_id, session)
+            if new_key and not new_key.startswith("ref-"):
+                ref.citekey = new_key
+
+        try:
+            session.add(
+                WorkspaceEvent(
+                    workspace_id=workspace_id,
+                    kind="reference.metadata_approved",
+                    actor_id=user.id,
+                    payload={"reference_id": str(reference_id)},
+                )
+            )
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+            ref.csl_json = csl
+            if isinstance(csl.get("title"), str) and csl["title"]:
+                ref.title = csl["title"]
+            ref.metadata_status = "approved"
+            session.add(
+                WorkspaceEvent(
+                    workspace_id=workspace_id,
+                    kind="reference.metadata_approved",
+                    actor_id=user.id,
+                    payload={"reference_id": str(reference_id)},
+                )
+            )
+            session.commit()
+
+        return MetadataOut(citekey=ref.citekey, metadata_status=ref.metadata_status, csl_json=csl)

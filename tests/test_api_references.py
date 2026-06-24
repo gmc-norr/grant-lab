@@ -161,3 +161,51 @@ def test_api_fetch_success_audits(monkeypatch, pg_url, tmp_path, pg_session_fact
             )
         )
         assert ev is not None
+
+
+def test_api_metadata_approve_sets_citekey_and_audits(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{rid}/metadata",
+        json={"title": "On Widgets", "authors": ["Roe, Jane"], "year": "2021"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["metadata_status"] == "approved"
+    assert body["citekey"] == "roe2021"
+    assert body["csl_json"]["title"] == "On Widgets"
+    with pg_session_factory() as s:
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "reference.metadata_approved",
+            )
+        )
+        assert ev is not None and ev.payload["reference_id"] == rid
+
+
+def test_api_metadata_empty_title_is_400(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{rid}/metadata",
+        json={"title": "   ", "authors": []},
+    )
+    assert r.status_code == 400
+
+
+def test_api_metadata_unknown_ref_is_404(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    import uuid as _uuid
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{_uuid.uuid4()}/metadata",
+        json={"title": "X", "authors": []},
+    )
+    assert r.status_code == 404
