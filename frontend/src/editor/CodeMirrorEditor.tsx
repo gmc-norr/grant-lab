@@ -1,7 +1,10 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { Compartment, EditorState, Transaction } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { EditorView, keymap, lineNumbers } from "@codemirror/view";
+import { tags as t } from "@lezer/highlight";
+import { vscodeDarkInit } from "@uiw/codemirror-theme-vscode";
 import { useEffect, useRef } from "react";
 
 import { citationPills } from "./citations";
@@ -41,35 +44,47 @@ export type CodeMirrorEditorProps = {
   onPillClick?: (citekey: string, evId: string) => void;
   /** SP2a-4b: the current non-empty editor selection (or null when collapsed). */
   onSelectionChange?: (sel: { from: number; to: number; text: string } | null) => void;
+  /** Reports the 1-based caret Ln/Col (or null) for the status bar. Default no-op. */
+  onCursorChange?: (pos: { line: number; col: number } | null) => void;
   /** Citation layer (pills + select-to-cite bridge). Default true preserves the
    *  draft editor; the Spec passes false for raw, citation-free text. Read once
    *  at mount — stable per editor instance. */
   citations?: boolean;
 };
 
-// The `--cm-*` vars below are the existing call-manager (NOT CodeMirror) design
-// tokens defined in src/styles/tokens.css (the "cm" prefix is "call-manager" — a
-// naming collision with CodeMirror that is purely coincidental). Do NOT redefine
-// them and do NOT import tokens.css here: it is loaded globally by the app entry,
-// so the running editor resolves them. The vitest tests assert document state +
-// contenteditable + decoration ranges, never computed colors, so theme resolution
-// is not exercised under jsdom (zero-rect polyfills) — that is fine.
-const cmTheme = EditorView.theme({
-  "&": {
-    backgroundColor: "var(--cm-surface)",
-    color: "var(--cm-ink)",
-    border: "1px solid var(--cm-border)",
-    borderRadius: "8px",
-    fontSize: "0.95rem",
+// VS Code dark editor recolored to our identity. The vscode base + gutter use
+// literal hex (the @uiw theme factory parses colors, so CSS vars can't be passed
+// there); they equal our --app-* tokens (#1a1b1e=--app-editor, #2dd4bf=accent-bright,
+// #0d3b38=selected). A teal HighlightStyle recolors markdown headings/links, and a
+// thin chrome override (token-based) styles the focus ring + citation pill. jsdom
+// never resolves these colors (zero rects), so the vitest suite is unaffected — the
+// look is screenshot-verified.
+const vscodeBase = vscodeDarkInit({
+  settings: {
+    background: "#1a1b1e",
+    gutterBackground: "#1a1b1e",
+    caret: "#2dd4bf",
+    selection: "#0d3b38",
+    selectionMatch: "#0d3b38",
+    lineHighlight: "#ffffff0a",
   },
-  ".cm-content": { caretColor: "var(--cm-primary)", fontFamily: "ui-monospace, monospace" },
-  "&.cm-focused": { outline: "2px solid var(--cm-primary-border)" },
+});
+const tealHighlight = syntaxHighlighting(
+  HighlightStyle.define([
+    { tag: [t.heading, t.heading1, t.heading2, t.heading3], color: "#4dc4d9", fontWeight: "600" },
+    { tag: [t.link, t.url], color: "#2dd4bf" },
+  ]),
+);
+const cmChrome = EditorView.theme({
+  "&": { borderRadius: "6px", fontSize: "0.95rem" },
+  ".cm-content": { fontFamily: "ui-monospace, monospace" },
+  "&.cm-focused": { outline: "2px solid var(--app-accent)" },
   ".cm-citation-pill": {
-    backgroundColor: "var(--cm-primary-soft)",
-    border: "1px solid var(--cm-primary-border)",
+    backgroundColor: "var(--app-selected)",
+    border: "1px solid var(--app-border-strong)",
     borderRadius: "4px",
     padding: "0 4px",
-    color: "var(--cm-primary)",
+    color: "var(--app-link)",
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
@@ -82,6 +97,7 @@ export function CodeMirrorEditor({
   readOnly = false,
   onPillClick = () => {},
   onSelectionChange = () => {},
+  onCursorChange = () => {},
   citations = true,
 }: CodeMirrorEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -95,10 +111,12 @@ export function CodeMirrorEditor({
   const requireHeadingRef = useRef(requireHeading);
   const onPillClickRef = useRef(onPillClick);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  const onCursorChangeRef = useRef(onCursorChange);
   onChangeRef.current = onChange;
   requireHeadingRef.current = requireHeading;
   onPillClickRef.current = onPillClick;
   onSelectionChangeRef.current = onSelectionChange;
+  onCursorChangeRef.current = onCursorChange;
 
   // Mount ONCE: build EditorView, destroy on unmount.
   useEffect(() => {
@@ -130,13 +148,21 @@ export function CodeMirrorEditor({
     }
     extensions.push(
       guard,
-      cmTheme,
+      vscodeBase,
+      tealHighlight,
+      cmChrome,
+      lineNumbers(),
       EditorView.lineWrapping,
       readOnlyComp.current.of([
         EditorState.readOnly.of(readOnly),
         EditorView.editable.of(!readOnly),
       ]),
       EditorView.updateListener.of((u) => {
+        if (u.selectionSet || u.docChanged) {
+          const head = u.state.selection.main.head;
+          const line = u.state.doc.lineAt(head);
+          onCursorChangeRef.current?.({ line: line.number, col: head - line.from + 1 });
+        }
         const localDocChange =
           u.docChanged && u.transactions.some((t) => !t.annotation(Transaction.remote));
         if (localDocChange) {

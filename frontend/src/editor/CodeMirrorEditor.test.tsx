@@ -259,3 +259,28 @@ it("citations default (true) still renders the citation pill", async () => {
   );
   await waitFor(() => expect(container.querySelector(".cm-citation-pill")).toBeTruthy());
 });
+
+it("publishes 1-based Ln/Col on selection change", () => {
+  const onCursorChange = vi.fn();
+  const { container } = render(
+    <CodeMirrorEditor
+      value={"line one\nline two"}
+      onChange={() => {}}
+      requireHeading={false}
+      citations={false}
+      onCursorChange={onCursorChange}
+    />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & { __cmView?: import("@codemirror/view").EditorView })
+    .__cmView!;
+  // Caret at index 12 = start of "line two" (9) + 3 -> line 2, col 4.
+  view.dispatch({ selection: { anchor: 12 } });
+  expect(onCursorChange).toHaveBeenLastCalledWith({ line: 2, col: 4 });
+});
+
+it("renders a line-number gutter", () => {
+  const { container } = render(
+    <CodeMirrorEditor value={"a\nb"} onChange={() => {}} requireHeading={false} citations={false} />,
+  );
+  expect(container.querySelector(".cm-gutters")).not.toBeNull();
+});
