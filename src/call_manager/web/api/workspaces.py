@@ -14,15 +14,17 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     ArtifactVersion,
+    Call,
     Reference,
     ReferenceChunk,
     SpecLockEvent,
     User,
+    Workspace,
     WorkspaceEvent,
     WorkspaceViewer,
 )
@@ -1004,3 +1006,72 @@ def get_reference_chunks(
             for c in rows
         ]
     return ReferenceChunksOut(reference_id=str(reference_id), title=str(title), chunks=chunks)
+
+
+# --- Slice A: workspace collection (list + create) -------------------------
+# Mirrors the ck_workspaces_status CHECK constraint (db/models.py) — the single
+# source of truth for the ?status allowlist.
+_WORKSPACE_STATUSES = frozenset({"drafting", "submitted", "awarded", "rejected", "abandoned"})
+_WORKSPACE_LIST_LIMIT = 200
+
+
+class WorkspaceListItemOut(BaseModel):
+    id: str
+    title: str
+    status: str  # drafting|submitted|awarded|rejected|abandoned
+    current_phase: str  # "setup" | "active"
+    deadline: datetime | None
+    updated_at: datetime
+    linked_call_title: str | None  # None when call_id is null (call deleted)
+    is_owner: bool
+
+
+@router.get("/workspaces", response_model=list[WorkspaceListItemOut])
+def list_workspaces_api(
+    request: Request,
+    status: str | None = None,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> list[WorkspaceListItemOut]:
+    """Workspaces visible to the user (owned OR viewer-of), not soft-deleted,
+    most-recently-updated first, capped. Optional ?status filter (allowlisted).
+    Mirrors the Jinja list_workspaces query; powers the React /cockpit list."""
+    if status is not None and status not in _WORKSPACE_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid status filter")
+    sf = request.app.state.session_factory
+    with sf() as session:
+        viewer_ids = session.scalars(
+            select(WorkspaceViewer.workspace_id).where(WorkspaceViewer.user_id == user.id)
+        ).all()
+        q = (
+            select(Workspace)
+            .where(
+                Workspace.soft_deleted_at.is_(None),
+                or_(Workspace.owner_id == user.id, Workspace.id.in_(viewer_ids)),
+            )
+            .order_by(Workspace.updated_at.desc())
+            .limit(_WORKSPACE_LIST_LIMIT)
+        )
+        if status:
+            q = q.where(Workspace.status == status)
+        rows = list(session.scalars(q))
+        # Batch the linked-call titles in ONE query (no N+1); a row whose call was
+        # deleted (call_id SET NULL) simply has no title.
+        call_ids = {w.call_id for w in rows if w.call_id is not None}
+        titles = (
+            dict(session.execute(select(Call.id, Call.title).where(Call.id.in_(call_ids))).all())
+            if call_ids
+            else {}
+        )
+        return [
+            WorkspaceListItemOut(
+                id=str(w.id),
+                title=w.title,
+                status=w.status,
+                current_phase=w.current_phase,
+                deadline=w.deadline,
+                updated_at=w.updated_at,
+                linked_call_title=titles.get(w.call_id),
+                is_owner=(w.owner_id == user.id),
+            )
+            for w in rows
+        ]

@@ -15,7 +15,15 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import ArtifactVersion, Reference, User, Workspace, WorkspaceViewer
+from call_manager.db.models import (
+    ArtifactVersion,
+    Call,
+    Reference,
+    Source,
+    User,
+    Workspace,
+    WorkspaceViewer,
+)
 from call_manager.main import create_app
 from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
@@ -1268,3 +1276,78 @@ def test_members_non_owner_member_403(monkeypatch, pg_url, pg_session_factory, t
     r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/members")
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "forbidden"
+
+
+# --- Slice A: GET /api/workspaces -------------------------------------------
+def _mk_source_call(s, *, slug, title):
+    """Seed a Source + Call (Call requires source_id/external_id/url/title)."""
+    src = Source(name=slug, slug=slug)
+    s.add(src)
+    s.flush()
+    call = Call(
+        source_id=src.id,
+        external_id=f"ext-{slug}",
+        url=f"https://x.test/{slug}",
+        title=title,
+    )
+    s.add(call)
+    s.flush()
+    return call
+
+
+def test_list_workspaces_owned_and_viewer_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        other = User(status="active", email="other@ki.se")
+        s.add_all([owner, other])
+        s.flush()
+        call = _mk_source_call(s, slug="test-funder", title="Linked Call")
+        w_own = Workspace(title="Mine", owner_id=owner.id, current_phase="active", call_id=call.id)
+        w_shared = Workspace(title="Shared", owner_id=other.id, current_phase="setup")
+        w_hidden = Workspace(title="Hidden", owner_id=other.id)
+        w_deleted = Workspace(title="Gone", owner_id=owner.id, soft_deleted_at=datetime.now(UTC))
+        s.add_all([w_own, w_shared, w_hidden, w_deleted])
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=w_shared.id, user_id=owner.id))
+        s.commit()
+        owner_id = owner.id
+        own_id, shared_id = str(w_own.id), str(w_shared.id)
+    c = _client(app, owner_id)
+    r = c.get("/api/workspaces")
+    assert r.status_code == 200
+    items = r.json()
+    ids = [it["id"] for it in items]
+    assert own_id in ids and shared_id in ids
+    assert all(it["title"] != "Hidden" for it in items)  # not visible
+    assert all(it["title"] != "Gone" for it in items)  # soft-deleted excluded
+    mine = next(it for it in items if it["id"] == own_id)
+    assert mine["is_owner"] is True
+    assert mine["linked_call_title"] == "Linked Call"
+    assert mine["current_phase"] == "active"
+    shared = next(it for it in items if it["id"] == shared_id)
+    assert shared["is_owner"] is False
+    assert shared["linked_call_title"] is None
+
+
+def test_list_workspaces_status_filter_and_validation(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        s.add_all(
+            [
+                Workspace(title="Draft one", owner_id=owner.id, status="drafting"),
+                Workspace(title="Submitted one", owner_id=owner.id, status="submitted"),
+            ]
+        )
+        s.commit()
+        owner_id = owner.id
+    c = _client(app, owner_id)
+    r = c.get("/api/workspaces?status=submitted")
+    assert r.status_code == 200
+    assert [it["title"] for it in r.json()] == ["Submitted one"]
+    assert c.get("/api/workspaces?status=bogus").status_code == 400
