@@ -4,6 +4,7 @@ match the rest of the /api suite."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
@@ -124,3 +125,38 @@ def test_turns_read_model_non_member_403(monkeypatch, pg_url, pg_session_factory
     _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/turns")
     assert r.status_code == 403
+
+
+def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    from call_manager.db.models import ChatTurn as CT
+    from call_manager.web.api.turns import _json_turn_stream
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    # Seed a user turn + a completed job + one assistant turn after it.
+    with pg_session_factory() as s:
+        u = CT(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
+        s.add(u)
+        s.flush()
+        job = TurnJob(workspace_id=ws_id, user_turn_id=u.id, status="completed")
+        s.add(job)
+        s.add(CT(workspace_id=ws_id, role="assistant", content={"type": "text", "text": "ok"}))
+        s.commit()
+        job_id, u_pos = job.id, u.position
+
+    async def _collect():
+        out = []
+        async for chunk in _json_turn_stream(
+            session_factory=pg_session_factory, workspace_id=ws_id,
+            turn_job_id=job_id, since_position=u_pos, poll_seconds=0.0, request=None,
+        ):
+            out.append(chunk)
+        return out
+
+    chunks = asyncio.run(_collect())
+    joined = "".join(chunks)
+    assert "event: turn" in joined
+    assert "id: " in joined                 # SSE id line = position (resume cursor)
+    assert '"role": "assistant"' in joined or '"role":"assistant"' in joined
+    assert "event: done" in joined
+    assert "completed" in joined

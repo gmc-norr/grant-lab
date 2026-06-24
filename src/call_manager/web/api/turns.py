@@ -5,11 +5,14 @@ business logic, no schema change."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -178,3 +181,72 @@ def list_turns(
             phase=ws.current_phase,
             running_job_id=str(running) if running else None,
         )
+
+
+_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _json_turn_stream(
+    *,
+    session_factory,
+    workspace_id,
+    turn_job_id,
+    since_position=None,
+    poll_seconds=0.2,
+    request=None,
+):
+    """JSON analogue of the Jinja _stream_turn_generator: emit one `turn` event
+    (with an `id:` cursor = ChatTurn.position) per new row, then a terminal
+    `done` event. Honors since_position so useEventStream can resume on reconnect."""
+    with session_factory() as s:
+        job = s.get(TurnJob, turn_job_id)
+        if job is None or job.workspace_id != workspace_id:
+            yield "event: done\ndata: {\"status\": \"missing\"}\n\n"
+            return
+        last_seen = since_position if since_position is not None else (
+            s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
+        )
+    while True:
+        if request is not None and await request.is_disconnected():
+            return
+        with session_factory() as s:
+            tj = s.get(TurnJob, turn_job_id)
+            terminal = tj is None or tj.status in _TERMINAL
+            rows = list(
+                s.scalars(
+                    select(ChatTurn)
+                    .where(ChatTurn.workspace_id == workspace_id, ChatTurn.position > last_seen)
+                    .order_by(ChatTurn.position)
+                )
+            )
+            for turn in rows:
+                payload = json.dumps(_turn_to_dict(turn))
+                yield f"id: {turn.position}\nevent: turn\ndata: {payload}\n\n"
+                last_seen = turn.position
+            if terminal:
+                status = tj.status if tj is not None else "missing"
+                yield f"event: done\ndata: {json.dumps({'status': status})}\n\n"
+                return
+        await asyncio.sleep(poll_seconds)
+
+
+@router.get("/workspaces/{workspace_id}/turns/{job_id}/stream", include_in_schema=False)
+def stream_turn(
+    workspace_id: uuid.UUID,
+    job_id: uuid.UUID,
+    request: Request,
+    since: int | None = None,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> StreamingResponse:
+    """SSE stream of new chat turns for one job (owner OR viewer). EventSource
+    can't set headers, so auth is the session cookie + require_member."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+    return StreamingResponse(
+        _json_turn_stream(
+            session_factory=sf, workspace_id=workspace_id, turn_job_id=job_id,
+            since_position=since, request=request,
+        ),
+        media_type="text/event-stream",
+    )
