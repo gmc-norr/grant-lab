@@ -137,6 +137,8 @@ def submit_turn(
 class TurnsResponse(BaseModel):
     turns: list[TurnOut]
     can_send: bool
+    is_owner: bool
+    disabled_reason: str | None
     needs_disclosure: bool
     phase: str
     running_job_id: str | None
@@ -178,10 +180,26 @@ def list_turns(
         is_owner = ws.owner_id == user.id
         drafting_on = request.app.state.settings.drafting_enabled
         can_send = bool(is_owner and ws.current_phase == "active" and drafting_on)
+        needs_disclosure = prior_ack is None
+        # Canonical order mirrors gate_cloud_llm (setup -> drafting -> disclosure),
+        # with not_owner prepended (submit is owner-only). disabled_reason is the
+        # authoritative footer driver; can_send is retained for back-compat.
+        if not is_owner:
+            disabled_reason: str | None = "not_owner"
+        elif ws.current_phase == "setup":
+            disabled_reason = "setup"
+        elif not drafting_on:
+            disabled_reason = "drafting_disabled"
+        elif needs_disclosure:
+            disabled_reason = "needs_disclosure"
+        else:
+            disabled_reason = None
         return TurnsResponse(
             turns=[TurnOut(**_turn_to_dict(t)) for t in rows],
             can_send=can_send,
-            needs_disclosure=prior_ack is None,
+            is_owner=is_owner,
+            disabled_reason=disabled_reason,
+            needs_disclosure=needs_disclosure,
             phase=ws.current_phase,
             running_job_id=str(running) if running else None,
         )

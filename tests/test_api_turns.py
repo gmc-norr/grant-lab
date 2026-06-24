@@ -250,3 +250,44 @@ def test_api_submit_turn_cross_workspace_attachment_is_400(
         json={"content": "hi", "attachment_ids": [str(_uuid.uuid4())]},
     )
     assert r.status_code == 400
+
+
+def test_turns_disabled_reason_branches(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    from call_manager.db.models import Workspace
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+
+    # not_owner: a member sees not_owner
+    r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.json()["disabled_reason"] == "not_owner"
+    assert r.json()["is_owner"] is False
+
+    # setup: owner on a setup-phase workspace
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).current_phase = "setup"
+        s.commit()
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.json()["disabled_reason"] == "setup"
+    assert r.json()["is_owner"] is True
+
+    # active again
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).current_phase = "active"
+        s.commit()
+
+    # drafting_disabled: global kill-switch off (owner, active)
+    app.state.settings.drafting_enabled = False
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.json()["disabled_reason"] == "drafting_disabled"
+    app.state.settings.drafting_enabled = True
+
+    # needs_disclosure: owner, active, drafting on, no ack yet
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.json()["disabled_reason"] == "needs_disclosure"
+
+    # null: after acking disclosure
+    _ack_disclosure(pg_session_factory, ws_id, owner_id)
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.json()["disabled_reason"] is None
+    assert r.json()["can_send"] is True
