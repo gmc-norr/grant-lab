@@ -27,10 +27,10 @@ function TurnItem({ turn, refs }: { turn: Turn; refs: Ref[] }) {
   return (
     <div className={cls}>
       {bs.map((b, i) => {
-        if (b.type === "turn_outcome") return <div key={i} className={styles.outcome}>✓ {String(b.text ?? "")}</div>;
-        if (b.type === "reference") return <RefChip key={i} id={String(b.reference_id)} refs={refs} />;
-        if (b.type === "text" || typeof b.text === "string") return <span key={i}>{String(b.text ?? "")}</span>;
-        return <span key={i} className={styles.note}>·</span>; // unknown block: muted, never throws
+        if (b.type === "turn_outcome") return <div key={`${turn.id}-${i}`} className={styles.outcome}>✓ {String(b.text ?? "")}</div>;
+        if (b.type === "reference") return <RefChip key={`${turn.id}-${i}`} id={String(b.reference_id)} refs={refs} />;
+        if (b.type === "text" || typeof b.text === "string") return <span key={`${turn.id}-${i}`}>{String(b.text ?? "")}</span>;
+        return <span key={`${turn.id}-${i}`} className={styles.note}>·</span>; // unknown block: muted, never throws
       })}
     </div>
   );
