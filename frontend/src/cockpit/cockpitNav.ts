@@ -73,3 +73,10 @@ export function useCockpitNav(): CockpitNav {
 
   return { tab, sec, setTab, setSec, navigate };
 }
+
+/** Extract the workspace id from a `/cockpit/:id` pathname (""" off the cockpit).
+ *  Lets the always-mounted StatusBar/TitleBar gate their cockpit queries by route. */
+export function cockpitIdFromPath(pathname: string): string {
+  const m = pathname.match(/^\/cockpit\/([^/]+)/);
+  return m ? m[1] : "";
+}

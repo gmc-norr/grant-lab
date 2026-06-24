@@ -54,6 +54,7 @@ export function useLatestEvaluator(id: string) {
 export function useScorecard(id: string) {
   return useQuery({
     queryKey: ["scorecard", id],
+    enabled: !!id,
     queryFn: async () =>
       unwrap(
         await api.GET("/api/workspaces/{workspace_id}/scorecard", {
