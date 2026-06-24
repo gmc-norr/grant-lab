@@ -1,6 +1,7 @@
 import { Tooltip } from "@mantine/core";
 import { NavLink, useLocation } from "react-router-dom";
 
+import { cockpitIdFromPath } from "../cockpit/cockpitNav";
 import styles from "./ActivityBar.module.css";
 import { ACTIVITY_BOTTOM, ACTIVITY_TOP, type ActivityItem } from "./nav-items";
 
@@ -39,21 +40,21 @@ function Item({ item }: { item: ActivityItem }) {
 
 export function ActivityBar() {
   const { pathname } = useLocation();
-  const inCockpit = pathname.startsWith("/cockpit");
+  const wsId = cockpitIdFromPath(pathname);
   return (
     <nav className={styles.activitybar} aria-label="Primary">
       <div className={styles.group}>
         {ACTIVITY_TOP.map((it) => (
           <Item key={it.id} item={it} />
         ))}
-        {inCockpit && (
+        {wsId && (
           <Item
             item={{
               id: "active-ws",
               label: "Current workspace",
               icon: "edit",
               kind: "spa",
-              to: pathname,
+              to: `/cockpit/${wsId}`,
             }}
           />
         )}

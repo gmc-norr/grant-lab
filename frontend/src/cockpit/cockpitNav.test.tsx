@@ -54,3 +54,13 @@ it("navigate writes ?tab and ?sec from a target (section_index)", () => {
   expect(screen.getByTestId("tab").textContent).toBe("draft");
   expect(screen.getByTestId("sec").textContent).toBe("2");
 });
+
+import { cockpitIdFromPath } from "./cockpitNav";
+
+it("cockpitIdFromPath returns the id only for the editor route", () => {
+  expect(cockpitIdFromPath("/cockpit/abc")).toBe("abc");
+  expect(cockpitIdFromPath("/cockpit/abc/sub")).toBe("abc");
+  expect(cockpitIdFromPath("/cockpit/new")).toBe(""); // create route, NOT an id
+  expect(cockpitIdFromPath("/cockpit")).toBe(""); // list route
+  expect(cockpitIdFromPath("/")).toBe(""); // off cockpit
+});

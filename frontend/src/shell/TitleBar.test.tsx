@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
 import { TitleBar } from "./TitleBar";
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 function renderAt(path: string) {
   const qc = new QueryClient();
@@ -30,5 +32,19 @@ it("shows 'Funding calls' off the cockpit and does not fetch", () => {
   const get = vi.spyOn(clientMod.api, "GET");
   renderAt("/");
   expect(screen.getByText("Funding calls")).toBeInTheDocument();
+  expect(get).not.toHaveBeenCalled();
+});
+
+it("shows 'Workspaces' on the cockpit list and does not fetch", () => {
+  const get = vi.spyOn(clientMod.api, "GET");
+  renderAt("/cockpit");
+  expect(screen.getByText("Workspaces")).toBeInTheDocument();
+  expect(get).not.toHaveBeenCalled();
+});
+
+it("shows 'New workspace' on the create route and does not fetch", () => {
+  const get = vi.spyOn(clientMod.api, "GET");
+  renderAt("/cockpit/new");
+  expect(screen.getByText("New workspace")).toBeInTheDocument();
   expect(get).not.toHaveBeenCalled();
 });

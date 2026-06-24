@@ -63,3 +63,9 @@ it("off the cockpit it does NOT fetch cockpit-meta / scorecard", () => {
   renderAt("/");
   expect(get).not.toHaveBeenCalled();
 });
+
+it("does NOT fetch on the cockpit create route (no editor chrome)", () => {
+  const get = vi.spyOn(clientMod.api, "GET");
+  renderAt("/cockpit/new");
+  expect(get).not.toHaveBeenCalled();
+});

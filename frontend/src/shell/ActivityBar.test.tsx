@@ -52,3 +52,13 @@ it("has no References destination", () => {
   renderWithProviders(<ActivityBar />, { route: "/" });
   expect(screen.queryByRole("link", { name: /references/i })).toBeNull();
 });
+
+it("hides the current-workspace item on the cockpit list route", () => {
+  renderWithProviders(<ActivityBar />, { route: "/cockpit" });
+  expect(screen.queryByRole("link", { name: "Current workspace" })).toBeNull();
+});
+
+it("hides the current-workspace item on the create route", () => {
+  renderWithProviders(<ActivityBar />, { route: "/cockpit/new" });
+  expect(screen.queryByRole("link", { name: "Current workspace" })).toBeNull();
+});

@@ -9,10 +9,14 @@ export function TitleBar() {
   const { pathname } = useLocation();
   const id = cockpitIdFromPath(pathname);
   const meta = useCockpitMeta(id).data;
-  // On the cockpit, the breadcrumb is the workspace title (falls back until it loads);
-  // off the cockpit it's the dashboard label. useCockpitMeta is gated (id===""), so the
-  // off-cockpit branch never fetches.
-  const title = id ? (meta?.workspace_title ?? "Proposal workspace") : "Funding calls";
+  // Editor → workspace title (falls back until it loads). Non-editor cockpit
+  // routes get their own labels; everything else is the dashboard. useCockpitMeta
+  // is gated (id===""), so the non-editor branches never fetch.
+  let title: string;
+  if (id) title = meta?.workspace_title ?? "Proposal workspace";
+  else if (pathname === "/cockpit/new") title = "New workspace";
+  else if (pathname.startsWith("/cockpit")) title = "Workspaces";
+  else title = "Funding calls";
   return (
     <header className={styles.titlebar}>
       <span className={styles.brand}>
