@@ -14,7 +14,12 @@ export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs
   const uploadFile = useUploadFile(id);
   const citable = refs.filter((r) => r.text_status === "done");
   const busy = disabled || submit.isPending;
-  const atCap = picked.length + images.length >= 5;
+  // Count an in-flight upload toward the cap: it will become a committed image
+  // on onSuccess, so a pending upload already occupies one of the 5 slots.
+  // Without this, the ref-<select> stays enabled during upload and lets the
+  // user add refs that push the total past 5 → backend 400 on send.
+  const inclusions = picked.length + images.length + (uploadFile.isPending ? 1 : 0);
+  const atCap = inclusions >= 5;
 
   function onPickImage(file: File) {
     if (atCap) return;
@@ -111,7 +116,7 @@ export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs
               e.target.value = "";
             }}
           />
-          📎 Image
+          <span>📎 Image</span>
         </label>
         <button
           type="button"

@@ -210,7 +210,11 @@ export function LibraryPanel({ id }: { id: string }) {
             e.target.value = "";
           }}
         />
-        {fileRows.length === 0 ? (
+        {files.isError ? (
+          <p className="library-msg">Could not load files.</p>
+        ) : files.isLoading ? (
+          <p className="library-msg">Loading…</p>
+        ) : fileRows.length === 0 ? (
           <p className="library-msg">No files yet.</p>
         ) : (
           <ul className="library-file-list">

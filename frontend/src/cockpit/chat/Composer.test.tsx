@@ -68,4 +68,23 @@ describe("Composer image attachments", () => {
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "hi" } });
     expect(screen.getByRole("button", { name: /send/i })).toBeDisabled();
   });
+
+  it("counts an in-flight upload toward the 5-inclusion cap (no over-fill via refs)", () => {
+    // An image upload is in flight (isPending=true, not yet committed). With 4
+    // refs picked that is already 5 inclusions, so the ref-<select> must be
+    // disabled — otherwise a 5th ref + the resolving image = 6 → backend 400.
+    h.uploadPending = true;
+    const refs = [1, 2, 3, 4, 5].map((n) => ({
+      id: `r${n}`,
+      citekey: `cite${n}`,
+      title: `T${n}`,
+      text_status: "done",
+    }));
+    wrap(<Composer id="ws1" refs={refs} disabled={false} onSubmitted={vi.fn()} />);
+    const select = screen.getByRole("combobox");
+    for (const v of ["r1", "r2", "r3", "r4"]) {
+      fireEvent.change(select, { target: { value: v } });
+    }
+    expect(select).toBeDisabled();
+  });
 });
