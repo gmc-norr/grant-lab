@@ -857,6 +857,7 @@ def get_cockpit_meta(
 
 
 class MemberOut(BaseModel):
+    user_id: int
     email: str
     role: str  # "owner" | "member"
 
@@ -882,8 +883,8 @@ def list_members(
         ).all()
         out: list[MemberOut] = []
         if owner is not None:
-            out.append(MemberOut(email=owner.email, role="owner"))
-        out.extend(MemberOut(email=v.email, role="member") for v in viewers)
+            out.append(MemberOut(user_id=owner.id, email=owner.email, role="owner"))
+        out.extend(MemberOut(user_id=v.id, email=v.email, role="member") for v in viewers)
         return out
 
 

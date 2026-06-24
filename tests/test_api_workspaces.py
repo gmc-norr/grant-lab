@@ -1267,8 +1267,8 @@ def test_members_owner_sees_named_list(monkeypatch, pg_url, pg_session_factory, 
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/members")
     assert r.status_code == 200
     b = r.json()
-    assert b[0] == {"email": "owner@ki.se", "role": "owner"}  # owner first
-    assert {"email": "member@ki.se", "role": "member"} in b
+    assert b[0]["email"] == "owner@ki.se" and b[0]["role"] == "owner"  # owner first
+    assert any(m["email"] == "member@ki.se" and m["role"] == "member" for m in b)
     assert len(b) == 2
 
 
@@ -1477,3 +1477,24 @@ def test_references_list_includes_library_fields(monkeypatch, pg_url, pg_session
     assert row["metadata_waiver"] is False
     assert row["text_error"] == "Boom: bad pdf"
     assert row["filename"] == "seed.pdf"
+
+
+# --- Task 1 (Slice D): MemberOut.user_id -----------------------------------
+def test_members_list_includes_user_id(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    from call_manager.db.models import User, WorkspaceViewer
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+    with pg_session_factory() as s:
+        viewer = User(status="active", email="viewer-d1@ki.se")
+        s.add(viewer)
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws_id, user_id=viewer.id))
+        s.commit()
+        viewer_id = viewer.id
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/members")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    by_email = {m["email"]: m for m in rows}
+    assert by_email["viewer-d1@ki.se"]["user_id"] == viewer_id
+    assert all("user_id" in m for m in rows)
