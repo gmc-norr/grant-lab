@@ -97,3 +97,30 @@ def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_
     monkeypatch.setattr("call_manager.web.api.turns.submit_user_turn", _boom)
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/turns", json={"content": "hi"})
     assert r.status_code == 429
+
+
+def test_turns_read_model_owner(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.status_code == 200
+    b = r.json()
+    assert b["phase"] == "active"
+    assert b["needs_disclosure"] is True         # no ack yet
+    assert b["can_send"] is True                  # owner + active + drafting_enabled
+    assert b["turns"] == []
+    assert b["running_job_id"] is None
+
+
+def test_turns_read_model_member_cannot_send(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    b = _client(app, member_id).get(f"/api/workspaces/{ws_id}/turns").json()
+    assert b["can_send"] is False                 # viewer
+
+
+def test_turns_read_model_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/turns")
+    assert r.status_code == 403

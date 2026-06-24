@@ -14,12 +14,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import ChatTurn, TurnJob, User
+from call_manager.db.models import ChatTurn, TurnJob, User, WorkspaceEvent
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
-from call_manager.proposal_assist.web._perms import require_owner
+from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()
 
@@ -127,3 +127,54 @@ def submit_turn(
         if user_turn is None:
             raise HTTPException(status_code=500, detail="user_turn missing after submit")
         return SubmitTurnResponse(job_id=str(job.id), user_turn=TurnOut(**_turn_to_dict(user_turn)))
+
+
+class TurnsResponse(BaseModel):
+    turns: list[TurnOut]
+    can_send: bool
+    needs_disclosure: bool
+    phase: str
+    running_job_id: str | None
+
+
+@router.get("/workspaces/{workspace_id}/turns", response_model=TurnsResponse)
+def list_turns(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> TurnsResponse:
+    """Chat read-model. The frontend gates the composer proactively from these
+    flags (mirrors the submit gate order), so a 4xx is only ever a race backstop."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        rows = list(
+            session.scalars(
+                select(ChatTurn)
+                .where(ChatTurn.workspace_id == workspace_id)
+                .order_by(ChatTurn.position)
+            )
+        )
+        prior_ack = session.scalar(
+            select(WorkspaceEvent.id).where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.kind == "disclosure_acknowledged",
+                WorkspaceEvent.actor_id == user.id,
+            ).limit(1)
+        )
+        running = session.scalar(
+            select(TurnJob.id)
+            .where(TurnJob.workspace_id == workspace_id, TurnJob.status.in_(("queued", "running")))
+            .order_by(TurnJob.queued_at.desc())
+            .limit(1)
+        )
+        is_owner = ws.owner_id == user.id
+        drafting_on = request.app.state.settings.drafting_enabled
+        can_send = bool(is_owner and ws.current_phase == "active" and drafting_on)
+        return TurnsResponse(
+            turns=[TurnOut(**_turn_to_dict(t)) for t in rows],
+            can_send=can_send,
+            needs_disclosure=prior_ack is None,
+            phase=ws.current_phase,
+            running_job_id=str(running) if running else None,
+        )
