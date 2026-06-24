@@ -1,8 +1,7 @@
 """JSON /api workspace settings + collaborator endpoints (Cockpit Slice D)."""
 
-# NOTE: Task 3 appends the member tests and adds `from sqlalchemy import func, select`
-# (used by `select(func.count())`). Not imported here — the settings-only tests don't
-# use them, and Task 2 runs `ruff check` before Task 3 (unused imports fail F401).
+from sqlalchemy import func, select
+
 from tests.proposal_assist._refs_helpers import add_member, authed_client, build_app
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -122,5 +121,129 @@ def test_settings_patch_member_403(monkeypatch, pg_url, tmp_path, pg_session_fac
     r = authed_client(app, user_id=member_id).patch(
         f"/api/workspaces/{ws_id}/settings",
         json={"title": "T", "status": "drafting", "deadline": None, "citation_style": "vancouver"},
+    )
+    assert r.status_code == 403
+
+
+def _add_user(pg_session_factory, email):
+    with pg_session_factory() as s:
+        u = make_user(s, email=email)
+        s.commit()
+        return u.id
+
+
+def test_members_add_owner_201_and_event(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+    new_id = _add_user(pg_session_factory, "newcollab@ki.se")
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/members", json={"email": "newcollab@ki.se"}
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body == {"user_id": new_id, "email": "newcollab@ki.se", "role": "member"}
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceViewer)
+                .where(WorkspaceViewer.workspace_id == ws_id, WorkspaceViewer.user_id == new_id)
+            )
+            == 1
+        )
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "member_added"
+            )
+        )
+        assert ev is not None and ev.actor_id == owner_id
+        assert ev.payload["target_user_id"] == new_id
+        assert ev.payload["target_email"] == "newcollab@ki.se"
+
+
+def test_members_add_unknown_email_400_generic(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/members", json={"email": "nobody@ki.se"}
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "bad_request"
+
+
+def test_members_add_duplicate_idempotent_200(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/members", json={"email": "member@ki.se"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["user_id"] == member_id
+
+
+def test_members_add_owner_email_idempotent_200(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/members", json={"email": "owner@ki.se"}
+    )
+    assert r.status_code == 200
+    assert r.json()["role"] == "owner"
+
+
+def test_members_add_non_owner_403(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/members", json={"email": "member@ki.se"}
+    )
+    assert r.status_code == 403
+
+
+def test_members_delete_owner_204_and_event(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
+    c = authed_client(app, user_id=owner_id)
+    r = c.delete(f"/api/workspaces/{ws_id}/members/{member_id}")
+    assert r.status_code == 204
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceViewer)
+                .where(WorkspaceViewer.workspace_id == ws_id, WorkspaceViewer.user_id == member_id)
+            )
+            == 0
+        )
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "member_removed"
+            )
+        )
+        assert ev is not None and ev.payload["target_user_id"] == member_id
+    # idempotent: deleting again is still 204, writes no second event
+    assert c.delete(f"/api/workspaces/{ws_id}/members/{member_id}").status_code == 204
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(
+                    WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "member_removed"
+                )
+            )
+            == 1
+        )
+
+
+def test_members_delete_non_owner_403(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, stranger_id = _setup(pg_session_factory)
+    r = authed_client(app, user_id=stranger_id).delete(
+        f"/api/workspaces/{ws_id}/members/{member_id}"
     )
     assert r.status_code == 403
