@@ -396,6 +396,7 @@ def test_api_submit_turn_with_attachment_builds_image_block(
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+    _ack_disclosure(pg_session_factory, ws_id, owner_id)
     aid = _uuid.uuid4()
     with pg_session_factory() as s:
         s.add(
@@ -435,6 +436,7 @@ def test_api_submit_turn_cross_workspace_attachment_is_400(
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+    _ack_disclosure(pg_session_factory, ws_id, owner_id)
     r = _client(app, owner_id).post(
         f"/api/workspaces/{ws_id}/turns",
         json={"content": "hi", "attachment_ids": [str(_uuid.uuid4())]},
@@ -442,7 +444,7 @@ def test_api_submit_turn_cross_workspace_attachment_is_400(
     assert r.status_code == 400
 ```
 
-> If `test_api_turns.py` does not already `from sqlalchemy import select`, add it. The disclosure gate: `_seed`/`make_workspace` create an `active`-phase workspace; if `submit_turn` 409s on a missing disclosure ack, mirror the existing turn-submit test in this file (it shows how the owner acks disclosure first) — reuse that helper rather than re-deriving it.
+> If `test_api_turns.py` does not already `from sqlalchemy import select`, add it. **Disclosure gate (do not skip):** `_seed`/`make_workspace` create an `active`-phase workspace, where `submit_turn` returns **403** (not 409) until the owner acks disclosure. Both tests above MUST call `_ack_disclosure(pg_session_factory, ws_id, owner_id)` immediately after `_seed` — the helper is already defined at module scope in this file (≈ line 16) and is used by the existing green `test_submit_turn_queues_job_and_echoes`. Without it the 403 fires before `attachment_ids` is ever exercised, and both asserts (200 / 400) fail for the wrong reason — a false red that does not prove the feature.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -830,17 +832,19 @@ import { Composer } from "./Composer";
 const h = vi.hoisted(() => ({
   submit: vi.fn(),
   upload: vi.fn(),
+  uploadPending: false,
 }));
 vi.mock("../../api/turns", () => ({
   useSubmitTurn: () => ({ mutate: h.submit, isPending: false }),
 }));
 vi.mock("../../api/files", () => ({
-  useUploadFile: () => ({ mutate: h.upload, isPending: false }),
+  useUploadFile: () => ({ mutate: h.upload, isPending: h.uploadPending }),
 }));
 
 beforeEach(() => {
   h.submit.mockReset();
   h.upload.mockReset();
+  h.uploadPending = false;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -878,6 +882,16 @@ describe("Composer image attachments", () => {
     await waitFor(() => expect(screen.getByText("fig.png")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /remove fig\.png/i }));
     expect(screen.queryByText("fig.png")).not.toBeInTheDocument();
+  });
+
+  it("disables Send while an image upload is in flight", () => {
+    // Upload started, not yet resolved: isPending=true, onSuccess hasn't fired,
+    // so `images` is still empty. Sending now would post attachment_ids:[] and
+    // silently drop the image — the Send guard must block until it settles.
+    h.uploadPending = true;
+    wrap(<Composer id="ws1" refs={[]} disabled={false} onSubmitted={vi.fn()} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "hi" } });
+    expect(screen.getByRole("button", { name: /send/i })).toBeDisabled();
   });
 });
 ```
@@ -954,7 +968,7 @@ Update `send()` to include `attachment_ids` and clear images on success:
 
 ```tsx
   const send = () => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || busy || uploadFile.isPending) return;
     submit.mutate(
       { content: text, reference_ids: picked, attachment_ids: images.map((i) => i.attachment_id) },
       {
@@ -969,7 +983,9 @@ Update `send()` to include `attachment_ids` and clear images on success:
   };
 ```
 
-And gate the ref-`<select>` with `disabled={atCap}` plus a small hint when `atCap` (e.g. `{atCap && <span className={styles.hint}>Up to 5 inclusions per turn</span>}`).
+Also update the **Send button** `disabled` to block while an image is uploading: `disabled={busy || uploadFile.isPending || !text.trim()}` (current code is `disabled={busy || !text.trim()}` at `Composer.tsx:78`). This is correctness, not polish: `images` is only populated in `uploadFile`'s `onSuccess`, so without this guard a user can pick an image and immediately Send (button **or** ⌘/Ctrl+Enter) before the upload resolves — the turn then posts with `attachment_ids: []` and silently drops the image. The `|| uploadFile.isPending` added to the `send()` guard above covers the keyboard path; this covers the button. (The textarea and ref-`<select>` intentionally keep only `busy`, so the user can keep typing while a small image uploads.)
+
+And gate the ref-`<select>` with `disabled={busy || atCap}` — **preserve** the existing `busy` guard at `Composer.tsx:58`; do not replace it with `atCap` alone — plus a small hint when `atCap` (e.g. `{atCap && <span className={styles.hint}>Up to 5 inclusions per turn</span>}`).
 
 > The `.picked` chip row currently only renders when `picked.length > 0`; change that condition to `picked.length > 0 || images.length > 0` so image chips show. Reuse the existing `styles` module (add `attach`/`imgChip`/`hint` classes if missing — keep the existing `.deferred` removal).
 
