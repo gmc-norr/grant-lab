@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { useReferences } from "../api/citations";
 import { useDraft, useSpec } from "../api/editor";
 import { type ScorecardCriterion, useScorecard } from "../api/evaluator";
+import { useCockpitMeta, useMembers, useVersions } from "../api/workspace";
 import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
 import { useEditorStore } from "./editorStore";
@@ -42,6 +43,16 @@ export function CockpitSidebar() {
   const refs = Array.isArray(references.data) ? references.data : [];
   const scorecard = useScorecard(id);
   const criteria = scorecard.data?.scorecard?.criteria ?? [];
+
+  const versions = useVersions(id);
+  const versionRows = Array.isArray(versions.data) ? versions.data : [];
+  const members = useMembers(id);
+  const meta = useCockpitMeta(id);
+  // Owners get the named list; non-owner members 403 on /members and fall back to the
+  // non-PII member_count from cockpit-meta. Array.isArray guard keeps it robust (and the
+  // 3a draft-fixture mock → memberRows=null → the count branch, never a .map crash).
+  const memberRows = Array.isArray(members.data) ? members.data : null;
+  const memberCount = meta.data?.member_count;
 
   return (
     <div className={styles.sidebar}>
@@ -97,6 +108,35 @@ export function CockpitSidebar() {
             </li>
           ))}
         </ul>
+      </SidebarGroup>
+
+      <SidebarGroup title="Versions" count={versionRows.length || undefined} defaultOpen={false}>
+        {versionRows.length === 0 && <p className={styles.note}>No versions yet.</p>}
+        <ul className={styles.outline} aria-label="Versions">
+          {versionRows.map((v) => (
+            <li key={v.commit_sha} className={styles.metaRow}>
+              <span className={styles.rowLabel}>{v.message}</span>
+              <span className={styles.metaSub}>{v.created_by}</span>
+            </li>
+          ))}
+        </ul>
+      </SidebarGroup>
+
+      <SidebarGroup title="Members" count={memberCount} defaultOpen={false}>
+        {memberRows ? (
+          <ul className={styles.outline} aria-label="Members">
+            {memberRows.map((m) => (
+              <li key={m.email} className={styles.metaRow}>
+                <span className={styles.rowLabel}>{m.email}</span>
+                <span className={styles.metaSub}>{m.role}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className={styles.note}>
+            {memberCount != null ? `${memberCount} member${memberCount === 1 ? "" : "s"}` : "—"}
+          </p>
+        )}
       </SidebarGroup>
     </div>
   );

@@ -107,3 +107,39 @@ it("clicking a criterion navigates to the Scorecard tab", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /Impact/ }));
   expect(screen.getByTestId("search").textContent).toContain("tab=scorecard");
 });
+
+it("owner sees the named Members list and the Versions commits", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/versions"))
+      return Promise.resolve({ data: [{ commit_sha: "a".repeat(40), message: "user spec init", created_by: "user", created_at: "2026-06-24T00:00:00Z" }], error: undefined });
+    if (path.endsWith("/members"))
+      return Promise.resolve({ data: [{ email: "owner@ki.se", role: "owner" }, { email: "m@ki.se", role: "member" }], error: undefined });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar();
+  fireEvent.click(await screen.findByRole("button", { name: /versions/i }));
+  expect(await screen.findByText("user spec init")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /members/i }));
+  expect(await screen.findByText("owner@ki.se")).toBeInTheDocument();
+});
+
+it("a non-owner member sees the member count only (no emails)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/members"))
+      return Promise.resolve({ data: undefined, error: { error: { code: "forbidden", message: "owner only" } } });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "member", spec_locked: false, member_count: 3 }, error: undefined });
+    if (path.endsWith("/versions")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar();
+  fireEvent.click(await screen.findByRole("button", { name: /members/i }));
+  expect(await screen.findByText(/3 members/)).toBeInTheDocument();
+  expect(screen.queryByText("owner@ki.se")).toBeNull();
+});
