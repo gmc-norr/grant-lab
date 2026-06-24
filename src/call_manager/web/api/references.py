@@ -20,9 +20,16 @@ from starlette.concurrency import run_in_threadpool
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Reference, User, WorkspaceEvent
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.admission import OverCapacity
+from call_manager.proposal_assist.references.deletion import delete_or_tombstone_reference
 from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
-from call_manager.proposal_assist.references.ingest import ingest_bytes, suffix_for_mime
+from call_manager.proposal_assist.references.ingest import (
+    ReprocessConflict,
+    ingest_bytes,
+    reprocess_reference,
+    suffix_for_mime,
+)
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web.references import (
@@ -413,3 +420,99 @@ def api_update_kind(
         )
         session.commit()
         return KindOut(kind=body.kind)
+
+
+class DeleteResultOut(BaseModel):
+    outcome: str  # "deleted" | "tombstoned"
+
+
+@router.post(
+    "/workspaces/{workspace_id}/references/{reference_id}/delete", response_model=DeleteResultOut
+)
+def api_delete_reference(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> DeleteResultOut:
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        storage = _storage_for(request)
+        repo_dir = workspace_repo_dir(request.app.state.settings.workspaces_dir, workspace_id)
+        try:
+            outcome = delete_or_tombstone_reference(
+                session=session,
+                repo_dir=repo_dir,
+                reference_id=reference_id,
+                workspace_id=workspace_id,
+                storage=storage,
+                actor_id=user.id,
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="reference not found") from None
+    return DeleteResultOut(outcome=outcome)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/references/{reference_id}/reprocess",
+    response_model=IngestResultOut,
+)
+async def api_reprocess_reference(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> IngestResultOut:
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+        if ref is None or ref.workspace_id != workspace_id or ref.tombstoned_at is not None:
+            raise HTTPException(status_code=404, detail="reference not found")
+
+    factory = request.app.state.session_factory
+    storage = _storage_for(request)
+    embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
+    limiter = request.app.state.reference_ingest_limiter
+    citation_service = request.app.state.citation_service
+    timeout = request.app.state.settings.reference_extract_timeout_seconds
+
+    def _run():
+        with limiter.slot():
+            return reprocess_reference(
+                session_factory=factory,
+                storage=storage,
+                embedder=embedder,
+                reference_id=reference_id,
+                workspace_id=workspace_id,
+                citation_service=citation_service,
+                extract_timeout_seconds=timeout,
+            )
+
+    try:
+        result = await run_in_threadpool(_run)
+    except OverCapacity:
+        raise HTTPException(
+            status_code=429, detail="server busy", headers={"Retry-After": "2"}
+        ) from None
+    except ReprocessConflict:
+        raise HTTPException(
+            status_code=409, detail="reference is not in a reprocessable state"
+        ) from None
+
+    with factory() as sev:
+        sev.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="reference.reprocessed",
+                actor_id=user.id,
+                payload={"reference_id": str(reference_id)},
+            )
+        )
+        sev.commit()
+    return IngestResultOut(
+        reference_id=str(result.reference_id),
+        text_status=result.text_status,
+        text_error=result.text_error,
+    )

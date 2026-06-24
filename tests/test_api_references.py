@@ -259,3 +259,53 @@ def test_api_update_kind_audits_and_validates(monkeypatch, pg_url, tmp_path, pg_
             )
         )
         assert ev is not None and ev.payload["to"] == "data"
+
+
+def test_api_delete_uncited_hard_deletes(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id)  # fresh, uncited → hard delete
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{rid}/delete"
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["outcome"] == "deleted"
+    with pg_session_factory() as s:
+        assert s.get(Reference, rid) is None
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "reference.deleted"
+            )
+        )
+        assert ev is not None
+
+
+def test_api_reprocess_conflict_when_not_failed(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id, text_status="done")
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{rid}/reprocess"
+    )
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "conflict"
+
+
+def test_api_reprocess_failed_ref_audits(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    # _seed_ref stores real bytes via _insert_failed_ref and leaves the ref in
+    # 'failed', so reprocess re-extracts → 'done' (FakeEmbedClient; Phase 3 skipped).
+    rid = _seed_ref(pg_session_factory, storage, ws_id)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/references/{rid}/reprocess"
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["text_status"] == "done"
+    with pg_session_factory() as s:
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "reference.reprocessed"
+            )
+        )
+        assert ev is not None
