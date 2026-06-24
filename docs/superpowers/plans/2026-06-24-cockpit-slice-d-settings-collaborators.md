@@ -145,11 +145,9 @@ Create `tests/test_api_settings.py`:
 ```python
 """JSON /api workspace settings + collaborator endpoints (Cockpit Slice D)."""
 
-import uuid
-
-from sqlalchemy import func, select
-
-from call_manager.db.models import Attachment  # noqa: F401  (ensures models import)
+# NOTE: Task 3 appends the member tests and adds `from sqlalchemy import func, select`
+# (used by `select(func.count())`). Not imported here — the settings-only tests don't
+# use them, and Task 2 runs `ruff check` before Task 3 (unused imports fail F401).
 from tests.proposal_assist._refs_helpers import add_member, authed_client, build_app
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -286,12 +284,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import User, WorkspaceEvent, WorkspaceViewer
+from call_manager.db.models import User
 from call_manager.proposal_assist.web._perms import require_owner
 from call_manager.proposal_assist.web.workspaces import (
     _CITATION_STYLES,
@@ -299,7 +296,11 @@ from call_manager.proposal_assist.web.workspaces import (
     _WORKSPACE_STATUSES,
     _parse_deadline_form,
 )
-from call_manager.web.api.workspaces import MemberOut
+
+# NOTE: Task 3 adds the member routes and ALSO extends this import block with
+# `Response` (fastapi), `select` (sqlalchemy), `WorkspaceEvent`/`WorkspaceViewer`
+# (db.models), and `MemberOut` (web.api.workspaces). They are intentionally NOT
+# imported here — Task 2 runs `ruff check` before Task 3, and unused imports fail F401.
 
 router = APIRouter()
 
@@ -401,7 +402,7 @@ git commit -m "feat(api): owner-gated workspace settings GET/PATCH reusing Jinja
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_api_settings.py`:
+Append to `tests/test_api_settings.py`. First add `from sqlalchemy import func, select` to the top imports (the member tests below use `select(func.count())`). Then append:
 
 ```python
 def _add_user(pg_session_factory, email):
@@ -522,7 +523,7 @@ Expected: FAIL — 404/405 (routes absent).
 
 - [ ] **Step 3: Implement — append the two routes**
 
-Append to `src/call_manager/web/api/settings.py` (add `AddMemberIn` near the other models):
+Append to `src/call_manager/web/api/settings.py`. First **extend the import block** with the symbols the member routes need (Task 2 left them out to keep `ruff` green): add `Response` to the `from fastapi import ...` line, add `from sqlalchemy import select`, add `WorkspaceEvent, WorkspaceViewer` to the `from call_manager.db.models import ...` line, and add `from call_manager.web.api.workspaces import MemberOut`. Then add `AddMemberIn` near the other models and append the two routes:
 
 ```python
 class AddMemberIn(BaseModel):
@@ -885,7 +886,7 @@ EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh
 ```bash
 git diff --stat frontend/src/api/schema.gen.ts
 git diff frontend/src/api/schema.gen.ts | grep '^-' | grep -v '^---' | grep -v '^-//' || echo "NO removed content lines"
-git diff --stat frontend/src/api/routes.gen.ts && echo "routes.gen.ts unchanged check above (expect empty)"
+git diff --stat frontend/src/routes.gen.ts && echo "routes.gen.ts unchanged check above (expect empty)"
 ```
 Expected: `schema.gen.ts` additions only (new settings/members paths + schemas + the added fields/enum value). Any "removed" line must be an openapi-typescript positional relocation — confirm the symbol still exists elsewhere before proceeding. `routes.gen.ts` empty diff.
 
@@ -1268,11 +1269,13 @@ git commit -m "feat(spa): workspace settings modal + owner-only TitleBar gear"
 Append to `frontend/src/cockpit/CockpitSidebar.test.tsx`. **Read the live file first** — it mocks the TRANSPORT via `vi.spyOn(clientMod.api, "GET").mockImplementation((path) => ...)` and renders through a local `renderSidebar(url)` (wrapping `QueryClientProvider` + `MemoryRouter`); there is NO hoisted `h` hook-mock object. `useMembers` is a real `../api/workspace` hook fed by the `/members` GET, so keep the `api.GET` spy for the READ side (seed rows WITH `user_id`); only the new WRITE hooks need a module mock:
 
 ```tsx
-const removeMutate = vi.fn();
-const addMutate = vi.fn();
+// vi.mock is hoisted ABOVE top-level consts, so the factory must reference a
+// vi.hoisted() object (a plain `const addMutate = vi.fn()` here trips
+// "cannot access before initialization"). Reset these in beforeEach.
+const m = vi.hoisted(() => ({ addMutate: vi.fn(), removeMutate: vi.fn() }));
 vi.mock("../api/settings", () => ({
-  useAddMember: () => ({ mutate: addMutate, isPending: false, isError: false }),
-  useRemoveMember: () => ({ mutate: removeMutate, isPending: false }),
+  useAddMember: () => ({ mutate: m.addMutate, isPending: false, isError: false }),
+  useRemoveMember: () => ({ mutate: m.removeMutate, isPending: false }),
 }));
 
 it("owner can remove a viewer (confirm-gated) from the Members group", async () => {
@@ -1298,7 +1301,7 @@ it("owner can remove a viewer (confirm-gated) from the Members group", async () 
   // The Members group is defaultOpen={false} — open it before the rows render:
   fireEvent.click(await screen.findByRole("button", { name: /members/i }));
   fireEvent.click(await screen.findByRole("button", { name: /remove viewer@ki\.se/i }));
-  expect(removeMutate).toHaveBeenCalledWith(2);
+  expect(m.removeMutate).toHaveBeenCalledWith(2);
   // owner row has NO remove control:
   expect(screen.queryByRole("button", { name: /remove owner@ki\.se/i })).toBeNull();
 });
@@ -1595,7 +1598,7 @@ git commit -m "feat(spa): activity member-category styling + render test"
 - [ ] Regression — Jinja settings/viewer/activity routes UNCHANGED: `uv run pytest tests/proposal_assist/ -k "settings or viewer or activity" -q`.
 - [ ] Lint: `uv run ruff check src/call_manager/web/api/ src/call_manager/proposal_assist/activity/ src/call_manager/proposal_assist/web/activity.py` — clean.
 - [ ] Frontend: `cd frontend && pnpm exec tsc --noEmit && pnpm vitest run && pnpm build` — tsc 0, all vitest green, build exit 0.
-- [ ] Schema additive: `git diff --stat <merge-base> -- frontend/src/api/schema.gen.ts` additions only; `frontend/src/api/routes.gen.ts` EMPTY diff branch-wide.
+- [ ] Schema additive: `git diff --stat <merge-base> -- frontend/src/api/schema.gen.ts` additions only; `frontend/src/routes.gen.ts` EMPTY diff branch-wide.
 - [ ] Alembic head unchanged (no migration). No `proposal_assist/web/` route handler edited (only `proposal_assist/web/activity.py` get_activity owner-filter + the imported constants — confirm `workspaces.py` Jinja handlers untouched).
 
 ## Self-review notes (spec coverage)
