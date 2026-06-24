@@ -21,3 +21,88 @@
 .tool { color: var(--app-dim); font-size: 0.85em; font-style: italic; }
 .outcome { color: var(--app-accent); font-weight: 600; }
 .refChip { display: inline-block; background: var(--app-selected); color: var(--app-link); border-radius: 10px; padding: 0 6px; margin: 0 2px; font-size: 0.85em; }
+
+/* Footer */
+.footer {
+  border-top: 1px solid var(--app-border);
+  padding: 8px;
+  flex-shrink: 0;
+}
+
+/* Disclosure gate */
+.disclosure {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85em;
+  color: var(--app-warn);
+}
+.disclosure button {
+  align-self: flex-start;
+  background: var(--app-accent);
+  color: var(--app-editor);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+.disclosure button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Composer */
+.composer { display: flex; flex-direction: column; gap: 6px; }
+
+.picked { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  background: var(--app-editor);
+  color: var(--app-text);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 0.9em;
+  box-sizing: border-box;
+}
+.textarea:disabled { opacity: 0.6; }
+
+.affordances {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.refSelect {
+  background: var(--app-editor);
+  color: var(--app-text);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.refSelect:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.deferred {
+  color: var(--app-dim);
+  font-size: 0.85em;
+  cursor: default;
+  user-select: none;
+}
+
+.send {
+  margin-left: auto;
+  background: var(--app-accent);
+  color: var(--app-editor);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+.send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.error { color: var(--app-bad); font-size: 0.85em; margin: 0; }
