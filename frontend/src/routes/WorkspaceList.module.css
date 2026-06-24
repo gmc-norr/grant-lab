@@ -1,0 +1,74 @@
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+.newBtn {
+  color: var(--app-link);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+.newBtn:hover {
+  text-decoration: underline;
+}
+.list {
+  margin: 0.5rem 0;
+  padding: 0;
+}
+.row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.25rem;
+  border-bottom: 1px solid var(--app-border);
+  list-style: none;
+}
+.body {
+  min-width: 0;
+}
+.title {
+  color: var(--app-link);
+  text-decoration: none;
+  font-weight: 500;
+}
+.title:hover {
+  text-decoration: underline;
+}
+.meta {
+  margin-top: 0.15rem;
+  color: var(--app-muted);
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.badge,
+.setup {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--app-muted);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+}
+.status {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--app-link);
+}
+.activity {
+  color: var(--app-muted);
+}
+.empty {
+  color: var(--app-muted);
+  margin: 1rem 0.25rem;
+}
