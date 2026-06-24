@@ -22,3 +22,11 @@
   margin: 0 auto;
   color: var(--app-muted-chrome);
 }
+.settingsGear {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--app-text);
+  font-size: 14px;
+}

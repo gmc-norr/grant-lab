@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { useLocation } from "react-router-dom";
 
 import { useCockpitMeta } from "../api/workspace";
 import { cockpitIdFromPath } from "../cockpit/cockpitNav";
+import { WorkspaceSettingsModal } from "../cockpit/WorkspaceSettingsModal";
 import { BrandMark } from "./BrandMark";
 import styles from "./TitleBar.module.css";
 
@@ -17,6 +19,8 @@ export function TitleBar() {
   else if (pathname === "/cockpit/new") title = "New workspace";
   else if (pathname.startsWith("/cockpit")) title = "Workspaces";
   else title = "Funding calls";
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const isOwner = !!id && meta?.role === "owner";
   return (
     <header className={styles.titlebar}>
       <span className={styles.brand}>
@@ -24,6 +28,19 @@ export function TitleBar() {
         <span className={styles.app}>Call Manager</span>
       </span>
       <span className={styles.title}>{title}</span>
+      {isOwner && (
+        <button
+          type="button"
+          className={styles.settingsGear}
+          aria-label="Workspace settings"
+          onClick={() => setSettingsOpen(true)}
+        >
+          ⚙
+        </button>
+      )}
+      {isOwner && settingsOpen && (
+        <WorkspaceSettingsModal id={id} opened onClose={() => setSettingsOpen(false)} />
+      )}
     </header>
   );
 }
