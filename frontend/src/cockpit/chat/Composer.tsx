@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { useUploadFile } from "../../api/files";
 import { useSubmitTurn } from "../../api/turns";
 import styles from "./CockpitChat.module.css";
 
@@ -8,18 +9,34 @@ type Ref = { id: string; citekey?: string | null; title: string; text_status?: s
 export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs: Ref[]; disabled: boolean; onSubmitted?: (jobId: string) => void }) {
   const [text, setText] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
+  const [images, setImages] = useState<{ attachment_id: string; filename: string }[]>([]);
   const submit = useSubmitTurn(id);
+  const uploadFile = useUploadFile(id);
   const citable = refs.filter((r) => r.text_status === "done");
   const busy = disabled || submit.isPending;
+  const atCap = picked.length + images.length >= 5;
+
+  function onPickImage(file: File) {
+    if (atCap) return;
+    uploadFile.mutate(file, {
+      onSuccess: (r) =>
+        setImages((prev) =>
+          prev.some((x) => x.attachment_id === r.attachment_id)
+            ? prev
+            : [...prev, { attachment_id: r.attachment_id, filename: r.filename }],
+        ),
+    });
+  }
 
   const send = () => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || busy || uploadFile.isPending) return;
     submit.mutate(
-      { content: text, reference_ids: picked },
+      { content: text, reference_ids: picked, attachment_ids: images.map((i) => i.attachment_id) },
       {
         onSuccess: (result) => {
           setText("");
           setPicked([]);
+          setImages([]);
           onSubmitted?.(result.job_id);
         },
       },
@@ -28,7 +45,7 @@ export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs
 
   return (
     <div className={styles.composer}>
-      {picked.length > 0 && (
+      {(picked.length > 0 || images.length > 0) && (
         <div className={styles.picked}>
           {picked.map((pid) => {
             const r = citable.find((x) => x.id === pid);
@@ -38,6 +55,17 @@ export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs
               </span>
             );
           })}
+          {images.map((im) => (
+            <span key={im.attachment_id} className={styles.imgChip}>
+              {im.filename}
+              <button
+                aria-label={`Remove ${im.filename}`}
+                onClick={() => setImages((prev) => prev.filter((x) => x.attachment_id !== im.attachment_id))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
         </div>
       )}
       <textarea
@@ -55,7 +83,7 @@ export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs
           <select
             className={styles.refSelect}
             value=""
-            disabled={busy}
+            disabled={busy || atCap}
             onChange={(e) => {
               if (e.target.value && !picked.includes(e.target.value))
                 setPicked([...picked, e.target.value]);
@@ -69,13 +97,26 @@ export function Composer({ id, refs, disabled, onSubmitted }: { id: string; refs
             ))}
           </select>
         )}
-        <span className={styles.deferred} title="Image attachments arrive with the Files slice">
+        {atCap && <span className={styles.hint}>Up to 5 inclusions per turn</span>}
+        <label className={styles.attach}>
+          <input
+            aria-label="Attach image"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            disabled={busy || atCap || uploadFile.isPending}
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) onPickImage(f);
+              e.target.value = "";
+            }}
+          />
           📎 Image
-        </span>
+        </label>
         <button
           type="button"
           className={styles.send}
-          disabled={busy || !text.trim()}
+          disabled={busy || uploadFile.isPending || !text.trim()}
           onClick={send}
         >
           Send
