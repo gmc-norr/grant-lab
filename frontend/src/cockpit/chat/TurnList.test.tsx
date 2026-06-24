@@ -8,6 +8,7 @@ const refs = [{ id: "r1", citekey: "smith2021", title: "Smith 2021", kind: "pape
 it("renders user text, assistant text, a compact tool line, and a reference chip", () => {
   render(
     <TurnList
+      id="ws1"
       refs={refs as never}
       turns={[
         { id: "1", role: "user", position: 1, created_at: "", content: [{ type: "text", text: "Use this" }, { type: "reference", reference_id: "r1" }] },
@@ -27,9 +28,35 @@ it("renders user text, assistant text, a compact tool line, and a reference chip
 it("falls back to a muted chip for an unknown reference id", () => {
   render(
     <TurnList
+      id="ws1"
       refs={[] as never}
       turns={[{ id: "1", role: "user", position: 1, created_at: "", content: [{ type: "reference", reference_id: "gone" }] }] as never}
     />,
   );
   expect(screen.getByText(/reference/i)).toBeInTheDocument();
+});
+
+it("renders an image block as an img pointing at the files serve route", () => {
+  render(
+    <TurnList
+      id="ws1"
+      turns={
+        [
+          {
+            id: "t1",
+            role: "user",
+            position: 1,
+            created_at: "x",
+            content: [
+              { type: "text", text: "see this" },
+              { type: "image", attachment_id: "a1" },
+            ],
+          },
+        ] as never
+      }
+      refs={[] as never}
+    />,
+  );
+  const img = screen.getByRole("img") as HTMLImageElement;
+  expect(img.getAttribute("src")).toBe("/workspaces/ws1/files/a1");
 });

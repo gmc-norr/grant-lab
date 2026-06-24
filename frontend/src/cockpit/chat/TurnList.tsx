@@ -16,7 +16,7 @@ function RefChip({ id, refs }: { id: string; refs: Ref[] }) {
   return <span className={styles.refChip}>{r ? (r.citekey ?? r.title) : "reference"}</span>;
 }
 
-function TurnItem({ turn, refs }: { turn: Turn; refs: Ref[] }) {
+function TurnItem({ id, turn, refs }: { id: string; turn: Turn; refs: Ref[] }) {
   const bs = blocks(turn.content);
   // Tool rows render as one compact, low-emphasis line.
   if (turn.role === "tool") {
@@ -29,6 +29,9 @@ function TurnItem({ turn, refs }: { turn: Turn; refs: Ref[] }) {
       {bs.map((b, i) => {
         if (b.type === "turn_outcome") return <div key={`${turn.id}-${i}`} className={styles.outcome}>✓ {String(b.text ?? "")}</div>;
         if (b.type === "reference") return <RefChip key={`${turn.id}-${i}`} id={String(b.reference_id)} refs={refs} />;
+        if (b.type === "image" && typeof b.attachment_id === "string") {
+          return <img key={`${turn.id}-${i}`} className={styles.chatImage} src={`/workspaces/${id}/files/${b.attachment_id}`} alt="attached image" />;
+        }
         if (b.type === "text" || typeof b.text === "string") return <span key={`${turn.id}-${i}`}>{String(b.text ?? "")}</span>;
         return <span key={`${turn.id}-${i}`} className={styles.note}>·</span>; // unknown block: muted, never throws
       })}
@@ -36,11 +39,11 @@ function TurnItem({ turn, refs }: { turn: Turn; refs: Ref[] }) {
   );
 }
 
-export function TurnList({ turns, refs }: { turns: Turn[]; refs: Ref[] }) {
+export function TurnList({ id, turns, refs }: { id: string; turns: Turn[]; refs: Ref[] }) {
   return (
     <div className={styles.transcript}>
       {turns.map((t) => (
-        <TurnItem key={t.id} turn={t} refs={refs} />
+        <TurnItem key={t.id} id={id} turn={t} refs={refs} />
       ))}
     </div>
   );

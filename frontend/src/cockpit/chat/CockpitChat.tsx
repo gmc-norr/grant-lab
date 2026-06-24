@@ -66,7 +66,7 @@ export function CockpitChat() {
       <header className={styles.header}>Chat</header>
       <div className={styles.body}>
         {turns.isLoading && <p className={styles.note}>Loading…</p>}
-        {d && <TurnList turns={merged} refs={refs} />}
+        {d && <TurnList id={id} turns={merged} refs={refs} />}
       </div>
       {d && (
         <footer className={styles.footer}>
