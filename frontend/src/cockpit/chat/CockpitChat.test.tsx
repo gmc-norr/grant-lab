@@ -12,10 +12,17 @@ afterEach(() => {
   resetEditorStore();
 });
 
-function mockTurns(over: Partial<{ can_send: boolean; needs_disclosure: boolean; phase: string; role: string }>) {
+function mockTurns(over: Partial<{ can_send: boolean; needs_disclosure: boolean; phase: string; role: string; is_owner: boolean; disabled_reason: string | null }>) {
+  const can_send = over.can_send ?? true;
+  const needs_disclosure = over.needs_disclosure ?? false;
+  const phase = over.phase ?? "active";
+  const disabled_reason =
+    over.disabled_reason !== undefined
+      ? over.disabled_reason
+      : phase === "setup" ? "setup" : !can_send ? "not_owner" : needs_disclosure ? "needs_disclosure" : null;
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
     if (path.endsWith("/turns"))
-      return Promise.resolve({ data: { turns: [], can_send: over.can_send ?? true, needs_disclosure: over.needs_disclosure ?? false, phase: over.phase ?? "active", running_job_id: null }, error: undefined });
+      return Promise.resolve({ data: { turns: [], can_send, needs_disclosure, phase, is_owner: over.is_owner ?? true, disabled_reason, running_job_id: null }, error: undefined });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
     return Promise.resolve({ data: null, error: undefined });
   }) as never);
@@ -92,4 +99,10 @@ it("streams turns from a running job and invalidates on done", async () => {
   expect(await screen.findByText("streamed!")).toBeInTheDocument();
   // done closes cleanly (no throw).
   captured.done?.({ data: JSON.stringify({ status: "completed" }) } as MessageEvent);
+});
+
+it("footer shows the drafting-disabled message via disabled_reason", async () => {
+  mockTurns({ disabled_reason: "drafting_disabled", can_send: false, phase: "active" });
+  renderChat();
+  expect(await screen.findByText(/drafting is currently disabled/i)).toBeInTheDocument();
 });
