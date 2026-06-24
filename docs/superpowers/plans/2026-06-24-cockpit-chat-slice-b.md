@@ -110,12 +110,26 @@ def test_submit_turn_non_owner_403(monkeypatch, pg_url, pg_session_factory, tmp_
 def test_submit_turn_setup_phase_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
-    _ack_disclosure(pg_session_factory, ws_id, owner_id)
+    # Deliberately DO NOT ack disclosure: with phase=setup we must get 409 (setup),
+    # not 403 (disclosure) — this is what proves setup beats disclosure in the gate.
     with pg_session_factory() as s:
         s.get(Workspace, ws_id).current_phase = "setup"
         s.commit()
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/turns", json={"content": "hi"})
     assert r.status_code == 409  # setup beats disclosure (canonical order)
+
+
+def test_submit_turn_second_turn_in_flight_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    _ack_disclosure(pg_session_factory, ws_id, owner_id)
+    c = _client(app, owner_id)
+    assert c.post(f"/api/workspaces/{ws_id}/turns", json={"content": "first"}).status_code == 200
+    # The first turn is now queued (no drain runs in the test); a second submit
+    # must be rejected while a turn is in flight.
+    r2 = c.post(f"/api/workspaces/{ws_id}/turns", json={"content": "second"})
+    assert r2.status_code == 409
+    assert r2.json()["error"]["code"] == "conflict"
 
 
 def test_submit_turn_needs_disclosure_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -160,9 +174,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ChatTurn, TurnJob, User
+from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
 from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
@@ -214,10 +230,35 @@ def submit_turn(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        gate_cloud_llm(
-            ws=ws, request=request, session=session, user=user,
-            disclosure_action=_DISCLOSURE_ACTION,
+        try:
+            gate_cloud_llm(
+                ws=ws, request=request, session=session, user=user,
+                disclosure_action=_DISCLOSURE_ACTION,
+            )
+        except HTTPException as exc:
+            # gate_cloud_llm raises 503 for the drafting kill-switch. On /api the
+            # >=500 handler (main.py:361) sanitizes that to "internal_error",
+            # discarding the message — so remap to a retriable 429 (the read-model's
+            # can_send is the proactive surface; this is only a race backstop).
+            if exc.status_code == 503:
+                raise HTTPException(
+                    status_code=429, detail=exc.detail, headers={"Retry-After": "30"}
+                ) from exc
+            raise
+        # One-in-flight guard: the DB only blocks two RUNNING jobs (turn_jobs
+        # partial index), not two QUEUED. Reject a second submit while a turn is
+        # queued/running. Endpoint-level (not under the mutex): the residual race
+        # is benign — owner-only + the composer is disabled while a turn runs +
+        # the running partial-index is the hard backstop; two queued turns would
+        # only process sequentially, never corrupt.
+        active = session.scalar(
+            select(TurnJob.id).where(
+                TurnJob.workspace_id == workspace_id,
+                TurnJob.status.in_(("queued", "running")),
+            ).limit(1)
         )
+        if active is not None:
+            raise HTTPException(status_code=409, detail="A turn is already in progress.")
         try:
             job = submit_user_turn(
                 session=session,
@@ -230,6 +271,12 @@ def submit_turn(
             )
         except (TokenCapExceeded, GlobalTokenCapExceeded) as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except CommitMutexTimeout as exc:
+            # submit_user_turn acquires the per-workspace commit mutex; busy → the
+            # codebase's standard retriable 429 (mirrors api/workspaces.py:733).
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from exc
         except ValueError as exc:  # cross-workspace reference id
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         session.commit()
@@ -306,7 +353,7 @@ def test_turns_read_model_non_member_403(monkeypatch, pg_url, pg_session_factory
 
 Run: `uv run pytest tests/test_api_turns.py -k read_model -v`
 
-- [ ] **Step 3: Implement** — append to `src/call_manager/web/api/turns.py` (add `from sqlalchemy import select` and `WorkspaceEvent` + `require_member` to the imports):
+- [ ] **Step 3: Implement** — append to `src/call_manager/web/api/turns.py` (`select` was imported in Task 1; add `WorkspaceEvent` to the `db.models` import and `require_member` to the `_perms` import):
 
 ```python
 class TurnsResponse(BaseModel):
@@ -359,11 +406,11 @@ def list_turns(
         )
 ```
 
-Update the import line in `turns.py`:
+Resulting import lines in `turns.py` (extend Task 1's, don't duplicate `select`):
 ```python
-from call_manager.proposal_assist.web._perms import require_member, require_owner
-from sqlalchemy import select
+from sqlalchemy import select  # already added in Task 1
 from call_manager.db.models import ChatTurn, TurnJob, User, WorkspaceEvent
+from call_manager.proposal_assist.web._perms import require_member, require_owner
 ```
 
 - [ ] **Step 4: Run — Expected: PASS**
@@ -614,7 +661,7 @@ git commit -m "feat(api): disclosure ack endpoint + regen OpenAPI types for turn
 **Files:**
 - Create: `frontend/src/api/turns.ts`
 - Modify: `frontend/src/api/events.ts`
-- Test: `frontend/src/api/turns.test.ts`, `frontend/src/api/events.test.ts`
+- Test: `frontend/src/api/turns.test.tsx`, `frontend/src/api/events.test.ts`
 
 **Interfaces:**
 - Consumes: `api`, `unwrap` (`./client`); `useQuery`, `useMutation`, `useQueryClient` (`@tanstack/react-query`).
@@ -641,9 +688,11 @@ it("resets the since cursor when the url changes (no stale cursor across job_ids
     }
   }
   vi.stubGlobal("EventSource", FakeES as unknown as typeof EventSource);
-  const { rerender } = renderHook(({ url }) => useEventStream(url, { ping: () => {} }), {
-    initialProps: { url: "/api/workspaces/ws-1/turns/job-a/stream" },
-  });
+  // OPT IN to per-url reset (the default — used by /api/events — keeps the cursor).
+  const { rerender } = renderHook(
+    ({ url }) => useEventStream(url, { ping: () => {} }, { resetCursorOnUrlChange: true }),
+    { initialProps: { url: "/api/workspaces/ws-1/turns/job-a/stream" } },
+  );
   captured.ping?.({ lastEventId: "42", data: "{}" } as MessageEvent);
   // Switch to a DIFFERENT job stream — the old cursor must NOT leak in.
   rerender({ url: "/api/workspaces/ws-1/turns/job-b/stream" });
@@ -651,29 +700,44 @@ it("resets the since cursor when the url changes (no stale cursor across job_ids
 });
 ```
 
-- [ ] **Step 2: Run — Expected: FAIL** (the stale `since=42` leaks; current ref persists across url change).
+- [ ] **Step 2: Run — Expected: FAIL** (`resetCursorOnUrlChange` not honored yet, so the stale `since=42` leaks).
 
 Run: `pnpm vitest run src/api/events.test.ts`
 
-- [ ] **Step 3: Implement the hardening** — in `frontend/src/api/events.ts`, reset the cursor at the top of the effect (the effect re-runs on `url` change):
+- [ ] **Step 3: Implement the hardening (OPT-IN).** A blanket reset would break the existing `?since=` test (events.test.ts:63 deliberately changes the url and expects `since=42` to survive — that resume-across-remount behavior is intentional for the `/api/events` feed). So gate the reset behind a new option. In `frontend/src/api/events.ts`, add the option to the `Opts` type:
+
+```tsx
+type Opts = {
+  onExpired?: () => void; // 401: session gone -> caller routes to /login
+  onNoAccess?: () => void; // 403 AccountInactive -> no-access state
+  probeAfter?: number; // N consecutive onerror before probing (default 3)
+  resetCursorOnUrlChange?: boolean; // chat: each url is a distinct job stream -> drop the cursor
+};
+```
+
+and reset the cursor at the top of the effect ONLY when opted in:
 
 ```tsx
   useEffect(() => {
     let es: EventSource | null = null;
-    lastId.current = null; // reset the resume cursor per url (job_id): no stale ?since across streams
+    // Opt-in: the chat streams a distinct job per url, so a url change must NOT
+    // carry the prior job's cursor. The /api/events feed does NOT opt in — it
+    // intentionally resumes across remounts/url tweaks.
+    if (opts?.resetCursorOnUrlChange) lastId.current = null;
 
     const open = () => {
 ```
 
-- [ ] **Step 4: Run — Expected: PASS** (both the new test and the existing `?since=` test, which sets its cursor AFTER mount, stay green).
+- [ ] **Step 4: Run — Expected: PASS.** The new test (opts in → cursor dropped) and the existing `?since=` test (does NOT opt in → cursor survives) are both green.
 
 Run: `pnpm vitest run src/api/events.test.ts`
 
-- [ ] **Step 5: Write the failing hooks test** — create `frontend/src/api/turns.test.ts`:
+- [ ] **Step 5: Write the failing hooks test** — create `frontend/src/api/turns.test.tsx` (`.tsx` — it contains JSX; this repo's tsconfig only allows JSX in `.tsx`):
 
 ```tsx
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
+import { type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "./client";
@@ -683,7 +747,7 @@ afterEach(() => vi.restoreAllMocks());
 
 function wrap() {
   const qc = new QueryClient();
-  return ({ children }: { children: React.ReactNode }) => (
+  return ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={qc}>{children}</QueryClientProvider>
   );
 }
@@ -704,7 +768,7 @@ it("turnStreamUrl builds the SSE path", () => {
 
 - [ ] **Step 6: Run — Expected: FAIL** (`./turns` missing).
 
-Run: `pnpm vitest run src/api/turns.test.ts`
+Run: `pnpm vitest run src/api/turns.test.tsx`
 
 - [ ] **Step 7: Implement** — create `frontend/src/api/turns.ts`:
 
@@ -732,7 +796,10 @@ export function useSubmitTurn(id: string) {
           body: { content: vars.content, reference_ids: vars.reference_ids ?? [] },
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["turns", id] }),
+    // onSettled (not onSuccess): a backstop 4xx/5xx (drafting-disabled race,
+    // in-flight, busy) must ALSO refetch the read-model so the footer re-renders
+    // the now-correct gate — the read-model is the authoritative gate surface.
+    onSettled: () => qc.invalidateQueries({ queryKey: ["turns", id] }),
   });
 }
 
@@ -752,13 +819,13 @@ export function turnStreamUrl(id: string, jobId: string): string {
 
 - [ ] **Step 8: Run — Expected: PASS**
 
-Run: `pnpm vitest run src/api/turns.test.ts src/api/events.test.ts && pnpm exec tsc --noEmit`
+Run: `pnpm vitest run src/api/turns.test.tsx src/api/events.test.ts && pnpm exec tsc --noEmit`
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add frontend/src/api/turns.ts frontend/src/api/turns.test.ts frontend/src/api/events.ts frontend/src/api/events.test.ts
-git commit -m "feat(spa): turns API hooks + useEventStream cursor-reset-on-url-change"
+git add frontend/src/api/turns.ts frontend/src/api/turns.test.tsx frontend/src/api/events.ts frontend/src/api/events.test.ts
+git commit -m "feat(spa): turns API hooks + opt-in useEventStream cursor-reset-on-url-change"
 ```
 
 ---
@@ -1189,12 +1256,12 @@ const d = turns.data;
         <button type="button" disabled={ack.isPending} onClick={() => ack.mutate()}>I understand</button>
       </div>
     ) : (
-      <Composer id={id} refs={refs} disabled={false} />
+      <Composer id={id} refs={refs} disabled={!!d.running_job_id} />
     )}
   </footer>
 )}
 ```
-Note the precedence: a `setup` workspace has `can_send=false`, so the read-only branch (which requires `phase==="active"`) is skipped and the setup branch wins — matching the backend gate order (setup before disclosure). Add `.composer/.textarea/.affordances/.send/.deferred/.refSelect/.picked/.error/.footer/.disclosure` styles to `CockpitChat.module.css` using `--app-*` tokens (mirror the Composer mockup: textarea on `--app-editor`, send button `--app-accent`).
+Note the precedence: a `setup` workspace has `can_send=false`, so the read-only branch (which requires `phase==="active"`) is skipped and the setup branch wins — matching the backend gate order (setup before disclosure). The composer is **disabled while a turn is in flight** (`running_job_id` from the read-model — Task 9 also factors in the just-submitted local `jobId`); this is the client half of the one-in-flight guard whose server half is Task 1's 409. Add `.composer/.textarea/.affordances/.send/.deferred/.refSelect/.picked/.error/.footer/.disclosure` styles to `CockpitChat.module.css` using `--app-*` tokens (mirror the Composer mockup: textarea on `--app-editor`, send button `--app-accent`).
 
 - [ ] **Step 4: Run — Expected: PASS**
 
@@ -1284,6 +1351,7 @@ useEventStream(
       qc.invalidateQueries({ queryKey: ["draft", id] });
     },
   },
+  { resetCursorOnUrlChange: true }, // each job_id is a distinct stream — drop the prior cursor
 );
 
 const merged = useMemo(() => {
@@ -1293,7 +1361,7 @@ const merged = useMemo(() => {
   return [...byPos.values()].sort((a, b) => a.position - b.position);
 }, [turns.data?.turns, streamed]);
 ```
-Pass `merged` to `<TurnList turns={merged} refs={refs} />`. When `useEventStream` is called with `""` (no job), it builds `new URL("", origin)` → harmless EventSource on the SPA origin that the cleanup closes; gate it instead by only mounting the stream when `jobId` is set — wrap the hook usage so it no-ops on empty url. **Implementation detail:** keep the hook call unconditional (Rules of Hooks) but make `turnStreamUrl` return `""` when `!jobId` and have `useEventStream` early-return inside its effect when `url === ""`. Add to `events.ts` at the top of the effect: `if (!url) return;` (before opening). After a successful submit, set the job id: in the `Composer`'s `onSuccess`, lift the returned `job_id` up via a callback prop `onSubmitted(jobId)` → `setJobId`.
+Pass `merged` to `<TurnList turns={merged} refs={refs} />`, and update the footer composer to also disable on the just-submitted local job: `<Composer id={id} refs={refs} disabled={!!jobId || !!d.running_job_id} onSubmitted={setJobId} />`. When `useEventStream` is called with `""` (no job), it would build `new URL("", origin)` → a stray EventSource on the SPA origin; gate it by early-returning. **Implementation detail (events.ts):** keep the hook call unconditional (Rules of Hooks), and add `if (!url) return;` as the **first** line of the effect — before the opt-in cursor reset and before opening. After a successful submit, lift the returned `job_id`: give `Composer` an `onSubmitted?: (jobId: string) => void` prop and call it from the mutate `onSuccess`.
 
 Wire the submit→stream handoff: give `Composer` an `onSubmitted?: (jobId: string) => void` prop; in its `submit.mutate` success, call `onSubmitted?.(result.job_id)` (the mutation returns `{job_id,...}`). In `CockpitChat`, pass `onSubmitted={setJobId}`.
 
@@ -1316,3 +1384,4 @@ git commit -m "feat(spa): live turn streaming + propose→inbox invalidation; em
 - **Spec coverage:** §4.1 read-model → Task 2; §4.2 submit + gate order → Task 1; §4.3 SSE `id:`/`since=` → Task 3; §4.4 disclosure → Task 4; §5 typed blocks + client-side ref resolution → Task 7; §6 `useEventStream` + cursor-reset → Tasks 5/9; §7 right-pane shell region + components + precedence → Tasks 6/8; §8 edge states → Tasks 2/8; §9 no-migration/targeted-tests → all backend tasks. **Deviation (noted):** §5's outcome chip "deep-links to the Inbox tab" is implemented as a **live Inbox-badge update via invalidation** (Task 9), not a tab-switch — the chat is a shell region and can't reach Cockpit's local `bottomTab` across the AppShell boundary without lifting it to a global channel; click-to-focus-Inbox is deferred. The spec's specific error codes (`workspace_setup` etc.) are **not** emitted (the `/api` handler maps status→generic code); the frontend gates from the read-model instead, which the spec already designates as the mechanism.
 - **Placeholder scan:** none — every code step is concrete.
 - **Type consistency:** `TurnOut`/`SubmitTurnResponse`/`TurnsResponse`/`DisclosureResponse` consistent backend↔tests; `useTurns`/`useSubmitTurn`/`useAckDisclosure`/`turnStreamUrl` consistent across Tasks 5/8/9; the `Turn`/`Ref`/`Block` shapes consistent across Tasks 7/8/9.
+- **Codex review (round 2) incorporated:** (1) **one-in-flight guard** — server-side queued/running check → 409 (Task 1, with a second-submit test) + the composer is disabled while a turn is active (Tasks 8/9); residual TOCTOU documented as benign. (2) **Submit error mapping** — `CommitMutexTimeout` → 429 + Retry-After (`BUSY_ERROR_MESSAGE`, mirrors api/workspaces.py:733); `gate_cloud_llm`'s drafting-disabled 503 explicitly remapped to a retriable 429 (else the `/api` ≥500 handler sanitizes it to `internal_error`); `useSubmitTurn` uses `onSettled` so any backstop refetches the read-model. (3) **Cursor reset is opt-in** (`resetCursorOnUrlChange`) so the existing `/api/events` `?since=` test stays green; chat opts in. (4) `turns.test.tsx` (JSX) + `ReactNode` import. (5) The setup-phase test no longer pre-acks disclosure, so it genuinely proves setup beats disclosure.
