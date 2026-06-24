@@ -1,14 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { resetEditorStore } from "../cockpit/editorStore";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { Cockpit } from "./Cockpit";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  resetEditorStore();
 });
 
 function draftPayload(canEdit: boolean) {
@@ -40,6 +42,11 @@ function renderCockpit() {
       </QueryClientProvider>,
     ),
   };
+}
+
+// add near the top, after the other helpers:
+function LocationProbe() {
+  return <span data-testid="loc">{useLocation().search}</span>;
 }
 
 const PEEK_EV = "ev-abc123def456";
@@ -583,6 +590,26 @@ it("ScorecardPanel 'Go to §' passes section_index to onNavigate", async () => {
   );
   fireEvent.click(await screen.findByRole("button", { name: /go to §2/i }));
   expect(onNavigate).toHaveBeenCalledWith({ top_tab: "draft", section_index: 2 });
+});
+
+it("an out-of-range ?sec clamps to a valid section and history-replaces the URL", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  const qc = new QueryClient();
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/cockpit/ws-1?sec=99"]}>
+        <Routes>
+          <Route path="/cockpit/:id" element={<><Cockpit /><LocationProbe /></>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  // The editor renders the preamble (section 0), not a blank doc...
+  await waitFor(() =>
+    expect(document.querySelector(".cm-content")?.textContent).toContain("preamble"),
+  );
+  // ...and the URL self-corrected to a valid section.
+  await waitFor(() => expect(screen.getByTestId("loc").textContent).toContain("sec=0"));
 });
 
 it("select-to-cite: retains the held selection across a background draft refetch (skips remote echoes)", async () => {

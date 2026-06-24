@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
@@ -12,9 +13,11 @@ afterEach(() => {
 function renderPanel() {
   const qc = new QueryClient();
   render(
-    <QueryClientProvider client={qc}>
-      <SpecPanel id="ws-1" />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <SpecPanel id="ws-1" />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 

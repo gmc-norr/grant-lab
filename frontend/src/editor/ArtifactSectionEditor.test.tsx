@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ArtifactSectionEditor } from "./ArtifactSectionEditor";
@@ -12,18 +13,20 @@ function renderEditor(sections: { index: number; heading: string; text: string; 
   const qc = new QueryClient();
   const save = { mutateAsync: vi.fn(), isPending: false };
   const { container } = render(
-    <QueryClientProvider client={qc}>
-      <ArtifactSectionEditor
-        workspaceId="ws-1"
-        queryKey={["spec", "ws-1"]}
-        head={"a".repeat(40)}
-        canEdit={true}
-        sections={sections}
-        save={save}
-        refetch={() => {}}
-        citations={false}
-      />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <ArtifactSectionEditor
+          workspaceId="ws-1"
+          queryKey={["spec", "ws-1"]}
+          head={"a".repeat(40)}
+          canEdit={true}
+          sections={sections}
+          save={save}
+          refetch={() => {}}
+          citations={false}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
   return { save, container };
 }

@@ -1,9 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useCitationSource } from "../api/citations";
 import { ApiError } from "../api/client";
+import { useCockpitNav } from "../cockpit/cockpitNav";
 import { CitationComposer } from "../cockpit/CitationComposer";
+import { resetEditorStore, setCursor, setDirty, setSave } from "../cockpit/editorStore";
 import { SourceViewer } from "../cockpit/SourceViewer";
 import { CodeMirrorEditor } from "./CodeMirrorEditor";
 
@@ -17,8 +19,6 @@ type SaveVars = {
 };
 type SaveResultLike = { head: string; section_sha: string };
 
-type Tab = { kind: "section"; index: number } | { kind: "full" };
-
 export type ArtifactSectionEditorProps = {
   workspaceId: string;
   /** TanStack cache key for this artifact, e.g. ["draft", id] | ["spec", id]. */
@@ -30,14 +30,11 @@ export type ArtifactSectionEditorProps = {
   refetch: () => void | Promise<unknown>;
   /** Draft passes true (pills + select-to-cite). Spec passes false. */
   citations?: boolean;
-  /** Label for the whole-artifact read-only View tab. Default keeps the draft
-   *  test's `/full draft/i` query green; the Spec passes "Full spec". */
+  /** Label for the whole-artifact read-only View tab. */
   fullViewLabel?: string;
 };
 
-// The banner copy for a failed save. ApiError.message is formatted "code: detail"
-// (api/client.ts), so strip the machine-code prefix and show just the backend's
-// human detail; a non-ApiError falls back to a generic line.
+// ApiError.message is "code: detail"; strip the code prefix, show the human detail.
 function saveErrorMessage(e: unknown): string {
   if (e instanceof ApiError) {
     const prefix = `${e.code}: `;
@@ -58,66 +55,73 @@ export function ArtifactSectionEditor({
   fullViewLabel = "Full draft",
 }: ArtifactSectionEditorProps) {
   const qc = useQueryClient();
-  // PER-SECTION dirty buffers: edits to one section survive switching to another
-  // section or to the Full-draft tab and back. A section is dirty iff it has an
-  // entry here that differs from the fetched text (see isDirty).
+  const { sec, setSec } = useCockpitNav();
+  // The active SECTION index lives in the URL (?sec); the Section<->Full VIEW is a
+  // local, editor-only toggle (it never crosses the sidebar boundary).
+  const [view, setView] = useState<"section" | "full">("section");
+  // PER-SECTION dirty buffers: edits to one section survive switching sections or
+  // the Full tab and back. A section is dirty iff its buffer differs from the fetch.
   const [buffers, setBuffers] = useState<Record<number, string>>({});
-  // Remember the last section we were on so returning from Full draft restores it
-  // (spec line 223: preserve the selection across swaps) instead of resetting to 0.
-  const [lastSectionIndex, setLastSectionIndex] = useState(0);
-  const [tab, setTab] = useState<Tab>({ kind: "section", index: 0 });
-  // The section index that 409'd; its banner offers Reload (discard) / Keep editing.
   const [staleSection, setStaleSection] = useState<number | null>(null);
-  // A non-conflict save failure (400 structure / 429 busy / 500 / network): surfaced
-  // as a dismissible banner so a save NEVER fails silently. The buffer is preserved
-  // (edits kept); the user can fix and re-Save. Cleared on a new edit, a section
-  // switch, or the start of the next save.
   const [saveError, setSaveError] = useState<string | null>(null);
-  // SP2a-4a citation peek: clicking a pill sets peekEv (center split); ⇱ Pin
-  // promotes it to pinnedEv (right pane). Both drive a useCitationSource query.
   const [peekEv, setPeekEv] = useState<string | null>(null);
   const [pinnedEv, setPinnedEv] = useState<string | null>(null);
-  // SP2a-4b select-to-cite: the editor's current selection (claim span) + whether
-  // the composer is open. The Cite control is gated on a SAVED (non-dirty) section
-  // because the anchor must exist in the on-disk proposal.md.
   const [selection, setSelection] = useState<{ from: number; to: number; text: string } | null>(
     null,
   );
   const [composerOpen, setComposerOpen] = useState(false);
-  // Inert when peekEv/pinnedEv are null (the hook disables a null id). Always
-  // called to keep hook order stable; only ever non-null when citations is on.
   const peek = useCitationSource(workspaceId, peekEv);
   const pinned = useCitationSource(workspaceId, pinnedEv);
 
-  // Identity-based lookup: resolve a section by its stable `index`, never by
-  // array position (which is only equal by coincidence today).
   const byIndex = useMemo(() => new Map(sections.map((s) => [s.index, s])), [sections]);
+  // Clamp the URL section to one that exists in THIS artifact. An out-of-range ?sec
+  // (artifact switch / deep-link before load) renders section 0 now and history-
+  // replaces the URL once sections resolve — no spurious back-history entry.
+  const validSec = byIndex.has(sec) ? sec : (sections[0]?.index ?? 0);
+  useEffect(() => {
+    if (sections.length > 0 && !byIndex.has(sec)) setSec(validSec, { replace: true });
+  }, [sec, validSec, sections.length, byIndex, setSec]);
 
-  const fullText = sections.map((s) => s.text).join("");
-  // The active section + its editor value. For the current section we prefer its
-  // in-flight buffer over the fetched text; once the buffer is cleared (after a
-  // successful save or a Reload) we fall back to the fetched/served text — which is
-  // what makes the conflict "Reload" affordance actually reload (Codex #3).
-  const activeIndex = tab.kind === "section" ? tab.index : -1;
+  // Side-effects of moving to a new section (mirrors the old selectSection): drop a
+  // stale conflict/save banner, the claim selection, and the composer; force Section
+  // view. Runs whenever ?sec changes. Does NOT touch buffers (edits must survive).
+  useEffect(() => {
+    setStaleSection(null);
+    setSaveError(null);
+    setSelection(null);
+    setComposerOpen(false);
+    setView("section");
+  }, [sec]);
+
+  const activeIndex = view === "full" ? -1 : validSec;
   const activeSection = activeIndex >= 0 ? byIndex.get(activeIndex) : undefined;
+  const fullText = sections.map((s) => s.text).join("");
   const editorValue =
-    tab.kind === "full" ? fullText : (buffers[activeIndex] ?? activeSection?.text ?? "");
+    view === "full" ? fullText : (buffers[activeIndex] ?? activeSection?.text ?? "");
 
   const isDirty = (idx: number) =>
     buffers[idx] !== undefined && buffers[idx] !== byIndex.get(idx)?.text;
 
-  // Switch the CURRENT section only. MUST NOT clear other sections' buffers — their
-  // unsaved edits survive (Codex #2). The conflict banner is per-section, so clear it.
-  function selectSection(index: number) {
-    setTab({ kind: "section", index });
-    setLastSectionIndex(index);
-    setStaleSection(null);
-    setSaveError(null);
-    // Drop any stale claim span / open composer: the selection belonged to the
-    // section we just left and its anchor won't exist in the new section.
-    setSelection(null);
-    setComposerOpen(false);
-  }
+  // Publish the dirty section set (for the sidebar Outline • markers). Recompute when
+  // buffers or the fetched sections change.
+  useEffect(() => {
+    setDirty(
+      sections.filter((s) => buffers[s.index] !== undefined && buffers[s.index] !== s.text).map((s) => s.index),
+    );
+  }, [buffers, sections]);
+
+  // Publish save-state for the status bar.
+  useEffect(() => {
+    if (save.isPending) setSave("saving");
+    else if (saveError) setSave("error");
+    else if (activeIndex >= 0 && isDirty(activeIndex)) setSave("dirty");
+    else setSave("saved");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [save.isPending, saveError, buffers, activeIndex]);
+
+  // Clear the store on unmount so a stale cursor/save/dirty never leaks to the status
+  // bar of a non-cockpit view or the next artifact.
+  useEffect(() => () => resetEditorStore(), []);
 
   function onEditorChange(next: string) {
     if (activeIndex < 0) return;
@@ -125,9 +129,6 @@ export function ArtifactSectionEditor({
     setBuffers((b) => ({ ...b, [activeIndex]: next }));
   }
 
-  // Discard this section's edits and show the freshly-fetched/served text. Clearing
-  // the buffer makes editorValue fall back to draft text (so the editor visibly
-  // reloads — fixing the inert reload), and the refetch pulls the latest server bytes.
   function reloadSection(index: number) {
     setBuffers((b) => {
       const next = { ...b };
@@ -150,10 +151,6 @@ export function ArtifactSectionEditor({
         base_commit_sha: head,
         base_section_sha: activeSection.sha,
       });
-      // Optimistically reconcile the cache for THIS section from the save response
-      // (head + section_sha; Task 2 dependency) BEFORE clearing the buffer, so the
-      // editor never flashes the pre-save draft.data while a refetch is in flight,
-      // and the next edit's anti-clobber base is correct (Codex #3).
       qc.setQueryData(queryKey, (prev: { head: string; sections: Section[] } | undefined) => {
         if (!prev) return prev;
         return {
@@ -172,23 +169,14 @@ export function ArtifactSectionEditor({
       setStaleSection(null);
     } catch (e) {
       if (e instanceof ApiError && e.code === "conflict") {
-        // Spec line 194: a stale save must NEVER drop the user's buffer. Keep it and
-        // prompt; "Reload" discards, "Keep editing" dismisses (re-save re-conflicts
-        // until reloaded).
         setStaleSection(index);
         return;
       }
-      // Any other failure (400 structure, 429 busy, 500, network) must SURFACE, not
-      // fail silently as an unhandled async rejection. A non-conflict failure also
-      // supersedes a prior stale-conflict prompt, so clear it (never stack two
-      // banners). The buffer is preserved — the user can fix and re-Save.
       setStaleSection(null);
       setSaveError(saveErrorMessage(e));
     }
   }
 
-  // Clicking a citation pill opens the source peek (SP2a-4a). select-to-cite
-  // (writing a NEW citation) is SP2a-4b.
   const onPillClick = (_citekey: string, evId: string) => setPeekEv(evId);
 
   return (
@@ -199,8 +187,8 @@ export function ArtifactSectionEditor({
             <li key={s.index}>
               <button
                 type="button"
-                aria-current={tab.kind === "section" && tab.index === s.index}
-                onClick={() => selectSection(s.index)}
+                aria-current={view === "section" && validSec === s.index}
+                onClick={() => setSec(s.index)}
               >
                 {(s.heading || "preamble") + (isDirty(s.index) ? " •" : "")}
               </button>
@@ -214,16 +202,16 @@ export function ArtifactSectionEditor({
           <button
             type="button"
             role="tab"
-            aria-selected={tab.kind === "section"}
-            onClick={() => selectSection(lastSectionIndex)}
+            aria-selected={view === "section"}
+            onClick={() => setView("section")}
           >
             Section
           </button>
           <button
             type="button"
             role="tab"
-            aria-selected={tab.kind === "full"}
-            onClick={() => setTab({ kind: "full" })}
+            aria-selected={view === "full"}
+            onClick={() => setView("full")}
           >
             {fullViewLabel}
           </button>
@@ -250,23 +238,18 @@ export function ArtifactSectionEditor({
           </p>
         )}
 
-        {/* ONE persistent EditorView across tab swaps — no `key` remount. The
-            controlled `value` effect swaps section bytes and the readOnly
-            Compartment (Task 6) flips edit/read-only, so the EditorView instance
-            (and its scroll container) survives Section<->Full-draft swaps; the
-            restored lastSectionIndex preserves which section you return to
-            (spec line 223). */}
         <CodeMirrorEditor
           value={editorValue}
-          onChange={tab.kind === "full" ? () => {} : onEditorChange}
-          requireHeading={tab.kind === "section" && activeIndex > 0}
-          readOnly={tab.kind === "full" || !canEdit}
+          onChange={view === "full" ? () => {} : onEditorChange}
+          requireHeading={view === "section" && activeIndex > 0}
+          readOnly={view === "full" || !canEdit}
           citations={citations}
           onPillClick={citations ? onPillClick : undefined}
-          onSelectionChange={citations && tab.kind === "section" ? setSelection : undefined}
+          onSelectionChange={citations && view === "section" ? setSelection : undefined}
+          onCursorChange={setCursor}
         />
 
-        {canEdit && tab.kind === "section" && (
+        {canEdit && view === "section" && (
           <div className="cockpit-section-actions">
             <button
               type="button"
@@ -275,8 +258,6 @@ export function ArtifactSectionEditor({
             >
               Save section
             </button>
-            {/* The anchor must already exist on disk, so cite is only offered on a
-                SAVED (non-dirty) section; dirty -> disabled with a hint to save. */}
             {citations && (
               <button
                 type="button"
