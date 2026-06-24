@@ -77,26 +77,27 @@ All member/owner-gated via the existing `require_member` / `require_owner` (`pro
   "turns": [ { "id": "uuid", "role": "user|assistant|tool|system",
                "content": <JSONB blocks, see §5>, "created_at": "iso", "position": 12 } ],
   "can_send": true,            // owner AND phase=active AND drafting_enabled
-  "needs_disclosure": false,   // no prior disclosure_acknowledged for this user
+  "needs_disclosure": false,   // TRUE when this user has no prior disclosure_acknowledged (false here = already acked)
   "phase": "active",           // "setup" | "active"
   "running_job_id": null       // a queued/running TurnJob for this ws, else null (resume the stream)
 }
 ```
 `running_job_id` lets a reloading client re-attach its `EventSource` to an in-flight turn.
 
-**4.2 `POST /api/workspaces/{id}/turns`** (owner) — JSON body `{ "content": "text", "reference_ids": ["uuid", ...] }`. Mirrors the Jinja `post_turn` gates **in the same order**, returning JSON errors via the standard `/api` envelope:
-- not owner → **403**; `needs_disclosure` and not acknowledged → **403** (`code: "disclosure_required"`);
-- `phase == "setup"` → **409** (`code: "workspace_setup"`); drafting feature-flag off → **503**;
+**4.2 `POST /api/workspaces/{id}/turns`** (owner) — JSON body `{ "content": "text", "reference_ids": ["uuid", ...] }`. Mirrors the existing turns-route gates **in the canonical order** (returning JSON errors via the standard `/api` envelope). The order is the source of truth in `web/_cloud_gate.py` — **owner → setup → drafting → disclosure → caps → in-flight** — and must not be reordered (e.g. a setup-phase workspace with no ack must surface the *setup* gate, not disclosure):
+- not owner → **403**;
+- `phase == "setup"` → **409** (`code: "workspace_setup"`); drafting feature-flag off → **503**; `needs_disclosure` (no prior ack) → **403** (`code: "disclosure_required"`) — these three reuse the shared **`gate_cloud_llm()`** (`proposal_assist/web/_cloud_gate.py`; canonical setup → drafting → disclosure), rather than a hand-ordered copy;
 - daily token cap (`TokenCapExceeded` / `GlobalTokenCapExceeded`) → **429**;
 - a turn already `queued`/`running` → **409** (`code: "turn_in_flight"`).
 - Success → **200** `{ "job_id": "uuid", "user_turn": { ...ChatTurn } }`. Reuses the existing user-content assembly (`attachments.resolver.resolve_user_content`, references-only in v1 — no image branch) + `submit_user_turn()` (creates the `user` ChatTurn with the assembled content blocks + the queued TurnJob).
 
-**4.3 `GET /api/workspaces/{id}/turns/{job_id}/stream`** (member) → `StreamingResponse(media_type="text/event-stream")`, the JSON analogue of the Jinja `_stream_turn_generator`: polls `chat_turns` after the connect-time `position`, emits one event per new row, and a terminal event when the `TurnJob` reaches `completed|failed|cancelled`:
+**4.3 `GET /api/workspaces/{id}/turns/{job_id}/stream?since=<position>`** (member) → `StreamingResponse(media_type="text/event-stream")`, the JSON analogue of the Jinja `_stream_turn_generator`. Resume contract (driven by how `useEventStream` reconnects — see §6): the endpoint honors a `since=<position>` query param and starts polling `chat_turns` **after** that position (defaulting to the connect-time max position when absent), and **emits an SSE `id:` line carrying `ChatTurn.position` on every `turn` event** so the client captures a cursor in `ev.lastEventId` and can resume exactly after the last delivered row on reconnect. One event per new row; a terminal `done` event when the `TurnJob` reaches `completed|failed|cancelled`:
 ```
-event: turn          event: done
-data: {<ChatTurn>}   data: {"status":"completed"}   // or "failed" with "error"
+id: 42                event: done
+event: turn           data: {"status":"completed"}   // or {"status":"failed","error":"..."}
+data: {<ChatTurn>}
 ```
-Same owner-or-viewer access and client-disconnect detection as today. (SSE works through the dev proxy and prod static-serve; the `/api/events/ping` endpoint already proves the pattern in this app.)
+Because `position` is a workspace-global sequence, `since` resumes deterministically regardless of job boundaries. Same owner-or-viewer access and client-disconnect detection as today. (SSE works through the dev proxy and prod static-serve; the `/api/events/ping` endpoint already proves the pattern in this app.)
 
 **4.4 `POST /api/workspaces/{id}/disclosure`** (member) → records the idempotent `WorkspaceEvent(kind="disclosure_acknowledged")` for this user; returns `{ "acknowledged": true }`. (The reference picker reuses the existing `GET /api/workspaces/{id}/references`.)
 
@@ -105,7 +106,7 @@ Same owner-or-viewer access and client-disconnect detection as today. (SSE works
 ## 5. Turn content model
 
 `ChatTurn.content` is JSONB. v1 renders the block shapes the engine already produces:
-- **user**: `{ "type": "text", "text": "..." }`, optionally a list including `{ "type": "reference", "reference_id": "uuid" }` blocks (rendered as a reference chip; resolved via a per-response `reference_map: {reference_id: {title, kind}}` included in the read-model and stream to avoid N lookups). *Image blocks are parsed but not producible in v1 (no upload UI).*
+- **user**: `{ "type": "text", "text": "..." }`, optionally a list including `{ "type": "reference", "reference_id": "uuid" }` blocks (rendered as a reference chip). The chip's label is resolved **client-side** against the `useReferences(id)` cache the cockpit already loads (no `reference_map` is added to the read-model or stream — avoiding the earlier inconsistency); a reference missing from that cache (e.g. since-tombstoned) falls back to a muted "reference" chip. *Image blocks are parsed but not producible in v1 (no upload UI).*
 - **assistant**: `{ "type": "text", "text": "..." }` (the streamed `AssistantTextEvent`), and the terminal **outcome** `{ "type": "turn_outcome", "text": "Proposed edit → Methods" }` rendered as the teal outcome chip that deep-links to the bottom Inbox tab.
 - **tool**: `tool_use` / `tool_result` rows (`ToolUseEvent` / `ToolResultEvent`) rendered as one compact, low-emphasis "⚙ tool_name" line (collapsible group), so the transcript reads as conversation, not a trace.
 
@@ -117,14 +118,14 @@ The renderer is a typed dispatch (`TurnItem`) keyed on `role` + block `type`, de
 
 Reuse the existing `useEventStream(url, handlers, opts)` (`frontend/src/api/events.ts`) — EventSource with `withCredentials`, error classification via `/api/me`. The chat opens the stream when a submit returns a `job_id` **or** when the history read returns a non-null `running_job_id` (reload re-attach). Handlers: `turn` → append the parsed `ChatTurn` to the live transcript (deduped by `position`); `done` → close the stream and `invalidate(["turns", id])`, `(["proposed-changes", id, "draft"])`, `(["proposed-changes", id, "spec"])`, `(["draft", id])` so the Inbox + editor refresh. A `failed` done-status renders the partial transcript plus an inline "turn failed" notice (mid-stream crashes leave partial `assistant`/`tool` rows — rendered coherently, not hidden).
 
-*Note:* `useEventStream` hardening was a deferred SPA-foundation item; this slice is its first real consumer, so the plan includes a hardening pass (reconnect/backoff, unmount cleanup) as part of Task scope.
+*Note:* `useEventStream` hardening was a deferred SPA-foundation item; this slice is its first real consumer, so the plan includes a hardening pass as part of Task scope. Two concrete items: (a) **reset the `lastId` cursor when `url` changes** — today the ref persists across a `url` (i.e. `job_id`) change, leaking a stale `since=` into the next job's stream; key/reset the cursor per `job_id`. (b) Confirm reconnect/backoff + unmount cleanup behave under a long-lived turn stream. The resume itself depends on the server emitting `id:` lines (§4.3).
 
 ---
 
 ## 7. Frontend components
 
 Under `frontend/src/cockpit/chat/`:
-- **`CockpitChat`** — the `handle.RightPane` region. Reads `id` from the URL, calls `useTurns(id)` (RQ) + the disclosure/can_send flags; renders header (with collapse toggle), `TurnList`, and exactly one footer in this **precedence order**: viewer (not owner) → read-only note; else `needs_disclosure` → `DisclosureGate`; else `phase === "setup"` or drafting-disabled → the gate/disabled state; else → `Composer`.
+- **`CockpitChat`** — the `handle.RightPane` region. Reads `id` from the URL, calls `useTurns(id)` (RQ) + the disclosure/can_send flags; renders header (with collapse toggle), `TurnList`, and exactly one footer in this **precedence order** (mirroring the backend gate order in §4.2 so the UI and the would-be 4xx agree): viewer (not owner) → read-only note; else `phase === "setup"` → setup gate; else drafting-disabled → disabled note; else `needs_disclosure` → `DisclosureGate`; else → `Composer`.
 - **`TurnList` / `TurnItem`** — the typed transcript renderer (§5); auto-scrolls on new turns.
 - **`Composer`** — textarea + `ReferencePicker` (multi-select over `useReferences`, `text_status === "done"` only) + Send; disabled while a turn runs or `!can_send`; a disabled, labeled "📎 Image — Files slice" affordance. Surfaces 429/409/503 inline.
 - **`DisclosureGate`** — the one-time acknowledgment; `POST /disclosure` → invalidate `["turns", id]`.
@@ -139,9 +140,9 @@ OpenAPI types regenerate via `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_ty
 | State | Backend | Frontend |
 |---|---|---|
 | Viewer (not owner) | history 200; submit 403 | history shown; **no composer** ("read-only") |
-| Disclosure not acknowledged | submit 403 `disclosure_required`; flag in read-model | `DisclosureGate` instead of composer |
 | `setup` phase | submit 409 `workspace_setup` | setup gate: "Finish setup in the legacy workspace" + link (until Slice E) |
 | Drafting flag off | submit 503 | inline "drafting is currently disabled" |
+| Disclosure not acknowledged | submit 403 `disclosure_required`; flag in read-model | `DisclosureGate` instead of composer |
 | Daily token cap | submit 429 | inline "daily limit reached" |
 | Turn already running | submit 409 `turn_in_flight`; one-running partial index | composer disabled + "agent is working…"; stream attached |
 | Mid-stream crash | orphan sweep → job `failed`; partial rows kept | partial transcript + "turn failed" notice |
@@ -163,7 +164,7 @@ OpenAPI types regenerate via `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_ty
 
 ## 10. Open questions / risks
 
-1. **Setup-phase dependency on Slice E.** v1 chat is fully usable on **active** workspaces (the common case for existing ones); brand-new workspaces sit in `setup` until the rubric gate (Slice E) flips them to `active`. v1 shows a gate state pointing at the legacy workspace. Acceptable because Slice A (create) isn't built yet either — new-workspace flow lands with A+E. **Confirm this is the intended interim.**
+1. **Setup-phase dependency on Slice E — RESOLVED (interim accepted).** v1 chat is fully usable on **active** workspaces (the common case for existing ones). The explicit interim contract: a `setup`-phase workspace returns **409 `workspace_setup`** on submit, and the right pane shows a **clear setup gate** ("Finish setup — review the rubric in the legacy workspace" + link) instead of a composer; React-created workspaces (Slice A) do **not** become chat-enabled until the rubric gate (Slice E) flips them `active`. Since Slice A (create) isn't built yet, the full new-workspace→chat flow lands with A+E; this slice neither builds nor blocks on them.
 2. **SSE lifecycle.** `useEventStream` is unproven under a long-lived turn stream; the plan hardens reconnect/cleanup. Risk is low (the engine is poll-based server-side) but called out.
 3. **Session resume.** The engine persists the SDK `session_id` per workspace for native resume; the cockpit chat inherits this transparently (no new work), noted for awareness.
 4. **Spike first.** Per the de-risking plan, Task 1 is a thin end-to-end spike (one text turn → streamed → proposal in the inbox against a seeded active workspace) before the full build.
