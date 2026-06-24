@@ -65,3 +65,14 @@ it("omits the sidebar region when no matched route declares one", () => {
   renderShellWithRoutes("/", [{ index: true, element: <p>BODY</p> }]);
   expect(screen.queryByLabelText("Sidebar")).toBeNull();
 });
+
+it("renders the right-pane region when the active route declares handle.RightPane", () => {
+  renderShellWithRoutes("/", [
+    {
+      index: true,
+      element: <p>BODY</p>,
+      handle: { RightPane: () => <aside aria-label="Chat" /> },
+    },
+  ]);
+  expect(screen.getByRole("complementary", { name: /chat/i })).toBeInTheDocument();
+});

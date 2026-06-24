@@ -1,5 +1,6 @@
 import { createBrowserRouter } from "react-router-dom";
 
+import { CockpitChat } from "./cockpit/chat/CockpitChat";
 import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { CallsFilters } from "./routes/CallsFilters";
 import { Cockpit } from "./routes/Cockpit";
@@ -15,7 +16,7 @@ export const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters } },
-      { path: "cockpit/:id", element: <Cockpit />, handle: { Sidebar: CockpitSidebar } },
+      { path: "cockpit/:id", element: <Cockpit />, handle: { Sidebar: CockpitSidebar, RightPane: CockpitChat } },
       // In-app soft 404 ONLY (client-side reached). NOT the route authority —
       // the server returns index.html only for manifest SPA routes, so an
       // unknown typed URL hits FastAPI's real 404, never this. Must not turn

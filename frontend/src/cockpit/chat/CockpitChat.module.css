@@ -1,0 +1,16 @@
+.chat {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-sidebar);
+  border-left: 1px solid var(--app-border);
+  min-height: 0;
+}
+.header {
+  padding: 6px 10px;
+  font-weight: 600;
+  color: var(--app-text);
+  border-bottom: 1px solid var(--app-border);
+}
+.body { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
+.note { color: var(--app-dim); }
