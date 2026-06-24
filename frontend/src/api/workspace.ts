@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
 
@@ -44,5 +44,33 @@ export function useMembers(id: string) {
           params: { path: { workspace_id: id } },
         }),
       ),
+  });
+}
+
+/** GET /api/workspaces — the workspace list for the React front door (/cockpit).
+ *  status: null = all; otherwise the lifecycle filter. */
+export function useWorkspaces(status: string | null) {
+  return useQuery({
+    queryKey: ["workspaces", status ?? ""],
+    queryFn: async () =>
+      unwrap(
+        await api.GET("/api/workspaces", {
+          params: { query: status ? { status } : {} },
+        }),
+      ),
+  });
+}
+
+/** POST /api/workspaces — from-call create. Returns { id }. No invalidation:
+ *  after create we leave the SPA for the Jinja setup page; the list refetches on
+ *  next mount. */
+export function useCreateWorkspace() {
+  return useMutation({
+    mutationFn: async (vars: {
+      call_id: number;
+      title: string;
+      deadline?: string | null;
+      profile_id?: number | null;
+    }) => unwrap(await api.POST("/api/workspaces", { body: vars })),
   });
 }
