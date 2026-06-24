@@ -16,6 +16,9 @@ export function DraftPanel({ id }: { id: string }) {
   return (
     <div className="draft-shell">
       <ArtifactSectionEditor
+        // Remount on workspace change so index-keyed buffers / peek / selection never
+        // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
+        key={`draft:${id}`}
         workspaceId={id}
         queryKey={["draft", id]}
         head={head}

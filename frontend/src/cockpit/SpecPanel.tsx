@@ -88,6 +88,9 @@ export function SpecPanel({ id }: { id: string }) {
         )}
       </div>
       <ArtifactSectionEditor
+        // Remount on workspace change so index-keyed buffers / peek / selection never
+        // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
+        key={`spec:${id}`}
         workspaceId={id}
         queryKey={["spec", id]}
         head={head}

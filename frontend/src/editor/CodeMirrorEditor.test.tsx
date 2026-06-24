@@ -284,3 +284,20 @@ it("renders a line-number gutter", () => {
   );
   expect(container.querySelector(".cm-gutters")).not.toBeNull();
 });
+
+it("reports the initial cursor (Ln 1, Col 1) once on mount, before any interaction", () => {
+  // The updateListener only fires on selection/doc CHANGES; new EditorView fires
+  // neither, so without a one-time mount report the status bar lacks Ln/Col until
+  // the user first clicks into a freshly-loaded cockpit.
+  const onCursorChange = vi.fn();
+  render(
+    <CodeMirrorEditor
+      value={"hello\nworld"}
+      onChange={() => {}}
+      requireHeading={false}
+      citations={false}
+      onCursorChange={onCursorChange}
+    />,
+  );
+  expect(onCursorChange).toHaveBeenCalledWith({ line: 1, col: 1 });
+});

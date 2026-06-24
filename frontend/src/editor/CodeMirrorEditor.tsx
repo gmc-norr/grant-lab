@@ -190,6 +190,15 @@ export function CodeMirrorEditor({
       parent: hostRef.current,
     });
     viewRef.current = view;
+    // Report the initial caret (Ln 1, Col 1) ONCE on mount: the updateListener above
+    // only fires on selection/doc CHANGES, and `new EditorView` triggers neither, so
+    // without this the status bar would lack Ln/Col until the user first interacts with
+    // a freshly-loaded cockpit.
+    {
+      const head0 = view.state.selection.main.head;
+      const line0 = view.state.doc.lineAt(head0);
+      onCursorChangeRef.current?.({ line: line0.number, col: head0 - line0.from + 1 });
+    }
     // Expose the view for tests ONLY. Gated behind a non-production env so the
     // production bundle never leaks a fully-mutable EditorView handle onto the DOM.
     // vitest runs with MODE === "test" (and DEV === true); the vite dev server has

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
@@ -664,4 +664,77 @@ it("select-to-cite: retains the held selection across a background draft refetch
   await waitFor(() =>
     expect(screen.getByRole("button", { name: /cite selection/i })).not.toBeDisabled(),
   );
+});
+
+it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no cross-workspace buffer leak", async () => {
+  // A param-only navigation keeps Cockpit (and the editor) mounted, so without a
+  // per-workspace key the index-keyed buffers would survive: editorValue would prefer
+  // workspace A's edited buffer and onSave could POST it to workspace B. The editor is
+  // keyed by `${artifact}:${id}`, so changing :id remounts it (fresh buffers + store).
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((
+    path: string,
+    init?: { params?: { path?: { workspace_id?: string } } },
+  ) => {
+    const tag = (init?.params?.path?.workspace_id ?? "") === "ws-b" ? "B" : "A";
+    if (path.endsWith("/draft"))
+      return Promise.resolve({
+        data: {
+          head: "a".repeat(40),
+          can_edit: true,
+          sections: [{ index: 0, heading: "", text: `preamble ${tag}\n`, sha: `s0${tag}` }],
+          citations: {},
+        },
+        error: undefined,
+      });
+    if (path.endsWith("/spec"))
+      return Promise.resolve({
+        data: { head: "a".repeat(40), can_edit: false, sections: [{ index: 0, heading: "", text: "", sha: "x" }], locked: false },
+        error: undefined,
+      });
+    if (path.endsWith("/proposed-changes")) return Promise.resolve({ data: { items: [] }, error: undefined });
+    if (path.endsWith("/problems"))
+      return Promise.resolve({ data: { problems: [], counts: { error: 0, warning: 0 }, scorecard_stale: [] }, error: undefined });
+    return Promise.resolve({ data: { head: "a".repeat(40), can_edit: true, sections: [], citations: {} }, error: undefined });
+  }) as never);
+
+  function GoTo({ to }: { to: string }) {
+    const navigate = useNavigate();
+    return (
+      <button type="button" onClick={() => navigate(to)}>
+        go-elsewhere
+      </button>
+    );
+  }
+  const qc = new QueryClient();
+  // Prime ws-b's draft so the navigation is WARM: useDraft("ws-b") returns cached data
+  // immediately (isLoading=false), so DraftPanel does NOT pass through its loading guard
+  // — the editor stays mounted across the param change. THAT is the path the per-workspace
+  // key must protect; a cold (uncached) nav unmounts via the loading guard and hides the bug.
+  qc.setQueryData(["draft", "ws-b"], {
+    head: "a".repeat(40),
+    can_edit: true,
+    sections: [{ index: 0, heading: "", text: "preamble B\n", sha: "s0B" }],
+    citations: {},
+  });
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/cockpit/ws-a"]}>
+        <Routes>
+          <Route path="/cockpit/:id" element={<><Cockpit /><GoTo to="/cockpit/ws-b" /></>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  // Workspace A loads; dirty its section-0 buffer with a token that must NOT leak.
+  await waitFor(() => expect(document.querySelector(".cm-content")?.textContent).toContain("preamble A"));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "LEAK" } }));
+  expect(document.querySelector(".cm-content")?.textContent).toContain("LEAK");
+  // Navigate to workspace B (same route -> Cockpit is NOT unmounted; only :id changes).
+  fireEvent.click(screen.getByRole("button", { name: /go-elsewhere/ }));
+  // B's content shows and A's buffered "LEAK" did NOT carry across.
+  await waitFor(() => expect(document.querySelector(".cm-content")?.textContent).toContain("preamble B"));
+  expect(document.querySelector(".cm-content")?.textContent).not.toContain("LEAK");
 });
