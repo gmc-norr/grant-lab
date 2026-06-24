@@ -43,8 +43,8 @@ will migrate.*
   every entry point we control (the dashboard) has a call in hand. Not built.
 - Workspace settings, viewer/collaborator management → **Slice D**.
 - A lightweight `/api/calls` options endpoint or `/api/profiles` — **not needed**
-  (from-call creation gets `call_id` + title from the dashboard row; profile is
-  optional and omitted).
+  (from-call creation gets `call_id` + title from the dashboard row, and the
+  dashboard's already-resolved `effective.profile_id` for the optional profile).
 - Soft-delete / rename / status-change actions from the list.
 - Migrating the Jinja `/workspaces*` routes — they keep working (coexistence
   until Slice G teardown).
@@ -55,7 +55,7 @@ will migrate.*
 Dashboard CallRow ──"Start drafting"──▶ /cockpit/new?call_id=&call_title=
                                               │
                                        WorkspaceCreate (title + deadline)
-                                              │ POST /api/workspaces {call_id,title,deadline?}
+                                              │ POST /api/workspaces {call_id,title,deadline?,profile_id?}
                                               ▼
                                     create_workspace() → status=drafting,
                                     current_phase=setup, Phase-0 job enqueued
@@ -114,8 +114,79 @@ Flip the one "workspaces" item from a Jinja deep-link to an in-app SPA link:
 ```
 
 ActivityBar already renders `kind:"spa"` as a react-router `NavLink` and
-`kind:"external"` as an `<a href>`; no ActivityBar change. The dynamic
-active-cockpit item (rendered only while `/cockpit/:id` is open) is unaffected.
+`kind:"external"` as an `<a href>`; no nav-items change beyond this flip. (The
+dynamic active-cockpit chip is corrected in §4.3.)
+
+### 4.3 Shell chrome for non-editor cockpit routes
+
+The always-mounted shell chrome (TitleBar, StatusBar, ActivityBar) derives "are
+we in a workspace editor?" from the URL. Today that derivation assumes every
+`/cockpit/*` path is an editor, which the new list/create routes break:
+
+- `cockpitIdFromPath` (`frontend/src/cockpit/cockpitNav.ts`) matches
+  `/^\/cockpit\/([^/]+)/`, so `/cockpit/new` returns `"new"` — TitleBar's
+  `useCockpitMeta("new")` and StatusBar's `useScorecard("new")` would fire queries
+  against a non-existent workspace. Add a reserved-segment guard so it returns
+  `""` for non-id subpaths (the bare `/cockpit` list already returns `""` — no
+  match):
+
+  ```ts
+  // static /cockpit/* subpaths that are NOT workspace ids
+  const COCKPIT_RESERVED = new Set(["new"]);
+  export function cockpitIdFromPath(pathname: string): string {
+    const m = pathname.match(/^\/cockpit\/([^/]+)/);
+    if (!m) return "";
+    return COCKPIT_RESERVED.has(m[1]) ? "" : m[1];
+  }
+  ```
+
+  (Reserved-set, not a UUID regex, on purpose: it stays green for existing tests
+  that mount the cockpit with non-UUID ids, and adding a future static subpath is
+  a one-line change.)
+
+- **TitleBar** must title the three cockpit routes distinctly (it currently has
+  only editor-vs-dashboard): editor (`id` set) → workspace title; `/cockpit/new`
+  → "New workspace"; `/cockpit` → "Workspaces"; `/` → "Funding calls".
+
+- **StatusBar** already gates its editor chrome (deadline / spec-lock / band /
+  save-state / Ln-Col) on `onCockpit = !!id`. Once `cockpitIdFromPath` returns
+  `""` for the list/create routes, that chrome correctly disappears there — no
+  StatusBar change beyond the helper fix.
+
+- **ActivityBar** currently renders the "Current workspace" chip whenever
+  `pathname.startsWith("/cockpit")` — i.e. also on the list and create routes.
+  Gate it on the real workspace id instead, and point it at the canonical editor
+  path:
+
+  ```tsx
+  const id = cockpitIdFromPath(pathname);
+  ...
+  {id && <Item item={{ id: "active-ws", label: "Current workspace",
+                        icon: "edit", kind: "spa", to: `/cockpit/${id}` }} />}
+  ```
+
+  The "Workspaces" item itself (`to:"/cockpit"`, `end=false`) stays highlighted
+  across the whole cockpit subtree — that's correct.
+
+- **Drift guard** (`frontend/src/router.test.tsx`): the manifest (`routes.gen.ts`)
+  is **unchanged**, but the guard's reduction only collapses `/:param` paths, so
+  the new static `/cockpit/new` leaf would not reduce to `/cockpit` and the test
+  would fail. Generalize the reduction to map each concrete leaf to its owning
+  manifest prefix (mirroring `is_spa_route`'s subtree match), then assert
+  set-equality with `SPA_ROUTES`:
+
+  ```ts
+  function toOwningPrefix(p: string): string {
+    const owner = SPA_ROUTES
+      .filter((r) => (r === "/" ? p === "/" : p === r || p.startsWith(r + "/")))
+      .sort((a, b) => b.length - a.length)[0];
+    return owner ?? p; // unowned -> stays itself -> set mismatch -> guard fails
+  }
+  // expect(new Set(concrete.map(toOwningPrefix))).toEqual(new Set(SPA_ROUTES));
+  ```
+
+  This keeps both guard directions: an unowned route maps to itself (absent from
+  `SPA_ROUTES` → fail), and every manifest entry must own ≥1 concrete leaf.
 
 ## 5. Backend
 
@@ -126,9 +197,10 @@ do not collide with the existing `/workspaces/{workspace_id}/...` routes. The
 runtime error envelope (`{error:{code,message,detail?}}`) is produced by the
 global HTTPException handler; handlers just `raise HTTPException`.
 
-New imports needed in that module: `Call`, `Workspace`, `WorkspaceSetupJob`
-(test only) from `db.models`; `or_` from `sqlalchemy`; `create_workspace` from
-`call_manager.workspaces`. The three constants and the deadline parser are
+New imports needed in that module: `Call`, `Profile`, `Workspace`,
+`WorkspaceSetupJob` (test only) from `db.models`; `or_` from `sqlalchemy`;
+`create_workspace` from `call_manager.workspaces`. The three constants and the
+deadline parser are
 defined **locally** in this module (the api layer must not import the heavy
 Jinja `proposal_assist.web.workspaces`); a comment ties `_WORKSPACE_STATUSES`
 to the `ck_workspaces_status` CHECK constraint as the single source of truth.
@@ -201,7 +273,8 @@ clean 400, not a foreign-key 500 — mirroring the Jinja `post_new_workspace`.
 class WorkspaceCreateIn(BaseModel):
     call_id: int
     title: str
-    deadline: str | None = None   # ISO-8601; parsed + validated server-side
+    deadline: str | None = None    # ISO-8601; parsed + validated server-side
+    profile_id: int | None = None  # the dashboard's resolved effective profile
 
 class WorkspaceCreatedOut(BaseModel):
     id: str
@@ -215,7 +288,10 @@ def create_workspace_api(body: WorkspaceCreateIn, request, user = Depends(get_cu
     with sf() as session:
         if session.get(Call, body.call_id) is None:
             raise HTTPException(status_code=400, detail=f"No such call: {body.call_id}")
-        ws = create_workspace(session=session, owner_id=user.id, title=title, call_id=body.call_id)
+        if body.profile_id is not None and session.get(Profile, body.profile_id) is None:
+            raise HTTPException(status_code=400, detail=f"No such profile: {body.profile_id}")
+        ws = create_workspace(session=session, owner_id=user.id, title=title,
+                              call_id=body.call_id, profile_id=body.profile_id)
         if deadline:
             ws.deadline = deadline
         session.commit()
@@ -226,7 +302,12 @@ def create_workspace_api(body: WorkspaceCreateIn, request, user = Depends(get_cu
 `_parse_deadline(s)` returns `None` for empty/None, a `datetime` for valid
 ISO-8601, and raises `HTTPException(400, "invalid deadline (expected ISO-8601)")`
 otherwise (copy of the Jinja `_parse_deadline_form` body, sans the `Form`
-coupling). Profile is omitted (optional; defaults to `None`).
+coupling). **Profile** is the dashboard's resolved `effective.profile_id` when
+present (validated to exist or 400, mirroring the Jinja create); `create_workspace`
+threads it onto the row, and Phase-0 snapshots its description
+(`profile_desc_snapshot`, `setup.py`) to feed rubric/section extraction — so
+carrying it preserves drafting quality parity with the current Jinja "Start
+drafting" flow. `None` is fine (no profile selected).
 
 Returns **201 Created**. openapi-fetch treats any 2xx as success; the codegen
 adds a 201 response shape. Read `str(ws.id)` *before* the `with` block closes
@@ -259,8 +340,9 @@ export function useWorkspaces(status: string | null) {
 
 export function useCreateWorkspace() {
   return useMutation({
-    mutationFn: async (vars: { call_id: number; title: string; deadline?: string | null }) =>
-      unwrap(await api.POST("/api/workspaces", { body: vars })),
+    mutationFn: async (vars: {
+      call_id: number; title: string; deadline?: string | null; profile_id?: number | null;
+    }) => unwrap(await api.POST("/api/workspaces", { body: vars })),
   });
 }
 ```
@@ -291,12 +373,13 @@ Sidebar filter declared via `handle.Sidebar`, mirroring `CallsFilters`: a Mantin
 
 ### 6.4 `WorkspaceCreate` (`frontend/src/routes/WorkspaceCreate.tsx` + `.module.css`)
 
-The `/cockpit/new` create form. Reads `call_id` and `call_title` from
-`useSearchParams`:
+The `/cockpit/new` create form. Reads `call_id`, `call_title`, and the optional
+`profile_id` from `useSearchParams`:
 - **`call_id` present:** show a "Drafting for: {call_title}" context line, a Title
   input pre-filled with `call_title` (editable, required), and an optional
   Deadline input (`type="datetime-local"` → ISO string). Submit calls
-  `useCreateWorkspace().mutateAsync({ call_id, title, deadline })`, then
+  `useCreateWorkspace().mutateAsync({ call_id, title, deadline, profile_id })`
+  (forwarding `profile_id` straight through, unparsed in the UI), then
   `window.location.assign(`/workspaces/${id}`)` to hand off to the Jinja setup
   flow (a full-page navigation — `/workspaces` is not SPA-served). Disable the
   submit while the mutation is pending; surface a 400 inline.
@@ -307,9 +390,14 @@ The `/cockpit/new` create form. Reads `call_id` and `call_title` from
 ### 6.5 Dashboard `CallRow` (`frontend/src/routes/CallRow.tsx`)
 
 Add a "Start drafting" action to each call row — a react-router `<Link>` to
-`/cockpit/new?call_id=${call.id}&call_title=${encodeURIComponent(call.title)}`.
-The existing title link (to the Jinja `/calls/${id}` detail page) is unchanged.
-`CallOut` already carries `id` + `title`, so no new fetch.
+`/cockpit/new?call_id=${call.id}&call_title=${encodeURIComponent(call.title)}`,
+plus `&profile_id=${profileId}` when the dashboard has a resolved profile.
+`CallRow` gains a `profileId?: number | null` prop; `Dashboard` passes
+`data.effective.profile_id` — the profile the visible rankings are computed
+against, i.e. the natural drafting context (and parity with the Jinja
+`best_profile_id` carried by `call_detail.html`'s "Start drafting"). The existing
+title link (Jinja `/calls/${id}`) is unchanged; `CallOut` already carries `id` +
+`title`, so no new fetch.
 
 ## 7. Data flow — the setup→rubric interim
 
@@ -352,19 +440,30 @@ setup stub is built now.
   and enqueues exactly one `WorkspaceSetupJob`.
 - `POST` validation: empty title → 400; title > 500 chars → 400; missing/unknown
   `call_id` → 400; malformed `deadline` → 400; valid `deadline` is stored.
+- `POST` with a valid `profile_id` stores it on the row (so Phase-0 can snapshot
+  the profile); an unknown `profile_id` → 400; omitting it succeeds (`None`).
 
 **Frontend** (vitest + Testing Library):
 - `useWorkspaces` / `useCreateWorkspace` hooks (mock `api.GET`/`api.POST`).
 - `WorkspaceList`: renders rows; an active row links to `/cockpit/{id}`, a setup
   row links to `/workspaces/{id}` and shows "Setting up"; empty state links to `/`.
-- `WorkspaceCreate`: prefilled title from `?call_title`; submit calls create then
-  navigates (assert on a stubbed `window.location.assign`); missing `call_id`
-  shows the guard, not a form.
+- `WorkspaceCreate`: prefilled title from `?call_title`; submit calls create
+  (forwarding `?profile_id` into the body) then navigates (assert on a stubbed
+  `window.location.assign`); missing `call_id` shows the guard, not a form.
 - `WorkspacesFilters`: changing the select updates the URL `?status`.
-- `CallRow`: the "Start drafting" link targets `/cockpit/new?call_id=…&call_title=…`.
+- `CallRow`: the "Start drafting" link targets
+  `/cockpit/new?call_id=…&call_title=…`, and includes `&profile_id=…` when a
+  `profileId` prop is supplied (and omits it when not).
 - Router: `/cockpit` → WorkspaceList, `/cockpit/new` → WorkspaceCreate (out-ranks
-  `:id`), `/cockpit/{uuid}` → Cockpit. The existing `routes.gen.ts` drift guard
-  stays green (no manifest change — `/cockpit` prefix already present).
+  `:id`), `/cockpit/{uuid}` → Cockpit. The `routes.gen.ts` manifest is unchanged,
+  but the `router.test.tsx` drift guard is generalized to collapse each concrete
+  leaf to its owning manifest prefix (so `/cockpit/new` reduces to `/cockpit`) —
+  see §4.3.
+- Shell chrome (§4.3): `cockpitIdFromPath("/cockpit/new")` → `""` and
+  `("/cockpit")` → `""`; TitleBar shows "Workspaces" on the list, "New workspace"
+  on create, and the workspace title on the editor; ActivityBar's "Current
+  workspace" chip renders only on `/cockpit/:id` (a real id), not on the list or
+  create routes.
 - `nav-items`: the "workspaces" item is `kind:"spa"`, `to:"/cockpit"`.
 
 Type gate: `pnpm exec tsc --noEmit`. Build: `pnpm build`.
@@ -374,7 +473,14 @@ Type gate: `pnpm exec tsc --noEmit`. Build: `pnpm build`.
 - **No schema change.** Alembic head stays where it is; `create_workspace` and
   the `Workspace`/`WorkspaceSetupJob` models are untouched.
 - **No `routes.gen.ts` change** — `/cockpit` prefix already owns these paths; do
-  not "fix" the manifest to param form (breaks prod serving).
+  not "fix" the manifest to param form (breaks prod serving). The
+  `router.test.tsx` drift-guard **test** DOES change (generalize its reduction to
+  collapse manifest-owned subpaths to their owning prefix; §4.3) — the manifest
+  data does not.
+- **Always-mounted shell chrome must tolerate the new non-editor cockpit routes**
+  — fix `cockpitIdFromPath` + TitleBar titling + the ActivityBar chip together
+  (§4.3), or the list/create routes fire workspace queries against `"new"`/`""`
+  and mis-render the editor chip.
 - **OpenAPI regen requires `EMBEDDING_MODEL=bge-m3`** (mxbai default corrupts the
   output via a stdout WARNING). Diff must be additive only.
 - **api layer must not import `proposal_assist.web.workspaces`** — redefine the
