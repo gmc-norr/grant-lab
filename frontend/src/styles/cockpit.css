@@ -1,9 +1,9 @@
-/* Cockpit layout: Outline | editor (+ center peek) | pinned source.
+/* Cockpit layout: editor (+ center peek) | pinned source.
    Plain global classes (the Cockpit uses bare className strings, not CSS
    modules). Tokens come from styles/tokens.css (loaded globally in main.tsx). */
 .cockpit {
   display: grid;
-  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 1rem;
   align-items: start;
 }

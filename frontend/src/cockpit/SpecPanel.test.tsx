@@ -60,7 +60,9 @@ it("empty spec shows the skeleton CTA, then init reveals sections", async () => 
   get.mockResolvedValue(SEEDED as never);
   fireEvent.click(cta);
   await waitFor(() => expect(post).toHaveBeenCalled());
-  await screen.findByText(/Aims/);
+  // The Outline nav moved to the shell sidebar (Task 6); confirm init revealed sections
+  // by checking the Full spec tab appears (only visible when !isEmpty).
+  await screen.findByRole("tab", { name: /full spec/i });
 });
 
 it("a non-empty spec renders the editor with a 'Full spec' tab", async () => {

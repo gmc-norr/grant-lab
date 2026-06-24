@@ -1,0 +1,76 @@
+.sidebar {
+  display: flex;
+  flex-direction: column;
+}
+.group {
+  display: flex;
+  flex-direction: column;
+}
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+  color: var(--app-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.groupHeader:hover {
+  color: var(--app-text);
+}
+.groupTitle {
+  flex: 1;
+  text-align: left;
+}
+.groupCount {
+  color: var(--app-dim);
+}
+.groupBody {
+  display: flex;
+  flex-direction: column;
+}
+.outline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0.25rem 0.5rem 0.25rem 1.25rem;
+  cursor: pointer;
+  color: var(--app-text);
+  font-size: 0.85rem;
+  text-align: left;
+}
+.row:hover {
+  background: var(--app-hover);
+}
+.row[aria-current="true"] {
+  background: var(--app-selected);
+  box-shadow: inset 2px 0 0 var(--app-accent);
+}
+.rowLabel {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dirty {
+  color: var(--app-warn);
+}
+.note {
+  color: var(--app-muted);
+  padding: 0.25rem 0.5rem 0.25rem 1.25rem;
+  font-size: 0.85rem;
+}

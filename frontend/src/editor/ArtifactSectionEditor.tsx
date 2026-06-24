@@ -181,22 +181,6 @@ export function ArtifactSectionEditor({
 
   return (
     <main className="cockpit">
-      <nav aria-label="Outline">
-        <ul>
-          {sections.map((s) => (
-            <li key={s.index}>
-              <button
-                type="button"
-                aria-current={view === "section" && validSec === s.index}
-                onClick={() => setSec(s.index)}
-              >
-                {(s.heading || "preamble") + (isDirty(s.index) ? " •" : "")}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </nav>
-
       <section className="cockpit-main">
         <div role="tablist" aria-label="View">
           <button

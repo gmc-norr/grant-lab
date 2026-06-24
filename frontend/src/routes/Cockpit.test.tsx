@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { CockpitSidebar } from "../cockpit/CockpitSidebar";
 import { resetEditorStore } from "../cockpit/editorStore";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { Cockpit } from "./Cockpit";
@@ -28,15 +29,23 @@ function draftPayload(canEdit: boolean) {
   };
 }
 
-function renderCockpit() {
+function renderCockpit(url = "/cockpit/ws-1") {
   const qc = new QueryClient();
   return {
     qc,
     ...render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+        <MemoryRouter initialEntries={[url]}>
           <Routes>
-            <Route path="/cockpit/:id" element={<Cockpit />} />
+            <Route
+              path="/cockpit/:id"
+              element={
+                <>
+                  <CockpitSidebar />
+                  <Cockpit />
+                </>
+              }
+            />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>,
