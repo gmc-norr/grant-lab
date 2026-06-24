@@ -14,3 +14,10 @@
 }
 .body { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
 .note { color: var(--app-dim); }
+
+.transcript { display: flex; flex-direction: column; gap: 8px; }
+.userTurn { align-self: flex-end; background: var(--app-selected); color: var(--app-text); border-radius: 8px 8px 2px 8px; padding: 5px 8px; max-width: 85%; }
+.assistantTurn { align-self: flex-start; background: var(--app-tabbar); color: var(--app-text); border-radius: 8px 8px 8px 2px; padding: 5px 8px; max-width: 90%; }
+.tool { color: var(--app-dim); font-size: 0.85em; font-style: italic; }
+.outcome { color: var(--app-accent); font-weight: 600; }
+.refChip { display: inline-block; background: var(--app-selected); color: var(--app-link); border-radius: 10px; padding: 0 6px; margin: 0 2px; font-size: 0.85em; }
