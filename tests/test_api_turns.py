@@ -72,7 +72,9 @@ def test_submit_turn_needs_disclosure_403(monkeypatch, pg_url, pg_session_factor
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/turns", json={"content": "hi"})
-    assert r.status_code == 403  # no disclosure ack, but phase=active so it's the disclosure gate
+    # workspace is in active phase by default (seeded state);
+    # no disclosure ack → disclosure gate fires 403
+    assert r.status_code == 403
 
 
 def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -83,10 +85,8 @@ def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_
     _ack_disclosure(pg_session_factory, ws_id, owner_id)
 
     def _boom(**kwargs):
-        import uuid as _uuid
-
         raise TokenCapExceeded(
-            _uuid.uuid4(),
+            uuid.uuid4(),
             used_in=100,
             used_out=100,
             cap_in=100,

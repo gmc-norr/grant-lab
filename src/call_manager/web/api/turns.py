@@ -124,4 +124,6 @@ def submit_turn(
         session.commit()
         session.refresh(job)
         user_turn = session.get(ChatTurn, job.user_turn_id)
+        if user_turn is None:
+            raise HTTPException(status_code=500, detail="user_turn missing after submit")
         return SubmitTurnResponse(job_id=str(job.id), user_turn=TurnOut(**_turn_to_dict(user_turn)))
