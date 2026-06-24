@@ -1246,3 +1246,25 @@ def test_versions_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_pa
     _, _, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     r = _client(app, stranger_id).get(f"/api/workspaces/{ws_id}/versions")
     assert r.status_code == 403
+
+
+# --- Task 3: GET /members ---------------------------------------------------
+def test_members_owner_sees_named_list(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/members")
+    assert r.status_code == 200
+    b = r.json()
+    assert b[0] == {"email": "owner@ki.se", "role": "owner"}  # owner first
+    assert {"email": "member@ki.se", "role": "member"} in b
+    assert len(b) == 2
+
+
+def test_members_non_owner_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # A workspace MEMBER (not just a stranger) must NOT see the named list — emails
+    # stay owner-only (mirrors the settings viewer surface; no PII expansion).
+    app = _app(monkeypatch, pg_url, tmp_path)
+    _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    r = _client(app, member_id).get(f"/api/workspaces/{ws_id}/members")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"

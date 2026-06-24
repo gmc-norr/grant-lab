@@ -852,6 +852,37 @@ def get_cockpit_meta(
         )
 
 
+class MemberOut(BaseModel):
+    email: str
+    role: str  # "owner" | "member"
+
+
+@router.get("/workspaces/{workspace_id}/members", response_model=list[MemberOut])
+def list_members(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> list[MemberOut]:
+    """Owner + viewers for the Members sidebar group. OWNER-GATED — mirrors the
+    settings viewer list, so member emails stay visible to the owner only (no PII
+    expansion; non-owners get only the member_count from cockpit-meta). Owner first."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        owner = session.get(User, ws.owner_id)
+        viewers = session.scalars(
+            select(User)
+            .join(WorkspaceViewer, WorkspaceViewer.user_id == User.id)
+            .where(WorkspaceViewer.workspace_id == workspace_id)
+            .order_by(User.email)
+        ).all()
+        out: list[MemberOut] = []
+        if owner is not None:
+            out.append(MemberOut(email=owner.email, role="owner"))
+        out.extend(MemberOut(email=v.email, role="member") for v in viewers)
+        return out
+
+
 class VersionOut(BaseModel):
     commit_sha: str
     message: str
