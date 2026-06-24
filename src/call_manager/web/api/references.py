@@ -324,3 +324,92 @@ def api_approve_metadata(
             session.commit()
 
         return MetadataOut(citekey=ref.citekey, metadata_status=ref.metadata_status, csl_json=csl)
+
+
+_WAIVER_MAX_REASON = 500  # mirrors proposal_assist/web/references.py:_MAX_WAIVER_REASON_LEN
+
+
+class WaiverIn(BaseModel):
+    waiver: bool
+    reason: str | None = None
+
+
+class WaiverOut(BaseModel):
+    metadata_waiver: bool
+    reason: str | None = None
+
+
+@router.post(
+    "/workspaces/{workspace_id}/references/{reference_id}/waiver", response_model=WaiverOut
+)
+def api_set_waiver(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    body: WaiverIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> WaiverOut:
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+        if ref is None or ref.workspace_id != workspace_id or ref.tombstoned_at is not None:
+            raise HTTPException(status_code=404, detail="reference not found")
+        ref.metadata_waiver = body.waiver
+        ref.metadata_waiver_reason = (
+            ((body.reason or "").strip()[:_WAIVER_MAX_REASON] or None) if body.waiver else None
+        )
+        session.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="reference_metadata_waived"
+                if body.waiver
+                else "reference_metadata_waiver_cleared",
+                actor_id=user.id,
+                payload={
+                    "reference_id": str(ref.id),
+                    "waiver": body.waiver,
+                    "reason": ref.metadata_waiver_reason,
+                },
+            )
+        )
+        session.commit()
+        return WaiverOut(metadata_waiver=ref.metadata_waiver, reason=ref.metadata_waiver_reason)
+
+
+class KindIn(BaseModel):
+    kind: str
+
+
+class KindOut(BaseModel):
+    kind: str
+
+
+@router.patch("/workspaces/{workspace_id}/references/{reference_id}/kind", response_model=KindOut)
+def api_update_kind(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    body: KindIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> KindOut:
+    if body.kind not in ALLOWED_KINDS:
+        raise HTTPException(status_code=400, detail=f"invalid kind: {body.kind!r}")
+    sf = request.app.state.session_factory
+    with sf() as session:
+        require_member(workspace_id=workspace_id, user=user, session=session)
+        ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+        if ref is None or ref.workspace_id != workspace_id or ref.tombstoned_at is not None:
+            raise HTTPException(status_code=404, detail="reference not found")
+        old = ref.kind
+        ref.kind = body.kind
+        session.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="reference.kind_changed",
+                actor_id=user.id,
+                payload={"reference_id": str(ref.id), "from": old, "to": body.kind},
+            )
+        )
+        session.commit()
+        return KindOut(kind=body.kind)

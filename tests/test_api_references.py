@@ -209,3 +209,53 @@ def test_api_metadata_unknown_ref_is_404(monkeypatch, pg_url, tmp_path, pg_sessi
         json={"title": "X", "authors": []},
     )
     assert r.status_code == 404
+
+
+def test_api_waiver_on_then_off_audits(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id)
+    c = authed_client(app, user_id=owner_id)
+
+    r1 = c.post(
+        f"/api/workspaces/{ws_id}/references/{rid}/waiver",
+        json={"waiver": True, "reason": "preprint"},
+    )
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["metadata_waiver"] is True
+    assert r1.json()["reason"] == "preprint"
+
+    r2 = c.post(f"/api/workspaces/{ws_id}/references/{rid}/waiver", json={"waiver": False})
+    assert r2.status_code == 200
+    assert r2.json()["metadata_waiver"] is False
+    assert r2.json()["reason"] is None
+
+    with pg_session_factory() as s:
+        kinds = set(
+            s.scalars(select(WorkspaceEvent.kind).where(WorkspaceEvent.workspace_id == ws_id)).all()
+        )
+    assert "reference_metadata_waived" in kinds
+    assert "reference_metadata_waiver_cleared" in kinds
+
+
+def test_api_update_kind_audits_and_validates(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
+    rid = _seed_ref(pg_session_factory, storage, ws_id, kind="paper")
+    c = authed_client(app, user_id=owner_id)
+
+    ok = c.patch(f"/api/workspaces/{ws_id}/references/{rid}/kind", json={"kind": "data"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["kind"] == "data"
+
+    bad = c.patch(f"/api/workspaces/{ws_id}/references/{rid}/kind", json={"kind": "nope"})
+    assert bad.status_code == 400
+
+    with pg_session_factory() as s:
+        ev = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "reference.kind_changed",
+            )
+        )
+        assert ev is not None and ev.payload["to"] == "data"
