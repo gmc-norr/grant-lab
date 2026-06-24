@@ -109,8 +109,8 @@ def test_turns_read_model_owner(monkeypatch, pg_url, pg_session_factory, tmp_pat
     assert r.status_code == 200
     b = r.json()
     assert b["phase"] == "active"
-    assert b["needs_disclosure"] is True         # no ack yet
-    assert b["can_send"] is True                  # owner + active + drafting_enabled
+    assert b["needs_disclosure"] is True  # no ack yet
+    assert b["can_send"] is True  # owner + active + drafting_enabled
     assert b["turns"] == []
     assert b["running_job_id"] is None
 
@@ -119,7 +119,7 @@ def test_turns_read_model_member_cannot_send(monkeypatch, pg_url, pg_session_fac
     app = _app(monkeypatch, pg_url, tmp_path)
     _, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     b = _client(app, member_id).get(f"/api/workspaces/{ws_id}/turns").json()
-    assert b["can_send"] is False                 # viewer
+    assert b["can_send"] is False  # viewer
 
 
 def test_turns_read_model_non_member_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -149,8 +149,12 @@ def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_
     async def _collect():
         out = []
         async for chunk in _json_turn_stream(
-            session_factory=pg_session_factory, workspace_id=ws_id,
-            turn_job_id=job_id, since_position=u_pos, poll_seconds=0.0, request=None,
+            session_factory=pg_session_factory,
+            workspace_id=ws_id,
+            turn_job_id=job_id,
+            since_position=u_pos,
+            poll_seconds=0.0,
+            request=None,
         ):
             out.append(chunk)
         return out
@@ -158,7 +162,7 @@ def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_
     chunks = asyncio.run(_collect())
     joined = "".join(chunks)
     assert "event: turn" in joined
-    assert "id: " in joined                 # SSE id line = position (resume cursor)
+    assert "id: " in joined  # SSE id line = position (resume cursor)
     assert '"role": "assistant"' in joined or '"role":"assistant"' in joined
     assert "event: done" in joined
     assert "completed" in joined
@@ -177,11 +181,72 @@ def test_disclosure_ack_idempotent_and_flips_flag(
     assert r2.status_code == 200
     assert c.get(f"/api/workspaces/{ws_id}/turns").json()["needs_disclosure"] is False
     with pg_session_factory() as s:
-        n = len(list(s.scalars(
-            select(WorkspaceEvent.id).where(
-                WorkspaceEvent.workspace_id == ws_id,
-                WorkspaceEvent.kind == "disclosure_acknowledged",
-                WorkspaceEvent.actor_id == owner_id,
+        n = len(
+            list(
+                s.scalars(
+                    select(WorkspaceEvent.id).where(
+                        WorkspaceEvent.workspace_id == ws_id,
+                        WorkspaceEvent.kind == "disclosure_acknowledged",
+                        WorkspaceEvent.actor_id == owner_id,
+                    )
+                )
             )
-        )))
+        )
         assert n == 1  # not duplicated
+
+
+def test_api_submit_turn_with_attachment_builds_image_block(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    import uuid as _uuid
+
+    from call_manager.db.models import Attachment, ChatTurn
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+    _ack_disclosure(pg_session_factory, ws_id, owner_id)
+    aid = _uuid.uuid4()
+    with pg_session_factory() as s:
+        s.add(
+            Attachment(
+                id=aid,
+                workspace_id=ws_id,
+                kind="figure",
+                filename="f.png",
+                storage_path=f"{aid}.png",
+                mime_type="image/png",
+                uploaded_by=owner_id,
+                width_px=10,
+                height_px=10,
+                tokens_estimate=80,
+            )
+        )
+        s.commit()
+    r = _client(app, owner_id).post(
+        f"/api/workspaces/{ws_id}/turns",
+        json={"content": "what is in this figure?", "attachment_ids": [str(aid)]},
+    )
+    assert r.status_code == 200, r.text
+    with pg_session_factory() as s:
+        turn = s.scalars(
+            select(ChatTurn)
+            .where(ChatTurn.workspace_id == ws_id, ChatTurn.role == "user")
+            .order_by(ChatTurn.position.desc())
+        ).first()
+        assert isinstance(turn.content, list)
+        assert {"type": "image", "attachment_id": str(aid)} in turn.content
+
+
+def test_api_submit_turn_cross_workspace_attachment_is_400(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    import uuid as _uuid
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
+    _ack_disclosure(pg_session_factory, ws_id, owner_id)
+    r = _client(app, owner_id).post(
+        f"/api/workspaces/{ws_id}/turns",
+        json={"content": "hi", "attachment_ids": [str(_uuid.uuid4())]},
+    )
+    assert r.status_code == 400

@@ -40,6 +40,7 @@ class TurnOut(BaseModel):
 class SubmitTurnIn(BaseModel):
     content: str
     reference_ids: list[str] = []
+    attachment_ids: list[str] = []
 
 
 class SubmitTurnResponse(BaseModel):
@@ -109,6 +110,7 @@ def submit_turn(
                 session=session,
                 workspace_id=workspace_id,
                 content_text=body.content,
+                attachment_ids=[uuid.UUID(a) for a in body.attachment_ids],
                 reference_ids=[uuid.UUID(r) for r in body.reference_ids],
                 submitted_by_user_id=user.id,
                 settings=settings,
@@ -159,11 +161,13 @@ def list_turns(
             )
         )
         prior_ack = session.scalar(
-            select(WorkspaceEvent.id).where(
+            select(WorkspaceEvent.id)
+            .where(
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.kind == "disclosure_acknowledged",
                 WorkspaceEvent.actor_id == user.id,
-            ).limit(1)
+            )
+            .limit(1)
         )
         running = session.scalar(
             select(TurnJob.id)
@@ -198,18 +202,22 @@ def ack_disclosure(
     with sf() as session:
         require_member(workspace_id=workspace_id, user=user, session=session)
         prior = session.scalar(
-            select(WorkspaceEvent.id).where(
+            select(WorkspaceEvent.id)
+            .where(
                 WorkspaceEvent.workspace_id == workspace_id,
                 WorkspaceEvent.kind == "disclosure_acknowledged",
                 WorkspaceEvent.actor_id == user.id,
-            ).limit(1)
+            )
+            .limit(1)
         )
         if prior is None:
-            session.add(WorkspaceEvent(
-                workspace_id=workspace_id,
-                kind="disclosure_acknowledged",
-                actor_id=user.id,
-            ))
+            session.add(
+                WorkspaceEvent(
+                    workspace_id=workspace_id,
+                    kind="disclosure_acknowledged",
+                    actor_id=user.id,
+                )
+            )
             session.commit()
     return DisclosureResponse(acknowledged=True)
 
@@ -232,10 +240,12 @@ async def _json_turn_stream(
     with session_factory() as s:
         job = s.get(TurnJob, turn_job_id)
         if job is None or job.workspace_id != workspace_id:
-            yield "event: done\ndata: {\"status\": \"missing\"}\n\n"
+            yield 'event: done\ndata: {"status": "missing"}\n\n'
             return
-        last_seen = since_position if since_position is not None else (
-            s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0
+        last_seen = (
+            since_position
+            if since_position is not None
+            else (s.scalar(select(ChatTurn.position).where(ChatTurn.id == job.user_turn_id)) or 0)
         )
     while True:
         if request is not None and await request.is_disconnected():
@@ -276,8 +286,11 @@ def stream_turn(
         require_member(workspace_id=workspace_id, user=user, session=session)
     return StreamingResponse(
         _json_turn_stream(
-            session_factory=sf, workspace_id=workspace_id, turn_job_id=job_id,
-            since_position=since, request=request,
+            session_factory=sf,
+            workspace_id=workspace_id,
+            turn_job_id=job_id,
+            since_position=since,
+            request=request,
         ),
         media_type="text/event-stream",
     )
