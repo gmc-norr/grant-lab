@@ -5,6 +5,7 @@ type Opts = {
   onExpired?: () => void; // 401: session gone -> caller routes to /login
   onNoAccess?: () => void; // 403 AccountInactive -> no-access state
   probeAfter?: number; // N consecutive onerror before probing (default 3)
+  resetCursorOnUrlChange?: boolean; // chat: each url is a distinct job stream -> drop the cursor
 };
 
 export function useEventStream(url: string, handlers: Handlers, opts?: Opts) {
@@ -15,6 +16,10 @@ export function useEventStream(url: string, handlers: Handlers, opts?: Opts) {
 
   useEffect(() => {
     let es: EventSource | null = null;
+    // Opt-in: the chat streams a distinct job per url, so a url change must NOT
+    // carry the prior job's cursor. The /api/events feed does NOT opt in — it
+    // intentionally resumes across remounts/url tweaks.
+    if (opts?.resetCursorOnUrlChange) lastId.current = null;
 
     const open = () => {
       // Pass the cursor on EVERY (re)open so the server resumes from where we left

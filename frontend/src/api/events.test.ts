@@ -66,3 +66,32 @@ it("re-open carries the last-seen id as a ?since cursor, with credentials", () =
   // The re-open URL carries ?since=42 — the fresh-connect catch-up cursor.
   expect(instances[1].url).toContain("since=42");
 });
+
+it("resets the since cursor when the url changes (no stale cursor across job_ids)", () => {
+  const instances: { url: string }[] = [];
+  const captured: { ping?: (e: MessageEvent) => void } = {};
+  class FakeES {
+    url: string;
+    onerror: ((e: unknown) => void) | null = null;
+    onopen: (() => void) | null = null;
+    removeEventListener = vi.fn();
+    close = vi.fn();
+    addEventListener(type: string, fn: (e: MessageEvent) => void) {
+      if (type === "ping") captured.ping = fn;
+    }
+    constructor(u: string) {
+      this.url = u;
+      instances.push({ url: u });
+    }
+  }
+  vi.stubGlobal("EventSource", FakeES as unknown as typeof EventSource);
+  // OPT IN to per-url reset (the default — used by /api/events — keeps the cursor).
+  const { rerender } = renderHook(
+    ({ url }) => useEventStream(url, { ping: () => {} }, { resetCursorOnUrlChange: true }),
+    { initialProps: { url: "/api/workspaces/ws-1/turns/job-a/stream" } },
+  );
+  captured.ping?.({ lastEventId: "42", data: "{}" } as MessageEvent);
+  // Switch to a DIFFERENT job stream — the old cursor must NOT leak in.
+  rerender({ url: "/api/workspaces/ws-1/turns/job-b/stream" });
+  expect(instances[1].url).not.toContain("since=42");
+});
