@@ -385,6 +385,10 @@
   padding: 0.25rem 0;
   font-size: 0.9rem;
 }
+.activity-row.category-member {
+  border-left: 2px solid var(--app-accent);
+  padding-left: 0.4rem;
+}
 .activity-actor {
   font-weight: 600;
 }

@@ -70,4 +70,17 @@ describe("ActivityPanel", () => {
     wrap(<ActivityPanel id="ws1" onNavigate={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/could not load activity/i);
   });
+
+  it("renders a member-category row", () => {
+    h.activity = {
+      data: {
+        items: [
+          { id: "e1", category: "member", actor: "owner@ki.se", summary: "added collaborator a@ki.se", count: 1, created_at: new Date().toISOString(), target: null },
+        ],
+      },
+    };
+    wrap(<ActivityPanel id="ws1" onNavigate={vi.fn()} />);
+    expect(screen.getByText(/added collaborator a@ki\.se/i)).toBeInTheDocument();
+    expect(document.querySelector(".category-member")).not.toBeNull();
+  });
 });
