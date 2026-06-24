@@ -71,3 +71,39 @@ it("shows a dirty marker for a section the store reports", async () => {
   setDirty([1]);
   expect(await screen.findByLabelText("unsaved")).toBeInTheDocument();
 });
+
+it("renders References and Criteria groups with a band pill", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/references"))
+      return Promise.resolve({ data: [{ id: "r1", citekey: "smith2021", title: "Smith 2021", kind: "paper", text_status: "done" }], error: undefined });
+    if (path.endsWith("/scorecard"))
+      return Promise.resolve({
+        data: { scorecard: { criteria: [{ index: 0, name: "Impact", band: "gap", note: "", deep_link: null, weight: 1, effective_weight: 1 }], overall_band: "gap", summary: "" }, evaluated_draft_sha: null, evaluated_spec_sha: null, completed_at: null, stale: false, stale_reasons: [] },
+        error: undefined,
+      });
+    return Promise.resolve(draft as never); // /draft + /spec
+  }) as never);
+  renderSidebar();
+  // Open the (default-collapsed) groups.
+  fireEvent.click(await screen.findByRole("button", { name: /references/i }));
+  expect(await screen.findByText("Smith 2021")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /criteria/i }));
+  expect(await screen.findByText("Impact")).toBeInTheDocument();
+  expect(screen.getByText("Gap")).toBeInTheDocument();
+});
+
+it("clicking a criterion navigates to the Scorecard tab", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard"))
+      return Promise.resolve({
+        data: { scorecard: { criteria: [{ index: 0, name: "Impact", band: "gap", note: "", deep_link: null, weight: 1, effective_weight: 1 }], overall_band: "gap", summary: "" }, evaluated_draft_sha: null, evaluated_spec_sha: null, completed_at: null, stale: false, stale_reasons: [] },
+        error: undefined,
+      });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar();
+  fireEvent.click(await screen.findByRole("button", { name: /criteria/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /Impact/ }));
+  expect(screen.getByTestId("search").textContent).toContain("tab=scorecard");
+});

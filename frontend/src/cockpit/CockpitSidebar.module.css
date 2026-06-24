@@ -74,3 +74,37 @@
   padding: 0.25rem 0.5rem 0.25rem 1.25rem;
   font-size: 0.85rem;
 }
+.metaRow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0.5rem 0.2rem 1.25rem;
+  font-size: 0.85rem;
+  color: var(--app-text);
+}
+.metaSub {
+  color: var(--app-muted);
+  font-size: 0.78rem;
+}
+.criterion {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0.2rem 0.5rem 0.2rem 1.25rem;
+  cursor: pointer;
+  color: var(--app-text);
+  font-size: 0.85rem;
+  text-align: left;
+}
+.criterion:hover {
+  background: var(--app-hover);
+}
+.criterionName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
