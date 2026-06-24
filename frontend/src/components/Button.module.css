@@ -1,13 +1,13 @@
 .btn {
-  background: var(--cm-primary);
-  color: #fff;
-  border: 1px solid var(--cm-primary-border);
+  background: var(--app-accent-bright);
+  color: #06201d;
+  border: 1px solid var(--app-border-strong);
   border-radius: 8px;
   padding: 0.5rem 0.9rem;
   cursor: pointer;
 }
 .btn:hover {
-  background: var(--cm-primary-hover);
+  background: var(--app-accent);
 }
 .btn:disabled {
   opacity: 0.5;
