@@ -14,14 +14,18 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from call_manager.db.models import (
     ArtifactVersion,
     Call,
+    Profile,
+    ProfileKind,
     Reference,
     Source,
     User,
     Workspace,
+    WorkspaceSetupJob,
     WorkspaceViewer,
 )
 from call_manager.main import create_app
@@ -1351,3 +1355,95 @@ def test_list_workspaces_status_filter_and_validation(
     assert r.status_code == 200
     assert [it["title"] for it in r.json()] == ["Submitted one"]
     assert c.get("/api/workspaces?status=bogus").status_code == 400
+
+
+# --- Slice A Task 2: POST /api/workspaces ------------------------------------
+def test_create_workspace_from_call(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        call = _mk_source_call(s, slug="test-funder-c1", title="Linked Call")
+        s.commit()
+        owner_id, call_id = owner.id, call.id
+    c = _client(app, owner_id)
+    r = c.post("/api/workspaces", json={"call_id": call_id, "title": "  My draft  "})
+    assert r.status_code == 201
+    new_id = r.json()["id"]
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, uuid.UUID(new_id))
+        assert ws.title == "My draft"  # trimmed
+        assert ws.current_phase == "setup"
+        assert ws.call_id == call_id
+        jobs = s.scalars(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id)
+        ).all()
+        assert len(jobs) == 1  # Phase-0 enqueued
+
+
+def test_create_workspace_validation(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        call = _mk_source_call(s, slug="test-funder-c2", title="C")
+        s.commit()
+        owner_id, call_id = owner.id, call.id
+    c = _client(app, owner_id)
+    assert c.post("/api/workspaces", json={"call_id": call_id, "title": "   "}).status_code == 400
+    assert (
+        c.post("/api/workspaces", json={"call_id": call_id, "title": "x" * 501}).status_code == 400
+    )
+    assert c.post("/api/workspaces", json={"call_id": 999999, "title": "ok"}).status_code == 400
+    assert (
+        c.post(
+            "/api/workspaces",
+            json={"call_id": call_id, "title": "ok", "deadline": "not-a-date"},
+        ).status_code
+        == 400
+    )
+    assert (
+        c.post(
+            "/api/workspaces",
+            json={"call_id": call_id, "title": "ok", "profile_id": 999999},
+        ).status_code
+        == 400
+    )
+
+
+def test_create_workspace_stores_profile_and_deadline(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    with pg_session_factory() as s:
+        owner = User(status="active", email="owner@ki.se")
+        s.add(owner)
+        s.flush()
+        call = _mk_source_call(s, slug="test-funder-c3", title="C")
+        prof = Profile(
+            name="Grp",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT.value,
+            description="d",
+            structured={},
+            created_by=owner.id,
+        )
+        s.add(prof)
+        s.commit()
+        owner_id, call_id, prof_id = owner.id, call.id, prof.id
+    c = _client(app, owner_id)
+    r = c.post(
+        "/api/workspaces",
+        json={
+            "call_id": call_id,
+            "title": "ok",
+            "profile_id": prof_id,
+            "deadline": "2099-07-12T00:00",
+        },
+    )
+    assert r.status_code == 201
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, uuid.UUID(r.json()["id"]))
+        assert ws.profile_id == prof_id
+        assert ws.deadline is not None and ws.deadline.year == 2099

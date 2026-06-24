@@ -20,6 +20,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     ArtifactVersion,
     Call,
+    Profile,
     Reference,
     ReferenceChunk,
     SpecLockEvent,
@@ -61,6 +62,7 @@ from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.web._perms import require_member, require_owner
+from call_manager.workspaces import create_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -1075,3 +1077,61 @@ def list_workspaces_api(
             )
             for w in rows
         ]
+
+
+_MAX_WORKSPACE_TITLE_LEN = 500
+
+
+class WorkspaceCreateIn(BaseModel):
+    call_id: int
+    title: str
+    deadline: str | None = None  # ISO-8601; parsed + validated server-side
+    profile_id: int | None = None  # the dashboard's resolved effective profile
+
+
+class WorkspaceCreatedOut(BaseModel):
+    id: str
+
+
+def _parse_deadline(raw: str | None) -> datetime | None:
+    """Parse an optional ISO-8601 deadline; 400 on a malformed string (mirrors the
+    Jinja _parse_deadline_form, without the Form coupling)."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="invalid deadline (expected ISO-8601)") from e
+
+
+@router.post("/workspaces", response_model=WorkspaceCreatedOut, status_code=201)
+def create_workspace_api(
+    body: WorkspaceCreateIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> WorkspaceCreatedOut:
+    """From-call workspace creation. Validates first (clean 400, not a FK 500),
+    then reuses create_workspace (sets current_phase='setup' + enqueues Phase-0).
+    Returns the new id; the SPA hands off to the Jinja setup flow."""
+    title = body.title.strip()
+    if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
+        raise HTTPException(status_code=400, detail="invalid title")
+    deadline = _parse_deadline(body.deadline)
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, body.call_id) is None:
+            raise HTTPException(status_code=400, detail=f"No such call: {body.call_id}")
+        if body.profile_id is not None and session.get(Profile, body.profile_id) is None:
+            raise HTTPException(status_code=400, detail=f"No such profile: {body.profile_id}")
+        ws = create_workspace(
+            session=session,
+            owner_id=user.id,
+            title=title,
+            call_id=body.call_id,
+            profile_id=body.profile_id,
+        )
+        if deadline:
+            ws.deadline = deadline
+        session.commit()
+        new_id = str(ws.id)
+    return WorkspaceCreatedOut(id=new_id)
