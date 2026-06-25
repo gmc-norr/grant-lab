@@ -95,10 +95,15 @@ DELETE /api/workspaces/{workspace_id}  → 204 No Content
   mirror [`web/api/settings.py`](../../../src/call_manager/web/api/settings.py) `remove_member`).
 - Resolves the workspace (cross-owner → `require_owner` raises 403), then calls
   `soft_delete_workspace(session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir))`.
-- Returns `Response(status_code=204)`. **Idempotent**: deleting an already-soft-deleted workspace
-  still returns 204 (the cascade helpers and the `soft_deleted_at` set are no-op-safe; this matches
-  the Jinja route, which never special-cased a re-delete). The 204 carries no body (the JSON
-  envelope does not wrap empty 2xx — same as `remove_member`).
+- Returns `Response(status_code=204)` (no body — the JSON envelope does not wrap empty 2xx, same as
+  `remove_member`).
+- **Not idempotent — re-delete is 404, by design.** `require_owner` filters
+  `soft_deleted_at IS NULL` ([`_perms.py:18`](../../../src/call_manager/proposal_assist/web/_perms.py)),
+  so a second delete of an already-soft-deleted workspace raises 404 before the service is reached —
+  **identical to the Jinja route**, which calls the same guard first
+  ([`workspaces.py:1272`](../../../src/call_manager/proposal_assist/web/workspaces.py)). No special
+  owner-only "already-deleted" lookup is added: a uniform 404 (same as unknown-workspace) keeps the
+  auth boundary clean and exposes no workspace-id existence oracle.
 
 **Repoint the doomed Jinja route.** Change the Jinja `soft_delete` handler body
 ([`proposal_assist/web/workspaces.py:1251`](../../../src/call_manager/proposal_assist/web/workspaces.py))
@@ -170,10 +175,18 @@ in flight and the viewer is the owner, show a cancel affordance.
 - Render an "Assistant is working… **Cancel**" row above the (disabled) `Composer`. The job id to
   cancel is `jobId ?? d.running_job_id`.
 - On click → `useCancelTurn(id)` mutation (`POST .../turns/{job_id}/cancel`). On settle, invalidate
-  `["turns", id]`. If the response is `cancelled === false`, show a brief inline note
-  `Too late — the assistant already started.` (faithful to the Jinja "Too late…" copy). On
-  `cancelled === true`, the read-model refetch clears the in-flight state; the `cloud_turn_cancelled`
-  chat row appears via the normal turns refetch.
+  `["turns", id]`.
+  - On `cancelled === true`: **explicitly `setJobId(null)` (and clear `streamed`) in the success
+    handler** — do *not* rely solely on the SSE `done` event. The composer's disabled state gates on
+    the **local** `jobId` as well as `running_job_id`
+    ([`CockpitChat.tsx:104`](../../../frontend/src/cockpit/chat/CockpitChat.tsx)), and local `jobId`
+    is otherwise cleared only by the SSE `done` handler
+    ([`CockpitChat.tsx:45`](../../../frontend/src/cockpit/chat/CockpitChat.tsx)); clearing it
+    directly removes the dependency on stream timing. The visible `turn_outcome` ("Cancelled…")
+    row appears via the `["turns", id]` refetch (cancel uses `emit_chat=True`, §3.2).
+  - On `cancelled === false`: **keep `jobId`** (the turn genuinely started and will stream to
+    completion) and show a brief inline note `Too late — the assistant already started.` (faithful
+    to the Jinja "Too late…" copy).
 - The button is disabled while `cancel.isPending`.
 
 New api hook in [`frontend/src/api/turns.ts`](../../../frontend/src/api/turns.ts):
@@ -188,10 +201,15 @@ invalidates `["turns", id]`.
 - **`DELETE /api/workspaces/{id}`** (extend `tests/test_api_workspaces.py` or a new
   `tests/test_api_workspaces_delete.py`):
   - owner delete → 204; `soft_deleted_at` set; a seeded queued coherence/evaluator/review/
-    uncited-claims job flips to `failed`; a seeded queued `TurnJob` flips to `cancelled`; seeded
-    attachment/reference bytes on disk are gone (DB rows remain).
+    uncited-claims job flips to `failed`; seeded attachment/reference bytes on disk are gone (DB
+    rows remain).
+  - **Carry forward the `emit_chat=False` guarantee** that the soon-deleted
+    `test_web_workspaces_delete.py` pins (so G2 does not silently lose it): a seeded queued
+    `TurnJob` flips to `cancelled` (not `failed`), a `cloud_turn_cancelled` `WorkspaceEvent` exists,
+    and **no `system` chat row is written** for it.
   - non-owner (viewer and stranger) → 403; unknown workspace → 404 (from `require_owner`).
-  - re-delete of an already-deleted workspace → still 204 (idempotent).
+  - re-delete of an already-soft-deleted workspace → **404** (`require_owner` filters
+    `soft_deleted_at IS NULL`; matches the Jinja route — not idempotent).
 - **`POST /api/workspaces/{id}/turns/{job}/cancel`** (new `tests/test_api_turns_cancel.py`):
   - owner cancels a `queued` job → `{cancelled: true}`; job is `cancelled`; a `cloud_turn_cancelled`
     `WorkspaceEvent` exists; a `turn_outcome` chat row exists.
@@ -225,8 +243,10 @@ cancel test to retarget.
   error path shows the note. (Mock `window.confirm`; mock the router `navigate` per the existing
   test setup.)
 - Chat cancel (extend `CockpitChat.test.tsx` or a focused test): cancel row visible only when
-  `is_owner && in-flight`; hidden for a viewer; clicking fires the POST and invalidates turns;
-  a `{cancelled: false}` response renders the "too late" note.
+  `is_owner && in-flight`; hidden for a viewer; clicking fires the POST and invalidates turns; a
+  `{cancelled: true}` response **clears the in-flight/disabled composer state** (proves `jobId` is
+  cleared by the success handler, not just the SSE `done` path); a `{cancelled: false}` response
+  renders the "too late" note **and leaves the composer disabled**.
 
 ---
 
@@ -265,9 +285,10 @@ generated types include them.
 - **Extraction must be behavior-preserving.** Mitigation: the existing `test_web_workspaces_delete.py`
   exercises the repointed route end-to-end; the 4 retargeted cascade tests exercise the new `/api`
   path; both hit the same service. A divergence fails one of them.
-- **Idempotent re-delete.** The `/api` DELETE returns 204 even on an already-deleted workspace
-  (matches the Jinja route). If a stricter 404-on-already-deleted is ever wanted, that is a
-  deliberate later change, not part of this parity slice.
+- **Re-delete is 404, not idempotent — and that is correct.** `require_owner` filters
+  `soft_deleted_at IS NULL`, so a second delete raises 404 before reaching the service, identical to
+  the Jinja route (same guard, called first). No special owner-only deleted-row lookup is added;
+  the uniform 404 keeps the auth boundary clean and leaks no existence oracle.
 - **Cancel affordance shows for `queued|running`.** Cancel only succeeds while `queued`; a click on
   a `running` job returns `{cancelled:false}` and surfaces "too late." This is the faithful Jinja
   behavior; distinguishing `queued` vs `running` in the read-model is unnecessary extra work
