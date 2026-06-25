@@ -20,6 +20,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ChatTurn, TurnJob, User, WorkspaceEvent
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
+from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._perms import require_member, require_owner
@@ -287,6 +288,40 @@ async def _json_turn_stream(
                 yield f"event: done\ndata: {json.dumps({'status': status})}\n\n"
                 return
         await asyncio.sleep(poll_seconds)
+
+
+class CancelTurnResponse(BaseModel):
+    cancelled: bool
+
+
+@router.post(
+    "/workspaces/{workspace_id}/turns/{job_id}/cancel", response_model=CancelTurnResponse
+)
+def cancel_turn(
+    workspace_id: uuid.UUID,
+    job_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> CancelTurnResponse:
+    """Owner-only cancel of a QUEUED turn. Race-safe + cross-workspace-safe via
+    record_terminal_outcome's conditional UPDATE (status='queued' AND
+    workspace_id=…): a job already 'running', already terminal, or owned by
+    another workspace → cancelled=False. Writes the cloud_turn_cancelled audit
+    event + a visible turn_outcome chat row (emit_chat=True)."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        did = record_terminal_outcome(
+            session,
+            turn_job_id=job_id,
+            workspace_id=ws.id,
+            outcome="cancelled",
+            expected_status="queued",
+            raw_error=None,
+            emit_chat=True,
+        )
+        session.commit()
+    return CancelTurnResponse(cancelled=did)
 
 
 @router.get("/workspaces/{workspace_id}/turns/{job_id}/stream", include_in_schema=False)
