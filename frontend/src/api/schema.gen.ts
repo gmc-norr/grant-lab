@@ -1999,57 +1999,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/workspaces/{workspace_id}/export-composed.md": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Export Composed
-         * @description Export the proposal with inline citations rendered + bibliography appended.
-         *
-         *     Unlike ``export.md`` (which serves raw proposal.md, ev-comments and all), this
-         *     transforms every ``[@citekey]<!-- ev:id -->`` marker into the workspace's
-         *     citation style (Vancouver ``[N]`` / author-year ``(Family Year)``), strips all
-         *     ev-comments, and appends the rendered bibliography.
-         *
-         *     Fail-closed: it builds the bibliography first (commit=False); if any cited
-         *     reference is unapproved/unresolved/tombstoned it returns a 409 listing the
-         *     blocked references rather than serving a half-transformed document.
-         *
-         *     Auth: owner OR viewer (read-only — no commit).
-         */
-        get: operations["export_composed_workspaces__workspace_id__export_composed_md_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/workspaces/{workspace_id}/export.md": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Export Markdown
-         * @description Markdown-only export. Word/PDF would require pandoc; deferred.
-         */
-        get: operations["export_markdown_workspaces__workspace_id__export_md_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/workspaces/{workspace_id}/files": {
         parameters: {
             query?: never;
@@ -11041,68 +10990,6 @@ export interface operations {
         };
     };
     post_disclosure_workspaces__workspace_id__disclosure_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspace_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    export_composed_workspaces__workspace_id__export_composed_md_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspace_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    export_markdown_workspaces__workspace_id__export_md_get: {
         parameters: {
             query?: never;
             header?: never;
