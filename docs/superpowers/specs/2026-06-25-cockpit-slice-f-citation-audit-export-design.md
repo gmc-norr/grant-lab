@@ -19,8 +19,10 @@ parity (and modestly exceeding it):
 2. **Proposal export** — download the proposal as Markdown (raw, and composed with
    inline citations + bibliography).
 
-Then **tear down** the Jinja routes/templates these replace (per-slice teardown, per
-the 2026-06-25 "Jinja need not be preserved" directive).
+Then **tear down the Jinja export routes** — the only citation/export surface cleanly
+excisable now (per the 2026-06-25 "Jinja need not be preserved" directive). The Jinja
+citations page + validate + reader stay until the later `workspace_main` sweep because
+they remain wired into live Jinja proposal rendering (see §6).
 
 **No DB schema change.** The audit engine, verdict cache (`citation_audit_verdicts`,
 migration 0039), usage ledger (`citation_llm_usage`, migration 0036), and the
@@ -190,8 +192,8 @@ class CitationAuditOut(BaseModel):
 
 class DeepCheckOut(BaseModel):
     semantic_available: bool   # false only when app.state.citation_service is None (tests/offline)
-    checked: int               # citations judged this run
-    cap_exceeded: bool
+    checked: int               # candidate citations the deep check considered; 0 when semantic unavailable
+    cap_exceeded: bool         # the daily LLM cap is exceeded (read via check_citation_caps, NOT audit_unavailable presence)
     error_count: int           # over the merged (deterministic + semantic) issue list
     warning_count: int
     issues: list[AuditIssueOut]  # deterministic + semantic, merged
@@ -211,7 +213,12 @@ class DeepCheckOut(BaseModel):
     `validate_citations_semantic(… citation_service=app.state.citation_service,
     session_factory=app.state.session_factory, deterministic_issues=…)` (writes verdict
     cache; respects caps), returns the merged issues + counts + `checked` + `cap_exceeded`.
-    **Synchronous.**
+    `checked` = candidate citations the pass considered (`len` of evidence rows with an
+    `id`), or `0` when `semantic_available` is false. `cap_exceeded` is read **precisely**
+    from `check_citation_caps(session, workspace_id, settings=settings).exceeded` — NOT
+    derived from the presence of an `audit_unavailable` issue, which the engine also emits
+    for transient errors and invalid verdicts (`audit.py:626,660`), not only cap hits
+    (`audit.py:638`). **Synchronous.**
 
 **Synchronous tradeoff (accepted):** the engine judges per-citation synchronously; an
 explicit owner action with a loading state is acceptable. Cap-exceeded degrades to
@@ -270,41 +277,39 @@ No background-job infra is introduced.
 
 ---
 
-## 6. Teardown (per-slice)
+## 6. Teardown (per-slice — EXPORT routes only)
 
-After the React surfaces land and are verified, delete the Jinja routes/templates React
-replaced. **Verify reachability before deleting** (Slice E lesson: router registration
-was in `main.py`, not the expected module).
+Slice F's teardown is deliberately **narrow**: only the Jinja **export** routes are
+deleted, because they are cleanly replaced by the React Export menu and are NOT invoked by
+any live Jinja renderer. Delete (route functions only; prune imports they alone used):
+- `GET /workspaces/{id}/export.md` in `proposal_assist/web/workspaces.py` (~:1348-1378).
+- `GET /workspaces/{id}/export-composed.md` in `proposal_assist/web/citations.py` (~:174-256).
+- The "Export markdown" / "Export with citations" links in `partials/artifact_pane.html`,
+  and the now-dead export-composed link in `workspace_citations.html`.
 
-Delete:
-- Routes: `GET /workspaces/{id}/citations` (page), `POST /citations/validate`,
-  `GET /citations/{ev}/reader`, `GET /export.md`, `GET /export-composed.md`
-  (in `proposal_assist/web/citations.py` and `web/workspaces.py`). If `web/citations.py`
-  has **no** remaining live routes after this, delete the module and its registration.
-- Templates: `workspace_citations.html`, `partials/citation_audit_results.html`,
-  `partials/citation_reader.html`, and the dead "Export …" links in any still-rendered
-  template (e.g. `partials/artifact_pane.html`).
-- **Nav links to the deleted citations page.** The shared workspace sub-nav renders a
-  `Citations` tab linking to `/workspaces/{id}/citations` in FOUR still-present templates:
-  `workspace_main.html:19`, `workspace_files.html:13`, `workspace_settings.html:13`,
-  `workspace_references.html:13` (verified). Remove that `<a>` from all four (mechanical)
-  so no template links a deleted route. **Do NOT** expand Slice F into deleting those whole
-  pages — that is the later `workspace_main` teardown sweep; only the citations link goes.
-- Tests bound to the deleted routes: migrate (to `/api`) or delete with explicit
-  per-test disposition (no blanket preserve).
+**DEFERRED to the later `workspace_main` teardown sweep — do NOT delete in Slice F:** the
+Jinja **citations page** (`GET /{id}/citations`), the **validate** route, the **citation
+reader** route + `partials/citation_reader.html`, `workspace_citations.html`,
+`partials/citation_audit_results.html`, and the `/citations` links in the four sub-nav
+templates (`workspace_main.html:19`, `workspace_files.html:13`, `workspace_settings.html:13`,
+`workspace_references.html:13`) + `partials/annotation_strip.html:38`.
 
-Keep: the entire `citations/*` engine + bibliography helpers, `_perms`, `_session_dep`,
-the new `export.py` and `citation_audit`/`export` `/api` modules.
+Reason (verified): the citation-reader renderer
+`citations/reader.py:render_proposal_with_citations` injects `/{id}/citations/{ev}/reader`
+links and is still called by LIVE Jinja proposal rendering in `web/sections.py:110` and
+`web/workspaces.py:169,179`; the citations page is also linked from the live
+`annotation_strip.html`. Excising any of these now would break those renderers or leave
+dangling links — that is the sweep's job. The React Citations tab and the (nav-dark) Jinja
+citations page coexist harmlessly until then (strangler pattern).
 
-**Re-run the OpenAPI regen AFTER teardown** (Slice E gotcha): deleting the Jinja export
-routes removes their paths from `schema.gen.ts`; a single pre-teardown regen would leave
-stale deleted-route paths. Regen command: `EMBEDDING_MODEL=bge-m3 bash
-scripts/gen_openapi_types.sh`. Confirm `frontend/src/routes.gen.ts` has an empty diff.
+Keep: the entire `citations/*` engine + bibliography + reader helpers, `_perms`,
+`_session_dep`, the new `export.py` and the `citation_audit`/`export` `/api` modules.
 
-**Out of scope for this slice's teardown:** the broader Jinja `workspace_main` two-pane
-editor and its other partials (the final teardown sweep) — Slice F only removes the
-citation-audit + export surfaces. If `workspace_main` is already unreachable, note it for
-the final sweep rather than expanding Slice F.
+**Re-run the OpenAPI regen AFTER deleting the two export routes** (Slice E gotcha): the
+Jinja `export.md`/`export-composed.md` operationIds must drop out of `schema.gen.ts`,
+leaving only the new `/api` export paths. A single pre-teardown regen would leave stale
+paths. Regen: `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`; confirm
+`frontend/src/routes.gen.ts` has an empty diff.
 
 ---
 
@@ -320,9 +325,9 @@ the final sweep rather than expanding Slice F.
   seeded drifted/orphan ledger + correct counts; `draft_present:false` pre-draft; corrupt
   citations.json → **409 `citation_ledger_invalid`** (GET and deep-check); deep-check
   **403 for a viewer** (owner-gate); deep-check with `app.state.citation_service` set to a
-  stub returns merged semantic issues + counts; cap-exceeded path → `cap_exceeded:true` +
-  `audit_unavailable`; `semantic_available:false` when `app.state.citation_service` is set
-  to `None`.
+  stub returns merged semantic issues + counts; cap-exceeded path → seed `citation_llm_usage`
+  rows over the daily input cap so `check_citation_caps` reports exceeded → `cap_exceeded:true`;
+  `semantic_available:false` + `checked:0` when `app.state.citation_service` is set to `None`.
 
 **Frontend (vitest, `tsc` is the gate):**
 - `CitationsPanel.test.tsx`: renders deterministic issues + severity grouping + badge;
@@ -360,9 +365,11 @@ the final sweep rather than expanding Slice F.
 - **Corrupt `citations.json` is pinned to 409 `citation_ledger_invalid`** across all three
   new endpoints (deterministic GET, deep-check, composed export) — `load_ledger` raises
   `ValueError`; the endpoints catch it and return the envelope rather than 500ing.
-- **Teardown reachability.** The plan must verify each route's registration/reachability
-  before deletion, remove the four citations sub-nav links (§6), and re-regen OpenAPI
-  post-teardown.
+- **Teardown is export-only.** Slice F deletes only the two Jinja export routes + their
+  links and re-regens OpenAPI; the citations page/validate/reader are deferred to the
+  `workspace_main` sweep (§6) because the reader renderer + page links are still invoked by
+  live Jinja proposal rendering. This is a Codex-review correction to the original
+  "delete the citations page + reader" scope.
 - **No new citation-service builder.** Deep-check reuses `app.state.citation_service` (the
   supported `build_citation_service`) and `app.state.session_factory`; the MCP tool's own
   construction is untouched, so its behavior cannot regress.

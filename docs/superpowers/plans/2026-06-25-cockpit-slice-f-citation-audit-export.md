@@ -33,7 +33,7 @@
 
 **Backend — modify:**
 - `src/call_manager/web/api/__init__.py` — mount the two routers.
-- Teardown (Task 6): delete Jinja routes in `proposal_assist/web/citations.py` + `proposal_assist/web/workspaces.py`, templates, sub-nav links.
+- Teardown (Task 6): delete ONLY the two Jinja export routes (`export.md` in `proposal_assist/web/workspaces.py`, `export-composed.md` in `proposal_assist/web/citations.py`) + their template links. Citations page / validate / reader are DEFERRED to the `workspace_main` sweep (still wired to live Jinja proposal rendering).
 
 **Frontend — create:**
 - `frontend/src/api/audit.ts`, `frontend/src/api/export.ts`.
@@ -451,6 +451,7 @@ from call_manager.proposal_assist.citations.audit import (
     validate_citations_semantic,
 )
 from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.citations.usage import check_citation_caps
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.web._perms import require_member, require_owner
@@ -573,11 +574,20 @@ def citation_audit_deep(
                 citation_service=citation_service,
                 deterministic_issues=det,
             )
+            # Candidate citations the pass considered (evidence rows with an id).
+            checked = len([r for r in (ledger.get("evidence") or []) if r.get("id")])
+            # PRECISE cap signal: read the actual daily usage cap. NOT
+            # any(audit_unavailable) — the engine emits audit_unavailable for transient
+            # errors (audit.py:626) and invalid verdicts (audit.py:660) too, not just
+            # cap hits (audit.py:638), which would show a false "AI budget" banner.
+            cap_exceeded = check_citation_caps(
+                session, workspace_id, settings=settings
+            ).exceeded
         else:
             sem = []
+            checked = 0  # spec: checked == 0 when semantic is unavailable
+            cap_exceeded = False
         issues = det + sem
-        checked = len([r for r in (ledger.get("evidence") or []) if r.get("id")])
-        cap_exceeded = any(i["type"] == "audit_unavailable" for i in sem)
         err, warn = _counts(issues)
         return DeepCheckOut(
             semantic_available=semantic_available,
@@ -603,9 +613,11 @@ Create `tests/test_api_citation_audit.py`. Reuse the `_app`/`_client` helpers fr
 from call_manager.main import create_app
 from call_manager.db.models import User, Workspace, WorkspaceViewer
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.citations.service import CitationLLMResult
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from fastapi.testclient import TestClient
+
+# The semantic/cap tests (added per the note below) import CitationLLMResult /
+# _StubCitationService themselves — keep this top import block F401-clean.
 
 ORPHAN_DRAFT = "We claim X [@ghost]<!-- ev:ev-aaaaaaaaaaaa -->.\n"
 
@@ -713,10 +725,28 @@ def test_deep_check_no_service_deterministic_only(
     body = r.json()
     assert body["semantic_available"] is False
     assert body["cap_exceeded"] is False
+    assert body["checked"] == 0
     assert "orphan_marker" in {i["type"] for i in body["issues"]}
 ```
 
-> Note: a deep-check test that actually exercises the **semantic** path (stub `app.state.citation_service` returning a `CitationLLMResult`, asserting a `semantic_*` issue + `cap_exceeded` on `cap_exceeded=True`) requires a fully *judgeable* citation (live marker + approved reference + chunk with matching hashes). Add `test_deep_check_semantic_flags` and `test_deep_check_cap_exceeded` by mirroring the EXACT seeding in `tests/proposal_assist/citations/test_audit_semantic.py` — reuse its `_StubCitationService`, `_verdict_result`, `_seed_reference`, `_row`/`build_evidence_row`, `append_evidence` helpers, write the resulting `proposal.md` + `dump_ledger(ledger)` into `workspace_repo_dir(tmp_path, ws_id)`, set `app.state.citation_service = _StubCitationService(_verdict_result("contradicts"))`, POST, and assert `semantic_available is True`, `checked == 1`, and a `semantic_*` issue is present (cap test: `_verdict_result(None, cap_exceeded=True, cap_scope="workspace")` → `cap_exceeded is True` and an `audit_unavailable` issue). Open that file first and copy its imports verbatim.
+> **Two more tests to add** (these need helpers from an existing harness — open
+> `tests/proposal_assist/citations/test_audit_semantic.py` first and copy its imports +
+> `_StubCitationService`/`_verdict_result`/`_seed_reference`/`_row`(=`build_evidence_row`)/`append_evidence`
+> helpers verbatim; add their imports inside these tests so the top block stays F401-clean):
+>
+> - `test_deep_check_semantic_flags`: build a fully *judgeable* citation (live marker +
+>   approved reference + chunk with matching hashes), write the resulting `proposal.md` +
+>   `dump_ledger(ledger)` into `workspace_repo_dir(tmp_path, ws_id)`, set
+>   `app.state.citation_service = _StubCitationService(_verdict_result("contradicts"))`,
+>   POST `/citation-audit/deep` as the owner, and assert `semantic_available is True`,
+>   `checked == 1`, and a `semantic_*` issue is present.
+> - `test_deep_check_cap_exceeded`: seed `citation_llm_usage` rows whose `tokens_in` sum
+>   `>= settings.citation_llm_daily_token_cap_input` (insert `CitationLlmUsage` rows, or call
+>   `call_manager.proposal_assist.citations.usage.record_usage` + commit), write ANY draft,
+>   POST as the owner, and assert `cap_exceeded is True`. No stub needed — the real
+>   `app.state.citation_service` (built by `create_app`) checks `check_citation_caps` before
+>   any LLM call, and the endpoint reads the same cap directly. (This replaces the old
+>   stub-`cap_exceeded` approach, which the endpoint no longer trusts — Codex finding 2.)
 
 - [ ] **Step 4: Run tests to verify they fail**
 
@@ -829,7 +859,7 @@ import { CitationsPanel } from "./CitationsPanel";
 
 const h = vi.hoisted(() => ({
   audit: { isLoading: false, isError: false, data: undefined as unknown, refetch: vi.fn() },
-  deep: { mutate: vi.fn(), isPending: false, data: undefined as unknown },
+  deep: { mutate: vi.fn(), isPending: false, reset: vi.fn(), data: undefined as unknown },
   meta: { data: { role: "owner" } as { role: string } | undefined },
 }));
 
@@ -841,7 +871,7 @@ vi.mock("../api/workspace", () => ({ useCockpitMeta: () => h.meta }));
 
 afterEach(() => {
   h.audit = { isLoading: false, isError: false, data: undefined, refetch: vi.fn() };
-  h.deep = { mutate: vi.fn(), isPending: false, data: undefined };
+  h.deep = { mutate: vi.fn(), isPending: false, reset: vi.fn(), data: undefined };
   h.meta = { data: { role: "owner" } };
 });
 
@@ -911,7 +941,23 @@ describe("CitationsPanel", () => {
     render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
     expect(screen.getByText("semantic_contradicts")).toBeInTheDocument();
     expect(screen.getByText(/checked 3/i)).toBeInTheDocument();
-    expect(screen.getByText(/throttled/i)).toBeInTheDocument();
+    expect(screen.getByText(/budget/i)).toBeInTheDocument();
+  });
+
+  it("resets deep-check data and refetches the baseline on Re-run", () => {
+    h.audit.data = { draft_present: true, issues: [], error_count: 0, warning_count: 0 };
+    h.deep.data = {
+      semantic_available: true,
+      checked: 1,
+      cap_exceeded: false,
+      error_count: 0,
+      warning_count: 0,
+      issues: [],
+    };
+    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /re-run/i }));
+    expect(h.deep.reset).toHaveBeenCalled();
+    expect(h.audit.refetch).toHaveBeenCalled();
   });
 });
 ```
@@ -926,6 +972,8 @@ Expected: FAIL (CitationsPanel does not exist).
 Create `frontend/src/cockpit/CitationsPanel.tsx`:
 
 ```tsx
+import { useEffect } from "react";
+
 import { type AuditIssue, useCitationAudit, useDeepCheck } from "../api/audit";
 import { useCockpitMeta } from "../api/workspace";
 import type { OnNavigate } from "./nav";
@@ -935,6 +983,12 @@ export function CitationsPanel({ id, onNavigate }: { id: string; onNavigate: OnN
   const deep = useDeepCheck(id);
   const meta = useCockpitMeta(id);
   const isOwner = meta.data?.role === "owner";
+
+  // Drop any prior deep-check result when the workspace changes, so stale deep data
+  // can never supersede a different workspace's deterministic baseline (Codex finding 3).
+  useEffect(() => {
+    deep.reset();
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps -- reset is stable; intentional id-only
 
   if (audit.isLoading) return <p aria-busy="true">Checking citations…</p>;
   if (audit.isError || !audit.data)
@@ -948,7 +1002,13 @@ export function CitationsPanel({ id, onNavigate }: { id: string; onNavigate: OnN
   return (
     <div className="citations-panel">
       <div className="citations-toolbar">
-        <button type="button" onClick={() => void audit.refetch()}>
+        <button
+          type="button"
+          onClick={() => {
+            deep.reset(); // clear superseding deep-check data so Re-run shows the fresh baseline
+            void audit.refetch();
+          }}
+        >
           Re-run
         </button>
         {isOwner && (
@@ -966,7 +1026,8 @@ export function CitationsPanel({ id, onNavigate }: { id: string; onNavigate: OnN
       </div>
       {deep.data?.cap_exceeded && (
         <p className="citations-cap" role="status">
-          Deep check was throttled by the daily AI budget — some citations were not judged.
+          Deep check hit the daily AI budget — some citations may not have been judged. Try
+          again tomorrow.
         </p>
       )}
       {deep.data && !deep.data.semantic_available && (
@@ -1441,67 +1502,61 @@ git commit -m "feat(spa): audit-row → citation peek deep-link (Slice F)"
 
 ---
 
-## Task 6: Jinja teardown + post-teardown OpenAPI regen
+## Task 6: Jinja export-route teardown + post-teardown OpenAPI regen
+
+**Scope (NARROWED per Codex finding 4):** delete ONLY the two Jinja **export** routes + their
+template links. The citations page / `/citations/validate` / `/citations/{ev}/reader` are
+**DEFERRED to the later `workspace_main` sweep** — the reader renderer
+`citations/reader.py:render_proposal_with_citations` is still called by live Jinja proposal
+rendering (`web/sections.py:110`, `web/workspaces.py:169,179`) and the citations page is
+linked from the live `annotation_strip.html` (verified). Excising them now would break those
+renderers / leave dangling links. The React Citations tab and the (nav-dark) Jinja citations
+page coexist harmlessly until the sweep.
 
 **Files:**
-- Delete/modify: `src/call_manager/proposal_assist/web/citations.py`, `src/call_manager/proposal_assist/web/workspaces.py` (export route only)
-- Delete: `src/call_manager/web/templates/proposal_assist/workspace_citations.html`, `partials/citation_audit_results.html`, `partials/citation_reader.html`
-- Modify: `workspace_main.html:19`, `workspace_files.html:13`, `workspace_settings.html:13`, `workspace_references.html:13`, `partials/artifact_pane.html`
+- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (delete the `export_markdown` route)
+- Modify: `src/call_manager/proposal_assist/web/citations.py` (delete the `export_composed` route ONLY — keep page/validate/reader)
+- Modify: `partials/artifact_pane.html` (remove the two Export links), `workspace_citations.html` (remove the export-composed link)
 - Modify: `frontend/src/api/schema.gen.ts` (regen)
-- Migrate/delete: tests bound to the deleted routes
+- Migrate/delete: tests asserting on the two deleted export routes
 
-> **Verify reachability before deleting** (the Slice E lesson). Find where `proposal_assist/web/citations.py`'s router is registered (likely `main.py`, not the empty `proposal_assist/web/__init__.py`).
+- [ ] **Step 1: Delete the two export routes**
 
-- [ ] **Step 1: Enumerate the citations.py routes**
+In `proposal_assist/web/workspaces.py`: delete the `export_markdown` function (`@router.get("/{workspace_id}/export.md")`, ~lines 1348-1378). Then `grep -n 'FileResponse' src/call_manager/proposal_assist/web/workspaces.py` — if that was its only use, remove `FileResponse` from the imports.
 
-Run: `cd /home/parlar_ai/dev/call-monitor && grep -n '@router' src/call_manager/proposal_assist/web/citations.py`
-Record every route. Slice F replaces: `GET /{id}/citations` (page), `POST /{id}/citations/validate`, `GET /{id}/citations/{ev}/reader`, `GET /{id}/export-composed.md`. The `/api` source-peek + add-citation are in `web/api/workspaces.py` (NOT this file) and STAY.
+In `proposal_assist/web/citations.py`: delete the `export_composed` function (`@router.get("/{workspace_id}/export-composed.md")`, ~lines 174-256). **KEEP every other route** in this module (the citations page, `/citations/validate`, `/citations/{ev}/reader`). Then check which imports the deleted route ALONE used: `grep -n 'build_bibliography\|compose_export\|BuildBibliographyBlocked\|^from\|^import' src/call_manager/proposal_assist/web/citations.py` and remove any now-unused import (e.g. `build_bibliography`/`compose_export`/`BuildBibliographyBlocked`/`Response`/`_safe_title`) ONLY if no remaining route references it. (`_safe_title` is likely now unused — remove it.)
 
-- [ ] **Step 2: Delete the replaced routes**
+- [ ] **Step 2: Remove the dead export links from templates**
 
-- If the four routes above are the ONLY routes in `citations.py`: delete the whole module and remove its `import` + `include_router` registration (grep `citations` in `src/call_manager/main.py` and delete those lines). Confirm: `grep -rn 'web.citations\|web import citations\|from .citations' src/call_manager`.
-- If other live routes remain: delete only the four route functions + their now-unused imports.
-- In `proposal_assist/web/workspaces.py`: delete the `export_markdown` route (`@router.get("/{workspace_id}/export.md")`, ~lines 1348-1378) and prune any imports it alone used (`FileResponse`?).
+In `partials/artifact_pane.html`, remove the two anchors `…/export.md` and `…/export-composed.md`. In `workspace_citations.html`, remove the `…/export-composed.md` link (its route is gone; the page itself STAYS). Do NOT touch the `/citations` page links or the reader template — those stay until the sweep.
 
-- [ ] **Step 3: Delete templates + sub-nav links**
+- [ ] **Step 3: Migrate or delete the export-route tests**
 
-```bash
-git rm src/call_manager/web/templates/proposal_assist/workspace_citations.html \
-       src/call_manager/web/templates/proposal_assist/partials/citation_audit_results.html \
-       src/call_manager/web/templates/proposal_assist/partials/citation_reader.html
-```
+Run: `grep -rln 'export\.md\|export-composed' tests/`
+For each hit testing the deleted Jinja routes: delete the obsolete test (the `/api` equivalents in `tests/test_api_export.py` already cover the behavior), with an explicit per-test disposition. Leave tests for the kept citations page/validate/reader untouched.
 
-Remove the `<a href="/workspaces/{{ workspace.id }}/citations">Citations</a>` line from each of: `workspace_main.html` (line 19), `workspace_files.html` (line 13), `workspace_settings.html` (line 13), `workspace_references.html` (line 13). Remove the two "Export …" links in `partials/artifact_pane.html` (the `export.md` + `export-composed.md` anchors). Do NOT delete those whole templates — that is the later workspace_main sweep.
-
-- [ ] **Step 4: Migrate or delete the route's tests**
-
-Run: `grep -rln 'export-composed\|/citations/validate\|citations/.*reader\|export\.md\|/citations"' tests/`
-For each test file: migrate assertions to the `/api` equivalents (already covered by `tests/test_api_export.py` + `tests/test_api_citation_audit.py`) or delete the obsolete test with an explicit per-test disposition. Do NOT blanket-delete a file that also tests still-live behavior.
-
-- [ ] **Step 5: Confirm the app imports cleanly + targeted tests pass**
+- [ ] **Step 4: Confirm the app imports cleanly + targeted tests pass**
 
 ```bash
 uv run python -c "from call_manager.main import create_app; create_app(); print('ok')"
 uv run pytest tests/test_api_export.py tests/test_api_citation_audit.py -v
-uv run ruff check src/call_manager/proposal_assist/web/ src/call_manager/web/api/
+uv run ruff check src/call_manager/proposal_assist/web/citations.py src/call_manager/proposal_assist/web/workspaces.py
 ```
 Expected: `ok` (no orphan imports), tests PASS, lint clean.
 
-- [ ] **Step 6: Re-run the OpenAPI regen AFTER teardown**
-
-The deleted Jinja routes (`export.md`, `export-composed.md`, the citations page/validate/reader) must drop out of the schema.
+- [ ] **Step 5: Re-run the OpenAPI regen AFTER deleting the export routes**
 
 Run: `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`
-Then: `grep -c 'export_markdown_workspaces\|export_composed_workspaces\|citations_validate\|citation_reader' frontend/src/api/schema.gen.ts || true`
-Expected: the OLD Jinja operationIds are GONE (only the new `/api` `export.md`/`export-composed.md` paths remain). `frontend/src/routes.gen.ts` empty diff.
+Then: `grep -c 'export_markdown_workspaces\|export_composed_workspaces' frontend/src/api/schema.gen.ts || true`
+Expected: the OLD Jinja `export_markdown_workspaces…`/`export_composed_workspaces…` operationIds are GONE (the new `/api` paths — under `…_api_workspaces…` — remain). `frontend/src/routes.gen.ts` empty diff.
 Then: `cd frontend && pnpm exec tsc --noEmit && pnpm build`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A
-git commit -m "refactor(spa): tear down Jinja citations + export routes/templates/links + post-teardown OpenAPI regen (Slice F)"
+git commit -m "refactor(spa): tear down Jinja export routes + links + post-teardown OpenAPI regen (Slice F)"
 ```
 
 ---
@@ -1509,7 +1564,7 @@ git commit -m "refactor(spa): tear down Jinja citations + export routes/template
 ## Self-Review
 
 **Spec coverage:**
-- §4.1 export service → Task 1. §4.3 export endpoints (200/404/409 export_blocked via detail.blocked/409 ledger_invalid) → Task 1. §4.2 reuse `app.state.citation_service` + §4.4 audit GET/deep + corrupt-ledger 409 + DeepCheckOut counts → Task 2. §5.1 Citations tab (deterministic auto, owner deep-check, badge, summary, cap banner) → Task 3. §5.2 Export menu + downloadExport (Content-Disposition filename, 409/404 handling) → Task 4. §5.3 peek deep-link → Task 5. §6 teardown (routes/templates/4 sub-nav links/test migration/post-teardown regen) → Task 6. §7 testing → each task's tests. No DB schema change (no migration task). ✅
+- §4.1 export service → Task 1. §4.3 export endpoints (200/404/409 export_blocked via detail.blocked/409 ledger_invalid) → Task 1. §4.2 reuse `app.state.citation_service` + §4.4 audit GET/deep + corrupt-ledger 409 + DeepCheckOut counts → Task 2. §5.1 Citations tab (deterministic auto, owner deep-check, badge, summary, cap banner) → Task 3. §5.2 Export menu + downloadExport (Content-Disposition filename, 409/404 handling) → Task 4. §5.3 peek deep-link → Task 5. §6 teardown (EXPORT routes only + their links + test migration + post-teardown regen; citations page/validate/reader deferred to the workspace_main sweep per Codex finding 4) → Task 6. §7 testing → each task's tests. No DB schema change (no migration task). ✅
 - The heavy semantic deep-check + cap tests are flagged for the implementer to mirror `test_audit_semantic.py` rather than reproduced inline — that is the one place exact code depends on helpers whose internals belong to an existing harness; the instruction names the file and the exact symbols to reuse.
 
 **Placeholder scan:** No TBD/TODO. Every code step has runnable code. The two "mirror the existing harness" notes (composed-blocked extra seeding; semantic deep-check tests) point at a named file + named symbols — not vague "add tests".
