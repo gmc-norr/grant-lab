@@ -1,8 +1,8 @@
 """B6 workspace web UX — list, create, main two-pane view, settings,
 turn submission + SSE bridge, viewer mgmt, disclosure modal, export.
 
-All routes mount at /workspaces. Mirrors the proposal_assist router
-pattern from rubric_review.py (same _session_dep, same auth dep).
+All routes mount at /workspaces. Uses the same _session_dep / auth dep
+pattern as other proposal_assist routers.
 
 Rev2 / Codex M2: uses `request.app.state.templates` (set up by
 main.py) — NOT a fresh Jinja2Templates instance. This is what keeps
@@ -41,7 +41,6 @@ from call_manager.db.models import (
     User,
     Workspace,
     WorkspaceEvent,
-    WorkspaceSetupJob,
     WorkspaceViewer,
 )
 from call_manager.db.session import get_db_dependency
@@ -611,18 +610,6 @@ def get_workspace_main(
     settings = request.app.state.settings
     raw, rendered, artifact_sections = _artifact_sections_and_rendered(settings, workspace_id)
 
-    # Phase-0 gate: while in setup, the left pane renders the setup-status
-    # card (partials/setup_status.html) instead of the composer. Query the
-    # job only when it's actually needed.
-    if ws.current_phase == "setup":
-        setup_job = session.scalar(
-            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id)
-        )
-        setup_status = setup_job.status if setup_job else "queued"
-        setup_last_error = setup_job.last_error if setup_job else None
-    else:
-        setup_status, setup_last_error = None, None
-
     is_owner = ws.owner_id == user.id
     templates = request.app.state.templates
     return templates.TemplateResponse(
@@ -643,39 +630,6 @@ def get_workspace_main(
             "workspace_attachments": workspace_attachments,
             "workspace_references": workspace_references,
             "chat_reference_map": chat_reference_map,
-            "setup_status": setup_status,
-            "setup_last_error": setup_last_error,
-        },
-    )
-
-
-@router.get("/{workspace_id}/setup-status", response_class=HTMLResponse)
-def get_setup_status(
-    workspace_id: uuid.UUID,
-    request: Request,
-    user=Depends(get_current_user),  # noqa: B008
-    session: Session = Depends(_session_dep),  # noqa: B008
-) -> HTMLResponse:
-    """Render ONLY the setup-status card partial (htmx poll target).
-
-    The card on the main view polls this every 3s while Phase 0 runs;
-    terminal states (for the viewing role) render without the hx-trigger,
-    so the final swap stops the polling. Access mirrors the main view.
-    """
-    ws = _require_owner_or_viewer(
-        workspace_id=workspace_id,
-        user=user,
-        session=session,
-    )
-    job = session.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id))
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "proposal_assist/partials/setup_status.html",
-        {
-            "workspace": ws,
-            "setup_status": job.status if job else "queued",
-            "setup_last_error": job.last_error if job else None,
-            "is_owner": ws.owner_id == user.id,
         },
     )
 

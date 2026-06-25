@@ -37,7 +37,10 @@
       {% include "proposal_assist/partials/turn_connector.html" %}
     {% endfor %}
     {% if workspace.current_phase == 'setup' %}
-    {% include "proposal_assist/partials/setup_status.html" %}
+    <div class="callout">
+      <p><strong>This workspace is set up in the cockpit.</strong></p>
+      <p><a role="button" href="/cockpit/{{ workspace.id }}">Open it in the cockpit →</a></p>
+    </div>
     {% elif is_owner %}
     <form id="composer" class="composer" method="post" enctype="multipart/form-data"
           action="/workspaces/{{ workspace.id }}/turns"

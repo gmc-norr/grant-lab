@@ -159,7 +159,7 @@ def test_phase0_happy_path_workspace_to_spec(
         assert (repo_dir / "proposal-spec.md").exists()
         assert (repo_dir / ".git").is_dir()
 
-    # === Step D: Owner POSTs the rubric review via the HTTP endpoint ===
+    # === Step D: Owner activates the workspace via the JSON API endpoint ===
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
@@ -171,22 +171,28 @@ def test_phase0_happy_path_workspace_to_spec(
         signer: SessionSigner = app.state.session_signer
         client.cookies.set("session", signer.make(user_id=uid))
         resp = client.post(
-            f"/workspaces/{wsid}/rubric-review",
-            data={
-                "criteria[0][name]": "Excellence",
-                "criteria[0][description]": "Scientific quality",
-                "criteria[0][weight]": "0.5",
-                "criteria[0][scale_max]": "5",
-                "criteria[1][name]": "Impact",
-                "criteria[1][description]": "Translational potential",
-                "criteria[1][weight]": "0.5",
-                "criteria[1][scale_max]": "5",
+            f"/api/workspaces/{wsid}/activate",
+            json={
+                "criteria": [
+                    {
+                        "name": "Excellence",
+                        "description": "Scientific quality",
+                        "weight": 0.5,
+                        "scale_max": 5,
+                    },
+                    {
+                        "name": "Impact",
+                        "description": "Translational potential",
+                        "weight": 0.5,
+                        "scale_max": 5,
+                    },
+                ],
                 "funder_notes": "See FAQ.",
             },
-            follow_redirects=False,
         )
-        assert resp.status_code == 303
-        assert resp.headers["location"] == f"/workspaces/{wsid}"
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["criteria"][0]["name"] == "Excellence"
     finally:
         client.__exit__(None, None, None)
 

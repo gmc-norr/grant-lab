@@ -28,6 +28,9 @@ from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.references.admission import IngestLimiter
+from call_manager.proposal_assist.web.activity import (
+    router as activity_router,
+)
 from call_manager.proposal_assist.web.annotations import (
     router as annotations_router,
 )
@@ -55,17 +58,11 @@ from call_manager.proposal_assist.web.references import (
 from call_manager.proposal_assist.web.review import (
     router as review_router,
 )
-from call_manager.proposal_assist.web.rubric_review import (
-    router as rubric_review_router,
-)
 from call_manager.proposal_assist.web.sections import (
     router as sections_router,
 )
 from call_manager.proposal_assist.web.uncited_claims import (
     router as uncited_claims_router,
-)
-from call_manager.proposal_assist.web.activity import (
-    router as activity_router,
 )
 from call_manager.proposal_assist.web.workspaces import (
     router as workspaces_router,
@@ -549,7 +546,6 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(golden_set.router)
     app.include_router(profiles.router)
-    app.include_router(rubric_review_router)
     app.include_router(workspaces_router)
     app.include_router(sections_router)
     app.include_router(proposals_router)
