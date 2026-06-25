@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -112,4 +112,72 @@ it("footer shows the drafting-disabled message via disabled_reason", async () =>
   mockTurns({ disabled_reason: "drafting_disabled", can_send: false, phase: "active" });
   renderChat();
   expect(await screen.findByText(/drafting is currently disabled/i)).toBeInTheDocument();
+});
+
+class FakeESNoop {
+  onerror = null; onopen: (() => void) | null = null; close = vi.fn();
+  addEventListener() {}
+  constructor(_u: string) {}
+}
+
+// Stateful mock: after a SUCCESSFUL cancel the server read-model drops the
+// in-flight job (running_job_id → null), so the post-cancel refetch cannot
+// re-set the local jobId. This lets the {cancelled:true} test prove the
+// success handler's setJobId(null) actually ran (the effect never clears
+// jobId on its own — it only sets it when running_job_id is truthy).
+function mockInFlightOwner(cancelled: boolean) {
+  let cleared = false;
+  vi.stubGlobal("EventSource", FakeESNoop as unknown as typeof EventSource);
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/turns"))
+      return Promise.resolve({ data: { turns: [], can_send: true, needs_disclosure: false, phase: "active", is_owner: true, disabled_reason: null, running_job_id: cleared ? null : "job-1" }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    return Promise.resolve({ data: null, error: undefined });
+  }) as never);
+  vi.spyOn(clientMod.api, "POST").mockImplementation(((path: string) => {
+    if (path.endsWith("/cancel")) {
+      if (cancelled) cleared = true;
+      return Promise.resolve({ data: { cancelled }, error: undefined });
+    }
+    return Promise.resolve({ data: null, error: undefined });
+  }) as never);
+}
+
+it("owner sees Cancel while in-flight; {cancelled:true} clears the in-flight state", async () => {
+  mockInFlightOwner(true);
+  renderChat();
+  fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+  await waitFor(() =>
+    expect(clientMod.api.POST).toHaveBeenCalledWith(
+      expect.stringContaining("/cancel"),
+      expect.objectContaining({ params: { path: { workspace_id: "ws-1", job_id: "job-1" } } }),
+    ),
+  );
+  // Cancel disappears ONLY if setJobId(null) ran AND the refetch returned
+  // running_job_id:null — proving the local clear (spec §4.3).
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument(),
+  );
+  expect(screen.queryByText(/too late/i)).not.toBeInTheDocument();
+});
+
+it("{cancelled:false} shows the too-late note and KEEPS the turn in-flight", async () => {
+  mockInFlightOwner(false);
+  renderChat();
+  fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+  expect(await screen.findByText(/too late/i)).toBeInTheDocument();
+  // jobId retained → the Cancel control stays (composer remains disabled), per spec §4.3.
+  expect(screen.getByRole("button", { name: /^cancel$/i })).toBeInTheDocument();
+});
+
+it("a viewer does not see the Cancel control", async () => {
+  vi.stubGlobal("EventSource", FakeESNoop as unknown as typeof EventSource);
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/turns"))
+      return Promise.resolve({ data: { turns: [], can_send: false, needs_disclosure: false, phase: "active", is_owner: false, disabled_reason: "not_owner", running_job_id: "job-1" }, error: undefined });
+    return Promise.resolve({ data: [], error: undefined });
+  }) as never);
+  renderChat();
+  expect(await screen.findByText(/read-only/i)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument();
 });

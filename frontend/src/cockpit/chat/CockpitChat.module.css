@@ -135,3 +135,11 @@
 .send:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .error { color: var(--app-bad); font-size: 0.85em; margin: 0; }
+
+.cancelRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.4rem;
+  flex-wrap: wrap;
+}
