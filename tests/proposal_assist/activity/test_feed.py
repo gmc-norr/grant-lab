@@ -36,9 +36,21 @@ def test_excluded_and_unknown_kinds_produce_no_rows():
 
 def test_collapse_same_actor_same_heading_edits():
     events = [
-        _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=0),
-        _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=10),
-        _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=20),
+        _ev(
+            "user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=0
+        ),
+        _ev(
+            "user_edit",
+            actor_id=1,
+            payload={"heading": "Methods", "artifact": "draft"},
+            secs_ago=10,
+        ),
+        _ev(
+            "user_edit",
+            actor_id=1,
+            payload={"heading": "Methods", "artifact": "draft"},
+            secs_ago=20,
+        ),
     ]
     rows = build_activity_feed(events, {1: "a@ki.se"})
     assert len(rows) == 1
@@ -83,9 +95,16 @@ def test_blank_heading_run_uses_artifact_fallback():
 
 def test_run_broken_by_interleaving_preserves_chronology():
     events = [
-        _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=0),
+        _ev(
+            "user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=0
+        ),
         _ev("cloud_turn_completed", actor_id=1, secs_ago=10),
-        _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}, secs_ago=20),
+        _ev(
+            "user_edit",
+            actor_id=1,
+            payload={"heading": "Methods", "artifact": "draft"},
+            secs_ago=20,
+        ),
     ]
     rows = build_activity_feed(events, {1: "a@ki.se"})
     assert [r.category for r in rows] == ["edit", "turn", "edit"]
@@ -109,9 +128,18 @@ def test_render_and_target_table():
         "cloud_turn_completed": ("ran the assistant", None),
         "cloud_turn_failed": ("had an assistant turn fail", None),
         "cloud_turn_cancelled": ("cancelled an assistant turn", None),
-        "review_run_triggered": ("started a panel review", {"top_tab": "review", "bottom_tab": None}),
-        "uncited_claims_run_triggered": ("started an uncited-claims check", {"top_tab": None, "bottom_tab": "problems"}),
-        "uncited_claim_dismissed": ("dismissed an uncited claim", {"top_tab": None, "bottom_tab": "problems"}),
+        "review_run_triggered": (
+            "started a panel review",
+            {"top_tab": "review", "bottom_tab": None},
+        ),
+        "uncited_claims_run_triggered": (
+            "started an uncited-claims check",
+            {"top_tab": None, "bottom_tab": "problems"},
+        ),
+        "uncited_claim_dismissed": (
+            "dismissed an uncited claim",
+            {"top_tab": None, "bottom_tab": "problems"},
+        ),
         "user_claim_dismissed": ("dismissed a flagged claim", None),
         "reference.added": ("added a reference", None),
         "reference.metadata_approved": ("approved reference metadata", None),
@@ -121,7 +149,10 @@ def test_render_and_target_table():
         "reference.reprocessed": ("reprocessed a reference", None),
         "reference.tombstoned": ("removed a reference", None),
         "reference.deleted": ("deleted a reference", None),
-        "rubric_initialized": ("set up the funder criteria", {"top_tab": "spec", "bottom_tab": None}),
+        "rubric_initialized": (
+            "set up the funder criteria",
+            {"top_tab": "spec", "bottom_tab": None},
+        ),
         # rubric_edited with actor_id set (the payload edited_by_user_id fallback is
         # exercised separately by test_actor_resolution_variants + the endpoint test).
         "rubric_edited": ("edited the funder criteria", {"top_tab": "spec", "bottom_tab": None}),
@@ -153,7 +184,13 @@ def test_actor_resolution_variants():
 def test_collapsed_row_id_and_time_come_from_most_recent():
     newest = uuid.uuid4()
     events = [
-        _ev("user_edit", actor_id=1, payload={"heading": "M", "artifact": "draft"}, secs_ago=0, ev_id=newest),
+        _ev(
+            "user_edit",
+            actor_id=1,
+            payload={"heading": "M", "artifact": "draft"},
+            secs_ago=0,
+            ev_id=newest,
+        ),
         _ev("user_edit", actor_id=1, payload={"heading": "M", "artifact": "draft"}, secs_ago=30),
     ]
     row = build_activity_feed(events, {1: "a@ki.se"})[0]
@@ -164,9 +201,22 @@ def test_collapsed_row_id_and_time_come_from_most_recent():
 def test_member_added_renders_under_member_category_with_email():
     from call_manager.proposal_assist.activity.feed import build_activity_feed
 
-    ev = _ev("member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@ki.se"})
+    ev = _ev(
+        "member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@ki.se"}
+    )
     rows = build_activity_feed([ev], {1: "owner@ki.se"})
     assert len(rows) == 1
     assert rows[0].category == "member"
     assert "alice@ki.se" in rows[0].summary
+    assert rows[0].actor == "owner@ki.se"
+
+
+def test_workspace_activated_renders_under_rubric_category():
+    from call_manager.proposal_assist.activity.feed import build_activity_feed
+
+    ev = _ev("workspace_activated", actor_id=1, payload={})
+    rows = build_activity_feed([ev], {1: "owner@ki.se"})
+    assert len(rows) == 1
+    assert rows[0].category == "rubric"
+    assert "activated the workspace" in rows[0].summary
     assert rows[0].actor == "owner@ki.se"

@@ -80,6 +80,7 @@ _RENDER: dict[str, tuple[str, str, ActivityTarget | None]] = {
     "reference.deleted": ("reference", "deleted a reference", None),
     "rubric_initialized": ("rubric", "set up the funder criteria", _SPEC),
     "rubric_edited": ("rubric", "edited the funder criteria", _SPEC),
+    "workspace_activated": ("rubric", "activated the workspace", None),
     "member_added": ("member", "added collaborator", None),
     "member_removed": ("member", "removed collaborator", None),
 }
