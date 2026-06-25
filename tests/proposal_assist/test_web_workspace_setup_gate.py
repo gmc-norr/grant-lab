@@ -9,8 +9,6 @@ The superseded Jinja poll endpoint (GET /setup-status) and rubric-review form
 
 from __future__ import annotations
 
-import pytest
-
 
 def test_post_turn_during_setup_returns_409(
     client_authed_owner,
