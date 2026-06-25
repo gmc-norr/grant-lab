@@ -32,7 +32,7 @@ from call_manager.proposal_assist.references.ingest import (
 )
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
 from call_manager.proposal_assist.web._perms import require_member
-from call_manager.proposal_assist.web.references import (
+from call_manager.proposal_assist.references.uploads import (
     _ALLOWED_MIMES,
     _MAX_BYTES,
     _read_capped,
@@ -271,7 +271,7 @@ def api_approve_metadata(
     from sqlalchemy.exc import IntegrityError
 
     from call_manager.proposal_assist.references.csl import generate_citekey
-    from call_manager.proposal_assist.web.references import _parse_authors
+    from call_manager.proposal_assist.references.uploads import _parse_authors
 
     sf = request.app.state.session_factory
     with sf() as session:
