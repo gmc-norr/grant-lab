@@ -31,6 +31,14 @@ function draftPayload(canEdit: boolean) {
 
 function renderCockpit(url = "/cockpit/ws-1") {
   const qc = new QueryClient();
+  // Pre-seed cockpit-meta so useCockpitMeta() resolves synchronously from cache on
+  // the initial render. Without this, Cockpit shows a loading guard until the first
+  // GET resolves, causing CockpitSidebar's useDraft to fire before DraftPanel mounts
+  // — the draft data is then stale by the time DraftPanel subscribes and React Query
+  // refetches, consuming an extra draft-sequence slot. The workspace id is "ws-1"
+  // (the default URL param), matching the query key useCockpitMeta uses.
+  const urlId = url.split("/").pop()?.split("?")[0] ?? "ws-1";
+  qc.setQueryData(["cockpit-meta", urlId], activeMeta().data);
   return {
     qc,
     ...render(
@@ -106,6 +114,24 @@ function sourcePayload(over: Record<string, unknown> = {}) {
   };
 }
 
+// Active-phase cockpit-meta response. Existing active-phase tests include this in their
+// mocks so the cockpit-meta loading guard in Cockpit.tsx does not add a loading cycle
+// that would cause CockpitSidebar's useDraft to consume a draft-sequence slot before
+// DraftPanel mounts.
+function activeMeta() {
+  return {
+    data: {
+      workspace_title: "W",
+      workspace_deadline: null,
+      current_phase: "active",
+      role: "owner",
+      spec_locked: false,
+      member_count: 1,
+    },
+    error: undefined,
+  };
+}
+
 // Route GET by path: /draft -> draft, /source -> source. The whole impl is cast
 // `as never` because openapi-fetch's GET has a complex generic signature that a
 // plain (path: string) lambda doesn't structurally satisfy under tsc.
@@ -113,7 +139,9 @@ function mockGetByPath(draft: unknown, source: unknown) {
   return vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) =>
     path.endsWith("/source")
       ? Promise.resolve(source)
-      : Promise.resolve(draft)) as never);
+      : path.endsWith("/cockpit-meta")
+        ? Promise.resolve(activeMeta())
+        : Promise.resolve(draft)) as never);
 }
 
 // Like mockGetByPath but routes /source by the evidence_id path param (openapi-
@@ -124,6 +152,7 @@ function mockGetByEv(draft: unknown, sourceByEv: Record<string, unknown>) {
     path: string,
     init?: { params?: { path?: { evidence_id?: string } } },
   ) => {
+    if (path.endsWith("/cockpit-meta")) return Promise.resolve(activeMeta());
     if (path.endsWith("/source")) {
       const ev = init?.params?.path?.evidence_id ?? "";
       return Promise.resolve(sourceByEv[ev]);
@@ -137,9 +166,15 @@ function mockGetByEv(draft: unknown, sourceByEv: Record<string, unknown>) {
 // (InboxPanel + badges) and /spec (InboxPanel.useSpec) — give each a fixed payload so
 // they NEVER consume a draft-sequence slot. Only the /draft counter advances, so the
 // draft sequence the test depends on is fully decoupled from the bottom-panel calls.
+// The cockpit-meta branch is explicit to avoid the fallthrough from consuming a draft-
+// sequence slot via CockpitSidebar's useDraft (which runs concurrently with the
+// cockpit-meta loading guard in Cockpit.tsx).
 function mockDraftSequenceByPath(firstDraft: unknown, restDraft: unknown) {
   let draftCalls = 0;
   return vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/cockpit-meta")) {
+      return Promise.resolve(activeMeta());
+    }
     if (path.endsWith("/proposed-changes")) {
       return Promise.resolve({ data: { items: [] }, error: undefined });
     }
@@ -489,6 +524,7 @@ it("Next citation refetches and shows the next reference cite in the peek", asyn
 
 it("select-to-cite: selecting a saved claim opens the composer and adds a citation", async () => {
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/cockpit-meta")) return Promise.resolve(activeMeta());
     if (path.endsWith("/references")) {
       return Promise.resolve({ data: [{ id: "r1", citekey: "k", title: "Smith", kind: "paper", text_status: "done" }], error: undefined });
     }
@@ -554,6 +590,7 @@ it("select-to-cite gate: dirtying the section disables Cite (must save first)", 
 
 it("clicking the Spec tab switches the artifact view and sets ?tab=spec", async () => {
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/cockpit-meta")) return Promise.resolve(activeMeta());
     if (path.endsWith("/spec")) {
       return Promise.resolve({
         data: { head: "a".repeat(40), can_edit: true, sections: [{ index: 0, heading: "", text: "", sha: "s0" }], locked: false },
@@ -676,6 +713,7 @@ it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no 
     init?: { params?: { path?: { workspace_id?: string } } },
   ) => {
     const tag = (init?.params?.path?.workspace_id ?? "") === "ws-b" ? "B" : "A";
+    if (path.endsWith("/cockpit-meta")) return Promise.resolve(activeMeta());
     if (path.endsWith("/draft"))
       return Promise.resolve({
         data: {
@@ -706,6 +744,12 @@ it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no 
     );
   }
   const qc = new QueryClient();
+  // Prime cockpit-meta for both workspaces so the cockpit-meta loading guard in
+  // Cockpit.tsx resolves synchronously from cache (no loading cycle) on both the
+  // initial render (ws-a) and after the param-only navigation (ws-b).
+  const metaValue = activeMeta().data;
+  qc.setQueryData(["cockpit-meta", "ws-a"], metaValue);
+  qc.setQueryData(["cockpit-meta", "ws-b"], metaValue);
   // Prime ws-b's draft so the navigation is WARM: useDraft("ws-b") returns cached data
   // immediately (isLoading=false), so DraftPanel does NOT pass through its loading guard
   // — the editor stays mounted across the param change. THAT is the path the per-workspace
@@ -737,4 +781,27 @@ it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no 
   // B's content shows and A's buffered "LEAK" did NOT carry across.
   await waitFor(() => expect(document.querySelector(".cm-content")?.textContent).toContain("preamble B"));
   expect(document.querySelector(".cm-content")?.textContent).not.toContain("LEAK");
+});
+
+it("renders the setup view when the workspace is in setup phase", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "setup", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
+    if (path.endsWith("/setup-status"))
+      return Promise.resolve({ data: { status: "queued", last_error: null }, error: undefined });
+    return Promise.resolve({ data: [], error: undefined });
+  }) as never);
+  // Use a fresh QueryClient WITHOUT pre-seeded cockpit-meta so the mock controls what
+  // phase is returned, allowing useCockpitMeta to read "setup" from the mock.
+  const qc = new QueryClient();
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+        <Routes>
+          <Route path="/cockpit/:id" element={<Cockpit />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText(/setting up your workspace/i)).toBeInTheDocument();
 });

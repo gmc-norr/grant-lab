@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 
+import { useCockpitMeta } from "../api/workspace";
 import { BottomPanel } from "../cockpit/BottomPanel";
 import { useCockpitNav } from "../cockpit/cockpitNav";
 import { DraftPanel } from "../cockpit/DraftPanel";
@@ -8,9 +9,11 @@ import type { BottomTab, NavTarget } from "../cockpit/nav";
 import { ReviewPanel } from "../cockpit/ReviewPanel";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { SpecPanel } from "../cockpit/SpecPanel";
+import { WorkspaceSetup } from "../cockpit/WorkspaceSetup";
 
 export function Cockpit() {
   const { id = "" } = useParams();
+  const meta = useCockpitMeta(id);
   // Artifact tab + active section live in the URL (?tab/?sec) so the shell sidebar
   // Outline and the editor stay in sync across the AppShell boundary. The bottom
   // region (tab + collapse) stays local — it never crosses that boundary.
@@ -25,6 +28,11 @@ export function Cockpit() {
       setCollapsed(false);
     }
   };
+
+  // Branch AFTER all hooks. The shell sidebar/right-pane are mounted by AppShell
+  // from the route handle (router.tsx) and handle setup themselves (Task 10).
+  if (meta.isLoading || !meta.data) return <p className="cockpit-loading">Loading…</p>;
+  if (meta.data.current_phase === "setup") return <WorkspaceSetup id={id} />;
 
   return (
     <div className="cockpit-shell">
