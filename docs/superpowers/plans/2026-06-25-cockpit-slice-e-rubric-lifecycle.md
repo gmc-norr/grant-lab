@@ -172,7 +172,7 @@ class CriterionOut(BaseModel):
 class RubricOut(BaseModel):
     criteria: list[CriterionOut]
     funder_notes: str | None
-    updated_at: object  # datetime; serialized to ISO by FastAPI
+    updated_at: object  # a datetime; FastAPI serializes it to ISO at runtime
 
 
 class SetupStatusOut(BaseModel):
@@ -217,7 +217,7 @@ def get_setup_status(
         )
 ```
 
-> `RubricOut.updated_at` is typed `object` to avoid importing `datetime` in this task (kept F401-clean); FastAPI serializes the `datetime` value to ISO and OpenAPI types it as a string. If the reviewer prefers an explicit `datetime`, that import is fine — but then keep it used.
+> `RubricOut.updated_at` is typed `object` to avoid importing `datetime` in this task (kept F401-clean). At runtime FastAPI serializes the `datetime` value to an ISO string; **in `schema.gen.ts` openapi-typescript types this field as `unknown`** (an empty schema, not `string`). That is harmless — NO consumer reads `rubric.updated_at` as a string (WorkspaceSetup uses only `criteria`/`funder_notes`). The Task 4 schema-diff check should therefore expect `updated_at?: unknown`, not a string. (If a reviewer prefers a typed `datetime` → `string`, importing `datetime` and annotating `updated_at: datetime` is also fine, but is not required.)
 
 - [ ] **Step 4: Mount the router** — in `src/call_manager/web/api/__init__.py`, add `rubric` to the import line and include after `settings`:
 
@@ -981,23 +981,39 @@ it("renders the setup view when the workspace is in setup phase", async () => {
 
 - [ ] **Step 2: Run to verify it fails** — `pnpm vitest run src/routes/Cockpit.test.tsx` → FAIL (no setup branch).
 
-- [ ] **Step 3: Implement** — in `frontend/src/routes/Cockpit.tsx`, add the phase branch at the top of `Cockpit()` (keep the rest unchanged):
+- [ ] **Step 3: Implement** — in `frontend/src/routes/Cockpit.tsx`, call **all** hooks unconditionally at the top, THEN branch. **Rules of Hooks:** the early returns must come AFTER every existing hook (`useCockpitNav`, the two `useState`), never before. Authoritative structure (keep the existing tab/nav JSX body verbatim as the final return):
 
 ```tsx
 import { useCockpitMeta } from "../api/workspace";
 import { WorkspaceSetup } from "../cockpit/WorkspaceSetup";
-// ...
+// ...existing imports...
+
 export function Cockpit() {
   const { id = "" } = useParams();
   const meta = useCockpitMeta(id);
-  // Branch the MAIN column on phase. The shell sidebar/right-pane are mounted by
-  // AppShell from the route handle (router.tsx) and handle setup themselves (Task 10).
+  const { tab, setTab, navigate } = useCockpitNav();   // existing — keep
+  const [bottomTab, setBottomTab] = useState<BottomTab>("inbox");  // existing — keep
+  const [collapsed, setCollapsed] = useState(false);   // existing — keep
+
+  const onNavigate = (target: NavTarget) => {           // existing — keep
+    navigate(target);
+    if (target.bottom_tab) { setBottomTab(target.bottom_tab); setCollapsed(false); }
+  };
+
+  // Branch AFTER all hooks. The shell sidebar/right-pane are mounted by AppShell
+  // from the route handle (router.tsx) and handle setup themselves (Task 10).
   if (meta.isLoading || !meta.data) return <p className="cockpit-loading">Loading…</p>;
   if (meta.data.current_phase === "setup") return <WorkspaceSetup id={id} />;
-  // ...existing tab/nav/panel body unchanged below...
+
+  return (
+    <div className="cockpit-shell">
+      {/* ...existing tablist + panels + BottomPanel body, unchanged... */}
+    </div>
+  );
+}
 ```
 
-> Keep the existing `useCockpitNav`/`useState`/panels code exactly as-is, after the branch. The two early returns precede the existing hook calls — to satisfy the Rules of Hooks, place the existing `const { tab, ... } = useCockpitNav()` etc. ABOVE the branch (call all hooks unconditionally), then branch on `meta` for the returned JSX. Read the live file and order accordingly: hooks first, then `if (loading) … if (setup) … return <existing/>`.
+> Read the live file (it already declares those exact hooks at lines 13-27) and simply move the two new lines (`useCockpitMeta` + the two `if` returns) into this order. Do NOT place any `if (...) return` above `useCockpitNav`/`useState`.
 
 - [ ] **Step 4: Run test + type-check + the routes regression** — `pnpm vitest run src/routes/Cockpit.test.tsx` ; `pnpm vitest run src/router.test.tsx` (drift guard) ; `pnpm exec tsc --noEmit` → PASS + 0.
 
@@ -1021,14 +1037,26 @@ git commit -m "feat(spa): cockpit branches to WorkspaceSetup in setup phase"
 **Interfaces:**
 - Produces: every newly-created workspace AND every setup-phase list row routes to `/cockpit/:id` (React), not the Jinja `/workspaces/:id`.
 
-- [ ] **Step 1: Write the failing tests** — read both test files. For `WorkspaceCreate.test.tsx`, change the post-create assertion from `window.location.assign('/workspaces/<id>')` to a react-router navigation to `/cockpit/<id>` (the file likely spies `window.location.assign` or checks the URL — switch it to assert `/cockpit/<id>`; use the file's existing router/render harness). For `WorkspaceList.test.tsx`, assert a setup-phase row renders a `<Link>`/anchor to `/cockpit/<id>` (not `/workspaces/<id>`).
+- [ ] **Step 1: Write the failing tests** — read both test files first.
+
+For `WorkspaceCreate.test.tsx`: the live file stubs `window.location.assign` via a local `stubLocation()` helper (lines 13-21) and asserts `loc.assign(...)` (line 42). After the impl switches to react-router `useNavigate()`, `window.location.assign` is NEVER called — so **remove `stubLocation()` and the `loc.assign` assertion** (they become dead). Assert navigation via the `MemoryRouter` the test harness already mounts, with a location probe reading `useLocation().pathname` (navigation changes the PATHNAME, not the search string):
 
 ```tsx
-// WorkspaceCreate.test.tsx — replace the old assign('/workspaces/..') expectation:
-expect(navigateSpy).toHaveBeenCalledWith("/cockpit/ws-new");  // however the file captures navigation
+import { Route, Routes, useLocation } from "react-router-dom";
+// (whatever render helper the file uses — keep it; just add the probe + a /cockpit/:id sink route)
+function LocationProbe() {
+  return <span data-testid="loc">{useLocation().pathname}</span>;
+}
+// render WorkspaceCreate + <LocationProbe/> (and a <Route path="/cockpit/:id"> sink) inside the
+// existing MemoryRouter, fill the form, submit, then:
+await waitFor(() => expect(screen.getByTestId("loc")).toHaveTextContent("/cockpit/new-9"));
 ```
+
+> Use whatever id the file's `useCreateWorkspace` mock returns (the existing test uses `new-9`). The probe pattern mirrors `Cockpit.test.tsx:57-59` / `cockpit/CockpitSidebar.test.tsx:42-44` (which read `.search`; here read `.pathname`).
+
+For `WorkspaceList.test.tsx`: assert a setup-phase row renders a `<Link>`/anchor to `/cockpit/<id>` (not `/workspaces/<id>`):
+
 ```tsx
-// WorkspaceList.test.tsx — setup row links into the cockpit:
 const link = screen.getByRole("link", { name: /setting-up workspace title/i });
 expect(link).toHaveAttribute("href", "/cockpit/ws-setup");
 ```
@@ -1106,7 +1134,9 @@ it("owner can open Edit rubric and save (active phase)", async () => {
 });
 ```
 
-> Match the live file's `api.GET` mock + `renderSidebar` helper; the Edit-rubric control and modal must only appear for `role==="owner" && current_phase==="active"`. The modal is Mantine → the file already renders through providers (Phase-3 tests); confirm `renderSidebar` supplies `MantineProvider` (it should, via `renderWithProviders`-style setup).
+> Match the live file's `api.GET` mock + `renderSidebar` helper; the Edit-rubric control + modal must only appear for `role==="owner" && current_phase==="active"`.
+>
+> **REQUIRED harness change (blocker if skipped):** `CockpitSidebar` uses ZERO Mantine components today, so the live `renderSidebar` helper (`CockpitSidebar.test.tsx:45-63`) wraps only `QueryClientProvider` + `MemoryRouter` + `<Routes><Route path="/cockpit/:id">` — there is **NO `MantineProvider`**. The new Task-10 Mantine `Modal`/`Button` throw `MantineProvider was not found` the instant the test opens the modal. **Add `MantineProvider` to the EXISTING `renderSidebar` wrapper** — `import { MantineProvider } from "@mantine/core"; import { theme } from "../theme/theme";` then wrap: `<MantineProvider theme={theme} defaultColorScheme="dark"><QueryClientProvider>…existing…</QueryClientProvider></MantineProvider>`. **Keep the `<Routes><Route path="/cockpit/:id">` structure** so `useParams().id` still resolves to `"ws-1"` (`CockpitSidebar.tsx:32`). Do **NOT** switch to `renderWithProviders` from `test-utils` — it mounts a bare `<MemoryRouter>` with no `:id` route, so `useParams()` returns `{}` and `id` falls back to `""`, breaking the sidebar's queries.
 
 - [ ] **Step 2: Run to verify it fails** — `pnpm vitest run src/cockpit/CockpitSidebar.test.tsx` → FAIL (no Edit-rubric control).
 
@@ -1189,7 +1219,7 @@ git commit -m "feat(spa): setup-aware chat copy + owner Edit-rubric modal + retr
 
 **Files:**
 - Delete: `src/call_manager/proposal_assist/web/rubric_review.py`, `src/call_manager/web/templates/proposal_assist/rubric_review.html`, `src/call_manager/web/templates/proposal_assist/partials/setup_status.html`
-- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (remove `get_setup_status` route + the `setup_status`/`setup_last_error` computation in `get_workspace_main`), `src/call_manager/proposal_assist/web/__init__.py` (drop the `rubric_review` router registration), `src/call_manager/web/templates/proposal_assist/workspace_main.html` (setup branch → notice)
+- Modify: `src/call_manager/proposal_assist/web/workspaces.py` (remove `get_setup_status` route + the `setup_status`/`setup_last_error` computation in `get_workspace_main`), **`src/call_manager/main.py`** (drop the `rubric_review` import + `include_router` — the router is registered HERE, NOT in the empty `proposal_assist/web/__init__.py`), `src/call_manager/web/templates/proposal_assist/workspace_main.html` (setup branch → notice)
 - Delete: `tests/proposal_assist/test_rubric_review_endpoint.py`
 - Modify: `tests/proposal_assist/test_phase0_e2e.py`, `tests/proposal_assist/test_web_workspace_setup_gate.py` (re-point activation to `/api`)
 
@@ -1198,13 +1228,25 @@ git commit -m "feat(spa): setup-aware chat copy + owner Edit-rubric modal + retr
 - [ ] **Step 1: Find every reference** — establish what imports the deleted symbols:
 
 ```bash
-grep -rn "rubric_review\|rubric-review\|setup_status\|setup-status\|setup_last_error" src/call_manager/proposal_assist/web/ src/call_manager/web/templates/ src/call_manager/web/__init__.py src/call_manager/proposal_assist/web/__init__.py
+grep -rn "rubric_review\|rubric-review\|setup_status\|setup-status\|setup_last_error" src/call_manager/main.py src/call_manager/proposal_assist/web/ src/call_manager/web/templates/ src/call_manager/web/__init__.py
 grep -rln "rubric-review\|/rubric-review\|get_setup_status\|setup-status" tests/
 ```
+> The registration lives in `src/call_manager/main.py` (lines 58-59 import `rubric_review_router`, line 552 `app.include_router(...)`) — NOT in `proposal_assist/web/__init__.py` (which is empty). If the import at `main.py:58` is left after deleting `rubric_review.py`, the whole app `ModuleNotFoundError`s and every `build_app`/`create_app` test errors at import.
 
-- [ ] **Step 2: Re-point the closed-loop tests FIRST** — in `tests/proposal_assist/test_phase0_e2e.py` and `tests/proposal_assist/test_web_workspace_setup_gate.py`, replace the activation call `POST /workspaces/{id}/rubric-review` (form) with `POST /api/workspaces/{id}/activate` (JSON body `{"criteria": [...current...], "funder_notes": ...}`). Keep these files' assertions that the workspace reaches `current_phase=="active"` and the setup job is `done`. **Preserve** the `test_web_workspace_setup_gate.py` assertions that cover the RETAINED Jinja behavior (the `workspace_main` setup notice + that a turn-submit is rejected in setup) — update them to the new notice text (Step 4), do not delete them. Run them RED first (routes still exist but you've switched the call) to confirm the new endpoint drives the loop.
+- [ ] **Step 2: Migrate the Jinja tests — explicit disposition (NOT blanket "preserve")**
 
-- [ ] **Step 3: Delete the Jinja routes/templates** — remove `rubric_review.py`, both templates, the `get_setup_status` handler in `workspaces.py` (lines 652-680), and in `get_workspace_main` drop the `if ws.current_phase == "setup": …setup_status…` block (615-624) + the `setup_status`/`setup_last_error` context keys (646-647). Remove the `rubric_review` router include from `proposal_assist/web/__init__.py`. Delete `tests/proposal_assist/test_rubric_review_endpoint.py`.
+`tests/proposal_assist/test_phase0_e2e.py`: replace its activation call `POST /workspaces/{id}/rubric-review` (form) with `POST /api/workspaces/{id}/activate` (JSON `{"criteria": [...current rubric...], "funder_notes": ...}`). Keep the assertions that the workspace reaches `current_phase=="active"` + the setup job is `done`.
+
+`tests/proposal_assist/test_web_workspace_setup_gate.py` is heavily coupled to the deleted route/markup (~13 tests directly GET `/setup-status` or assert `id="setup-status"`). Handle each group explicitly:
+- **DELETE** every `test_setup_status_*` test that calls the deleted `GET /workspaces/{id}/setup-status` (lines ~82-203: `running_polls`, `missing_job_falls_back`, `waiting_links_rubric`, `failed_owner_sees_error`, `done_links_back`, `viewer_waiting_keeps_polling`, `failed_viewer_hidden_error`, `non_member_403_and_missing_404`) **and** both card-parity tests (`test_setup_card_inline_and_poll_endpoint_render_identically` ~:302, `test_setup_card_parity_for_viewer` ~:321) — they test the deleted poll endpoint + inline-vs-poll parity, both gone.
+- **REWRITE** the `test_main_view_*` setup assertions to the NEW static notice: in `test_main_view_during_setup_shows_card_not_composer` (~:206) and `test_main_view_viewer_during_setup_sees_card_without_rubric_link` (~:244), change `assert 'id="setup-status"' in r.text` → `assert "Open it in the cockpit" in r.text` + `assert f"/cockpit/{wsid}" in r.text`; in `test_main_view_waiting_shows_rubric_link` (~:218) change the `/rubric-review` link assertion to the cockpit-notice assertion. Keep each `assert 'id="composer"' not in r.text`.
+- **REWRITE** `test_create_confirm_composer_closed_loop` (~:352): replace the `id="setup-status"` assertion (~:373) with the notice assertion, and replace the form `POST /workspaces/{id}/rubric-review` (~:380) with JSON `POST /api/workspaces/{id}/activate` (it already seeds `rubric_criteria` + a waiting job). Keep the post-activate `assert 'id="setup-status"' not in after.text`.
+- **KEEP unchanged**: `test_post_turn_during_setup_returns_409` (~:13) and `test_post_turn_after_setup_proceeds` (~:38) — they cover the RETAINED `workspaces.py:791` setup turn-409 guard; `test_main_view_after_setup_shows_composer_not_card` (~:228) already asserts the active composer.
+- **UPDATE** the module docstring (lines ~3-5) describing the now-deleted poll card.
+
+Where feasible, run the `/api/activate`-migrated tests RED first (before deleting the routes) to confirm the new endpoint drives the loop.
+
+- [ ] **Step 3: Delete the Jinja routes/templates** — remove `rubric_review.py`, both templates, the `get_setup_status` handler in `workspaces.py` (lines 652-680), and in `get_workspace_main` drop the `if ws.current_phase == "setup": …setup_status…` block (615-624) + the `setup_status`/`setup_last_error` context keys (646-647). **In `src/call_manager/main.py`, delete the `rubric_review` import (lines 58-59: `from call_manager.proposal_assist.web.rubric_review import (router as rubric_review_router,)`) AND the `app.include_router(rubric_review_router)` line (552)** — the registration lives there, not in the empty `proposal_assist/web/__init__.py`. Delete `tests/proposal_assist/test_rubric_review_endpoint.py`.
 
 - [ ] **Step 4: Convert the `workspace_main.html` setup branch to a notice** — replace the `{% if workspace.current_phase == 'setup' %}{% include "...setup_status.html" %}` (lines 39-40) with a static link (so the page stays reachable but inert for setup, never falling through to the 409'd composer):
 
@@ -1222,7 +1264,7 @@ grep -rln "rubric-review\|/rubric-review\|get_setup_status\|setup-status" tests/
 ```bash
 uv run pytest tests/proposal_assist/test_phase0_e2e.py tests/proposal_assist/test_web_workspace_setup_gate.py -q
 uv run pytest tests/proposal_assist/ -k "setup or workspace_main or activate" -q
-uv run ruff check src/call_manager/proposal_assist/web/workspaces.py src/call_manager/proposal_assist/web/__init__.py
+uv run ruff check src/call_manager/proposal_assist/web/workspaces.py src/call_manager/main.py
 ```
 Expected: green; no import errors from the deletions.
 
