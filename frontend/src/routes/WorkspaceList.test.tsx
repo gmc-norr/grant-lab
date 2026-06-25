@@ -26,14 +26,14 @@ it("an active workspace links to the React cockpit", async () => {
   expect(link).toHaveAttribute("href", "/cockpit/ws-1");
 });
 
-it("a setup workspace links to the Jinja setup flow and is marked 'Setting up'", async () => {
+it("a setup workspace links to the React cockpit and is marked 'Setting up'", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: [wsItem({ id: "ws-2", title: "New one", current_phase: "setup", is_owner: false, linked_call_title: null })],
+    data: [wsItem({ id: "ws-setup", title: "Setting-up workspace title", current_phase: "setup", is_owner: false, linked_call_title: null })],
     error: undefined,
   } as never);
   renderWithProviders(<WorkspaceList />, { route: "/cockpit" });
-  const link = await screen.findByRole("link", { name: "New one" });
-  expect(link).toHaveAttribute("href", "/workspaces/ws-2");
+  const link = await screen.findByRole("link", { name: /setting-up workspace title/i });
+  expect(link).toHaveAttribute("href", "/cockpit/ws-setup");
   expect(screen.getByText("Setting up")).toBeInTheDocument();
   expect(screen.getByText("Shared")).toBeInTheDocument(); // viewer-of badge
 });

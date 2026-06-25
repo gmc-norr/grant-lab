@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { useCreateWorkspace } from "../api/workspace";
 import styles from "./WorkspaceCreate.module.css";
@@ -15,6 +15,7 @@ export function WorkspaceCreate() {
   const [title, setTitle] = useState(callTitle);
   const [deadline, setDeadline] = useState("");
   const create = useCreateWorkspace();
+  const navigate = useNavigate();
 
   // From-call only: without a call there is nothing to draft against (Phase-0
   // requires a call). Guard a direct hit / refresh-without-params.
@@ -36,8 +37,8 @@ export function WorkspaceCreate() {
       deadline: deadline || undefined,
       profile_id: profileId,
     });
-    // Hand off to the Jinja setup/rubric flow (not SPA-served) — full page nav.
-    window.location.assign(`/workspaces/${out.id}`);
+    // Setup + rubric now live in the React cockpit (Slice E).
+    navigate(`/cockpit/${out.id}`);
   }
 
   return (

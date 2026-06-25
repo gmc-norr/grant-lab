@@ -62,8 +62,8 @@ export function useWorkspaces(status: string | null) {
 }
 
 /** POST /api/workspaces — from-call create. Returns { id }. No invalidation:
- *  after create we leave the SPA for the Jinja setup page; the list refetches on
- *  next mount. */
+ *  after create the caller navigates to the in-cockpit setup view; the list
+ *  refetches on next mount. */
 export function useCreateWorkspace() {
   return useMutation({
     mutationFn: async (vars: {

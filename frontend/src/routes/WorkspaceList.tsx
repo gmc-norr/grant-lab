@@ -16,22 +16,15 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 function WorkspaceRow({ ws }: { ws: WsItem }) {
-  // Setup-phase workspaces aren't cockpit-ready (no repo yet); the setup + rubric
-  // flow is still Jinja (Slice E) — full-page hand-off via <a>. Active workspaces
-  // open the React cockpit.
+  // Both setup- and active-phase workspaces open in the React cockpit (Slice E
+  // brought the setup + rubric flow in-cockpit). The "Setting up" badge marks setup.
   const setup = ws.current_phase === "setup";
   return (
     <li className={styles.row}>
       <div className={styles.body}>
-        {setup ? (
-          <a className={styles.title} href={`/workspaces/${ws.id}`}>
-            {ws.title}
-          </a>
-        ) : (
-          <Link className={styles.title} to={`/cockpit/${ws.id}`}>
-            {ws.title}
-          </Link>
-        )}
+        <Link className={styles.title} to={`/cockpit/${ws.id}`}>
+          {ws.title}
+        </Link>
         <div className={styles.meta}>
           <span className={styles.status}>{STATUS_LABEL[ws.status] ?? ws.status}</span>
           {ws.linked_call_title && (
