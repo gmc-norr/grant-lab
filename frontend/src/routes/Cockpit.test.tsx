@@ -1,3 +1,4 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -7,6 +8,7 @@ import * as clientMod from "../api/client";
 import { CockpitSidebar } from "../cockpit/CockpitSidebar";
 import { resetEditorStore } from "../cockpit/editorStore";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
+import { theme } from "../theme/theme";
 import { Cockpit } from "./Cockpit";
 
 afterEach(() => {
@@ -42,21 +44,23 @@ function renderCockpit(url = "/cockpit/ws-1") {
   return {
     qc,
     ...render(
-      <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={[url]}>
-          <Routes>
-            <Route
-              path="/cockpit/:id"
-              element={
-                <>
-                  <CockpitSidebar />
-                  <Cockpit />
-                </>
-              }
-            />
-          </Routes>
-        </MemoryRouter>
-      </QueryClientProvider>,
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <MemoryRouter initialEntries={[url]}>
+            <Routes>
+              <Route
+                path="/cockpit/:id"
+                element={
+                  <>
+                    <CockpitSidebar />
+                    <Cockpit />
+                  </>
+                }
+              />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      </MantineProvider>,
     ),
   };
 }
@@ -642,13 +646,15 @@ it("an out-of-range ?sec clamps to a valid section and history-replaces the URL"
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   const qc = new QueryClient();
   render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/cockpit/ws-1?sec=99"]}>
-        <Routes>
-          <Route path="/cockpit/:id" element={<><Cockpit /><LocationProbe /></>} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/cockpit/ws-1?sec=99"]}>
+          <Routes>
+            <Route path="/cockpit/:id" element={<><Cockpit /><LocationProbe /></>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
   );
   // The editor renders the preamble (section 0), not a blank doc...
   await waitFor(() =>
@@ -761,13 +767,15 @@ it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no 
     citations: {},
   });
   render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/cockpit/ws-a"]}>
-        <Routes>
-          <Route path="/cockpit/:id" element={<><Cockpit /><GoTo to="/cockpit/ws-b" /></>} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/cockpit/ws-a"]}>
+          <Routes>
+            <Route path="/cockpit/:id" element={<><Cockpit /><GoTo to="/cockpit/ws-b" /></>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
   );
   // Workspace A loads; dirty its section-0 buffer with a token that must NOT leak.
   await waitFor(() => expect(document.querySelector(".cm-content")?.textContent).toContain("preamble A"));
