@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from call_manager.web.api import (
     calls,
+    citation_audit,
     export,
     files,
     me,
@@ -36,3 +37,4 @@ router.include_router(files.router)
 router.include_router(settings.router)
 router.include_router(rubric.router)
 router.include_router(export.router)
+router.include_router(citation_audit.router)
