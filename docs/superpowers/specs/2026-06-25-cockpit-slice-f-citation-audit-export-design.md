@@ -263,10 +263,15 @@ No background-job infra is introduced.
   - 404 → "No draft to export yet."
 
 ### 5.3 Peek deep-link (lowest-priority task — trimmable if time-boxed)
-- Audit rows carry `evidence_id`. "View source" navigates to `?tab=draft&ev=<id>`.
-- `ArtifactSectionEditor.tsx` gains a small effect syncing its existing `peekEv` from the
-  `ev` URL param (additive; pill-click behavior unchanged). Reuses the existing
-  `useCitationSource` peek entirely — no new peek UI.
+- Audit rows carry `evidence_id`. "View source" calls `onNavigate({ top_tab: "draft",
+  evidence_id })`. Cockpit holds a small `openPeek` state and threads it
+  Cockpit → DraftPanel → `ArtifactSectionEditor` as a prop; the editor syncs its existing
+  `peekEv` from `openPeek` via an effect (additive; pill-click behavior unchanged). Reuses
+  the existing `useCitationSource` peek entirely — no new peek UI.
+- Deliberately **prop-based, NOT a `?ev=` URL param** — this keeps the change local to the
+  cockpit and avoids `cockpitNav`/URL churn. Consequence: an externally-pasted `?ev=`
+  deep-link does NOT open the peek (out of scope for this trimmable task); the in-app
+  "View source" click does.
 - If trimmed, audit rows still display citekey/location/detail; only the one-click jump
   is deferred. This task is independent and last.
 
@@ -335,7 +340,7 @@ paths. Regen: `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`; confir
   deep-check merges semantic issues + summary; cap banner on `cap_exceeded`.
 - `export.test.ts`: `downloadExport` triggers a blob save on 200; on 409 surfaces the
   blocked-refs list; on 404 the no-draft message. (Transport spies; mock `fetch`.)
-- Peek deep-link: `ArtifactSectionEditor` opens peek when `?ev=` is set (if the task ships).
+- Peek deep-link: `ArtifactSectionEditor` opens peek when the `openPeek` prop is set (if the task ships).
 
 **OpenAPI regen** after backend (and again after teardown, per §6).
 

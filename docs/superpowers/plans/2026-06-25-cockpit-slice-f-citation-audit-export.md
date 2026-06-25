@@ -318,7 +318,11 @@ def test_export_markdown_no_draft_404(monkeypatch, pg_url, pg_session_factory, t
     owner_id, _, _, ws_id = _seed(pg_session_factory)
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "not_found"
+    body = r.json()
+    assert body["error"]["code"] == "not_found"
+    # Assert the ROUTE's own message: an UNMOUNTED /api/* 404 says "Not Found", so this
+    # makes the test genuinely fail-before-mount (adversarial-review finding).
+    assert body["error"]["message"] == "no draft to export yet"
 
 
 def test_export_markdown_viewer_ok_stranger_forbidden(
@@ -905,6 +909,23 @@ describe("CitationsPanel", () => {
     expect(onNavigate).toHaveBeenCalledWith({ top_tab: "draft", evidence_id: "ev-1" });
   });
 
+  it("renders errors before warnings (severity grouping)", () => {
+    h.audit.data = {
+      draft_present: true,
+      error_count: 1,
+      warning_count: 1,
+      // backend order is warning-then-error; the panel must reorder error-first.
+      issues: [
+        { type: "metadata_unapproved", severity: "warning", citekey: "a", evidence_id: null, location: null, detail: "w" },
+        { type: "orphan_marker", severity: "error", citekey: "b", evidence_id: null, location: null, detail: "e" },
+      ],
+    };
+    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    const items = screen.getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent("orphan_marker");
+    expect(items[1]).toHaveTextContent("metadata_unapproved");
+  });
+
   it("shows Deep check for the owner and runs it", () => {
     h.audit.data = { draft_present: true, issues: [], error_count: 0, warning_count: 0 };
     render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
@@ -912,8 +933,8 @@ describe("CitationsPanel", () => {
     expect(h.deep.mutate).toHaveBeenCalled();
   });
 
-  it("hides Deep check from a viewer", () => {
-    h.meta = { data: { role: "viewer" } };
+  it("hides Deep check from a non-owner member", () => {
+    h.meta = { data: { role: "member" } }; // the cockpit-meta API returns owner|member, never "viewer"
     h.audit.data = { draft_present: true, issues: [], error_count: 0, warning_count: 0 };
     render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
     expect(screen.queryByRole("button", { name: /deep check/i })).not.toBeInTheDocument();
@@ -996,8 +1017,13 @@ export function CitationsPanel({ id, onNavigate }: { id: string; onNavigate: OnN
   if (!audit.data.draft_present)
     return <p className="citations-empty">No draft yet — citations appear once drafting begins.</p>;
 
-  // Deep-check results (when present) supersede the deterministic baseline.
-  const issues: AuditIssue[] = deep.data?.issues ?? audit.data.issues;
+  // Deep-check results (when present) supersede the deterministic baseline. Render errors
+  // before warnings (spec §5.1) — the backend returns them interleaved per row. Array.sort
+  // is stable, so within a severity the backend order is preserved.
+  const RANK: Record<string, number> = { error: 0, warning: 1 };
+  const issues: AuditIssue[] = [...(deep.data?.issues ?? audit.data.issues)].sort(
+    (a, b) => (RANK[a.severity] ?? 9) - (RANK[b.severity] ?? 9),
+  );
 
   return (
     <div className="citations-panel">
@@ -1416,19 +1442,41 @@ export function DraftPanel({ id }: { id: string }) {
 }
 ```
 
+- [ ] **Step 6b: Add MantineProvider to the existing Cockpit route test (REGRESSION GUARD — adversarial-review blocker)**
+
+`DraftPanel` now renders a Mantine `<Menu>`/`<Button>` unconditionally. The existing
+`frontend/src/routes/Cockpit.test.tsx` renders the real `<Cockpit/>` → `DraftPanel` (its
+default tab is `"draft"`) inside only `QueryClientProvider` + `MemoryRouter` — **NO
+`MantineProvider`** (verified: `renderCockpit()` at `Cockpit.test.tsx:44-60`, no DraftPanel
+mock) — so ~19 of its 22 tests would now throw `MantineProvider was not found in component
+tree` at render. Wrap that test's render tree in `MantineProvider`.
+
+In `frontend/src/routes/Cockpit.test.tsx`, add these imports:
+
+```tsx
+import { MantineProvider } from "@mantine/core";
+import { theme } from "../theme/theme";
+```
+
+and in `renderCockpit()` make `<MantineProvider theme={theme} defaultColorScheme="dark">`
+the **outermost** wrapper around the existing `<QueryClientProvider>…</QueryClientProvider>`
+tree. (The three standalone `render(...)` call sites in that file — CodeMirrorEditor,
+ScorecardPanel, setup-phase — do NOT mount DraftPanel and need no change. Production is
+unaffected: the AppShell already provides MantineProvider; this gap is test-only.)
+
 - [ ] **Step 7: Run tests + type-check**
 
 ```bash
 cd frontend
-pnpm vitest run src/cockpit/DraftPanel.test.tsx src/api/export.test.ts
+pnpm vitest run src/cockpit/DraftPanel.test.tsx src/api/export.test.ts src/routes/Cockpit.test.tsx
 pnpm exec tsc --noEmit
 ```
-Expected: PASS, tsc clean.
+Expected: PASS (including the full Cockpit route suite — the regression guard), tsc clean.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/src/api/export.ts frontend/src/api/export.test.ts frontend/src/cockpit/DraftPanel.tsx frontend/src/cockpit/DraftPanel.test.tsx
+git add frontend/src/api/export.ts frontend/src/api/export.test.ts frontend/src/cockpit/DraftPanel.tsx frontend/src/cockpit/DraftPanel.test.tsx frontend/src/routes/Cockpit.test.tsx
 git commit -m "feat(spa): Export menu on the draft toolbar (raw + composed Markdown) (Slice F)"
 ```
 
@@ -1528,7 +1576,7 @@ In `proposal_assist/web/citations.py`: delete the `export_composed` function (`@
 
 - [ ] **Step 2: Remove the dead export links from templates**
 
-In `partials/artifact_pane.html`, remove the two anchors `…/export.md` and `…/export-composed.md`. In `workspace_citations.html`, remove the `…/export-composed.md` link (its route is gone; the page itself STAYS). Do NOT touch the `/citations` page links or the reader template — those stay until the sweep.
+In `partials/artifact_pane.html`, remove the two anchors `…/export.md` and `…/export-composed.md`. In `workspace_citations.html`, remove the **entire Export `<section>` block** (the `<h2>Export</h2>` heading, the `…/export-composed.md` anchor, and its `<small>` help text — `workspace_citations.html:61-69`); deleting only the `<a>` would leave a dangling empty "Export" heading. The page itself STAYS. Do NOT touch the `/citations` page links or the reader template — those stay until the sweep.
 
 - [ ] **Step 3: Migrate or delete the export-route tests**
 
