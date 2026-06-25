@@ -64,7 +64,8 @@ These three choices were made before design and bound the whole slice:
     cache; cap-checked per call; stops on cap-exceeded.
 - MCP orchestration the agent already uses: `proposal_assist/tools/audit.py`
   `validate_citations_impl(ctx)` (`:66–104`) → `{issues, semantic_available, checked}`.
-  This is the reference for constructing the citation service + running det→semantic.
+  This is the reference for the det→semantic run + merge order; the service itself is
+  **reused** from `app.state.citation_service` (§4.2), not reconstructed.
 - Service/LLM/caps: `proposal_assist/citations/service.py` (`CitationLLMService.complete_json`
   cap-checks then logs usage), `citations/llm.py` (`build_citation_llm()` wraps
   Anthropic/Ollama), `citations/verdict_cache.py` (`VALIDATOR_VERSION`, get/store).
@@ -137,12 +138,20 @@ Implementer reads the two Jinja routes to transcribe exact builder kwargs (`repo
 `commit=False`, `bibliography_text=…`). The `_safe_title` in `citations.py` and the
 inline sanitizer in `workspaces.py` are both replaced by `export.safe_title`.
 
-### 4.2 New `proposal_assist/citations/audit_run.py`
-A `build_citation_service(settings, session_factory)` helper extracted from the MCP
-`tools/audit.py` ctx construction, so `/api` deep-check and the MCP tool share one
-service/cap path (no duplication). Returns a `CitationLLMService` or `None` when the
-provider/key is unavailable. Implementer reads `tools/audit.py` + `service.py` +
-`llm.py` to mirror the existing construction exactly.
+### 4.2 Citation service (reuse — no new module)
+Deep-check reuses the citation service already built at startup:
+`request.app.state.citation_service` — constructed via the **supported**
+`build_citation_service(*, settings, session_factory)` (`citations/service.py:105`,
+exported from `citations/__init__.py`), wired at `main.py:485` (lazy/per-call, so present
+but cheap at startup). **Do not add a parallel builder** — a second helper would risk
+diverging None-on-misconfig semantics from the supported path.
+
+`validate_citations_semantic` also needs a `session_factory` for its verdict-cache writes
+— use `request.app.state.session_factory` (set at `main.py:460`). `semantic_available` is
+`True` whenever `app.state.citation_service` is present (always, in prod) and `False`
+only when it is `None` — tests/offline overrides set it to `None` to exercise the
+deterministic-only path. Cap-exceeded and transient-provider degradation are handled
+inside the service/engine (`cap_exceeded`, `audit_unavailable` rows), not by the endpoint.
 
 ### 4.3 New `web/api/export.py` (APIRouter, mounted in `web/api/__init__.py`)
 - `GET /api/workspaces/{workspace_id}/export.md`
@@ -151,12 +160,16 @@ provider/key is unavailable. Implementer reads `tools/audit.py` + `service.py` +
     404 (envelope `not_found`) if no draft.
 - `GET /api/workspaces/{workspace_id}/export-composed.md`
   - `require_member`. `get_composed_export`. 200 → composed markdown,
-    `…filename="{safe_title}-composed.md"`. On `BuildBibliographyBlocked` →
-    **409 JSONResponse** body `{"error": {"code": "export_blocked", "message": <human>,
-    "blocked": [{"citekey": str, "reason": str}]}}` (the `blocked` field extends the
-    standard envelope so the UI can list what to fix). 404 if no draft.
-- **Binary/file responses are exempt from the JSON envelope** (consistent with the
-  C-media `/raw` and `/files/{aid}` serves). Only the 409 error path is JSON.
+    `…filename="{safe_title}-composed.md"`. 404 if no draft. On corrupt `citations.json`
+    (`load_ledger` raises `ValueError`) → **409 `citation_ledger_invalid`**. On
+    `BuildBibliographyBlocked` → **409** built with
+    `api_error(409, "export_blocked", <human message>, detail={"blocked":
+    [{"citekey": str, "reason": str}]})` — the blocked list rides in the envelope's
+    existing optional `error.detail` field (see `web/api/errors.py:8,43`), **NOT** a new
+    top-level `error.blocked`.
+- **Binary/file 200 responses are exempt from the JSON envelope** (consistent with the
+  C-media `/raw` and `/files/{aid}` serves). The error paths (404/409) ARE standard
+  `ApiError` envelopes.
 
 ### 4.4 New `web/api/citation_audit.py` (APIRouter, mounted in `web/api/__init__.py`)
 Response models (pydantic, emitted to `schema.gen.ts`):
@@ -176,22 +189,29 @@ class CitationAuditOut(BaseModel):
     warning_count: int
 
 class DeepCheckOut(BaseModel):
-    semantic_available: bool   # false when provider/key unavailable
+    semantic_available: bool   # false only when app.state.citation_service is None (tests/offline)
     checked: int               # citations judged this run
     cap_exceeded: bool
+    error_count: int           # over the merged (deterministic + semantic) issue list
+    warning_count: int
     issues: list[AuditIssueOut]  # deterministic + semantic, merged
 ```
 - `GET /api/workspaces/{workspace_id}/citation-audit`
   - `require_member`. Read-only (no LLM, no writes). Loads proposal.md + citations.json;
     if no draft → `{draft_present: false, issues: [], error_count: 0, warning_count: 0}`.
-    Else runs `validate_citations_deterministic` and returns the issue list + counts.
+    On corrupt `citations.json` → **409 `citation_ledger_invalid`** (do NOT 500, and do
+    NOT silently degrade like the Jinja path — a JSON client gets a clear code). Else runs
+    `validate_citations_deterministic` and returns the issue list + counts.
 - `POST /api/workspaces/{workspace_id}/citation-audit/deep`
-  - **`require_owner`** (consumes LLM budget). Runs deterministic first (for
-    `deterministic_issues` skip-set), builds the citation service via
-    `build_citation_service`; if `None` → `{semantic_available: false, checked: 0,
-    cap_exceeded: false, issues: <deterministic only>}`. Else runs
-    `validate_citations_semantic` (writes verdict cache; respects caps), returns merged
-    issues + `checked` + `cap_exceeded`. **Synchronous.**
+  - **`require_owner`** (consumes LLM budget). On corrupt `citations.json` →
+    **409 `citation_ledger_invalid`**. Runs deterministic first (for the
+    `deterministic_issues` skip-set). If `request.app.state.citation_service is None`
+    (tests/offline) → `{semantic_available: false, checked: 0, cap_exceeded: false,
+    error_count, warning_count, issues: <deterministic only>}`. Else runs
+    `validate_citations_semantic(… citation_service=app.state.citation_service,
+    session_factory=app.state.session_factory, deterministic_issues=…)` (writes verdict
+    cache; respects caps), returns the merged issues + counts + `checked` + `cap_exceeded`.
+    **Synchronous.**
 
 **Synchronous tradeoff (accepted):** the engine judges per-citation synchronously; an
 explicit owner action with a loading state is acceptable. Cap-exceeded degrades to
@@ -214,7 +234,10 @@ No background-job infra is introduced.
     `useCockpitMeta(id).data?.role === "owner"`; clicking calls `useDeepCheck(id)`
     (POST), shows a loading state, then merges semantic issues + a "checked N · flagged M"
     summary; `cap_exceeded` → a small banner. Viewers never see Deep check.
-  - Tab badge = `error_count` from the deterministic query.
+  - **Tab badge = deterministic `error_count`** (from the GET query). It is NOT updated by
+    deep-check (deep-check is transient and not re-run on mount). After a deep-check the
+    panel body shows the merged issues + the deep-check `error_count`/`warning_count`
+    summary inline; the tab badge stays deterministic-only by design.
 
 ### 5.2 Export menu on the draft toolbar
 - `cockpit/DraftPanel.tsx`: add a small toolbar row above `<ArtifactSectionEditor>` with
@@ -223,11 +246,13 @@ No background-job infra is introduced.
 - New `api/export.ts` `downloadExport(workspaceId, kind)` helper — raw `fetch` with
   `credentials: "include"` to the `/api` export URL (openapi-fetch is awkward for binary):
   - 200 → `res.blob()` → save via a transient `<a download>` + `URL.createObjectURL`
-    (native; no new dependency). Filename derived client-side from `workspace_title`
-    (already available via `useCockpitMeta`) — `<title>.md` / `<title>-composed.md` —
-    rather than parsing the `Content-Disposition` header.
-  - 409 → parse `error.blocked` and surface an inline message listing the blocked
-    citekeys + reasons ("approve these references, then export").
+    (native; no new dependency). Filename parsed from the response `Content-Disposition`
+    header (readable on same-origin fetch; the backend already owns sanitization via
+    `safe_title`), falling back to `proposal.md` / `proposal-composed.md` when the header
+    is absent. `downloadExport(workspaceId, kind)` needs no title input.
+  - 409 `export_blocked` → read `error.detail.blocked` and surface an inline message
+    listing the blocked citekeys + reasons ("approve these references, then export").
+  - 409 `citation_ledger_invalid` → "citations.json is corrupt — re-save citations."
   - 404 → "No draft to export yet."
 
 ### 5.3 Peek deep-link (lowest-priority task — trimmable if time-boxed)
@@ -259,6 +284,12 @@ Delete:
 - Templates: `workspace_citations.html`, `partials/citation_audit_results.html`,
   `partials/citation_reader.html`, and the dead "Export …" links in any still-rendered
   template (e.g. `partials/artifact_pane.html`).
+- **Nav links to the deleted citations page.** The shared workspace sub-nav renders a
+  `Citations` tab linking to `/workspaces/{id}/citations` in FOUR still-present templates:
+  `workspace_main.html:19`, `workspace_files.html:13`, `workspace_settings.html:13`,
+  `workspace_references.html:13` (verified). Remove that `<a>` from all four (mechanical)
+  so no template links a deleted route. **Do NOT** expand Slice F into deleting those whole
+  pages — that is the later `workspace_main` teardown sweep; only the citations link goes.
 - Tests bound to the deleted routes: migrate (to `/api`) or delete with explicit
   per-test disposition (no blanket preserve).
 
@@ -281,13 +312,17 @@ the final sweep rather than expanding Slice F.
 
 **Backend (targeted files only — never the whole suite):**
 - `tests/.../test_api_export.py`: raw export 200 + filename header; composed 200 over a
-  seeded approved-reference ledger; composed **409** with `blocked` list when a cited ref
-  is unapproved; member can read, viewer can read, non-member 403/404; no-draft 404.
+  seeded approved-reference ledger; composed **409 `export_blocked`** with the blocked list
+  under `error.detail.blocked` when a cited ref is unapproved; composed **409
+  `citation_ledger_invalid`** on corrupt citations.json; member can read, viewer can read,
+  non-member 403/404; no-draft 404.
 - `tests/.../test_api_citation_audit.py`: deterministic GET returns expected issues over a
-  seeded drifted/orphan ledger + correct counts; `draft_present:false` pre-draft;
-  deep-check **403 for a viewer** (owner-gate); deep-check with a stub citation service
-  returns merged semantic issues; cap-exceeded path → `cap_exceeded:true` +
-  `audit_unavailable`; `semantic_available:false` when the service builder returns None.
+  seeded drifted/orphan ledger + correct counts; `draft_present:false` pre-draft; corrupt
+  citations.json → **409 `citation_ledger_invalid`** (GET and deep-check); deep-check
+  **403 for a viewer** (owner-gate); deep-check with `app.state.citation_service` set to a
+  stub returns merged semantic issues + counts; cap-exceeded path → `cap_exceeded:true` +
+  `audit_unavailable`; `semantic_available:false` when `app.state.citation_service` is set
+  to `None`.
 
 **Frontend (vitest, `tsc` is the gate):**
 - `CitationsPanel.test.tsx`: renders deterministic issues + severity grouping + badge;
@@ -318,11 +353,16 @@ the final sweep rather than expanding Slice F.
 
 - **Long deep-check on large drafts.** Mitigation: explicit owner action + loading state;
   caps bound cost; cap-exceeded degrades gracefully. Acceptable for v1.
-- **409 envelope extension.** The `error.blocked` field is a deliberate, documented
-  extension of `{error:{code,message}}` for the one composed-export-blocked case; the UI
-  reads it via a raw fetch (not `unwrap`), so the standard `ApiError` path is unaffected.
+- **409 blocked list rides in `error.detail`.** The blocked-refs list uses the envelope's
+  existing optional `detail` field (`error.detail.blocked`) via `api_error(...)` — no new
+  envelope field is introduced. The UI reads it via a raw fetch (not `unwrap`), so the
+  standard `ApiError` path is unaffected.
+- **Corrupt `citations.json` is pinned to 409 `citation_ledger_invalid`** across all three
+  new endpoints (deterministic GET, deep-check, composed export) — `load_ledger` raises
+  `ValueError`; the endpoints catch it and return the envelope rather than 500ing.
 - **Teardown reachability.** The plan must verify each route's registration/reachability
-  before deletion and re-regen OpenAPI post-teardown (§6).
-- **`build_citation_service` extraction** must not change MCP-tool behavior — it is a
-  pure refactor of existing ctx construction; covered by leaving the MCP tool's own
-  tests green (targeted run if such tests exist).
+  before deletion, remove the four citations sub-nav links (§6), and re-regen OpenAPI
+  post-teardown.
+- **No new citation-service builder.** Deep-check reuses `app.state.citation_service` (the
+  supported `build_citation_service`) and `app.state.session_factory`; the MCP tool's own
+  construction is untouched, so its behavior cannot regress.
