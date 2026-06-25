@@ -966,8 +966,11 @@ git diff --stat frontend/src/api/schema.gen.ts
 # Expected: schema.gen.ts changed — gains the 2 new paths
 #   /api/workspaces/{workspace_id}/references/{reference_id}/raw
 #   /api/workspaces/{workspace_id}/files/{attachment_id}
-git status --porcelain frontend/src/api/routes.gen.ts
-# Expected: no output (G1 adds no React routes; routes.gen.ts is untouched).
+test -z "$(git status --porcelain frontend/src/routes.gen.ts)" \
+  && echo "routes.gen.ts untouched ✓" || echo "routes.gen.ts CHANGED ✗"
+# Expected: "routes.gen.ts untouched ✓". The React route manifest lives at
+# frontend/src/routes.gen.ts (NOT under api/); G1 adds no SPA route, so it must
+# not change. (gen_openapi_types.sh only writes schema.gen.ts.)
 ```
 
 - [ ] **Step 13: Ruff + commit**
