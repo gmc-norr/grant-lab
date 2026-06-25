@@ -72,3 +72,18 @@ export function useRemoveMember(id: string) {
     },
   });
 }
+
+export function useDeleteWorkspace(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      unwrap(
+        await api.DELETE("/api/workspaces/{workspace_id}", {
+          params: { path: { workspace_id: id } },
+        }),
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
+    },
+  });
+}
