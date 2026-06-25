@@ -48,6 +48,7 @@ export function CockpitChat() {
       done: () => {
         setJobId(null);
         setStreamed({});
+        setCancelNote(null); // don't let a "too late" note bleed into the next turn
         qc.invalidateQueries({ queryKey: ["turns", id] });
         qc.invalidateQueries({ queryKey: ["proposed-changes", id, "draft"] });
         qc.invalidateQueries({ queryKey: ["proposed-changes", id, "spec"] });
@@ -133,7 +134,10 @@ export function CockpitChat() {
                   id={id}
                   refs={refs}
                   disabled={!!jobId || !!d.running_job_id}
-                  onSubmitted={setJobId}
+                  onSubmitted={(jid) => {
+                    setJobId(jid);
+                    setCancelNote(null); // a new turn starts clean
+                  }}
                 />
               </>
             );

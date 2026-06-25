@@ -57,6 +57,11 @@ def test_cancel_running_turn_is_too_late(client_authed_owner, current_user, pg_s
     assert r.json()["cancelled"] is False
     with pg_session_factory() as s:
         assert s.get(TurnJob, jid).status == "running"  # unchanged
+        # a no-op cancel must NOT write an audit event
+        assert (
+            s.scalar(select(WorkspaceEvent.id).where(WorkspaceEvent.kind == "cloud_turn_cancelled"))
+            is None
+        )
 
 
 def test_non_owner_cancel_403(client_authed_owner, current_user, pg_session_factory):
@@ -86,3 +91,8 @@ def test_cross_workspace_job_id_no_op(client_authed_owner, current_user, pg_sess
     assert r.json()["cancelled"] is False
     with pg_session_factory() as s:
         assert s.get(TurnJob, jid_b).status == "queued"  # B's job untouched
+        # the cross-workspace no-op must NOT write an audit event
+        assert (
+            s.scalar(select(WorkspaceEvent.id).where(WorkspaceEvent.kind == "cloud_turn_cancelled"))
+            is None
+        )

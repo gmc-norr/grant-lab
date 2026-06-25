@@ -96,8 +96,12 @@ def soft_delete_workspace(
     The caller resolves ownership (require_owner) before calling this.
     """
     ws = session.get(Workspace, workspace_id)
-    if ws is not None:
-        ws.soft_deleted_at = datetime.now(UTC)
+    if ws is None:
+        # The caller resolves ownership (require_owner) first, so the row must
+        # exist; a None here means the contract was bypassed — fail loudly rather
+        # than silently skipping the soft_deleted_at stamp while cancelling jobs.
+        raise ValueError(f"workspace not found: {workspace_id}")
+    ws.soft_deleted_at = datetime.now(UTC)
     # Fail any active (queued|running) background pass so it can't claim and burn
     # cloud tokens after the workspace is gone (each claim_next also excludes
     # soft-deleted workspaces; this also unwedges the active-unique slot). Same txn.

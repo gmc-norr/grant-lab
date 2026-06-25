@@ -181,3 +181,32 @@ it("a viewer does not see the Cancel control", async () => {
   expect(await screen.findByText(/read-only/i)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument();
 });
+
+it("clears the stale 'too late' note when the turn finishes (SSE done)", async () => {
+  const captured: { done?: (e: MessageEvent) => void } = {};
+  class CapturingES {
+    onerror = null; onopen: (() => void) | null = null; close = vi.fn();
+    addEventListener(type: string, fn: (e: MessageEvent) => void) {
+      if (type === "done") captured.done = fn;
+    }
+    constructor(_u: string) {}
+  }
+  vi.stubGlobal("EventSource", CapturingES as unknown as typeof EventSource);
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/turns"))
+      return Promise.resolve({ data: { turns: [], can_send: true, needs_disclosure: false, phase: "active", is_owner: true, disabled_reason: null, running_job_id: "job-1" }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    return Promise.resolve({ data: null, error: undefined });
+  }) as never);
+  vi.spyOn(clientMod.api, "POST").mockImplementation(((path: string) => {
+    if (path.endsWith("/cancel")) return Promise.resolve({ data: { cancelled: false }, error: undefined });
+    return Promise.resolve({ data: null, error: undefined });
+  }) as never);
+  renderChat();
+  fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+  expect(await screen.findByText(/too late/i)).toBeInTheDocument();
+  // The turn finishes → SSE done fires → the stale note must NOT survive into the next turn.
+  await waitFor(() => expect(captured.done).toBeDefined());
+  captured.done!({ data: JSON.stringify({ status: "completed" }) } as MessageEvent);
+  await waitFor(() => expect(screen.queryByText(/too late/i)).not.toBeInTheDocument());
+});

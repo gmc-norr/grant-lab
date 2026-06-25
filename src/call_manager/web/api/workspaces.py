@@ -1162,6 +1162,8 @@ def soft_delete_workspace_api(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # soft_delete_workspace commits internally (unlike create_workspace_api,
+        # where the caller commits) — do not add a second commit here.
         soft_delete_workspace(
             session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir)
         )
