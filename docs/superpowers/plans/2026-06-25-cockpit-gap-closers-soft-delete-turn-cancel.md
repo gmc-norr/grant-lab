@@ -27,12 +27,13 @@
 ## File Structure
 
 **Backend — created:**
-- `tests/test_workspaces_service.py` — unit test for the extracted `soft_delete_workspace` service.
-- `tests/test_api_workspaces_delete.py` — the `DELETE /api/workspaces/{id}` endpoint tests.
-- `tests/test_api_turns_cancel.py` — the `POST /api/workspaces/{id}/turns/{job}/cancel` endpoint tests.
+- `tests/test_workspaces_service.py` — unit test for the extracted `soft_delete_workspace` service. (Stays in `tests/` root: it uses only `pg_session_factory` (root conftest) + `tmp_path`, and imports `make_workspace` as a plain function — no proposal_assist fixtures.)
+- `tests/proposal_assist/test_api_workspaces_delete.py` — the `DELETE /api/workspaces/{id}` endpoint tests. (MUST live under `tests/proposal_assist/` — it uses `client_authed_owner`/`_app`/`current_user`, which are defined only in `tests/proposal_assist/conftest.py` and are out of scope for `tests/` root.)
+- `tests/proposal_assist/test_api_turns_cancel.py` — the `POST /api/workspaces/{id}/turns/{job}/cancel` endpoint tests. (Same fixture-scoping reason — under `tests/proposal_assist/`.)
 
 **Backend — modified:**
-- `src/call_manager/workspaces.py` — add `soft_delete_workspace` + its imports.
+- `src/call_manager/workspaces.py` — add `soft_delete_workspace` + its imports; refresh the module docstring (no longer "single entrypoint").
+- `tests/proposal_assist/test_web_workspaces_settings.py` — retarget two caplog logger references to `call_manager.workspaces` (Task 1, after the repoint moves the cleanup warning's logger).
 - `src/call_manager/proposal_assist/web/workspaces.py` — repoint the `soft_delete` Jinja route to the service; remove the 5 orphaned imports.
 - `src/call_manager/web/api/workspaces.py` — add the `DELETE /api/workspaces/{id}` endpoint + imports.
 - `src/call_manager/web/api/turns.py` — add `CancelTurnResponse` + the cancel endpoint + import.
@@ -93,7 +94,9 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
         s.flush()
         s.add(CoherenceJob(workspace_id=ws.id, status="queued"))
         s.add(EvaluatorJob(workspace_id=ws.id, status="queued"))
-        s.add(ReviewRun(workspace_id=ws.id, status="queued"))
+        # ReviewRun.draft_sha is NOT NULL with no server_default — seed it (matches
+        # tests/proposal_assist/review/test_soft_delete_cancels_review.py).
+        s.add(ReviewRun(workspace_id=ws.id, status="queued", draft_sha="a" * 64))
         s.add(UncitedClaimsJob(workspace_id=ws.id, status="queued"))
         ut = ChatTurn(workspace_id=ws.id, role="user", content={"type": "text", "text": "hi"})
         s.add(ut)
@@ -141,7 +144,9 @@ Expected: FAIL — `ImportError: cannot import name 'soft_delete_workspace'`.
 
 - [ ] **Step 3: Implement the service**
 
-In `src/call_manager/workspaces.py`, replace the import block (lines 17-21) with:
+First refresh the now-stale module docstring at the top of `src/call_manager/workspaces.py` — it opens with "Single entrypoint today: `create_workspace`." Change that opening sentence to name both entrypoints, e.g. "Workspace lifecycle service functions: `create_workspace` and `soft_delete_workspace`." (Keep the rest of the docstring.)
+
+Then, in `src/call_manager/workspaces.py`, replace the import block (lines 17-21) with:
 
 ```python
 from __future__ import annotations
@@ -277,16 +282,18 @@ Add the import (with the module's other `call_manager.*` imports):
 from call_manager.workspaces import soft_delete_workspace
 ```
 
-- [ ] **Step 6: Remove the 5 imports the repoint orphaned, then verify lint + the regression net**
+- [ ] **Step 6: Remove the 5 orphaned imports + fix the moved-logger caplog test, then verify lint + the regression net**
 
-The repoint leaves these unused in the Jinja module — delete their import lines: `cancel_coherence_jobs_for_workspace`, `cancel_evaluator_jobs_for_workspace`, `cancel_review_runs_for_workspace`, `cancel_uncited_claims_jobs_for_workspace`, and `ReferenceStorage`. (`record_terminal_outcome` and `AttachmentStorage` are still used by `cancel_turn` / other routes — KEEP them.)
+(a) The repoint leaves these unused in the Jinja module — delete their import lines: `cancel_coherence_jobs_for_workspace`, `cancel_evaluator_jobs_for_workspace`, `cancel_review_runs_for_workspace`, `cancel_uncited_claims_jobs_for_workspace`, and `ReferenceStorage`. (`record_terminal_outcome` and `AttachmentStorage` are still used by `cancel_turn` / other routes — KEEP them.)
+
+(b) The repoint also moves the best-effort FS-cleanup `OSError` warning from the Jinja module's logger to the service's logger (`call_manager.workspaces`). One existing test pins the OLD logger name and will now match zero records. In `tests/proposal_assist/test_web_workspaces_settings.py`, update BOTH caplog references — the `caplog.set_level(logging.WARNING, logger="call_manager.proposal_assist.web.workspaces")` line (~:465) and the `if rec.name == "call_manager.proposal_assist.web.workspaces"` filter (~:481) — to `"call_manager.workspaces"`. The asserted message substring (`"attachment cleanup failed"`) is preserved by the service (`soft_delete_workspace: attachment cleanup failed for workspace …`), so ONLY the logger name changes. (This is the only test that filters on that logger for the cleanup warning — verified by grep; the other `call_manager.proposal_assist.web.workspaces` references in the test tree are plain function imports.)
 
 Run: `uv run ruff check src/call_manager/proposal_assist/web/workspaces.py src/call_manager/workspaces.py`
 Expected: All checks passed! (If ruff still flags an F401, remove exactly what it names; if it flags one of the KEEP symbols, you removed a route's use by mistake — revert and recheck.)
 
-Run the extraction's regression net (the existing Jinja route test + the 4 not-yet-retargeted cascade tests still drive the repointed route):
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_web_workspaces_delete.py tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py tests/proposal_assist/evaluator/test_soft_delete_cancels_evaluator.py tests/proposal_assist/review/test_soft_delete_cancels_review.py tests/proposal_assist/uncited_claims/test_soft_delete.py -v`
-Expected: all PASS (the repoint is behavior-identical).
+Run the extraction's regression net (the existing Jinja route test + the moved-logger settings test + the 4 not-yet-retargeted cascade tests still drive the repointed route):
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_web_workspaces_delete.py tests/proposal_assist/test_web_workspaces_settings.py tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py tests/proposal_assist/evaluator/test_soft_delete_cancels_evaluator.py tests/proposal_assist/review/test_soft_delete_cancels_review.py tests/proposal_assist/uncited_claims/test_soft_delete.py -v`
+Expected: all PASS (the repoint is behavior-identical; the settings caplog test passes against the new logger name).
 
 - [ ] **Step 7: Verify the app still boots, then commit**
 
@@ -294,7 +301,7 @@ Run: `EMBEDDING_MODEL=bge-m3 uv run python -c "import call_manager.main; print('
 Expected: `boot ok` (no import cycle from the new `call_manager.workspaces` imports).
 
 ```bash
-git add src/call_manager/workspaces.py src/call_manager/proposal_assist/web/workspaces.py tests/test_workspaces_service.py
+git add src/call_manager/workspaces.py src/call_manager/proposal_assist/web/workspaces.py tests/test_workspaces_service.py tests/proposal_assist/test_web_workspaces_settings.py
 git commit -m "feat(workspaces): extract soft_delete_workspace service; repoint Jinja route"
 ```
 
@@ -304,7 +311,7 @@ git commit -m "feat(workspaces): extract soft_delete_workspace service; repoint 
 
 **Files:**
 - Modify: `src/call_manager/web/api/workspaces.py` (append endpoint after `create_workspace_api`, ~:1147; add imports)
-- Test: `tests/test_api_workspaces_delete.py` (create)
+- Test: `tests/proposal_assist/test_api_workspaces_delete.py` (create — under `proposal_assist/` so the `client_authed_owner`/`_app`/`current_user` fixtures are in scope)
 
 **Interfaces:**
 - Consumes: `soft_delete_workspace(...)` (Task 1); `require_owner` + `create_workspace` are already imported at `web/api/workspaces.py:64-65`.
@@ -312,18 +319,26 @@ git commit -m "feat(workspaces): extract soft_delete_workspace service; repoint 
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_api_workspaces_delete.py`:
+Create `tests/proposal_assist/test_api_workspaces_delete.py` (keep UUID objects for `session.get()`/`WHERE`/path interpolation — the codebase idiom, e.g. `test_web_workspaces_delete.py:30`; a UUID interpolates into the URL via `__str__`):
 
 ```python
 """DELETE /api/workspaces/{id} — owner-only soft-delete (cockpit gap-closer)."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import ChatTurn, CoherenceJob, TurnJob, Workspace, WorkspaceEvent
+from call_manager.db.models import (
+    ChatTurn,
+    CoherenceJob,
+    TurnJob,
+    Workspace,
+    WorkspaceEvent,
+    WorkspaceViewer,
+)
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -348,9 +363,9 @@ def test_owner_delete_204_cascades_and_scrubs(
             )
         )
         s.commit()
-        ws_id = str(ws.id)
+        ws_id = ws.id
 
-    attach_dir = tmp_path / ws_id / "attachments"
+    attach_dir = tmp_path / str(ws_id) / "attachments"
     attach_dir.mkdir(parents=True)
     (attach_dir / "blob.bin").write_bytes(b"x")
 
@@ -370,13 +385,32 @@ def test_owner_delete_204_cascades_and_scrubs(
 def test_non_owner_delete_403(client_authed_owner, current_user, pg_session_factory):
     with pg_session_factory() as s:
         stranger = make_user(s, email="stranger@ki.se")
-        ws = make_workspace(s, owner=stranger)  # current_user does NOT own it
+        ws = make_workspace(s, owner=stranger)  # current_user has no relationship to it
         s.commit()
-        ws_id = str(ws.id)
+        ws_id = ws.id
     r = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
     assert r.status_code == 403
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is None  # untouched
+
+
+def test_viewer_delete_403(client_authed_owner, current_user, pg_session_factory):
+    # A workspace member (viewer) is still not the owner → 403 (spec §4.1: viewer AND stranger).
+    with pg_session_factory() as s:
+        stranger = make_user(s, email="viewer-owner@ki.se")
+        ws = make_workspace(s, owner=stranger)
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
+        s.commit()
+        ws_id = ws.id
+    r = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+    assert r.status_code == 403
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).soft_deleted_at is None  # untouched
+
+
+def test_unknown_workspace_delete_404(client_authed_owner, current_user, pg_session_factory):
+    # require_owner returns 404 for a workspace that does not exist (spec §4.1).
+    assert client_authed_owner.delete(f"/api/workspaces/{uuid.uuid4()}").status_code == 404
 
 
 def test_redelete_is_404(
@@ -386,7 +420,7 @@ def test_redelete_is_404(
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.commit()
-        ws_id = str(ws.id)
+        ws_id = ws.id
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
     # require_owner filters soft_deleted_at IS NULL → second delete is 404 (not idempotent).
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 404
@@ -394,7 +428,7 @@ def test_redelete_is_404(
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/test_api_workspaces_delete.py -v`
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_api_workspaces_delete.py -v`
 Expected: FAIL — 405 Method Not Allowed (no DELETE route yet) / assertions unreached.
 
 - [ ] **Step 3: Add the endpoint + imports**
@@ -435,16 +469,16 @@ def soft_delete_workspace_api(
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/test_api_workspaces_delete.py -v`
-Expected: 3 PASS.
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_api_workspaces_delete.py -v`
+Expected: 5 PASS.
 
 - [ ] **Step 5: Lint + commit**
 
-Run: `uv run ruff check src/call_manager/web/api/workspaces.py tests/test_api_workspaces_delete.py`
+Run: `uv run ruff check src/call_manager/web/api/workspaces.py tests/proposal_assist/test_api_workspaces_delete.py`
 Expected: All checks passed!
 
 ```bash
-git add src/call_manager/web/api/workspaces.py tests/test_api_workspaces_delete.py
+git add src/call_manager/web/api/workspaces.py tests/proposal_assist/test_api_workspaces_delete.py
 git commit -m "feat(api): DELETE /api/workspaces/{id} owner-only soft-delete"
 ```
 
@@ -498,7 +532,7 @@ git commit -m "test(api): retarget cascade-on-delete tests to DELETE /api/worksp
 
 **Files:**
 - Modify: `src/call_manager/web/api/turns.py` (add `CancelTurnResponse` + endpoint + import)
-- Test: `tests/test_api_turns_cancel.py` (create)
+- Test: `tests/proposal_assist/test_api_turns_cancel.py` (create — under `proposal_assist/` for the `client_authed_owner`/`current_user` fixtures)
 
 **Interfaces:**
 - Consumes: `record_terminal_outcome` (`proposal_assist.turns.outcomes`); `require_owner` already imported at `turns.py:25`.
@@ -506,7 +540,7 @@ git commit -m "test(api): retarget cascade-on-delete tests to DELETE /api/worksp
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_api_turns_cancel.py`:
+Create `tests/proposal_assist/test_api_turns_cancel.py` (keep UUID objects for `session.get()` and path interpolation — codebase idiom):
 
 ```python
 """POST /api/workspaces/{id}/turns/{job}/cancel — owner-only queued-turn cancel."""
@@ -542,7 +576,7 @@ def test_owner_cancels_queued_turn(client_authed_owner, current_user, pg_session
         ws = make_workspace(s, owner=current_user)
         jid = _seed_queued_turn(s, ws, current_user.id)
         s.commit()
-        ws_id, jid = str(ws.id), str(jid)
+        ws_id, jid = ws.id, jid
     r = client_authed_owner.post(f"/api/workspaces/{ws_id}/turns/{jid}/cancel")
     assert r.status_code == 200
     assert r.json()["cancelled"] is True
@@ -559,7 +593,7 @@ def test_cancel_running_turn_is_too_late(client_authed_owner, current_user, pg_s
         jid = _seed_queued_turn(s, ws, current_user.id)
         s.get(TurnJob, jid).status = "running"  # already started
         s.commit()
-        ws_id, jid = str(ws.id), str(jid)
+        ws_id, jid = ws.id, jid
     r = client_authed_owner.post(f"/api/workspaces/{ws_id}/turns/{jid}/cancel")
     assert r.status_code == 200
     assert r.json()["cancelled"] is False
@@ -573,7 +607,7 @@ def test_non_owner_cancel_403(client_authed_owner, current_user, pg_session_fact
         ws = make_workspace(s, owner=stranger)
         jid = _seed_queued_turn(s, ws, stranger.id)
         s.commit()
-        ws_id, jid = str(ws.id), str(jid)
+        ws_id, jid = ws.id, jid
     r = client_authed_owner.post(f"/api/workspaces/{ws_id}/turns/{jid}/cancel")
     assert r.status_code == 403
     with pg_session_factory() as s:
@@ -588,7 +622,7 @@ def test_cross_workspace_job_id_no_op(client_authed_owner, current_user, pg_sess
         ws_b = make_workspace(s, owner=current_user)
         jid_b = _seed_queued_turn(s, ws_b, current_user.id)
         s.commit()
-        ws_a_id, jid_b = str(ws_a.id), str(jid_b)
+        ws_a_id, jid_b = ws_a.id, jid_b
     r = client_authed_owner.post(f"/api/workspaces/{ws_a_id}/turns/{jid_b}/cancel")
     assert r.status_code == 200
     assert r.json()["cancelled"] is False
@@ -598,7 +632,7 @@ def test_cross_workspace_job_id_no_op(client_authed_owner, current_user, pg_sess
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/test_api_turns_cancel.py -v`
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_api_turns_cancel.py -v`
 Expected: FAIL — 405 (no cancel route yet).
 
 - [ ] **Step 3: Add the endpoint + import**
@@ -645,16 +679,16 @@ def cancel_turn(
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/test_api_turns_cancel.py -v`
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_api_turns_cancel.py -v`
 Expected: 4 PASS.
 
 - [ ] **Step 5: Lint + commit**
 
-Run: `uv run ruff check src/call_manager/web/api/turns.py tests/test_api_turns_cancel.py`
+Run: `uv run ruff check src/call_manager/web/api/turns.py tests/proposal_assist/test_api_turns_cancel.py`
 Expected: All checks passed!
 
 ```bash
-git add src/call_manager/web/api/turns.py tests/test_api_turns_cancel.py
+git add src/call_manager/web/api/turns.py tests/proposal_assist/test_api_turns_cancel.py
 git commit -m "feat(api): POST /api/workspaces/{id}/turns/{job}/cancel owner-only"
 ```
 
@@ -866,9 +900,17 @@ git commit -m "feat(spa): delete-workspace Danger zone in the settings modal"
 - Consumes: `POST /api/workspaces/{id}/turns/{job_id}/cancel` (typed via Task 5).
 - Produces: `useCancelTurn(id)` mutation; an owner-only "Cancel" control shown while a turn is in flight that clears `jobId` on `{cancelled:true}` and shows a "too late" note on `{cancelled:false}`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1a: Add `fireEvent` to the test's import (BEFORE writing the bodies)**
 
-Append to `frontend/src/cockpit/chat/CockpitChat.test.tsx` (reuse the file's existing imports `clientMod`, `renderChat`, `waitFor`):
+The new tests use `fireEvent`, which the file does not yet import. Change `frontend/src/cockpit/chat/CockpitChat.test.tsx:2` from `import { render, screen, waitFor } from "@testing-library/react";` to:
+```tsx
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+```
+(Do this first — otherwise the Step 2 run errors with `ReferenceError: fireEvent is not defined` instead of the intended "no Cancel button" red, muddying the TDD signal.)
+
+- [ ] **Step 1b: Write the failing tests**
+
+Append to `frontend/src/cockpit/chat/CockpitChat.test.tsx` (reuse the file's existing `clientMod`, `renderChat`):
 
 ```tsx
 class FakeESNoop {
@@ -877,21 +919,30 @@ class FakeESNoop {
   constructor(_u: string) {}
 }
 
+// Stateful mock: after a SUCCESSFUL cancel the server read-model drops the
+// in-flight job (running_job_id → null), so the post-cancel refetch cannot
+// re-set the local jobId. This lets the {cancelled:true} test prove the
+// success handler's setJobId(null) actually ran (the effect never clears
+// jobId on its own — it only sets it when running_job_id is truthy).
 function mockInFlightOwner(cancelled: boolean) {
+  let cleared = false;
   vi.stubGlobal("EventSource", FakeESNoop as unknown as typeof EventSource);
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
     if (path.endsWith("/turns"))
-      return Promise.resolve({ data: { turns: [], can_send: true, needs_disclosure: false, phase: "active", is_owner: true, disabled_reason: null, running_job_id: "job-1" }, error: undefined });
+      return Promise.resolve({ data: { turns: [], can_send: true, needs_disclosure: false, phase: "active", is_owner: true, disabled_reason: null, running_job_id: cleared ? null : "job-1" }, error: undefined });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
     return Promise.resolve({ data: null, error: undefined });
   }) as never);
   vi.spyOn(clientMod.api, "POST").mockImplementation(((path: string) => {
-    if (path.endsWith("/cancel")) return Promise.resolve({ data: { cancelled }, error: undefined });
+    if (path.endsWith("/cancel")) {
+      if (cancelled) cleared = true;
+      return Promise.resolve({ data: { cancelled }, error: undefined });
+    }
     return Promise.resolve({ data: null, error: undefined });
   }) as never);
 }
 
-it("owner sees Cancel while in-flight; {cancelled:true} clears it", async () => {
+it("owner sees Cancel while in-flight; {cancelled:true} clears the in-flight state", async () => {
   mockInFlightOwner(true);
   renderChat();
   fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
@@ -899,14 +950,21 @@ it("owner sees Cancel while in-flight; {cancelled:true} clears it", async () => 
     expect.stringContaining("/cancel"),
     expect.objectContaining({ params: { path: { workspace_id: "ws-1", job_id: "job-1" } } }),
   );
-  await waitFor(() => expect(screen.queryByText(/too late/i)).not.toBeInTheDocument());
+  // Cancel disappears ONLY if setJobId(null) ran AND the refetch returned
+  // running_job_id:null — proving the local clear (spec §4.3).
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument(),
+  );
+  expect(screen.queryByText(/too late/i)).not.toBeInTheDocument();
 });
 
-it("{cancelled:false} shows the too-late note and keeps the turn in-flight", async () => {
+it("{cancelled:false} shows the too-late note and KEEPS the turn in-flight", async () => {
   mockInFlightOwner(false);
   renderChat();
   fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
   expect(await screen.findByText(/too late/i)).toBeInTheDocument();
+  // jobId retained → the Cancel control stays (composer remains disabled), per spec §4.3.
+  expect(screen.getByRole("button", { name: /^cancel$/i })).toBeInTheDocument();
 });
 
 it("a viewer does not see the Cancel control", async () => {
@@ -921,8 +979,6 @@ it("a viewer does not see the Cancel control", async () => {
   expect(screen.queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument();
 });
 ```
-
-Add `fireEvent` to the file's `@testing-library/react` import.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1037,7 +1093,7 @@ git commit -m "feat(spa): cancel-turn affordance in the cockpit chat footer"
 
 - [ ] Backend boots: `EMBEDDING_MODEL=bge-m3 uv run python -c "import call_manager.main; print('ok')"`.
 - [ ] Targeted backend suites green (separate stdout from the benign APScheduler shutdown noise):
-  `EMBEDDING_MODEL=bge-m3 uv run pytest tests/test_workspaces_service.py tests/test_api_workspaces_delete.py tests/test_api_turns_cancel.py tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py tests/proposal_assist/evaluator/test_soft_delete_cancels_evaluator.py tests/proposal_assist/review/test_soft_delete_cancels_review.py tests/proposal_assist/uncited_claims/test_soft_delete.py tests/proposal_assist/test_web_workspaces_delete.py tests/proposal_assist/test_web_workspaces_cancel.py -v` — any failure that looks like connection-refused / `DeadlockDetected` on `TRUNCATE…CASCADE` is the documented infra flake; re-run that test **isolated** to confirm green.
+  `EMBEDDING_MODEL=bge-m3 uv run pytest tests/test_workspaces_service.py tests/proposal_assist/test_api_workspaces_delete.py tests/proposal_assist/test_api_turns_cancel.py tests/proposal_assist/coherence/test_soft_delete_cancels_coherence.py tests/proposal_assist/evaluator/test_soft_delete_cancels_evaluator.py tests/proposal_assist/review/test_soft_delete_cancels_review.py tests/proposal_assist/uncited_claims/test_soft_delete.py tests/proposal_assist/test_web_workspaces_delete.py tests/proposal_assist/test_web_workspaces_settings.py tests/proposal_assist/test_web_workspaces_cancel.py -v` — any failure that looks like connection-refused / `DeadlockDetected` on `TRUNCATE…CASCADE` is the documented infra flake; re-run that test **isolated** to confirm green.
 - [ ] `uv run ruff check src/ tests/` clean.
 - [ ] Frontend: `cd frontend && pnpm exec tsc --noEmit && pnpm exec vitest run && pnpm build` all clean.
 - [ ] Schema diff additive-only (the two new paths; `routes.gen.ts` unchanged).
@@ -1051,3 +1107,5 @@ git commit -m "feat(spa): cancel-turn affordance in the cockpit chat footer"
 **Placeholder scan:** none — every code/edit step carries full content; one verification note (confirm `EvaluatorJob`/`ReviewRun`/`UncitedClaimsJob` class names) is a guard, not a placeholder.
 
 **Type consistency:** `soft_delete_workspace(session, *, workspace_id, workspaces_dir)` is called identically in Task 1 (Jinja route), Task 2 (`/api`); `useDeleteWorkspace`/`useCancelTurn` names match between hook definition (Tasks 6/7) and the modal/chat consumers; `CancelTurnResponse.cancelled` matches the `res?.cancelled` read in Task 7.
+
+**Adversarial-review revisions applied (3 must-fix + 2 should-fix + nits):** (1) the two `/api` test files live under `tests/proposal_assist/` so the `client_authed_owner`/`_app`/`current_user` fixtures are in scope; (2) the service test seeds `ReviewRun(... draft_sha="a"*64)` (NOT-NULL column); (3) Task 1 retargets `test_web_workspaces_settings.py`'s two caplog logger references to `call_manager.workspaces` (the repoint moves the cleanup-warning logger) and adds that test to the regression net + final verification; (4) Task 7's cancel tests are stateful — `{cancelled:true}` asserts the Cancel control disappears (proving `setJobId(null)`), `{cancelled:false}` asserts it stays; (5) `fireEvent` import is an explicit first sub-step. Nits: tests keep UUID objects (codebase idiom), Task 2 adds viewer-403 + unknown-404 cases, module docstring refreshed. Deferred (deliberate): `del.isError`/`isPending` UI-state tests (standard mutation flags) and the drafting-disabled+in-flight cancel edge (pre-existing footer branch; spec-silent).
