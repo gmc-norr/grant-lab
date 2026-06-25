@@ -12,9 +12,9 @@ def test_soft_delete_cancels_active_coherence_jobs(
         s.add(CoherenceJob(workspace_id=ws.id, status="queued"))
         s.commit()
         ws_id = str(ws.id)
-    # Real soft-delete route is mounted under /workspaces (not /api) and 303-redirects.
-    r = client_authed_owner.post(f"/workspaces/{ws_id}/delete", follow_redirects=False)
-    assert r.status_code in (200, 303)
+    # Soft-delete now lives at DELETE /api/workspaces/{id} (cockpit gap-closer).
+    r = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+    assert r.status_code == 204
     with pg_session_factory() as s:
         job = s.query(CoherenceJob).filter_by(workspace_id=ws_id).one()
         assert job.status == "failed"  # cancelled on delete
