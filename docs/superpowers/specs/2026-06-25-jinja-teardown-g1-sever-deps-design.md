@@ -33,8 +33,11 @@ No DB schema change.
 consumes. The teardown must NOT touch the kept set.
 
 **KEEP (live — the React backend):**
-- All of `src/call_manager/web/api/*.py` (10 modules: calls, me, workspaces, turns,
-  references, files, settings, rubric, citation_audit, export).
+- All of `src/call_manager/web/api/*.py` — the **10 router modules** (calls, me, workspaces,
+  turns, references, files, settings, rubric, citation_audit, export) **plus the package
+  support files** (`__init__.py`, `errors.py`, `events.py`). The severance guard (§4.3) globs
+  the whole package — all 13 — not just the 10 routers, so a re-coupling in a support file
+  can't slip past.
 - The **7 JSON modules** under `proposal_assist/web/` that serve `/api/workspaces/…`:
   `proposals.py` (Inbox), `activity.py` (Activity tab), `problems.py`, `coherence.py`,
   `evaluator.py` (+ scorecard), `review.py` (Panel review), `uncited_claims.py`.
@@ -91,10 +94,19 @@ The serving Jinja routes: `references.py:819` `serve_reference_raw` (member-gate
   — `require_member`, transcribe the existing `serve_reference_raw` logic verbatim (storage
   lookup via `_storage_for` + `suffix_for_mime`, `FileResponse` with the same
   `Content-Disposition: attachment; filename=…` + `X-Content-Type-Options: nosniff` +
-  `Cache-Control: private, max-age=300`). 404 if the reference or its bytes are missing.
+  `Cache-Control: private, max-age=300`). Carry the existing guard **verbatim**: 404 if the
+  reference is missing, **belongs to another workspace** (`ref.workspace_id != ws.id` →
+  cross-workspace IDOR returns 404 not 403, so existence isn't leaked — see
+  `references.py:829`), or its bytes are missing.
 - `web/api/files.py`: add `GET /workspaces/{workspace_id}/files/{attachment_id}` — same
   pattern from the existing `serve_file` (member-gated, `FileResponse` of attachment bytes,
-  same cache/nosniff headers). 404 on missing.
+  `Cache-Control: private, max-age=300` + `Content-Disposition: inline; filename=…`). **The
+  files serve sets NO `nosniff`** — it serves images inline; only the references serve forces
+  download + nosniff (wide MIME range). Transcribe verbatim — G1 changes the URL prefix, not
+  the headers (adding nosniff would be a behavior change out of scope for a parity slice).
+  Carry the existing guard verbatim: 404 if the attachment is missing, **belongs to another
+  workspace** (`att.workspace_id != ws.id` → cross-workspace IDOR returns 404 not 403 — see
+  `files.py:372`), or its file is missing.
 - These reuse the relocated upload helpers (§4.2). Binary 200 responses are **exempt from
   the JSON envelope** (consistent with Slice F export and the existing serves).
 - **Repoint React** (3 literals → prefix `/api`): `LibraryPanel.tsx:174` →
@@ -131,9 +143,12 @@ relocate a copy. Prefer importing an existing neutral source over creating a new
 
 ### 4.3 Severance proof (the verify gate)
 - **Backend guard test** `tests/test_jinja_severance.py`: reads the source of each kept
-  module (`web/api/*.py` + the 7 JSON modules) and asserts none contains an import
+  module and asserts none contains an import
   `from call_manager.proposal_assist.web.{workspaces,files,references,sections,citations,annotations} import …`.
-  This is a durable regression guard against re-coupling.
+  The kept set is the **whole `web/api/` package** (glob `web/api/*.py` — all 10 routers AND
+  the support files `__init__.py`/`errors.py`/`events.py`, so a re-coupling in a support file
+  is caught) **plus the 7 live JSON modules**. This is a durable regression guard against
+  re-coupling.
 - **Frontend guard** (plan verification step): `grep -rn '"/workspaces/\|`/workspaces/' frontend/src --include=*.ts --include=*.tsx | grep -v schema.gen` returns **nothing**
   (only React `/cockpit` routes + `/api/…` remain). `schema.gen.ts` still lists the Jinja
   paths — that's fine; it's generated and they're deleted in G2.
@@ -144,9 +159,14 @@ relocate a copy. Prefer importing an existing neutral source over creating a new
 
 **Backend (targeted files only):**
 - `test_api_references.py`: add raw-serve cases — member 200 returns the original bytes +
-  `Content-Disposition` filename; non-member 403; missing-reference/missing-bytes 404.
+  `Content-Disposition: attachment` filename + `X-Content-Type-Options: nosniff`; non-member
+  403; missing-reference/missing-bytes 404; **cross-workspace IDOR** — member of workspace A
+  requests a reference id owned by workspace B → **404 (not 403)**, no bytes leaked.
 - `test_api_files.py`: add attachment-byte-serve cases — member 200 returns the bytes +
-  cache/nosniff headers; non-member 403; missing-attachment 404.
+  `Cache-Control: private, max-age=300` + `Content-Disposition: inline` (assert **no**
+  `X-Content-Type-Options` header — parity with the existing serve, §4.1); non-member 403;
+  missing-attachment 404; **cross-workspace IDOR** — member of workspace A requests an
+  attachment id owned by workspace B → **404 (not 403)**.
 - After the relocations, the existing suites for the 7 JSON modules + `web/api/settings.py`
   / `files.py` / `references.py` must stay green (run the affected files).
 - `test_jinja_severance.py` (the guard above).
