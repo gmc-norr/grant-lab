@@ -87,6 +87,17 @@ def test_audit_corrupt_ledger_409(monkeypatch, pg_url, pg_session_factory, tmp_p
     assert r.json()["error"]["code"] == "citation_ledger_invalid"
 
 
+def test_deep_check_corrupt_ledger_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # The deep handler has its OWN corrupt-ledger branch (citation_audit.py); the spec
+    # pins 409 citation_ledger_invalid for GET AND deep-check, so guard it explicitly.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, ws_id = _seed(pg_session_factory)
+    _write(tmp_path, ws_id, proposal="x\n", citations="{ not json")
+    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/citation-audit/deep")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "citation_ledger_invalid"
+
+
 def test_audit_viewer_can_read(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _app(monkeypatch, pg_url, tmp_path)
     _, viewer_id, ws_id = _seed(pg_session_factory)
