@@ -12,13 +12,14 @@ routes (deleted in this slice). No DB schema change.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import User, WorkspaceSetupJob
+from call_manager.db.models import User, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()
@@ -80,3 +81,109 @@ def get_setup_status(
             status=job.status if job else "queued",
             last_error=(job.last_error if job else None) if is_owner else None,
         )
+
+
+class CriterionIn(BaseModel):
+    # extra="allow" carries subcriteria (and any unknown field) through unchanged.
+    model_config = ConfigDict(extra="allow")
+    name: str
+    description: str
+    weight: float
+    scale_max: int
+
+
+class RubricUpdateIn(BaseModel):
+    criteria: list[CriterionIn]
+    funder_notes: str | None = None
+
+
+def _validate_criteria(criteria: list[CriterionIn]) -> list[dict]:
+    # Semantic validation -> 400 bad_request (parity with the Jinja form). Returns
+    # plain dicts that PRESERVE passthrough fields (model_dump keeps extras).
+    if not criteria:
+        raise HTTPException(status_code=400, detail="rubric must have at least one criterion")
+    out: list[dict] = []
+    for i, c in enumerate(criteria):
+        name = c.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail=f"criterion {i}: name required")
+        if c.weight < 0:
+            raise HTTPException(status_code=400, detail=f"criterion {i}: weight must be >= 0")
+        if not (1 <= c.scale_max <= 10):
+            raise HTTPException(status_code=400, detail=f"criterion {i}: scale_max must be 1..10")
+        d = c.model_dump()
+        d["name"] = name
+        out.append(d)
+    return out
+
+
+def _apply_rubric(session, ws, user, criteria: list[dict], funder_notes: str) -> None:
+    # Single saver for both activate and PUT. Writes rubric_edited ONLY on real
+    # change. NOTE: we set actor_id=user.id (cleaner than the Jinja path, which
+    # left actor_id NULL and stored payload['edited_by_user_id']); activity's
+    # actor_user_id() prefers actor_id, so this resolves the editor correctly.
+    old_c = ws.rubric_criteria
+    old_n = ws.rubric_funder_notes or ""
+    content_changed = criteria != old_c or funder_notes != old_n
+    ws.rubric_criteria = criteria
+    ws.rubric_funder_notes = funder_notes
+    if content_changed:
+        ws.rubric_updated_at = datetime.now(UTC)
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="rubric_edited",
+                actor_id=user.id,
+                payload={
+                    "old_criteria": old_c,
+                    "new_criteria": criteria,
+                    "old_funder_notes": old_n,
+                    "new_funder_notes": funder_notes,
+                },
+            )
+        )
+
+
+@router.put("/workspaces/{workspace_id}/rubric", response_model=RubricOut)
+def update_rubric(
+    workspace_id: uuid.UUID,
+    body: RubricUpdateIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> RubricOut:
+    criteria = _validate_criteria(body.criteria)
+    with request.app.state.session_factory() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
+        session.commit()
+        return _rubric_out(ws)
+
+
+@router.post("/workspaces/{workspace_id}/activate", response_model=RubricOut)
+def activate(
+    workspace_id: uuid.UUID,
+    body: RubricUpdateIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> RubricOut:
+    criteria = _validate_criteria(body.criteria)
+    with request.app.state.session_factory() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        job = session.scalar(
+            select(WorkspaceSetupJob)
+            .where(WorkspaceSetupJob.workspace_id == ws.id)
+            .with_for_update()
+        )
+        if job is None or job.status != "waiting_for_rubric_review":
+            raise HTTPException(status_code=409, detail="workspace is not awaiting rubric review")
+        _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
+        job.status = "done"
+        job.completed_at = datetime.now(UTC)
+        ws.current_phase = "active"
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id, kind="workspace_activated", actor_id=user.id, payload={}
+            )
+        )
+        session.commit()
+        return _rubric_out(ws)

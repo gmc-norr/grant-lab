@@ -94,3 +94,160 @@ def test_setup_status_stranger_403(monkeypatch, pg_url, tmp_path, pg_session_fac
     ws_id, _, _, stranger_id = _setup(pg_session_factory)
     r = authed_client(app, user_id=stranger_id).get(f"/api/workspaces/{ws_id}/setup-status")
     assert r.status_code == 403
+
+
+def test_put_rubric_saves_and_preserves_subcriteria_and_bumps(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):  # noqa: E501
+    from sqlalchemy import func, select
+
+    from call_manager.db.models import Workspace, WorkspaceEvent
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active")
+    with pg_session_factory() as s:
+        before = s.get(Workspace, ws_id).rubric_updated_at
+    body = {
+        "criteria": [
+            {
+                "name": "Impact!",
+                "description": "d2",
+                "weight": 0.7,
+                "scale_max": 5,
+                "subcriteria": [{"name": "reach", "description": "x"}],
+            },
+            {"name": "Feasibility", "description": "d", "weight": 0.4, "scale_max": 5},
+        ],
+        "funder_notes": "notes",
+    }
+    r = authed_client(app, user_id=owner_id).put(f"/api/workspaces/{ws_id}/rubric", json=body)
+    assert r.status_code == 200, r.text
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        assert ws.rubric_criteria[0]["name"] == "Impact!"
+        assert ws.rubric_criteria[0]["subcriteria"] == [{"name": "reach", "description": "x"}]
+        assert ws.rubric_updated_at > before  # changed → bumped
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "rubric_edited")
+            )
+            == 1
+        )
+
+
+def test_put_rubric_unchanged_is_noop(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    """Round-tripping the current rubric (incl. subcriteria) writes no event."""
+    from sqlalchemy import func, select
+
+    from call_manager.db.models import Workspace, WorkspaceEvent
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active")
+    with pg_session_factory() as s:
+        current = list(s.get(Workspace, ws_id).rubric_criteria)
+    r = authed_client(app, user_id=owner_id).put(
+        f"/api/workspaces/{ws_id}/rubric", json={"criteria": current, "funder_notes": "notes"}
+    )
+    assert r.status_code == 200, r.text
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "rubric_edited")
+            )
+            == 0
+        )
+
+
+def test_put_rubric_member_403(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory, phase="active")
+    r = authed_client(app, user_id=member_id).put(
+        f"/api/workspaces/{ws_id}/rubric",
+        json={
+            "criteria": [{"name": "A", "description": "", "weight": 1, "scale_max": 5}],
+            "funder_notes": None,
+        },
+    )
+    assert r.status_code == 403
+
+
+def test_put_rubric_validation_400(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active")
+    c = authed_client(app, user_id=owner_id)
+    base = {"name": "A", "description": "", "weight": 1.0, "scale_max": 5}
+    url = f"/api/workspaces/{ws_id}/rubric"
+    fn = {"funder_notes": None}
+    assert c.put(url, json={"criteria": [], **fn}).status_code == 400
+    assert c.put(url, json={"criteria": [{**base, "name": "  "}], **fn}).status_code == 400
+    assert c.put(url, json={"criteria": [{**base, "weight": -1}], **fn}).status_code == 400
+    assert c.put(url, json={"criteria": [{**base, "scale_max": 0}], **fn}).status_code == 400
+    r = c.put(url, json={"criteria": [], "funder_notes": None})
+    assert r.json()["error"]["code"] == "bad_request"
+
+
+def test_activate_owner_advances_phase_and_audits(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):  # noqa: E501
+    from sqlalchemy import select
+
+    from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory)  # setup phase, waiting job
+    with pg_session_factory() as s:
+        current = list(s.get(Workspace, ws_id).rubric_criteria)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/activate", json={"criteria": current, "funder_notes": "notes"}
+    )
+    assert r.status_code == 200, r.text
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        assert ws.current_phase == "active"
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
+        assert job.status == "done" and job.completed_at is not None
+        activated = s.scalar(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "workspace_activated"
+            )
+        )
+        assert activated is not None
+        # unedited activate wrote NO rubric_edited (subcriteria round-tripped)
+        assert (
+            s.scalar(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == ws_id, WorkspaceEvent.kind == "rubric_edited"
+                )
+            )
+            is None
+        )
+
+
+def test_activate_when_not_waiting_409(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    from call_manager.db.models import Workspace
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active", job_status="done")
+    with pg_session_factory() as s:
+        current = list(s.get(Workspace, ws_id).rubric_criteria)
+    r = authed_client(app, user_id=owner_id).post(
+        f"/api/workspaces/{ws_id}/activate", json={"criteria": current, "funder_notes": "notes"}
+    )
+    assert r.status_code == 409
+
+
+def test_activate_member_403(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/activate",
+        json={
+            "criteria": [{"name": "A", "description": "", "weight": 1, "scale_max": 5}],
+            "funder_notes": None,
+        },
+    )
+    assert r.status_code == 403
