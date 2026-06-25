@@ -48,19 +48,9 @@ from call_manager.proposal_assist.attachments.tokens import estimate_image_token
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
 from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.coherence.jobs import (
-    cancel_coherence_jobs_for_workspace,
-)
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.evaluator.jobs import (
-    cancel_evaluator_jobs_for_workspace,
-)
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.proposal_assist.review.jobs import (
-    cancel_review_runs_for_workspace,
-)
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.history import (
     diff_artifact_impl,
@@ -74,9 +64,6 @@ from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.turns.submit import (
     MAX_TURN_INCLUSIONS,
     submit_user_turn,
-)
-from call_manager.proposal_assist.uncited_claims.jobs import (
-    cancel_uncited_claims_jobs_for_workspace,
 )
 from call_manager.proposal_assist.web._perms import (
     require_member as _require_owner_or_viewer,
@@ -94,6 +81,7 @@ from call_manager.proposal_assist.web.files import (
     _sanitize_filename,
 )
 from call_manager.workspaces import create_workspace as _create_workspace
+from call_manager.workspaces import soft_delete_workspace
 
 # Valid Workspace.status values (mirrors the ck_workspaces_status CHECK
 # constraint in db/models.py). Used to allowlist the ?status filter.
@@ -1255,92 +1243,18 @@ def soft_delete(
     user=Depends(get_current_user),  # noqa: B008
     session: Session = Depends(_session_dep),  # noqa: B008
 ):
-    """Soft-delete a workspace and scrub attachment bytes from disk.
+    """Soft-delete a workspace (owner-only) and scrub its file bytes.
 
-    Order (Codex-finding fix): DB commit FIRST (so the user-visible
-    "deleted" state is durable), THEN best-effort FS cleanup. If the
-    FS cleanup fails, the workspace is still soft-deleted; the orphan
-    files are harmless (no app code reads them, and the row-source-of-
-    truth lookup gates serving on a live DB row) and a re-invocation
-    of this handler OR a future sweep job will collect them.
-
-    Attachment DB rows are intentionally preserved for the audit
-    trail; only the bytes on disk are removed.
+    Delegates to the shared `soft_delete_workspace` service — the same code path
+    the JSON `DELETE /api/workspaces/{id}` endpoint uses. This Jinja route is
+    deleted in the G2 teardown; the service is the durable home.
     """
-    from datetime import UTC, datetime
-
-    ws = _require_owner(
-        workspace_id=workspace_id,
-        user=user,
-        session=session,
+    ws = _require_owner(workspace_id=workspace_id, user=user, session=session)
+    soft_delete_workspace(
+        session,
+        workspace_id=ws.id,
+        workspaces_dir=Path(request.app.state.settings.workspaces_dir),
     )
-    ws.soft_deleted_at = datetime.now(UTC)
-    # Fail any active (queued|running) coherence pass so it can't claim and burn
-    # cloud tokens after the workspace is deleted (claim_next also excludes
-    # soft-deleted workspaces; this also unwedges the active-unique slot and
-    # supersedes any partial pending rows). Runs in this same transaction, before
-    # the commit below.
-    cancel_coherence_jobs_for_workspace(session, workspace_id=workspace_id)
-    # SP2b-3a: same rationale for the evaluator queue — fail any active
-    # (queued|running) scorecard pass so it can't burn cloud tokens after the
-    # workspace is deleted (claim_next_evaluator_job also excludes soft-deleted
-    # workspaces; this unwedges the active-unique slot). Same transaction.
-    cancel_evaluator_jobs_for_workspace(session, workspace_id=workspace_id)
-    # SP2b-3c: same rationale for the review queue — cancel any active mock-panel run.
-    cancel_review_runs_for_workspace(session, workspace_id=workspace_id)
-    # SP2b-3d: same rationale for the uncited-claims queue — cancel any active run.
-    cancel_uncited_claims_jobs_for_workspace(session, workspace_id=workspace_id)
-    # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route
-    # through the helper for audit parity (closes each cloud_turn_sent chain),
-    # but emit_chat=False — the workspace is 404 the instant it's soft-deleted,
-    # so a viewer-safe row would be dead-on-arrival. 'cancelled' (owner-
-    # initiated, never started), not 'failed'.
-    queued = session.execute(
-        select(TurnJob.id).where(
-            TurnJob.workspace_id == workspace_id,
-            TurnJob.status == "queued",
-        )
-    ).all()
-    for row in queued:
-        record_terminal_outcome(
-            session,
-            turn_job_id=row.id,
-            workspace_id=workspace_id,
-            outcome="cancelled",
-            expected_status="queued",
-            raw_error="workspace soft-deleted",
-            emit_chat=False,
-        )
-    session.commit()
-    # B7: scrub attachment bytes from disk. DB rows remain (compliance —
-    # audit trail preserved); only the bytes are removed. Errors here
-    # are non-fatal: the workspace is already soft-deleted at the DB
-    # level, which is the durable user-visible state.
-    workspaces_dir = Path(request.app.state.settings.workspaces_dir)
-    storage = AttachmentStorage(root=workspaces_dir)
-    try:
-        storage.delete_workspace(workspace_id=workspace_id)
-    except OSError:
-        logger.warning(
-            "soft_delete: attachment cleanup failed for workspace %s; "
-            "files will be collected by future sweep",
-            workspace_id,
-            exc_info=True,
-        )
-    # Also scrub reference bytes (original files + extracted text.txt).
-    # Same compliance promise as attachments — DB rows remain for the
-    # audit trail, only the on-disk bytes are removed. Best-effort; an
-    # error here is non-fatal (the workspace is already soft-deleted).
-    ref_storage = ReferenceStorage(root=workspaces_dir)
-    try:
-        ref_storage.delete_workspace(workspace_id=workspace_id)
-    except OSError:
-        logger.warning(
-            "soft_delete: reference cleanup failed for workspace %s; "
-            "files will be collected by future sweep",
-            workspace_id,
-            exc_info=True,
-        )
     return RedirectResponse(url="/workspaces", status_code=303)
 
 

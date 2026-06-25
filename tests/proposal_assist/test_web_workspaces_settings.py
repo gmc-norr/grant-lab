@@ -462,7 +462,7 @@ def test_soft_delete_idempotent_on_fs_failure(
     fake_shutil = types.SimpleNamespace(rmtree=_boom)
     monkeypatch.setattr(storage_mod, "shutil", fake_shutil)
 
-    caplog.set_level(logging.WARNING, logger="call_manager.proposal_assist.web.workspaces")
+    caplog.set_level(logging.WARNING, logger="call_manager.workspaces")
     response = client_authed_owner.post(
         f"/workspaces/{wsid}/delete",
         follow_redirects=False,
@@ -478,7 +478,7 @@ def test_soft_delete_idempotent_on_fs_failure(
     warnings = [
         rec
         for rec in caplog.records
-        if rec.name == "call_manager.proposal_assist.web.workspaces"
+        if rec.name == "call_manager.workspaces"
         and rec.levelno == logging.WARNING
     ]
     assert warnings, f"expected WARNING log; got records: {caplog.records}"
