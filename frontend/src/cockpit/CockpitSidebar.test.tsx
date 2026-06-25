@@ -1,7 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+import { theme } from "../theme/theme";
 
 // vi.mock is hoisted above top-level consts, so the factory must reference a
 // vi.hoisted() object (a plain `const addMutate = vi.fn()` here trips
@@ -12,6 +15,17 @@ vi.mock("../api/settings", () => ({
   useRemoveMember: () => ({ mutate: m.removeMutate, isPending: false }),
 }));
 
+const rb = vi.hoisted(() => ({
+  update: vi.fn(),
+  // Stable reference so the useEffect([editOpen, rubric.data]) dependency doesn't
+  // fire on every render (a new object literal would cause an infinite loop).
+  rubricData: { criteria: [{ name: "Impact", description: "d", weight: 1, scale_max: 5 }], funder_notes: "", updated_at: "x" },
+}));
+vi.mock("../api/rubric", () => ({
+  useUpdateRubric: () => ({ mutate: rb.update, isPending: false, isError: false }),
+  useRubric: () => ({ data: rb.rubricData, isLoading: false }),
+}));
+
 import * as clientMod from "../api/client";
 import { CockpitSidebar } from "./CockpitSidebar";
 import { resetEditorStore, setDirty } from "./editorStore";
@@ -19,6 +33,7 @@ import { resetEditorStore, setDirty } from "./editorStore";
 beforeEach(() => {
   m.addMutate.mockReset();
   m.removeMutate.mockReset();
+  rb.update.mockReset();
 });
 
 afterEach(() => {
@@ -45,21 +60,23 @@ function Probe() {
 function renderSidebar(url = "/cockpit/ws-1") {
   const qc = new QueryClient();
   return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[url]}>
-        <Routes>
-          <Route
-            path="/cockpit/:id"
-            element={
-              <>
-                <CockpitSidebar />
-                <Probe />
-              </>
-            }
-          />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[url]}>
+          <Routes>
+            <Route
+              path="/cockpit/:id"
+              element={
+                <>
+                  <CockpitSidebar />
+                  <Probe />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
   );
 }
 
@@ -186,4 +203,22 @@ it("owner can remove a viewer (confirm-gated) from the Members group", async () 
   expect(m.removeMutate).toHaveBeenCalledWith(2);
   // owner row has NO remove control:
   expect(screen.queryByRole("button", { name: /remove owner@ki\.se/i })).toBeNull();
+});
+
+it("owner can open Edit rubric and save (active phase)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
+    if (path.endsWith("/members"))
+      return Promise.resolve({ data: [{ user_id: 1, email: "owner@ki.se", role: "owner" }], error: undefined });
+    if (path.endsWith("/versions")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar();
+  fireEvent.click(await screen.findByRole("button", { name: /criteria/i })); // open the group
+  fireEvent.click(await screen.findByRole("button", { name: /edit rubric/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /save/i }));
+  expect(rb.update).toHaveBeenCalled();
 });

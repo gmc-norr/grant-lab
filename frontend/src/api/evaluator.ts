@@ -55,6 +55,7 @@ export function useScorecard(id: string) {
   return useQuery({
     queryKey: ["scorecard", id],
     enabled: !!id,
+    retry: false,
     queryFn: async () =>
       unwrap(
         await api.GET("/api/workspaces/{workspace_id}/scorecard", {

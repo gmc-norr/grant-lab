@@ -1,14 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+
+import { Button, Modal } from "@mantine/core";
 
 import { useReferences } from "../api/citations";
 import { useDraft, useSpec } from "../api/editor";
 import { type ScorecardCriterion, useScorecard } from "../api/evaluator";
+import { type RubricCriterion, useRubric, useUpdateRubric } from "../api/rubric";
 import { useAddMember, useRemoveMember } from "../api/settings";
 import { useCockpitMeta, useMembers, useVersions } from "../api/workspace";
 import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
 import { useEditorStore } from "./editorStore";
+import { RubricEditor } from "./RubricEditor";
 import { SidebarGroup } from "./SidebarGroup";
 
 const BAND_CLASS: Record<ScorecardCriterion["band"], string> = {
@@ -59,6 +63,19 @@ export function CockpitSidebar() {
   const removeMember = useRemoveMember(id);
   const [newEmail, setNewEmail] = useState("");
 
+  const isOwnerActive = meta.data?.role === "owner" && meta.data?.current_phase === "active";
+  const [editOpen, setEditOpen] = useState(false);
+  const rubric = useRubric(id);
+  const updateRubric = useUpdateRubric(id);
+  const [draftCriteria, setDraftCriteria] = useState<RubricCriterion[]>([]);
+  const [draftNotes, setDraftNotes] = useState("");
+  useEffect(() => {
+    if (editOpen && rubric.data) {
+      setDraftCriteria(rubric.data.criteria);
+      setDraftNotes(rubric.data.funder_notes ?? "");
+    }
+  }, [editOpen, rubric.data]);
+
   return (
     <div className={styles.sidebar}>
       <SidebarGroup title="Outline" count={sections.length || undefined}>
@@ -98,6 +115,11 @@ export function CockpitSidebar() {
       </SidebarGroup>
 
       <SidebarGroup title="Criteria" count={criteria.length || undefined} defaultOpen={false}>
+        {isOwnerActive && (
+          <button type="button" className={styles.editRubric} onClick={() => setEditOpen(true)}>
+            Edit rubric
+          </button>
+        )}
         {criteria.length === 0 && <p className={styles.note}>No criteria yet.</p>}
         <ul className={styles.outline} aria-label="Criteria">
           {criteria.map((c) => (
@@ -176,6 +198,26 @@ export function CockpitSidebar() {
           </p>
         )}
       </SidebarGroup>
+
+      {isOwnerActive && editOpen && (
+        <Modal opened onClose={() => setEditOpen(false)} title="Edit funder criteria" size="xl">
+          <RubricEditor
+            criteria={draftCriteria}
+            funderNotes={draftNotes}
+            onChange={(n) => { setDraftCriteria(n.criteria); setDraftNotes(n.funderNotes); }}
+          />
+          {updateRubric.isError && <p className={styles.note}>Could not save the rubric.</p>}
+          <Button
+            disabled={updateRubric.isPending}
+            onClick={() => updateRubric.mutate(
+              { criteria: draftCriteria, funder_notes: draftNotes || null },
+              { onSuccess: () => setEditOpen(false) },
+            )}
+          >
+            Save
+          </Button>
+        </Modal>
+      )}
     </div>
   );
 }

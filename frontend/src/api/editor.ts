@@ -13,6 +13,7 @@ export type SaveSectionVars = {
 export function useDraft(id: string) {
   return useQuery({
     queryKey: ["draft", id],
+    retry: false,
     queryFn: async () =>
       unwrap(await api.GET("/api/workspaces/{workspace_id}/draft", { params: { path: { workspace_id: id } } })),
   });
@@ -51,6 +52,7 @@ export type SaveSpecSectionVars = {
 export function useSpec(id: string) {
   return useQuery({
     queryKey: ["spec", id],
+    retry: false,
     queryFn: async () =>
       unwrap(await api.GET("/api/workspaces/{workspace_id}/spec", { params: { path: { workspace_id: id } } })),
   });

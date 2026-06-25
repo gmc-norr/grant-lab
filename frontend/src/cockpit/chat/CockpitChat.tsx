@@ -85,7 +85,7 @@ export function CockpitChat() {
             if (reason === "setup")
               return (
                 <p className={styles.note}>
-                  Finish setup — review the rubric in the legacy workspace before drafting.
+                  Finish setup — review the funder rubric above to start drafting.
                 </p>
               );
             if (reason === "drafting_disabled")

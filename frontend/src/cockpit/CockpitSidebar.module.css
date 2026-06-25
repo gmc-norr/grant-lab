@@ -149,3 +149,15 @@
   opacity: 0.5;
   cursor: default;
 }
+.editRubric {
+  border: none;
+  background: transparent;
+  color: var(--app-accent, teal);
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem 0.15rem 1.25rem;
+  cursor: pointer;
+  text-align: left;
+}
+.editRubric:hover {
+  text-decoration: underline;
+}
