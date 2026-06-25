@@ -5,7 +5,7 @@ import { useDraft, useSaveSection } from "../api/editor";
 import { downloadExport, type ExportKind } from "../api/export";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
 
-export function DraftPanel({ id }: { id: string }) {
+export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: string; n: number } | null }) {
   const draft = useDraft(id);
   const save = useSaveSection(id);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -64,6 +64,7 @@ export function DraftPanel({ id }: { id: string }) {
         save={save}
         refetch={draft.refetch}
         citations
+        openPeek={openPeek}
       />
     </div>
   );

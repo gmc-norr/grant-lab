@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
+import * as citationsApi from "../api/citations";
 import { resetEditorStore } from "../cockpit/editorStore";
 import { ArtifactSectionEditor } from "./ArtifactSectionEditor";
 
@@ -64,4 +65,54 @@ it("resolves the active section by section.index, not array position", async () 
 it("citations={false} renders no Cite control", () => {
   renderEditor([{ index: 0, heading: "", text: "x\n", sha: "s0" }]);
   expect(screen.queryByRole("button", { name: /cite selection/i })).toBeNull();
+});
+
+it("openPeek prop opens the citation source peek panel", async () => {
+  const fakeSource = {
+    ev_id: "ev-9",
+    citekey: "smith2021",
+    reference_title: "Smith et al. 2021",
+    reference_kind: "paper",
+    chunk_index: 0,
+    section_path: null,
+    evidence_quote: "the azure sky",
+    prev_ev_id: null,
+    next_ev_id: null,
+  };
+  vi.spyOn(citationsApi, "useCitationSource").mockReturnValue({
+    data: fakeSource,
+    isLoading: false,
+    isError: false,
+  } as unknown as ReturnType<typeof citationsApi.useCitationSource>);
+
+  const qc = new QueryClient();
+  const save = { mutateAsync: vi.fn(), isPending: false };
+  render(
+    <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+      <QueryClientProvider client={qc}>
+        <Routes>
+          <Route
+            path="/cockpit/:id"
+            element={
+              <ArtifactSectionEditor
+                workspaceId="ws-1"
+                queryKey={["draft", "ws-1"]}
+                head={"a".repeat(40)}
+                canEdit={true}
+                sections={[{ index: 0, heading: "", text: "x\n", sha: "s0" }]}
+                save={save}
+                refetch={() => {}}
+                citations={true}
+                openPeek={{ ev: "ev-9", n: 1 }}
+              />
+            }
+          />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
+
+  await waitFor(() =>
+    expect(screen.getByRole("region", { name: /citation source peek/i })).toBeInTheDocument(),
+  );
 });

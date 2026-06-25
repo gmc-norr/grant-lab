@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { useCockpitMeta } from "../api/workspace";
@@ -20,12 +20,18 @@ export function Cockpit() {
   const { tab, setTab, navigate } = useCockpitNav();
   const [bottomTab, setBottomTab] = useState<BottomTab>("inbox");
   const [collapsed, setCollapsed] = useState(false);
+  const peekNonce = useRef(0);
+  const [openPeek, setOpenPeek] = useState<{ ev: string; n: number } | null>(null);
 
   const onNavigate = (target: NavTarget) => {
     navigate(target); // ?tab + ?sec
     if (target.bottom_tab) {
       setBottomTab(target.bottom_tab);
       setCollapsed(false);
+    }
+    if (target.evidence_id) {
+      peekNonce.current += 1;
+      setOpenPeek({ ev: target.evidence_id, n: peekNonce.current });
     }
   };
 
@@ -50,7 +56,7 @@ export function Cockpit() {
           Panel review
         </button>
       </div>
-      {tab === "draft" && <DraftPanel id={id} />}
+      {tab === "draft" && <DraftPanel id={id} openPeek={openPeek} />}
       {tab === "spec" && <SpecPanel id={id} />}
       {tab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
       {tab === "review" && <ReviewPanel id={id} />}

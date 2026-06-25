@@ -32,6 +32,9 @@ export type ArtifactSectionEditorProps = {
   citations?: boolean;
   /** Label for the whole-artifact read-only View tab. */
   fullViewLabel?: string;
+  /** When set, drives the peek panel to show a specific citation source. The `n`
+   *  nonce lets the parent re-open the same evidence_id a second time. */
+  openPeek?: { ev: string; n: number } | null;
 };
 
 // ApiError.message is "code: detail"; strip the code prefix, show the human detail.
@@ -53,6 +56,7 @@ export function ArtifactSectionEditor({
   refetch,
   citations = false,
   fullViewLabel = "Full draft",
+  openPeek,
 }: ArtifactSectionEditorProps) {
   const qc = useQueryClient();
   const { sec, setSec } = useCockpitNav();
@@ -65,6 +69,9 @@ export function ArtifactSectionEditor({
   const [staleSection, setStaleSection] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [peekEv, setPeekEv] = useState<string | null>(null);
+  useEffect(() => {
+    if (openPeek) setPeekEv(openPeek.ev);
+  }, [openPeek?.ev, openPeek?.n]);
   const [pinnedEv, setPinnedEv] = useState<string | null>(null);
   const [selection, setSelection] = useState<{ from: number; to: number; text: string } | null>(
     null,
