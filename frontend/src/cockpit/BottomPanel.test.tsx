@@ -6,13 +6,16 @@ import { BottomPanel } from "./BottomPanel";
 const h = vi.hoisted(() => ({
   count: 3,
   problems: { data: { problems: [], counts: { error: 2, warning: 1 }, scorecard_stale: [] } },
+  audit: { data: { error_count: 2 } },
 }));
 
 vi.mock("../api/proposals", () => ({ useInboxCount: () => h.count }));
 vi.mock("../api/problems", () => ({ useProblems: () => h.problems }));
+vi.mock("../api/audit", () => ({ useCitationAudit: () => h.audit }));
 vi.mock("./InboxPanel", () => ({ InboxPanel: () => <div>inbox-body</div> }));
 vi.mock("./ProblemsPanel", () => ({ ProblemsPanel: () => <div>problems-body</div> }));
 vi.mock("./ActivityPanel", () => ({ ActivityPanel: () => <div>activity-body</div> }));
+vi.mock("./CitationsPanel", () => ({ CitationsPanel: () => <div>citations-body</div> }));
 
 describe("BottomPanel", () => {
   it("renders badges and switches tabs", () => {
@@ -80,5 +83,20 @@ describe("BottomPanel", () => {
       />,
     );
     expect(screen.getByText("activity-body")).toBeInTheDocument();
+  });
+
+  it("exposes the Citations tab with an error-count badge", () => {
+    render(
+      <BottomPanel
+        id="ws1"
+        activeTab="citations"
+        onTab={vi.fn()}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("tab", { name: /citations 2/i })).toBeInTheDocument();
+    expect(screen.getByText("citations-body")).toBeInTheDocument();
   });
 });

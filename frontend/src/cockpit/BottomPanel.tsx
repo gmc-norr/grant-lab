@@ -1,6 +1,8 @@
+import { useCitationAudit } from "../api/audit";
 import { useProblems } from "../api/problems";
 import { useInboxCount } from "../api/proposals";
 import { ActivityPanel } from "./ActivityPanel";
+import { CitationsPanel } from "./CitationsPanel";
 import { InboxPanel } from "./InboxPanel";
 import { LibraryPanel } from "./LibraryPanel";
 import type { BottomTab, OnNavigate } from "./nav";
@@ -25,6 +27,8 @@ export function BottomPanel({
   const problems = useProblems(id);
   const problemsCount =
     (problems.data?.counts?.error ?? 0) + (problems.data?.counts?.warning ?? 0);
+  const audit = useCitationAudit(id);
+  const auditCount = audit.data?.error_count ?? 0;
 
   return (
     <section className="bottom-panel" aria-label="Workspace panel">
@@ -62,6 +66,14 @@ export function BottomPanel({
           >
             Library
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "citations"}
+            onClick={() => onTab("citations")}
+          >
+            Citations {auditCount}
+          </button>
         </div>
         <button
           type="button"
@@ -78,6 +90,7 @@ export function BottomPanel({
           {activeTab === "problems" && <ProblemsPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "activity" && <ActivityPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "library" && <LibraryPanel id={id} />}
+          {activeTab === "citations" && <CitationsPanel id={id} onNavigate={onNavigate} />}
         </div>
       )}
     </section>
