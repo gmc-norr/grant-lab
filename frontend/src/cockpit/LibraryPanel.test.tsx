@@ -138,7 +138,7 @@ describe("LibraryPanel Files section", () => {
     wrap(<LibraryPanel id="ws1" />);
     expect(screen.getByText("fig.png")).toBeInTheDocument();
     const img = screen.getByRole("img", { name: /fig\.png/i }) as HTMLImageElement;
-    expect(img.getAttribute("src")).toBe("/workspaces/ws1/files/a1");
+    expect(img.getAttribute("src")).toBe("/api/workspaces/ws1/files/a1");
   });
 
   it("deletes a file after confirm", () => {

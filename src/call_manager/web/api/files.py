@@ -1,26 +1,27 @@
 """JSON /api surface for image attachments (Cockpit Library Files, Slice C-media).
 
-Owner-gated writes (upload/delete) + member-gated list, REUSING the existing
-files service helpers (_probe_image_format, _read_capped, AttachmentStorage,
-estimate_image_tokens) and inlining the Jinja upload_file flow. Image BYTES are
-served by the existing Jinja GET /workspaces/{id}/files/{aid} (no new binary
-serve here — Slice G owns that). The Jinja files routes coexist until Slice G.
+Owner-gated writes (upload/delete) + member-gated list + member-gated byte
+serve, REUSING the relocated files helpers (_probe_image_format, _read_capped,
+AttachmentStorage, estimate_image_tokens) and inlining the Jinja upload_file
+flow. The byte serve (GET /workspaces/{id}/files/{aid}) was added in the Jinja
+teardown G1; the parallel Jinja serve coexists until G2 deletes it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Attachment, User
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
-from call_manager.proposal_assist.web._perms import require_member, require_owner
 from call_manager.proposal_assist.web._file_uploads import (
     _ALLOWED_MIMES,
     _MAX_BYTES,
@@ -31,6 +32,9 @@ from call_manager.proposal_assist.web._file_uploads import (
     _sanitize_filename,
     _storage_for,
 )
+from call_manager.proposal_assist.web._perms import require_member, require_owner
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -160,3 +164,53 @@ def api_delete_file(
     with contextlib.suppress(OSError):
         storage.delete_one(workspace_id=workspace_id, attachment_id=attachment_id, suffix=suffix)
     return Response(status_code=204)
+
+
+@router.get("/workspaces/{workspace_id}/files/{attachment_id}")
+def api_serve_file(
+    workspace_id: uuid.UUID,
+    attachment_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> FileResponse:
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        att = session.get(Attachment, attachment_id)
+        # IDOR defense: return 404 (NOT 403) on cross-workspace lookups so we
+        # don't leak the existence of attachments outside the caller's view.
+        if att is None or att.workspace_id != ws.id:
+            raise HTTPException(status_code=404, detail="attachment not found")
+        mime_type = att.mime_type
+        filename = att.filename
+        storage_suffix = Path(att.storage_path).suffix.lower()
+
+    storage = _storage_for(request)
+    try:
+        path = storage.path_for(
+            workspace_id=workspace_id,
+            attachment_id=attachment_id,
+            suffix=storage_suffix,
+        )
+    except ValueError as e:
+        # Unsupported suffix snuck into the DB somehow — treat as missing.
+        logger.warning(
+            "api_serve_file: attachment %s has disallowed suffix %r: %s",
+            attachment_id,
+            storage_suffix,
+            e,
+        )
+        raise HTTPException(status_code=404, detail="attachment not found") from e
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="attachment file missing")
+
+    safe_filename = _sanitize_filename(filename or f"attachment{storage_suffix}")
+    return FileResponse(
+        path,
+        media_type=mime_type,
+        headers={
+            # private: a shared proxy MUST NOT cache and serve to another user.
+            "Cache-Control": "private, max-age=300",
+            "Content-Disposition": f'inline; filename="{safe_filename}"',
+        },
+    )

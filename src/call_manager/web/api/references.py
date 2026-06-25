@@ -14,6 +14,7 @@ import hashlib
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
@@ -31,7 +32,6 @@ from call_manager.proposal_assist.references.ingest import (
     suffix_for_mime,
 )
 from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
-from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.references.uploads import (
     _ALLOWED_MIMES,
     _MAX_BYTES,
@@ -39,6 +39,7 @@ from call_manager.proposal_assist.references.uploads import (
     _sanitize_filename,
     _storage_for,
 )
+from call_manager.proposal_assist.web._perms import require_member
 
 router = APIRouter()
 
@@ -524,4 +525,41 @@ async def api_reprocess_reference(
         reference_id=str(result.reference_id),
         text_status=result.text_status,
         text_error=result.text_error,
+    )
+
+
+@router.get("/workspaces/{workspace_id}/references/{reference_id}/raw")
+def api_serve_reference_raw(
+    workspace_id: uuid.UUID,
+    reference_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> FileResponse:
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+        if ref is None or ref.workspace_id != ws.id:
+            # Don't leak existence — 404 for cross-workspace lookups too.
+            raise HTTPException(status_code=404, detail="reference not found")
+        mime_type = ref.mime_type
+        filename = ref.filename
+
+    storage = _storage_for(request)
+    suffix = suffix_for_mime(mime_type)
+    path = storage.path_for(workspace_id=workspace_id, reference_id=reference_id, suffix=suffix)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="reference bytes missing")
+
+    safe_name = _sanitize_filename(filename)
+    return FileResponse(
+        path,
+        media_type=mime_type,
+        headers={
+            # Force download — references serve a wide MIME range
+            # (HTML/SVG/etc would otherwise be a same-origin XSS vector).
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=300",
+        },
     )

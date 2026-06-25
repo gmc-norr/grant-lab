@@ -171,7 +171,7 @@ export function LibraryPanel({ id }: { id: string }) {
                 </span>
                 <a
                   className="library-dl"
-                  href={`/workspaces/${id}/references/${r.id}/raw`}
+                  href={`/api/workspaces/${id}/references/${r.id}/raw`}
                   target="_blank"
                   rel="noreferrer"
                 >
@@ -222,7 +222,7 @@ export function LibraryPanel({ id }: { id: string }) {
               <li key={f.id} className="library-file-row">
                 <img
                   className="library-thumb"
-                  src={`/workspaces/${id}/files/${f.id}`}
+                  src={`/api/workspaces/${id}/files/${f.id}`}
                   alt={f.filename}
                 />
                 <span className="library-file-name">{f.filename}</span>

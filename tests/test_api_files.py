@@ -118,3 +118,59 @@ def test_api_files_delete_viewer_403(monkeypatch, pg_url, tmp_path, pg_session_f
     aid = _upload(app, user_id=owner_id, ws_id=ws_id).json()["attachment_id"]
     r = authed_client(app, user_id=member_id).delete(f"/api/workspaces/{ws_id}/files/{aid}")
     assert r.status_code == 403
+
+
+def test_api_serve_file_member_roundtrips_bytes(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
+    png = _png_bytes()
+    aid = _upload(app, user_id=owner_id, ws_id=ws_id, data=png).json()["attachment_id"]
+    r = authed_client(app, user_id=member_id).get(f"/api/workspaces/{ws_id}/files/{aid}")
+    assert r.status_code == 200, r.text
+    assert r.content == png
+    assert r.headers["content-disposition"].startswith("inline;")
+    assert r.headers["cache-control"] == "private, max-age=300"
+    # Parity with the existing Jinja serve: the route handler does NOT set
+    # X-Content-Type-Options (the SecurityHeadersMiddleware adds it globally
+    # to all responses; only the reference serve sets it explicitly so that
+    # the intent is visible in the route handler itself).
+    # We verify the Content-Disposition is "inline" (not "attachment"), which
+    # is the key parity difference vs the reference serve.
+
+
+def test_api_serve_file_non_member_403(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, _, stranger_id = _setup(pg_session_factory)
+    aid = _upload(app, user_id=owner_id, ws_id=ws_id).json()["attachment_id"]
+    r = authed_client(app, user_id=stranger_id).get(f"/api/workspaces/{ws_id}/files/{aid}")
+    assert r.status_code == 403, r.text
+
+
+def test_api_serve_file_missing_attachment_404(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=member_id).get(
+        f"/api/workspaces/{ws_id}/files/{uuid.uuid4()}"
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_api_serve_file_cross_workspace_404(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """IDOR: a member of workspace A cannot read an attachment owned by workspace B."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_a, _, member_a, _ = _setup(pg_session_factory)
+    with pg_session_factory() as s:
+        owner_b = make_user(s, email="ownerb@ki.se")
+        ws_b = make_workspace(s, owner=owner_b)
+        s.commit()
+        ws_b_id, owner_b_id = ws_b.id, owner_b.id
+    aid_b = _upload(app, user_id=owner_b_id, ws_id=ws_b_id).json()["attachment_id"]
+    # member of A requests B's attachment id under A's URL -> 404 (not 403, not 200).
+    r = authed_client(app, user_id=member_a).get(f"/api/workspaces/{ws_a}/files/{aid_b}")
+    assert r.status_code == 404, r.text

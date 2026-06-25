@@ -58,5 +58,5 @@ it("renders an image block as an img pointing at the files serve route", () => {
     />,
   );
   const img = screen.getByRole("img") as HTMLImageElement;
-  expect(img.getAttribute("src")).toBe("/workspaces/ws1/files/a1");
+  expect(img.getAttribute("src")).toBe("/api/workspaces/ws1/files/a1");
 });

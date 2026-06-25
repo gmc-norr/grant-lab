@@ -341,3 +341,103 @@ def test_api_reprocess_failed_ref_audits(monkeypatch, pg_url, tmp_path, pg_sessi
             )
         )
         assert ev is not None
+
+
+def test_api_serve_reference_raw_member_roundtrips_bytes(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, _, member_id, _ = _setup(pg_session_factory, tmp_path)
+    pdf = _real_pdf_bytes()
+    rid = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/references",
+        data={"kind": "paper", "auto_classify": "false"},
+        files={"file": ("p.pdf", pdf, "application/pdf")},
+    ).json()["reference_id"]
+    r = authed_client(app, user_id=member_id).get(
+        f"/api/workspaces/{ws_id}/references/{rid}/raw"
+    )
+    assert r.status_code == 200, r.text
+    assert r.content == pdf
+    assert r.headers["content-disposition"].startswith("attachment;")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["cache-control"] == "private, max-age=300"
+
+
+def test_api_serve_reference_raw_non_member_403(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, _, member_id, stranger_id = _setup(pg_session_factory, tmp_path)
+    rid = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/references",
+        data={"kind": "paper", "auto_classify": "false"},
+        files={"file": ("p.pdf", _real_pdf_bytes(), "application/pdf")},
+    ).json()["reference_id"]
+    r = authed_client(app, user_id=stranger_id).get(
+        f"/api/workspaces/{ws_id}/references/{rid}/raw"
+    )
+    assert r.status_code == 403, r.text
+
+
+def test_api_serve_reference_raw_missing_reference_404(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    import uuid
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_id, _, member_id, _ = _setup(pg_session_factory, tmp_path)
+    r = authed_client(app, user_id=member_id).get(
+        f"/api/workspaces/{ws_id}/references/{uuid.uuid4()}/raw"
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_api_serve_reference_raw_missing_bytes_404(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    import uuid
+
+    from call_manager.proposal_assist.references.ingest import suffix_for_mime
+
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, _, member_id, _ = _setup(pg_session_factory, tmp_path)
+    rid = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/references",
+        data={"kind": "paper", "auto_classify": "false"},
+        files={"file": ("p.pdf", _real_pdf_bytes(), "application/pdf")},
+    ).json()["reference_id"]
+    # DB row remains, stored bytes removed -> serve must 404, not 500. Derive the
+    # suffix exactly as the serve does so the unlink can't miss the file.
+    storage.path_for(
+        workspace_id=ws_id,
+        reference_id=uuid.UUID(rid),
+        suffix=suffix_for_mime("application/pdf"),
+    ).unlink()
+    r = authed_client(app, user_id=member_id).get(
+        f"/api/workspaces/{ws_id}/references/{rid}/raw"
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_api_serve_reference_raw_cross_workspace_404(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """IDOR: a member of workspace A cannot read a reference owned by workspace B."""
+    app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    _, ws_a, _, member_a, _ = _setup(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        owner_b = make_user(s, email="ownerb@ki.se")
+        ws_b = make_workspace(s, owner=owner_b)
+        s.commit()
+        ws_b_id, owner_b_id = ws_b.id, owner_b.id
+    rid_b = authed_client(app, user_id=owner_b_id).post(
+        f"/api/workspaces/{ws_b_id}/references",
+        data={"kind": "paper", "auto_classify": "false"},
+        files={"file": ("p.pdf", _real_pdf_bytes(), "application/pdf")},
+    ).json()["reference_id"]
+    # member of A requests B's reference id under A's URL -> 404 (not 403, not 200).
+    r = authed_client(app, user_id=member_a).get(
+        f"/api/workspaces/{ws_a}/references/{rid_b}/raw"
+    )
+    assert r.status_code == 404, r.text
