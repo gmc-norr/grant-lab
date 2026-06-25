@@ -22,7 +22,7 @@ from call_manager.proposal_assist.activity.feed import (
     build_activity_feed,
 )
 from call_manager.proposal_assist.web._perms import require_member
-from call_manager.proposal_assist.web.workspaces import _session_dep
+from call_manager.proposal_assist.web._deps import _session_dep
 
 router = APIRouter(prefix="/api/workspaces", tags=["activity"])
 

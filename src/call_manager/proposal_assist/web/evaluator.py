@@ -21,7 +21,7 @@ from call_manager.proposal_assist.evaluator.jobs import (
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._perms import require_member
-from call_manager.proposal_assist.web.workspaces import _session_dep
+from call_manager.proposal_assist.web._deps import _session_dep
 
 router = APIRouter(prefix="/api/workspaces", tags=["evaluator"])
 
