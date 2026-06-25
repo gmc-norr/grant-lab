@@ -24,8 +24,8 @@ from call_manager.proposal_assist.uncited_claims.jobs import (
     uncited_claims_cap_exceeded,
 )
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
-from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web._deps import _session_dep
+from call_manager.proposal_assist.web._perms import require_member
 
 router = APIRouter(prefix="/api/workspaces", tags=["uncited-claims"])
 

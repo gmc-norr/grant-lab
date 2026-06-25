@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 from call_manager.auth.dependencies import get_current_user
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.problems.aggregate import assemble_problems
-from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web._deps import _session_dep
+from call_manager.proposal_assist.web._perms import require_member
 
 router = APIRouter(prefix="/api/workspaces", tags=["problems"])
 

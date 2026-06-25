@@ -28,8 +28,8 @@ from call_manager.proposal_assist.review.jobs import (
     review_runs_today,
 )
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
-from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web._deps import _session_dep
+from call_manager.proposal_assist.web._perms import require_member
 
 router = APIRouter(prefix="/api/workspaces", tags=["review"])
 

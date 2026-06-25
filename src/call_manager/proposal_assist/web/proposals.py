@@ -22,8 +22,8 @@ from call_manager.proposal_assist.proposals.accepting import (
     reject_proposed_change,
 )
 from call_manager.proposal_assist.proposals.staleness import refresh_staleness
-from call_manager.proposal_assist.web._perms import require_member
 from call_manager.proposal_assist.web._deps import _session_dep
+from call_manager.proposal_assist.web._perms import require_member
 
 router = APIRouter(prefix="/api/workspaces", tags=["proposed-changes"])
 
