@@ -17,9 +17,11 @@ from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User, WorkspaceEvent, WorkspaceViewer
+from call_manager.proposal_assist.citations.bibliography import (
+    CITATION_STYLES as _CITATION_STYLES,
+)
 from call_manager.proposal_assist.web._perms import require_owner
-from call_manager.proposal_assist.web.workspaces import (
-    _CITATION_STYLES,
+from call_manager.proposal_assist.web.workspace_meta import (
     _MAX_WORKSPACE_TITLE_LEN,
     _WORKSPACE_STATUSES,
     _parse_deadline_form,
