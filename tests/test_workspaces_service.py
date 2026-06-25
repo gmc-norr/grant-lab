@@ -56,13 +56,34 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
 
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is not None
-        assert s.scalar(select(CoherenceJob.status).where(CoherenceJob.workspace_id == ws_id)) == "failed"
-        assert s.scalar(select(EvaluatorJob.status).where(EvaluatorJob.workspace_id == ws_id)) == "failed"
+        assert (
+            s.scalar(select(CoherenceJob.status).where(CoherenceJob.workspace_id == ws_id))
+            == "failed"
+        )
+        assert (
+            s.scalar(select(EvaluatorJob.status).where(EvaluatorJob.workspace_id == ws_id))
+            == "failed"
+        )
         # NB: review's cancel helper sets "cancelled" (not "failed" like the other three).
-        assert s.scalar(select(ReviewRun.status).where(ReviewRun.workspace_id == ws_id)) == "cancelled"
-        assert s.scalar(select(UncitedClaimsJob.status).where(UncitedClaimsJob.workspace_id == ws_id)) == "failed"
-        assert s.scalar(select(TurnJob.status).where(TurnJob.workspace_id == ws_id)) == "cancelled"
+        assert (
+            s.scalar(select(ReviewRun.status).where(ReviewRun.workspace_id == ws_id))
+            == "cancelled"
+        )
+        assert (
+            s.scalar(
+                select(UncitedClaimsJob.status).where(UncitedClaimsJob.workspace_id == ws_id)
+            )
+            == "failed"
+        )
+        assert (
+            s.scalar(select(TurnJob.status).where(TurnJob.workspace_id == ws_id)) == "cancelled"
+        )
         # emit_chat=False → audit event but NO system chat row.
-        assert s.scalar(select(WorkspaceEvent.id).where(WorkspaceEvent.kind == "cloud_turn_cancelled")) is not None
+        assert (
+            s.scalar(
+                select(WorkspaceEvent.id).where(WorkspaceEvent.kind == "cloud_turn_cancelled")
+            )
+            is not None
+        )
         assert s.scalar(select(ChatTurn).where(ChatTurn.role == "system")) is None
     assert not attach_dir.exists()  # bytes scrubbed
