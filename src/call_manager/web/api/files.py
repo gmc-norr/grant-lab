@@ -21,7 +21,7 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Attachment, User
 from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
 from call_manager.proposal_assist.web._perms import require_member, require_owner
-from call_manager.proposal_assist.web.files import (
+from call_manager.proposal_assist.web._file_uploads import (
     _ALLOWED_MIMES,
     _MAX_BYTES,
     _PIL_FORMAT_TO_MIME,
