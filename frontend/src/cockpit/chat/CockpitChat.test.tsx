@@ -60,11 +60,18 @@ it("shows the disclosure gate (not composer) when not acked", async () => {
   expect(screen.queryByPlaceholderText(/message the agent/i)).not.toBeInTheDocument();
 });
 
-it("shows the setup gate (not the disclosure gate) on a setup-phase workspace", async () => {
+it("shows the setup placeholder (not the disclosure gate) on a setup-phase workspace", async () => {
   mockTurns({ phase: "setup", needs_disclosure: true, can_send: false });
   renderChat();
-  expect(await screen.findByText(/finish setup/i)).toBeInTheDocument();
+  expect(await screen.findByText(/chat opens once the workspace is active/i)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /i understand/i })).not.toBeInTheDocument();
+});
+
+it("setup-phase viewer sees the setup placeholder, not the read-only message", async () => {
+  mockTurns({ phase: "setup", is_owner: false, can_send: false, disabled_reason: "not_owner" });
+  renderChat();
+  expect(await screen.findByText(/chat opens once the workspace is active/i)).toBeInTheDocument();
+  expect(screen.queryByText(/read-only/i)).not.toBeInTheDocument();
 });
 
 it("read-only for a non-owner (can_send false, phase active)", async () => {

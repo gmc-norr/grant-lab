@@ -71,23 +71,18 @@ export function CockpitChat() {
       {d && (
         <footer className={styles.footer}>
           {(() => {
+            // Setup phase: the agent chat is unavailable for everyone until activation.
+            // Branch on phase FIRST so a viewer (whose disabled_reason is "not_owner")
+            // still gets setup messaging, not the active-phase read-only copy.
+            if (d.phase === "setup")
+              return (
+                <p className={styles.note}>The agent chat opens once the workspace is active.</p>
+              );
             const reason =
               d.disabled_reason ??
-              (d.phase === "setup"
-                ? "setup"
-                : !d.can_send
-                  ? "not_owner"
-                  : d.needs_disclosure
-                    ? "needs_disclosure"
-                    : null);
+              (!d.can_send ? "not_owner" : d.needs_disclosure ? "needs_disclosure" : null);
             if (reason === "not_owner")
               return <p className={styles.note}>Read-only — only the owner can message the agent.</p>;
-            if (reason === "setup")
-              return (
-                <p className={styles.note}>
-                  Finish setup — review the funder rubric above to start drafting.
-                </p>
-              );
             if (reason === "drafting_disabled")
               return <p className={styles.note}>Drafting is currently disabled.</p>;
             if (reason === "needs_disclosure")

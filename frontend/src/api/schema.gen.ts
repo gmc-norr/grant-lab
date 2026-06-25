@@ -2184,24 +2184,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/workspaces/{workspace_id}/rubric-review": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Rubric Review */
-        get: operations["get_rubric_review_workspaces__workspace_id__rubric_review_get"];
-        put?: never;
-        /** Post Rubric Review */
-        post: operations["post_rubric_review_workspaces__workspace_id__rubric_review_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/workspaces/{workspace_id}/sections/{n}": {
         parameters: {
             query?: never;
@@ -2309,30 +2291,6 @@ export interface paths {
         put?: never;
         /** Post Settings */
         post: operations["post_settings_workspaces__workspace_id__settings_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/workspaces/{workspace_id}/setup-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Setup Status
-         * @description Render ONLY the setup-status card partial (htmx poll target).
-         *
-         *     The card on the main view polls this every 3s while Phase 0 runs;
-         *     terminal states (for the viewing role) render without the hx-trigger,
-         *     so the final swap stops the polling. Access mirrors the main view.
-         */
-        get: operations["get_setup_status_workspaces__workspace_id__setup_status_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -11081,68 +11039,6 @@ export interface operations {
             };
         };
     };
-    get_rubric_review_workspaces__workspace_id__rubric_review_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspace_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    post_rubric_review_workspaces__workspace_id__rubric_review_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspace_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     get_section_view_workspaces__workspace_id__sections__n__get: {
         parameters: {
             query?: never;
@@ -11362,37 +11258,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_setup_status_workspaces__workspace_id__setup_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                workspace_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
                 };
             };
             /** @description Validation Error */
