@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from call_manager.web.api import calls, files, me, references, settings, turns, workspaces
+from call_manager.web.api import calls, files, me, references, rubric, settings, turns, workspaces
 from call_manager.web.api.errors import STATUS_CODES, ApiError
 
 # Document the error-envelope shape on every status the /api surface actually
@@ -24,3 +24,4 @@ router.include_router(turns.router)
 router.include_router(references.router)
 router.include_router(files.router)
 router.include_router(settings.router)
+router.include_router(rubric.router)
