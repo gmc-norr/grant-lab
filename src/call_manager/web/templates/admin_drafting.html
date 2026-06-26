@@ -14,10 +14,10 @@
   <header><strong>Kill switch</strong></header>
   <p>
     {% if drafting_enabled %}
-      <strong>Drafting enabled</strong> — POST /workspaces/&lt;id&gt;/turns
+      <strong>Drafting enabled</strong> — POST /api/workspaces/&lt;id&gt;/turns
       accepts new turns; the drain tick is running.
     {% else %}
-      <strong>Drafting disabled</strong> — POST /workspaces/&lt;id&gt;/turns
+      <strong>Drafting disabled</strong> — POST /api/workspaces/&lt;id&gt;/turns
       returns 503; queued turns wait for re-enable.
     {% endif %}
   </p>
@@ -62,7 +62,7 @@
     <tbody>
       {% for row in per_workspace %}
         <tr>
-          <td><a href="/workspaces/{{ row.id }}">{{ row.title | e }}</a></td>
+          <td><a href="/cockpit/{{ row.id }}">{{ row.title | e }}</a></td>
           <td>{{ row.owner_email | e }}</td>
           <td>{{ row.used_in }}</td>
           <td>{{ row.used_out }}</td>
