@@ -33,7 +33,7 @@
 .fieldset { border: none; margin: 0 0 0.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
 .check { display: flex; align-items: center; gap: 0.45rem; font-size: 0.9rem; }
 
-button {
+.card button {
   background: var(--app-accent);
   color: #fff;
   border: none;
@@ -43,7 +43,7 @@ button {
   font-weight: 500;
   cursor: pointer;
 }
-button:disabled { opacity: 0.6; cursor: default; }
+.card button:disabled { opacity: 0.6; cursor: default; }
 
 .ok { margin-left: 0.6rem; color: var(--app-good); font-size: 0.85rem; }
 .err { margin-left: 0.6rem; color: var(--app-bad); font-size: 0.85rem; }
