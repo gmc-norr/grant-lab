@@ -139,7 +139,9 @@ def list_profiles(request: Request, user: User = Depends(get_current_user)):  # 
 
 @router.get("/profiles/{profile_id}", response_model=ProfileDetailOut)
 def get_profile(
-    request: Request, profile_id: int, user: User = Depends(get_current_user)  # noqa: B008
+    request: Request,
+    profile_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
 ):
     sf = request.app.state.session_factory
     with sf() as session:
@@ -152,8 +154,12 @@ def get_profile(
         ).scalar_one_or_none()
         flat = _flatten_structured(p)
         core = {
-            "id": p.id, "name": p.name, "kind": p.kind, "level": p.level,
-            "description": p.description or "", "budget_currency": p.budget_currency,
+            "id": p.id,
+            "name": p.name,
+            "kind": p.kind,
+            "level": p.level,
+            "description": p.description or "",
+            "budget_currency": p.budget_currency,
         }
         # Defense-in-depth: only the owner/admin (who polls on the edit page) sees job state.
         if can_edit and job is not None:
@@ -200,7 +206,9 @@ class ProfileCreateOut(BaseModel):
 
 @router.post("/profiles", response_model=ProfileCreateOut)
 def create_profile(
-    request: Request, body: ProfileCreateIn, user: User = Depends(get_current_user)  # noqa: B008
+    request: Request,
+    body: ProfileCreateIn,
+    user: User = Depends(get_current_user),  # noqa: B008
 ):
     if len(body.name) > 200:
         raise HTTPException(status_code=400, detail="name too long (max 200 chars)")
@@ -219,12 +227,18 @@ def create_profile(
         user_structured = parse_structured(
             kind=kind,
             raw={
-                "areas": body.areas, "career_stage": body.career_stage,
-                "applicant_types": body.applicant_types, "role": body.role,
-                "years_since_phd": body.years_since_phd, "org_type": body.org_type,
-                "capabilities": body.capabilities, "patient_populations": body.patient_populations,
-                "scale": body.scale, "funding_instruments": body.funding_instruments,
-                "funder_exclusions": body.funder_exclusions, "country": body.country,
+                "areas": body.areas,
+                "career_stage": body.career_stage,
+                "applicant_types": body.applicant_types,
+                "role": body.role,
+                "years_since_phd": body.years_since_phd,
+                "org_type": body.org_type,
+                "capabilities": body.capabilities,
+                "patient_populations": body.patient_populations,
+                "scale": body.scale,
+                "funding_instruments": body.funding_instruments,
+                "funder_exclusions": body.funder_exclusions,
+                "country": body.country,
                 "host_institution": body.host_institution,
             },
         )
@@ -240,18 +254,25 @@ def create_profile(
             raise HTTPException(status_code=409, detail="profile name already exists")
     members = parse_members_strict(body.orcids, body.names_affiliations)
     seed_payload = {
-        "name": body.name, "kind": kind, "level": level_val,
+        "name": body.name,
+        "kind": kind,
+        "level": level_val,
         "members": [
-            {"orcid": m.orcid, "name": m.name, "affiliation": m.affiliation}
-            for m in members
+            {"orcid": m.orcid, "name": m.name, "affiliation": m.affiliation} for m in members
         ],
-        "pasted_grants": body.pasted_grants, "mission_text": body.mission_text,
+        "pasted_grants": body.pasted_grants,
+        "mission_text": body.mission_text,
     }
     try:
         with sf() as session:
             profile = create_profile_with_bootstrap(
-                session=session, owner_id=user.id, name=body.name, kind=kind,
-                level=level_val, structured={**user_structured}, seed_payload=seed_payload,
+                session=session,
+                owner_id=user.id,
+                name=body.name,
+                kind=kind,
+                level=level_val,
+                structured={**user_structured},
+                seed_payload=seed_payload,
             )
             session.commit()
             session.refresh(profile)
@@ -339,8 +360,10 @@ def update_profile(
             p.level = lv
         base = {
             "areas": split_lines(body.areas),
-            "budget_min": parsed_budget_min, "budget_max": parsed_budget_max,
-            "trl_min": parsed_trl_min, "trl_max": parsed_trl_max,
+            "budget_min": parsed_budget_min,
+            "budget_max": parsed_budget_max,
+            "trl_min": parsed_trl_min,
+            "trl_max": parsed_trl_max,
             "must_include": split_lines(body.must_include),
             "hard_exclusions": split_lines(body.hard_exclusions),
         }
@@ -348,13 +371,18 @@ def update_profile(
             new_ns = parse_structured(
                 kind=p.kind,
                 raw={
-                    "areas": body.areas, "career_stage": body.career_stage,
-                    "applicant_types": body.applicant_types, "role": body.role,
-                    "years_since_phd": body.years_since_phd, "org_type": body.org_type,
+                    "areas": body.areas,
+                    "career_stage": body.career_stage,
+                    "applicant_types": body.applicant_types,
+                    "role": body.role,
+                    "years_since_phd": body.years_since_phd,
+                    "org_type": body.org_type,
                     "capabilities": body.capabilities,
                     "patient_populations": body.patient_populations,
-                    "scale": body.scale, "funding_instruments": body.funding_instruments,
-                    "funder_exclusions": body.funder_exclusions, "country": body.country,
+                    "scale": body.scale,
+                    "funding_instruments": body.funding_instruments,
+                    "funder_exclusions": body.funder_exclusions,
+                    "country": body.country,
                     "host_institution": body.host_institution,
                 },
             )
