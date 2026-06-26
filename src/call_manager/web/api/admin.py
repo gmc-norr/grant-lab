@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
@@ -9,12 +10,15 @@ from sqlalchemy import func, or_, select, text
 from call_manager.auth.dependencies import require_admin
 from call_manager.db.models import (
     Call,
+    ChatTurn,
     DigestRun,
     Profile,
     RankingJob,
     RankingJobStatus,
     Source,
     User,
+    Workspace,
+    WorkspaceEvent,
 )
 from call_manager.digest.send import week_start as _week_start
 from call_manager.ranking.backfill import BACKFILL_DAYS
@@ -228,3 +232,109 @@ def admin_dashboard(
         golden_set_report=golden,
         calibration_warning=calibration_warning,
     )
+
+
+def _drafting_panel_context(session, settings) -> dict:
+    from call_manager.proposal_assist.turns.caps import (
+        _stockholm_day_start_utc,
+        check_global_daily_token_cap,
+    )
+
+    global_cap = check_global_daily_token_cap(session, settings=settings)
+
+    day_start_utc = _stockholm_day_start_utc()
+    per_workspace_rows = list(
+        session.execute(
+            select(
+                Workspace.id,
+                Workspace.title,
+                User.email.label("owner_email"),
+                func.coalesce(func.sum(ChatTurn.tokens_in), 0).label("used_in"),
+                func.coalesce(func.sum(ChatTurn.tokens_out), 0).label("used_out"),
+            )
+            .join(User, User.id == Workspace.owner_id)
+            .outerjoin(
+                ChatTurn,
+                (ChatTurn.workspace_id == Workspace.id) & (ChatTurn.created_at >= day_start_utc),
+            )
+            .where(Workspace.soft_deleted_at.is_(None))
+            .group_by(Workspace.id, Workspace.title, User.email)
+            .order_by(func.coalesce(func.sum(ChatTurn.tokens_in), 0).desc())
+        ).all()
+    )
+
+    recent_events = list(
+        session.scalars(
+            select(WorkspaceEvent)
+            .where(WorkspaceEvent.kind.in_(["cloud_turn_failed", "cloud_turn_cancelled"]))
+            .order_by(WorkspaceEvent.created_at.desc())
+            .limit(50)
+        ).all()
+    )
+
+    return {
+        "drafting_enabled": settings.drafting_enabled,
+        "global_cap": global_cap,
+        "per_workspace": per_workspace_rows,
+        "recent_events": recent_events,
+    }
+
+
+class GlobalCapOut(BaseModel):
+    allowed: bool
+    used_in: int
+    used_out: int
+    cap_in: int
+    cap_out: int
+    reason: str | None
+
+
+class PerWorkspaceOut(BaseModel):
+    id: uuid.UUID
+    title: str
+    owner_email: str
+    used_in: int
+    used_out: int
+
+
+class RecentEventOut(BaseModel):
+    created_at: datetime
+    workspace_id: uuid.UUID
+    kind: str
+    payload: dict
+
+
+class AdminDraftingOut(BaseModel):
+    drafting_enabled: bool
+    global_cap: GlobalCapOut
+    per_workspace: list[PerWorkspaceOut]
+    recent_events: list[RecentEventOut]
+
+
+@router.get("/admin/drafting", response_model=AdminDraftingOut)
+def admin_drafting(
+    request: Request,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    settings = request.app.state.settings
+    with request.app.state.session_factory() as session:
+        ctx = _drafting_panel_context(session, settings)
+        cap = ctx["global_cap"]
+        per_workspace = [
+            PerWorkspaceOut(id=row.id, title=row.title, owner_email=row.owner_email,
+                            used_in=row.used_in, used_out=row.used_out)
+            for row in ctx["per_workspace"]
+        ]
+        recent_events = [
+            RecentEventOut(created_at=e.created_at, workspace_id=e.workspace_id,
+                           kind=e.kind, payload=e.payload)
+            for e in ctx["recent_events"]
+        ]
+        result = AdminDraftingOut(
+            drafting_enabled=ctx["drafting_enabled"],
+            global_cap=GlobalCapOut(allowed=cap.allowed, used_in=cap.used_in, used_out=cap.used_out,
+                                    cap_in=cap.cap_in, cap_out=cap.cap_out, reason=cap.reason),
+            per_workspace=per_workspace,
+            recent_events=recent_events,
+        )
+    return result
