@@ -222,14 +222,12 @@ def test_disable_only_active_400(monkeypatch, pg_url, pg_session_factory):
     assert c.post(f"/api/admin/users/{did}/disable").status_code == 400
 
 
-def test_cannot_disable_self_as_only_admin(monkeypatch, pg_url, pg_session_factory):
+def test_cannot_disable_last_active_admin(monkeypatch, pg_url, pg_session_factory):
+    # Parity: the sole active admin disabling their OWN account hits the
+    # last-admin guard -> 400 (no self-disable special-case exists).
     app = _setup(monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)
-    # When there's only 1 active admin and they try to disable themselves,
-    # the self-check fires at 403 before the last-admin guard.
-    # This verifies the correct check order: 404 → self-check → status → guard
-    r = c.post(f"/api/admin/users/{aid}/disable")
-    assert r.status_code == 403
+    assert c.post(f"/api/admin/users/{aid}/disable").status_code == 400
     with pg_session_factory() as s:
         assert s.get(User, aid).status == "active"
 
@@ -276,34 +274,6 @@ def test_change_role_not_active_400(monkeypatch, pg_url, pg_session_factory):
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="rd@ki.se", status="disabled")
     assert c.post(f"/api/admin/users/{did}/role", json={"role": "admin"}).status_code == 400
-
-
-def test_cannot_disable_self(monkeypatch, pg_url, pg_session_factory):
-    app = _setup(monkeypatch, pg_url)
-    c, aid = _admin(app, pg_session_factory)
-    _user(pg_session_factory, email="admin2@ki.se", status="active", is_admin=True)  # keep >1 admin
-    assert c.post(f"/api/admin/users/{aid}/disable").status_code == 403
-    with pg_session_factory() as s:
-        assert s.get(User, aid).status == "active"
-
-
-def test_cannot_disable_last_active_other_admin(monkeypatch, pg_url, pg_session_factory):
-    """Guard fires when attempting to disable the last remaining active admin.
-
-    Note: This test exercises the last-admin guard on the disable path.
-    With 2 admins, one admin disables the other leaves 1 admin (allowed).
-    The guard only fires when count <= 1 before the disable (impossible with 2+ admins).
-    This test verifies that the guard check logic is evaluated (not skipped for non-self).
-    """
-    app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory, email="admin_a@ki.se")
-    bid = _user(pg_session_factory, email="admin_b@ki.se", status="active", is_admin=True)
-    r = c.post(f"/api/admin/users/{bid}/disable")
-    # With 2 active admins, guard check is: count (2) <= 1 ? NO
-    # So guard doesn't fire; disable succeeds leaving 1 admin
-    assert r.status_code == 200
-    with pg_session_factory() as s:
-        assert s.get(User, bid).status == "disabled"
 
 
 def test_enable_only_disabled(monkeypatch, pg_url, pg_session_factory):

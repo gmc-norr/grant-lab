@@ -192,8 +192,6 @@ def admin_disable_user(
         u = db.get(User, user_id)
         if u is None:
             raise HTTPException(status_code=404, detail="user not found")
-        if user_id == admin.id:
-            raise HTTPException(status_code=403, detail="cannot disable your own account")
         if u.status != "active":
             raise HTTPException(status_code=400, detail="user is not active")
         if u.is_admin and _lock_active_admin_count(db) <= 1:
