@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-import call_manager.web.api.annotations as annotations_router_mod
+import call_manager.web.api.annotations as annotations_router
 from call_manager.web.api import (
     calls,
     citation_audit,
@@ -30,7 +30,7 @@ router = APIRouter(
     responses={code: {"model": ApiError} for code in STATUS_CODES},
 )
 router.include_router(me.router)
-router.include_router(annotations_router_mod.router)
+router.include_router(annotations_router.router)
 router.include_router(calls.router)
 router.include_router(workspaces.router)
 router.include_router(turns.router)
