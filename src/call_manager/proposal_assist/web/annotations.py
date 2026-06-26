@@ -41,12 +41,12 @@ from call_manager.db.models import (
     WorkspaceEvent,
 )
 from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
-from call_manager.proposal_assist.analysis.queue import enqueue_section_job
+from call_manager.proposal_assist.analysis.queue import (
+    enqueue_containing_section,
+    enqueue_section_job,
+)
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
-from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.tools.citations import _citation_snapshot
 from call_manager.proposal_assist.web._perms import (
     require_member as _require_owner_or_viewer,
@@ -67,48 +67,6 @@ _STRIP_PARTIAL = "proposal_assist/partials/annotation_strip.html"
 
 # ClaimAnalysisJob statuses that mean "analysis is still coming".
 _JOB_PENDING_STATUSES = ("queued", "running")
-
-
-def _enqueue_containing_section(
-    session: Session,
-    *,
-    ws_id: uuid.UUID,
-    workspaces_dir: str,
-    commit_sha: str,
-    ev_id: str,
-) -> None:
-    """After a successful citation insert, enqueue a claim-analysis job for
-    the section that now contains the new ev_id marker.
-
-    Re-splits the HEAD document, locates the first section whose text
-    contains the new marker, and calls enqueue_section_job in the SAME
-    session (content-keyed ON CONFLICT DO NOTHING makes this idempotent).
-    The reconciliation tick would self-heal eventually; this is immediacy.
-
-    Errors are logged and swallowed — a failed re-enqueue must not roll back
-    the committed insert.
-    """
-    marker_fragment = f"ev:{ev_id}"
-    try:
-        repo = workspace_repo_dir(workspaces_dir, ws_id)
-        proposal = repo / PROPOSAL_FILENAME
-        if not proposal.exists():
-            return
-        sections = split_sections(proposal.read_text())
-        for sec in sections:
-            if marker_fragment in sec.text:
-                enqueue_section_job(
-                    session,
-                    workspace_id=ws_id,
-                    section_index=sec.index,
-                    section_heading=sec.heading,
-                    section_sha=sec.sha,
-                    commit_sha=commit_sha,
-                )
-                session.commit()
-                return
-    except Exception:
-        logger.exception("post-insert re-enqueue failed for workspace %s ev %s", ws_id, ev_id)
 
 
 def _ref_labels(session: Session, workspace: Workspace, annotations) -> dict[uuid.UUID, str]:
@@ -281,9 +239,9 @@ def post_annotation_insert(
     # the job already exists for this sha. Only enqueue on a genuine insert
     # (not idempotent) and only when we can locate the section.
     if "idempotent" not in result:
-        _enqueue_containing_section(
+        enqueue_containing_section(
             session,
-            ws_id=workspace_id,
+            workspace_id=workspace_id,
             workspaces_dir=settings.workspaces_dir,
             commit_sha=result["commit_sha"],
             ev_id=result["ev_id"],
