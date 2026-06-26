@@ -5,6 +5,7 @@ from fastapi import APIRouter
 import call_manager.web.api.annotations as annotations_router
 from call_manager.web.api import (
     admin,
+    admin_golden_set,
     admin_users,
     calls,
     citation_audit,
@@ -35,6 +36,7 @@ router = APIRouter(
 router.include_router(me.router)
 router.include_router(admin.router)
 router.include_router(admin_users.router)
+router.include_router(admin_golden_set.router)
 router.include_router(annotations_router.router)
 router.include_router(calls.router)
 router.include_router(profiles.router)
