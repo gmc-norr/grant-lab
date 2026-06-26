@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -98,3 +98,28 @@ def get_settings(request: Request, user: User = Depends(get_current_user)):  # n
         has_password=user.password_hash is not None,
         profiles=profile_out,
     )
+
+
+class UpdateNameIn(BaseModel):
+    name: str
+
+
+class UpdateNameOut(BaseModel):
+    name: str | None
+
+
+@router.post("/me/name", response_model=UpdateNameOut)
+def update_name(
+    request: Request,
+    body: UpdateNameIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    sf = request.app.state.session_factory
+    with sf() as session:
+        db_user = session.get(User, user.id)
+        if db_user is None:
+            raise HTTPException(status_code=401, detail="user not found")
+        db_user.name = body.name.strip() or None
+        new_name = db_user.name
+        session.commit()
+    return UpdateNameOut(name=new_name)
