@@ -14,7 +14,7 @@
 
 Every task implicitly includes these. Exact values copied from the spec:
 
-- **No DB schema change. No new dependency.** Strict parity port. Only two blessed deviations: golden-set FK→`400` (Jinja would 500) and the banner-UX JSON translation.
+- **No DB schema change. No new dependency.** Strict parity port. Blessed deviations: golden-set FK→`400` and duplicate-pair→`409` (Jinja 500s on both) and the banner-UX JSON translation.
 - **Errors via `raise HTTPException(status_code, detail)`** → the global `/api` envelope handler (`main.py`) maps `/api` paths to `{"error":{"code","message"}}`. NEVER hand-build a JSON error body. Codes: 400=bad_request, 401=unauthorized, 403=forbidden, 404=not_found, 409=conflict, 413=payload_too_large.
 - **Every endpoint is `require_admin`** (`Depends(require_admin)`, param annotated `# noqa: B008`): `403` for an authenticated non-admin, `401` for unauthenticated.
 - **`OriginCSRFMiddleware` allows an ABSENT `Origin`** — TestClient mutation tests pass without an `Origin` header. Do NOT add one.
@@ -1115,7 +1115,7 @@ git commit -m "feat(api): admin ops mutations rerank/digest/fetch (admin Slice 2
 
 ### Task 4: Backend — golden-set `/api` module
 
-Golden-set read + add + delete in a new module, reusing the unchanged `ranking/golden_set.py` service. The add path 400s on bad score AND on FK `IntegrityError` (parity improvement — Jinja 500s here), with `session.rollback()` BEFORE raising or the session is poisoned. Delete is `204` idempotent.
+Golden-set read + add + delete in a new module, reusing the unchanged `ranking/golden_set.py` service. The add path 400s on bad score; on `IntegrityError` it `session.rollback()`s (or the session is poisoned) then branches on SQLSTATE — FK violation (`23503`)→`400` "unknown call or profile", unique-pair violation (`23505`, the `uq_golden_set_triples_pair` constraint)→`409` "triple already exists"; any other constraint re-raises (sanitized 500). Both are parity improvements (Jinja 500s on both). Delete is `204` idempotent.
 
 **Files:**
 - Create: `src/call_manager/web/api/admin_golden_set.py`
@@ -1124,7 +1124,7 @@ Golden-set read + add + delete in a new module, reusing the unchanged `ranking/g
 
 **Interfaces:**
 - Consumes: `require_admin`; `User` model; from `call_manager.ranking.golden_set`: `add_triple(session, *, call_id, profile_id, expected_score, note=None, created_by=None) -> int` (calls `session.flush()` internally — FK violation raises here), `delete_triple(session, *, triple_id) -> None` (no-op if absent), `list_triples(session) -> list[TripleRow]`, `candidates_dismissed_high_score/_cosine_disagreement/_escalation_disagreement(session) -> list[CandidateRow]`. `TripleRow` fields: `id, call_id, profile_id, expected_score, note, call_title, profile_name`. `CandidateRow` fields: `call_id, profile_id, call_title, profile_name, aggregate_score, embed_similarity, reason`.
-- Produces: `GET /api/admin/golden-set` → `AdminGoldenSetOut`; `POST /api/admin/golden-set` body `AddTripleIn` → `201 TripleCreatedOut{id}`; `DELETE /api/admin/golden-set/{triple_id}` → `204`.
+- Produces: `GET /api/admin/golden-set` → `AdminGoldenSetOut`; `POST /api/admin/golden-set` body `AddTripleIn` → `201 TripleCreatedOut{id}` (`400` bad score / FK; `409` duplicate pair); `DELETE /api/admin/golden-set/{triple_id}` → `204`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1229,6 +1229,21 @@ def test_add_unknown_fk_is_400_not_500(monkeypatch, pg_url, pg_session_factory):
                json={"call_id": 999999, "profile_id": 999999, "expected_score": 50})
     assert r.status_code == 400
     assert "unknown call or profile" in r.json()["error"]["message"]
+
+
+def test_add_duplicate_pair_is_409(monkeypatch, pg_url, pg_session_factory):
+    # A second triple for the same (call, profile) hits uq_golden_set_triples_pair.
+    # It must be a 409 with a "duplicate" message — NOT the FK "unknown" 400.
+    app = _setup(monkeypatch, pg_url)
+    c, uid = _admin(app, pg_session_factory)
+    cid, pid = _seed_call_profile(pg_session_factory, uid)
+    first = c.post("/api/admin/golden-set",
+                   json={"call_id": cid, "profile_id": pid, "expected_score": 65})
+    assert first.status_code == 201
+    dup = c.post("/api/admin/golden-set",
+                 json={"call_id": cid, "profile_id": pid, "expected_score": 70})
+    assert dup.status_code == 409
+    assert "already exists" in dup.json()["error"]["message"]
 
 
 def test_delete_absent_is_204_idempotent(monkeypatch, pg_url, pg_session_factory):
@@ -1366,9 +1381,19 @@ def golden_set_add(
                 created_by=admin.id,
             )
             session.commit()
-        except IntegrityError:
+        except IntegrityError as e:
             session.rollback()
-            raise HTTPException(status_code=400, detail="unknown call or profile") from None
+            # Two constraints can fire here: the call/profile FKs vs
+            # uq_golden_set_triples_pair. (The 0-100 CheckConstraint is pre-guarded
+            # above.) Branch on SQLSTATE so a duplicate isn't mislabeled "unknown".
+            sqlstate = getattr(getattr(e, "orig", None), "sqlstate", None)
+            if sqlstate == "23505":  # unique_violation -> duplicate (call, profile)
+                raise HTTPException(
+                    status_code=409, detail="triple already exists for this call and profile"
+                ) from None
+            if sqlstate == "23503":  # foreign_key_violation -> unknown call/profile
+                raise HTTPException(status_code=400, detail="unknown call or profile") from None
+            raise  # unexpected constraint -> sanitized 500
     return TripleCreatedOut(id=triple_id)
 
 
@@ -1476,30 +1501,36 @@ it("useRerank POSTs and invalidates the dashboard", async () => {
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin-dashboard"] });
 });
 
-it("useSendDigest POSTs digest/send", async () => {
+it("useSendDigest POSTs digest/send and invalidates the dashboard", async () => {
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { triggered: true }, error: undefined } as never);
   const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
   const { result } = renderHook(() => useSendDigest(), { wrapper: wrapper(qc) });
   await result.current.mutateAsync();
   expect(post).toHaveBeenCalledWith("/api/admin/digest/send", {});
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin-dashboard"] });
 });
 
-it("useReenableDigestUser POSTs the user_id body", async () => {
+it("useReenableDigestUser POSTs the user_id body and invalidates the dashboard", async () => {
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: 9 }, error: undefined } as never);
   const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
   const { result } = renderHook(() => useReenableDigestUser(), { wrapper: wrapper(qc) });
   await result.current.mutateAsync({ user_id: 9 });
   expect(post).toHaveBeenCalledWith("/api/admin/digest/reenable", { body: { user_id: 9 } });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin-dashboard"] });
 });
 
-it("useFetchSource POSTs the slug path param", async () => {
+it("useFetchSource POSTs the slug path param and invalidates the dashboard", async () => {
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { triggered: true }, error: undefined } as never);
   const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
   const { result } = renderHook(() => useFetchSource(), { wrapper: wrapper(qc) });
   await result.current.mutateAsync({ slug: "vinnova" });
   expect(post).toHaveBeenCalledWith("/api/admin/sources/{slug}/fetch", {
     params: { path: { slug: "vinnova" } },
   });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin-dashboard"] });
 });
 ```
 
@@ -1639,14 +1670,16 @@ it("useAddTriple POSTs the body and invalidates", async () => {
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin-golden-set"] });
 });
 
-it("useDeleteTriple DELETEs the path param", async () => {
+it("useDeleteTriple DELETEs the path param and invalidates the golden set", async () => {
   const del = vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: undefined, error: undefined } as never);
   const qc = new QueryClient();
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
   const { result } = renderHook(() => useDeleteTriple(), { wrapper: wrapper(qc) });
   await result.current.mutateAsync({ triple_id: 7 });
   expect(del).toHaveBeenCalledWith("/api/admin/golden-set/{triple_id}", {
     params: { path: { triple_id: 7 } },
   });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin-golden-set"] });
 });
 ```
 
@@ -2091,7 +2124,10 @@ it("renders kill switch, cap, per-workspace and events", async () => {
   mockDraft();
   renderWithProviders(<AdminDrafting />);
   expect(await screen.findByText(/drafting enabled/i)).toBeInTheDocument();
-  expect(screen.getByText(/EXCEEDED/)).toBeInTheDocument();
+  // "EXCEEDED" appears twice (input-row cell + overall-status line) — a /EXCEEDED/
+  // regex would double-match and throw. Assert each specifically.
+  expect(screen.getByText("EXCEEDED")).toBeInTheDocument(); // input-row cell (exact)
+  expect(screen.getByText(/Overall status: EXCEEDED/)).toBeInTheDocument();
   const link = screen.getByRole("link", { name: "Big" });
   expect(link).toHaveAttribute("href", "/cockpit/11111111-1111-1111-1111-111111111111");
   expect(screen.getByText(/boom_xyz/)).toBeInTheDocument();
@@ -2479,10 +2515,11 @@ The routing-coupled bundle. Restructure `router.tsx` so every `/admin/*` route n
 - Modify: `frontend/src/router.tsx`
 - Modify: `frontend/src/shell/nav-items.ts` (add the Admin item)
 - Modify: `frontend/src/shell/ActivityBar.tsx` (render Admin item only for admins)
+- Modify: `frontend/src/shell/ActivityBar.test.tsx` (APPEND admin-gating tests — the file already has 11 nav/active-route tests that MUST be preserved)
 - Modify: `frontend/routes.json` (`spa_routes`: `/admin/users` → `/admin`)
 - Modify (regenerated): `frontend/src/routes.gen.ts`, `src/call_manager/web/spa_routes.py`
 - Modify: `frontend/src/router.test.tsx` (no code change expected — set-equality still holds; verify)
-- Test: `frontend/src/routes/AdminNav.test.tsx`, `frontend/src/shell/ActivityBar.test.tsx`
+- Test (create): `frontend/src/routes/AdminNav.test.tsx`
 
 **Interfaces:**
 - Consumes: `RequireAdmin` (`./RequireAdmin`); `AdminDashboard, AdminDrafting, AdminGoldenSet, AdminUsers, AdminPendingUsers`; `useSession` (`../api/session`, `capabilities.admin`).
@@ -2635,15 +2672,17 @@ Expected: PASS (artifacts in sync).
 
 - [ ] **Step 6: Add the ActivityBar Admin entry (admin-gated)**
 
-Create `frontend/src/shell/ActivityBar.test.tsx`:
+`frontend/src/shell/ActivityBar.test.tsx` ALREADY EXISTS with 11 nav/active-route tests (Calls/Workspaces/Profiles/Settings links, current-workspace chip logic, References absence). Do NOT overwrite it. APPEND the imports it lacks (`waitFor` to the existing `@testing-library/react` import; add `afterEach`, `vi` to the existing `vitest` import; add `import * as clientMod from "../api/client";`), an `afterEach(() => vi.restoreAllMocks());`, the `mockMe` helper, and the two admin-gating tests below.
+
+The existing 11 tests render `<ActivityBar/>` WITHOUT mocking `/api/me`. After Step 7 adds `useSession()` to the component, those tests trigger an unmocked `/api/me` fetch that fails in jsdom → `retry:false` → `session` undefined → `isAdmin` false → the Admin item is hidden. They assert only the always-present nav items, so they keep passing unchanged. `restoreAllMocks` is a no-op for the spy-free existing tests.
+
+Add to the file:
 
 ```tsx
-import { screen, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { waitFor } from "@testing-library/react";
+import { afterEach, vi } from "vitest";
 
 import * as clientMod from "../api/client";
-import { renderWithProviders } from "../test-utils";
-import { ActivityBar } from "./ActivityBar";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -2671,7 +2710,9 @@ it("hides the Admin entry for a non-admin", async () => {
 });
 ```
 
-Run: `cd frontend && pnpm vitest run src/shell/ActivityBar.test.tsx` → FAIL (no Admin entry yet).
+(Merge the new imports into the existing import lines rather than duplicating them — `noUnusedLocals` and duplicate-import would otherwise fail tsc. The existing file already imports `screen` from `@testing-library/react` and `expect, it` from `vitest`.)
+
+Run: `cd frontend && pnpm vitest run src/shell/ActivityBar.test.tsx` → the two new tests FAIL (no Admin entry yet); the existing 11 still pass.
 
 Add the Admin item to `frontend/src/shell/nav-items.ts` `ACTIVITY_BOTTOM` (append after Settings):
 
