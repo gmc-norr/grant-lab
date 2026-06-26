@@ -90,7 +90,12 @@ Reused services (unchanged, all already off the Jinja route modules):
 - `GET /api/admin/drafting` → `{drafting_enabled: bool, global_cap: {used_in,
   cap_in, used_out, cap_out, reason, allowed}, per_workspace: [{id, title,
   owner_email, used_in, used_out}], recent_events: [{created_at, workspace_id,
-  kind, payload}]}`.
+  kind, payload}]}`. `per_workspace` preserves the builder's **`used_in` desc**
+  order (list order is the contract). Serialization: the ported builders return
+  ORM rows / a `CapCheckResult` dataclass (`global_cap`) / `Row` objects — not
+  JSON; the `/api` layer maps them to these declared shapes via Pydantic.
+  `recent_events.payload` is admin-only JSONB already exposed in Jinja (nothing
+  newly sensitive; confirm it serializes cleanly).
 - `GET /api/admin/golden-set` → `{triples: [{id, call_id, profile_id,
   expected_score, note, call_title, profile_name}], candidates: [{call_id,
   profile_id, call_title, profile_name, aggregate_score, embed_similarity,
@@ -99,18 +104,21 @@ Reused services (unchanged, all already off the Jinja route modules):
 #### Mutation endpoints
 
 - `POST /api/admin/rerank` → `200 {enqueued: N}` — enqueue `backfill_profile`
-  for every active profile (N = active-profile count). Idempotent (partial unique
-  index dedup, same as Jinja).
+  for every active profile; **N = active-profile count, not job count** (one bulk
+  backfill per profile). Idempotent (partial unique index dedup, same as Jinja).
 - `POST /api/admin/digest/send` → `200 {triggered: bool}` — `trigger_job_now`
   on `digest:weekly`; `false` = unconfigured (no email backend).
-- `POST /api/admin/digest/reenable` `{user_id}` → `200`; `404` unknown user.
-  Clears `digest_disabled_at` (idempotent no-op if already enabled).
+- `POST /api/admin/digest/reenable` `{user_id}` → `200 {id}` (the Slice-1
+  `AdminActionOut` shape); `404` unknown user. Clears `digest_disabled_at`
+  (idempotent no-op if already enabled).
 - `POST /api/admin/sources/{slug}/fetch` → `200 {triggered: bool}`; `404` unknown
   slug. `trigger_job_now` on `ingest:{slug}`; `false` = scheduler/job unavailable.
 - `POST /api/admin/golden-set` `{call_id, profile_id, expected_score, note?}` →
   `201 {id}`; `400` if `expected_score` ∉ 0–100; **`400` "unknown call or
   profile"** on FK `IntegrityError` (a parity *improvement* — the Jinja route
-  would 500 here). `created_by` = the acting admin.
+  would 500 here) — the handler MUST `session.rollback()` before raising the 400
+  or the session is poisoned for the rest of the request. `created_by` = the
+  acting admin.
 - `DELETE /api/admin/golden-set/{triple_id}` → `204` — idempotent (the service's
   `delete_triple` is a no-op when the row is absent; matches the Jinja redirect).
 
@@ -123,25 +131,36 @@ slug/user, `400` bad score/FK).
 
 ### React surface
 
-- **Routes** (under AppShell, behind the Slice-1 `RequireAdmin`):
+- **Routes:** a nested `/admin` layout route (`AdminLayout`, below) wraps
   `/admin` → `AdminDashboard.tsx`, `/admin/drafting` → `AdminDrafting.tsx`,
-  `/admin/golden-set` → `AdminGoldenSet.tsx`.
+  `/admin/golden-set` → `AdminGoldenSet.tsx`, plus the migrated Slice-1
+  `/admin/users` + `/admin/users/pending`. `RequireAdmin` moves to the layout
+  (wrap once).
 - **Hooks:** `api/adminDashboard.ts` (dashboard + drafting reads, 4 ops
   mutations) and `api/adminGoldenSet.ts` (golden-set read, add, delete).
   Existing `api/admin.ts` (Slice-1 user-mgmt) untouched. Query hooks `retry:
   false`. Ops mutations invalidate `["admin-dashboard"]`; golden-set add/delete
   invalidate `["admin-golden-set"]`.
-- **`AdminNav.tsx`** — shared subnav (Operational health · Drafting · Golden set ·
-  Users · Pending) as react-router `<Link>`s, rendered on every admin page.
-  Connects the Slice-1 `/admin/users[/pending]` pages into in-SPA nav (they were
-  cross-document-only before).
+- **`AdminLayout.tsx` (nested layout route) + `AdminNav.tsx`** — rather than
+  editing the Slice-1 page components, restructure `router.tsx` so all `/admin/*`
+  routes nest under one `<AdminLayout>` that renders `<RequireAdmin>` once +
+  `<AdminNav>` + `<Outlet/>`. `AdminNav` is the shared subnav (Operational
+  health · Drafting · Golden set · Users · Pending) as react-router `<Link>`s.
+  This connects the Slice-1 `/admin/users[/pending]` pages into in-SPA nav
+  (cross-document-only before) **without touching their components** — only
+  `router.tsx` changes (Slice-1 routes move under the layout; their per-route
+  `RequireAdmin` wrappers collapse into the layout's).
 - **SPA ActivityBar Admin entry** — an "Admin" item in the shell's ActivityBar,
   shown only when `capabilities.admin`, linking to `/admin`. This is the "wire
   SPA admin nav" item deferred from Slice 1.
 - **`AdminDashboard`** — read-only panels + four ops action buttons (a confirm
   step on rerank, per the Jinja `data-confirm`), inline result banners reflecting
-  `{triggered}`/`{enqueued}` and the human messages from the Jinja `_ok_msgs`/
-  `_err_msgs`. **`AdminDrafting`** — read-only tables; per-workspace rows link to
+  `{triggered}`/`{enqueued}` and the human messages **ported verbatim from the
+  Jinja `_ok_msgs`/`_err_msgs`** (`admin.html`:23-31; `_err_msgs` covers only
+  `fetch` and `digest_unconfigured` → the `{triggered: false}` cases). With
+  `retry: false`, a single failed sub-query 500s the whole read-model, so the
+  page MUST render a **clean error state, not a blank shell**.
+  **`AdminDrafting`** — read-only tables; per-workspace rows link to
   `/cockpit/:id` (now in-SPA). **`AdminGoldenSet`** — triples table (+ delete),
   manual add form, candidates table (+ per-row inline add with a score input).
 - **Styling:** CSS Modules + `--app-*` tokens, no bare element selectors.
@@ -155,8 +174,11 @@ slug/user, `400` bad score/FK).
   `include_router(...)` lines from `main.py`. Delete `admin.html`,
   `admin_drafting.html`, `golden_set.html`.
 - **Manifest:** replace `/admin/users` with **`/admin`** in `frontend/routes.json`
-  `spa_routes`; **remove `/admin` from `backend_prefixes`** (no non-`/api` admin
-  routes remain). Regen `schema.gen.ts`
+  `spa_routes` — this is the functional change (bare `/admin` now SPA-owned,
+  subsuming every `/admin/*`). Also drop `/admin` from `backend_prefixes`, but
+  note that is **documentation-only**: `BACKEND_PREFIXES` is "never used to
+  decide SPA ownership" (`spa_routes.py`:6-9), so the prefix removal is not
+  load-bearing. Regen `schema.gen.ts`
   (`EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`) **after** the
   teardown (route deletions change the schema — the Slice-E lesson) and
   `routes.gen.ts` + `spa_routes.py` (`uv run python scripts/gen_routes.py`).
@@ -164,15 +186,36 @@ slug/user, `400` bad score/FK).
   `test_web_admin_ranking.py`, `test_web_admin_digest_panel.py`,
   `test_web_admin_embedding_coverage.py`, `test_web_admin_drafting_panel.py`,
   `test_web_admin_levers.py`, `test_web_admin_calibration_banner.py`,
-  `test_web_golden_set_crud.py`) to `/api`, preserving every behavior. Add a
-  route-absence guard (the Jinja `/admin` dashboard/drafting/golden-set/ops paths
-  gone from `app.routes`; `/api/admin/*` present).
-- **`test_web_auth` repoint:** the 3 auth tests Slice 1 pointed at the
-  now-deleted Jinja `/admin` move to **`/api/admin/dashboard`** (401 unauth, 403
-  non-admin) — exercising `require_admin` on a live route. The Jinja-only
-  "302 → `/login?next=`" assertion is legacy (no protected Jinja HTML route
-  survives; the SPA does `next=` client-side via `redirectToLogin`) and retires
-  with the auth slice. Confirm the exact 3 tests in the plan.
+  `test_web_golden_set_crud.py`) to `/api`, preserving every behavior
+  (coverage-mapping check before deleting them — the profiles re-embed lesson).
+  Extend the existing `tests/test_admin_users_jinja_surface_absent.py` (Slice 1,
+  same `app.routes` pattern) with the bare `/admin` + drafting + golden-set + ops
+  paths gone and the new `/api/admin/*` present.
+- **`test_web_auth` repoint — NOT a 1:1 move (2 retired + 1 repointed + 1 new).**
+  The 3 tests Slice 1 left pointing at `/admin` (`test_web_auth.py`:119-153)
+  actually exercise the `_redirect_html_401` exception handler (`main.py`:330-391),
+  which branches on `api_request()` (path under `/api`):
+  - `test_html_401_get_threads_next` (GET `/admin?x=1`, Accept text/html → 303
+    `/login?next=…`) and `test_html_401_post_does_not_thread_next` (POST
+    `/admin/rerank` → 303 `/login`) test the **HTML-redirect branch**
+    (`main.py`:356-375). `/api/admin/dashboard` takes the envelope branch, never a
+    303 — that behavior is not expressible against `/api`, so these are
+    **deleted**. (`safe_next`'s sanitizer is independently covered by
+    `test_auth_redirects.py`; no sanitizer coverage is lost.)
+  - `test_json_401_unaffected_by_next` (GET `/admin` non-HTML → 401 JSON) is
+    **repointed** to `GET /api/admin/dashboard` → 401 envelope and **renamed**
+    (e.g. `test_api_admin_requires_auth`) — "unaffected_by_next" no longer means
+    anything.
+  - **New:** `GET /api/admin/dashboard` as a non-admin → `403`.
+  - **Tracked dormant-code decision (the Slice-1 silent-drift lesson):** after
+    this slice the `_redirect_html_401` non-`/api` HTML branches (the 401-redirect
+    at 356-375 and the styled-error path) are live-looking but **unreachable** —
+    every surviving non-`/api` route is either public (auth/register/oauth/health)
+    or an SPA path served at 200; no protected non-`/api` HTML route can 401. Do
+    NOT synthesize a throwaway protected route to keep testing it. Add a one-line
+    comment marking the branch dormant ("no protected non-/api HTML route triggers
+    this after admin Slice 2; remove in the auth slice") so it is not mistaken for
+    working, tested code.
 
 ## Testing
 
