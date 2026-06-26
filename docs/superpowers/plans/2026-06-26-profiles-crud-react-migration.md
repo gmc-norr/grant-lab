@@ -14,7 +14,7 @@
 
 - **No DB schema change. No new dependency. Strict parity port.** Additive `/api`, then teardown.
 - **New backend module is `web/api/profiles.py`**; register it in `web/api/__init__.py` (the `/api`-prefixed router). Response models namespaced `ProfilesListOut` / `ProfileListItemOut` / `ProfileDetailOut` / `ProfileCreateIn` / `ProfileCreateOut` / `ProfileUpdateIn` / `ProfileUpdateOut` (only `ProfileFacet` exists today — no collision; re-verify in `schema.gen.ts` during Task 5's regen).
-- **Errors via `raise HTTPException(status_code=…, detail=…)`** — the global handler maps `/api` paths to `{"error":{"code","message"}}` (`code_for(400)=="bad_request"`, `403=="forbidden"`, `404=="not_found"`, `409=="conflict"`, `413=="request_entity_too_large"`, `401=="unauthorized"`). Never hand-build the envelope.
+- **Errors via `raise HTTPException(status_code=…, detail=…)`** — the global handler maps `/api` paths to `{"error":{"code","message"}}` (`code_for(400)=="bad_request"`, `403=="forbidden"`, `404=="not_found"`, `409=="conflict"`, `413=="payload_too_large"` (verified `errors.py:64`), `401=="unauthorized"`). Never hand-build the envelope.
 - **Validation ORDER must exactly mirror the Jinja handler** (observable on combined-failure requests). Create: name 400 → grants/mission 413 → level 400 → `parse_structured` 400 → **dup-name 409 → member-bounds 400** → IntegrityError 409. Update: description 413 → budget/TRL 400 → currency 400 → **(in-session) 404 → 403 → 409** → level 400 → `parse_structured` 400.
 - **`funding_instruments` flatten asymmetry:** flat `funding_instruments` reads from `structured["funding"]["instruments"]` (NOT `["funding_instruments"]`). All other namespaced fields are 1:1. Read via `.get` (the `org` namespace exists only for org units, `career_stage` only for individuals).
 - **`bootstrap_*` fields are nulled when `!can_edit`** (defense-in-depth; non-owners never poll/see them).
@@ -212,8 +212,9 @@ def refresh_and_backfill_in_background(
 - [ ] **Step 5: Repoint the still-live Jinja module at the new homes**
 
 In `src/call_manager/web/routes/profiles.py`:
-1. DELETE the moved defs: `_refresh_embedding_in_background`, `_refresh_and_backfill_in_background`, `_split_lines`, `_bounded_int`, `_parse_members_strict`, `_parse_members`, and the constants `_MAX_MEMBERS`, `_MAX_SEED_LINE`, `_MAX_LIST_ENTRIES`, `_ALLOWED_CURRENCIES`, `_BUDGET_MIN`, `_BUDGET_MAX`, `_TRL_MIN`, `_TRL_MAX`.
-2. Add imports near the top:
+1. DELETE the moved defs: `_refresh_embedding_in_background`, `_refresh_and_backfill_in_background`, `_split_lines`, `_bounded_int`, `_parse_members_strict`, `_parse_members`, the constants `_MAX_MEMBERS`, `_MAX_SEED_LINE`, `_MAX_LIST_ENTRIES`, `_ALLOWED_CURRENCIES`, `_BUDGET_MIN`, `_BUDGET_MAX`, `_TRL_MIN`, `_TRL_MAX`, AND the module-level `_logger = logging.getLogger(__name__)`.
+2. **Remove the now-unused imports** that only the moved code referenced (ruff F401 will flag them in Step 6 otherwise): `import contextlib`, `import logging`, `from call_manager.embeddings.refresh import refresh_profile_embedding`, `from call_manager.profiles.seed import Member`, `from call_manager.ranking.backfill import backfill_profile`. KEEP all other imports (the GET/POST handlers still use `fastapi`, `HTMLResponse`/`RedirectResponse`, `select`, `IntegrityError`, `get_current_user`, the models, `build_profile_text`, `create_profile_with_bootstrap`, `parse_structured`/`FieldValidationError`).
+3. Add imports near the top:
 
 ```python
 from call_manager.profiles.forms import (
@@ -733,6 +734,18 @@ def test_create_duplicate_name_409(monkeypatch, pg_url, pg_session_factory):
     assert r2.json()["error"]["code"] == "conflict"
 
 
+def test_create_dup_name_checked_before_member_bounds(monkeypatch, pg_url, pg_session_factory):
+    # Combined failure: a duplicate active name AND >50 members. Parity requires
+    # the dup-name 409 to fire BEFORE the member-bounds 400 (profiles.py:131-137).
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    too_many = "\n".join(f"0000-0001-0000-{i:04d}" for i in range(60))
+    with client:
+        assert client.post("/api/profiles", json=_BODY).status_code == 200
+        r = client.post("/api/profiles", json={**_BODY, "orcids": too_many})
+    assert r.status_code == 409  # NOT 400 — dup checked before member bounds
+
+
 def test_create_name_too_long_400(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     client, _ = _login(app, pg_session_factory)
@@ -866,7 +879,7 @@ def create_profile(
 - [ ] **Step 4: Run the test + ruff**
 
 Run: `uv run pytest tests/test_api_profiles_create.py -q && uv run ruff check src/call_manager/web/api/profiles.py`
-Expected: PASS (5); ruff clean.
+Expected: PASS (6); ruff clean.
 
 - [ ] **Step 5: Commit**
 
@@ -975,6 +988,22 @@ def test_update_409_while_drafting(monkeypatch, pg_url, pg_session_factory, prof
     with client:
         r = client.put(f"/api/profiles/{pid}", json=_EDIT)
     assert r.status_code == 409
+
+
+def test_update_403_before_409_when_drafting(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    # Combined failure: a non-owner AND an active bootstrap job. The in-session
+    # order checks 403 (ownership) BEFORE the 409 (drafting), so a non-owner sees
+    # 403 even while the profile is drafting (profiles.py 297-309).
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Lab")
+    with pg_session_factory() as s:
+        s.add(ProfileBootstrapJob(profile_id=pid, status="running", seed={"x": 1}))
+        s.commit()
+    other = _other_user(pg_session_factory, email="other2@ki.se")
+    client = _client_for(app, other)
+    with client:
+        r = client.put(f"/api/profiles/{pid}", json=_EDIT)
+    assert r.status_code == 403  # NOT 409 — 403 checked before the drafting 409
 
 
 def test_update_bad_currency_400_before_404(monkeypatch, pg_url, pg_session_factory):
@@ -1132,7 +1161,7 @@ def update_profile(
 - [ ] **Step 4: Run the test + ruff**
 
 Run: `uv run pytest tests/test_api_profile_update.py -q && uv run ruff check src/call_manager/web/api/profiles.py`
-Expected: PASS (5); ruff clean.
+Expected: PASS (6); ruff clean.
 
 - [ ] **Step 5: Regenerate the OpenAPI TS types**
 
@@ -1311,7 +1340,7 @@ git commit -m "feat(spa): profiles hooks (list/detail-with-poll/create/update)"
 Create `frontend/src/routes/ProfilesList.test.tsx`:
 
 ```tsx
-import { screen, waitFor } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
@@ -1602,7 +1631,7 @@ function DetailView({ p }: { p: Detail }) {
           <p className={styles.kind}>{p.kind}{p.level ? ` · ${p.level}` : ""}</p>
         </hgroup>
         <div className={styles.actions}>
-          <Link className="primary" to={`/?profile=${p.id}`}>Ranked feed →</Link>
+          <Link className={styles.primary} to={`/?profile=${p.id}`}>Ranked feed →</Link>
           <Link to={`/profiles/${p.id}/edit`}>Edit</Link>
         </div>
       </header>
