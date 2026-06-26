@@ -367,11 +367,11 @@ def _login(app, pg_session_factory, *, password_hash=None, oidc=False):
 
 def test_password_change_remints_cookie_and_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
-    client, uid = _login(app, pg_session_factory, password_hash=hash_password("oldpassword"))
+    client, uid = _login(app, pg_session_factory, password_hash=hash_password("oldpassword12"))
     with client:
         r = client.post(
             "/api/me/password",
-            json={"current_password": "oldpassword", "new_password": "newlongpassword"},
+            json={"current_password": "oldpassword12", "new_password": "newlongpassword"},
         )
     assert r.status_code == 200
     assert r.json() == {"ok": True}
@@ -398,10 +398,10 @@ def test_password_wrong_current_400(monkeypatch, pg_url, pg_session_factory):
 
 def test_password_weak_new_400(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
-    client, _ = _login(app, pg_session_factory, password_hash=hash_password("oldpassword"))
+    client, _ = _login(app, pg_session_factory, password_hash=hash_password("oldpassword12"))
     with client:
         r = client.post(
-            "/api/me/password", json={"current_password": "oldpassword", "new_password": "a"}
+            "/api/me/password", json={"current_password": "oldpassword12", "new_password": "a"}
         )
     assert r.status_code == 400
 
@@ -783,6 +783,9 @@ export function useAccountSettings() {
   return useQuery({
     queryKey: ["me-settings"],
     queryFn: async () => unwrap(await api.GET("/api/me/settings", {})),
+    // House pattern (session.ts, calls.ts, editor.ts, …): no retry so an
+    // unauthenticated load redirects via unwrap immediately, not after 3 retries.
+    retry: false,
   });
 }
 
@@ -1131,7 +1134,7 @@ function PasswordSection() {
         )}
         {change.isError && (
           <span className={styles.err} role="alert">
-            {(change.error as { message?: string } | null)?.message ?? "Couldn’t change password."}
+            {(change.error as Error | null)?.message ?? "Couldn’t change password."}
           </span>
         )}
       </form>
