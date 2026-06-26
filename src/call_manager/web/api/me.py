@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
+from call_manager.auth.passwords import WeakPassword, hash_password, verify_password
 from call_manager.db.models import Profile, Subscription, User
 from call_manager.web.dashboard import set_default_profile
 
@@ -123,3 +124,50 @@ def update_name(
         new_name = db_user.name
         session.commit()
     return UpdateNameOut(name=new_name)
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ChangePasswordOut(BaseModel):
+    ok: bool
+
+
+@router.post("/me/password", response_model=ChangePasswordOut)
+def change_password(
+    request: Request,
+    body: ChangePasswordIn,
+    response: Response,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    sf = request.app.state.session_factory
+    signer = request.app.state.session_signer
+    settings = request.app.state.settings
+    with sf() as session:
+        db_user = session.get(User, user.id)
+        if db_user is None:
+            raise HTTPException(status_code=401, detail="user not found")
+        # An OAuth-only account (no hash) can't mint a first password from a session.
+        if db_user.password_hash is None or not verify_password(
+            db_user.password_hash, body.current_password
+        ):
+            raise HTTPException(status_code=400, detail="current password is incorrect")
+        try:
+            db_user.password_hash = hash_password(body.new_password)
+        except WeakPassword as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        db_user.session_epoch = (db_user.session_epoch or 0) + 1  # revoke other sessions
+        new_epoch = db_user.session_epoch
+        session.commit()
+    # Re-mint THIS browser's session under the new epoch (same cookie attrs as the Jinja route).
+    response.set_cookie(
+        "session",
+        signer.make(user_id=user.id, session_epoch=new_epoch),
+        max_age=settings.session_max_age_seconds,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+    )
+    return ChangePasswordOut(ok=True)
