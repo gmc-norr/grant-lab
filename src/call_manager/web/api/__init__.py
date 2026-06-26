@@ -9,6 +9,7 @@ from call_manager.web.api import (
     export,
     files,
     me,
+    profiles,
     references,
     rubric,
     settings,
@@ -32,6 +33,7 @@ router = APIRouter(
 router.include_router(me.router)
 router.include_router(annotations_router.router)
 router.include_router(calls.router)
+router.include_router(profiles.router)
 router.include_router(workspaces.router)
 router.include_router(turns.router)
 router.include_router(references.router)
