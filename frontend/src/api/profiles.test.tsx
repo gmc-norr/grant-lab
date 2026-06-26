@@ -49,4 +49,5 @@ it("useUpdateProfile PUTs the body + invalidates", async () => {
   await result.current.mutateAsync({ description: "d" } as never);
   expect(put).toHaveBeenCalledWith("/api/profiles/{profile_id}", { params: { path: { profile_id: 5 } }, body: { description: "d" } });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["profile", 5] });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["profiles"] });
 });
