@@ -190,6 +190,8 @@ def admin_disable_user(
             raise HTTPException(status_code=404, detail="user not found")
         if u.status != "active":
             raise HTTPException(status_code=400, detail="user is not active")
+        if user_id == admin.id:
+            raise HTTPException(status_code=403, detail="cannot disable your own account")
         if u.is_admin and _lock_active_admin_count(db) <= 1:
             raise HTTPException(status_code=400, detail="cannot disable the last active admin")
         u.status = "disabled"
