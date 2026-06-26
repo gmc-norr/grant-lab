@@ -197,3 +197,78 @@ def test_deny_404(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     assert c.post("/api/admin/users/999999/deny").status_code == 404
+
+
+def test_disable_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    _user(pg_session_factory, email="admin2@ki.se", status="active", is_admin=True)  # keep >1 admin
+    with pg_session_factory() as s:
+        m = User(email="m@ki.se", status="active")
+        s.add(m)
+        s.commit()
+        s.refresh(m)
+        mid, before = m.id, m.session_epoch
+    assert c.post(f"/api/admin/users/{mid}/disable").status_code == 200
+    with pg_session_factory() as s:
+        u = s.get(User, mid)
+        assert u.status == "disabled" and u.session_epoch == before + 1
+
+
+def test_disable_only_active_400(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    did = _user(pg_session_factory, email="dis@ki.se", status="disabled")
+    assert c.post(f"/api/admin/users/{did}/disable").status_code == 400
+
+
+def test_cannot_disable_last_active_admin(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, aid = _admin(app, pg_session_factory)
+    assert c.post(f"/api/admin/users/{aid}/disable").status_code == 400
+    with pg_session_factory() as s:
+        assert s.get(User, aid).status == "active"
+
+
+def test_disable_404(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    assert c.post("/api/admin/users/999999/disable").status_code == 404
+
+
+def test_change_role_to_admin_and_member(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)  # keeps an admin around for demote tests
+    uid = _user(pg_session_factory, email="r@ki.se", status="active", is_admin=False)
+    with pg_session_factory() as s:
+        ep0 = s.get(User, uid).session_epoch
+    assert c.post(f"/api/admin/users/{uid}/role", json={"role": "admin"}).status_code == 200
+    with pg_session_factory() as s:
+        assert s.get(User, uid).is_admin is True
+    assert c.post(f"/api/admin/users/{uid}/role", json={"role": "member"}).status_code == 200
+    with pg_session_factory() as s:
+        u = s.get(User, uid)
+        assert u.is_admin is False
+        assert u.session_epoch == ep0  # role changes do NOT bump epoch
+
+
+def test_change_role_demote_last_admin_guarded(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, aid = _admin(app, pg_session_factory)  # only one active admin
+    r = c.post(f"/api/admin/users/{aid}/role", json={"role": "member"})
+    assert r.status_code == 400
+    with pg_session_factory() as s:
+        assert s.get(User, aid).is_admin is True
+
+
+def test_change_role_invalid_role_on_nonexistent_is_400(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    assert c.post("/api/admin/users/999999/role", json={"role": "galaxy"}).status_code == 400
+
+
+def test_change_role_not_active_400(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    did = _user(pg_session_factory, email="rd@ki.se", status="disabled")
+    assert c.post(f"/api/admin/users/{did}/role", json={"role": "admin"}).status_code == 400

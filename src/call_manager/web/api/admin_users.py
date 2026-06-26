@@ -66,9 +66,7 @@ def admin_users_list(
             select(func.count()).select_from(User).where(User.status != "pending")
         ).scalar_one()
         users = [
-            AdminUserOut(
-                id=u.id, email=u.email, name=u.name, status=u.status, is_admin=u.is_admin
-            )
+            AdminUserOut(id=u.id, email=u.email, name=u.name, status=u.status, is_admin=u.is_admin)
             for u in rows
         ]
     return AdminUsersPageOut(users=users, page=page, per_page=_PER_PAGE, total=total)
@@ -115,6 +113,23 @@ class AdminActionOut(BaseModel):
     id: int
 
 
+class AdminRoleIn(BaseModel):
+    role: str
+
+
+def _lock_active_admin_count(db) -> int:
+    """Count active admins while LOCKING those rows, so two concurrent
+    demote/disable transactions serialize and can't both pass the guard."""
+    db.execute(
+        select(User.id).where(User.is_admin.is_(True), User.status == "active").with_for_update()
+    ).all()
+    return db.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.is_admin.is_(True), User.status == "active")
+    ).scalar_one()
+
+
 @router.post("/admin/users/{user_id}/approve", response_model=AdminActionOut)
 def admin_approve_user(
     request: Request,
@@ -159,5 +174,48 @@ def admin_deny_user(
         if u.status != "pending":
             raise HTTPException(status_code=400, detail="user is not pending")
         u.status = "disabled"
+        db.commit()
+    return AdminActionOut(id=user_id)
+
+
+@router.post("/admin/users/{user_id}/disable", response_model=AdminActionOut)
+def admin_disable_user(
+    request: Request,
+    user_id: int,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "active":
+            raise HTTPException(status_code=400, detail="user is not active")
+        if u.is_admin and _lock_active_admin_count(db) <= 1:
+            raise HTTPException(status_code=400, detail="cannot disable the last active admin")
+        u.status = "disabled"
+        u.session_epoch = (u.session_epoch or 0) + 1
+        db.commit()
+    return AdminActionOut(id=user_id)
+
+
+@router.post("/admin/users/{user_id}/role", response_model=AdminActionOut)
+def admin_change_role(
+    request: Request,
+    user_id: int,
+    body: AdminRoleIn,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    if body.role not in ("member", "admin"):
+        raise HTTPException(status_code=400, detail="invalid role")
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "active":
+            raise HTTPException(status_code=400, detail="user is not active")
+        demoting = u.is_admin and body.role == "member"
+        if demoting and _lock_active_admin_count(db) <= 1:
+            raise HTTPException(status_code=400, detail="cannot demote the last active admin")
+        u.is_admin = body.role == "admin"
         db.commit()
     return AdminActionOut(id=user_id)
