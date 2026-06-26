@@ -1,5 +1,7 @@
-import { screen } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { screen, waitFor } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+
+import * as clientMod from "../api/client";
 
 import { renderWithProviders } from "../test-utils";
 import { ActivityBar } from "./ActivityBar";
@@ -67,4 +69,29 @@ it("hides the current-workspace item on the cockpit list route", () => {
 it("hides the current-workspace item on the create route", () => {
   renderWithProviders(<ActivityBar />, { route: "/cockpit/new" });
   expect(screen.queryByRole("link", { name: "Current workspace" })).toBeNull();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+function mockMe(admin: boolean) {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+    data: { user: { id: 1, email: "a@ki.se", status: "active", default_profile_id: null }, capabilities: { admin } },
+    error: undefined,
+  } as never);
+}
+
+it("shows the Admin entry for an admin", async () => {
+  mockMe(true);
+  renderWithProviders(<ActivityBar />);
+  await waitFor(() => expect(screen.getByRole("link", { name: "Admin" })).toBeInTheDocument());
+});
+
+it("hides the Admin entry for a non-admin", async () => {
+  mockMe(false);
+  renderWithProviders(<ActivityBar />);
+  // Settings always renders; wait for it, then assert Admin is absent.
+  await waitFor(() => expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument());
+  expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
 });
