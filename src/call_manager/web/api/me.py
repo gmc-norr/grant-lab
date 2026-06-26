@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.auth.passwords import WeakPassword, hash_password, verify_password
@@ -171,3 +171,55 @@ def change_password(
         samesite="lax",
     )
     return ChangePasswordOut(ok=True)
+
+
+class SubscriptionsIn(BaseModel):
+    profile_ids: list[int]
+
+
+class SubscriptionsOut(BaseModel):
+    subscribed: list[int]
+
+
+@router.put("/me/subscriptions", response_model=SubscriptionsOut)
+def update_subscriptions(
+    request: Request,
+    body: SubscriptionsIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    sf = request.app.state.session_factory
+    desired = set(body.profile_ids)
+    with sf() as session:
+        db_user = session.get(User, user.id)
+        if db_user is None:
+            raise HTTPException(status_code=401, detail="user not found")
+        valid_ids = (
+            set(
+                session.execute(
+                    select(Profile.id).where(
+                        Profile.id.in_(desired), Profile.is_active.is_(True)
+                    )
+                ).scalars()
+            )
+            if desired
+            else set()
+        )
+        existing_ids = set(
+            session.execute(
+                select(Subscription.profile_id).where(Subscription.user_id == user.id)
+            ).scalars()
+        )
+        # DIFF, not delete-all-then-reinsert — reinserting would reset digest_enabled.
+        to_remove = existing_ids - valid_ids
+        to_add = valid_ids - existing_ids
+        if to_remove:
+            session.execute(
+                delete(Subscription).where(
+                    Subscription.user_id == user.id,
+                    Subscription.profile_id.in_(to_remove),
+                )
+            )
+        for pid in to_add:
+            session.add(Subscription(user_id=user.id, profile_id=pid))
+        session.commit()
+    return SubscriptionsOut(subscribed=sorted(valid_ids))
