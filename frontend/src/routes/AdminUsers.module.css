@@ -1,0 +1,16 @@
+.page { max-width: 60rem; margin: 0 auto; padding: 1rem 0.5rem 3rem; }
+.page h1 { color: var(--app-heading); }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--app-border); font-size: 0.9rem; }
+.table th { color: var(--app-muted); font-weight: 600; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.actions button { border-radius: 5px; padding: 0.3rem 0.7rem; background: var(--app-accent); color: #fff; border: none; cursor: pointer; }
+.actions button:disabled { opacity: 0.5; cursor: default; }
+.secondary { background: var(--app-sidebar) !important; color: var(--app-text) !important; border: 1px solid var(--app-border) !important; }
+.resetForm { display: inline-flex; gap: 0.3rem; align-items: center; }
+.resetForm input { padding: 0.25rem 0.4rem; border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-sidebar); color: var(--app-text); }
+.pager { margin-top: 1rem; color: var(--app-muted); font-size: 0.9rem; }
+.pager button { margin-left: 0.4rem; }
+.nav { font-size: 0.85rem; }
+.nav a { color: var(--app-link); text-decoration: none; }
+.err { color: var(--app-danger, #e5484d); font-size: 0.8rem; }
