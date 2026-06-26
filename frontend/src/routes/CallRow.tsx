@@ -5,7 +5,7 @@ import { MatchBadge } from "../components/MatchBadge";
 import { Deadline } from "./Deadline";
 import styles from "./CallRow.module.css";
 
-// One call in the list: title link (to the un-ported Jinja detail page), a muted
+// One call in the list: title link (to the React detail route), a muted
 // meta line (source · deadline), the banded match pill, and a "Start drafting"
 // action that opens the React from-call create form. profileId is the dashboard's
 // resolved effective profile (carried so Phase-0 can snapshot it).
@@ -16,9 +16,12 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
   return (
     <li className={styles.row}>
       <div className={styles.body}>
-        <a className={styles.title} href={`/calls/${call.id}`}>
+        <Link
+          className={styles.title}
+          to={profileId != null ? `/calls/${call.id}?profile=${profileId}` : `/calls/${call.id}`}
+        >
           {call.title}
-        </a>
+        </Link>
         <div className={styles.meta}>
           {call.source_name && <span>{call.source_name}</span>}
           {call.source_name && call.deadline && <span aria-hidden> · </span>}

@@ -22,11 +22,19 @@ function renderRow(ui: React.ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
 }
 
-it("links the title to the Jinja call-detail page, shows source + match badge", () => {
+it("links the title to the React detail route, shows source + match badge", () => {
   renderRow(<CallRow call={call()} />);
   expect(screen.getByRole("link", { name: "Grant X" })).toHaveAttribute("href", "/calls/3");
   expect(screen.getByText("Vinnova")).toBeInTheDocument();
   expect(screen.getByText("82")).toHaveAttribute("data-band", "strong");
+});
+
+it("threads the resolved profile into the detail link", () => {
+  renderRow(<CallRow call={call()} profileId={7} />);
+  expect(screen.getByRole("link", { name: "Grant X" })).toHaveAttribute(
+    "href",
+    "/calls/3?profile=7",
+  );
 });
 
 it("omits the match badge when the score is null", () => {

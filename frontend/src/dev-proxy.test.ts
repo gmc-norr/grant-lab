@@ -3,13 +3,13 @@ import { describe, expect, it } from "vitest";
 import { isSpaRoute, isViteAsset, shouldServeViaVite } from "./dev-proxy";
 
 describe("isSpaRoute (shipped manifest = ['/'] after the Plan-3 Task-9 flip)", () => {
-  it("owns the root / exactly", () => {
+  it("owns the root and the /calls prefix", () => {
     expect(isSpaRoute("/")).toBe(true);
+    expect(isSpaRoute("/calls/1")).toBe(true);
   });
   it("does NOT own backend or unknown paths (they reach FastAPI's real 404)", () => {
     expect(isSpaRoute("/api/me")).toBe(false);
     expect(isSpaRoute("/login")).toBe(false);
-    expect(isSpaRoute("/calls/1")).toBe(false); // un-ported call-detail page
     expect(isSpaRoute("/totally-unknown")).toBe(false);
   });
 });
@@ -61,7 +61,7 @@ describe("shouldServeViaVite (the proxy bypass decision)", () => {
     expect(shouldServeViaVite("/@vite/client")).toBe(true); // dev asset
     expect(shouldServeViaVite("/login")).toBe(false); // backend route -> uvicorn (not Vite's index)
     expect(shouldServeViaVite("/api/me")).toBe(false); // backend route -> uvicorn
-    expect(shouldServeViaVite("/calls/1")).toBe(false); // un-ported detail page -> uvicorn
+    expect(shouldServeViaVite("/calls/1")).toBe(true); // owned detail route
     expect(shouldServeViaVite("/totally-unknown")).toBe(false); // unknown -> uvicorn real 404
   });
 });
