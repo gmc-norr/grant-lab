@@ -3,9 +3,19 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Profile, ProfileBootstrapJob, User
+from call_manager.db.models import (
+    Profile,
+    ProfileBootstrapJob,
+    ProfileKind,
+    ProfileLevel,
+    User,
+)
+from call_manager.profiles.create import create_profile_with_bootstrap
+from call_manager.profiles.fields import FieldValidationError, parse_structured
+from call_manager.profiles.forms import parse_members_strict
 
 router = APIRouter()
 
@@ -148,3 +158,93 @@ def get_profile(
                 "publications_fetched": None,
             }
     return ProfileDetailOut(**core, **flat, can_edit=can_edit, **boot)
+
+
+class ProfileCreateIn(BaseModel):
+    name: str
+    kind: str = "organizational_unit"
+    level: str = ""
+    orcids: str = ""
+    names_affiliations: str = ""
+    pasted_grants: str = ""
+    mission_text: str = ""
+    areas: str = ""
+    career_stage: str = ""
+    applicant_types: str = ""
+    role: str = ""
+    years_since_phd: str = ""
+    org_type: str = ""
+    capabilities: str = ""
+    patient_populations: str = ""
+    scale: str = ""
+    funding_instruments: str = ""
+    funder_exclusions: str = ""
+    country: str = ""
+    host_institution: str = ""
+
+
+class ProfileCreateOut(BaseModel):
+    id: int
+
+
+@router.post("/profiles", response_model=ProfileCreateOut)
+def create_profile(
+    request: Request, body: ProfileCreateIn, user: User = Depends(get_current_user)  # noqa: B008
+):
+    if len(body.name) > 200:
+        raise HTTPException(status_code=400, detail="name too long (max 200 chars)")
+    if len(body.pasted_grants) > 100_000:
+        raise HTTPException(status_code=413, detail="pasted grants too large (max 100 KB)")
+    if len(body.mission_text) > 10_240:
+        raise HTTPException(status_code=413, detail="mission text too large (max 10 KB)")
+    valid_kinds = {k.value for k in ProfileKind}
+    kind = body.kind if body.kind in valid_kinds else ProfileKind.ORGANIZATIONAL_UNIT.value
+    level_val: str | None = None
+    if kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
+        level_val = body.level.strip() or None
+        if level_val is not None and level_val not in {x.value for x in ProfileLevel}:
+            raise HTTPException(status_code=400, detail=f"unknown level: {body.level!r}")
+    try:
+        user_structured = parse_structured(
+            kind=kind,
+            raw={
+                "areas": body.areas, "career_stage": body.career_stage,
+                "applicant_types": body.applicant_types, "role": body.role,
+                "years_since_phd": body.years_since_phd, "org_type": body.org_type,
+                "capabilities": body.capabilities, "patient_populations": body.patient_populations,
+                "scale": body.scale, "funding_instruments": body.funding_instruments,
+                "funder_exclusions": body.funder_exclusions, "country": body.country,
+                "host_institution": body.host_institution,
+            },
+        )
+    except FieldValidationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
+
+    sf = request.app.state.session_factory
+    with sf() as session:
+        existing = session.execute(
+            select(Profile.id).where(Profile.name == body.name, Profile.is_active.is_(True))
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="profile name already exists")
+    members = parse_members_strict(body.orcids, body.names_affiliations)
+    seed_payload = {
+        "name": body.name, "kind": kind, "level": level_val,
+        "members": [
+            {"orcid": m.orcid, "name": m.name, "affiliation": m.affiliation}
+            for m in members
+        ],
+        "pasted_grants": body.pasted_grants, "mission_text": body.mission_text,
+    }
+    try:
+        with sf() as session:
+            profile = create_profile_with_bootstrap(
+                session=session, owner_id=user.id, name=body.name, kind=kind,
+                level=level_val, structured={**user_structured}, seed_payload=seed_payload,
+            )
+            session.commit()
+            session.refresh(profile)
+            new_id = profile.id
+    except IntegrityError as e:
+        raise HTTPException(status_code=409, detail="profile name already exists") from e
+    return ProfileCreateOut(id=new_id)
