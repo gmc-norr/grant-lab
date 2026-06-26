@@ -225,9 +225,11 @@ def test_disable_only_active_400(monkeypatch, pg_url, pg_session_factory):
 def test_cannot_disable_last_active_admin(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)
-    # aid is the only active admin; try to disable themselves
-    # This now hits the self-disable guard (403) before the last-admin guard (400)
-    assert c.post(f"/api/admin/users/{aid}/disable").status_code == 403
+    # When there's only 1 active admin and they try to disable themselves,
+    # the self-check fires at 403 before the last-admin guard.
+    # This verifies the correct check order: 404 → self-check → status → guard
+    r = c.post(f"/api/admin/users/{aid}/disable")
+    assert r.status_code == 403
     with pg_session_factory() as s:
         assert s.get(User, aid).status == "active"
 
