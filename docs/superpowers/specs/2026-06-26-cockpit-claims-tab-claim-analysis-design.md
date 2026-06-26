@@ -63,15 +63,30 @@ Jinja strip; a viewer sees the findings read-only.
 
 Self-contained on **kept** primitives only (the same the kept `web/api/workspaces.py` already
 uses: `workspace_repo_dir`, `PROPOSAL_FILENAME`, `current_head`, `split_sections`); it does **not**
-import the doomed Jinja `web/sections.py` / `web/workspaces.py` helpers. Reuses the existing
-analysis services verbatim: `insert_from_annotation` (`analysis/insert.py`), `enqueue_section_job`
-(`analysis/queue.py`), `_citation_snapshot` (`tools/citations.py`), and the models.
+import the doomed Jinja `web/sections.py` / `web/workspaces.py` / `web/annotations.py` helpers.
+Reuses the existing analysis services verbatim: `insert_from_annotation` (`analysis/insert.py`),
+`enqueue_section_job` (`analysis/queue.py`), `_citation_snapshot` (`tools/citations.py`), and the
+models.
+
+**Shared-helper extraction (prerequisite — Task 0 of the plan).** The post-insert re-enqueue helper
+`_enqueue_containing_section` currently lives **inside the doomed Jinja `web/annotations.py`**
+([`web/annotations.py:72`](../../../src/call_manager/proposal_assist/web/annotations.py)). The
+new `/api` needs it for insert parity, and importing it from the doomed module would re-create
+exactly the coupling the teardown is removing. **Extract it to `analysis/queue.py`** (next to
+`enqueue_section_job`, all kept) as `enqueue_containing_section(session, *, workspace_id,
+workspaces_dir, commit_sha, ev_id) -> None` — behavior byte-identical. The new `/api` insert calls
+it; **repoint the Jinja route at it too** (drop its inline copy now, so the route's existing tests
+become a free regression net — the same extract-and-repoint pattern the gap-closers soft-delete
+used). G2 then deletes only the Jinja route, not the helper.
 
 **`GET /api/workspaces/{workspace_id}/annotations`** (member) — the read-model.
 - Read the current `proposal.md` at HEAD (`repo = workspace_repo_dir(...)`,
   `raw = (repo/PROPOSAL_FILENAME).read_text()`, `head = current_head(repo)`), `split_sections(raw)`.
-  If there is no `proposal.md`, return `{is_owner, sections: []}` (not a 404 — an empty draft is a
-  valid state for the tab).
+- **Always degrade to `{is_owner, sections: []}` — never 404/500 — on ANY pre-draft state:** no git
+  repo / uninitialized repo (`current_head` raises) / no `proposal.md` / empty file. A setup-phase or
+  brand-new workspace legitimately has no draft yet, and the Claims tab is always mounted. (This is
+  the one deliberate behavior change from the Jinja `get_section_annotations`, which 404s — a strip
+  fragment can 404, an always-present tab cannot.)
 - For each live section compute its `occurrence` (count of earlier sections with the same sha),
   gather `status="open"` annotations matching `(workspace_id, section_sha, section_occurrence)`
   ordered by `sentence_ordinal, id`, resolve each `reference_id` → "Family Year" label
@@ -87,7 +102,8 @@ analysis services verbatim: `insert_from_annotation` (`analysis/insert.py`), `en
 **`POST .../annotations/{annotation_id}/insert`** (owner) — verbatim reuse of the Jinja body:
 `_annotation_or_404` (IDOR: `annotation.workspace_id != ws.id` → 404) → capture `(section_sha,
 section_occurrence)` before the service → `insert_from_annotation(...)` → `commit` → on a genuine
-(non-idempotent) insert, the post-insert `_enqueue_containing_section` re-enqueue. Error map:
+(non-idempotent) insert, the post-insert `enqueue_containing_section` re-enqueue (the extracted
+shared helper). Error map:
 `InsertConflict`→409 (detail = the message, e.g. turn-in-flight), `CommitMutexTimeout`→**429**
 (`Retry-After`; `/api` sanitizes ≥500 so 503→429, per the Slice-B convention),
 `GitCommitError`→500 ("insert failed — nothing was written"). Returns
@@ -133,10 +149,12 @@ for writes, `require_member` for the read; binary/HTML responses become JSON.
 
 - **One slice** (1 read-model + 3 actions + 1 panel; cohesive — comparable to Slice F). **No DB
   schema change.**
-- **Additive.** The Jinja `web/annotations.py`, `partials/annotation_strip.html`, and the
-  `section_view.html` strip wiring are **kept** (still rendered in the live Jinja editor). **G2
-  deletes them** once this lands — same narrow-teardown discipline as Slice F (don't delete Jinja
-  that's still wired to live rendering).
+- **Additive** (one extraction aside). The Jinja `web/annotations.py`, `partials/annotation_strip.html`,
+  and the `section_view.html` strip wiring are **kept** (still rendered in the live Jinja editor).
+  **G2 deletes them** once this lands — same narrow-teardown discipline as Slice F (don't delete Jinja
+  that's still wired to live rendering). The one touch to the doomed module is the §3.1 extract-and-repoint
+  of `enqueue_containing_section` (so the `/api` doesn't import doomed code); the Jinja insert route's
+  behavior is unchanged.
 - **Deferred (follow-up, not v1):** clicking a finding to jump the editor to the claim's
   `char_offset` (a Citations-`openPeek`-style deep-link). Adds editor-coordination complexity for
   marginal v1 value; the finding already shows the claim text.
@@ -165,8 +183,11 @@ for writes, `require_member` for the read; binary/HTML responses become JSON.
 - Backend suite green: read-model (section mapping + occurrence, job state, owner flag, stale
   omission, no-proposal empty), insert (success / idempotent / `InsertConflict`-409 / busy-429 /
   non-owner-403 / cross-workspace-404), dismiss (success + audit event / empty-422 / race-409 /
-  non-owner-403), reanalyze (enqueue + idempotent dedup / out-of-range-404 / non-owner-403). `ruff`
-  clean. The Jinja annotation tests stay green (untouched).
+  non-owner-403), reanalyze (enqueue + idempotent dedup / out-of-range-404 / non-owner-403), and the
+  read-model's **empty-on-pre-draft** path (no repo / no proposal → `sections: []`, 200) plus the
+  duplicate-section occurrence math. `ruff` clean. The Jinja annotation tests stay green — the insert
+  route is repointed to the extracted `enqueue_containing_section` (its tests are the extraction's
+  regression net); the other Jinja annotation routes are untouched.
 - Frontend `tsc` clean, `vitest` green (ClaimsPanel renders all 3 kinds, insert/dismiss/reanalyze
   paths, owner-vs-viewer gating, pending/failed indicator, the new tab + count), `build` clean.
 - OpenAPI regen (`EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`): the new annotation
@@ -188,6 +209,12 @@ for writes, `require_member` for the read; binary/HTML responses become JSON.
   one import updates.
 - **Two coexisting UIs until G2:** the Jinja strip and the React Claims tab both read the same
   tables. They never conflict (the tab is additive; both use the same guarded write paths).
+- **Perpetual "analyzing…" when the local analysis stack is unconfigured.** The scheduler ticks
+  (`drain_analysis_queue`/`reconcile_analysis_coverage`) are gated on `citation_service` +
+  `analysis_embedder`; if those are unset (local LLM/embedder down), `reanalyze` enqueues jobs that
+  never drain and the tab's per-section indicator stays "analyzing…". This is **parity with the
+  Jinja strip** (which polls forever in the same case) — accepted for v1; a future enhancement could
+  surface analysis-availability and disable Reanalyze when the stack is off.
 
 ---
 
