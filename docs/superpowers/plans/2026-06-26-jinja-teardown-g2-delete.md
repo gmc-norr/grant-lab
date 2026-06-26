@@ -27,7 +27,7 @@ The spec's audit predated the 3 gap-closer slices. Re-running it against master 
 
 1. **Two kept templates hardcode doomed `/workspaces/…` URLs** (not just `base.html:40`) — deleting the routes without repointing these is a live regression:
    - `call_detail.html:19` — the **"Start drafting"** link → `/workspaces/new?call_id=…&profile_id=…`. Repoint to **`/cockpit/new?…`** (React `WorkspaceCreate.tsx` reads `call_id`+`profile_id` — verified). Update `test_web_calls_start_drafting.py` (asserts the URL string).
-   - `admin_drafting.html:65` — each workspace row → `/workspaces/{id}`. Repoint to **`/cockpit/{id}`** (the React cockpit editor). No test asserts this link.
+   - `admin_drafting.html:65` — each workspace row → `/workspaces/{id}`. Repoint to **`/cockpit/{id}`** (the React cockpit editor). No test asserts this link. Also `admin_drafting.html:17,20` — kill-switch status **copy** literally names `POST /workspaces/<id>/turns` (not a link, so URL/href greps miss it); after G2 the kept endpoint is `/api/workspaces/{id}/turns` → update the copy.
 2. **Mixed test files need trim/retarget, not blanket delete** (resolved per-file in Task 2 / Task 5).
 3. `app.js:327` (`/workspaces/{id}/artifact` ajax) is dead-but-harmless on the kept pages (its trigger element lives only on the deleted workspace editor) → deferred with the rest of `app.js`.
 
@@ -38,9 +38,9 @@ The spec's audit predated the 3 gap-closer slices. Re-running it against master 
 Additive-safe: the doomed routes still exist at this point, and the React `/cockpit` targets already work, so nothing breaks. This task removes every kept reference to a doomed `/workspaces/…` URL.
 
 **Files:**
-- Modify: `src/call_manager/web/templates/base.html` (line 40)
-- Modify: `src/call_manager/web/templates/call_detail.html` (line 19)
-- Modify: `src/call_manager/web/templates/admin_drafting.html` (line 65)
+- Modify: `src/call_manager/web/templates/base.html` (line 40 — remove Workspaces nav)
+- Modify: `src/call_manager/web/templates/call_detail.html` (line 19 — Start-drafting link)
+- Modify: `src/call_manager/web/templates/admin_drafting.html` (line 65 — row link; lines 17/20 — kill-switch copy)
 - Modify: `tests/proposal_assist/test_web_calls_start_drafting.py`
 
 - [ ] **Step 1: Update the failing test first (TDD) — assert the React URL**
@@ -73,25 +73,35 @@ Change `href="/workspaces/new?call_id=…"` to `href="/cockpit/new?call_id=…"`
 Run: `uv run pytest tests/proposal_assist/test_web_calls_start_drafting.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Repoint `admin_drafting.html:65`**
+- [ ] **Step 5: Repoint `admin_drafting.html` — the row link AND the stale kill-switch copy**
 
-Change the workspace-row link from `/workspaces/{{ row.id }}` to `/cockpit/{{ row.id }}`:
+(a) Line 65 — change the workspace-row link from `/workspaces/{{ row.id }}` to `/cockpit/{{ row.id }}`:
 
 ```html
           <td><a href="/cockpit/{{ row.id }}">{{ row.title | e }}</a></td>
+```
+
+(b) Lines 17 and 20 — the kill-switch status copy literally names the now-doomed endpoint (`POST /workspaces/&lt;id&gt;/turns`). After G2 that bare route is gone; the kept equivalent is `/api/workspaces/{id}/turns`. Update both occurrences:
+
+```html
+      <strong>Drafting enabled</strong> — POST /api/workspaces/&lt;id&gt;/turns
+```
+```html
+      <strong>Drafting disabled</strong> — POST /api/workspaces/&lt;id&gt;/turns
 ```
 
 - [ ] **Step 6: Remove the `base.html:40` Workspaces nav link**
 
 Delete the entire line 40 `<li>…Workspaces…</li>` from `src/call_manager/web/templates/base.html`. (The React `/cockpit` is linked from the SPA AppShell; no replacement nav link is added.)
 
-- [ ] **Step 7: Verify no kept template/Python still references a bare doomed `/workspaces/…` URL**
+- [ ] **Step 7: Verify no kept template references a bare doomed `/workspaces/…` URL — in links OR in copy**
 
-Run:
+Run (broad match — `/workspaces/` anywhere, not just quoted hrefs, so admin copy is caught too; exclude the `/api/` paths and the doomed `proposal_assist/` templates):
 ```bash
-grep -rnE '"/workspaces/|href="/workspaces' src/call_manager/web/templates/ --include='*.html' | grep -v 'proposal_assist/'
+grep -rnE '/workspaces/?[<{a-z]' src/call_manager/web/templates/ --include='*.html' \
+  | grep -v 'proposal_assist/' | grep -v '/api/workspaces'
 ```
-Expected: **no output** (the only remaining `/workspaces` literals live inside the doomed `proposal_assist/` templates, deleted in Task 4). `app.js`/`app.css` are deferred (Global Constraints).
+Expected: **no output** (every kept-template `/workspaces` reference — `base.html` nav, `call_detail` link, `admin_drafting` link + kill-switch copy — is now repointed or removed; the only remaining `/workspaces` literals live inside the doomed `proposal_assist/` templates, deleted in Task 4). `app.js`/`app.css` are deferred (Global Constraints).
 
 - [ ] **Step 8: Commit**
 
@@ -112,14 +122,20 @@ Remove every test that exercises a doomed Jinja route, BEFORE the routes are del
 
 - [ ] **Step 1: Per-file gate — confirm the delete set is doomed-only**
 
-Run (each should print NOTHING that indicates a kept-surface test or an exported fixture a kept test imports):
+Run (note the glob is `test_web_workspace*` — singular-aware — so it catches `test_web_workspace_setup_gate.py`, which the plural `test_web_workspaces_*` glob would MISS):
 ```bash
-# none of the delete-set files should contain an /api/ request or be imported by a kept test
-grep -rln '"/api/\|/api/workspaces' tests/proposal_assist/test_web_workspaces_*.py tests/proposal_assist/test_web_references_*.py tests/proposal_assist/test_web_citation_reader_route.py tests/proposal_assist/test_web_citation_render_wiring.py tests/test_web_sections.py tests/test_web_annotations.py tests/proposal_assist/test_error_handler_htmx.py tests/proposal_assist/test_b7_e2e.py || echo "OK: no /api tests mixed in"
+# which delete-set files contain an /api/ request? (candidates for trim, not delete)
+grep -rln '"/api/\|/api/workspaces' tests/proposal_assist/test_web_workspace*.py tests/proposal_assist/test_web_references_*.py tests/proposal_assist/test_web_citation_reader_route.py tests/proposal_assist/test_web_citation_render_wiring.py tests/test_web_sections.py tests/test_web_annotations.py tests/proposal_assist/test_error_handler_htmx.py tests/proposal_assist/test_b7_e2e.py || echo "OK: no /api tests mixed in"
 # is any delete-set file imported by another (kept) test? (fixture reuse)
-grep -rln "from tests.proposal_assist.test_web_workspaces\|from tests.test_web_sections\|from tests.test_web_annotations\|import test_b7_e2e" tests/ || echo "OK: no kept test imports a delete-set file"
+grep -rln "from tests.proposal_assist.test_web_workspace\|from tests.test_web_sections\|from tests.test_web_annotations\|import test_b7_e2e" tests/ || echo "OK: no kept test imports a delete-set file"
 ```
-Expected: both print the `OK:` line. (If a file shows an `/api/` test, move it to the trim set instead.)
+Expected: the second grep prints `OK:` (no fixture reuse). The first grep prints **exactly one** file: `tests/proposal_assist/test_web_workspace_setup_gate.py` — the **one documented exception** (see below). Any OTHER file it prints is a genuine mixed file → move it to the trim set instead of deleting.
+
+**Documented exception — `test_web_workspace_setup_gate.py` is DELETED despite an `/api/` hit.** Its `test_create_confirm_composer_closed_loop` calls `/api/workspaces/{id}/activate` as ONE step, but every assertion in the file is coupled to the Jinja `/workspaces/{id}` VIEW (`client.get(f"/workspaces/{wsid}")` — the doomed `workspace_main` page) plus the Jinja `/workspaces/{id}/turns` route; there is no cleanly-extractable `/api` test. The `/api/activate` closed-loop behavior is **independently covered by the kept `tests/proposal_assist/test_phase0_e2e.py:174`** (`create → POST /api/.../activate → drafting live`, pure `/api`, no Jinja view). So deleting this file loses no unique `/api` coverage. Confirm before deleting:
+```bash
+grep -n "/api/workspaces/{.*}/activate\|/api/workspaces/.*activate" tests/proposal_assist/test_phase0_e2e.py
+```
+Expected: a hit at ~line 174 (the kept `/api` activation coverage). If this grep is EMPTY, STOP — trim `test_web_workspace_setup_gate.py` (keep an `/api/activate` test) instead of deleting it.
 
 - [ ] **Step 2: Delete the 34 doomed-route-only test files**
 
@@ -218,8 +234,12 @@ from __future__ import annotations
 from call_manager.main import create_app
 
 
-def test_no_bare_workspaces_route_registered(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+def test_no_bare_workspaces_route_registered(monkeypatch, pg_url):
+    # Use pg_url (the real testcontainer URL, psycopg3 driver) — a bare
+    # "postgresql://" selects the psycopg2 dialect, which is NOT installed, so
+    # create_app() would fail at engine creation before the route assertion.
+    # pg_url is defined in tests/conftest.py and available to this root test.
+    monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
