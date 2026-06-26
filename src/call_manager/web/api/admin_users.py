@@ -117,6 +117,10 @@ class AdminRoleIn(BaseModel):
     role: str
 
 
+class AdminResetPasswordIn(BaseModel):
+    new_password: str
+
+
 def _lock_active_admin_count(db) -> int:
     """Count active admins while LOCKING those rows, so two concurrent
     demote/disable transactions serialize and can't both pass the guard."""
@@ -219,5 +223,43 @@ def admin_change_role(
         if demoting and _lock_active_admin_count(db) <= 1:
             raise HTTPException(status_code=400, detail="cannot demote the last active admin")
         u.is_admin = body.role == "admin"
+        db.commit()
+    return AdminActionOut(id=user_id)
+
+
+@router.post("/admin/users/{user_id}/enable", response_model=AdminActionOut)
+def admin_enable_user(
+    request: Request,
+    user_id: int,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "disabled":
+            raise HTTPException(status_code=400, detail="user is not disabled")
+        u.status = "active"
+        db.commit()
+    return AdminActionOut(id=user_id)
+
+
+@router.post("/admin/users/{user_id}/reset-password", response_model=AdminActionOut)
+def admin_reset_password(
+    request: Request,
+    user_id: int,
+    body: AdminResetPasswordIn,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    # NO status gate — parity: resets a password for a user in any status.
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        try:
+            u.password_hash = hash_password(body.new_password)
+        except WeakPassword as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        u.session_epoch = (u.session_epoch or 0) + 1  # revoke the target's sessions
         db.commit()
     return AdminActionOut(id=user_id)

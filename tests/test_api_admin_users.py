@@ -304,3 +304,67 @@ def test_cannot_disable_last_active_other_admin(monkeypatch, pg_url, pg_session_
     assert r.status_code == 200
     with pg_session_factory() as s:
         assert s.get(User, bid).status == "disabled"
+
+
+def test_enable_only_disabled(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    did = _user(pg_session_factory, email="en@ki.se", status="disabled")
+    with pg_session_factory() as s:
+        ep0 = s.get(User, did).session_epoch
+    assert c.post(f"/api/admin/users/{did}/enable").status_code == 200
+    with pg_session_factory() as s:
+        u = s.get(User, did)
+        assert u.status == "active"
+        assert u.session_epoch == ep0  # enable does NOT bump epoch
+    # enabling a non-disabled (pending) user -> 400
+    pid = _user(pg_session_factory, email="enp@ki.se", status="pending", oidc_sub="sp")
+    assert c.post(f"/api/admin/users/{pid}/enable").status_code == 400
+
+
+def test_enable_404(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    assert c.post("/api/admin/users/999999/enable").status_code == 404
+
+
+def test_reset_password_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    with pg_session_factory() as s:
+        u = User(email="rp@ki.se", status="active")
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        uid, ep0 = u.id, u.session_epoch
+    assert (
+        c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "fresh-strong-pw"}).status_code
+        == 200
+    )
+    with pg_session_factory() as s:
+        u = s.get(User, uid)
+        assert verify_password(u.password_hash, "fresh-strong-pw") and u.session_epoch == ep0 + 1
+
+
+def test_reset_rejects_weak_400(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    uid = _user(pg_session_factory, email="rp2@ki.se", status="active")
+    assert c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "short"}).status_code == 400
+
+
+def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_factory):
+    # reset-password works for a DISABLED user (no status gate) — pins the non-gate invariant.
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    did = _user(pg_session_factory, email="rpd@ki.se", status="disabled")
+    assert (
+        c.post(f"/api/admin/users/{did}/reset-password", json={"new_password": "fresh-strong-pw"}).status_code
+        == 200
+    )
+
+
+def test_reset_404(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    assert c.post("/api/admin/users/999999/reset-password", json={"new_password": "fresh-strong-pw"}).status_code == 404
