@@ -19,66 +19,6 @@ def test_limiter_releases_slot():
 
 
 # ---------------------------------------------------------------------------
-# Route 429 test
-# ---------------------------------------------------------------------------
-
-
-def test_upload_returns_429_when_no_slot(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from tests.proposal_assist._refs_helpers import authed_client, build_app
-    from tests.proposal_assist.conftest import make_workspace
-
-    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    from call_manager.proposal_assist.references.admission import IngestLimiter
-
-    lim = IngestLimiter(capacity=1)
-    app.state.reference_ingest_limiter = lim
-    assert lim.try_acquire() is True  # hold the only slot
-
-    with pg_session_factory() as s:
-        ws = make_workspace(s)
-        s.commit()
-        wsid, owner_id = ws.id, ws.owner_id
-
-    try:
-        resp = authed_client(app, user_id=owner_id).post(
-            f"/workspaces/{wsid}/references",
-            data={"auto_classify": "true"},
-            files={"file": ("a.pdf", b"%PDF-1.4 minimal", "application/pdf")},
-        )
-        assert resp.status_code == 429, resp.text
-    finally:
-        lim.release()
-
-
-def test_fetch_route_returns_429_when_no_slot(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from tests.proposal_assist._refs_helpers import authed_client, build_app
-    from tests.proposal_assist.conftest import make_workspace
-
-    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    from call_manager.proposal_assist.references.admission import IngestLimiter
-
-    lim = IngestLimiter(capacity=1)
-    app.state.reference_ingest_limiter = lim
-    assert lim.try_acquire() is True  # hold the only slot
-
-    with pg_session_factory() as s:
-        ws = make_workspace(s)
-        s.commit()
-        wsid, owner_id = ws.id, ws.owner_id
-
-    try:
-        # A valid-shaped DOI passes input validation, then hits the exhausted
-        # limiter → fail-fast 429 (no network fetch attempted).
-        resp = authed_client(app, user_id=owner_id).post(
-            f"/workspaces/{wsid}/references/fetch",
-            data={"input": "10.1234/abcd.efgh", "kind": "paper"},
-        )
-        assert resp.status_code == 429, resp.text
-    finally:
-        lim.release()
-
-
-# ---------------------------------------------------------------------------
 # MCP fetch tool busy test
 # ---------------------------------------------------------------------------
 

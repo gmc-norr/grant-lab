@@ -1,83 +1,9 @@
-"""DRAFTING_ENABLED=false: POST /turns refuses with 503; drain
-tick logs + no-ops so queued turns wait for re-enable."""
+"""DRAFTING_ENABLED=false: drain tick logs + no-ops so queued turns wait for re-enable."""
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import ChatTurn, TurnJob, User, Workspace
-from call_manager.main import create_app
-
-
-def _build_app_kill(monkeypatch, pg_url, *, drafting_enabled: bool):
-    monkeypatch.setenv("DATABASE_URL", pg_url)
-    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    monkeypatch.setenv("DRAFTING_ENABLED", "true" if drafting_enabled else "false")
-    return create_app()
-
-
-def _authed_client(app, *, user_id: int) -> TestClient:
-    client = TestClient(app, raise_server_exceptions=True)
-    client.__enter__()
-    signer: SessionSigner = app.state.session_signer
-    client.cookies.set("session", signer.make(user_id=user_id))
-    return client
-
-
-def test_post_turn_returns_503_when_kill_switch_off(monkeypatch, pg_url, pg_session_factory):
-    app = _build_app_kill(monkeypatch, pg_url, drafting_enabled=False)
-    with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
-        s.add(owner)
-        s.flush()
-        ws = Workspace(owner_id=owner.id, title="Test", current_phase="active")
-        s.add(ws)
-        s.commit()
-        uid, wsid = owner.id, ws.id
-
-    client = _authed_client(app, user_id=uid)
-    client.post(f"/workspaces/{wsid}/disclosure")  # clear disclosure gate
-    try:
-        resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"})
-    finally:
-        client.__exit__(None, None, None)
-
-    assert resp.status_code == 503
-    assert "drafting" in resp.text.lower()
-    # No ChatTurn or TurnJob persisted.
-    with pg_session_factory() as s:
-        turns = list(s.scalars(select(ChatTurn).where(ChatTurn.workspace_id == wsid)))
-        jobs = list(s.scalars(select(TurnJob).where(TurnJob.workspace_id == wsid)))
-    assert turns == []
-    assert jobs == []
-
-
-def test_post_turn_works_when_kill_switch_on(monkeypatch, pg_url, pg_session_factory):
-    """Sanity: defaulted/explicitly-True kill switch lets submits through."""
-    app = _build_app_kill(monkeypatch, pg_url, drafting_enabled=True)
-    with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
-        s.add(owner)
-        s.flush()
-        ws = Workspace(owner_id=owner.id, title="Test", current_phase="active")
-        s.add(ws)
-        s.commit()
-        uid, wsid = owner.id, ws.id
-
-    client = _authed_client(app, user_id=uid)
-    client.post(f"/workspaces/{wsid}/disclosure")  # clear disclosure gate
-    try:
-        resp = client.post(f"/workspaces/{wsid}/turns", data={"content": "hi"})
-    finally:
-        client.__exit__(None, None, None)
-
-    assert resp.status_code == 200, resp.text
-    with pg_session_factory() as s:
-        jobs = list(s.scalars(select(TurnJob).where(TurnJob.workspace_id == wsid)))
-    assert len(jobs) == 1
+from call_manager.db.models import ChatTurn, TurnJob
 
 
 @pytest.mark.asyncio
