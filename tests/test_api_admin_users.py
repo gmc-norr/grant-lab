@@ -222,7 +222,7 @@ def test_disable_only_active_400(monkeypatch, pg_url, pg_session_factory):
     assert c.post(f"/api/admin/users/{did}/disable").status_code == 400
 
 
-def test_cannot_disable_last_active_admin(monkeypatch, pg_url, pg_session_factory):
+def test_cannot_disable_self_as_only_admin(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, aid = _admin(app, pg_session_factory)
     # When there's only 1 active admin and they try to disable themselves,
