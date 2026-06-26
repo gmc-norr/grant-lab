@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select, text
 
@@ -21,7 +21,8 @@ from call_manager.db.models import (
     WorkspaceEvent,
 )
 from call_manager.digest.send import week_start as _week_start
-from call_manager.ranking.backfill import BACKFILL_DAYS
+from call_manager.ranking.backfill import BACKFILL_DAYS, backfill_profile
+from call_manager.scheduler import trigger_job_now
 
 router = APIRouter()
 
@@ -338,3 +339,75 @@ def admin_drafting(
             recent_events=recent_events,
         )
     return result
+
+
+class RerankOut(BaseModel):
+    enqueued: int
+
+
+class TriggeredOut(BaseModel):
+    triggered: bool
+
+
+class ReenableIn(BaseModel):
+    user_id: int
+
+
+class AdminActionOut(BaseModel):
+    id: int
+
+
+def _scheduler(request: Request):
+    """The app's APScheduler, or None if absent (e.g. before lifespan)."""
+    return getattr(request.app.state, "scheduler", None)
+
+
+@router.post("/admin/rerank", response_model=RerankOut)
+def admin_rerank(
+    request: Request,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    session_factory = request.app.state.session_factory
+    with session_factory() as session:
+        active_profile_ids = (
+            session.execute(select(Profile.id).where(Profile.is_active.is_(True))).scalars().all()
+        )
+    for pid in active_profile_ids:
+        backfill_profile(session_factory=session_factory, profile_id=pid)
+    return RerankOut(enqueued=len(active_profile_ids))
+
+
+@router.post("/admin/digest/send", response_model=TriggeredOut)
+def admin_send_digest(
+    request: Request,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    return TriggeredOut(triggered=trigger_job_now(_scheduler(request), "digest:weekly"))
+
+
+@router.post("/admin/digest/reenable", response_model=AdminActionOut)
+def admin_reenable_user(
+    request: Request,
+    body: ReenableIn,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    with request.app.state.session_factory() as session:
+        target = session.get(User, body.user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="unknown user")
+        target.digest_disabled_at = None
+        session.commit()
+    return AdminActionOut(id=body.user_id)
+
+
+@router.post("/admin/sources/{slug}/fetch", response_model=TriggeredOut)
+def admin_fetch_source(
+    slug: str,
+    request: Request,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    with request.app.state.session_factory() as session:
+        src = session.execute(select(Source).where(Source.slug == slug)).scalar_one_or_none()
+    if src is None:
+        raise HTTPException(status_code=404, detail="unknown source")
+    return TriggeredOut(triggered=trigger_job_now(_scheduler(request), f"ingest:{slug}"))
