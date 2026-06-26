@@ -1573,40 +1573,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/calls/{call_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Call Detail */
-        get: operations["call_detail_calls__call_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/calls/{call_id}/hide": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Hide Call */
-        post: operations["hide_call_calls__call_id__hide_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -10528,70 +10494,6 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
-                };
-            };
-        };
-    };
-    call_detail_calls__call_id__get: {
-        parameters: {
-            query?: {
-                profile?: string | null;
-            };
-            header?: never;
-            path: {
-                call_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    hide_call_calls__call_id__hide_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                call_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

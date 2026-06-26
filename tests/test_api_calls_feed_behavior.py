@@ -703,9 +703,9 @@ def test_high_score_badge_excludes_closed(monkeypatch, pg_url, pg_session_factor
 
 
 def test_dismissed_calls_omitted(monkeypatch, pg_url, pg_session_factory):
-    """A call the user hid (POST /calls/{id}/hide → UserCallDismissal) is omitted
-    from that user's /api/calls feed. The hide POST itself (redirect/idempotency/
-    404/auth) stays covered in test_web_calls_hide.py."""
+    """A call the user hid (POST /api/calls/{id}/hide → UserCallDismissal) is
+    omitted from that user's /api/calls feed. The hide POST itself
+    (idempotency/404/auth) stays covered in test_api_calls_hide.py."""
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
@@ -729,7 +729,7 @@ def test_dismissed_calls_omitted(monkeypatch, pg_url, pg_session_factory):
         s.commit()
     c, uid, _ = _login(app, pg_session_factory)
     with c:
-        c.post(f"/calls/{hidden_id}/hide", follow_redirects=False)
+        c.post(f"/api/calls/{hidden_id}/hide")
         body = c.get("/api/calls").json()
     titles = _titles(body)
     assert "VisibleCall" in titles

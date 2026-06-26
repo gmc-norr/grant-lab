@@ -15,7 +15,6 @@ BACKEND_PREFIXES: tuple[str, ...] = (
     "/logout",
     "/static",
     "/login",
-    "/calls",
     "/admin",
     "/auth",
     "/api",
