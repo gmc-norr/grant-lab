@@ -29,6 +29,7 @@ def test_is_spa_route_is_exact_not_prefix():
     assert is_spa_route("/made-up-page") is False
     assert is_spa_route("/api/me") is False
     assert is_spa_route("/calls/123") is True  # /calls is now an SPA-owned prefix (calls-detail)
+    assert is_spa_route("/me") is True  # /me is now an SPA-owned prefix (account/settings)
     assert is_spa_route("/login") is False
 
 
@@ -53,3 +54,4 @@ def test_is_backend_route_for_proxy_carveout():
     assert is_backend_route("/api/me") is True
     assert is_backend_route("/calls/123") is False  # /calls retired from backend_prefixes (calls-detail)
     assert is_backend_route("/app") is False
+    assert is_backend_route("/me/name") is False  # /me retired from backend_prefixes (account/settings)

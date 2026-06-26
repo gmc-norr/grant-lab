@@ -1,0 +1,49 @@
+.settings {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem 0.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.header h1 { margin: 0 0 0.25rem; color: var(--app-heading); }
+.sub { margin: 0; color: var(--app-muted); font-size: 0.9rem; }
+.sub code { background: var(--app-hover); padding: 0.05rem 0.3rem; border-radius: 3px; }
+.muted { color: var(--app-muted); font-size: 0.85rem; }
+
+.card {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 1rem;
+  background: var(--app-sidebar);
+}
+.card h2 { margin: 0 0 0.6rem; font-size: 1rem; color: var(--app-heading); }
+
+.label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; margin-bottom: 0.6rem; }
+.label input {
+  background: var(--app-editor, var(--app-hover));
+  border: 1px solid var(--app-border-strong);
+  border-radius: 5px;
+  padding: 0.4rem 0.55rem;
+  color: var(--app-text);
+  font: inherit;
+}
+.label input:focus { outline: 2px solid var(--app-accent); outline-offset: 1px; }
+
+.fieldset { border: none; margin: 0 0 0.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.check { display: flex; align-items: center; gap: 0.45rem; font-size: 0.9rem; }
+
+.card button {
+  background: var(--app-accent);
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 0.4rem 0.9rem;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.card button:disabled { opacity: 0.6; cursor: default; }
+
+.ok { margin-left: 0.6rem; color: var(--app-good); font-size: 0.85rem; }
+.err { margin-left: 0.6rem; color: var(--app-bad); font-size: 0.85rem; }

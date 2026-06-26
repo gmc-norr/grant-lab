@@ -22,8 +22,8 @@ export const ACTIVITY_TOP: ActivityItem[] = [
   },
 ];
 
-// Bottom-pinned group. These mirror the existing Jinja nav exactly
-// (base.html: /profiles, /me) and deep-link out until those pages migrate.
+// Bottom-pinned group. Profiles deep-links to its Jinja page until it migrates;
+// Settings is now an SPA route (/me).
 export const ACTIVITY_BOTTOM: ActivityItem[] = [
   {
     id: "profiles",
@@ -32,5 +32,5 @@ export const ACTIVITY_BOTTOM: ActivityItem[] = [
     kind: "external",
     to: "/profiles",
   },
-  { id: "settings", label: "Settings", icon: "gear", kind: "external", to: "/me" },
+  { id: "settings", label: "Settings", icon: "gear", kind: "spa", to: "/me" },
 ];
