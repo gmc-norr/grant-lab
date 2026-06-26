@@ -89,20 +89,27 @@ Standard slice shape, three layers in one branch:
 - `GET /api/admin/users/pending?page=N`
   → `{ users: [{id, email, name, created_at, google_linked}], page }`
   (`google_linked = oidc_sub is not None`).
-- `POST /api/admin/users/{id}/approve` `{role, initial_password?}` → `200`
-  - `400` invalid role (not in `{member, admin}`)
-  - `400` user is not pending
-  - `400` local account (no `oidc_sub`) with no `initial_password`
-  - `400` weak password (`str(WeakPassword)` as the envelope message)
-  - `404` user not found
+- `POST /api/admin/users/{id}/approve` `{role="member", initial_password?}` →
+  `200`. **Preserve the existing intra-handler check order** (`approve_user`,
+  admin.py:430-451): the role param is validated **before** the DB lookup, and
+  404 comes **before** the status/password checks. In order:
+  1. `400` invalid role (not in `{member, admin}`) — *before* the lookup
+  2. `404` user not found
+  3. `400` user is not pending
+  4. `400` local account (no `oidc_sub`) with no `initial_password`
+  5. `400` weak password (`str(WeakPassword)` as the envelope message)
+  The request model **defaults `role` to `"member"`** (parity with the Jinja
+  `Form("member")`; the UI always sends it explicitly).
 - `POST /api/admin/users/{id}/deny` → `200`; `400` not pending; `404`
 - `POST /api/admin/users/{id}/disable` → `200`; `400` not active;
   `400` cannot disable the last active admin; `404`
 - `POST /api/admin/users/{id}/enable` → `200`; `400` not disabled; `404`
-- `POST /api/admin/users/{id}/role` `{role}` → `200`; `400` invalid role;
-  `400` not active; `400` cannot demote the last active admin; `404`
+- `POST /api/admin/users/{id}/role` `{role}` → `200`. Same role-before-lookup
+  order as approve (`change_role`, admin.py:497-517): `400` invalid role
+  (*before* the lookup) → `404` not found → `400` not active → `400` cannot
+  demote the last active admin.
 - `POST /api/admin/users/{id}/reset-password` `{new_password}` → `200`;
-  `400` weak password; `404`
+  `400` weak password; `404`. **No status gate** — see invariants.
 
 Mutations return a minimal body (e.g. `{"id": <user_id>}`) on success; the React
 client refetches the list rather than consuming a full updated row.
@@ -128,6 +135,15 @@ the 1:1 mapping to the retired Jinja routes obvious.
 - **Status-transition gates** — `approve`/`deny` require `status == "pending"`;
   `disable`/`role` require `status == "active"`; `enable` requires
   `status == "disabled"`. Each wrong-state attempt is a `400`.
+- **`reset-password` has NO status gate (explicit non-gate)** — the current
+  route resets a password for a user in *any* status (admin.py:520-537 checks
+  only 404, then weak-password); its only failure modes are `404` and weak-`400`.
+  Do **not** add a `status == "active"` (or any status) gate — that is exactly
+  the kind of "helpful hardening" that would silently break parity.
+- **Check ordering** — for `approve` and `role`, the role param is validated
+  **before** the DB lookup (so an invalid role on a nonexistent user is `400`,
+  not `404`); for all mutations, the `404` user-not-found check precedes the
+  state/guard checks. Preserve this order verbatim.
 - **Weak passwords** — `hash_password` raises `WeakPassword`; map to `400` with
   `str(e)` as the message. (`MIN_PASSWORD_LENGTH = 12`; test fixtures must seed
   ≥12-char passwords.)
@@ -146,8 +162,13 @@ the 1:1 mapping to the retired Jinja routes obvious.
   `useAdminPendingUsers(page)` (both `retry: false`, per house pattern); six
   mutation hooks (`useApproveUser`, `useDenyUser`, `useDisableUser`,
   `useEnableUser`, `useChangeRole`, `useResetPassword`), each invalidating the
-  relevant list query on success. Backend guard messages are surfaced inline to
-  the admin from the error envelope.
+  relevant list query on success. **`approve` and `deny` invalidate *both* the
+  pending and the active/disabled lists** — an approved/denied user leaves the
+  pending queue and shows up in the other list (active, resp. disabled), so a
+  navigated-to users list stays fresh. This is a deliberate judgment call beyond
+  strict parity (the Jinja flow just reloads pending); the other four mutations
+  invalidate the active/disabled list only. Backend guard messages are surfaced
+  inline to the admin from the error envelope.
 - **`AdminUsers` UI:** table (Email · Status · Role · Actions). Active rows:
   **Disable**, **Make admin**/**Make member** (toggle by current role), and an
   inline **reset-password** input + button. Disabled rows: **Enable**.
@@ -195,7 +216,11 @@ the 1:1 mapping to the retired Jinja routes obvious.
   requires password + bumps epoch; OAuth approve without password; deny only
   pending; enable only disabled; disable bumps epoch; cannot disable/demote the
   last active admin; reset-password bumps epoch + rejects weak; non-admin → 403;
-  unknown user → 404. Plus a route-absence guard for the retired Jinja paths.
+  unknown user → 404. **Ordering locks:** "invalid role on a nonexistent user →
+  `400` (not `404`)" pins role-before-lookup for both approve and role; a
+  reset-password on a non-active (e.g. disabled) user succeeds, pinning the
+  no-status-gate invariant. Plus a route-absence guard for the retired Jinja
+  paths.
 - **Frontend** (`frontend`, vitest + RTL): `AdminUsers.test.tsx`,
   `AdminPendingUsers.test.tsx`, `api/admin.test.tsx`, and the `router.test.tsx`
   set-equality update. Cover the role toggle, disable/enable, inline
