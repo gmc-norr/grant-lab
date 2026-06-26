@@ -1,5 +1,4 @@
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Profile, ProfileKind, Subscription, User

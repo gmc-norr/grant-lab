@@ -127,7 +127,9 @@ def test_detail_active_profile_returns_ranking_and_why(monkeypatch, pg_url, pg_s
     assert body["best_profile_id"] == pid
 
 
-def test_detail_active_not_owned_profile_still_shows_ranking(monkeypatch, pg_url, pg_session_factory):
+def test_detail_active_not_owned_profile_still_shows_ranking(
+    monkeypatch, pg_url, pg_session_factory
+):
     # P1b parity: ranking display keys off is_active ALONE, not ownership.
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)

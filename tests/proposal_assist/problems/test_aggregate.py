@@ -30,7 +30,12 @@ def test_assemble_empty_when_no_draft_no_scorecard(pg_session_factory, tmp_path)
             ws_rubric_updated_at=rubric_ts,
             budget=6000,
         )
-    assert out == {"problems": [], "counts": {"error": 0, "warning": 0}, "scorecard_stale": [], "uncited_claims_stale": False}
+    assert out == {
+        "problems": [],
+        "counts": {"error": 0, "warning": 0},
+        "scorecard_stale": [],
+        "uncited_claims_stale": False,
+    }
 
 
 def test_assemble_no_ledger_but_markers_surface_orphan_errors(pg_session_factory, tmp_path):

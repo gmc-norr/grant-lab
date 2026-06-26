@@ -52,7 +52,9 @@ def test_subscriptions_diff_preserves_digest_enabled(monkeypatch, pg_url, pg_ses
     assert r.json() == {"subscribed": sorted([pid_a, pid_b])}
     with pg_session_factory() as s:
         row_a = s.execute(
-            select(Subscription).where(Subscription.user_id == uid, Subscription.profile_id == pid_a)
+            select(Subscription).where(
+                Subscription.user_id == uid, Subscription.profile_id == pid_a
+            )
         ).scalar_one()
         assert row_a.digest_enabled is False  # NOT reset to default True
 

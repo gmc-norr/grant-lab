@@ -13,7 +13,9 @@ def _ws(_app, current_user, pg_session_factory, tmp_path):
         return ws.id
 
 
-def test_activity_empty_shape(client_authed_owner, _app, current_user, pg_session_factory, tmp_path):
+def test_activity_empty_shape(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
     r = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity")
     assert r.status_code == 200
@@ -30,7 +32,11 @@ def test_activity_happy_path_orders_and_summarizes(
     t0 = datetime(2026, 6, 23, 12, 0, 0, tzinfo=UTC)
     t1 = datetime(2026, 6, 23, 12, 5, 0, tzinfo=UTC)
     with pg_session_factory() as s:
-        s.add(WorkspaceEvent(workspace_id=ws_id, kind="created", actor_id=current_user.id, created_at=t0))
+        s.add(
+            WorkspaceEvent(
+                workspace_id=ws_id, kind="created", actor_id=current_user.id, created_at=t0
+            )
+        )
         s.add(
             WorkspaceEvent(
                 workspace_id=ws_id,
@@ -78,8 +84,20 @@ def test_activity_tiebreak_is_deterministic(
     lo = uuid.UUID(int=1)
     hi = uuid.UUID(int=2)
     with pg_session_factory() as s:
-        s.add(WorkspaceEvent(id=lo, workspace_id=ws_id, kind="created", actor_id=current_user.id, created_at=same))
-        s.add(WorkspaceEvent(id=hi, workspace_id=ws_id, kind="reference.added", actor_id=current_user.id, created_at=same))
+        s.add(
+            WorkspaceEvent(
+                id=lo, workspace_id=ws_id, kind="created", actor_id=current_user.id, created_at=same
+            )
+        )
+        s.add(
+            WorkspaceEvent(
+                id=hi,
+                workspace_id=ws_id,
+                kind="reference.added",
+                actor_id=current_user.id,
+                created_at=same,
+            )
+        )
         s.commit()
     body = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity").json()
     # equal created_at -> id DESC, so the larger uuid (hi) comes first
@@ -142,9 +160,10 @@ def test_activity_member_category_owner_only_pii(
     client_authed_owner, _app, current_user, pg_session_factory, tmp_path
 ):
     """Owner sees member_added rows (with email); non-owner members do not."""
-    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
     from fastapi.testclient import TestClient
+
     from call_manager.auth.session_cookie import SessionSigner
+    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
 
     _app.state.settings.workspaces_dir = str(tmp_path)
     member_email = "viewer@ki.se"

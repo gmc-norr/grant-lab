@@ -27,7 +27,12 @@ def test_problems_empty_shape(
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
     r = client_authed_owner.get(f"/api/workspaces/{ws_id}/problems")
     assert r.status_code == 200
-    assert r.json() == {"problems": [], "counts": {"error": 0, "warning": 0}, "scorecard_stale": [], "uncited_claims_stale": False}
+    assert r.json() == {
+        "problems": [],
+        "counts": {"error": 0, "warning": 0},
+        "scorecard_stale": [],
+        "uncited_claims_stale": False,
+    }
 
 
 def test_problems_over_length_and_criterion_gap(
