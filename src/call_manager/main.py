@@ -31,20 +31,11 @@ from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web.activity import (
     router as activity_router,
 )
-from call_manager.proposal_assist.web.annotations import (
-    router as annotations_router,
-)
-from call_manager.proposal_assist.web.citations import (
-    router as citations_router,
-)
 from call_manager.proposal_assist.web.coherence import (
     router as coherence_router,
 )
 from call_manager.proposal_assist.web.evaluator import (
     router as evaluator_router,
-)
-from call_manager.proposal_assist.web.files import (
-    router as files_router,
 )
 from call_manager.proposal_assist.web.problems import (
     router as problems_router,
@@ -52,20 +43,11 @@ from call_manager.proposal_assist.web.problems import (
 from call_manager.proposal_assist.web.proposals import (
     router as proposals_router,
 )
-from call_manager.proposal_assist.web.references import (
-    router as references_router,
-)
 from call_manager.proposal_assist.web.review import (
     router as review_router,
 )
-from call_manager.proposal_assist.web.sections import (
-    router as sections_router,
-)
 from call_manager.proposal_assist.web.uncited_claims import (
     router as uncited_claims_router,
-)
-from call_manager.proposal_assist.web.workspaces import (
-    router as workspaces_router,
 )
 from call_manager.web.api import router as api_router
 from call_manager.web.api.errors import api_error, api_request, code_for
@@ -546,8 +528,6 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(golden_set.router)
     app.include_router(profiles.router)
-    app.include_router(workspaces_router)
-    app.include_router(sections_router)
     app.include_router(proposals_router)
     app.include_router(coherence_router)
     app.include_router(evaluator_router)
@@ -555,10 +535,6 @@ def create_app() -> FastAPI:
     app.include_router(problems_router)
     app.include_router(uncited_claims_router)
     app.include_router(activity_router)
-    app.include_router(annotations_router)
-    app.include_router(files_router)
-    app.include_router(references_router)
-    app.include_router(citations_router)
     app.include_router(api_router)
 
     # Dev-only SSE validation endpoint (/events/ping). Mounted ONLY in dev so it
