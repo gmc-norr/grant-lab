@@ -43,6 +43,36 @@ _EDIT = {
 }
 
 
+def test_update_areas_only_change_triggers_reembed(  # noqa: E501
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    # Editing ONLY areas (description resubmitted UNCHANGED) must still re-embed,
+    # because areas feed build_profile_text — not just `description`. Parity with the
+    # retired Jinja test_editing_only_areas_triggers_reembed (Codex-H1). Here we SPY
+    # on the driver (instead of no-op'ing it) to assert refresh_embedding=True.
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    captured: dict = {}
+
+    def _spy(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(post_edit, "refresh_and_backfill_in_background", _spy)
+    app = create_app()
+    pid, owner_id = profile_factory(
+        name="Lab", description="Imaging research lab.", structured={"areas": ["old area"]}
+    )
+    client = _client_for(app, owner_id)
+    # Same non-empty description (so the bg task is scheduled), only areas differ.
+    body = {**_EDIT, "description": "Imaging research lab.", "areas": "new area"}
+    with client:
+        r = client.put(f"/api/profiles/{pid}", json=body)
+    assert r.status_code == 200
+    assert captured.get("refresh_embedding") is True  # areas changed -> re-embed
+
+
 def test_update_owner_renamespaces(monkeypatch, pg_url, pg_session_factory, profile_factory):
     app = _setup(monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Lab", structured={})
