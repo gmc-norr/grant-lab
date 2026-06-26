@@ -7,6 +7,7 @@ No new business logic, no schema change."""
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ from call_manager.db.models import (
     User,
     UserClaimAnnotation,
     Workspace,
+    WorkspaceEvent,
 )
 from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
 from call_manager.proposal_assist.analysis.queue import enqueue_containing_section
@@ -238,3 +240,62 @@ def insert_annotation(
                 commit_sha=result["commit_sha"],
             )
     return InsertResultOut(idempotent=True)
+
+
+class DismissReasonIn(BaseModel):
+    reason: str
+
+
+class DismissResultOut(BaseModel):
+    dismissed: bool
+
+
+@router.post(
+    "/workspaces/{workspace_id}/annotations/{annotation_id}/dismiss",
+    response_model=DismissResultOut,
+)
+def dismiss_annotation(
+    workspace_id: uuid.UUID,
+    annotation_id: int,
+    body: DismissReasonIn,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> DismissResultOut:
+    """Dismiss an open annotation with a required, audited reason. Owner-only.
+    Guarded UPDATE WHERE status='open' (race -> 409) + user_claim_dismissed event."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        ann = _annotation_or_404(session, ws, annotation_id)
+        reason = body.reason.strip()
+        if not reason:
+            raise HTTPException(status_code=422, detail="a reason is required")
+        updated = (
+            session.query(UserClaimAnnotation)
+            .filter(
+                UserClaimAnnotation.id == ann.id,
+                UserClaimAnnotation.status == "open",
+            )
+            .update(
+                {
+                    "status": "dismissed",
+                    "dismissed_reason": reason,
+                    "resolved_by_user_id": user.id,
+                    "resolved_at": datetime.now(UTC),
+                },
+                synchronize_session=False,
+            )
+        )
+        if not updated:
+            session.rollback()
+            raise HTTPException(status_code=409, detail="annotation is no longer actionable")
+        session.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="user_claim_dismissed",
+                actor_id=user.id,
+                payload={"annotation_id": ann.id, "reason": reason},
+            )
+        )
+        session.commit()
+    return DismissResultOut(dismissed=True)
