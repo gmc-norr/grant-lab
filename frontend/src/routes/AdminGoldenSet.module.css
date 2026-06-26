@@ -1,0 +1,14 @@
+.page { max-width: 60rem; margin: 0 auto; padding: 1rem 0.5rem 3rem; }
+.page h1 { color: var(--app-heading); }
+.card { border: 1px solid var(--app-border); border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+.card h2 { color: var(--app-heading); font-size: 1rem; margin: 0 0 0.6rem; }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--app-border); font-size: 0.9rem; }
+.table th { color: var(--app-muted); font-weight: 600; }
+.form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
+.form input, .inline input { padding: 0.25rem 0.4rem; border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-sidebar); color: var(--app-text); }
+.form button, .inline button { background: var(--app-accent); color: #fff; border: none; border-radius: 5px; padding: 0.3rem 0.7rem; cursor: pointer; }
+.secondary { background: var(--app-sidebar); color: var(--app-text); border: 1px solid var(--app-border); border-radius: 5px; padding: 0.3rem 0.7rem; cursor: pointer; }
+.secondary:disabled, .form button:disabled, .inline button:disabled { opacity: 0.5; cursor: default; }
+.muted { color: var(--app-muted); }
