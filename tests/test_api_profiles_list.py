@@ -34,8 +34,13 @@ def test_list_active_by_name(monkeypatch, pg_url, pg_session_factory, profile_fa
     # archive the third
     from call_manager.db.models import Profile
     with pg_session_factory() as s:
-        p = s.execute(Profile.__table__.select().where(Profile.name == "Archived")).first()
-        s.execute(Profile.__table__.update().where(Profile.name == "Archived").values(is_active=False))
+        s.execute(Profile.__table__.select().where(Profile.name == "Archived")).first()
+        archived_update = (
+            Profile.__table__.update()
+            .where(Profile.name == "Archived")
+            .values(is_active=False)
+        )
+        s.execute(archived_update)
         s.commit()
     client = _login(app, pg_session_factory)
     with client:
