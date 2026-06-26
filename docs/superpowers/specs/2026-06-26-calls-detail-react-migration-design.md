@@ -59,9 +59,14 @@ workspace-scoped) — the detail read-model. Mirrors the Jinja `call_detail` que
 - Load the `Call` (+ joined `source`); 404 if missing.
 - Parse `?profile=` with the existing empty-string-is-None semantics (port `_parse_optional_profile_id`:
   empty/whitespace → None, non-empty non-int → 400).
-- If a valid active profile is given, load its `CallRanking` + `CallRankingCriterion` rows.
-- Compute `best_profile_id` (highest-scoring profile owned by the user for this call — the same
-  `aggregate_score.desc().nullslast()` query).
+- If a valid **active** profile is given, load its `CallRanking` + `CallRankingCriterion` rows.
+  **Parity note (do NOT add an ownership check):** the Jinja route resolves `?profile=` by `is_active`
+  **alone** — it does *not* require the profile be owned by the current user (`web/routes/calls.py:69-71`
+  loads the ranking on `p.is_active` only; the `_login` helper in `tests/test_api_calls_feed_behavior.py`
+  states this explicitly). Ownership (`created_by == user.id`) governs ONLY `best_profile_id` below, not
+  whether a ranking is shown. Mirror that exactly — an active not-owned profile MUST still show its ranking.
+- Compute `best_profile_id` (highest-scoring profile **owned by the user** for this call — the same
+  `aggregate_score.desc().nullslast()` query; ownership applies here and only here).
 - Build the response with server-computed labels + the "why" strings.
 
 Response model `CallDetailOut`:
@@ -98,8 +103,21 @@ Both endpoints follow the `web/api` session-factory + envelope conventions. Moun
   404 states.
 - `routes/CallRow.tsx`: change the title `<a href="/calls/{id}">` to a React-Router `<Link to={...}>`
   carrying `?profile=${profileId}` (so the ranking shows for the dashboard's effective profile).
-- Register `/calls/:id` as a new React route under the AppShell layout — **`routes.gen.ts` changes here**
-  (a genuine new SPA route, unlike the cockpit bottom-tabs).
+- **Route ownership — two distinct layers (this is the load-bearing detail).**
+  1. **React Router route** (inside the app's route tree): add `<Route path="/calls/:id" element={<CallDetail/>}>`
+     under the AppShell layout. The `:id` param lives only here, in the React app — NOT in the manifest.
+  2. **SPA ownership manifest** (`frontend/routes.json`): the matcher in `scripts/gen_routes.py` /
+     `dev-proxy.ts` is an **exact-or-prefix-subpath** test (`path == r || path.startswith(r + "/")`) — it does
+     **NOT** understand React `:param` patterns. So the manifest entry is the **prefix `/calls`** (the
+     `/cockpit` precedent), never `/calls/:id`. Concretely: **add `"/calls"` to `spa_routes` AND remove
+     `"/calls"` from `backend_prefixes`** (after teardown no `/calls` route is mounted in `main.py`, so the
+     documentary backend-prefix entry is stale). Then regenerate (`uv run python scripts/gen_routes.py`),
+     which rewrites **both** `frontend/src/routes.gen.ts` and `src/call_manager/web/spa_routes.py`:
+     `SPA_ROUTES` gains `/calls`, `BACKEND_PREFIXES` drops it. `is_spa_route("/calls/123")` →
+     `"/calls/123".startswith("/calls/")` → True, so the catch-all serves the SPA shell and React Router
+     renders `CallDetail`.
+  - **Pitfall:** putting `/calls/:id` in the manifest leaves `/calls/123` matching nothing → after the Jinja
+    route is deleted it falls through to FastAPI's real 404. The `:param` form is a prod-breaker; use the prefix.
 
 ---
 
@@ -112,6 +130,28 @@ Both endpoints follow the `web/api` session-factory + envelope conventions. Moun
   module, and its `main.py` import + `include_router`. Relocate the 3 "why" helpers FIRST so nothing
   kept imports the deleted module. The `_parse_optional_profile_id` parser is ported into the `/api`
   endpoint (the Jinja route that used it is deleted).
+- **Test manifest — deleting `web/routes/calls.py` touches SIX test surfaces, not one.** Enumerate them so
+  the teardown leaves the suite green:
+  1. `tests/test_web_call_detail.py` — port its criterion-breakdown/ranking assertions onto the
+     `GET /api/calls/{id}` read-model, then **delete** (the Jinja render it asserts is gone).
+  2. `tests/test_web_calls_hide.py` — port redirect/idempotent/404/auth onto `POST /api/calls/{id}/hide`
+     (now `{hidden: true}` + idempotent + 404 + 401, no 303), then **delete**.
+  3. `tests/test_web_calls_start_drafting.py` — port the Start-drafting-link + criterion-detail assertions
+     onto the `/api` read-model, then **delete**.
+  4. `tests/test_web_auth.py` — `test_html_401_get_threads_next`, `test_html_401_post_does_not_thread_next`,
+     and `test_json_401_unaffected_by_next` use `/calls/5` + `/calls/5/hide` only as *sample* protected
+     routes. After teardown `/calls/5` is an SPA-owned public shell (no 401/redirect), so **repoint** them
+     to a kept protected Jinja route — GET → `/me` (kept profile/account page); the POST test → a kept Jinja
+     POST (the plan picks one, e.g. a profile-edit POST). The auth-middleware behavior under test is generic;
+     only the sample path changes.
+  5. `tests/test_gen_routes.py` — `is_spa_route("/calls/123")` flips **False→True**; `is_backend_route("/calls/123")`
+     flips **True→False** (because `/calls` is removed from `backend_prefixes`). Update both. The
+     explicit-`("/",)`-manifest tests (`test_root_owns_only_itself`) are unaffected — they pin the root
+     special-case with their own manifest.
+  6. `frontend/src/dev-proxy.test.ts` — the **shipped-manifest** assertions `isSpaRoute("/calls/1")` and
+     `shouldServeViaVite("/calls/1")` flip **False→True**; update them + the "un-ported" comments. The
+     **explicit-`["/"]`-manifest** branch test (`isSpaRoute("/calls/1", ["/"])`) stays False — it pins the
+     root special-case independent of the shipped routes; do NOT touch it.
 - **No DB schema change.** No new dependency.
 - **Deferred / out of scope:** any redesign of the detail page (parity port only); an in-page profile
   switcher (the ranking shown follows the profile carried from the dashboard, as today); the other
@@ -121,13 +161,17 @@ Both endpoints follow the `web/api` session-factory + envelope conventions. Moun
 
 ## 5. Data flow / error handling
 
-- **Routing:** today the Jinja `/calls/{id}` route is registered and wins over the SPA catch-all. After
-  teardown the route is gone, the SPA catch-all serves `/calls/:id`, and the new React route renders it.
-  (Order matters: add the React route + `/api` first, delete the Jinja route last — so `/calls/:id`
-  always resolves to *something* during the slice.)
+- **Routing:** today the Jinja `/calls/{id}` route is registered and **wins over the SPA catch-all** (a real
+  registered route always beats the fallback; `is_spa_route` only governs the catch-all). So adding `/calls`
+  to the manifest while the Jinja route still exists is inert — the real route keeps winning. After teardown
+  the Jinja route is gone, the catch-all + manifest take over, and the React route renders. **Order:** add the
+  React route + `/api` FIRST (so `/calls/:id` resolves to *something* throughout); then in the teardown step
+  do the manifest flip (`+/calls` in `spa_routes`, `−/calls` in `backend_prefixes`, regen) **together with**
+  the Jinja-route deletion — deleting the route WITHOUT the manifest flip would 404 `/calls/123`.
 - **Profile param:** `?profile=` empty/whitespace → treated as "no profile" (no ranking shown); a
   non-empty non-integer → 400 (parity with `_parse_optional_profile_id`). A profile that exists but is
-  inactive or not the user's → no ranking (parity).
+  **inactive → no ranking**. A profile that is **active but not owned by the user → ranking IS shown**
+  (parity — see §3.1; ownership gates only `best_profile_id`, never ranking display).
 - **Missing call → 404** (both endpoints). **Hide is idempotent** (clicking twice is a no-op 200).
 - **Error envelope:** handlers raise `HTTPException`; the global `/api` handler produces the standard
   envelope.
@@ -139,15 +183,26 @@ Both endpoints follow the `web/api` session-factory + envelope conventions. Moun
 - `uv run python -c "import call_manager.main"` boots; after teardown the bare `/calls/{id}` Jinja route
   is gone (a route-table check: no non-`/api` route under `/calls/` except the SPA catch-all).
 - Backend suite green: detail read-model (call fields; ranking present/absent; criteria + the "why"
-  strings for budget/timeline/trl/embedding; best_profile_id; profile empty→none, bad→400; missing→404),
-  hide (success + idempotent + 404). `ruff` clean. The relocated helpers produce identical output (port
-  the existing `test_web_calls_start_drafting.py` assertions onto the `/api` read-model, then delete the
-  Jinja test with the route).
+  strings for budget/timeline/trl/embedding; best_profile_id; profile empty→none, bad→400; missing→404;
+  **active-but-not-owned profile → ranking IS returned** — the P1b parity test), hide (success +
+  idempotent + 404 + 401). `ruff` clean. The relocated helpers produce identical output (port the
+  `test_web_call_detail.py` / `test_web_calls_hide.py` / `test_web_calls_start_drafting.py` assertions onto
+  the `/api` read-model + hide, then delete the three Jinja tests with the route). The repointed
+  `test_web_auth.py` 401/redirect tests stay green against their new kept-Jinja sample paths.
+- **Route-ownership gates:** `tests/test_gen_routes.py` updated — `is_spa_route("/calls/123")` is now True,
+  `is_backend_route("/calls/123")` is now False; `frontend/src/dev-proxy.test.ts` updated —
+  `isSpaRoute("/calls/1")` and `shouldServeViaVite("/calls/1")` now True (explicit-manifest branch tests
+  untouched). A route-table assertion confirms no non-`/api` backend route remains under `/calls/` — which
+  is *why* the repointed `test_web_auth.py` cases move off `/calls/5` (it no longer reaches the protected
+  Jinja handler that produced the 303/401; the test-app `SPA_MODE` makes shell-vs-404 an implementation
+  detail, so the gate is route absence, not a specific status).
 - Frontend `tsc` clean, `vitest` green (CallDetail renders ranking/criteria/notes, banded hero,
   hide→navigate, CallRow links to `/calls/:id?profile=`), `build` clean.
-- OpenAPI regen (`EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`): new `/api/calls/{id}` +
-  hide paths added; the Jinja `/calls/{id}` HTML path dropped; **`routes.gen.ts` gains `/calls/:id`**
-  (expected change — verify it's an addition, not a removal of an existing route).
+- OpenAPI / manifest regen: `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh` adds the
+  `/api/calls/{id}` + hide paths and drops the Jinja `/calls/{id}` HTML path; `uv run python
+  scripts/gen_routes.py` rewrites `routes.gen.ts` + `spa_routes.py` so **`SPA_ROUTES` gains the prefix
+  `/calls`** (NOT `/calls/:id`) and **`BACKEND_PREFIXES` drops `/calls`**. Verify the SPA_ROUTES change is
+  an addition of the `/calls` prefix, and that no `:param` string leaked into the manifest.
 
 ---
 
@@ -155,8 +210,12 @@ Both endpoints follow the `web/api` session-factory + envelope conventions. Moun
 
 - **The "why" relocation is the one real-logic move.** Mitigation: byte-identical relocation + the ported
   criterion-detail tests pin the output; `ruff` catches an orphaned import after the module is deleted.
-- **`routes.gen.ts` changes** (new `/calls/:id` route) — unlike every cockpit slice, this is expected.
-  The gate asserts it's an addition; a removal would be a regression.
+- **The manifest changes** — unlike every cockpit slice, `routes.gen.ts` + `spa_routes.py` are regenerated
+  here (`+/calls` in `SPA_ROUTES`, `−/calls` in `BACKEND_PREFIXES`). This is the slice's single
+  highest-risk edit: the matcher is prefix-not-`:param`, so the manifest entry MUST be `/calls` and the
+  React `:id` lives only in the app's route tree (§3.2). The route-ownership gates (`test_gen_routes.py`,
+  `dev-proxy.test.ts`) pin the flip; a `/calls/:id` string in the manifest, or a forgotten `backend_prefixes`
+  removal, is the regression to watch for.
 - **Two date formats:** the read-model returns raw ISO; React formats (reusing the dashboard's
   `Deadline`/date helpers) — no server-side `display_dt`/`display_date` needed, keeping parity with the
   already-React list.
