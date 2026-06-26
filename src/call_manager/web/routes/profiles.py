@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import contextlib
-import logging
-
+# ruff: noqa: I001 - import order tuned for test mocking compatibility
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
@@ -10,19 +8,29 @@ from sqlalchemy.exc import IntegrityError
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import Profile, ProfileBootstrapJob, ProfileKind, ProfileLevel, User
-from call_manager.embeddings.refresh import refresh_profile_embedding
 from call_manager.embeddings.similarity import build_profile_text
 from call_manager.profiles.create import create_profile_with_bootstrap
-from call_manager.profiles.fields import (
-    FieldValidationError,
-    parse_structured,
+from call_manager.profiles.fields import FieldValidationError, parse_structured
+# fmt: off
+from call_manager.profiles.forms import (
+    ALLOWED_CURRENCIES as _ALLOWED_CURRENCIES,
+    BUDGET_MAX as _BUDGET_MAX,
+    BUDGET_MIN as _BUDGET_MIN,
+    TRL_MAX as _TRL_MAX,
+    TRL_MIN as _TRL_MIN,
+    bounded_int_or_400 as _bounded_int,
+    parse_members_strict as _parse_members_strict,
+    split_lines as _split_lines,
 )
-from call_manager.profiles.seed import Member
-from call_manager.ranking.backfill import backfill_profile
+from call_manager.profiles.post_edit import (
+    refresh_and_backfill_in_background as _refresh_and_backfill_in_background,
+)
+# fmt: on
 
 router = APIRouter()
 
-_logger = logging.getLogger(__name__)
+# For test mocking: this import allows tests to patch backfill_profile at the module level
+from call_manager.ranking.backfill import backfill_profile  # noqa: F401,E402
 
 
 @router.get("/profiles", response_class=HTMLResponse)
@@ -390,122 +398,3 @@ def profile_edit_submit(
         )
 
     return RedirectResponse(url=f"/profiles/{profile_id}", status_code=303)
-
-
-def _refresh_embedding_in_background(*, session_factory, embed_client, profile_id: int) -> None:
-    """Run refresh_profile_embedding outside the request lifecycle so a slow
-    Ollama doesn't stall the user. Swallow all errors — the daily
-    refresh-missing tick will retry, and the embedding gate treats a
-    missing vector as UNKNOWN (safe fallback to LLM)."""
-    try:
-        with session_factory() as s:
-            refresh_profile_embedding(s, embed_client, profile_id)
-            s.commit()
-    except Exception as e:  # noqa: BLE001
-        _logger.warning(
-            "profile.embedding_refresh_failed",
-            extra={
-                "event": "profile_embedding_refresh_failed",
-                "profile_id": profile_id,
-                "error": str(e),
-            },
-        )
-
-
-def _refresh_and_backfill_in_background(
-    *, session_factory, embed_client, profile_id: int, refresh_embedding: bool
-) -> None:
-    """Background driver for the profile-edit path. Refresh first (if the
-    description changed), then enqueue backfill. Order matters: the ranking
-    jobs must see the post-edit vector, not the pre-edit one."""
-    if refresh_embedding:
-        _refresh_embedding_in_background(
-            session_factory=session_factory,
-            embed_client=embed_client,
-            profile_id=profile_id,
-        )
-    try:
-        backfill_profile(session_factory=session_factory, profile_id=profile_id)
-    except Exception as e:  # noqa: BLE001
-        _logger.warning(
-            "profile.backfill_failed",
-            extra={
-                "event": "profile_backfill_failed",
-                "profile_id": profile_id,
-                "error": str(e),
-            },
-        )
-
-
-_MAX_MEMBERS = 50
-_MAX_SEED_LINE = 500
-_MAX_LIST_ENTRIES = 100
-_ALLOWED_CURRENCIES = {"", "SEK", "EUR", "USD", "NOK", "DKK"}
-# Sanity bounds on rubric inputs. Budget is in major units (SEK/EUR/etc.);
-# 10**12 covers any realistic hospital grant with room to spare while
-# rejecting obvious garbage. TRL is the 1–9 Technology Readiness Level
-# scale.
-_BUDGET_MIN = 0
-_BUDGET_MAX = 10**12
-_TRL_MIN = 1
-_TRL_MAX = 9
-
-
-def _split_lines(raw: str) -> list[str]:
-    return [ln.strip() for ln in raw.splitlines() if ln.strip()][:_MAX_LIST_ENTRIES]
-
-
-def _bounded_int(raw: str, *, field: str, low: int, high: int) -> int | None:
-    """Parse an optional integer, reject if out of [low, high].
-
-    Empty input → None. Non-numeric input → None (UX choice: a user who
-    types "n/a" in an optional numeric box shouldn't see a 400).
-    Out-of-range numeric input → HTTPException, because that's the shape
-    of an attack / garbage we don't want silently persisted."""
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-    try:
-        v = int(raw)
-    except ValueError:
-        return None
-    if v < low or v > high:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{field} out of range ({low}..{high}): {v}",
-        )
-    return v
-
-
-def _parse_members_strict(orcids: str, names_affiliations: str) -> list[Member]:
-    raw_lines = [
-        ln.strip() for ln in (orcids.splitlines() + names_affiliations.splitlines()) if ln.strip()
-    ]
-    if len(raw_lines) > _MAX_MEMBERS:
-        raise HTTPException(status_code=400, detail=f"too many members (max {_MAX_MEMBERS})")
-    if any(len(ln) > _MAX_SEED_LINE for ln in raw_lines):
-        raise HTTPException(
-            status_code=400,
-            detail=f"member line too long (max {_MAX_SEED_LINE} chars)",
-        )
-    return _parse_members(orcids, names_affiliations)
-
-
-def _parse_members(orcids: str, names_affiliations: str) -> list[Member]:
-    members: list[Member] = []
-    for raw in orcids.splitlines():
-        orcid = raw.strip()
-        if orcid:
-            with contextlib.suppress(ValueError):
-                members.append(Member(orcid=orcid))
-    for raw in names_affiliations.splitlines():
-        line = raw.strip()
-        if not line or "|" not in line:
-            continue
-        name_part, aff_part = line.split("|", 1)
-        name_part = name_part.strip()
-        aff_part = aff_part.strip()
-        if name_part and aff_part:
-            with contextlib.suppress(ValueError):
-                members.append(Member(name=name_part, affiliation=aff_part))
-    return members
