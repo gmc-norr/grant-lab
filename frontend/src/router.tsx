@@ -2,6 +2,9 @@ import { createBrowserRouter } from "react-router-dom";
 
 import { CockpitChat } from "./cockpit/chat/CockpitChat";
 import { CockpitSidebar } from "./cockpit/CockpitSidebar";
+import { AdminPendingUsers } from "./routes/AdminPendingUsers";
+import { AdminUsers } from "./routes/AdminUsers";
+import { RequireAdmin } from "./routes/RequireAdmin";
 import { CallDetail } from "./routes/CallDetail";
 import { CallsFilters } from "./routes/CallsFilters";
 import { ProfileDetail } from "./routes/ProfileDetail";
@@ -34,6 +37,8 @@ export const router = createBrowserRouter([
       { path: "profiles/new", element: <ProfileNew /> },
       { path: "profiles/:id", element: <ProfileDetail /> },
       { path: "profiles/:id/edit", element: <ProfileEdit /> },
+      { path: "admin/users", element: <RequireAdmin><AdminUsers /></RequireAdmin> },
+      { path: "admin/users/pending", element: <RequireAdmin><AdminPendingUsers /></RequireAdmin> },
       // In-app soft 404 ONLY (client-side reached). NOT the route authority —
       // the server returns index.html only for manifest SPA routes, so an
       // unknown typed URL hits FastAPI's real 404, never this. Must not turn
