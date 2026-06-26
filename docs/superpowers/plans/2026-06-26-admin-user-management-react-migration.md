@@ -365,11 +365,17 @@ def test_approve_local_requires_password_then_bumps_epoch(monkeypatch, pg_url, p
         assert u.session_epoch == ep0 + 1
 
 
-def test_approve_oauth_without_password_ok(monkeypatch, pg_url, pg_session_factory):
+def test_approve_oauth_without_password_does_not_bump_epoch(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="g@ki.se", status="pending", oidc_sub="s9")
+    with pg_session_factory() as s:
+        ep0 = s.get(User, pid).session_epoch
     assert c.post(f"/api/admin/users/{pid}/approve", json={"role": "member"}).status_code == 200
+    with pg_session_factory() as s:
+        u = s.get(User, pid)
+        assert u.status == "active"
+        assert u.session_epoch == ep0  # passwordless OAuth approve does NOT bump epoch
 
 
 def test_approve_weak_password_400(monkeypatch, pg_url, pg_session_factory):
@@ -389,9 +395,13 @@ def test_deny_only_pending(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="d@ki.se", status="pending", oidc_sub="sd")
+    with pg_session_factory() as s:
+        ep0 = s.get(User, pid).session_epoch
     assert c.post(f"/api/admin/users/{pid}/deny").status_code == 200
     with pg_session_factory() as s:
-        assert s.get(User, pid).status == "disabled"
+        u = s.get(User, pid)
+        assert u.status == "disabled"
+        assert u.session_epoch == ep0  # deny does NOT bump epoch
     # denying a non-pending user -> 400
     uid = _user(pg_session_factory, email="active2@ki.se", status="active")
     assert c.post(f"/api/admin/users/{uid}/deny").status_code == 400
@@ -550,12 +560,16 @@ def test_change_role_to_admin_and_member(monkeypatch, pg_url, pg_session_factory
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)  # keeps an admin around for demote tests
     uid = _user(pg_session_factory, email="r@ki.se", status="active", is_admin=False)
+    with pg_session_factory() as s:
+        ep0 = s.get(User, uid).session_epoch
     assert c.post(f"/api/admin/users/{uid}/role", json={"role": "admin"}).status_code == 200
     with pg_session_factory() as s:
         assert s.get(User, uid).is_admin is True
     assert c.post(f"/api/admin/users/{uid}/role", json={"role": "member"}).status_code == 200
     with pg_session_factory() as s:
-        assert s.get(User, uid).is_admin is False
+        u = s.get(User, uid)
+        assert u.is_admin is False
+        assert u.session_epoch == ep0  # role changes do NOT bump epoch
 
 
 def test_change_role_demote_last_admin_guarded(monkeypatch, pg_url, pg_session_factory):
@@ -680,9 +694,13 @@ def test_enable_only_disabled(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="en@ki.se", status="disabled")
+    with pg_session_factory() as s:
+        ep0 = s.get(User, did).session_epoch
     assert c.post(f"/api/admin/users/{did}/enable").status_code == 200
     with pg_session_factory() as s:
-        assert s.get(User, did).status == "active"
+        u = s.get(User, did)
+        assert u.status == "active"
+        assert u.session_epoch == ep0  # enable does NOT bump epoch
     # enabling a non-disabled (pending) user -> 400
     pid = _user(pg_session_factory, email="enp@ki.se", status="pending", oidc_sub="sp")
     assert c.post(f"/api/admin/users/{pid}/enable").status_code == 400
@@ -1128,7 +1146,7 @@ it("blocks a non-admin", async () => {
 
 ```tsx
 // frontend/src/routes/AdminUsers.test.tsx
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -1146,6 +1164,10 @@ function mockUsers(users: unknown[], total = users.length) {
     .mockResolvedValue({ data: { users, page: 1, per_page: 50, total }, error: undefined } as never);
 }
 
+function mockPost() {
+  return vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: 1 }, error: undefined } as never);
+}
+
 it("renders active and disabled rows with the right actions", async () => {
   mockUsers([
     { id: 1, email: "act@ki.se", name: null, status: "active", is_admin: false },
@@ -1156,18 +1178,55 @@ it("renders active and disabled rows with the right actions", async () => {
   // active row -> Disable + Make admin + reset-password; disabled row -> Enable
   expect(screen.getByRole("button", { name: /disable/i })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /make admin/i })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /reset password/i })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /enable/i })).toBeInTheDocument();
 });
 
 it("clicking Make admin posts role=admin", async () => {
   mockUsers([{ id: 1, email: "act@ki.se", name: null, status: "active", is_admin: false }]);
-  const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: 1 }, error: undefined } as never);
+  const post = mockPost();
   renderWithProviders(<AdminUsers />);
   await userEvent.click(await screen.findByRole("button", { name: /make admin/i }));
-  expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/role", {
-    params: { path: { user_id: 1 } },
-    body: { role: "admin" },
-  });
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/role", {
+      params: { path: { user_id: 1 } },
+      body: { role: "admin" },
+    }),
+  );
+});
+
+it("clicking Disable posts disable", async () => {
+  mockUsers([{ id: 3, email: "act@ki.se", name: null, status: "active", is_admin: false }]);
+  const post = mockPost();
+  renderWithProviders(<AdminUsers />);
+  await userEvent.click(await screen.findByRole("button", { name: /disable/i }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/disable", { params: { path: { user_id: 3 } } }),
+  );
+});
+
+it("clicking Enable on a disabled row posts enable", async () => {
+  mockUsers([{ id: 4, email: "dis@ki.se", name: null, status: "disabled", is_admin: false }]);
+  const post = mockPost();
+  renderWithProviders(<AdminUsers />);
+  await userEvent.click(await screen.findByRole("button", { name: /enable/i }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/enable", { params: { path: { user_id: 4 } } }),
+  );
+});
+
+it("submitting the reset-password form posts the new password", async () => {
+  mockUsers([{ id: 5, email: "act@ki.se", name: null, status: "active", is_admin: false }]);
+  const post = mockPost();
+  renderWithProviders(<AdminUsers />);
+  await userEvent.type(await screen.findByPlaceholderText(/new password/i), "fresh-strong-pw");
+  await userEvent.click(screen.getByRole("button", { name: /reset password/i }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/reset-password", {
+      params: { path: { user_id: 5 } },
+      body: { new_password: "fresh-strong-pw" },
+    }),
+  );
 });
 ```
 
@@ -1379,11 +1438,13 @@ git commit -m "feat(spa): RequireAdmin guard + AdminUsers table route"
 - Consumes: Task-5 hooks (`useAdminPendingUsers`, `useApproveUser`, `useDenyUser`).
 - Produces: `<AdminPendingUsers>` (the approval queue), consumed by Task 8.
 
+**Parity note (deliberate divergence — design-approved):** the retired Jinja template carried a *duplicate* `initial_password` input inside EACH of the two approve `<form>`s (member, admin). This React renders **one shared password input** per local pending user, feeding both Approve buttons (both disabled until it is non-empty). Functionally equivalent — the admin types the issued password once, then clicks member or admin — and drops the redundant re-entry. The test asserts exactly one password input per local row by design.
+
 - [ ] **Step 1: Write the failing test**
 
 ```tsx
 // frontend/src/routes/AdminPendingUsers.test.tsx
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -1421,10 +1482,12 @@ it("approve-as-admin posts role=admin with the typed password", async () => {
   renderWithProviders(<AdminPendingUsers />);
   await userEvent.type(await screen.findByPlaceholderText(/initial password/i), "issued-strong-pw");
   await userEvent.click(screen.getByRole("button", { name: /approve as admin/i }));
-  expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/approve", {
-    params: { path: { user_id: 1 } },
-    body: { role: "admin", initial_password: "issued-strong-pw" },
-  });
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith("/api/admin/users/{user_id}/approve", {
+      params: { path: { user_id: 1 } },
+      body: { role: "admin", initial_password: "issued-strong-pw" },
+    }),
+  );
 });
 
 it("renders an empty state", async () => {
@@ -1620,7 +1683,7 @@ git commit -m "feat(spa): own /admin/users in the manifest + mount AdminUsers/Pe
 - Produces: the eight Jinja `/admin/users*` route paths are gone; `/api/admin/users*` remain; the rest of `/admin` (Slice 2) is untouched.
 
 **Coverage check before deleting the two Jinja test files** — every behavior they assert is already covered in `tests/test_api_admin_users.py`:
-`pending lists` → `test_pending_list_shape`; `approve member/admin` → `test_approve_member_and_admin`; `approve rejects non-pending` → `test_approve_rejects_non_pending`; `deny only pending` → `test_deny_only_pending`; `enable only disabled` → `test_enable_only_disabled`; `disable bumps epoch` → `test_disable_bumps_epoch`; `change-role demote guarded` → `test_change_role_demote_last_admin_guarded`; `cannot disable last admin` → `test_cannot_disable_last_active_admin`; `non-admin blocked` → `test_reads_require_admin_403`; `local approve requires pw + epoch` → `test_approve_local_requires_password_then_bumps_epoch`; `oauth approve w/o pw` → `test_approve_oauth_without_password_ok`; `reset bumps epoch` → `test_reset_password_bumps_epoch`; `reset rejects short` → `test_reset_rejects_weak_400`. No coverage is lost.
+`pending lists` → `test_pending_list_shape`; `approve member/admin` → `test_approve_member_and_admin`; `approve rejects non-pending` → `test_approve_rejects_non_pending`; `deny only pending` → `test_deny_only_pending`; `enable only disabled` → `test_enable_only_disabled`; `disable bumps epoch` → `test_disable_bumps_epoch`; `change-role demote guarded` → `test_change_role_demote_last_admin_guarded`; `cannot disable last admin` → `test_cannot_disable_last_active_admin`; `non-admin blocked` → `test_reads_require_admin_403`; `local approve requires pw + epoch` → `test_approve_local_requires_password_then_bumps_epoch`; `oauth approve w/o pw` → `test_approve_oauth_without_password_does_not_bump_epoch`; `reset bumps epoch` → `test_reset_password_bumps_epoch`; `reset rejects short` → `test_reset_rejects_weak_400`. No coverage is lost.
 
 - [ ] **Step 1: Write the route-absence guard test**
 
@@ -1730,5 +1793,7 @@ All green = ready for the final whole-branch review. **Do NOT merge** — a huma
 
 - **Spec coverage:** every spec endpoint (2 reads + 6 mutations), the parity invariants (last-admin guard, epoch bumps, no-reset-status-gate, role-before-lookup ordering, role default), the React guard + both-list invalidation, the manifest prefix, and the teardown all map to tasks T1–T9.
 - **Ordering locks present:** `test_approve_invalid_role_on_nonexistent_is_400_not_404`, `test_change_role_invalid_role_on_nonexistent_is_400`, `test_reset_password_has_no_status_gate`.
+- **Epoch invariants pinned both ways:** positive bumps (disable, reset-password, approve-with-password) AND the negative non-bumps (passwordless-OAuth approve, deny, role, enable) are asserted — so a future "helpful" epoch bump can't silently invalidate sessions.
+- **UI action wiring covered:** AdminUsers route tests exercise Make-admin, Disable, Enable, and reset-password submission (not just button presence); component-test POST assertions are wrapped in `waitFor` per repo convention.
 - **No new schema, no new dependency.** The only generated files touched are `schema.gen.ts` (T4 + T9), `routes.gen.ts`/`spa_routes.py` (T8).
 - **Known interim:** no SPA ActivityBar admin entry (Slice 2); entry stays via the Jinja `/admin` dashboard links, which now cross-doc-land on the React pages.

@@ -174,10 +174,16 @@ the 1:1 mapping to the retired Jinja routes obvious.
   inline **reset-password** input + button. Disabled rows: **Enable**.
   Prev/next pagination from `total`/`per_page`.
 - **`AdminPendingUsers` UI:** one block per pending user (email, optional name,
-  a "(Google)" marker when `google_linked`). Actions: **Approve as member**,
-  **Approve as admin** (each shows an inline `initial_password` input **only when
-  not** `google_linked`), and **Deny**. Empty state: "No accounts awaiting
-  approval."
+  a "(Google)" marker when `google_linked`, and the registration date). Actions:
+  **Approve as member**, **Approve as admin**, and **Deny**. For a non-`google_linked`
+  (local) account a **single shared `initial_password` input** sits above the two
+  Approve buttons (both submit it, and both are disabled until it is non-empty);
+  Google accounts show no password field. Empty state: "No accounts awaiting
+  approval." **Deliberate, design-approved divergence from strict parity:** the
+  retired Jinja template carried a *duplicate* `initial_password` input inside each
+  of the two approve `<form>`s; the React consolidates them into one shared input —
+  functionally equivalent (the admin types the issued password once, then clicks
+  member or admin) and drops the redundant re-entry.
 - **Password-entry UX:** replicate the **inline per-row password inputs**
   (parity) — no modals.
 - **Interim nav:** no SPA ActivityBar change in this slice. Entry stays via the
