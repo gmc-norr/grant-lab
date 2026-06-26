@@ -77,7 +77,9 @@ def test_dashboard_lists_sources_with_call_counts(monkeypatch, pg_url, pg_sessio
     assert row["last_fetched_at"].startswith("2026-04-16T03:15")
 
 
-def test_dashboard_queue_counts_default_zero(monkeypatch, pg_url, pg_session_factory, profile_factory):
+def test_dashboard_queue_counts_default_zero(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
@@ -92,14 +94,23 @@ def test_dashboard_queue_counts_default_zero(monkeypatch, pg_url, pg_session_fac
     assert counts == {"pending": 1, "running": 0, "done": 0, "failed": 0}
 
 
-def test_dashboard_rerank_estimate_is_product(monkeypatch, pg_url, pg_session_factory, profile_factory):
+def test_dashboard_rerank_estimate_is_product(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
     profile_factory()
     profile_factory(name="Group B")
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         for i in range(3):
-            s.add(Call(source_id=src.id, external_id=f"E{i}", url=f"https://x/e{i}",
-                       title="T", published_at=datetime.now(UTC) - timedelta(days=5)))
+            s.add(
+                Call(
+                    source_id=src.id,
+                    external_id=f"E{i}",
+                    url=f"https://x/e{i}",
+                    title="T",
+                    published_at=datetime.now(UTC) - timedelta(days=5),
+                )
+            )
         s.commit()
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
@@ -116,8 +127,12 @@ def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory):
     now = datetime.now(UTC)
     with pg_session_factory() as s:
         s.add(DigestRun(user_id=uid, sent_at=now, included_call_ids=[1, 2]))
-        s.add(User(status="active", email="older@ki.se", digest_disabled_at=now - timedelta(days=3)))
-        s.add(User(status="active", email="newer@ki.se", digest_disabled_at=now - timedelta(hours=1)))
+        s.add(
+            User(status="active", email="older@ki.se", digest_disabled_at=now - timedelta(days=3))
+        )
+        s.add(
+            User(status="active", email="newer@ki.se", digest_disabled_at=now - timedelta(hours=1))
+        )
         s.commit()
     d = c.get("/api/admin/dashboard").json()["digest"]
     assert d["runs_this_week"] == 1
@@ -134,19 +149,64 @@ def test_dashboard_embedding_coverage(monkeypatch, pg_url, pg_session_factory):
     vec = [0.0] * 1024
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add(Call(source_id=src.id, external_id="c1", url="https://x/1", title="C1",
-                   embedding=vec, embedding_model="bge-m3", published_at=datetime.now(UTC)))
-        s.add(Call(source_id=src.id, external_id="c2", url="https://x/2", title="C2",
-                   embedding=vec, embedding_model="bge-old", published_at=datetime.now(UTC)))
-        s.add(Call(source_id=src.id, external_id="c3", url="https://x/3", title="C3",
-                   embedding=None, embedding_model=None, published_at=datetime.now(UTC)))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="c1",
+                url="https://x/1",
+                title="C1",
+                embedding=vec,
+                embedding_model="bge-m3",
+                published_at=datetime.now(UTC),
+            )
+        )
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="c2",
+                url="https://x/2",
+                title="C2",
+                embedding=vec,
+                embedding_model="bge-old",
+                published_at=datetime.now(UTC),
+            )
+        )
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="c3",
+                url="https://x/3",
+                title="C3",
+                embedding=None,
+                embedding_model=None,
+                published_at=datetime.now(UTC),
+            )
+        )
         owner = User(status="active", email="owner@ki.se")
         s.add(owner)
         s.flush()
-        s.add(Profile(name="P1", kind=ProfileKind.ORGANIZATIONAL_UNIT, description="d",
-                      structured={}, created_by=owner.id, embedding=vec, embedding_model="bge-m3"))
-        s.add(Profile(name="P2", kind=ProfileKind.ORGANIZATIONAL_UNIT, description="d",
-                      structured={}, created_by=owner.id, embedding=None, embedding_model=None))
+        s.add(
+            Profile(
+                name="P1",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="d",
+                structured={},
+                created_by=owner.id,
+                embedding=vec,
+                embedding_model="bge-m3",
+            )
+        )
+        s.add(
+            Profile(
+                name="P2",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="d",
+                structured={},
+                created_by=owner.id,
+                embedding=None,
+                embedding_model=None,
+            )
+        )
         s.commit()
     cov = c.get("/api/admin/dashboard").json()["embedding_coverage"]
     assert cov["call_embedded"] == 1 and cov["call_total"] == 3 and cov["call_stale"] == 2
@@ -164,12 +224,29 @@ def test_dashboard_coverage_excludes_blank_profiles_counts_areas_only(
         s.add(owner)
         s.flush()
         # blank description, no areas -> excluded from total entirely
-        s.add(Profile(name="PB", kind=ProfileKind.ORGANIZATIONAL_UNIT, description="   ",
-                      structured={}, created_by=owner.id, embedding=None, embedding_model=None))
+        s.add(
+            Profile(
+                name="PB",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="   ",
+                structured={},
+                created_by=owner.id,
+                embedding=None,
+                embedding_model=None,
+            )
+        )
         # areas-only (blank description) -> embeddable -> counted, stale
-        s.add(Profile(name="PA", kind=ProfileKind.ORGANIZATIONAL_UNIT, description="",
-                      structured={"areas": ["genomics"]}, created_by=owner.id,
-                      embedding=None, embedding_model=None))
+        s.add(
+            Profile(
+                name="PA",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="",
+                structured={"areas": ["genomics"]},
+                created_by=owner.id,
+                embedding=None,
+                embedding_model=None,
+            )
+        )
         s.commit()
     cov = c.get("/api/admin/dashboard").json()["embedding_coverage"]
     assert cov["profile_total"] == 1  # blank excluded, areas-only included

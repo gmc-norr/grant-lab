@@ -46,12 +46,21 @@ class _FakeScheduler:
         return None
 
 
-def test_rerank_enqueues_for_active_profiles(monkeypatch, pg_url, pg_session_factory, profile_factory):
+def test_rerank_enqueues_for_active_profiles(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
     pid, _ = profile_factory()
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        s.add(Call(source_id=src.id, external_id="R", url="https://x/r", title="T",
-                   published_at=datetime.now(UTC) - timedelta(days=10)))
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="R",
+                url="https://x/r",
+                title="T",
+                published_at=datetime.now(UTC) - timedelta(days=10),
+            )
+        )
         s.commit()
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)

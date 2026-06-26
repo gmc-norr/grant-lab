@@ -65,8 +65,15 @@ def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory):
         ws = Workspace(owner_id=owner.id, title="VisibleInPanel")
         s.add(ws)
         s.flush()
-        s.add(ChatTurn(workspace_id=ws.id, role="assistant",
-                       content={"type": "text", "text": "x"}, tokens_in=42, tokens_out=7))
+        s.add(
+            ChatTurn(
+                workspace_id=ws.id,
+                role="assistant",
+                content={"type": "text", "text": "x"},
+                tokens_in=42,
+                tokens_out=7,
+            )
+        )
         s.commit()
     c = _admin(app, pg_session_factory)
     rows = c.get("/api/admin/drafting").json()["per_workspace"]
@@ -86,10 +93,22 @@ def test_drafting_per_workspace_desc_by_used_in(monkeypatch, pg_url, pg_session_
         big = Workspace(owner_id=owner.id, title="Big")
         s.add_all([small, big])
         s.flush()
-        s.add(ChatTurn(workspace_id=small.id, role="assistant",
-                       content={"type": "text", "text": "x"}, tokens_in=5))
-        s.add(ChatTurn(workspace_id=big.id, role="assistant",
-                       content={"type": "text", "text": "x"}, tokens_in=500))
+        s.add(
+            ChatTurn(
+                workspace_id=small.id,
+                role="assistant",
+                content={"type": "text", "text": "x"},
+                tokens_in=5,
+            )
+        )
+        s.add(
+            ChatTurn(
+                workspace_id=big.id,
+                role="assistant",
+                content={"type": "text", "text": "x"},
+                tokens_in=500,
+            )
+        )
         s.commit()
     c = _admin(app, pg_session_factory)
     titles = [r["title"] for r in c.get("/api/admin/drafting").json()["per_workspace"]]
@@ -105,13 +124,21 @@ def test_drafting_recent_failed_events(monkeypatch, pg_url, pg_session_factory):
         ws = Workspace(owner_id=owner.id, title="WithFails")
         s.add(ws)
         s.flush()
-        s.add(WorkspaceEvent(workspace_id=ws.id, kind="cloud_turn_failed", actor_id=owner.id,
-                             payload={"error": "distinctive_test_error"}))
+        s.add(
+            WorkspaceEvent(
+                workspace_id=ws.id,
+                kind="cloud_turn_failed",
+                actor_id=owner.id,
+                payload={"error": "distinctive_test_error"},
+            )
+        )
         s.commit()
     c = _admin(app, pg_session_factory)
     events = c.get("/api/admin/drafting").json()["recent_events"]
-    assert any(e["kind"] == "cloud_turn_failed"
-               and e["payload"]["error"] == "distinctive_test_error" for e in events)
+    assert any(
+        e["kind"] == "cloud_turn_failed" and e["payload"]["error"] == "distinctive_test_error"
+        for e in events
+    )
 
 
 def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory):
@@ -123,8 +150,14 @@ def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory):
         ws = Workspace(owner_id=owner.id, title="OverCapWs")
         s.add(ws)
         s.flush()
-        s.add(ChatTurn(workspace_id=ws.id, role="assistant",
-                       content={"type": "text", "text": "x"}, tokens_in=1500))  # cap_in=1000
+        s.add(
+            ChatTurn(
+                workspace_id=ws.id,
+                role="assistant",
+                content={"type": "text", "text": "x"},
+                tokens_in=1500,
+            )
+        )  # cap_in=1000
         s.commit()
     c = _admin(app, pg_session_factory)
     cap = c.get("/api/admin/drafting").json()["global_cap"]

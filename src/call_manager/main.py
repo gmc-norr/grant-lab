@@ -65,9 +65,7 @@ from call_manager.web.middleware import (
     build_csp,
 )
 from call_manager.web.routes import (
-    admin,
     auth,
-    golden_set,
     health,
     oauth_google,
     register,
@@ -353,6 +351,11 @@ def create_app() -> FastAPI:
             request.headers.get("hx-request") == "true"
             and request.headers.get("hx-boosted") != "true"
         )
+        # DORMANT after admin Slice 2: no protected non-/api HTML route can 401
+        # any more — every surviving non-/api route is public (auth/register/
+        # oauth/health) or an SPA path served at 200. Kept until the auth slice
+        # (which removes this whole non-/api branch). Not dead-code-removed here
+        # to keep this slice's diff scoped to admin.
         if exc.status_code == 401 and wants_html:
             # 401 is intentionally NOT gated on hx_partial: an htmx request
             # that hits 401 follows the 303 to /login as a full-page
@@ -520,8 +523,6 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(register.router)
     app.include_router(oauth_google.router)
-    app.include_router(admin.router)
-    app.include_router(golden_set.router)
     app.include_router(proposals_router)
     app.include_router(coherence_router)
     app.include_router(evaluator_router)
