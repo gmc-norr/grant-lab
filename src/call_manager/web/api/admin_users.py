@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from call_manager.auth.dependencies import require_admin
+from call_manager.auth.passwords import WeakPassword, hash_password
 from call_manager.db.models import User
 
 router = APIRouter()
@@ -103,3 +104,60 @@ def admin_pending_list(
             for u in rows
         ]
     return AdminPendingPageOut(users=users, page=page)
+
+
+class AdminApproveIn(BaseModel):
+    role: str = "member"
+    initial_password: str | None = None
+
+
+class AdminActionOut(BaseModel):
+    id: int
+
+
+@router.post("/admin/users/{user_id}/approve", response_model=AdminActionOut)
+def admin_approve_user(
+    request: Request,
+    user_id: int,
+    body: AdminApproveIn,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    if body.role not in ("member", "admin"):
+        raise HTTPException(status_code=400, detail="invalid role")
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "pending":
+            raise HTTPException(status_code=400, detail="user is not pending")
+        if u.oidc_sub is None and not body.initial_password:
+            raise HTTPException(status_code=400, detail="initial password required")
+        if body.initial_password:
+            try:
+                u.password_hash = hash_password(body.initial_password)
+            except WeakPassword as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            u.session_epoch = (u.session_epoch or 0) + 1  # credential issued -> revoke prior
+        u.status = "active"
+        u.is_admin = body.role == "admin"
+        u.approved_by_user_id = admin.id
+        u.approved_at = datetime.now(UTC)
+        db.commit()
+    return AdminActionOut(id=user_id)
+
+
+@router.post("/admin/users/{user_id}/deny", response_model=AdminActionOut)
+def admin_deny_user(
+    request: Request,
+    user_id: int,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "pending":
+            raise HTTPException(status_code=400, detail="user is not pending")
+        u.status = "disabled"
+        db.commit()
+    return AdminActionOut(id=user_id)
