@@ -10,7 +10,6 @@ SPA_ROUTES: tuple[str, ...] = ("/profiles", "/cockpit", "/calls", "/me", "/")
 BACKEND_PREFIXES: tuple[str, ...] = (
     "/workspaces",
     "/register",
-    "/profiles",
     "/healthz",
     "/logout",
     "/static",
