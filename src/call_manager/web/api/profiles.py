@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -13,9 +13,20 @@ from call_manager.db.models import (
     ProfileLevel,
     User,
 )
+from call_manager.embeddings.similarity import build_profile_text
+from call_manager.profiles import post_edit
 from call_manager.profiles.create import create_profile_with_bootstrap
 from call_manager.profiles.fields import FieldValidationError, parse_structured
-from call_manager.profiles.forms import parse_members_strict
+from call_manager.profiles.forms import (
+    ALLOWED_CURRENCIES,
+    BUDGET_MAX,
+    BUDGET_MIN,
+    TRL_MAX,
+    TRL_MIN,
+    bounded_int_or_400,
+    parse_members_strict,
+    split_lines,
+)
 
 router = APIRouter()
 
@@ -248,3 +259,120 @@ def create_profile(
     except IntegrityError as e:
         raise HTTPException(status_code=409, detail="profile name already exists") from e
     return ProfileCreateOut(id=new_id)
+
+
+class ProfileUpdateIn(BaseModel):
+    description: str = ""
+    areas: str = ""
+    budget_min: str = ""
+    budget_max: str = ""
+    budget_currency: str = ""
+    trl_min: str = ""
+    trl_max: str = ""
+    must_include: str = ""
+    hard_exclusions: str = ""
+    level: str = ""
+    career_stage: str = ""
+    applicant_types: str = ""
+    role: str = ""
+    years_since_phd: str = ""
+    org_type: str = ""
+    capabilities: str = ""
+    patient_populations: str = ""
+    scale: str = ""
+    funding_instruments: str = ""
+    funder_exclusions: str = ""
+    country: str = ""
+    host_institution: str = ""
+
+
+class ProfileUpdateOut(BaseModel):
+    id: int
+
+
+@router.put("/profiles/{profile_id}", response_model=ProfileUpdateOut)
+def update_profile(
+    request: Request,
+    profile_id: int,
+    body: ProfileUpdateIn,
+    background: BackgroundTasks,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    if len(body.description) > 50_000:
+        raise HTTPException(status_code=413, detail="description too long (max 50 KB)")
+    parsed_budget_min = bounded_int_or_400(
+        body.budget_min, field="budget_min", low=BUDGET_MIN, high=BUDGET_MAX
+    )
+    parsed_budget_max = bounded_int_or_400(
+        body.budget_max, field="budget_max", low=BUDGET_MIN, high=BUDGET_MAX
+    )
+    parsed_trl_min = bounded_int_or_400(body.trl_min, field="trl_min", low=TRL_MIN, high=TRL_MAX)
+    parsed_trl_max = bounded_int_or_400(body.trl_max, field="trl_max", low=TRL_MIN, high=TRL_MAX)
+    normalized_currency = (body.budget_currency or "").strip().upper()
+    if normalized_currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=400, detail=f"unknown currency: {body.budget_currency!r}")
+
+    sf = request.app.state.session_factory
+    embed_text_changed = False
+    with sf() as session:
+        p = session.get(Profile, profile_id)
+        if p is None or p.is_active is False:
+            raise HTTPException(status_code=404, detail="profile not found")
+        if p.created_by != user.id and not user.is_admin:
+            raise HTTPException(status_code=403, detail="not authorized")
+        active_job = session.execute(
+            select(ProfileBootstrapJob.id).where(
+                ProfileBootstrapJob.profile_id == profile_id,
+                ProfileBootstrapJob.status.in_(("queued", "running")),
+            )
+        ).scalar_one_or_none()
+        if active_job is not None:
+            raise HTTPException(
+                status_code=409, detail="profile is still drafting — try again shortly"
+            )
+        old_embed_text = build_profile_text(p)
+        p.description = body.description
+        if p.kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
+            lv = (body.level or "").strip() or None
+            if lv is not None and lv not in {x.value for x in ProfileLevel}:
+                raise HTTPException(status_code=400, detail=f"unknown level: {body.level!r}")
+            p.level = lv
+        base = {
+            "areas": split_lines(body.areas),
+            "budget_min": parsed_budget_min, "budget_max": parsed_budget_max,
+            "trl_min": parsed_trl_min, "trl_max": parsed_trl_max,
+            "must_include": split_lines(body.must_include),
+            "hard_exclusions": split_lines(body.hard_exclusions),
+        }
+        try:
+            new_ns = parse_structured(
+                kind=p.kind,
+                raw={
+                    "areas": body.areas, "career_stage": body.career_stage,
+                    "applicant_types": body.applicant_types, "role": body.role,
+                    "years_since_phd": body.years_since_phd, "org_type": body.org_type,
+                    "capabilities": body.capabilities,
+                    "patient_populations": body.patient_populations,
+                    "scale": body.scale, "funding_instruments": body.funding_instruments,
+                    "funder_exclusions": body.funder_exclusions, "country": body.country,
+                    "host_institution": body.host_institution,
+                },
+            )
+        except FieldValidationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        new_ns.pop("areas", None)  # base owns areas
+        p.structured = {**base, **new_ns}
+        p.budget_currency = normalized_currency or None
+        new_embed_text = build_profile_text(p)
+        embed_text_changed = old_embed_text.strip() != new_embed_text.strip()
+        session.commit()
+
+    if body.description.strip():
+        background.add_task(
+            post_edit.refresh_and_backfill_in_background,
+            session_factory=sf,
+            embed_client=request.app.state.embed_client,
+            profile_id=profile_id,
+            refresh_embedding=embed_text_changed,
+        )
+    return ProfileUpdateOut(id=profile_id)
