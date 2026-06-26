@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
@@ -18,13 +19,17 @@ from call_manager.db.models import (
     Reference,
     User,
     UserClaimAnnotation,
+    Workspace,
 )
+from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
+from call_manager.proposal_assist.analysis.queue import enqueue_containing_section
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
+from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.tools.citations import _citation_snapshot
-from call_manager.proposal_assist.web._perms import require_member
+from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()
 
@@ -159,3 +164,77 @@ def get_annotations(
                 )
             )
     return AnnotationsOut(is_owner=is_owner, sections=out_sections)
+
+
+def _annotation_or_404(
+    session: Session, ws: Workspace, annotation_id: int
+) -> UserClaimAnnotation:
+    ann = session.get(UserClaimAnnotation, annotation_id)
+    if ann is None or ann.workspace_id != ws.id:
+        raise HTTPException(status_code=404, detail="annotation not found")
+    return ann
+
+
+class InsertResultOut(BaseModel):
+    ev_id: str | None = None
+    citekey: str | None = None
+    commit_sha: str | None = None
+    idempotent: bool = False
+
+
+@router.post(
+    "/workspaces/{workspace_id}/annotations/{annotation_id}/insert",
+    response_model=InsertResultOut,
+)
+def insert_annotation(
+    workspace_id: uuid.UUID,
+    annotation_id: int,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> InsertResultOut:
+    """Insert the citation an uncited_supported annotation suggests, via the
+    canonical write path (insert_from_annotation). Owner-only. On a genuine
+    (non-idempotent) insert, re-enqueue analysis for the now-changed section."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        ann = _annotation_or_404(session, ws, annotation_id)
+        try:
+            result = insert_from_annotation(
+                session=session,
+                workspace=ws,
+                user_id=user.id,
+                annotation=ann,
+                workspaces_dir=settings.workspaces_dir,
+            )
+            session.commit()
+        except InsertConflict as e:
+            session.rollback()
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except CommitMutexTimeout as e:
+            session.rollback()
+            # /api sanitizes >=500 -> remap the 503 busy signal to a retriable 429.
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        except GitCommitError as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=500, detail="insert failed — nothing was written"
+            ) from e
+
+        if "idempotent" not in result:
+            enqueue_containing_section(
+                session,
+                workspace_id=workspace_id,
+                workspaces_dir=settings.workspaces_dir,
+                commit_sha=result["commit_sha"],
+                ev_id=result["ev_id"],
+            )
+            return InsertResultOut(
+                ev_id=result["ev_id"],
+                citekey=result["citekey"],
+                commit_sha=result["commit_sha"],
+            )
+    return InsertResultOut(idempotent=True)
