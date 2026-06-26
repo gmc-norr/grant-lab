@@ -2515,7 +2515,7 @@ The routing-coupled bundle. Restructure `router.tsx` so every `/admin/*` route n
 - Modify: `frontend/src/router.tsx`
 - Modify: `frontend/src/shell/nav-items.ts` (add the Admin item)
 - Modify: `frontend/src/shell/ActivityBar.tsx` (render Admin item only for admins)
-- Modify: `frontend/src/shell/ActivityBar.test.tsx` (APPEND admin-gating tests — the file already has 11 nav/active-route tests that MUST be preserved)
+- Modify: `frontend/src/shell/ActivityBar.test.tsx` (APPEND admin-gating tests — the file already has 10 nav/active-route tests that MUST be preserved)
 - Modify: `frontend/routes.json` (`spa_routes`: `/admin/users` → `/admin`)
 - Modify (regenerated): `frontend/src/routes.gen.ts`, `src/call_manager/web/spa_routes.py`
 - Modify: `frontend/src/router.test.tsx` (no code change expected — set-equality still holds; verify)
@@ -2672,9 +2672,9 @@ Expected: PASS (artifacts in sync).
 
 - [ ] **Step 6: Add the ActivityBar Admin entry (admin-gated)**
 
-`frontend/src/shell/ActivityBar.test.tsx` ALREADY EXISTS with 11 nav/active-route tests (Calls/Workspaces/Profiles/Settings links, current-workspace chip logic, References absence). Do NOT overwrite it. APPEND the imports it lacks (`waitFor` to the existing `@testing-library/react` import; add `afterEach`, `vi` to the existing `vitest` import; add `import * as clientMod from "../api/client";`), an `afterEach(() => vi.restoreAllMocks());`, the `mockMe` helper, and the two admin-gating tests below.
+`frontend/src/shell/ActivityBar.test.tsx` ALREADY EXISTS with 10 nav/active-route tests (Calls/Workspaces/Profiles/Settings links, current-workspace chip logic, References absence). Do NOT overwrite it. APPEND the imports it lacks (`waitFor` to the existing `@testing-library/react` import; add `afterEach`, `vi` to the existing `vitest` import; add `import * as clientMod from "../api/client";`), an `afterEach(() => vi.restoreAllMocks());`, the `mockMe` helper, and the two admin-gating tests below.
 
-The existing 11 tests render `<ActivityBar/>` WITHOUT mocking `/api/me`. After Step 7 adds `useSession()` to the component, those tests trigger an unmocked `/api/me` fetch that fails in jsdom → `retry:false` → `session` undefined → `isAdmin` false → the Admin item is hidden. They assert only the always-present nav items, so they keep passing unchanged. `restoreAllMocks` is a no-op for the spy-free existing tests.
+The existing 10 tests render `<ActivityBar/>` WITHOUT mocking `/api/me`. After Step 7 adds `useSession()` to the component, those tests trigger an unmocked `/api/me` fetch that fails in jsdom → `retry:false` → `session` undefined → `isAdmin` false → the Admin item is hidden. They assert only the always-present nav items, so they keep passing unchanged. `restoreAllMocks` is a no-op for the spy-free existing tests.
 
 Add to the file:
 
@@ -2712,7 +2712,7 @@ it("hides the Admin entry for a non-admin", async () => {
 
 (Merge the new imports into the existing import lines rather than duplicating them — `noUnusedLocals` and duplicate-import would otherwise fail tsc. The existing file already imports `screen` from `@testing-library/react` and `expect, it` from `vitest`.)
 
-Run: `cd frontend && pnpm vitest run src/shell/ActivityBar.test.tsx` → the two new tests FAIL (no Admin entry yet); the existing 11 still pass.
+Run: `cd frontend && pnpm vitest run src/shell/ActivityBar.test.tsx` → the two new tests FAIL (no Admin entry yet); the existing 10 still pass.
 
 Add the Admin item to `frontend/src/shell/nav-items.ts` `ACTIVITY_BOTTOM` (append after Settings):
 
