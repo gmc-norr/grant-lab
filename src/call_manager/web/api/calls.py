@@ -3,12 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import User
+from call_manager.db.models import Call, CallRanking, CallRankingCriterion, Profile, User
+from call_manager.web.call_detail_view import _criterion_detail, _parse_optional_profile_id
 from call_manager.web.dashboard import build_dashboard_view, resolve_profile_selection
+from call_manager.web.filters import criterion_label, model_label, note_category_heading
 
 router = APIRouter()
 
@@ -83,6 +87,177 @@ class DashboardOut(BaseModel):
     ranking: RankingOut
     effective: EffectiveOut
     facets: FacetsOut
+
+
+class CallDetailCallOut(BaseModel):
+    id: int
+    title: str
+    source_name: str | None
+    programme: str | None
+    external_id: str | None
+    published_at: datetime | None
+    deadline: datetime | None
+    budget_min: int | None
+    budget_max: int | None
+    currency: str | None
+    url: str
+    keywords: list[str]
+    summary: str | None
+
+
+class CallDetailNoteOut(BaseModel):
+    category: str | None
+    heading: str
+    text: str
+
+
+class CallDetailRankingOut(BaseModel):
+    aggregate_score: int
+    aggregate_reason_label: str | None
+    model_label: str
+    rationale: str
+    embed_similarity: float | None
+    escalated: bool
+    escalated_from_score: int | None
+    analysis_model_label: str
+    summary: str | None
+    applicant_notes: list[CallDetailNoteOut]
+
+
+class CallDetailCriterionOut(BaseModel):
+    criterion: str
+    label: str
+    rating: str
+    is_topic_fit: bool
+    detail: str | None
+    rationale: str | None
+    is_reason_code: bool
+    quoted_evidence: str | None
+
+
+class CallDetailOut(BaseModel):
+    call: CallDetailCallOut
+    ranking: CallDetailRankingOut | None
+    criteria: list[CallDetailCriterionOut]
+    best_profile_id: int | None
+
+
+@router.get("/calls/{call_id}", response_model=CallDetailOut)
+def get_call_detail(
+    request: Request,
+    call_id: int,
+    profile: str | None = Query(default=None),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    profile_id = _parse_optional_profile_id(profile)  # empty -> None, bad -> 400
+    sf = request.app.state.session_factory
+    with sf() as session:
+        call = session.execute(
+            select(Call).options(joinedload(Call.source)).where(Call.id == call_id)
+        ).scalar_one_or_none()
+        if call is None:
+            raise HTTPException(status_code=404, detail="call not found")
+
+        ranking = None
+        criteria: list[CallRankingCriterion] = []
+        profile_obj: Profile | None = None
+        # Parity: resolve ?profile by is_active ALONE — NOT ownership (web/routes/calls.py:69-71).
+        if profile_id is not None:
+            p = session.get(Profile, profile_id)
+            if p is not None and p.is_active:
+                profile_obj = p
+                ranking = session.execute(
+                    select(CallRanking).where(
+                        CallRanking.call_id == call_id,
+                        CallRanking.profile_id == profile_id,
+                    )
+                ).scalar_one_or_none()
+                if ranking is not None:
+                    criteria = list(
+                        session.execute(
+                            select(CallRankingCriterion).where(
+                                CallRankingCriterion.call_id == call_id,
+                                CallRankingCriterion.profile_id == profile_id,
+                            )
+                        ).scalars()
+                    )
+
+        # best-fit profile: highest-scoring profile OWNED by the current user.
+        best_profile_id = session.scalar(
+            select(CallRanking.profile_id)
+            .join(Profile, Profile.id == CallRanking.profile_id)
+            .where(CallRanking.call_id == call_id, Profile.created_by == user.id)
+            .order_by(
+                CallRanking.aggregate_score.desc().nullslast(),
+                CallRanking.embed_similarity.desc().nullslast(),
+            )
+            .limit(1)
+        )
+
+        call_out = CallDetailCallOut(
+            id=call.id,
+            title=call.title,
+            source_name=(call.source.name if call.source else None),
+            programme=call.programme,
+            external_id=call.external_id,
+            published_at=call.published_at,
+            deadline=call.deadline,
+            budget_min=call.budget_min,
+            budget_max=call.budget_max,
+            currency=call.currency,
+            url=call.url,
+            keywords=list(call.keywords or []),
+            summary=call.summary,
+        )
+
+        ranking_out = None
+        if ranking is not None:
+            notes = [
+                CallDetailNoteOut(
+                    category=n.get("category"),
+                    heading=note_category_heading(n.get("category")),
+                    text=n.get("text", ""),
+                )
+                for n in (ranking.applicant_notes or [])
+            ]
+            ranking_out = CallDetailRankingOut(
+                aggregate_score=ranking.aggregate_score,
+                aggregate_reason_label=(
+                    criterion_label(ranking.aggregate_reason)
+                    if ranking.aggregate_reason
+                    else None
+                ),
+                model_label=model_label(ranking.model),
+                rationale=ranking.rationale,
+                embed_similarity=ranking.embed_similarity,
+                escalated=ranking.escalated,
+                escalated_from_score=ranking.escalated_from_score,
+                analysis_model_label=model_label(ranking.analysis_model or ranking.model),
+                summary=ranking.summary,
+                applicant_notes=notes,
+            )
+
+        criteria_out = [
+            CallDetailCriterionOut(
+                criterion=c.criterion,
+                label=criterion_label(c.criterion),
+                rating=c.rating,
+                is_topic_fit=(c.criterion == "topic_fit"),
+                detail=(
+                    _criterion_detail(c.criterion, call=call, profile=profile_obj, ranking=ranking)
+                    if (profile_obj is not None and ranking is not None)
+                    else None
+                ),
+                rationale=c.rationale,
+                is_reason_code=(c.criterion in ("budget", "timeline", "trl", "embedding")),
+                quoted_evidence=c.quoted_evidence,
+            )
+            for c in criteria
+        ]
+
+    return CallDetailOut(
+        call=call_out, ranking=ranking_out, criteria=criteria_out, best_profile_id=best_profile_id
+    )
 
 
 @router.get("/calls", response_model=DashboardOut)
