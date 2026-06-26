@@ -28,7 +28,7 @@ def test_is_spa_route_is_exact_not_prefix():
     assert is_spa_route("/") is True
     assert is_spa_route("/made-up-page") is False
     assert is_spa_route("/api/me") is False
-    assert is_spa_route("/calls/123") is False
+    assert is_spa_route("/calls/123") is True  # /calls is now an SPA-owned prefix (calls-detail)
     assert is_spa_route("/login") is False
 
 
@@ -51,5 +51,5 @@ def test_is_backend_route_for_proxy_carveout():
     from call_manager.web.spa_routes import is_backend_route
 
     assert is_backend_route("/api/me") is True
-    assert is_backend_route("/calls/123") is True
+    assert is_backend_route("/calls/123") is False  # /calls retired from backend_prefixes (calls-detail)
     assert is_backend_route("/app") is False
