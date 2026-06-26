@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: I001 - import order tuned for test mocking compatibility
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
@@ -11,7 +10,6 @@ from call_manager.db.models import Profile, ProfileBootstrapJob, ProfileKind, Pr
 from call_manager.embeddings.similarity import build_profile_text
 from call_manager.profiles.create import create_profile_with_bootstrap
 from call_manager.profiles.fields import FieldValidationError, parse_structured
-# fmt: off
 from call_manager.profiles.forms import (
     ALLOWED_CURRENCIES as _ALLOWED_CURRENCIES,
     BUDGET_MAX as _BUDGET_MAX,
@@ -25,12 +23,9 @@ from call_manager.profiles.forms import (
 from call_manager.profiles.post_edit import (
     refresh_and_backfill_in_background as _refresh_and_backfill_in_background,
 )
-# fmt: on
+# ruff: noqa: I001
 
 router = APIRouter()
-
-# For test mocking: this import allows tests to patch backfill_profile at the module level
-from call_manager.ranking.backfill import backfill_profile  # noqa: F401,E402
 
 
 @router.get("/profiles", response_class=HTMLResponse)

@@ -52,7 +52,7 @@ def test_edit_blocked_while_bootstrap_active(monkeypatch, pg_url, pg_session_fac
 def test_blank_description_save_does_not_backfill(monkeypatch, pg_url, pg_session_factory):
     called = {"n": 0}
     monkeypatch.setattr(
-        "call_manager.web.routes.profiles.backfill_profile",
+        "call_manager.profiles.post_edit.backfill_profile",
         lambda **k: called.__setitem__("n", called["n"] + 1) or 0,
     )
     app = _app(monkeypatch, pg_url)

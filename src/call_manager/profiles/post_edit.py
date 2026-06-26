@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from call_manager.embeddings.refresh import refresh_profile_embedding
+from call_manager.ranking.backfill import backfill_profile
 
 _logger = logging.getLogger(__name__)
 
@@ -36,10 +37,7 @@ def refresh_and_backfill_in_background(
             session_factory=session_factory, embed_client=embed_client, profile_id=profile_id
         )
     try:
-        # Late import to allow test mocking of profiles.backfill_profile
-        import call_manager.web.routes.profiles as profiles_mod
-
-        profiles_mod.backfill_profile(session_factory=session_factory, profile_id=profile_id)
+        backfill_profile(session_factory=session_factory, profile_id=profile_id)
     except Exception as e:  # noqa: BLE001
         _logger.warning(
             "profile.backfill_failed",

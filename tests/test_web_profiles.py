@@ -1127,10 +1127,10 @@ def test_create_rejects_unknown_career_stage(monkeypatch, pg_url, pg_session_fac
 def test_edit_persists_new_fields_and_schedules_backfill(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     scheduled = {"backfill": 0}
-    import call_manager.web.routes.profiles as profiles_mod
+    import call_manager.profiles.post_edit as post_edit_mod
 
     monkeypatch.setattr(
-        profiles_mod,
+        post_edit_mod,
         "backfill_profile",
         lambda **kw: scheduled.__setitem__("backfill", scheduled["backfill"] + 1),
     )
