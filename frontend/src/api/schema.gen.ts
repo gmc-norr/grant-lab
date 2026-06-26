@@ -402,6 +402,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Soft Delete Workspace Api
+         * @description Owner-only soft-delete. Cascades active jobs + queued turns and scrubs
+         *     file bytes via the shared soft_delete_workspace service. Re-delete of an
+         *     already-soft-deleted workspace → 404 (require_owner filters soft_deleted_at),
+         *     matching the Jinja route — not idempotent, by design.
+         */
+        delete: operations["soft_delete_workspace_api_api_workspaces__workspace_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{workspace_id}/activate": {
         parameters: {
             query?: never;
@@ -1248,6 +1271,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/turns/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Turn
+         * @description Owner-only cancel of a QUEUED turn. Race-safe + cross-workspace-safe via
+         *     record_terminal_outcome's conditional UPDATE (status='queued' AND
+         *     workspace_id=…): a job already 'running', already terminal, or owned by
+         *     another workspace → cancelled=False. Writes the cloud_turn_cancelled audit
+         *     event + a visible turn_outcome chat row (emit_chat=True).
+         */
+        post: operations["cancel_turn_api_workspaces__workspace_id__turns__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{workspace_id}/uncited-claims-runs": {
         parameters: {
             query?: never;
@@ -1975,17 +2022,11 @@ export interface paths {
         put?: never;
         /**
          * Soft Delete
-         * @description Soft-delete a workspace and scrub attachment bytes from disk.
+         * @description Soft-delete a workspace (owner-only) and scrub its file bytes.
          *
-         *     Order (Codex-finding fix): DB commit FIRST (so the user-visible
-         *     "deleted" state is durable), THEN best-effort FS cleanup. If the
-         *     FS cleanup fails, the workspace is still soft-deleted; the orphan
-         *     files are harmless (no app code reads them, and the row-source-of-
-         *     truth lookup gates serving on a live DB row) and a re-invocation
-         *     of this handler OR a future sweep job will collect them.
-         *
-         *     Attachment DB rows are intentionally preserved for the audit
-         *     trail; only the bytes on disk are removed.
+         *     Delegates to the shared `soft_delete_workspace` service — the same code path
+         *     the JSON `DELETE /api/workspaces/{id}` endpoint uses. This Jinja route is
+         *     deleted in the G2 teardown; the service is the durable home.
          */
         post: operations["soft_delete_workspaces__workspace_id__delete_post"];
         delete?: never;
@@ -3028,6 +3069,11 @@ export interface components {
             source_slug: string | null;
             /** Title */
             title: string;
+        };
+        /** CancelTurnResponse */
+        CancelTurnResponse: {
+            /** Cancelled */
+            cancelled: boolean;
         };
         /** ChunkOut */
         ChunkOut: {
@@ -4776,6 +4822,116 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["WorkspaceCreatedOut"];
                 };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    soft_delete_workspace_api_api_workspaces__workspace_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Bad Request */
             400: {
@@ -9747,6 +9903,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmitTurnResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    cancel_turn_api_workspaces__workspace_id__turns__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelTurnResponse"];
                 };
             };
             /** @description Bad Request */

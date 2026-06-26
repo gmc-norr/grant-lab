@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { useReferences } from "../../api/citations";
 import { useEventStream } from "../../api/events";
-import { turnStreamUrl, useAckDisclosure, useTurns } from "../../api/turns";
+import { turnStreamUrl, useAckDisclosure, useCancelTurn, useTurns } from "../../api/turns";
 import styles from "./CockpitChat.module.css";
 import { Composer } from "./Composer";
 import { TurnList } from "./TurnList";
@@ -30,6 +30,9 @@ export function CockpitChat() {
   // keyed by position for deduplication with history turns
   const [streamed, setStreamed] = useState<Record<number, Turn>>({});
 
+  const cancel = useCancelTurn(id);
+  const [cancelNote, setCancelNote] = useState<string | null>(null);
+
   // Re-attach to an in-flight turn after a reload.
   useEffect(() => {
     if (turns.data?.running_job_id) setJobId(turns.data.running_job_id);
@@ -45,6 +48,7 @@ export function CockpitChat() {
       done: () => {
         setJobId(null);
         setStreamed({});
+        setCancelNote(null); // don't let a "too late" note bleed into the next turn
         qc.invalidateQueries({ queryKey: ["turns", id] });
         qc.invalidateQueries({ queryKey: ["proposed-changes", id, "draft"] });
         qc.invalidateQueries({ queryKey: ["proposed-changes", id, "spec"] });
@@ -98,12 +102,44 @@ export function CockpitChat() {
                 </div>
               );
             return (
-              <Composer
-                id={id}
-                refs={refs}
-                disabled={!!jobId || !!d.running_job_id}
-                onSubmitted={setJobId}
-              />
+              <>
+                {d.is_owner && (jobId || d.running_job_id) && (
+                  <div className={styles.cancelRow}>
+                    <span className={styles.note}>Assistant is working…</span>
+                    <button
+                      type="button"
+                      disabled={cancel.isPending}
+                      onClick={() => {
+                        const jid = jobId ?? d.running_job_id;
+                        if (!jid) return;
+                        cancel.mutate(jid, {
+                          onSuccess: (res) => {
+                            if (res?.cancelled) {
+                              setJobId(null);
+                              setStreamed({});
+                              setCancelNote(null);
+                            } else {
+                              setCancelNote("Too late — the assistant already started.");
+                            }
+                          },
+                        });
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    {cancelNote && <span className={styles.note}>{cancelNote}</span>}
+                  </div>
+                )}
+                <Composer
+                  id={id}
+                  refs={refs}
+                  disabled={!!jobId || !!d.running_job_id}
+                  onSubmitted={(jid) => {
+                    setJobId(jid);
+                    setCancelNote(null); // a new turn starts clean
+                  }}
+                />
+              </>
             );
           })()}
         </footer>

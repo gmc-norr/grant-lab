@@ -12,8 +12,9 @@ def test_soft_delete_cancels_active_review_runs(
         s.add(ReviewRun(workspace_id=ws.id, status="queued", draft_sha="a" * 64))
         s.commit()
         ws_id = str(ws.id)
-    r = client_authed_owner.post(f"/workspaces/{ws_id}/delete", follow_redirects=False)
-    assert r.status_code in (200, 303)
+    # Soft-delete now lives at DELETE /api/workspaces/{id} (cockpit gap-closer).
+    r = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+    assert r.status_code == 204
     with pg_session_factory() as s:
         run = s.query(ReviewRun).filter_by(workspace_id=ws_id).one()
         assert run.status == "cancelled"

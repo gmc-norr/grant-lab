@@ -40,3 +40,16 @@ export function useAckDisclosure(id: string) {
 export function turnStreamUrl(id: string, jobId: string): string {
   return `/api/workspaces/${id}/turns/${jobId}/stream`;
 }
+
+export function useCancelTurn(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (jobId: string) =>
+      unwrap(
+        await api.POST("/api/workspaces/{workspace_id}/turns/{job_id}/cancel", {
+          params: { path: { workspace_id: id, job_id: jobId } },
+        }),
+      ),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["turns", id] }),
+  });
+}

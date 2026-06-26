@@ -1,7 +1,8 @@
 import { Button, Modal, Select, TextInput } from "@mantine/core";
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
-import { useSettings, useUpdateSettings } from "../api/settings";
+import { useDeleteWorkspace, useSettings, useUpdateSettings } from "../api/settings";
 
 const STATUSES = ["drafting", "submitted", "awarded", "rejected", "abandoned"];
 const CITATION_STYLES = ["vancouver", "author-year"];
@@ -17,6 +18,8 @@ export function WorkspaceSettingsModal({
 }) {
   const settings = useSettings(id);
   const update = useUpdateSettings(id);
+  const del = useDeleteWorkspace(id);
+  const navigate = useNavigate();
   const [title, setTitle] = useState("");
   const [status, setStatus] = useState("drafting");
   const [deadline, setDeadline] = useState("");
@@ -72,6 +75,31 @@ export function WorkspaceSettingsModal({
       >
         Save
       </Button>
+      <div style={{ marginTop: "1.5rem", borderTop: "1px solid var(--mantine-color-red-9)", paddingTop: "0.75rem" }}>
+        <p style={{ fontSize: "0.85rem", opacity: 0.8 }}>
+          Soft-deletes the workspace and scrubs uploaded file bytes. Audit rows are kept. This
+          cannot be undone.
+        </p>
+        {del.isError ? <p className="library-error">Could not delete workspace.</p> : null}
+        <Button
+          color="red"
+          variant="outline"
+          disabled={del.isPending}
+          onClick={() => {
+            const name = settings.data?.title ?? "";
+            if (window.confirm(`Delete "${name}"? This scrubs all uploaded file bytes and cannot be undone.`)) {
+              del.mutate(undefined, {
+                onSuccess: () => {
+                  onClose();
+                  navigate("/cockpit");
+                },
+              });
+            }
+          }}
+        >
+          Delete workspace
+        </Button>
+      </div>
     </Modal>
   );
 }

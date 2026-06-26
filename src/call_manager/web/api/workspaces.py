@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 
@@ -62,7 +63,7 @@ from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.web._perms import require_member, require_owner
-from call_manager.workspaces import create_workspace
+from call_manager.workspaces import create_workspace, soft_delete_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -1145,3 +1146,25 @@ def create_workspace_api(
         session.commit()
         new_id = str(ws.id)
     return WorkspaceCreatedOut(id=new_id)
+
+
+@router.delete("/workspaces/{workspace_id}", status_code=204)
+def soft_delete_workspace_api(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> Response:
+    """Owner-only soft-delete. Cascades active jobs + queued turns and scrubs
+    file bytes via the shared soft_delete_workspace service. Re-delete of an
+    already-soft-deleted workspace → 404 (require_owner filters soft_deleted_at),
+    matching the Jinja route — not idempotent, by design."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # soft_delete_workspace commits internally (unlike create_workspace_api,
+        # where the caller commits) — do not add a second commit here.
+        soft_delete_workspace(
+            session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir)
+        )
+    return Response(status_code=204)

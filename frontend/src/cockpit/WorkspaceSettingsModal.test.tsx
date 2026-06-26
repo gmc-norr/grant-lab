@@ -3,14 +3,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithProviders } from "../test-utils";
 import { WorkspaceSettingsModal } from "./WorkspaceSettingsModal";
 
-const h = vi.hoisted(() => ({ update: vi.fn(), settings: vi.fn() }));
+const h = vi.hoisted(() => ({ update: vi.fn(), settings: vi.fn(), del: vi.fn(), navigate: vi.fn(), delError: false }));
 vi.mock("../api/settings", () => ({
   useSettings: () => h.settings(),
   useUpdateSettings: () => ({ mutate: h.update, isPending: false, isError: false }),
+  useDeleteWorkspace: () => ({ mutate: h.del, isPending: false, isError: h.delError }),
+}));
+vi.mock("react-router-dom", async (orig) => ({
+  ...(await orig<typeof import("react-router-dom")>()),
+  useNavigate: () => h.navigate,
 }));
 
 beforeEach(() => {
   h.update.mockReset();
+  h.del.mockReset();
+  h.navigate.mockReset();
+  h.delError = false;
   h.settings.mockReturnValue({
     data: { title: "Proj", status: "drafting", deadline: "2026-09-01", citation_style: "vancouver" },
   });
@@ -27,5 +35,32 @@ describe("WorkspaceSettingsModal", () => {
       expect.objectContaining({ title: "Renamed", citation_style: "vancouver" }),
       expect.anything(),
     );
+  });
+
+  it("deletes after confirm, closes, and navigates to /cockpit", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    h.del.mockImplementation((_vars: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+    const onClose = vi.fn();
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: /delete workspace/i }));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Proj"));
+    expect(h.del).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+    expect(h.navigate).toHaveBeenCalledWith("/cockpit");
+  });
+
+  it("does nothing when the delete confirm is declined", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /delete workspace/i }));
+    expect(h.del).not.toHaveBeenCalled();
+    expect(h.navigate).not.toHaveBeenCalled();
+  });
+
+  it("shows an error note and does NOT navigate when the delete fails", async () => {
+    h.delError = true;
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
+    expect(await screen.findByText(/could not delete workspace/i)).toBeInTheDocument();
+    expect(h.navigate).not.toHaveBeenCalled();
   });
 });
