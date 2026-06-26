@@ -23,6 +23,7 @@
 - **`/api` calls tests live in `tests/` ROOT** (calls are not workspace-scoped — the existing `tests/test_api_calls_feed_behavior.py` is at root), NOT under `tests/proposal_assist/`.
 - **psycopg2 is NOT installed.** Test `DATABASE_URL`s use `postgresql+psycopg://` or the `pg_url` fixture; the gen-openapi script already uses a dummy `postgresql+psycopg://` URL.
 - **Frontend has no TS linter — `tsc` (via `pnpm build`) is the gate.** Run `cd frontend && pnpm test` and `pnpm build`.
+- **SPA styling = CSS Modules + `--app-*` theme tokens** (the Dashboard/CallRow pattern; the routes use almost no Mantine layout primitives — only `Select`/`Switch`/`Tooltip`). New route components get a sibling `*.module.css` using the theme tokens (`--app-border`, `--app-link`, `--app-muted`, `--app-heading`, `--app-text`, `--app-good`, `--app-warn`, `--app-bad`, `--app-accent`, `--app-sidebar`, `--app-hover`, `--app-dim`, `--app-border-strong`). The Jinja-era global classes (`score-hero`, `detail-grid`, `criterion-card`, `gate-tag`, …) live only in the doomed `app.css` the SPA does **not** load (`main.tsx` loads only `@mantine/core/styles.css`, codicon, `styles/cockpit.css`, `theme/theme.css`) — never reference them.
 - **Subagent git discipline (detached SDD):** every dispatch must `cd <worktree>`, use `git -C <worktree>`, and `git rev-parse --abbrev-ref HEAD` to verify the branch before committing; use `git rm` for deletions. Subagents default to the MAIN-tree cwd.
 
 ---
@@ -165,20 +166,15 @@ In `src/call_manager/web/routes/calls.py`:
 3. Add, with the other `call_manager` imports:
 
 ```python
-from call_manager.web.call_detail_view import (
-    _criterion_detail,
-    _money_range,
-    _parse_optional_profile_id,
-    _trl_range,
-)
+from call_manager.web.call_detail_view import _criterion_detail, _parse_optional_profile_id
 ```
 
-`_money_range` / `_trl_range` are imported because the module-level template context and the route still reference them transitively via `_criterion_detail`; keep all four imported so the route module is unchanged in behavior. (If ruff flags `_money_range`/`_trl_range` as unused in `calls.py`, drop those two from the import — `_criterion_detail` calls them from `call_detail_view.py`, not from `calls.py`. Let ruff decide.)
+Import ONLY these two — they are the only helpers `calls.py` itself references (`_parse_optional_profile_id` at the old line 57, `_criterion_detail` at the old line 118). `_money_range` / `_trl_range` are called only from *inside* `_criterion_detail`, which now lives in `call_detail_view.py`, so importing them into `calls.py` would be an unused-import (ruff F401) that fails Step 6.
 
 - [ ] **Step 5: Run the relocated-helper test + the existing Jinja-detail tests**
 
-Run: `uv run pytest tests/test_call_detail_view.py tests/test_web_call_detail.py tests/test_web_calls_start_drafting.py -q`
-Expected: PASS (relocation is behavior-preserving; the Jinja route now imports the helpers).
+Run: `uv run pytest tests/test_call_detail_view.py tests/test_web_call_detail.py tests/proposal_assist/test_web_calls_start_drafting.py -q`
+Expected: PASS (relocation is behavior-preserving; the Jinja route now imports the helpers). NOTE: `test_web_calls_start_drafting.py` lives under `tests/proposal_assist/` (it exercises workspace-creation-from-call), unlike `test_web_call_detail.py` / `test_web_calls_hide.py` which are at `tests/` root.
 
 - [ ] **Step 6: ruff + boot check**
 
@@ -961,11 +957,14 @@ Render the detail sections at Jinja parity (score hero, analyst notes, details g
 
 **Files:**
 - Create: `frontend/src/routes/CallDetail.tsx`
+- Create: `frontend/src/routes/CallDetail.module.css`
 - Test: `frontend/src/routes/CallDetail.test.tsx`
 
 **Interfaces:**
 - Consumes: `useCallDetail`, `useHideCall` (Task 4); `Deadline` from `./Deadline`; `useParams`/`useSearchParams`/`useNavigate`/`Link` from `react-router-dom`.
 - Produces: `export function CallDetail()` — registered at `calls/:id` in Task 6.
+
+**Styling:** uses a sibling `CallDetail.module.css` with `--app-*` theme tokens (the CallRow/Dashboard pattern) — NOT the Jinja global classes. The score-hero band exposes `data-band` (`strong`/`mid`/`low`) so the test can assert the band without depending on hashed module class names (mirrors `MatchBadge`'s `data-band`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1030,10 +1029,20 @@ it("renders the ranking hero, analyst notes, and criterion why-string", async ()
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   renderDetail();
   expect(await screen.findByRole("heading", { name: "Genomics Grant" })).toBeInTheDocument();
-  expect(screen.getByText("72")).toBeInTheDocument();
+  expect(screen.getByText("72")).toHaveAttribute("data-band", "strong"); // 72 >= 70
   expect(screen.getByText("Deep summary.")).toBeInTheDocument();
   expect(screen.getByText("Budget & funding")).toBeInTheDocument();
   expect(screen.getByText("Cosine similarity 0.420 (pass threshold 0.30).")).toBeInTheDocument();
+});
+
+it("Start drafting links to /cockpit/new with the call + best profile prefilled", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  renderDetail();
+  const href =
+    (await screen.findByRole("link", { name: /start drafting/i })).getAttribute("href") ?? "";
+  expect(href).toContain("/cockpit/new?");
+  expect(href).toContain("call_id=5");
+  expect(href).toContain("profile_id=7"); // best_profile_id from RANKED
 });
 
 it("a not-found error shows the not-found alert", async () => {
@@ -1064,7 +1073,110 @@ it("Hide posts and navigates back to /", async () => {
 Run: `cd frontend && pnpm exec vitest run src/routes/CallDetail.test.tsx`
 Expected: FAIL — cannot resolve `./CallDetail`.
 
-- [ ] **Step 3: Create the component**
+- [ ] **Step 3: Create the CSS Module**
+
+Create `frontend/src/routes/CallDetail.module.css` (theme tokens only — no Jinja globals):
+
+```css
+.detail {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 1rem 0.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.backlink { color: var(--app-link); text-decoration: none; font-size: 0.85rem; }
+.backlink:hover { text-decoration: underline; }
+
+.header h1 { margin: 0 0 0.25rem; color: var(--app-heading); }
+.sub { margin: 0; color: var(--app-muted); font-size: 0.9rem; }
+.sub code { background: var(--app-hover); padding: 0.05rem 0.3rem; border-radius: 3px; }
+.actions { margin-top: 0.75rem; }
+.startButton {
+  display: inline-block;
+  background: var(--app-accent);
+  color: #fff;
+  text-decoration: none;
+  padding: 0.4rem 0.9rem;
+  border-radius: 5px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.startButton:hover { background: var(--app-accent-bright); }
+
+.hero {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 1rem;
+  background: var(--app-sidebar);
+}
+.figure {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--app-dim);
+  min-width: 3rem;
+  text-align: center;
+}
+.figure.strong { color: var(--app-good); }
+.figure.mid { color: var(--app-warn); }
+.heroBody { display: flex; flex-direction: column; gap: 0.4rem; }
+.gateTag {
+  display: inline-block;
+  align-self: flex-start;
+  background: var(--app-hover);
+  color: var(--app-text);
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+}
+.rationale { color: var(--app-text); font-size: 0.9rem; }
+.muted { color: var(--app-muted); font-size: 0.8rem; }
+
+.section h2 { margin: 0 0 0.5rem; font-size: 1.05rem; color: var(--app-heading); }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 0.75rem; }
+.note { border: 1px solid var(--app-border); border-radius: 6px; padding: 0.6rem 0.75rem; }
+.note h3 { margin: 0 0 0.25rem; font-size: 0.85rem; color: var(--app-accent); }
+.note p { margin: 0; font-size: 0.85rem; }
+
+.detailGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 0.75rem; }
+.kv { display: flex; flex-direction: column; gap: 0.15rem; }
+.k { color: var(--app-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.v { color: var(--app-text); }
+
+.keywords { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.chip { background: var(--app-hover); color: var(--app-text); font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; }
+
+.criteria { display: flex; flex-direction: column; gap: 0.6rem; }
+.card { border: 1px solid var(--app-border); border-radius: 6px; padding: 0.6rem 0.75rem; }
+.cardHead { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 0.25rem; }
+.quote {
+  margin: 0.4rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--app-border-strong);
+  color: var(--app-muted);
+  font-style: italic;
+}
+
+.hideCall { display: flex; align-items: center; gap: 0.75rem; }
+.hideButton {
+  background: transparent;
+  border: 1px solid var(--app-border-strong);
+  color: var(--app-muted);
+  padding: 0.35rem 0.75rem;
+  border-radius: 5px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.hideButton:hover { color: var(--app-bad); border-color: var(--app-bad); }
+```
+
+- [ ] **Step 4: Create the component (CSS Module classes + `data-band`)**
 
 Create `frontend/src/routes/CallDetail.tsx`:
 
@@ -1073,6 +1185,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 
 import { useCallDetail, useHideCall } from "../api/calls";
 import { Deadline } from "./Deadline";
+import styles from "./CallDetail.module.css";
 
 function budgetText(c: { budget_min: number | null; budget_max: number | null; currency: string | null }): string {
   if (c.budget_min == null && c.budget_max == null) return "—";
@@ -1103,20 +1216,18 @@ export function CallDetail() {
   if (best_profile_id != null) startParams.set("profile_id", String(best_profile_id));
 
   return (
-    <main>
-      <Link to="/" className="backlink">← All calls</Link>
+    <main className={styles.detail}>
+      <Link to="/" className={styles.backlink}>← All calls</Link>
 
-      <header className="page-header">
-        <hgroup>
-          <h1>{call.title}</h1>
-          <p>
-            {call.source_name}
-            {call.programme && <> · {call.programme}</>}
-            {call.external_id && <> · <code>{call.external_id}</code></>}
-          </p>
-        </hgroup>
-        <div className="actions">
-          <Link to={`/cockpit/new?${startParams.toString()}`} role="button">
+      <header className={styles.header}>
+        <h1>{call.title}</h1>
+        <p className={styles.sub}>
+          {call.source_name}
+          {call.programme && <> · {call.programme}</>}
+          {call.external_id && <> · <code>{call.external_id}</code></>}
+        </p>
+        <div className={styles.actions}>
+          <Link to={`/cockpit/new?${startParams.toString()}`} className={styles.startButton}>
             Start drafting workspace
           </Link>
         </div>
@@ -1124,34 +1235,32 @@ export function CallDetail() {
 
       {ranking && (
         <section aria-label="Ranking">
-          <article className="score-hero">
+          <article className={styles.hero}>
             <div
-              className={`figure ${
-                ranking.aggregate_score >= 70 ? "strong" : ranking.aggregate_score > 0 ? "mid" : ""
+              className={`${styles.figure} ${
+                ranking.aggregate_score >= 70 ? styles.strong : ranking.aggregate_score > 0 ? styles.mid : ""
               }`}
+              data-band={ranking.aggregate_score >= 70 ? "strong" : ranking.aggregate_score > 0 ? "mid" : "low"}
             >
               {ranking.aggregate_score}
             </div>
-            <div className="body">
+            <div className={styles.heroBody}>
               <strong>Aggregate score</strong>
               {ranking.aggregate_reason_label && (
-                <span className="gate-tag">{ranking.aggregate_reason_label}</span>
+                <span className={styles.gateTag}>{ranking.aggregate_reason_label}</span>
               )}
-              <span className="gate-tag" title="LLM that produced this ranking">
+              <span className={styles.gateTag} title="LLM that produced this ranking">
                 Analyzed by {ranking.model_label}
               </span>
               {ranking.rationale && !ranking.aggregate_reason_label && (
-                <div className="rationale">{ranking.rationale}</div>
+                <div className={styles.rationale}>{ranking.rationale}</div>
               )}
               {ranking.embed_similarity != null && (
-                <div className="muted similarity">
-                  Cosine similarity: {ranking.embed_similarity.toFixed(3)}
-                </div>
+                <div className={styles.muted}>Cosine similarity: {ranking.embed_similarity.toFixed(3)}</div>
               )}
               {ranking.escalated && ranking.escalated_from_score != null && (
-                <div className="muted escalation">
-                  Escalated from {ranking.escalated_from_score} (analysis by{" "}
-                  {ranking.analysis_model_label}).
+                <div className={styles.muted}>
+                  Escalated from {ranking.escalated_from_score} (analysis by {ranking.analysis_model_label}).
                 </div>
               )}
             </div>
@@ -1160,15 +1269,15 @@ export function CallDetail() {
       )}
 
       {ranking && (ranking.summary || ranking.applicant_notes.length > 0) && (
-        <section className="analysis-section" aria-label="Deep analysis">
+        <section className={styles.section} aria-label="Deep analysis">
           <h2>
-            Analyst notes <small className="muted" style={{ fontWeight: 400 }}>— {ranking.model_label}</small>
+            Analyst notes <small className={styles.muted}>— {ranking.model_label}</small>
           </h2>
-          {ranking.summary && <p className="summary-paragraph">{ranking.summary}</p>}
+          {ranking.summary && <p>{ranking.summary}</p>}
           {ranking.applicant_notes.length > 0 && (
-            <div className="analysis-notes">
+            <div className={styles.notes}>
               {ranking.applicant_notes.map((n, i) => (
-                <article key={i} className={`analysis-note cat-${n.category ?? "other"}`}>
+                <article key={i} className={styles.note}>
                   <h3>{n.heading}</h3>
                   <p>{n.text}</p>
                 </article>
@@ -1178,78 +1287,72 @@ export function CallDetail() {
         </section>
       )}
 
-      <section aria-label="Call details">
+      <section className={styles.section} aria-label="Call details">
         <h2>Details</h2>
-        <div className="detail-grid">
-          <div>
-            <span className="k">Published</span>
-            <span className="v">{call.published_at ? call.published_at.slice(0, 10) : "—"}</span>
+        <div className={styles.detailGrid}>
+          <div className={styles.kv}>
+            <span className={styles.k}>Published</span>
+            <span className={styles.v}>{call.published_at ? call.published_at.slice(0, 10) : "—"}</span>
           </div>
-          <div>
-            <span className="k">Deadline</span>
-            <span className="v">{call.deadline ? <Deadline iso={call.deadline} /> : "—"}</span>
+          <div className={styles.kv}>
+            <span className={styles.k}>Deadline</span>
+            <span className={styles.v}>{call.deadline ? <Deadline iso={call.deadline} /> : "—"}</span>
           </div>
-          <div>
-            <span className="k">Budget</span>
-            <span className="v">{budgetText(call)}</span>
+          <div className={styles.kv}>
+            <span className={styles.k}>Budget</span>
+            <span className={styles.v}>{budgetText(call)}</span>
           </div>
-          <div>
-            <span className="k">External link</span>
-            <span className="v">
+          <div className={styles.kv}>
+            <span className={styles.k}>External link</span>
+            <span className={styles.v}>
               <a href={call.url} target="_blank" rel="noopener">Open at source →</a>
             </span>
           </div>
         </div>
         {call.keywords.length > 0 && (
-          <p className="keyword-list">
-            <small className="muted">Keywords:</small>{" "}
+          <p className={styles.keywords}>
+            <small className={styles.muted}>Keywords:</small>
             {call.keywords.map((kw) => (
-              <span key={kw} className="chip">{kw}</span>
+              <span key={kw} className={styles.chip}>{kw}</span>
             ))}
           </p>
         )}
       </section>
 
       {call.summary && (
-        <section>
+        <section className={styles.section}>
           <h2>Summary</h2>
           <p>{call.summary}</p>
         </section>
       )}
 
       {criteria.length > 0 && (
-        <section>
+        <section className={styles.section}>
           <h2>Criterion breakdown</h2>
-          <div className="criterion-list">
+          <div className={styles.criteria}>
             {criteria.map((c) => (
-              <div key={c.criterion} className="criterion-card">
-                <div className="head">
+              <div key={c.criterion} className={styles.card}>
+                <div className={styles.cardHead}>
                   <span>{c.label}</span>
-                  <span>
-                    <strong>{c.is_topic_fit ? `${c.rating}/5` : c.rating}</strong>
-                  </span>
+                  <strong>{c.is_topic_fit ? `${c.rating}/5` : c.rating}</strong>
                 </div>
-                {c.detail && <div className="rationale">{c.detail}</div>}
+                {c.detail && <div className={styles.rationale}>{c.detail}</div>}
                 {c.rationale && (!c.detail || !c.detail.includes(c.rationale)) && (
-                  <div className="rationale muted" style={{ fontSize: "0.9em" }}>
-                    {c.is_reason_code ? (
-                      <>Reason code: <code>{c.rationale}</code></>
-                    ) : (
-                      c.rationale
-                    )}
+                  <div className={styles.muted}>
+                    {c.is_reason_code ? <>Reason code: <code>{c.rationale}</code></> : c.rationale}
                   </div>
                 )}
-                {c.quoted_evidence && <blockquote>“{c.quoted_evidence}”</blockquote>}
+                {c.quoted_evidence && <blockquote className={styles.quote}>“{c.quoted_evidence}”</blockquote>}
               </div>
             ))}
           </div>
         </section>
       )}
 
-      <section className="hide-call">
+      <section className={styles.hideCall}>
         <button
           type="button"
-          className="secondary outline compact"
+          className={styles.hideButton}
           onClick={async () => {
             await hide.mutateAsync(call.id);
             navigate("/");
@@ -1257,23 +1360,23 @@ export function CallDetail() {
         >
           Hide this call
         </button>
-        <small className="muted">Removes it from your feed permanently. Other users are unaffected.</small>
+        <small className={styles.muted}>Removes it from your feed permanently. Other users are unaffected.</small>
       </section>
     </main>
   );
 }
 ```
 
-- [ ] **Step 4: Run the test + tsc**
+- [ ] **Step 5: Run the test + tsc**
 
 Run: `cd frontend && pnpm exec vitest run src/routes/CallDetail.test.tsx && pnpm exec tsc --noEmit`
-Expected: PASS (3); tsc clean.
+Expected: PASS (4 — includes the Start-drafting href test); tsc clean.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/src/routes/CallDetail.tsx frontend/src/routes/CallDetail.test.tsx
-git commit -m "feat(spa): CallDetail route component (ranking hero, notes, criteria, hide)"
+git add frontend/src/routes/CallDetail.tsx frontend/src/routes/CallDetail.module.css frontend/src/routes/CallDetail.test.tsx
+git commit -m "feat(spa): CallDetail route component + module CSS (ranking hero, notes, criteria, hide)"
 ```
 
 ---
@@ -1411,7 +1514,7 @@ Now that `/calls/:id` is fully live in React, delete the Jinja detail surface, r
 - Modify: `frontend/routes.json` (remove `/calls` from `backend_prefixes`)
 - Modify (generated): `frontend/src/routes.gen.ts`, `src/call_manager/web/spa_routes.py`, `frontend/src/api/schema.gen.ts`
 - Modify: `tests/test_gen_routes.py` (`is_backend_route` flip), `tests/test_web_auth.py` (repoint)
-- Delete: `tests/test_web_call_detail.py`, `tests/test_web_calls_hide.py`, `tests/test_web_calls_start_drafting.py`
+- Delete: `tests/test_web_call_detail.py`, `tests/test_web_calls_hide.py`, `tests/proposal_assist/test_web_calls_start_drafting.py`
 
 **Interfaces:**
 - Produces: no bare `/calls/{id}` Jinja route; `BACKEND_PREFIXES` no longer contains `/calls`; `schema.gen.ts` no longer contains the Jinja `/calls/{call_id}` HTML path.
@@ -1485,7 +1588,8 @@ def test_no_jinja_calls_route_remains(monkeypatch, pg_url):
 Delete the superseded Jinja tests (coverage moved to `tests/test_api_call_detail.py` + `tests/test_api_calls_hide.py` in Tasks 2–3; the Start-drafting link is covered by `CallDetail.test.tsx`):
 
 ```bash
-git rm tests/test_web_call_detail.py tests/test_web_calls_hide.py tests/test_web_calls_start_drafting.py
+git rm tests/test_web_call_detail.py tests/test_web_calls_hide.py \
+       tests/proposal_assist/test_web_calls_start_drafting.py
 ```
 
 - [ ] **Step 5: Repoint the auth tests off `/calls`**
@@ -1542,8 +1646,10 @@ git commit -m "feat(teardown): delete Jinja call-detail route/template/module; r
 
 ## Self-Review
 
-**Spec coverage:** §3.1 backend read-model → Task 2 (incl. P1b active-not-owned parity test). §3.1 hide → Task 3. Helper relocation → Task 1. §3.2 hooks → Task 4; `CallDetail` → Task 5; `CallRow` Link + manifest prefix → Task 6. §4 teardown + six test surfaces → Tasks 6 (gen_routes is_spa_route, dev-proxy, CallRow.test) + 7 (call_detail/hide/start_drafting deletes, auth repoint, gen_routes is_backend_route). §5 routing order + manifest-flip-with-deletion → Tasks 6/7 split (manifest add while Jinja exists = inert; backend_prefixes removal + deletion together in 7). §6 gates → per-task + whole-slice. No spec requirement is unmapped.
+**Spec coverage:** §3.1 backend read-model → Task 2 (incl. P1b active-not-owned parity test). §3.1 hide → Task 3. Helper relocation → Task 1. §3.2 hooks → Task 4; `CallDetail` + its module CSS → Task 5; `CallRow` Link + manifest prefix → Task 6. §4 teardown + six test surfaces → Tasks 6 (gen_routes is_spa_route, dev-proxy, CallRow.test) + 7 (call_detail/hide/start_drafting deletes, auth repoint, gen_routes is_backend_route). §5 routing order + manifest-flip-with-deletion → Tasks 6/7 split (manifest add while Jinja exists = inert; backend_prefixes removal + deletion together in 7). §6 gates → per-task + whole-slice. No spec requirement is unmapped.
 
 **Placeholder scan:** every code step carries complete code; commands have expected output. The one deliberately-flagged spot is the auth `next=` expected string (Task 7 Step 5) — the plan instructs running the test to confirm the exact encoding, which is the correct TDD posture for an env-derived value, not a placeholder.
 
 **Type consistency:** Pydantic field names in Task 2 (`aggregate_reason_label`, `model_label`, `analysis_model_label`, `is_topic_fit`, `is_reason_code`, `best_profile_id`) match the TS usage in Task 5. Hook signatures `useCallDetail(id: number, profile?: number | null)` / `useHideCall()` (Task 4) match their call sites (Task 5). Model names are uniformly `CallDetail*`/`CallHide*` (collision-proof). Path template `"/api/calls/{call_id}"` is identical across schema, hooks, tests.
+
+**Codex-review fixes applied (this revision):** (1) `CallDetail` now ships a sibling `CallDetail.module.css` using `--app-*` theme tokens — NOT the Jinja-era global classes (`score-hero`/`detail-grid`/…) that the SPA does not load; the score band is verified via `data-band`. (2) `test_web_calls_start_drafting.py` paths corrected to `tests/proposal_assist/` (it is NOT at `tests/` root) in Task 1 Step 5, Task 7 Step 4, the Files list, and here. (3) Task 1 imports only `_criterion_detail` + `_parse_optional_profile_id` into `calls.py` (importing the other two would be ruff F401). (4) The Start-drafting `/cockpit/new?…` href now has an explicit assertion in `CallDetail.test.tsx` (Task 5), so it keeps coverage after the Jinja start-drafting test is deleted.
