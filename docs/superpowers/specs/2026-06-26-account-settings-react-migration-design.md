@@ -57,8 +57,8 @@ Append four endpoints (any authenticated user — operates on self):
 - `profiles: list[AccountProfileOut]` — active profiles ordered by name, each `{id, name, subscribed: bool}`
   (`subscribed` = a `Subscription` row exists for `(user, profile)`).
 
-**`POST /api/me/name`** — body `{name: str}` → `db_user.name = name.strip() or None` → returns
-`{name: str | None}`.
+**`POST /api/me/name`** — body `{name: str}` → 401 if the user row is missing (mirror the Jinja guard) →
+`db_user.name = name.strip() or None` → returns `{name: str | None}`.
 
 **`POST /api/me/password`** — body `{current_password: str, new_password: str}`:
 - 401 if the user row vanished; **400 "current password is incorrect"** if `password_hash is None` OR
@@ -70,6 +70,7 @@ Append four endpoints (any authenticated user — operates on self):
   secure=cookie_secure, samesite="lax")` and return `{ok: true}`. Byte-for-byte the Jinja cookie attrs.
 
 **`PUT /api/me/subscriptions`** — body `{profile_ids: list[int]}` (the *desired* subscribed set):
+- 401 if the user row is missing (mirror the Jinja guard).
 - Filter to active profiles in the set (`valid_ids`); apply the **diff-not-replace** logic verbatim
   (`to_remove = existing - valid_ids`, `to_add = valid_ids - existing`) so a surviving row's
   `digest_enabled` is never reset. Returns `{subscribed: list[int]}` (sorted resulting set).
@@ -85,11 +86,14 @@ when `google_oidc_enabled && !google_linked`. The OAuth flow + its UI changes be
 
 ### 3.2 Frontend — `Settings` route + hooks
 
-- `api/settings.ts`: `useSettings()` (query `["me-settings"]` → `GET /api/me/settings`), `useUpdateName()`
-  (→ `POST /api/me/name`, invalidate `["me-settings"]`), `useChangePassword()` (→ `POST /api/me/password`;
-  no invalidation — `has_password` stays true and the cookie is re-minted by the response),
-  `useSaveSubscriptions()` (→ `PUT /api/me/subscriptions`, invalidate `["me-settings"]`). (The session query
-  `["me"]` carries no name field, so a name change need not touch it.)
+- `api/account.ts` (**NOT `api/settings.ts`** — that already exists for the cockpit *workspace* settings,
+  exporting `useSettings(id)`; a second `api/settings.ts`/`useSettings` would overwrite it / collide. Use an
+  account-scoped module + hook names): `useAccountSettings()` (query `["me-settings"]` → `GET /api/me/settings`),
+  `useUpdateName()` (→ `POST /api/me/name`, invalidate `["me-settings"]`), `useChangePassword()`
+  (→ `POST /api/me/password`; no invalidation — `has_password` stays true and the cookie is re-minted by the
+  response), `useSaveSubscriptions()` (→ `PUT /api/me/subscriptions`, invalidate `["me-settings"]`). (The
+  session query `["me"]` carries no name field, so a name change need not touch it.) `routes/Settings.tsx` has
+  no collision.
 - `routes/Settings.tsx` + `Settings.module.css`: the five sections at parity —
   header (`Signed in as {email}` + admin badge), **display-name** form (save → inline success),
   **Google sign-in** (only if `google_oidc_enabled`: "connected" when linked, else the native connect form),
@@ -147,16 +151,25 @@ when `google_oidc_enabled && !google_linked`. The OAuth flow + its UI changes be
 - `uv run python -c "import call_manager.main"` boots; after teardown no non-`/api` route under `/me/`
   remains (route-table check).
 - Backend suite green: settings read-model (name/email/admin, oauth/password flags, active profiles +
-  subscribed flag); name update (strip→None); **password** (success re-mints the cookie + bumps
-  `session_epoch`; wrong-current → 400; weak-new → 400; OAuth-only-no-password → 400); **subscriptions**
-  (diff preserves `digest_enabled`; validates active; empty set clears). `ruff` clean.
+  subscribed flag); name update (strip→None); **password** (success re-mints the session cookie — **assert the
+  `Set-Cookie` carries `httponly`, `samesite=lax`, `secure == cookie_secure`,
+  `max-age == session_max_age_seconds`**, not merely that a cookie is present — and bumps `session_epoch`;
+  wrong-current → 400; weak-new → 400; OAuth-only-no-password → 400); **subscriptions** (diff preserves
+  `digest_enabled`; validates active; empty set clears). `ruff` clean. (The new mutations are unsafe `/api`
+  methods so `OriginCSRFMiddleware` applies, but it 403s only a *present-but-mismatched* / `"null"` Origin —
+  an **absent** Origin is allowed (`csrf.py:122-124`), so the TestClient mutation tests pass without an Origin
+  header, exactly as the calls-detail hide tests do.)
 - Frontend `tsc` + `vitest` green (Settings renders the conditional sections off the flags; name save;
   password change success/error; subscriptions checkbox → `PUT` the checked ids) + `build` clean.
-- **Auth re-repoint:** the calls-detail slice pointed `test_web_auth.py`'s 401-redirect tests at `/me` +
-  `/me/name`; this slice deletes those, so re-repoint them onto a still-Jinja protected route — `GET /profiles`
-  (GET tests) + `POST /profiles/{id}/edit` (the POST-no-`next` test; its Form fields are all `Form("")`
-  defaults, so an unauthenticated POST 401s on the dependency, not a 422). Confirm the exact `next=` encoding
-  by running.
+- **Auth re-repoint — THREE tests, not two.** The calls-detail slice pointed all three of `test_web_auth.py`'s
+  `/me`-sampling tests at `/me`: `test_html_401_get_threads_next` (`GET /me?x=1` → 303),
+  `test_json_401_unaffected_by_next` (`GET /me`, no `Accept: text/html` → raw 401 JSON), and
+  `test_html_401_post_does_not_thread_next` (`POST /me/name` → 303). This slice deletes the Jinja `/me` routes
+  and `/me` flips from server-auth-gated to a client-auth-gated SPA prefix, so **all three move** (the JSON-401
+  one too — after teardown `GET /me` 404s, it does not 401). Repoint: the **two GET** tests → `GET /profiles`
+  (still-Jinja, protected); the **POST** test → `POST /profiles/{id}/edit` (its Form fields are all `Form("")`
+  defaults, so an unauthenticated POST 401s on the auth dependency, not a 422 — a safe target). Confirm the
+  exact `next=` encoding by running.
 - Manifest/schema regen: `uv run python scripts/gen_routes.py` → `SPA_ROUTES` gains `/me`,
   `BACKEND_PREFIXES` drops `/me`; `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh` → new
   `/api/me/settings|name|password|subscriptions` paths added, Jinja `/me` HTML path dropped; `routes.gen.ts`
@@ -174,7 +187,13 @@ when `google_oidc_enabled && !google_linked`. The OAuth flow + its UI changes be
   `/me`; this slice → `/profiles`; the profiles slice → `/admin`; the auth slice ultimately moves the 401
   behavior client-side). Expected, small, per-slice.
 - **`/me` becomes a pure SPA prefix:** after teardown the only `/me*` backend routes are `/api/me/*` (under
-  `/api`), so dropping `/me` from `backend_prefixes` is correct and `/me` joins `spa_routes` cleanly.
+  `/api`), so dropping `/me` from `backend_prefixes` is correct and `/me` joins `spa_routes` cleanly. (`/me`
+  ships no React sub-routes, so EXACT ownership would be marginally stricter, but PREFIX matches the `/calls`
+  precedent and is harmless — `is_spa_route` appends `/`, so `/me` never swallows a sibling like `/members`.)
+- **OAuth connect callback still lands cleanly:** the native `/auth/google/start?link=1` POST redirects back to
+  `/me` on callback success. Now that `/me` is a SPA GET prefix, that redirect serves the SPA shell → React
+  renders Settings (and `google_linked` flips to "connected") — there is no Jinja `/me` to 404 into. So the
+  connect button keeps working across this slice and into the later auth slice.
 - **Model-name collisions:** namespace the new models (`Account*`/`UpdateName*`/`ChangePassword*`/
   `Subscriptions*`); verify none collide in `schema.gen.ts` during the plan.
 
