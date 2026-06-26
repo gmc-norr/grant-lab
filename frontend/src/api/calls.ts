@@ -20,6 +20,7 @@ export function useCallDetail(id: number, profile?: number | null) {
           },
         }),
       ),
+    retry: 0,
   });
 }
 
