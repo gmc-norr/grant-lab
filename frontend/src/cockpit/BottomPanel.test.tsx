@@ -12,6 +12,8 @@ const h = vi.hoisted(() => ({
 vi.mock("../api/proposals", () => ({ useInboxCount: () => h.count }));
 vi.mock("../api/problems", () => ({ useProblems: () => h.problems }));
 vi.mock("../api/audit", () => ({ useCitationAudit: () => h.audit }));
+vi.mock("../api/annotations", () => ({ useAnnotations: () => ({ data: { is_owner: true, sections: [] } }) }));
+vi.mock("./ClaimsPanel", () => ({ ClaimsPanel: () => <div>claims-body</div> }));
 vi.mock("./InboxPanel", () => ({ InboxPanel: () => <div>inbox-body</div> }));
 vi.mock("./ProblemsPanel", () => ({ ProblemsPanel: () => <div>problems-body</div> }));
 vi.mock("./ActivityPanel", () => ({ ActivityPanel: () => <div>activity-body</div> }));

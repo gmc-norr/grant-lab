@@ -15,7 +15,7 @@ export function useAnnotations(id: string) {
     enabled: !!id,
     refetchInterval: (query) => {
       const data = query.state.data as AnnotationsResponse | undefined;
-      const pending = data?.sections.some((s) => s.job.status === "pending");
+      const pending = data?.sections.some((s) => s.job?.status === "pending");
       return pending ? 3000 : false;
     },
     queryFn: async () =>
