@@ -340,6 +340,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/calls/{call_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Call Detail */
+        get: operations["get_call_detail_api_calls__call_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{call_id}/hide": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hide Call */
+        post: operations["hide_call_api_calls__call_id__hide_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/me": {
         parameters: {
             query?: never;
@@ -2267,6 +2301,100 @@ export interface components {
              */
             name: string;
         };
+        /** CallDetailCallOut */
+        CallDetailCallOut: {
+            /** Budget Max */
+            budget_max: number | null;
+            /** Budget Min */
+            budget_min: number | null;
+            /** Currency */
+            currency: string | null;
+            /** Deadline */
+            deadline: string | null;
+            /** External Id */
+            external_id: string | null;
+            /** Id */
+            id: number;
+            /** Keywords */
+            keywords: string[];
+            /** Programme */
+            programme: string | null;
+            /** Published At */
+            published_at: string | null;
+            /** Source Name */
+            source_name: string | null;
+            /** Summary */
+            summary: string | null;
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
+        };
+        /** CallDetailCriterionOut */
+        CallDetailCriterionOut: {
+            /** Criterion */
+            criterion: string;
+            /** Detail */
+            detail: string | null;
+            /** Is Reason Code */
+            is_reason_code: boolean;
+            /** Is Topic Fit */
+            is_topic_fit: boolean;
+            /** Label */
+            label: string;
+            /** Quoted Evidence */
+            quoted_evidence: string | null;
+            /** Rating */
+            rating: string;
+            /** Rationale */
+            rationale: string | null;
+        };
+        /** CallDetailNoteOut */
+        CallDetailNoteOut: {
+            /** Category */
+            category: string | null;
+            /** Heading */
+            heading: string;
+            /** Text */
+            text: string;
+        };
+        /** CallDetailOut */
+        CallDetailOut: {
+            /** Best Profile Id */
+            best_profile_id: number | null;
+            call: components["schemas"]["CallDetailCallOut"];
+            /** Criteria */
+            criteria: components["schemas"]["CallDetailCriterionOut"][];
+            ranking: components["schemas"]["CallDetailRankingOut"] | null;
+        };
+        /** CallDetailRankingOut */
+        CallDetailRankingOut: {
+            /** Aggregate Reason Label */
+            aggregate_reason_label: string | null;
+            /** Aggregate Score */
+            aggregate_score: number;
+            /** Analysis Model Label */
+            analysis_model_label: string;
+            /** Applicant Notes */
+            applicant_notes: components["schemas"]["CallDetailNoteOut"][];
+            /** Embed Similarity */
+            embed_similarity: number | null;
+            /** Escalated */
+            escalated: boolean;
+            /** Escalated From Score */
+            escalated_from_score: number | null;
+            /** Model Label */
+            model_label: string;
+            /** Rationale */
+            rationale: string;
+            /** Summary */
+            summary: string | null;
+        };
+        /** CallHideOut */
+        CallHideOut: {
+            /** Hidden */
+            hidden: boolean;
+        };
         /** CallOut */
         CallOut: {
             /** Aggregate Score */
@@ -3652,6 +3780,232 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DashboardOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_call_detail_api_calls__call_id__get: {
+        parameters: {
+            query?: {
+                profile?: string | null;
+            };
+            header?: never;
+            path: {
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallDetailOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    hide_call_api_calls__call_id__hide_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallHideOut"];
                 };
             };
             /** @description Bad Request */

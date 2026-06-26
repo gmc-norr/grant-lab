@@ -6,10 +6,18 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import Call, CallRanking, CallRankingCriterion, Profile, User
+from call_manager.db.models import (
+    Call,
+    CallRanking,
+    CallRankingCriterion,
+    Profile,
+    User,
+    UserCallDismissal,
+)
 from call_manager.web.call_detail_view import _criterion_detail, _parse_optional_profile_id
 from call_manager.web.dashboard import build_dashboard_view, resolve_profile_selection
 from call_manager.web.filters import criterion_label, model_label, note_category_heading
@@ -140,6 +148,30 @@ class CallDetailOut(BaseModel):
     ranking: CallDetailRankingOut | None
     criteria: list[CallDetailCriterionOut]
     best_profile_id: int | None
+
+
+class CallHideOut(BaseModel):
+    hidden: bool
+
+
+@router.post("/calls/{call_id}/hide", response_model=CallHideOut)
+def hide_call(
+    request: Request,
+    call_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        # ON CONFLICT DO NOTHING — idempotent if the user hides twice.
+        session.execute(
+            pg_insert(UserCallDismissal)
+            .values(user_id=user.id, call_id=call_id)
+            .on_conflict_do_nothing(index_elements=["user_id", "call_id"])
+        )
+        session.commit()
+    return CallHideOut(hidden=True)
 
 
 @router.get("/calls/{call_id}", response_model=CallDetailOut)
