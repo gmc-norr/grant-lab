@@ -18,7 +18,7 @@ it("Workspaces is an SPA link to the cockpit front door", () => {
   expect(screen.getByRole("link", { name: "Workspaces" })).toHaveAttribute("href", "/cockpit");
 });
 
-it("Profiles and Settings still deep-link to their Jinja pages", () => {
+it("Profiles deep-links to its Jinja page; Settings routes in-app to /me", () => {
   renderWithProviders(<ActivityBar />, { route: "/" });
   expect(screen.getByRole("link", { name: "Profiles" })).toHaveAttribute("href", "/profiles");
   expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/me");
