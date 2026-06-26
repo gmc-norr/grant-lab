@@ -32,7 +32,7 @@ def test_call_detail_includes_best_profile_id_when_ranking_exists(
 
     response = client_authed_user.get(f"/calls/{cid}")
     assert response.status_code == 200
-    assert f"/workspaces/new?call_id={cid}&profile_id={pid}".encode() in response.content
+    assert f"/cockpit/new?call_id={cid}&profile_id={pid}".encode() in response.content
 
 
 def test_call_detail_falls_back_to_no_profile_id_when_no_ranking(
@@ -55,9 +55,9 @@ def test_call_detail_falls_back_to_no_profile_id_when_no_ranking(
     # Either: only ?call_id=N (no &profile_id), OR no Start drafting link at all if
     # the call has no rankings for the user. We just want the bare call_id form
     # — not a URL with profile_id.
-    assert f"/workspaces/new?call_id={cid}".encode() in response.content
+    assert f"/cockpit/new?call_id={cid}".encode() in response.content
     # Confirm there's no profile_id query string immediately following.
-    assert f"/workspaces/new?call_id={cid}&profile_id=".encode() not in response.content
+    assert f"/cockpit/new?call_id={cid}&profile_id=".encode() not in response.content
 
 
 def test_call_detail_picks_highest_scoring_profile_among_users_profiles(

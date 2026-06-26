@@ -37,8 +37,7 @@
       <ul class="nav-links">
         <li><a href="/" {% if path == '/' or path.startswith('/calls') %}aria-current="page"{% endif %}>Dashboard</a></li>
         <li><a href="/profiles" {% if path.startswith('/profiles') %}aria-current="page"{% endif %}>Profiles</a></li>
-        <li><a href="/workspaces" {% if path.startswith('/workspaces') %}aria-current="page"{% endif %}>Workspaces</a></li>
-        <li><a href="/me" {% if path == '/me' %}aria-current="page"{% endif %}>Settings</a></li>
+<li><a href="/me" {% if path == '/me' %}aria-current="page"{% endif %}>Settings</a></li>
         {% if user.is_admin %}<li><a href="/admin" {% if path.startswith('/admin') %}aria-current="page"{% endif %}>Admin</a></li>{% endif %}
       </ul>
       <div class="nav-user">
