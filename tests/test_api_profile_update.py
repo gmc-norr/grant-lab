@@ -146,3 +146,40 @@ def test_update_404_missing(monkeypatch, pg_url, pg_session_factory):
     with client:
         r = client.put("/api/profiles/999999", json=_EDIT)
     assert r.status_code == 404
+
+
+def test_update_budget_out_of_range_400(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Lab")
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(f"/api/profiles/{pid}", json={**_EDIT, "budget_min": "999999999999999"})
+    assert r.status_code == 400
+
+
+def test_update_trl_out_of_range_400(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Lab")
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(f"/api/profiles/{pid}", json={**_EDIT, "trl_max": "99"})
+    assert r.status_code == 400
+
+
+def test_update_unknown_level_400(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    # level is validated IN-session (org units only) — profile_factory makes an org unit.
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Lab")
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(f"/api/profiles/{pid}", json={**_EDIT, "level": "galaxy"})
+    assert r.status_code == 400
+
+
+def test_update_description_too_large_413(monkeypatch, pg_url, pg_session_factory, profile_factory):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Lab")
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(f"/api/profiles/{pid}", json={**_EDIT, "description": "x" * 50_001})
+    assert r.status_code == 413
