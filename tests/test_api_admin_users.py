@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -116,7 +115,9 @@ def test_approve_rejects_non_pending(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 400
 
 
-def test_approve_invalid_role_on_nonexistent_is_400_not_404(monkeypatch, pg_url, pg_session_factory):
+def test_approve_invalid_role_on_nonexistent_is_400_not_404(
+    monkeypatch, pg_url, pg_session_factory
+):
     # ordering lock: role is validated BEFORE the user lookup.
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
@@ -151,7 +152,9 @@ def test_approve_local_requires_password_then_bumps_epoch(monkeypatch, pg_url, p
         assert u.session_epoch == ep0 + 1
 
 
-def test_approve_oauth_without_password_does_not_bump_epoch(monkeypatch, pg_url, pg_session_factory):
+def test_approve_oauth_without_password_does_not_bump_epoch(
+    monkeypatch, pg_url, pg_session_factory
+):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     pid = _user(pg_session_factory, email="g@ki.se", status="pending", oidc_sub="s9")
@@ -173,7 +176,10 @@ def test_approve_weak_password_400(monkeypatch, pg_url, pg_session_factory):
         s.commit()
         s.refresh(p)
         pid = p.id
-    r = c.post(f"/api/admin/users/{pid}/approve", json={"role": "member", "initial_password": "short"})
+    r = c.post(
+        f"/api/admin/users/{pid}/approve",
+        json={"role": "member", "initial_password": "short"},
+    )
     assert r.status_code == 400
 
 
@@ -307,10 +313,8 @@ def test_reset_password_bumps_epoch(monkeypatch, pg_url, pg_session_factory):
         s.commit()
         s.refresh(u)
         uid, ep0 = u.id, u.session_epoch
-    assert (
-        c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "fresh-strong-pw"}).status_code
-        == 200
-    )
+    r = c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "fresh-strong-pw"})
+    assert r.status_code == 200
     with pg_session_factory() as s:
         u = s.get(User, uid)
         assert verify_password(u.password_hash, "fresh-strong-pw") and u.session_epoch == ep0 + 1
@@ -320,7 +324,8 @@ def test_reset_rejects_weak_400(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     uid = _user(pg_session_factory, email="rp2@ki.se", status="active")
-    assert c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "short"}).status_code == 400
+    r = c.post(f"/api/admin/users/{uid}/reset-password", json={"new_password": "short"})
+    assert r.status_code == 400
 
 
 def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_factory):
@@ -328,13 +333,12 @@ def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_facto
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="rpd@ki.se", status="disabled")
-    assert (
-        c.post(f"/api/admin/users/{did}/reset-password", json={"new_password": "fresh-strong-pw"}).status_code
-        == 200
-    )
+    r = c.post(f"/api/admin/users/{did}/reset-password", json={"new_password": "fresh-strong-pw"})
+    assert r.status_code == 200
 
 
 def test_reset_404(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
-    assert c.post("/api/admin/users/999999/reset-password", json={"new_password": "fresh-strong-pw"}).status_code == 404
+    r = c.post("/api/admin/users/999999/reset-password", json={"new_password": "fresh-strong-pw"})
+    assert r.status_code == 404
