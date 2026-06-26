@@ -122,7 +122,7 @@ export function CallDetail() {
           <div className={styles.kv}>
             <span className={styles.k}>External link</span>
             <span className={styles.v}>
-              <a href={call.url} target="_blank" rel="noopener">Open at source →</a>
+              <a href={call.url} target="_blank" rel="noopener noreferrer">Open at source →</a>
             </span>
           </div>
         </div>
@@ -166,7 +166,7 @@ export function CallDetail() {
         </section>
       )}
 
-      <section className={styles.hideCall}>
+      <section className={styles.hideCall} aria-label="Hide this call">
         <button
           type="button"
           className={styles.hideButton}

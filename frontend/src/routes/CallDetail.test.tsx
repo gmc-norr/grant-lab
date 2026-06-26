@@ -72,6 +72,13 @@ it("Start drafting links to /cockpit/new with the call + best profile prefilled"
   expect(href).toContain("profile_id=7"); // best_profile_id from RANKED
 });
 
+it("renders the low band for a zero aggregate score", async () => {
+  const zero = { ...RANKED, ranking: { ...RANKED.ranking, aggregate_score: 0 } };
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: zero, error: undefined } as never);
+  renderDetail();
+  expect(await screen.findByText("0")).toHaveAttribute("data-band", "low");
+});
+
 it("a not-found error shows the not-found alert", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({
     data: undefined,
