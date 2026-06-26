@@ -24,7 +24,10 @@ from call_manager.db.models import (
     WorkspaceEvent,
 )
 from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
-from call_manager.proposal_assist.analysis.queue import enqueue_containing_section
+from call_manager.proposal_assist.analysis.queue import (
+    enqueue_containing_section,
+    enqueue_section_job,
+)
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
@@ -299,3 +302,47 @@ def dismiss_annotation(
         )
         session.commit()
     return DismissResultOut(dismissed=True)
+
+
+class ReanalyzeResultOut(BaseModel):
+    enqueued: bool
+
+
+@router.post(
+    "/workspaces/{workspace_id}/sections/{n}/reanalyze",
+    response_model=ReanalyzeResultOut,
+)
+def reanalyze_section(
+    workspace_id: uuid.UUID,
+    n: int,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> ReanalyzeResultOut:
+    """Re-enqueue claim analysis for the section's LIVE content at HEAD.
+    Owner-only. 404 if n is out of range or there is no draft yet."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    with sf() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        repo = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        proposal = repo / PROPOSAL_FILENAME
+        if not proposal.exists():
+            raise HTTPException(status_code=404, detail="no such section")
+        try:
+            head = current_head(repo)
+        except GitCommitError as e:
+            raise HTTPException(status_code=404, detail="no such section") from e
+        sections = split_sections(proposal.read_text())
+        if n < 0 or n >= len(sections):
+            raise HTTPException(status_code=404, detail="no such section")
+        sec = sections[n]
+        enqueued = enqueue_section_job(
+            session,
+            workspace_id=ws.id,
+            section_index=sec.index,
+            section_heading=sec.heading,
+            section_sha=sec.sha,
+            commit_sha=head,
+        )
+        session.commit()
+    return ReanalyzeResultOut(enqueued=enqueued)
