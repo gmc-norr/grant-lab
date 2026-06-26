@@ -78,7 +78,10 @@ it("a not-found error shows the not-found alert", async () => {
     error: { error: { code: "not_found", message: "call not found" } },
   } as never);
   renderDetail();
-  expect(await screen.findByRole("alert")).toHaveTextContent(/call not found/i);
+  await screen.findByRole("alert");
+  // Proves the notFound branch fires: unwrap throws ApiError with .code = "not_found",
+  // which the component reads directly off the error object (cast is correct).
+  expect(screen.getByRole("alert").textContent).toBe("Call not found.");
 });
 
 it("Hide posts and navigates back to /", async () => {
