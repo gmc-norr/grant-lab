@@ -459,6 +459,72 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/annotations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Annotations
+         * @description Claims-tab read-model: every live draft section with its open findings +
+         *     the latest analysis-job state. Degrades to {is_owner, sections: []} (200) on
+         *     ANY pre-draft state — no repo / no HEAD / no proposal.md — because the Claims
+         *     tab is always mounted (a strip fragment may 404; an always-present tab cannot).
+         */
+        get: operations["get_annotations_api_workspaces__workspace_id__annotations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/annotations/{annotation_id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss Annotation
+         * @description Dismiss an open annotation with a required, audited reason. Owner-only.
+         *     Guarded UPDATE WHERE status='open' (race -> 409) + user_claim_dismissed event.
+         */
+        post: operations["dismiss_annotation_api_workspaces__workspace_id__annotations__annotation_id__dismiss_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/annotations/{annotation_id}/insert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Insert Annotation
+         * @description Insert the citation an uncited_supported annotation suggests, via the
+         *     canonical write path (insert_from_annotation). Owner-only. On a genuine
+         *     (non-idempotent) insert, re-enqueue analysis for the now-changed section.
+         */
+        post: operations["insert_annotation_api_workspaces__workspace_id__annotations__annotation_id__insert_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{workspace_id}/citation-audit": {
         parameters: {
             query?: never;
@@ -1113,6 +1179,27 @@ export interface paths {
          *     commit mutex is released by this handler's COMMIT / ROLLBACK.
          */
         post: operations["post_save_section_api_workspaces__workspace_id__sections__index__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/sections/{n}/reanalyze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reanalyze Section
+         * @description Re-enqueue claim analysis for the section's LIVE content at HEAD.
+         *     Owner-only. 404 if n is out of range or there is no draft yet.
+         */
+        post: operations["reanalyze_section_api_workspaces__workspace_id__sections__n__reanalyze_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2588,6 +2675,13 @@ export interface components {
             /** Email */
             email: string;
         };
+        /** AnnotationsOut */
+        AnnotationsOut: {
+            /** Is Owner */
+            is_owner: boolean;
+            /** Sections */
+            sections: components["schemas"]["ClaimSectionOut"][];
+        };
         /**
          * ApiError
          * @description OpenAPI SCHEMA mirror of the error envelope (see ``envelope_dict``).
@@ -3145,6 +3239,30 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** ClaimFindingOut */
+        ClaimFindingOut: {
+            /** Can Insert */
+            can_insert: boolean;
+            /** Claim Text */
+            claim_text: string;
+            /** Evidence Quote */
+            evidence_quote: string | null;
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Ref Label */
+            ref_label: string;
+            /** Sentence Ordinal */
+            sentence_ordinal: number;
+        };
+        /** ClaimJobOut */
+        ClaimJobOut: {
+            /** Error */
+            error: string | null;
+            /** Status */
+            status: string | null;
+        };
         /** ClaimOut */
         ClaimOut: {
             /** Claim Hash */
@@ -3155,6 +3273,20 @@ export interface components {
             reason: string;
             /** Section Index */
             section_index: number;
+        };
+        /** ClaimSectionOut */
+        ClaimSectionOut: {
+            /** Findings */
+            findings: components["schemas"]["ClaimFindingOut"][];
+            /** Heading */
+            heading: string;
+            /** Index */
+            index: number;
+            job: components["schemas"]["ClaimJobOut"];
+            /** Occurrence */
+            occurrence: number;
+            /** Section Sha */
+            section_sha: string;
         };
         /** CockpitMetaOut */
         CockpitMetaOut: {
@@ -3242,6 +3374,16 @@ export interface components {
             /** Acknowledged */
             acknowledged: boolean;
         };
+        /** DismissReasonIn */
+        DismissReasonIn: {
+            /** Reason */
+            reason: string;
+        };
+        /** DismissResultOut */
+        DismissResultOut: {
+            /** Dismissed */
+            dismissed: boolean;
+        };
         /** DraftOut */
         DraftOut: {
             /** Can Edit */
@@ -3322,6 +3464,20 @@ export interface components {
             text_error?: string | null;
             /** Text Status */
             text_status: string;
+        };
+        /** InsertResultOut */
+        InsertResultOut: {
+            /** Citekey */
+            citekey?: string | null;
+            /** Commit Sha */
+            commit_sha?: string | null;
+            /** Ev Id */
+            ev_id?: string | null;
+            /**
+             * Idempotent
+             * @default false
+             */
+            idempotent: boolean;
         };
         /** KindIn */
         KindIn: {
@@ -3408,6 +3564,11 @@ export interface components {
             failed: number;
             /** Pending */
             pending: number;
+        };
+        /** ReanalyzeResultOut */
+        ReanalyzeResultOut: {
+            /** Enqueued */
+            enqueued: boolean;
         };
         /** ReferenceChunksOut */
         ReferenceChunksOut: {
@@ -5168,6 +5329,348 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_annotations_api_workspaces__workspace_id__annotations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnotationsOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    dismiss_annotation_api_workspaces__workspace_id__annotations__annotation_id__dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                annotation_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DismissReasonIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DismissResultOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    insert_annotation_api_workspaces__workspace_id__annotations__annotation_id__insert_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                annotation_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InsertResultOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };
@@ -8770,6 +9273,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SaveResultOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    reanalyze_section_api_workspaces__workspace_id__sections__n__reanalyze_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReanalyzeResultOut"];
                 };
             };
             /** @description Bad Request */

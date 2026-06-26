@@ -8,6 +8,7 @@ Spec 2026-06-10 §3."""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -16,8 +17,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ClaimAnalysisJob
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 
 MAX_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
 
 
 def enqueue_section_job(
@@ -60,6 +66,50 @@ def enqueue_section_job(
     )
     result = session.execute(stmt)
     return result.inserted_primary_key is not None
+
+
+def enqueue_containing_section(
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    workspaces_dir: str,
+    commit_sha: str,
+    ev_id: str,
+) -> None:
+    """After a successful citation insert, enqueue a claim-analysis job for the
+    section that now contains the new ev_id marker.
+
+    Re-splits the HEAD document, locates the first section whose text contains
+    the new marker, and calls enqueue_section_job in the SAME session
+    (content-keyed ON CONFLICT DO NOTHING makes this idempotent). The
+    reconciliation tick would self-heal eventually; this is immediacy.
+
+    Errors are logged and swallowed — a failed re-enqueue must not roll back
+    the committed insert.
+    """
+    marker_fragment = f"ev:{ev_id}"
+    try:
+        repo = workspace_repo_dir(workspaces_dir, workspace_id)
+        proposal = repo / PROPOSAL_FILENAME
+        if not proposal.exists():
+            return
+        sections = split_sections(proposal.read_text())
+        for sec in sections:
+            if marker_fragment in sec.text:
+                enqueue_section_job(
+                    session,
+                    workspace_id=workspace_id,
+                    section_index=sec.index,
+                    section_heading=sec.heading,
+                    section_sha=sec.sha,
+                    commit_sha=commit_sha,
+                )
+                session.commit()
+                return
+    except Exception:
+        logger.exception(
+            "post-insert re-enqueue failed for workspace %s ev %s", workspace_id, ev_id
+        )
 
 
 def claim_queued_jobs(session: Session, *, limit: int = 5) -> list[ClaimAnalysisJob]:

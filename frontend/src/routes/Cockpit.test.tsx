@@ -6,6 +6,13 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
 import { CockpitSidebar } from "../cockpit/CockpitSidebar";
+
+// useAnnotations polls /annotations and uses s.job.status (non-optional).  The
+// tests in this file mock api.GET to return draft-shaped data for every path,
+// so the annotations query would resolve with sections that lack a `job` field
+// and crash the refetchInterval callback.  Mock the hook at module level so it
+// never calls the real implementation in these tests.
+vi.mock("../api/annotations", () => ({ useAnnotations: () => ({ data: undefined }) }));
 import { resetEditorStore } from "../cockpit/editorStore";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { theme } from "../theme/theme";
