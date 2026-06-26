@@ -18,7 +18,6 @@ BACKEND_PREFIXES: tuple[str, ...] = (
     "/admin",
     "/auth",
     "/api",
-    "/me",
 )
 
 

@@ -69,7 +69,6 @@ from call_manager.web.routes import (
     auth,
     golden_set,
     health,
-    me,
     oauth_google,
     profiles,
     register,
@@ -522,7 +521,6 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(register.router)
     app.include_router(oauth_google.router)
-    app.include_router(me.router)
     app.include_router(admin.router)
     app.include_router(golden_set.router)
     app.include_router(profiles.router)
