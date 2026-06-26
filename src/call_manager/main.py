@@ -70,7 +70,6 @@ from call_manager.web.routes import (
     golden_set,
     health,
     oauth_google,
-    profiles,
     register,
 )
 from call_manager.web.spa_serving import mount_spa
@@ -523,7 +522,6 @@ def create_app() -> FastAPI:
     app.include_router(oauth_google.router)
     app.include_router(admin.router)
     app.include_router(golden_set.router)
-    app.include_router(profiles.router)
     app.include_router(proposals_router)
     app.include_router(coherence_router)
     app.include_router(evaluator_router)

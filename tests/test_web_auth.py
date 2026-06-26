@@ -122,12 +122,12 @@ def test_html_401_get_threads_next(monkeypatch, pg_url):
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.get(
-            "/profiles?x=1",
+            "/admin?x=1",
             headers={"Accept": "text/html"},
             follow_redirects=False,
         )
     assert r.status_code == 303
-    assert r.headers["location"] == "/login?next=%2Fprofiles%3Fx%3D1"
+    assert r.headers["location"] == "/login?next=%2Fadmin%3Fx%3D1"
 
 
 def test_html_401_post_does_not_thread_next(monkeypatch, pg_url):
@@ -136,7 +136,7 @@ def test_html_401_post_does_not_thread_next(monkeypatch, pg_url):
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
         r = client.post(
-            "/profiles/5/edit",
+            "/admin/rerank",
             headers={"Accept": "text/html"},
             follow_redirects=False,
         )
@@ -148,7 +148,7 @@ def test_json_401_unaffected_by_next(monkeypatch, pg_url):
     """A non-HTML caller still gets the raw JSON 401, no redirect."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
-        r = client.get("/profiles", follow_redirects=False)
+        r = client.get("/admin", follow_redirects=False)
     assert r.status_code == 401
     assert r.headers["content-type"].startswith("application/json")
 

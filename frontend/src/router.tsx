@@ -4,6 +4,10 @@ import { CockpitChat } from "./cockpit/chat/CockpitChat";
 import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { CallDetail } from "./routes/CallDetail";
 import { CallsFilters } from "./routes/CallsFilters";
+import { ProfileDetail } from "./routes/ProfileDetail";
+import { ProfileEdit } from "./routes/ProfileEdit";
+import { ProfileNew } from "./routes/ProfileNew";
+import { ProfilesList } from "./routes/ProfilesList";
 import { Settings } from "./routes/Settings";
 import { Cockpit } from "./routes/Cockpit";
 import { Dashboard } from "./routes/Dashboard";
@@ -26,6 +30,10 @@ export const router = createBrowserRouter([
       { path: "cockpit/:id", element: <Cockpit />, handle: { Sidebar: CockpitSidebar, RightPane: CockpitChat } },
       { path: "calls/:id", element: <CallDetail /> },
       { path: "me", element: <Settings /> },
+      { path: "profiles", element: <ProfilesList /> },
+      { path: "profiles/new", element: <ProfileNew /> },
+      { path: "profiles/:id", element: <ProfileDetail /> },
+      { path: "profiles/:id/edit", element: <ProfileEdit /> },
       // In-app soft 404 ONLY (client-side reached). NOT the route authority —
       // the server returns index.html only for manifest SPA routes, so an
       // unknown typed URL hits FastAPI's real 404, never this. Must not turn

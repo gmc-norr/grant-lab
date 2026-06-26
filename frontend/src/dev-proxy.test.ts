@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 import { isSpaRoute, isViteAsset, shouldServeViaVite } from "./dev-proxy";
 
 describe("isSpaRoute (shipped manifest = ['/'] after the Plan-3 Task-9 flip)", () => {
-  it("owns the root, the /calls prefix, and the /me prefix", () => {
+  it("owns the root, the /calls prefix, the /me prefix, and the /profiles prefix", () => {
     expect(isSpaRoute("/")).toBe(true);
     expect(isSpaRoute("/calls/1")).toBe(true);
     expect(isSpaRoute("/me")).toBe(true);
+    expect(isSpaRoute("/profiles")).toBe(true);
   });
   it("does NOT own backend or unknown paths (they reach FastAPI's real 404)", () => {
     expect(isSpaRoute("/api/me")).toBe(false);
@@ -64,6 +65,7 @@ describe("shouldServeViaVite (the proxy bypass decision)", () => {
     expect(shouldServeViaVite("/api/me")).toBe(false); // backend route -> uvicorn
     expect(shouldServeViaVite("/calls/1")).toBe(true); // owned detail route
     expect(shouldServeViaVite("/me")).toBe(true); // owned settings route
+    expect(shouldServeViaVite("/profiles/5/edit")).toBe(true); // owned profiles route
     expect(shouldServeViaVite("/totally-unknown")).toBe(false); // unknown -> uvicorn real 404
   });
 });

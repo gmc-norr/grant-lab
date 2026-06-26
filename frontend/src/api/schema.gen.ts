@@ -476,6 +476,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Profiles */
+        get: operations["list_profiles_api_profiles_get"];
+        put?: never;
+        /** Create Profile */
+        post: operations["create_profile_api_profiles_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profiles/{profile_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Profile */
+        get: operations["get_profile_api_profiles__profile_id__get"];
+        /** Update Profile */
+        put: operations["update_profile_api_profiles__profile_id__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces": {
         parameters: {
             query?: never;
@@ -1712,93 +1748,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/profiles": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Profiles Index */
-        get: operations["profiles_index_profiles_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/profiles/new": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Profile New Form */
-        get: operations["profile_new_form_profiles_new_get"];
-        put?: never;
-        /** Profile New Submit */
-        post: operations["profile_new_submit_profiles_new_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/profiles/{profile_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Profile Detail */
-        get: operations["profile_detail_profiles__profile_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/profiles/{profile_id}/bootstrap-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Profile Bootstrap Status */
-        get: operations["profile_bootstrap_status_profiles__profile_id__bootstrap_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/profiles/{profile_id}/edit": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Profile Edit Form */
-        get: operations["profile_edit_form_profiles__profile_id__edit_get"];
-        put?: never;
-        /** Profile Edit Submit */
-        post: operations["profile_edit_submit_profiles__profile_id__edit_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/register": {
         parameters: {
             query?: never;
@@ -2043,219 +1992,6 @@ export interface components {
             next?: string | null;
             /** Password */
             password: string;
-        };
-        /** Body_profile_edit_submit_profiles__profile_id__edit_post */
-        Body_profile_edit_submit_profiles__profile_id__edit_post: {
-            /**
-             * Applicant Types
-             * @default
-             */
-            applicant_types: string;
-            /**
-             * Areas
-             * @default
-             */
-            areas: string;
-            /**
-             * Budget Currency
-             * @default
-             */
-            budget_currency: string;
-            /**
-             * Budget Max
-             * @default
-             */
-            budget_max: string;
-            /**
-             * Budget Min
-             * @default
-             */
-            budget_min: string;
-            /**
-             * Capabilities
-             * @default
-             */
-            capabilities: string;
-            /**
-             * Career Stage
-             * @default
-             */
-            career_stage: string;
-            /**
-             * Country
-             * @default
-             */
-            country: string;
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Funder Exclusions
-             * @default
-             */
-            funder_exclusions: string;
-            /**
-             * Funding Instruments
-             * @default
-             */
-            funding_instruments: string;
-            /**
-             * Hard Exclusions
-             * @default
-             */
-            hard_exclusions: string;
-            /**
-             * Host Institution
-             * @default
-             */
-            host_institution: string;
-            /**
-             * Level
-             * @default
-             */
-            level: string;
-            /**
-             * Must Include
-             * @default
-             */
-            must_include: string;
-            /**
-             * Org Type
-             * @default
-             */
-            org_type: string;
-            /**
-             * Patient Populations
-             * @default
-             */
-            patient_populations: string;
-            /**
-             * Role
-             * @default
-             */
-            role: string;
-            /**
-             * Scale
-             * @default
-             */
-            scale: string;
-            /**
-             * Trl Max
-             * @default
-             */
-            trl_max: string;
-            /**
-             * Trl Min
-             * @default
-             */
-            trl_min: string;
-            /**
-             * Years Since Phd
-             * @default
-             */
-            years_since_phd: string;
-        };
-        /** Body_profile_new_submit_profiles_new_post */
-        Body_profile_new_submit_profiles_new_post: {
-            /**
-             * Applicant Types
-             * @default
-             */
-            applicant_types: string;
-            /**
-             * Areas
-             * @default
-             */
-            areas: string;
-            /**
-             * Capabilities
-             * @default
-             */
-            capabilities: string;
-            /**
-             * Career Stage
-             * @default
-             */
-            career_stage: string;
-            /**
-             * Country
-             * @default
-             */
-            country: string;
-            /**
-             * Funder Exclusions
-             * @default
-             */
-            funder_exclusions: string;
-            /**
-             * Funding Instruments
-             * @default
-             */
-            funding_instruments: string;
-            /**
-             * Host Institution
-             * @default
-             */
-            host_institution: string;
-            /**
-             * Kind
-             * @default organizational_unit
-             */
-            kind: string;
-            /**
-             * Level
-             * @default
-             */
-            level: string;
-            /**
-             * Mission Text
-             * @default
-             */
-            mission_text: string;
-            /** Name */
-            name: string;
-            /**
-             * Names Affiliations
-             * @default
-             */
-            names_affiliations: string;
-            /**
-             * Orcids
-             * @default
-             */
-            orcids: string;
-            /**
-             * Org Type
-             * @default
-             */
-            org_type: string;
-            /**
-             * Pasted Grants
-             * @default
-             */
-            pasted_grants: string;
-            /**
-             * Patient Populations
-             * @default
-             */
-            patient_populations: string;
-            /**
-             * Role
-             * @default
-             */
-            role: string;
-            /**
-             * Scale
-             * @default
-             */
-            scale: string;
-            /**
-             * Years Since Phd
-             * @default
-             */
-            years_since_phd: string;
         };
         /** Body_register_submit_register_post */
         Body_register_submit_register_post: {
@@ -2782,12 +2518,318 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** ProfileCreateIn */
+        ProfileCreateIn: {
+            /**
+             * Applicant Types
+             * @default
+             */
+            applicant_types: string;
+            /**
+             * Areas
+             * @default
+             */
+            areas: string;
+            /**
+             * Capabilities
+             * @default
+             */
+            capabilities: string;
+            /**
+             * Career Stage
+             * @default
+             */
+            career_stage: string;
+            /**
+             * Country
+             * @default
+             */
+            country: string;
+            /**
+             * Funder Exclusions
+             * @default
+             */
+            funder_exclusions: string;
+            /**
+             * Funding Instruments
+             * @default
+             */
+            funding_instruments: string;
+            /**
+             * Host Institution
+             * @default
+             */
+            host_institution: string;
+            /**
+             * Kind
+             * @default organizational_unit
+             */
+            kind: string;
+            /**
+             * Level
+             * @default
+             */
+            level: string;
+            /**
+             * Mission Text
+             * @default
+             */
+            mission_text: string;
+            /** Name */
+            name: string;
+            /**
+             * Names Affiliations
+             * @default
+             */
+            names_affiliations: string;
+            /**
+             * Orcids
+             * @default
+             */
+            orcids: string;
+            /**
+             * Org Type
+             * @default
+             */
+            org_type: string;
+            /**
+             * Pasted Grants
+             * @default
+             */
+            pasted_grants: string;
+            /**
+             * Patient Populations
+             * @default
+             */
+            patient_populations: string;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /**
+             * Scale
+             * @default
+             */
+            scale: string;
+            /**
+             * Years Since Phd
+             * @default
+             */
+            years_since_phd: string;
+        };
+        /** ProfileCreateOut */
+        ProfileCreateOut: {
+            /** Id */
+            id: number;
+        };
+        /** ProfileDetailOut */
+        ProfileDetailOut: {
+            /** Applicant Types */
+            applicant_types: string[];
+            /** Areas */
+            areas: string[];
+            /** Bootstrap Pubmed Status */
+            bootstrap_pubmed_status: string | null;
+            /** Bootstrap Status */
+            bootstrap_status: string | null;
+            /** Budget Currency */
+            budget_currency: string | null;
+            /** Budget Max */
+            budget_max: number | null;
+            /** Budget Min */
+            budget_min: number | null;
+            /** Can Edit */
+            can_edit: boolean;
+            /** Capabilities */
+            capabilities: string[];
+            /** Career Stage */
+            career_stage: string | null;
+            /** Country */
+            country: string | null;
+            /** Description */
+            description: string;
+            /** Funder Exclusions */
+            funder_exclusions: string[];
+            /** Funding Instruments */
+            funding_instruments: string[];
+            /** Hard Exclusions */
+            hard_exclusions: string[];
+            /** Host Institution */
+            host_institution: string | null;
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Level */
+            level: string | null;
+            /** Must Include */
+            must_include: string[];
+            /** Name */
+            name: string;
+            /** Org Type */
+            org_type: string | null;
+            /** Patient Populations */
+            patient_populations: string[];
+            /** Publications Fetched */
+            publications_fetched: number | null;
+            /** Role */
+            role: string | null;
+            /** Scale */
+            scale: string | null;
+            /** Trl Max */
+            trl_max: number | null;
+            /** Trl Min */
+            trl_min: number | null;
+            /** Years Since Phd */
+            years_since_phd: number | null;
+        };
         /** ProfileFacet */
         ProfileFacet: {
             /** Id */
             id: number;
             /** Name */
             name: string;
+        };
+        /** ProfileListItemOut */
+        ProfileListItemOut: {
+            /** Areas Count */
+            areas_count: number;
+            /** Budget Currency */
+            budget_currency: string | null;
+            /** Description */
+            description: string;
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Level */
+            level: string | null;
+            /** Name */
+            name: string;
+        };
+        /** ProfileUpdateIn */
+        ProfileUpdateIn: {
+            /**
+             * Applicant Types
+             * @default
+             */
+            applicant_types: string;
+            /**
+             * Areas
+             * @default
+             */
+            areas: string;
+            /**
+             * Budget Currency
+             * @default
+             */
+            budget_currency: string;
+            /**
+             * Budget Max
+             * @default
+             */
+            budget_max: string;
+            /**
+             * Budget Min
+             * @default
+             */
+            budget_min: string;
+            /**
+             * Capabilities
+             * @default
+             */
+            capabilities: string;
+            /**
+             * Career Stage
+             * @default
+             */
+            career_stage: string;
+            /**
+             * Country
+             * @default
+             */
+            country: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Funder Exclusions
+             * @default
+             */
+            funder_exclusions: string;
+            /**
+             * Funding Instruments
+             * @default
+             */
+            funding_instruments: string;
+            /**
+             * Hard Exclusions
+             * @default
+             */
+            hard_exclusions: string;
+            /**
+             * Host Institution
+             * @default
+             */
+            host_institution: string;
+            /**
+             * Level
+             * @default
+             */
+            level: string;
+            /**
+             * Must Include
+             * @default
+             */
+            must_include: string;
+            /**
+             * Org Type
+             * @default
+             */
+            org_type: string;
+            /**
+             * Patient Populations
+             * @default
+             */
+            patient_populations: string;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /**
+             * Scale
+             * @default
+             */
+            scale: string;
+            /**
+             * Trl Max
+             * @default
+             */
+            trl_max: string;
+            /**
+             * Trl Min
+             * @default
+             */
+            trl_min: string;
+            /**
+             * Years Since Phd
+             * @default
+             */
+            years_since_phd: string;
+        };
+        /** ProfileUpdateOut */
+        ProfileUpdateOut: {
+            /** Id */
+            id: number;
+        };
+        /** ProfilesListOut */
+        ProfilesListOut: {
+            /** Profiles */
+            profiles: components["schemas"]["ProfileListItemOut"][];
         };
         /** RankingOut */
         RankingOut: {
@@ -4685,6 +4727,458 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubscriptionsOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_profiles_api_profiles_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfilesListOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    create_profile_api_profiles_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileCreateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileCreateOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_profile_api_profiles__profile_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileDetailOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    update_profile_api_profiles__profile_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileUpdateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileUpdateOut"];
                 };
             };
             /** @description Bad Request */
@@ -11083,225 +11577,6 @@ export interface operations {
             };
         };
         requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profiles_index_profiles_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profile_new_form_profiles_new_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profile_new_submit_profiles_new_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/x-www-form-urlencoded": components["schemas"]["Body_profile_new_submit_profiles_new_post"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profile_detail_profiles__profile_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profile_bootstrap_status_profiles__profile_id__bootstrap_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profile_edit_form_profiles__profile_id__edit_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/html": string;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    profile_edit_submit_profiles__profile_id__edit_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/x-www-form-urlencoded": components["schemas"]["Body_profile_edit_submit_profiles__profile_id__edit_post"];
-            };
-        };
         responses: {
             /** @description Successful Response */
             200: {

@@ -106,24 +106,36 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
     )
 
     with client:
-        # 1. Create the profile — async: no inline bootstrap, a queued job is enqueued.
+        # 1. Create the profile via the JSON API — async: no inline bootstrap, a
+        #    queued job is enqueued.  (The Jinja /profiles/new route was retired in
+        #    T13 teardown; this now drives the React-SPA-facing /api/profiles.)
         r = client.post(
-            "/profiles/new",
-            data={
+            "/api/profiles",
+            json={
                 "name": "E2E Profile",
                 "kind": "organizational_unit",
                 "level": "group",
                 "orcids": "",
                 "names_affiliations": "",
                 "pasted_grants": "",
+                "mission_text": "",
+                "areas": "",
+                "career_stage": "",
+                "applicant_types": "",
+                "role": "",
+                "years_since_phd": "",
+                "org_type": "",
+                "capabilities": "",
+                "patient_populations": "",
+                "scale": "",
+                "funding_instruments": "",
+                "funder_exclusions": "",
+                "country": "",
+                "host_institution": "",
             },
-            follow_redirects=False,
         )
-        assert r.status_code == 303
-
-        with pg_session_factory() as s:
-            profile = s.execute(select(Profile).where(Profile.name == "E2E Profile")).scalar_one()
-        profile_id = profile.id
+        assert r.status_code == 200
+        profile_id = r.json()["id"]
 
         # 2. Run the bootstrap worker → writes the description, embeds (mocked),
         #    and enqueues the ranking backfill for the seeded call.
