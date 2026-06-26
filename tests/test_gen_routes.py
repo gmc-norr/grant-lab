@@ -30,6 +30,8 @@ def test_is_spa_route_is_exact_not_prefix():
     assert is_spa_route("/api/me") is False
     assert is_spa_route("/calls/123") is True  # /calls is now an SPA-owned prefix (calls-detail)
     assert is_spa_route("/me") is True  # /me is now an SPA-owned prefix (account/settings)
+    assert is_spa_route("/profiles") is True  # /profiles is now an SPA-owned prefix
+    assert is_spa_route("/profiles/5/edit") is True
     assert is_spa_route("/login") is False
 
 

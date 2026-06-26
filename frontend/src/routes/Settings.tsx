@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import type { AccountSettings } from "../api/account";
 import {
@@ -150,7 +151,7 @@ function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profile
       <section className={styles.card}>
         <h2>Weekly digest subscriptions</h2>
         <p className={styles.muted}>
-          No profiles to subscribe to yet — <a href="/profiles/new">create one</a>.
+          No profiles to subscribe to yet — <Link to="/profiles/new">create one</Link>.
         </p>
       </section>
     );

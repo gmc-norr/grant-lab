@@ -22,14 +22,13 @@ export const ACTIVITY_TOP: ActivityItem[] = [
   },
 ];
 
-// Bottom-pinned group. Profiles deep-links to its Jinja page until it migrates;
-// Settings is now an SPA route (/me).
+// Bottom-pinned group. Profiles and Settings are both SPA routes.
 export const ACTIVITY_BOTTOM: ActivityItem[] = [
   {
     id: "profiles",
     label: "Profiles",
     icon: "account",
-    kind: "external",
+    kind: "spa",
     to: "/profiles",
   },
   { id: "settings", label: "Settings", icon: "gear", kind: "spa", to: "/me" },
