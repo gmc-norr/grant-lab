@@ -1,0 +1,13 @@
+.page { max-width: 48rem; margin: 0 auto; padding: 1rem 0.5rem 3rem; }
+.page h1 { color: var(--app-heading); }
+.card { border: 1px solid var(--app-border); border-radius: 8px; padding: 1rem; margin: 0.75rem 0; background: var(--app-sidebar); }
+.head { margin: 0 0 0.5rem; }
+.tag { color: var(--app-muted); }
+.card input { padding: 0.3rem 0.5rem; border: 1px solid var(--app-border); border-radius: 4px; margin-bottom: 0.5rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.actions button { border-radius: 5px; padding: 0.35rem 0.8rem; background: var(--app-accent); color: #fff; border: none; cursor: pointer; }
+.actions button:disabled { opacity: 0.5; cursor: default; }
+.secondary { background: var(--app-sidebar) !important; color: var(--app-text) !important; border: 1px solid var(--app-border) !important; }
+.nav { font-size: 0.85rem; margin-top: 1rem; }
+.nav a { color: var(--app-link); text-decoration: none; }
+.err { display: block; margin-top: 0.4rem; color: var(--app-danger, #e5484d); font-size: 0.8rem; }
