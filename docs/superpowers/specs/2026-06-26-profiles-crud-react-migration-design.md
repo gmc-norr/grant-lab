@@ -88,26 +88,39 @@ is missing or `is_active is False` (parity — archived profiles 404 everywhere)
   scale: str|None` (org); `career_stage: str|None, role: str|None, years_since_phd: int|None,
   applicant_types: list[str]` (eligibility); `funding_instruments: list[str], funder_exclusions: list[str]`
   (funding); `country: str|None, host_institution: str|None` (geo)
+  - **The flatten is the mirror of `parse_structured` and MUST read the STORED key names, via `.get` (the `org`
+    namespace is present only for org units, `career_stage` only for individuals).** One asymmetry to watch:
+    flat `funding_instruments` reads from `structured["funding"]["instruments"]` (`fields.py:137`), **not**
+    `["funding_instruments"]` — a naive read returns `[]` and silently drops the instruments on detail/edit. All
+    other fields are 1:1.
 - state: `can_edit: bool` (`created_by == user.id or user.is_admin`), `bootstrap_status:
   "queued"|"running"|"done"|"failed"|None`, `bootstrap_pubmed_status: str|None`,
-  `publications_fetched: int|None`
+  `publications_fetched: int|None`. **The three `bootstrap_*` fields are nulled when `!can_edit`**
+  (defense-in-depth — the banner/poll only ever runs on the owner's edit page, so this fully preserves the
+  read-model consolidation while removing even theoretical exposure of the publications count to non-owners).
 
 **`POST /api/profiles` → `ProfileCreateOut {id: int}`** — body `ProfileCreateIn` carrying the create-form fields
 (`name, kind, level, orcids, names_affiliations, pasted_grants, mission_text` + the structured flat fields).
-Validation mirrors the Jinja handler **in order**: `name` ≤200 (400); `pasted_grants` ≤100KB / `mission_text`
-≤10KB (413); unknown `kind` → silently default `organizational_unit`; unknown `level` for an org unit (400);
-`parse_structured` (`FieldValidationError` → its `status_code`/`message`); `_parse_members_strict` bounds
-(>50 members / line >500 → 400); early duplicate-active-name check (409) + `IntegrityError` fallback (409).
+Validation order **exactly mirrors the handler** — order is observable on combined-failure requests (a both-failing
+request returns the FIRST code), so TDD tests must follow it: `name` ≤200 (400); `pasted_grants` ≤100KB /
+`mission_text` ≤10KB (413); unknown `kind` → silently default `organizational_unit`; unknown `level` for an org
+unit (400); `parse_structured` (`FieldValidationError` → its `status_code`/`message`); **then** the
+duplicate-active-name check (409); **then** `_parse_members_strict` bounds (>50 members / line >500 → 400);
+**then** `create_profile_with_bootstrap` with an `IntegrityError` fallback (409). I.e. the dup-name 409 is checked
+BEFORE the member-bounds 400 (`profiles.py:131-137`) — not the reverse.
 Reuses `create_profile_with_bootstrap` (which inserts the profile, enqueues the `ProfileBootstrapJob`,
 auto-subscribes the creator, and sets their default profile if unset — all in the caller's committed
 transaction). The React client then navigates to `/profiles/{id}/edit`.
 
 **`PUT /api/profiles/{id}` → `ProfileUpdateOut {id: int}`** — body `ProfileUpdateIn` carrying the edit-form flat
 fields (`description, areas, budget_min, budget_max, budget_currency, trl_min, trl_max, must_include,
-hard_exclusions, level` + the structured flat fields). 404 missing/inactive; **403 if not owner-or-admin**
-(`created_by != user.id and not user.is_admin`); **409 while a bootstrap job is `queued`/`running`**;
-`description` ≤50KB (413); budget out of `[0, 10**12]` / TRL out of `[1, 9]` (400); unknown currency (400);
-unknown level for an org unit (400); `parse_structured` (400). Re-namespaces the flat fields via
+hard_exclusions, level` + the structured flat fields). Validation order **exactly mirrors the handler**, which
+deliberately validates input shape BEFORE opening a DB session (`profiles.py:266-269`), so the order is
+observable: `description` ≤50KB (413); budget out of `[0, 10**12]` / TRL out of `[1, 9]` (400); unknown currency
+(400); **then** (in-session) 404 missing/inactive; **403 if not owner-or-admin** (`created_by != user.id and not
+user.is_admin`); **409 while a bootstrap job is `queued`/`running`**; **then** unknown level for an org unit
+(400); **then** `parse_structured` (400). I.e. a PUT to a missing profile with an oversized `description` returns
+413 (not 404), and a non-owner with a bad currency returns 400 (not 403). Re-namespaces the flat fields via
 `parse_structured` (`base` rubric keys + the `eligibility/org/funding/geo` namespaces, `base` wins on `areas`),
 applies the same `build_profile_text`-based re-embed change detection, and schedules the identical
 `_refresh_and_backfill_in_background` task (re-embed first when the embed text changed, then 90-day backfill).
@@ -116,21 +129,26 @@ The React client then navigates to `/profiles/{id}`.
 **Two deliberate, flagged consolidations (NOT silent behavior changes):**
 1. The separate `GET /profiles/{id}/bootstrap-status` poll endpoint **does not get an `/api` twin**. React polls
    `GET /api/profiles/{id}` via TanStack Query `refetchInterval` while `bootstrap_status ∈ {queued, running}`,
-   stopping on `done`/`failed`. Consequence: `bootstrap_status` becomes visible to any authenticated viewer
-   (the Jinja poll was owner-or-admin gated). The status is non-sensitive ("drafting"/"done"); the **save** path
-   (`PUT`) stays strictly owner-or-admin. Documented here so the review knows it is intentional.
-2. **Helper relocation (structural).** `_parse_members`/`_parse_members_strict`, `_bounded_int`, `_split_lines`,
-   and the bound constants (`_BUDGET_MIN/MAX`, `_TRL_MIN/MAX`, `_ALLOWED_CURRENCIES`, `_MAX_MEMBERS`,
-   `_MAX_SEED_LINE`, `_MAX_LIST_ENTRIES`) currently live **inside the doomed** `web/routes/profiles.py`. They
-   relocate to a neutral home in the `profiles/` package (`profiles/forms.py`) early; the still-live Jinja module
-   is repointed at it during the additive phase, then deleted in teardown — so nothing kept imports a doomed
-   module (the calls-detail relocate / G1-sever pattern). The re-embed/backfill background driver
-   (`_refresh_and_backfill_in_background` + its `_refresh_embedding_in_background` helper) ALSO currently lives in
-   the doomed Jinja module and the kept `PUT` needs it, so it **must relocate too** (to `profiles/forms.py` or a
-   sibling neutral module). `create_profile_with_bootstrap`, `parse_structured`, `FieldValidationError`,
-   `build_profile_text`, `refresh_profile_embedding`, and `backfill_profile` already live in neutral packages
-   (`profiles/`, `embeddings/`, `ranking/`) and are reused as-is. Net rule: after relocation, **nothing kept
-   imports `web/routes/profiles.py`** (a severance check, as in G1).
+   stopping on `done`/`failed`. Consequence: `bootstrap_status` would become visible to any authenticated viewer
+   (the Jinja poll was owner-or-admin gated) — but the read-model **nulls the three `bootstrap_*` fields when
+   `!can_edit`** (see §3.1 read-model), so non-owners see nothing and the **save** path (`PUT`) stays strictly
+   owner-or-admin. Documented here so the review knows it is intentional.
+2. **Helper relocation (structural), into two cohesive homes.** (a) The **parsing helpers** —
+   `_parse_members`/`_parse_members_strict`, `_bounded_int`, `_split_lines`, and the bound constants
+   (`_BUDGET_MIN/MAX`, `_TRL_MIN/MAX`, `_ALLOWED_CURRENCIES`, `_MAX_MEMBERS`, `_MAX_SEED_LINE`,
+   `_MAX_LIST_ENTRIES`) — relocate to `profiles/forms.py`. **Rename the route's `_bounded_int` →
+   `_bounded_int_or_400`**: `profiles/fields.py:84` already defines a different `_bounded_int` (different
+   signature, raises `FieldValidationError`), and `forms.py` is **intentionally FastAPI-coupled** (raises
+   `HTTPException`) — the rename + a module docstring make that deliberate, not an accidental shadow. (b) The
+   **post-save side-effect orchestrator** — `_refresh_and_backfill_in_background` + its
+   `_refresh_embedding_in_background` helper — is not a form helper, so it relocates to its **own** neutral module
+   `profiles/post_edit.py` (cohesion: parsing vs side-effects). Both currently live **inside the doomed**
+   `web/routes/profiles.py`; the still-live Jinja module is repointed at the new homes during the additive phase,
+   then deleted in teardown (the calls-detail relocate / G1-sever pattern). `create_profile_with_bootstrap`,
+   `parse_structured`, `FieldValidationError`, `build_profile_text`, `refresh_profile_embedding`, and
+   `backfill_profile` already live in neutral packages (`profiles/`, `embeddings/`, `ranking/`), none of which
+   imports `profiles` (cycle-safe), and are reused as-is. Net rule: after relocation, **nothing kept imports
+   `web/routes/profiles.py`** (a severance check, as in G1).
 
 ### 3.2 Frontend — `Profiles*` routes + hooks
 
@@ -226,11 +244,13 @@ The React client then navigates to `/profiles/{id}`.
   - `test_gen_routes` (`is_spa_route("/profiles")` / `("/profiles/5/edit")` True; `is_backend_route` on a
     `/profiles` subpath False post-teardown; `is_spa_route("/api/profiles")` stays False),
     `test_profiles_jinja_surface_absent`, and the three repointed `test_web_auth` tests. `ruff` clean.
-  - **Offline-tests gotcha:** the `PUT` edit path schedules the re-embed + backfill background task when
-    `description` is non-empty, and `TestClient` runs background tasks synchronously after the response — which
-    would hit Ollama and hang/fail offline. Update-endpoint tests MUST either **monkeypatch
-    `_refresh_and_backfill_in_background`** (or the embed client / `backfill_profile`) or exercise edits that do
-    not schedule it. Create is clean (it only enqueues the `ProfileBootstrapJob` row; the worker drafts
+  - **Offline-tests gotcha:** the `PUT` edit path schedules the re-embed + backfill background task whenever
+    `description.strip()` is non-empty (regardless of `embed_text_changed`), and `TestClient` runs background
+    tasks synchronously after the response. The precise hang is the **embed client** (Ollama); `backfill_profile`
+    itself is DB-only. Update-endpoint tests MUST either **monkeypatch the relocated
+    `profiles/post_edit.py::_refresh_and_backfill_in_background`** (the clean fix — kills both side effects at the
+    driver) or exercise edits with an empty `description` (which skips scheduling entirely). Create is clean (it
+    only enqueues the `ProfileBootstrapJob` row; the worker drafts
     separately).
 - **Frontend `tsc` + `vitest` green** + `build` clean: `api/profiles.test.tsx` (the four hooks incl. the
   poll-while-drafting `refetchInterval`), `ProfilesList`/`ProfileDetail`/`ProfileNew`/`ProfileEdit`/
@@ -241,9 +261,12 @@ The React client then navigates to `/profiles/{id}`.
   `test_json_401_unaffected_by_next` (`GET /profiles`, no `Accept: text/html` → raw 401 JSON),
   `test_html_401_post_does_not_thread_next` (`POST /profiles/5/edit` → 303). This slice deletes the Jinja
   `/profiles` routes, so all three move to the next surviving protected Jinja surface, **`/admin`** (verified
-  targets): the two GET tests → `GET /admin` (`admin_index`, HTMLResponse, `require_admin` → `get_current_user`
-  raises 401 before the admin 403 check); the POST test → `POST /admin/rerank` (no Form fields, no path param →
-  a clean 401, never a 422). Confirm the exact `next=` encoding by running.
+  targets): `test_html_401_get_threads_next` → **`GET /admin?x=1`** (→ `/login?next=%2Fadmin%3Fx%3D1`) — KEEP a
+  query string so the test still asserts **query-threading**, not just path-threading; `test_json_401_unaffected_by_next`
+  → bare `GET /admin` (no `Accept: text/html` → raw 401 JSON); both hit `admin_index` (HTMLResponse,
+  `require_admin` → `get_current_user` raises 401 before the admin 403 check). `test_html_401_post_does_not_thread_next`
+  → `POST /admin/rerank` (no Form fields, no path param → a clean 401, never a 422). Confirm the exact `next=`
+  encoding by running.
 - **Manifest/schema regen:** `uv run python scripts/gen_routes.py` → `SPA_ROUTES` gains `/profiles`,
   `BACKEND_PREFIXES` drops `/profiles`; `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh` → the four
   `/api/profiles*` paths added, the four Jinja `/profiles*` HTML paths dropped; `routes.gen.ts` gains the
