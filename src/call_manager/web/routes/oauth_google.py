@@ -13,7 +13,7 @@ from call_manager.auth.oauth_txn import InvalidTransaction
 from call_manager.auth.oidc import IdTokenInvalid, OIDCError, generate_pkce, generate_token
 from call_manager.auth.redirects import safe_next
 from call_manager.db.models import User
-from call_manager.web.routes.auth import _client_ip
+from call_manager.web.client_ip import client_ip
 
 _logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,7 +47,7 @@ def google_start(
     client = _require_enabled(request)
     settings = request.app.state.settings
     cipher = request.app.state.oauth_txn_cipher
-    if not request.app.state.ip_limiter.allow(_client_ip(request)):
+    if not request.app.state.ip_limiter.allow(client_ip(request)):
         raise HTTPException(status_code=429, detail="too many requests")
 
     verifier, challenge = generate_pkce()
