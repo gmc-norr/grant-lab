@@ -296,7 +296,18 @@ def create_app() -> FastAPI:
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
 
-    app = FastAPI(lifespan=lifespan)
+    # Disable the interactive API docs + raw schema URL in every non-dev mode.
+    # In dev (spa_mode='dev') the schema is useful for local DX; in prod/disabled
+    # it leaks the full API surface unauthenticated. The offline codegen script
+    # (scripts/gen_openapi_types.sh) calls create_app().openapi() directly — it
+    # does NOT fetch /openapi.json over HTTP — so disabling the route is safe.
+    _dev = settings.spa_mode == "dev"
+    app = FastAPI(
+        lifespan=lifespan,
+        docs_url="/docs" if _dev else None,
+        redoc_url="/redoc" if _dev else None,
+        openapi_url="/openapi.json" if _dev else None,
+    )
     # CSRF defense: Origin/Referer enforcement for state-changing requests.
     # Sits below FastAPI's routing but above handlers — see auth/csrf.py
     # for the design rationale. Layers on top of the session cookie's

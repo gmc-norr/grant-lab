@@ -89,3 +89,85 @@ def test_hide_requires_auth(monkeypatch, pg_url, pg_session_factory):
     with TestClient(app) as client:
         r = client.post(f"/api/calls/{cid}/hide")
     assert r.status_code == 401
+
+
+# --- Defect 4: un-hide + list hidden ---
+
+def test_unhide_removes_dismissal(monkeypatch, pg_url, pg_session_factory):
+    """DELETE /api/calls/{id}/hide removes the dismissal so the call reappears."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide")
+        r = client.delete(f"/api/calls/{cid}/hide")
+    assert r.status_code == 200
+    assert r.json() == {"hidden": False}
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(UserCallDismissal).where(
+                UserCallDismissal.user_id == uid, UserCallDismissal.call_id == cid
+            )
+        ).scalar_one_or_none()
+    assert row is None, "dismissal row should have been deleted"
+
+
+def test_unhide_is_idempotent(monkeypatch, pg_url, pg_session_factory):
+    """DELETE on a not-hidden call is a 200, not a 404."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    with client:
+        r = client.delete(f"/api/calls/{cid}/hide")
+    assert r.status_code == 200
+    assert r.json() == {"hidden": False}
+
+
+def test_unhide_404_for_unknown_call(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    with client:
+        r = client.delete("/api/calls/999999/hide")
+    assert r.status_code == 404
+
+
+def test_unhide_requires_auth(monkeypatch, pg_url, pg_session_factory):
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/calls/{cid}/hide")
+    assert r.status_code == 401
+
+
+def test_hidden_list_shows_hidden_calls(monkeypatch, pg_url, pg_session_factory):
+    """GET /api/calls/hidden returns the calls hidden by the current user."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide")
+        r = client.get("/api/calls/hidden")
+    assert r.status_code == 200
+    ids = [item["id"] for item in r.json()["items"]]
+    assert cid in ids
+
+
+def test_hidden_list_excludes_unhidden_calls(monkeypatch, pg_url, pg_session_factory):
+    """After un-hide the call no longer appears in GET /api/calls/hidden."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide")
+        client.delete(f"/api/calls/{cid}/hide")
+        r = client.get("/api/calls/hidden")
+    assert r.status_code == 200
+    ids = [item["id"] for item in r.json()["items"]]
+    assert cid not in ids
+
+
+def test_hidden_list_requires_auth(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    with TestClient(app) as client:
+        r = client.get("/api/calls/hidden")
+    assert r.status_code == 401

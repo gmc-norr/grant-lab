@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
 from call_manager.auth.dependencies import get_current_user
@@ -102,7 +102,7 @@ def get_settings(request: Request, user: User = Depends(get_current_user)):  # n
 
 
 class UpdateNameIn(BaseModel):
-    name: str
+    name: str = Field(max_length=200)
 
 
 class UpdateNameOut(BaseModel):
@@ -204,14 +204,23 @@ def update_subscriptions(
             if desired
             else set()
         )
-        existing_ids = set(
+        # DIFF scoped to ACTIVE-profile subscriptions only — subs to temporarily-
+        # inactive profiles are left untouched so their digest_enabled preference is
+        # preserved. The client can never echo an inactive profile id back (the UI
+        # only shows active profiles), so scoping to active-only is the only safe diff.
+        existing_active_ids = set(
             session.execute(
-                select(Subscription.profile_id).where(Subscription.user_id == user.id)
+                select(Subscription.profile_id)
+                .join(Profile, Profile.id == Subscription.profile_id)
+                .where(
+                    Subscription.user_id == user.id,
+                    Profile.is_active.is_(True),
+                )
             ).scalars()
         )
         # DIFF, not delete-all-then-reinsert — reinserting would reset digest_enabled.
-        to_remove = existing_ids - valid_ids
-        to_add = valid_ids - existing_ids
+        to_remove = existing_active_ids - valid_ids
+        to_add = valid_ids - existing_active_ids
         if to_remove:
             session.execute(
                 delete(Subscription).where(

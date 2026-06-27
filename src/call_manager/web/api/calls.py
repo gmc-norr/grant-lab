@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -20,7 +20,12 @@ from call_manager.db.models import (
 )
 from call_manager.web.call_detail_view import _criterion_detail, _parse_optional_profile_id
 from call_manager.web.dashboard import build_dashboard_view, resolve_profile_selection
-from call_manager.web.filters import criterion_label, model_label, note_category_heading
+from call_manager.web.filters import (
+    criterion_label,
+    deadline_local_date,
+    model_label,
+    note_category_heading,
+)
 
 router = APIRouter()
 
@@ -34,6 +39,10 @@ class CallOut(BaseModel):
     # str passthrough produced. Same instant, both valid RFC 3339; the
     # `format: date-time` contract lets the Plan 3 TS client parse either form.
     deadline: datetime | None
+    # Pre-localized calendar date string (YYYY-MM-DD, Europe/Stockholm) for the
+    # deadline — single source of truth so the SPA and the digest email agree
+    # even across DST boundaries. None when deadline is not set.
+    deadline_local_date: str | None
     published_at: datetime | None
     source_name: str | None
     source_slug: str | None
@@ -105,6 +114,9 @@ class CallDetailCallOut(BaseModel):
     external_id: str | None
     published_at: datetime | None
     deadline: datetime | None
+    # Pre-localized calendar date string (YYYY-MM-DD, Europe/Stockholm). None when
+    # deadline is not set. Computed by the same shared helper as the digest email.
+    deadline_local_date: str | None
     budget_min: int | None
     budget_max: int | None
     currency: str | None
@@ -154,6 +166,18 @@ class CallHideOut(BaseModel):
     hidden: bool
 
 
+class HiddenCallOut(BaseModel):
+    id: int
+    title: str
+    deadline: datetime | None
+    deadline_local_date: str | None
+    source_name: str | None
+
+
+class HiddenListOut(BaseModel):
+    items: list[HiddenCallOut]
+
+
 @router.post("/calls/{call_id}/hide", response_model=CallHideOut)
 def hide_call(
     request: Request,
@@ -172,6 +196,59 @@ def hide_call(
         )
         session.commit()
     return CallHideOut(hidden=True)
+
+
+@router.delete("/calls/{call_id}/hide", response_model=CallHideOut)
+def unhide_call(
+    request: Request,
+    call_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Remove a dismissal so the call reappears in the feed. Idempotent — 200
+    even when the call was not hidden (no dismissal row to delete)."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        session.execute(
+            delete(UserCallDismissal).where(
+                UserCallDismissal.user_id == user.id,
+                UserCallDismissal.call_id == call_id,
+            )
+        )
+        session.commit()
+    return CallHideOut(hidden=False)
+
+
+@router.get("/calls/hidden", response_model=HiddenListOut)
+def list_hidden_calls(
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Return the calls the current user has hidden, ordered newest-dismissed first."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        rows = session.execute(
+            select(Call, UserCallDismissal.dismissed_at)
+            .join(
+                UserCallDismissal,
+                (UserCallDismissal.call_id == Call.id)
+                & (UserCallDismissal.user_id == user.id),
+            )
+            .options(joinedload(Call.source))
+            .order_by(UserCallDismissal.dismissed_at.desc())
+        ).all()
+        items = [
+            HiddenCallOut(
+                id=call.id,
+                title=call.title,
+                deadline=call.deadline,
+                deadline_local_date=deadline_local_date(call.deadline),
+                source_name=(call.source.name if call.source else None),
+            )
+            for call, _dismissed_at in rows
+        ]
+    return HiddenListOut(items=items)
 
 
 @router.get("/calls/{call_id}", response_model=CallDetailOut)
@@ -234,6 +311,7 @@ def get_call_detail(
             external_id=call.external_id,
             published_at=call.published_at,
             deadline=call.deadline,
+            deadline_local_date=deadline_local_date(call.deadline),
             budget_min=call.budget_min,
             budget_max=call.budget_max,
             currency=call.currency,
@@ -324,6 +402,7 @@ def get_calls(
                 id=call.id,
                 title=call.title,
                 deadline=call.deadline,
+                deadline_local_date=deadline_local_date(call.deadline),
                 published_at=call.published_at,
                 source_name=(call.source.name if call.source else None),
                 source_slug=(call.source.slug if call.source else None),

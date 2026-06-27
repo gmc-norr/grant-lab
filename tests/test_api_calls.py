@@ -89,6 +89,7 @@ def test_api_calls_returns_seeded_call_shape(monkeypatch, pg_url, pg_session_fac
         "id",
         "title",
         "deadline",
+        "deadline_local_date",
         "published_at",
         "source_name",
         "source_slug",
