@@ -196,6 +196,29 @@ def test_days_until_is_deterministic_with_explicit_now():
     assert "in 14 days" in text
 
 
+def _payload_with_more(more_count: int):
+    p = _payload()
+    p.sections[0].more_count = more_count
+    return p
+
+
+def test_html_renders_more_breadcrumb_when_positive():
+    html = render_html(_payload_with_more(12), dashboard_url="http://app/")
+    assert "12 more strong matches in your dashboard" in html
+    assert "http://app/?profile=1&amp;min_score=60" in html
+
+
+def test_html_omits_more_breadcrumb_when_zero():
+    html = render_html(_payload_with_more(0), dashboard_url="http://app/")
+    assert "more strong matches" not in html
+
+
+def test_text_renders_more_breadcrumb_when_positive():
+    text = render_text(_payload_with_more(12), dashboard_url="http://app/")
+    assert "12 more strong matches in your dashboard" in text
+    assert "http://app/?profile=1&min_score=60" in text
+
+
 def test_html_escapes_xss_in_title():
     """Autoescape must be active for HTML template — user-supplied content is not raw."""
     xss_entry = DigestCallEntry(

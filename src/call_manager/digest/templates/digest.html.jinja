@@ -30,6 +30,9 @@
       {% endfor %}
     </details>
   {% endif %}
+  {% if section.more_count > 0 %}
+    <p style="font-size: 13px; margin: 8px 0;"><a href="{{ dashboard_url }}?profile={{ section.profile_id }}&amp;min_score=60" style="color: #27a; text-decoration: none;">+{{ section.more_count }} more strong matches in your dashboard &rarr;</a></p>
+  {% endif %}
 {% endfor %}
 
 <p style="font-size: 12px; color: #888; margin-top: 24px;">

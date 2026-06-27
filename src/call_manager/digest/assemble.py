@@ -59,6 +59,7 @@ class DigestProfileSection:
     profile_id: int
     profile_name: str
     entries: list[DigestCallEntry]
+    more_count: int = 0
 
 
 @dataclass
@@ -160,6 +161,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     # Track: dict[call_id, list[(profile, bucket, ranking_or_none)]]
     per_call: dict[int, list[tuple[Profile, str, CallRanking | None]]] = defaultdict(list)
     call_objs: dict[int, Call] = {}
+    top_total_by_profile: dict[int, int] = {}
 
     for profile in profiles:
         # Shared normalization (min length) with the ranking path so the SAME
@@ -220,15 +222,16 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 call_objs[c.id] = c
 
         # 3b. top candidates: aggregate_score >= threshold
+        top_conditions = [
+            CallRanking.profile_id == profile.id,
+            CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
+            excl_clause,
+            or_(Call.deadline.is_(None), Call.deadline > now),
+        ]
         top_q = (
             select(Call, CallRanking)
             .join(CallRanking, CallRanking.call_id == Call.id)
-            .where(
-                CallRanking.profile_id == profile.id,
-                CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
-                excl_clause,
-                or_(Call.deadline.is_(None), Call.deadline > now),
-            )
+            .where(*top_conditions)
             .order_by(
                 CallRanking.aggregate_score.desc(),
                 CallRanking.embed_similarity.desc().nullslast(),
@@ -238,6 +241,17 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         for c, rk in session.execute(top_q).all():
             per_call[c.id].append((profile, "top", rk))
             call_objs[c.id] = c
+        # Total strong matches for this profile == the dashboard's ?min_score=60
+        # set; used for an honest "+N more in your dashboard" breadcrumb.
+        top_total_by_profile[profile.id] = (
+            session.scalar(
+                select(func.count())
+                .select_from(Call)
+                .join(CallRanking, CallRanking.call_id == Call.id)
+                .where(*top_conditions)
+            )
+            or 0
+        )
 
         # 3c. borderline candidates: 45 <= aggregate_score < threshold
         border_q = (
@@ -327,11 +341,13 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         ordered = buckets["must_include"] + buckets["top"] + buckets["borderline"]
         if not ordered:
             continue
+        more_count = max(0, top_total_by_profile.get(pid, 0) - len(buckets["top"]))
         sections.append(
             DigestProfileSection(
                 profile_id=pid,
                 profile_name=profiles_by_id[pid].name,
                 entries=ordered,
+                more_count=more_count,
             )
         )
 
