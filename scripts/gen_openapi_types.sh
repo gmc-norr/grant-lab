@@ -15,10 +15,19 @@ trap 'rm -f "$tmp"' EXIT
 
 # Dummy-but-valid env: the psycopg3 dialect URL lets create_engine import the
 # driver without connecting; SPA_MODE=disabled keeps the schema to the real API.
+#
+# EMBEDDING_MODEL is PINNED to bge-m3 (overriding any value in a local .env)
+# because create_app() logs a calibration WARNING to STDOUT when the configured
+# model isn't calibrated (e.g. the repo .env's EMBEDDING_MODEL=mxbai-embed-large).
+# That WARNING line is captured into "$tmp" alongside the JSON and corrupts it,
+# producing a garbage schema.gen.ts on local `pnpm gen:api`. Pinning here makes
+# generation hermetic and identical to CI (which has no .env), so local and CI
+# always agree regardless of the developer's .env.
 DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://u:p@localhost:5432/db}" \
   SESSION_SECRET="${SESSION_SECRET:-test-secret-at-least-16-chars}" \
   ALLOWED_EMAIL_DOMAINS="${ALLOWED_EMAIL_DOMAINS:-ki.se}" \
   APP_BASE_URL="${APP_BASE_URL:-http://localhost:8000}" \
+  EMBEDDING_MODEL=bge-m3 \
   SPA_MODE=disabled \
   uv run python -c "import json,sys; from call_manager.main import create_app; json.dump(create_app().openapi(), sys.stdout, sort_keys=True)" >"$tmp"
 

@@ -97,13 +97,26 @@ def _run_round_trip(engine, alembic_cfg):
     # Down to 0005 — exercises 0008→0007→0006→0005. After 0008's downgrade,
     # the seeded row gets scheme='v2' (server_default); 0006's downgrade then
     # deletes all v2 rows by design.
-    command.downgrade(alembic_cfg, "0005")
-    with engine.begin() as conn:
-        n_rows = conn.execute(text("SELECT count(*) FROM call_rankings")).scalar_one()
-    assert n_rows == 0, "0006's down-migration deletes the v2-tagged seed row"
+    #
+    # CRITICAL: this downgrade crosses BELOW 0031, where the `references` table
+    # is created. The testcontainer DB is SESSION-scoped — shared by the whole
+    # suite — and every test's `pg_session_factory` teardown TRUNCATEs all
+    # tables (incl. `references`). If anything between the downgrade and the
+    # re-upgrade raises (an assertion, a transient PG/embed hiccup under load, a
+    # slow re-upgrade), the shared DB would be stranded below 0031 with NO
+    # `references` table, and the NEXT test's TRUNCATE would cascade an opaque
+    # `UndefinedTable: relation "references" does not exist` — misattributed as
+    # a connection flake. The try/finally GUARANTEES the DB is restored to head
+    # even on failure (mirrors the precedent in test_migration_0050_magic_link).
+    try:
+        command.downgrade(alembic_cfg, "0005")
+        with engine.begin() as conn:
+            n_rows = conn.execute(text("SELECT count(*) FROM call_rankings")).scalar_one()
+        assert n_rows == 0, "0006's down-migration deletes the v2-tagged seed row"
+    finally:
+        # Re-upgrade to head. Schema must reach the post-0008 state cleanly.
+        command.upgrade(alembic_cfg, "head")
 
-    # Re-upgrade to head. Schema must reach the post-0008 state cleanly.
-    command.upgrade(alembic_cfg, "head")
     with engine.begin() as conn:
         cols = (
             conn.execute(

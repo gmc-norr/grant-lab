@@ -37,6 +37,12 @@ def test_security_headers_present_on_response(migrated_engine, pg_url, monkeypat
     assert "script-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp
     assert "object-src 'none'" in csp
+    # Permissions-Policy: powerful browser features the app never uses are
+    # explicitly disabled (defense-in-depth against a compromised sub-resource).
+    pp = r.headers["permissions-policy"]
+    assert "camera=()" in pp
+    assert "geolocation=()" in pp
+    assert "microphone=()" in pp
 
 
 def test_hsts_absent_over_http(migrated_engine, pg_url, monkeypatch):
@@ -64,6 +70,30 @@ def test_oversized_body_rejected_with_413(migrated_engine, pg_url, monkeypatch):
         # before routing / CSRF / the handler ever runs.
         r = client.post("/api/auth/login", content=b"x" * 2000)
     assert r.status_code == 413
+    # The early-reject response must carry the SAME security headers every other
+    # response does — including CSP (previously omitted on this path).
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert r.headers["referrer-policy"] == "same-origin"
+    csp = r.headers["content-security-policy"]
+    assert "script-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "camera=()" in r.headers["permissions-policy"]
+    # http deploy → no HSTS even on the early-reject path.
+    assert "strict-transport-security" not in r.headers
+
+
+def test_413_early_reject_carries_csp_and_hsts_over_https(migrated_engine, pg_url, monkeypatch):
+    """In prod (https), the body-cap 413 must also carry HSTS — matching every
+    other response. Regression guard for the early-reject CSP/HSTS omission."""
+    _set_https_env(monkeypatch, pg_url)
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "1000")
+    app = create_app()
+    with TestClient(app) as client:
+        r = client.post("/api/auth/login", content=b"x" * 2000)
+    assert r.status_code == 413
+    assert "script-src 'self'" in r.headers["content-security-policy"]
+    assert "max-age=" in r.headers["strict-transport-security"]
 
 
 def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):

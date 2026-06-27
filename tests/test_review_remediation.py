@@ -1,4 +1,5 @@
 """Tests for review-remediation fixes 1-6."""
+
 from __future__ import annotations
 
 import asyncio
@@ -221,17 +222,20 @@ def test_connect_google_off_domain_rejected(pg_url, monkeypatch, pg_session_fact
         q = parse_qs(urlparse(start.headers["location"]).query)
         nonce = q["nonce"][0]
         state = q["state"][0]
-        fake.set_code("OFF", {
-            "iss": "https://accounts.google.com",
-            "aud": "test-cid",
-            "sub": "off-domain-sub",
-            "email": "personal@gmail.com",
-            "email_verified": True,
-            "name": "Off Domain",
-            "iat": now,
-            "exp": now + 600,
-            "nonce": nonce,
-        })
+        fake.set_code(
+            "OFF",
+            {
+                "iss": "https://accounts.google.com",
+                "aud": "test-cid",
+                "sub": "off-domain-sub",
+                "email": "personal@gmail.com",
+                "email_verified": True,
+                "name": "Off Domain",
+                "iat": now,
+                "exp": now + 600,
+                "nonce": nonce,
+            },
+        )
         r = c.get(
             f"/auth/google/callback?code=OFF&state={state}",
             follow_redirects=False,
@@ -277,7 +281,9 @@ def test_duplicate_distinct_content_length_rejected():
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b""})
 
-        mw = MaxBodySizeMiddleware(app_stub, max_bytes=1_000_000)
+        mw = MaxBodySizeMiddleware(
+            app_stub, max_bytes=1_000_000, csp="default-src 'self'", hsts=False
+        )
 
         responses = []
 
@@ -315,7 +321,9 @@ def test_duplicate_identical_content_length_passes():
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b""})
 
-        mw = MaxBodySizeMiddleware(app_stub, max_bytes=1_000_000)
+        mw = MaxBodySizeMiddleware(
+            app_stub, max_bytes=1_000_000, csp="default-src 'self'", hsts=False
+        )
 
         responses = []
 
@@ -355,6 +363,7 @@ def test_transport_configured_rejects_example_com_email_from(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_live_key")
     # EMAIL_FROM left at default (no-reply@example.com) → must raise
     from call_manager.config import Settings
+
     with pytest.raises(ValueError, match="example.com"):
         Settings()
 
@@ -369,6 +378,7 @@ def test_prod_without_transport_allows_default_email_from(monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.delenv("SMTP_HOST", raising=False)
     from call_manager.config import Settings
+
     s = Settings()
     assert "example.com" in s.email_from
 
@@ -381,6 +391,7 @@ def test_https_real_email_from_ok(monkeypatch):
     monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
     monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
     from call_manager.config import Settings
+
     s = Settings()
     assert s.email_from == "noreply@ki.se"
 
@@ -392,5 +403,41 @@ def test_http_default_email_from_ok(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     from call_manager.config import Settings
+
     s = Settings()
     assert "example.com" in s.email_from
+
+
+# ── Gap-fix: EMBEDDING_DIM ↔ Vector(1024) startup assertion ──────────────────
+
+
+def test_create_app_rejects_mismatched_embedding_dim(monkeypatch):
+    """EMBEDDING_DIM != the hard-coded Vector(1024) column width must fail FAST
+    at create_app() with a clear message — not late at the first INSERT."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("EMBEDDING_DIM", "768")
+    from call_manager.main import create_app
+
+    with pytest.raises(RuntimeError, match="EMBEDDING_DIM"):
+        create_app()
+
+
+def test_create_app_accepts_default_embedding_dim(monkeypatch):
+    """The default EMBEDDING_DIM (1024) matches the column width → no assertion."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.delenv("EMBEDDING_DIM", raising=False)
+    from call_manager.main import create_app
+
+    app = create_app()
+    try:
+        assert app is not None
+    finally:
+        # App built without entering lifespan → dispose the lazy engine's pool
+        # so the never-used connection doesn't surface a GC ResourceWarning.
+        app.state.engine.dispose()

@@ -59,6 +59,48 @@ def build_csp(dev: bool = False) -> str:
     )
 
 
+# Single source of truth for the HSTS value, so SecurityHeadersMiddleware and
+# the body-cap early-reject path can never drift. 1 year, include subdomains;
+# no `preload` (a hard-to-reverse browser-preload-list commitment that's wrong
+# for an internal/intranet hostname).
+HSTS_VALUE = b"max-age=31536000; includeSubDomains"
+
+# Restrictive Permissions-Policy: explicitly disable powerful browser features
+# the app never uses, so an injected/compromised sub-resource can't request
+# them. Static value, shipped in both dev and prod.
+PERMISSIONS_POLICY_VALUE = (
+    b"camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), interest-cohort=()"
+)
+
+
+def security_headers(*, csp: str, hsts: bool) -> list[tuple[bytes, bytes]]:
+    """The canonical defense-in-depth header set, shared by
+    SecurityHeadersMiddleware (every response) and MaxBodySizeMiddleware's
+    early-reject path (413/400) so the two can never diverge.
+
+    `csp` is the policy string computed by build_csp(); `hsts` mirrors
+    cookie_secure (https) — HSTS is omitted over plain-HTTP dev.
+    """
+    headers: list[tuple[bytes, bytes]] = [
+        (b"x-content-type-options", b"nosniff"),
+        (b"x-frame-options", b"DENY"),
+        # `same-origin`, NOT `no-referrer`: per the Fetch spec, a
+        # no-referrer policy makes browsers serialize the Origin header
+        # as `null` on form POSTs, which OriginCSRFMiddleware then 403s
+        # — every browser form submission in the app would fail. With
+        # `same-origin`, nothing leaks to external sites and Origin is
+        # sent normally, keeping the CSRF check effective.
+        (b"referrer-policy", b"same-origin"),
+        (b"permissions-policy", PERMISSIONS_POLICY_VALUE),
+        (b"content-security-policy", csp.encode("latin-1")),
+    ]
+    if hsts:
+        # 1 year, include subdomains. Only emitted when the deployment is
+        # https (cookie_secure) — pointless/harmful over plain-HTTP dev.
+        headers.append((b"strict-transport-security", HSTS_VALUE))
+    return headers
+
+
 class SecurityHeadersMiddleware:
     """Attach defense-in-depth security headers to every HTTP response.
 
@@ -69,23 +111,7 @@ class SecurityHeadersMiddleware:
 
     def __init__(self, app: ASGIApp, *, csp: str, hsts: bool) -> None:
         self.app = app
-        headers: list[tuple[bytes, bytes]] = [
-            (b"x-content-type-options", b"nosniff"),
-            (b"x-frame-options", b"DENY"),
-            # `same-origin`, NOT `no-referrer`: per the Fetch spec, a
-            # no-referrer policy makes browsers serialize the Origin header
-            # as `null` on form POSTs, which OriginCSRFMiddleware then 403s
-            # — every browser form submission in the app would fail. With
-            # `same-origin`, nothing leaks to external sites and Origin is
-            # sent normally, keeping the CSRF check effective.
-            (b"referrer-policy", b"same-origin"),
-            (b"content-security-policy", csp.encode("latin-1")),
-        ]
-        if hsts:
-            # 1 year, include subdomains. Only emitted when the deployment is
-            # https (cookie_secure) — pointless/harmful over plain-HTTP dev.
-            headers.append((b"strict-transport-security", b"max-age=31536000; includeSubDomains"))
-        self._headers = headers
+        self._headers = security_headers(csp=csp, hsts=hsts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -116,9 +142,15 @@ class MaxBodySizeMiddleware:
     safety net.
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, *, max_bytes: int, csp: str, hsts: bool) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        # Precompute the canonical security-header set so early-reject (413/400)
+        # responses — emitted BEFORE SecurityHeadersMiddleware runs in the
+        # response direction (body-cap is the outermost layer) — carry the SAME
+        # CSP/HSTS/Permissions-Policy/etc. as every other response. Reuses the
+        # shared builder so the policy is never duplicated as a literal.
+        self._security_headers = security_headers(csp=csp, hsts=hsts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -136,20 +168,37 @@ class MaxBodySizeMiddleware:
                 try:
                     cl_values.append(int(value))
                 except ValueError:
-                    await _send_error(send, 400, "bad_request", "malformed content-length", as_json)
+                    await _send_error(
+                        send,
+                        400,
+                        "bad_request",
+                        "malformed content-length",
+                        as_json,
+                        self._security_headers,
+                    )
                     return
 
         if cl_values:
             if len(set(cl_values)) > 1:
                 # Two or more distinct values → request smuggling attempt; reject.
                 await _send_error(
-                    send, 400, "bad_request", "conflicting content-length headers", as_json
+                    send,
+                    400,
+                    "bad_request",
+                    "conflicting content-length headers",
+                    as_json,
+                    self._security_headers,
                 )
                 return
             declared = cl_values[0]
             if declared > self.max_bytes:
                 await _send_error(
-                    send, 413, "payload_too_large", "request body too large", as_json
+                    send,
+                    413,
+                    "payload_too_large",
+                    "request body too large",
+                    as_json,
+                    self._security_headers,
                 )
                 return
 
@@ -169,27 +218,36 @@ class MaxBodySizeMiddleware:
         await self.app(scope, limited_receive, send)
 
 
-async def _send_error(send: Send, status: int, code: str, message: str, as_json: bool) -> None:
+async def _send_error(
+    send: Send,
+    status: int,
+    code: str,
+    message: str,
+    as_json: bool,
+    security_headers: list[tuple[bytes, bytes]],
+) -> None:
     if as_json:
         body = json.dumps(envelope_dict(code, message)).encode()
         ctype = b"application/json"
     else:
         body = message.encode()
         ctype = b"text/plain; charset=utf-8"
+    # Stamp the FULL canonical security-header set (CSP, HSTS in prod,
+    # Permissions-Policy, nosniff, frame-options, referrer-policy) on these
+    # early-reject responses. They are emitted before SecurityHeadersMiddleware
+    # runs in the response direction (body-cap is the outermost layer), so we
+    # must add them manually — reusing the same set every other response carries
+    # so the policy can never drift between the two paths.
+    headers: list[tuple[bytes, bytes]] = [
+        (b"content-type", ctype),
+        (b"content-length", str(len(body)).encode("ascii")),
+        *security_headers,
+    ]
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [
-                (b"content-type", ctype),
-                (b"content-length", str(len(body)).encode("ascii")),
-                # Minimal security headers on early-reject responses (emitted
-                # before SecurityHeadersMiddleware gets to add its own set, so
-                # we must stamp them here manually).
-                (b"x-content-type-options", b"nosniff"),
-                (b"x-frame-options", b"DENY"),
-                (b"referrer-policy", b"same-origin"),
-            ],
+            "headers": headers,
         }
     )
     await send({"type": "http.response.body", "body": body})
