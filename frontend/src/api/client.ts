@@ -16,8 +16,8 @@ export class ApiError extends Error {
   }
 }
 
-// Full-page nav to the server-rendered /login, preserving where we were so the
-// user lands back after signing in (mirrors the backend's 401-redirect next=).
+// Full-page nav to /login (now a React pre-auth page), preserving where we were
+// so the user lands back after signing in (mirrors the backend's 401 next=).
 export function redirectToLogin(): void {
   const next = window.location.pathname + window.location.search;
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);

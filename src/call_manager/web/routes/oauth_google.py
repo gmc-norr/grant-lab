@@ -5,7 +5,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from call_manager.auth.accounts import link_google_identity, resolve_google_account
 from call_manager.auth.domain import domain_allowed
@@ -178,23 +178,3 @@ def google_callback(
     _logger.info("google sign-in success", extra={"event": "google_signin_success"})
     return resp
 
-
-@router.get("/auth/pending", response_class=HTMLResponse)
-def auth_pending(request: Request):
-    return request.app.state.templates.TemplateResponse(
-        request=request, name="account_pending.html", context={}
-    )
-
-
-@router.get("/auth/no-access", response_class=HTMLResponse)
-def auth_no_access(request: Request):
-    return request.app.state.templates.TemplateResponse(
-        request=request, name="account_no_access.html", context={}
-    )
-
-
-@router.get("/auth/error", response_class=HTMLResponse)
-def auth_error(request: Request):
-    return request.app.state.templates.TemplateResponse(
-        request=request, name="auth_error.html", context={}
-    )

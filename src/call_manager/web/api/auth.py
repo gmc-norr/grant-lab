@@ -99,7 +99,7 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
             _logger.info("login failed", extra={"event": "login_failed", "email_fp": email_fp})
             raise _denied()
         if user.status != "active":
-            # Mirrors web/routes/auth.py:140 — pending vs the no-access CATCH-ALL.
+            # pending → /auth/pending; any other non-active status → /auth/no-access.
             # Do NOT hard-code status == "disabled" (silently drops a future status).
             target = "/auth/pending" if user.status == "pending" else "/auth/no-access"
             return LoginOut(redirect=target)  # no cookie
@@ -124,7 +124,7 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
 def register(request: Request, body: RegisterIn) -> RegisterOut:
     """Anti-enumeration: ALWAYS 200 {ok: true}. Silent on duplicate / disallowed
     domain / rate-limit; one dummy argon2 for timing parity on every eligible
-    attempt. Verbatim port of web/routes/register.py."""
+    attempt."""
     settings = request.app.state.settings
     ip_limiter = request.app.state.ip_limiter
     email_limiter = request.app.state.email_limiter
