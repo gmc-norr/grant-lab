@@ -121,9 +121,61 @@ it("renders without crashing while the query is loading (facet selects disabled)
   renderWithProviders(<CallsFilters />, { route: "/" });
   expect((await screen.findByLabelText("Profile", { selector: "input" })) as HTMLInputElement).toBeDisabled();
   expect((screen.getByLabelText("Source", { selector: "input" })) as HTMLInputElement).toBeDisabled();
+  expect(screen.getByLabelText("Min score", { selector: "input" })).toBeDisabled();
   // Sort + Show-closed bind to the URL and stay usable.
   expect(screen.getByLabelText("Sort", { selector: "input" })).not.toBeDisabled();
   expect(screen.getByLabelText("Show closed")).toBeInTheDocument();
+});
+
+it("typing in Search writes a debounced ?q= and resets the page", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: 7 }) as never);
+  const user = userEvent.setup({ pointerEventsCheck: 0 });
+  renderWithProviders(
+    <>
+      <CallsFilters />
+      <LocationProbe />
+    </>,
+    { route: "/?page=3" },
+  );
+  await user.type(await screen.findByLabelText("Search"), "onco");
+  await waitFor(() => {
+    const s = screen.getByTestId("search").textContent ?? "";
+    expect(s).toContain("q=onco");
+    expect(s).not.toContain("page=3");
+  });
+});
+
+it("seeds the Search box from the URL ?q=", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: 7 }) as never);
+  renderWithProviders(<CallsFilters />, { route: "/?q=onco" });
+  expect(await screen.findByLabelText("Search")).toHaveValue("onco");
+});
+
+it("the score floor is disabled without a profile and enabled with one", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: null }) as never);
+  const { unmount } = renderWithProviders(<CallsFilters />, { route: "/" });
+  const el = (await screen.findByLabelText("Min score", { selector: "input" })) as HTMLInputElement;
+  await waitFor(() => expect(el).toBeDisabled());
+  unmount();
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: 7 }) as never);
+  renderWithProviders(<CallsFilters />, { route: "/" });
+  const el2 = (await screen.findByLabelText("Min score", { selector: "input" })) as HTMLInputElement;
+  await waitFor(() => expect(el2).not.toBeDisabled());
+});
+
+it("selecting a score band writes ?min_score=", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: 7 }) as never);
+  const user = userEvent.setup({ pointerEventsCheck: 0 });
+  renderWithProviders(
+    <>
+      <CallsFilters />
+      <LocationProbe />
+    </>,
+    { route: "/" },
+  );
+  await user.click(await screen.findByLabelText("Min score", { selector: "input" }));
+  await user.click(await screen.findByRole("option", { name: "60+ (Good)", hidden: true }));
+  await waitFor(() => expect(screen.getByTestId("search").textContent).toContain("min_score=60"));
 });
 
 it("renders without crashing when /api/calls errors before any data exists", async () => {

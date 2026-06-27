@@ -675,6 +675,99 @@ def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
 # Defect 3: DIGEST_TOTAL_MUST_INCLUDE_CAP — whole-payload cap across profiles
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Task 5: more_count — "+N more in your dashboard" breadcrumb
+# ---------------------------------------------------------------------------
+
+def test_more_count_counts_top_surplus_beyond_shown(pg_session_factory, now):
+    """7 strong (>=60) matches -> 5 shown in the section, more_count == 2."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        for i in range(7):
+            _seed_call(
+                s, title=f"Strong {i}", score=80, profile_id=pid,
+                deadline=now + timedelta(days=30 + i),
+            )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    section = next(sec for sec in payload.sections if sec.profile_id == pid)
+    shown_top = [e for e in section.entries if e.bucket == "top"]
+    assert len(shown_top) == 5
+    assert section.more_count == 2
+
+
+def test_more_count_zero_when_top_fits(pg_session_factory, now):
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        for i in range(3):
+            _seed_call(
+                s, title=f"Strong {i}", score=80, profile_id=pid,
+                deadline=now + timedelta(days=30 + i),
+            )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    section = next(sec for sec in payload.sections if sec.profile_id == pid)
+    assert section.more_count == 0
+
+
+def _profile(u, name):
+    return Profile(
+        name=name,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
+        description="",
+        structured={
+            "areas": [], "budget_min": None, "budget_max": None,
+            "trl_min": None, "trl_max": None, "must_include": [], "hard_exclusions": [],
+        },
+        created_by=u.id,
+    )
+
+
+def test_more_count_counts_dashboard_set_not_deduped_section(pg_session_factory, now):
+    """DELIBERATE (spec): more_count is the profile's DASHBOARD strong-match count
+    (all >=60 for the profile), NOT the digest's deduped section. A call ranked
+    strong for two profiles is deduped into exactly one section, but it still
+    contributes to the OTHER profile's more_count — because the dashboard the
+    breadcrumb links to is not deduped."""
+    with pg_session_factory() as s:
+        u = User(email="x@ki.se", status="active")
+        s.add(u)
+        s.flush()
+        pa = _profile(u, "AProfile")  # lower id -> wins the dedup tie-break
+        pb = _profile(u, "BProfile")
+        s.add_all([pa, pb])
+        s.flush()
+        s.add_all([
+            Subscription(user_id=u.id, profile_id=pa.id, digest_enabled=True),
+            Subscription(user_id=u.id, profile_id=pb.id, digest_enabled=True),
+        ])
+        # Shared strong call: score 80 for BOTH profiles -> top bucket in both.
+        # Dedup tie-break (bucket, -score, -cos, profile_id) sends it to pa (lower id).
+        cid = _seed_call(s, title="Shared strong", score=80, profile_id=pa.id,
+                         deadline=now + timedelta(days=40))
+        s.add(CallRanking(call_id=cid, profile_id=pb.id, aggregate_score=80,
+                          rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
+                          ranked_at=now))
+        # pb keeps a section via its own borderline call (so it isn't dropped empty).
+        _seed_call(s, title="B borderline", score=50, profile_id=pb.id,
+                   deadline=now + timedelta(days=41))
+        uid = u.id
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    section_a = next(sec for sec in payload.sections if sec.profile_name == "AProfile")
+    section_b = next(sec for sec in payload.sections if sec.profile_name == "BProfile")
+    # pa shows the shared call in top (1 shown, 1 total) -> no surplus.
+    assert [e.title for e in section_a.entries if e.bucket == "top"] == ["Shared strong"]
+    assert section_a.more_count == 0
+    # pb's section shows NO top entry (the shared call deduped to pa), yet the
+    # call still counts toward pb's dashboard strong matches -> more_count == 1.
+    assert [e.title for e in section_b.entries if e.bucket == "top"] == []
+    assert section_b.more_count == 1
+
+
 def test_total_must_include_cap_across_profiles(pg_session_factory, now):
     """With 3 profiles each having 20 must_include matches the total must_include
     count across all sections must not exceed DIGEST_TOTAL_MUST_INCLUDE_CAP (50).

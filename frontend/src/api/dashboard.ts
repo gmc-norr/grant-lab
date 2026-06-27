@@ -14,15 +14,27 @@ export type DashboardParams = {
   profile?: string;
   page?: number;
   show_closed?: boolean;
+  q?: string;
+  min_score?: number;
 };
 
 export function dashboardParamsFrom(sp: URLSearchParams): DashboardParams {
+  // Sanitize q/min_score here so the query key and controls only ever see
+  // canonical values (a malformed deep link can't poison client state).
+  const rawQ = (sp.get("q") ?? "").trim();
+  const rawScore = sp.get("min_score");
+  const parsedScore = rawScore != null ? Number(rawScore) : NaN;
   return {
     source: sp.get("source") ?? undefined,
     sort: (sp.get("sort") as "newest" | "deadline" | null) ?? undefined,
     profile: sp.get("profile") ?? undefined,
     page: sp.get("page") ? Number(sp.get("page")) : 1,
     show_closed: sp.get("show_closed") === "1",
+    q: rawQ || undefined,
+    min_score:
+      Number.isFinite(parsedScore) && parsedScore >= 0 && parsedScore <= 100
+        ? parsedScore
+        : undefined,
   };
 }
 

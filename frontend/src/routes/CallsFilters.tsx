@@ -1,4 +1,6 @@
-import { Select, Switch } from "@mantine/core";
+import { Select, Switch, TextInput } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { dashboardParamsFrom, useDashboard, useSetDefaultProfile } from "../api/dashboard";
@@ -26,6 +28,21 @@ export function CallsFilters() {
       return next;
     });
   }
+
+  const [searchInput, setSearchInput] = useState(params.q ?? "");
+  const [debouncedSearch] = useDebouncedValue(searchInput, 300);
+  // Commit only when the debounced value differs from the (already-trimmed) URL
+  // value — this guard prevents an echo loop with the re-sync effect below.
+  // params.q is in the deps so the closure never reads a stale URL value; the
+  // guard makes the resulting self-triggered re-run a no-op.
+  useEffect(() => {
+    const next = debouncedSearch.trim();
+    if (next !== (params.q ?? "")) updateParam("q", next);
+  }, [debouncedSearch, params.q]);
+  // Re-sync the box when the URL q changes externally (back/forward, deep link).
+  useEffect(() => {
+    setSearchInput(params.q ?? "");
+  }, [params.q]);
 
   async function onSelectProfile(value: string) {
     // Explicit selection: PERSIST FIRST (awaited), reflect the view only on success.
@@ -57,6 +74,13 @@ export function CallsFilters() {
     <div className={styles.filters}>
       <h2 className={styles.heading}>Filters</h2>
 
+      <TextInput
+        label="Search"
+        placeholder="Search calls…"
+        value={searchInput}
+        onChange={(e) => setSearchInput(e.currentTarget.value)}
+      />
+
       <Select
         label="Profile"
         data={profileOptions}
@@ -86,6 +110,21 @@ export function CallsFilters() {
         ]}
         value={params.sort ?? "newest"}
         onChange={(v) => updateParam("sort", v ?? "newest")}
+        allowDeselect={false}
+        comboboxProps={{ withinPortal: false }}
+      />
+
+      <Select
+        label="Min score"
+        description={data?.effective.profile_id == null ? "Select a profile to filter by score" : undefined}
+        data={[
+          { value: "", label: "Any" },
+          { value: "60", label: "60+ (Good)" },
+          { value: "80", label: "80+ (Strong)" },
+        ]}
+        value={params.min_score != null ? String(params.min_score) : ""}
+        onChange={(v) => updateParam("min_score", v ?? "")}
+        disabled={loading || data?.effective.profile_id == null}
         allowDeselect={false}
         comboboxProps={{ withinPortal: false }}
       />

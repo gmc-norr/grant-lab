@@ -17,6 +17,8 @@
 {% for e in bord %}- {{ e.title }} (score {{ e.score }})
   {{ dashboard_url }}calls/{{ e.call_id }}?profile={{ section.profile_id }}
 {% endfor %}{% endif %}
+{% if section.more_count > 0 %}+{{ section.more_count }} more strong matches in your dashboard: {{ dashboard_url }}?profile={{ section.profile_id }}&min_score=60
+{% endif %}
 {% endfor %}
 
 Manage subscriptions: {{ dashboard_url }}me
