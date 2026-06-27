@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from call_manager.auth.domain import domain_allowed
 from call_manager.auth.passwords import verify_password
 from call_manager.auth.redirects import safe_next
+from call_manager.auth.session_cookie import InvalidSession
 from call_manager.db.models import User
 from call_manager.web.client_ip import MAX_EMAIL_LEN, client_ip, email_fingerprint
 
@@ -47,6 +48,10 @@ class RegisterIn(BaseModel):
 
 
 class RegisterOut(BaseModel):
+    ok: bool
+
+
+class LogoutOut(BaseModel):
     ok: bool
 
 
@@ -158,3 +163,32 @@ def register(request: Request, body: RegisterIn) -> RegisterOut:
         extra={"event": "register_created", "email_fp": email_fingerprint(email_normalized)},
     )
     return ok
+
+
+@router.post("/auth/logout", response_model=LogoutOut)
+def logout(
+    request: Request,
+    response: Response,
+    session: str | None = Cookie(default=None),
+) -> LogoutOut:
+    """Bump session_epoch (revokes EVERY outstanding cookie for the user) and
+    clear the session cookie. Does NOT touch oauth_txn — strict parity with the
+    deleted logout_submit. React then full-page-navs to /login."""
+    settings = request.app.state.settings
+    if session is not None:
+        signer = request.app.state.session_signer
+        session_factory = request.app.state.session_factory
+        try:
+            data = signer.verify(session)
+        except InvalidSession:
+            data = None
+        if data is not None:
+            with session_factory() as db:
+                user = db.get(User, data.user_id)
+                if user is not None:
+                    user.session_epoch = (user.session_epoch or 0) + 1
+                    db.commit()
+    response.delete_cookie(
+        "session", path="/", httponly=True, secure=settings.cookie_secure, samesite="lax"
+    )
+    return LogoutOut(ok=True)

@@ -223,3 +223,27 @@ def test_register_rate_limited_silent_no_row(monkeypatch, pg_url, pg_session_fac
             s.execute(_select(User).where(User.email == "limited@ki.se")).scalar_one_or_none()
             is None
         )
+
+
+def test_logout_bumps_epoch_and_clears_cookie(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    uid = _user(
+        app.state.session_factory, email="a@ki.se", status="active", password="correct-horse-1"
+    )
+    with TestClient(app) as c:
+        c.cookies.set("session", app.state.session_signer.make(user_id=uid, session_epoch=0))
+        r = c.post("/api/auth/logout")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    set_cookie = " ".join(r.headers.get_list("set-cookie"))
+    assert "session=" in set_cookie and (
+        "Max-Age=0" in set_cookie or "expires=" in set_cookie.lower()
+    )
+    with pg_session_factory() as s:
+        assert s.get(User, uid).session_epoch == 1  # revokes all outstanding cookies
+
+
+def test_logout_without_cookie_is_noop_200(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    with TestClient(app) as c:
+        r = c.post("/api/auth/logout")
+    assert r.status_code == 200 and r.json() == {"ok": True}
