@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
+from call_manager.web.api.turns import SSE_HEADERS
+
 router = APIRouter()
 
 
@@ -46,5 +48,5 @@ async def ping(
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=SSE_HEADERS,
     )

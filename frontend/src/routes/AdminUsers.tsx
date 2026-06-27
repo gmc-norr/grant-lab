@@ -117,8 +117,7 @@ export function AdminUsers() {
       <p className={styles.nav}>
         <Link to="/admin/users/pending">Pending approvals</Link>
         {" · "}
-        {/* bare /admin is still Jinja (Slice 2) -> full-page nav, not a router Link */}
-        <a href="/admin">Admin home</a>
+        <Link to="/admin">Admin home</Link>
       </p>
     </main>
   );

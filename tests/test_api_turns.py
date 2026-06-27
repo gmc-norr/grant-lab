@@ -291,3 +291,34 @@ def test_turns_disabled_reason_branches(monkeypatch, pg_url, pg_session_factory,
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns")
     assert r.json()["disabled_reason"] is None
     assert r.json()["can_send"] is True
+
+
+def test_turn_stream_response_carries_sse_anti_buffer_headers(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The production turn-stream endpoint MUST carry X-Accel-Buffering: no so
+    Nginx / reverse-proxies do not buffer SSE chunks and clients see real-time
+    events.  This test hits the HTTP surface (not the generator directly) to
+    verify the StreamingResponse headers are wired correctly."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    # A completed job gives the stream something to emit and terminate quickly.
+    from call_manager.db.models import ChatTurn as CT
+
+    with pg_session_factory() as s:
+        u = CT(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
+        s.add(u)
+        s.flush()
+        job = TurnJob(workspace_id=ws_id, user_turn_id=u.id, status="completed")
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    r = _client(app, owner_id).get(
+        f"/api/workspaces/{ws_id}/turns/{job_id}/stream"
+    )
+    assert r.status_code == 200
+    assert r.headers.get("x-accel-buffering") == "no", (
+        "SSE prod stream missing X-Accel-Buffering: no — Nginx will buffer chunks"
+    )
+    assert r.headers.get("cache-control") == "no-cache"
