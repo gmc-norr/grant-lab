@@ -702,6 +702,133 @@ def test_high_score_badge_excludes_closed(monkeypatch, pg_url, pg_session_factor
 # --- dismissed calls --------------------------------------------------------
 
 
+# --- free-text search (q) ---------------------------------------------------
+
+
+def _seed_search_corpus(pg_session_factory):
+    """Five open Vinnova calls, each carrying a distinct search term in exactly
+    one column, plus two wildcard-escape traps."""
+    now = datetime.now(UTC)
+    with pg_session_factory() as s:
+        vn = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        deadline = now + timedelta(days=60)
+        s.add_all(
+            [
+                Call(
+                    source_id=vn.id, external_id="S1", url="s1",
+                    title="Oncology research",
+                    published_at=datetime(2026, 4, 1, tzinfo=UTC), deadline=deadline,
+                ),
+                Call(
+                    source_id=vn.id, external_id="S2", url="s2",
+                    title="Generic grant",
+                    summary="Funds cancer immunotherapy work",
+                    published_at=datetime(2026, 4, 2, tzinfo=UTC), deadline=deadline,
+                ),
+                Call(
+                    source_id=vn.id, external_id="S3", url="s3",
+                    title="Infra call",
+                    full_text="Detailed body mentions proteomics methods",
+                    published_at=datetime(2026, 4, 3, tzinfo=UTC), deadline=deadline,
+                ),
+                Call(
+                    source_id=vn.id, external_id="S4", url="s4",
+                    title="Keyword call",
+                    keywords=["genomics", "sequencing"],
+                    published_at=datetime(2026, 4, 4, tzinfo=UTC), deadline=deadline,
+                ),
+                Call(
+                    source_id=vn.id, external_id="S5", url="s5",
+                    title="Discount 50% bonus grant_id",
+                    published_at=datetime(2026, 4, 5, tzinfo=UTC), deadline=deadline,
+                ),
+                Call(
+                    source_id=vn.id, external_id="S6", url="s6",
+                    title="Number 5012 grantXid plan",
+                    published_at=datetime(2026, 4, 6, tzinfo=UTC), deadline=deadline,
+                ),
+            ]
+        )
+        s.commit()
+
+
+def test_search_matches_title_substring(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _seed_search_corpus(pg_session_factory)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        # substring, case-insensitive: "onco" matches "Oncology research".
+        body = c.get("/api/calls", params={"q": "onco"}).json()
+    assert _titles(body) == ["Oncology research"]
+
+
+def test_search_matches_each_column(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _seed_search_corpus(pg_session_factory)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        r_immuno = c.get("/api/calls", params={"q": "immunotherapy"}).json()
+        r_proteo = c.get("/api/calls", params={"q": "proteomics"}).json()
+        r_geno = c.get("/api/calls", params={"q": "genomics"}).json()
+    assert _titles(r_immuno) == ["Generic grant"]
+    assert _titles(r_proteo) == ["Infra call"]
+    assert _titles(r_geno) == ["Keyword call"]
+
+
+def test_search_multi_term_is_and(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _seed_search_corpus(pg_session_factory)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        # both terms live in S2's summary -> match
+        r_both = c.get("/api/calls", params={"q": "cancer immunotherapy"}).json()
+        # no single call carries both terms -> empty
+        r_none = c.get("/api/calls", params={"q": "oncology immunotherapy"}).json()
+    assert _titles(r_both) == ["Generic grant"]
+    assert _titles(r_none) == []
+
+
+def test_search_escapes_like_wildcards(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _seed_search_corpus(pg_session_factory)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        # "50%" must match the literal "50%" (S5), NOT "50" anywhere (S6 "5012").
+        r_pct = c.get("/api/calls", params={"q": "50%"}).json()
+        # "_" must be literal too: "grant_id" matches S5, not S6's "grantXid".
+        r_under = c.get("/api/calls", params={"q": "grant_id"}).json()
+    assert _titles(r_pct) == ["Discount 50% bonus grant_id"]
+    assert _titles(r_under) == ["Discount 50% bonus grant_id"]
+
+
+def test_blank_search_is_noop(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    _seed_search_corpus(pg_session_factory)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        assert len(c.get("/api/calls", params={"q": "   "}).json()["items"]) == 6
+
+
+def test_search_too_long_is_422(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        assert c.get("/api/calls", params={"q": "x" * 201}).status_code == 422
+
+
+def test_search_narrows_summary_badges(monkeypatch, pg_url, pg_session_factory):
+    """q narrows the summary badges too (it lives in base_filters)."""
+    app = _app(monkeypatch, pg_url)
+    _seed_search_corpus(pg_session_factory)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        body = c.get("/api/calls", params={"q": "oncology"}).json()
+    assert body["summary"]["open_count"] == 1  # only "Oncology research" matches
+
+
+# --- dismissed calls --------------------------------------------------------
+
+
 def test_dismissed_calls_omitted(monkeypatch, pg_url, pg_session_factory):
     """A call the user hid (POST /api/calls/{id}/hide → UserCallDismissal) is
     omitted from that user's /api/calls feed. The hide POST itself

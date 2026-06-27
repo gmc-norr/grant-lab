@@ -379,6 +379,7 @@ def get_calls(
     limit: int = Query(default=50, ge=1, le=200),
     page: int = Query(default=1, ge=1),
     show_closed: bool = Query(default=False),
+    q: str | None = Query(default=None, max_length=200),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     sf = request.app.state.session_factory
@@ -396,6 +397,7 @@ def get_calls(
             limit=limit,
             page=page,
             show_closed=show_closed,
+            q=q,
         )
         items = [
             CallOut(

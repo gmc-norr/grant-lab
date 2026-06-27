@@ -202,6 +202,31 @@ def _ranking_counts(session: Session, profile_id: int) -> tuple[int, int]:
     return pending, failed
 
 
+def _ilike_escape(term: str) -> str:
+    """Escape LIKE wildcards so a user search term matches literally. ``\\`` is
+    the escape char passed to ``.ilike(..., escape="\\\\")``."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _search_predicate(q: str):
+    """Substring free-text match: AND across whitespace-split terms, OR across
+    title/summary/full_text/keywords. Index-backed (pg_trgm) on the first three;
+    the keywords leg is an accepted unindexed expression scan."""
+    keywords_str = func.array_to_string(Call.keywords, " ")
+    term_clauses = []
+    for term in q.split():
+        pat = f"%{_ilike_escape(term)}%"
+        term_clauses.append(
+            or_(
+                Call.title.ilike(pat, escape="\\"),
+                Call.summary.ilike(pat, escape="\\"),
+                Call.full_text.ilike(pat, escape="\\"),
+                keywords_str.ilike(pat, escape="\\"),
+            )
+        )
+    return and_(*term_clauses)
+
+
 def build_dashboard_view(
     session: Session,
     *,
@@ -212,6 +237,7 @@ def build_dashboard_view(
     limit: int,
     page: int,
     show_closed: bool,
+    q: str | None = None,
 ) -> DashboardView:
     """Build the dashboard read-model (read-only; no writes).
 
@@ -288,6 +314,8 @@ def build_dashboard_view(
     base_filters = [Call.id.notin_(dismissed_subq)]
     if source_id is not None:
         base_filters.append(Call.source_id == source_id)
+    if q and q.strip():
+        base_filters.append(_search_predicate(q.strip()))
     # The list (and its pagination total) hide closed calls by default.
     list_filters = list(base_filters)
     if not show_closed:
