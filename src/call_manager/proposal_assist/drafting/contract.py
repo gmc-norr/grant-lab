@@ -106,6 +106,19 @@ class SDKTurnError(RuntimeError):
         self.status = status
 
 
+class DraftingAtCapacity(RuntimeError):
+    """Raised by the registry when a NET-NEW subprocess launch is requested but
+    the live-subprocess ceiling (DRAFTING_MAX_LIVE_SUBPROCESSES) is reached and
+    every live handle is mid-turn (so none can be evicted to make room).
+
+    This is a transient "busy" signal: the API layer maps it to a retriable
+    HTTP 429, and the drain tick leaves the queued turn for the next tick.
+    Distinct from LockNotAcquired (cross-process contention) — this is the
+    in-process self-imposed cap that keeps drafting from starving the engine's
+    request pool. Lives on the contract so callers can catch it without
+    importing the registry's concrete classes."""
+
+
 @runtime_checkable
 class DraftingAgent(Protocol):
     """The adapter contract.
@@ -137,6 +150,17 @@ class DraftingAgent(Protocol):
     ) -> AsyncIterator[StreamEvent]: ...
 
     async def terminate(self, handle: AgentHandle) -> None: ...
+
+    # OPTIONAL (intentionally NOT a Protocol member, so runtime_checkable
+    # isinstance() doesn't require it): adapters MAY provide
+    #
+    #     async def interrupt(self, handle: AgentHandle) -> None
+    #
+    # for a best-effort graceful stop of an in-flight turn WITHOUT tearing down
+    # the subprocess (so a timed-out turn can stop cleanly and the handle be
+    # reused). The registry/controller probe for it via getattr and skip when
+    # absent (the Fake doesn't implement it). Callers MUST treat it as advisory
+    # and keep terminate() as the guaranteed backstop.
 
     async def set_turn_provenance(
         self,

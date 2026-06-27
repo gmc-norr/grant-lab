@@ -157,11 +157,19 @@ class ClaudeAgentSDKAdapter:
         tools_factory: Callable[[Path, uuid.UUID], McpSdkServerConfig] | None = None,
         tool_context_sink: dict[uuid.UUID, Any] | None = None,
         allowed_tools: list[str] | None = None,
+        anthropic_api_key: str | None = None,
     ) -> None:
         self._model = model
         self._workspaces_dir = Path(workspaces_dir)
         self._permission_mode = permission_mode  # type: ignore[assignment]
         self._tools_factory = tools_factory
+        # Defect 2: pydantic-settings reads ANTHROPIC_API_KEY from .env into
+        # Settings but does NOT export it to os.environ, so the SDK subprocess
+        # (which inherits os.environ) would not see a .env-only key and every
+        # turn would fail auth. We thread the key from Settings here and inject
+        # it into ClaudeAgentOptions.env so the subprocess always gets it. None
+        # = rely on the ambient environment (real os.environ export / dev login).
+        self._anthropic_api_key = anthropic_api_key or None
         # SP2b-2c: role-scoped allowlist override. None = the interactive default
         # (the hardcoded list below). The coherence-keeper passes a smaller,
         # lock-aware list so e.g. propose_spec_edit is unreachable when locked.
@@ -235,6 +243,14 @@ class ClaudeAgentSDKAdapter:
         # Neutralize app secrets in the subprocess environment (see
         # _SCRUBBED_ENV_KEYS). Merged over inherited env by the SDK.
         options_kwargs["env"] = {key: "" for key in _SCRUBBED_ENV_KEYS}
+        # Defect 2: explicitly pass ANTHROPIC_API_KEY into the subprocess env
+        # when configured. pydantic-settings keeps a .env-only key OUT of
+        # os.environ, so relying on inheritance would fail auth on every turn for
+        # the common .env deployment. Only set when present so an unset key
+        # falls back to the ambient environment rather than being forced empty
+        # (which WOULD break a key supplied via real os.environ / dev login).
+        if self._anthropic_api_key is not None:
+            options_kwargs["env"]["ANTHROPIC_API_KEY"] = self._anthropic_api_key
         # Standing safety instruction: treat <untrusted-reference> content as
         # data, never instructions. Preset form preserves the default Claude
         # Code system prompt (the SDK's implicit default when unset) and appends.
@@ -443,6 +459,26 @@ class ClaudeAgentSDKAdapter:
             session_id=None,
         )
 
+    async def interrupt(self, handle: AgentHandle) -> None:
+        """Best-effort graceful interrupt of the in-flight turn (Defect 5).
+
+        Sends the SDK's interrupt control request so the subprocess stops the
+        current turn cleanly WITHOUT tearing down the connection — letting the
+        handle be reused or terminate() exit normally rather than via a forced
+        kill. Advisory only: the caller keeps terminate() as the backstop, so we
+        swallow (and log) any failure rather than propagating it."""
+        client: ClaudeSDKClient | None = handle.state.get("client")
+        if client is None:
+            return
+        try:
+            await client.interrupt()
+        except Exception:
+            logger.debug(
+                "SDK client interrupt failed for workspace %s; caller will terminate",
+                handle.workspace_id,
+                exc_info=True,
+            )
+
     async def terminate(self, handle: AgentHandle) -> None:
         """Disconnect the SDK client. Safe to call even if never connected."""
         # Tie the retained ToolContext's lifetime to the subprocess: evict it here
@@ -456,9 +492,43 @@ class ClaudeAgentSDKAdapter:
         try:
             await client.disconnect()
         except Exception:
+            # Defect 3: disconnect() raising (e.g. an anyio task-group error)
+            # short-circuits BEFORE the SDK transport's own SIGTERM→SIGKILL
+            # escalation, leaving the OS subprocess orphaned and its pooled DB
+            # connection potentially pinned. Fall back to a direct force-kill of
+            # the underlying process so the OS reaps it. Best-effort: if even the
+            # kill fails we log loudly — there is no further handle to retry.
             logger.warning(
-                "SDK client disconnect failed for workspace %s; subprocess may have leaked",
+                "SDK client disconnect failed for workspace %s; force-killing subprocess",
                 handle.workspace_id,
+                exc_info=True,
+            )
+            self._force_kill_subprocess(client, handle.workspace_id)
+
+    @staticmethod
+    def _force_kill_subprocess(client: ClaudeSDKClient, workspace_id: uuid.UUID) -> None:
+        """Reach through the SDK client to its transport's OS process and kill
+        it. Used only when disconnect() raised before the SDK could reap the
+        child. Tolerates SDK-internal shape drift (transport/_process may be
+        absent) — every step is guarded, and a failure is logged not raised."""
+        try:
+            transport = getattr(client, "_transport", None)
+            process = getattr(transport, "_process", None) if transport is not None else None
+            if process is None:
+                logger.warning(
+                    "no subprocess handle reachable for workspace %s after disconnect "
+                    "failure; OS process may have leaked",
+                    workspace_id,
+                )
+                return
+            kill = getattr(process, "kill", None)
+            if kill is not None:
+                kill()
+        except Exception:
+            logger.warning(
+                "force-kill of drafting subprocess for workspace %s failed; "
+                "OS process may have leaked",
+                workspace_id,
                 exc_info=True,
             )
 

@@ -315,3 +315,63 @@ async def test_drain_terminates_handle_on_turn_timeout(
     # The fix: the handle was terminated (not left cached with a dirty stream).
     assert len(adapter.terminations) == 1
     assert wsid not in registry._entries
+
+
+class _InterruptRecordingAdapter(_SlowAdapter):
+    """Records interrupt() calls so the drain timeout path can be asserted to
+    attempt a graceful interrupt before falling back to terminate."""
+
+    def __init__(self):
+        super().__init__()
+        self.interrupts: list = []
+
+    async def interrupt(self, handle) -> None:  # noqa: ANN001
+        self.interrupts.append(handle.workspace_id)
+
+
+@pytest.mark.asyncio
+async def test_drain_attempts_interrupt_before_terminate_on_timeout(
+    pg_session_factory,
+    _settings_env,
+):
+    """Defect 5: a timed-out turn should first try the SDK's interrupt() so the
+    subprocess can stop cleanly, then terminate() remains the guaranteed
+    backstop (handle gone after the tick)."""
+    adapter = _InterruptRecordingAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry,
+        session_factory=pg_session_factory,
+    )
+
+    with pg_session_factory() as s:
+        user = make_user(s)
+        s.commit()
+        uid = user.id
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        wsid = ws.id
+        t = ChatTurn(workspace_id=wsid, role="user", content="hi")
+        s.add(t)
+        s.flush()
+        s.add(
+            TurnJob(
+                workspace_id=wsid,
+                user_turn_id=t.id,
+                status="queued",
+                submitted_by_user_id=uid,
+            )
+        )
+        s.commit()
+
+    dispatched = await drain_turn_queue_tick(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_max_seconds=0.05,
+    )
+    assert dispatched == 0
+    # Interrupt was attempted for the workspace...
+    assert adapter.interrupts == [wsid]
+    # ...and terminate still ran as the guaranteed backstop.
+    assert len(adapter.terminations) == 1
+    assert wsid not in registry._entries

@@ -165,6 +165,35 @@ class Settings(BaseSettings):
             "demos without an API key)."
         ),
     )
+    drafting_max_live_subprocesses: int = Field(
+        default=8,
+        alias="DRAFTING_MAX_LIVE_SUBPROCESSES",
+        gt=0,
+        description=(
+            "Hard ceiling on concurrent live drafting subprocesses (Defect 1 "
+            "remediation). Each live subprocess pins ONE pooled DB connection "
+            "for its lifetime (the session-level advisory lock keeps it checked "
+            "out, up to WORKSPACE_IDLE_TIMEOUT_SECONDS). Keep this well below the "
+            "engine pool (pool_size=10 + max_overflow=20 = 30) so drafting can "
+            "never starve web/scheduler connections. In production those lock "
+            "sessions come from a DEDICATED engine (DRAFTING_DB_POOL_SIZE) sized "
+            "to this ceiling, so they don't draw on the request pool at all. At "
+            "the cap, a new launch evicts the least-recently-used IDLE handle; if "
+            "all are mid-turn, it returns a retriable 429."
+        ),
+    )
+    drafting_db_pool_size: int = Field(
+        default=8,
+        alias="DRAFTING_DB_POOL_SIZE",
+        gt=0,
+        description=(
+            "pool_size for the DEDICATED engine that backs drafting advisory-lock "
+            "sessions, isolating long-held drafting connections from the request/"
+            "scheduler engine. Size it to DRAFTING_MAX_LIVE_SUBPROCESSES (+1 head "
+            "room for the brief launch overlap during LRU eviction). max_overflow "
+            "is 1 so the pool can't silently exceed the ceiling."
+        ),
+    )
     workspace_idle_timeout_seconds: int = Field(
         default=600,
         alias="WORKSPACE_IDLE_TIMEOUT_SECONDS",

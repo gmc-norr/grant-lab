@@ -9,6 +9,7 @@ from __future__ import annotations
 from sqlalchemy.orm import sessionmaker
 
 from call_manager.config import Settings
+from call_manager.db.session import make_drafting_engine, make_session_factory
 from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.drafting.contract import DraftingAgent
 from call_manager.proposal_assist.drafting.controller import (
@@ -23,16 +24,34 @@ def build_workspace_controller(
     settings: Settings,
     session_factory: sessionmaker,
     reference_ingest_limiter: object | None = None,
+    lock_session_factory: sessionmaker | None = None,
 ) -> WorkspaceController:
+    """Build the WorkspaceController for the running environment.
+
+    Defect 1: drafting advisory-lock sessions are long-lived (held for each
+    subprocess's whole life). To keep them off the shared request pool we build
+    a DEDICATED engine sized to the live-subprocess ceiling and pass its factory
+    as lock_session_factory. Callers may inject lock_session_factory (tests)
+    to override; otherwise it's created here. The registry's max_live ceiling
+    and this dedicated pool are sized together from the same settings.
+    """
     adapter = _build_adapter(settings, session_factory, reference_ingest_limiter)
     registry = SubprocessRegistry(
         adapter=adapter,
         idle_seconds=settings.workspace_idle_timeout_seconds,
+        max_live=settings.drafting_max_live_subprocesses,
     )
+    if lock_session_factory is None:
+        drafting_engine = make_drafting_engine(
+            settings.database_url,
+            pool_size=settings.drafting_db_pool_size,
+        )
+        lock_session_factory = make_session_factory(drafting_engine)
     return WorkspaceController(
         registry=registry,
         session_factory=session_factory,
         workspaces_dir=settings.workspaces_dir,
+        lock_session_factory=lock_session_factory,
     )
 
 
@@ -86,5 +105,8 @@ def _build_adapter(
             workspaces_dir=settings.workspaces_dir,
             tools_factory=tools_factory,
             tool_context_sink=tool_context_sink,
+            # Defect 2: a .env-only ANTHROPIC_API_KEY never reaches os.environ,
+            # so thread it explicitly into the subprocess env via the adapter.
+            anthropic_api_key=settings.anthropic_api_key,
         )
     raise ValueError(f"unknown DRAFTING_ADAPTER choice: {choice!r} (expected 'claude' or 'fake')")

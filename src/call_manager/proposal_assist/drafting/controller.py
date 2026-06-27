@@ -50,9 +50,18 @@ class WorkspaceController:
         registry: SubprocessRegistry,
         session_factory: sessionmaker,
         workspaces_dir: Path | str = "var/workspaces",
+        lock_session_factory: sessionmaker | None = None,
     ) -> None:
         self._registry = registry
         self._session_factory = session_factory
+        # Defect 1: the long-held advisory-lock session (kept checked out for
+        # the subprocess's whole life) is opened from lock_session_factory — a
+        # DEDICATED small pool sized to the live-subprocess ceiling — so it never
+        # draws on the shared request/scheduler pool. Short-lived work (orphan
+        # sweep, reconciliation, queued-turn lookup) stays on session_factory.
+        # Defaults to session_factory when no dedicated factory is wired (tests),
+        # preserving the original single-pool behavior.
+        self._lock_session_factory = lock_session_factory or session_factory
         # Production callers pass settings.workspaces_dir explicitly;
         # the default keeps existing tests that omit this parameter working.
         self._workspaces_dir = Path(workspaces_dir)
@@ -113,7 +122,8 @@ class WorkspaceController:
         handed_off = False
 
         try:
-            lock_session = self._session_factory()
+            # Long-held lock session from the DEDICATED drafting pool (Defect 1).
+            lock_session = self._lock_session_factory()
             if not acquire_workspace_lock(lock_session, workspace_id):
                 raise LockNotAcquired(workspace_id)
             lock_acquired = True
@@ -215,6 +225,14 @@ class WorkspaceController:
     async def terminate(self, workspace_id: uuid.UUID) -> None:
         await self._registry.terminate(workspace_id)
 
+    async def interrupt(self, workspace_id: uuid.UUID) -> bool:
+        """Best-effort graceful interrupt of the workspace's in-flight turn
+        (Defect 5). Lets a timed-out turn stop cleanly so the subprocess can be
+        reused, instead of always cold-terminating. Returns True if an interrupt
+        was attempted. The caller MUST still terminate as the guaranteed
+        backstop — interrupt is advisory."""
+        return await self._registry.interrupt(workspace_id)
+
     async def set_turn_provenance(
         self,
         workspace_id: uuid.UUID,
@@ -239,5 +257,36 @@ class WorkspaceController:
 
         Returns the number of handles swept. Intended for the scheduler
         tick — exposed here so the scheduler closure doesn't have to reach
-        into _registry."""
-        return await self._registry.sweep_idle()
+        into _registry.
+
+        Defect 4: workspaces with a queued turn are skipped so their resumable
+        session isn't torn down only to cold-relaunch on the next drain tick.
+        The predicate is a single indexed SELECT against turn_jobs in a short-
+        lived session, opened per-call (never threaded through the registry)."""
+        return await self._registry.sweep_idle(has_queued_turn=self._workspace_has_queued_turn)
+
+    def _workspace_has_queued_turn(self, workspace_id: uuid.UUID) -> bool:
+        """True if the workspace has at least one queued turn_jobs row. Opens a
+        fresh short-lived session (the per-unit-of-work invariant in
+        db/session.py). Best-effort: on any DB error, return False so the sweep
+        still tears down a genuinely idle handle (the conservative default —
+        never pin a connection on a lookup failure)."""
+        from call_manager.db.models import TurnJob
+
+        try:
+            with self._session_factory() as s:
+                return (
+                    s.scalar(
+                        select(TurnJob.id)
+                        .where(TurnJob.workspace_id == workspace_id)
+                        .where(TurnJob.status == "queued")
+                        .limit(1)
+                    )
+                    is not None
+                )
+        except Exception:
+            logger.exception(
+                "sweep_idle: queued-turn lookup failed for %s; treating as no queue",
+                workspace_id,
+            )
+            return False
