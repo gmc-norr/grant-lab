@@ -1,3 +1,4 @@
+import { Box, Button, Group, Tabs, Text } from "@mantine/core";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
@@ -6,6 +7,7 @@ import { ApiError } from "../api/client";
 import { useCockpitNav } from "../cockpit/cockpitNav";
 import { CitationComposer } from "../cockpit/CitationComposer";
 import { resetEditorStore, setCursor, setDirty, setSave } from "../cockpit/editorStore";
+import styles from "../cockpit/CockpitPanels.module.css";
 import { SourceViewer } from "../cockpit/SourceViewer";
 import { CodeMirrorEditor } from "./CodeMirrorEditor";
 
@@ -193,46 +195,34 @@ export function ArtifactSectionEditor({
   const onPillClick = (_citekey: string, evId: string) => setPeekEv(evId);
 
   return (
-    <main className="cockpit">
-      <section className="cockpit-main">
-        <div role="tablist" aria-label="View">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "section"}
-            onClick={() => setView("section")}
-          >
-            Section
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "full"}
-            onClick={() => setView("full")}
-          >
-            {fullViewLabel}
-          </button>
-        </div>
+    <Box component="main" className={styles.editorGrid} p="md">
+      <Box component="section" className={styles.editorMain}>
+        <Tabs value={view} onChange={(v) => v && setView(v as "section" | "full")}>
+          <Tabs.List aria-label="View">
+            <Tabs.Tab value="section">Section</Tabs.Tab>
+            <Tabs.Tab value="full">{fullViewLabel}</Tabs.Tab>
+          </Tabs.List>
+        </Tabs>
 
         {staleSection !== null && (
-          <p role="alert">
+          <Text role="alert" c="red" size="sm">
             This section changed underneath you. Your edits are kept.{" "}
-            <button type="button" onClick={() => reloadSection(staleSection)}>
+            <Button size="xs" variant="subtle" onClick={() => reloadSection(staleSection)}>
               Reload (discard my edits)
-            </button>{" "}
-            <button type="button" onClick={() => setStaleSection(null)}>
+            </Button>{" "}
+            <Button size="xs" variant="subtle" onClick={() => setStaleSection(null)}>
               Keep editing
-            </button>
-          </p>
+            </Button>
+          </Text>
         )}
 
         {saveError !== null && (
-          <p role="alert">
+          <Text role="alert" c="red" size="sm">
             {saveError}{" "}
-            <button type="button" onClick={() => setSaveError(null)}>
+            <Button size="xs" variant="subtle" onClick={() => setSaveError(null)}>
               Dismiss
-            </button>
-          </p>
+            </Button>
+          </Text>
         )}
 
         <CodeMirrorEditor
@@ -254,33 +244,33 @@ export function ArtifactSectionEditor({
         />
 
         {canEdit && view === "section" && (
-          <div className="cockpit-section-actions">
-            <button
-              type="button"
+          <Group gap="sm">
+            <Button
+              size="xs"
               onClick={onSave}
               disabled={save.isPending || !isDirty(activeIndex)}
             >
               Save section
-            </button>
+            </Button>
             {citations && (
-              <button
-                type="button"
-                className="cite-selection-btn"
+              <Button
+                size="xs"
+                variant="default"
                 disabled={!selection || isDirty(activeIndex)}
                 title={isDirty(activeIndex) ? "Save this section first" : undefined}
                 onClick={() => setComposerOpen(true)}
               >
                 Cite selection
-              </button>
+              </Button>
             )}
-          </div>
+          </Group>
         )}
-      </section>
+      </Box>
 
       {citations && peekEv !== null && (
-        <section className="cockpit-peek" aria-label="Citation source peek">
-          {peek.isLoading && <p aria-busy="true">Loading source…</p>}
-          {peek.isError && <p role="alert">Could not load the cited source.</p>}
+        <Box component="section" className={styles.sidePane} data-region="peek" aria-label="Citation source peek">
+          {peek.isLoading && <Text aria-busy="true">Loading source…</Text>}
+          {peek.isError && <Text role="alert" c="red">Could not load the cited source.</Text>}
           {peek.data && (
             <SourceViewer
               source={peek.data}
@@ -293,13 +283,13 @@ export function ArtifactSectionEditor({
               onNavigate={(evId) => setPeekEv(evId)}
             />
           )}
-        </section>
+        </Box>
       )}
 
       {citations && pinnedEv !== null && (
-        <aside className="cockpit-pinned" aria-label="Pinned source">
-          {pinned.isLoading && <p aria-busy="true">Loading source…</p>}
-          {pinned.isError && <p role="alert">Could not load the cited source.</p>}
+        <Box component="aside" className={styles.sidePane} data-region="pinned" aria-label="Pinned source">
+          {pinned.isLoading && <Text aria-busy="true">Loading source…</Text>}
+          {pinned.isError && <Text role="alert" c="red">Could not load the cited source.</Text>}
           {pinned.data && (
             <SourceViewer
               source={pinned.data}
@@ -309,11 +299,11 @@ export function ArtifactSectionEditor({
               onNavigate={(evId) => setPinnedEv(evId)}
             />
           )}
-        </aside>
+        </Box>
       )}
 
       {citations && composerOpen && selection && activeSection && (
-        <section className="cockpit-composer">
+        <Box component="section" className={styles.composerPane}>
           <CitationComposer
             workspaceId={workspaceId}
             claim={{
@@ -329,8 +319,8 @@ export function ArtifactSectionEditor({
             }}
             onCancel={() => setComposerOpen(false)}
           />
-        </section>
+        </Box>
       )}
-    </main>
+    </Box>
   );
 }

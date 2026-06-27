@@ -27,3 +27,25 @@
   color: var(--app-bad);
   border-color: color-mix(in srgb, var(--app-bad) 40%, transparent);
 }
+
+/* --- ArtifactSectionEditor layout (the old .cockpit grid) --- */
+.editorGrid {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.editorMain {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+.sidePane {
+  min-width: 18rem;
+  max-width: 28rem;
+}
+.composerPane {
+  min-width: 20rem;
+  max-width: 30rem;
+}

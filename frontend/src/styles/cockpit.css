@@ -1,24 +1,7 @@
 /* Cockpit layout: editor (+ center peek) | pinned source. The Outline moved to the
-   shell sidebar (CockpitSidebar) in Phase 3a. Plain global classes (the Cockpit uses
-   bare className strings). Tokens come from theme/theme.css (--app-*). */
-.cockpit {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 1rem;
-  align-items: start;
-}
-.cockpit-main {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  min-width: 0;
-}
-.cockpit-peek,
-.cockpit-pinned {
-  min-width: 18rem;
-  max-width: 28rem;
-}
-
+   shell sidebar (CockpitSidebar) in Phase 3a. Editor layout now lives in
+   CockpitPanels.module.css (.editorGrid / .editorMain / .sidePane / .composerPane).
+   Tokens come from theme/theme.css (--app-*). */
 .source-viewer {
   border: 1px solid var(--app-border);
   border-radius: 8px;
@@ -103,18 +86,8 @@
   border: 1px solid color-mix(in srgb, var(--app-good) 40%, transparent);
 }
 
-/* select-to-cite: the Save/Cite action row, the composer pane + surface. */
-.cockpit-section-actions {
-  display: flex;
-  align-items: center;
-}
-.cite-selection-btn {
-  margin-left: 0.5rem;
-}
-.cockpit-composer {
-  min-width: 20rem;
-  max-width: 30rem;
-}
+/* select-to-cite: the composer surface (Save/Cite action row now in Mantine Group;
+   pane sizing now in CockpitPanels.module.css .composerPane). */
 .cite-composer {
   border: 1px solid var(--app-border);
   border-radius: 8px;
@@ -160,25 +133,6 @@
   align-items: flex-start;
   gap: 0.5rem;
   padding: 1rem;
-}
-
-/* The editor's own [Section | Full] view toggle. */
-.cockpit-main > [role="tablist"] {
-  display: flex;
-  gap: 0.25rem;
-}
-.cockpit-main > [role="tablist"] button[role="tab"] {
-  border: 1px solid var(--app-border);
-  background: var(--app-tabbar);
-  border-radius: 6px 6px 0 0;
-  padding: 0.2rem 0.6rem;
-  cursor: pointer;
-  color: var(--app-muted);
-}
-.cockpit-main > [role="tablist"] button[role="tab"][aria-selected="true"] {
-  background: var(--app-editor);
-  color: var(--app-text);
-  font-weight: 600;
 }
 
 /* spec lock banner + owner toggle bar. */

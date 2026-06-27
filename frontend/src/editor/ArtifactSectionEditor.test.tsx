@@ -1,3 +1,4 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -5,6 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import * as citationsApi from "../api/citations";
 import { resetEditorStore } from "../cockpit/editorStore";
+import { theme } from "../theme/theme";
 import { ArtifactSectionEditor } from "./ArtifactSectionEditor";
 
 afterEach(() => {
@@ -19,27 +21,29 @@ function renderEditor(
   const qc = new QueryClient();
   const save = { mutateAsync: vi.fn(), isPending: false };
   const { container } = render(
-    <MemoryRouter initialEntries={[url]}>
-      <QueryClientProvider client={qc}>
-        <Routes>
-          <Route
-            path="/cockpit/:id"
-            element={
-              <ArtifactSectionEditor
-                workspaceId="ws-1"
-                queryKey={["spec", "ws-1"]}
-                head={"a".repeat(40)}
-                canEdit={true}
-                sections={sections}
-                save={save}
-                refetch={() => {}}
-                citations={false}
-              />
-            }
-          />
-        </Routes>
-      </QueryClientProvider>
-    </MemoryRouter>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter initialEntries={[url]}>
+        <QueryClientProvider client={qc}>
+          <Routes>
+            <Route
+              path="/cockpit/:id"
+              element={
+                <ArtifactSectionEditor
+                  workspaceId="ws-1"
+                  queryKey={["spec", "ws-1"]}
+                  head={"a".repeat(40)}
+                  canEdit={true}
+                  sections={sections}
+                  save={save}
+                  refetch={() => {}}
+                  citations={false}
+                />
+              }
+            />
+          </Routes>
+        </QueryClientProvider>
+      </MemoryRouter>
+    </MantineProvider>,
   );
   return { save, container };
 }
@@ -88,28 +92,30 @@ it("openPeek prop opens the citation source peek panel", async () => {
   const qc = new QueryClient();
   const save = { mutateAsync: vi.fn(), isPending: false };
   render(
-    <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
-      <QueryClientProvider client={qc}>
-        <Routes>
-          <Route
-            path="/cockpit/:id"
-            element={
-              <ArtifactSectionEditor
-                workspaceId="ws-1"
-                queryKey={["draft", "ws-1"]}
-                head={"a".repeat(40)}
-                canEdit={true}
-                sections={[{ index: 0, heading: "", text: "x\n", sha: "s0" }]}
-                save={save}
-                refetch={() => {}}
-                citations={true}
-                openPeek={{ ev: "ev-9", n: 1 }}
-              />
-            }
-          />
-        </Routes>
-      </QueryClientProvider>
-    </MemoryRouter>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+        <QueryClientProvider client={qc}>
+          <Routes>
+            <Route
+              path="/cockpit/:id"
+              element={
+                <ArtifactSectionEditor
+                  workspaceId="ws-1"
+                  queryKey={["draft", "ws-1"]}
+                  head={"a".repeat(40)}
+                  canEdit={true}
+                  sections={[{ index: 0, heading: "", text: "x\n", sha: "s0" }]}
+                  save={save}
+                  refetch={() => {}}
+                  citations={true}
+                  openPeek={{ ev: "ev-9", n: 1 }}
+                />
+              }
+            />
+          </Routes>
+        </QueryClientProvider>
+      </MemoryRouter>
+    </MantineProvider>,
   );
 
   await waitFor(() =>
