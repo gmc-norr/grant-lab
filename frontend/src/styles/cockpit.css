@@ -154,35 +154,6 @@
   padding: 0.4rem;
 }
 
-/* The artifact [Draft | Spec | Scorecard | Panel review] tab strip — IDE editor tabs. */
-.cockpit-shell {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.cockpit-shell > [role="tablist"] {
-  display: flex;
-  gap: 0;
-  background: var(--app-tabbar);
-  border-bottom: 1px solid var(--app-border);
-}
-.cockpit-shell > [role="tablist"] button[role="tab"] {
-  border: none;
-  border-right: 1px solid var(--app-border);
-  background: transparent;
-  padding: 0.35rem 0.9rem;
-  cursor: pointer;
-  color: var(--app-muted);
-}
-.cockpit-shell > [role="tablist"] button[role="tab"]:hover {
-  color: var(--app-text);
-}
-.cockpit-shell > [role="tablist"] button[role="tab"][aria-selected="true"] {
-  background: var(--app-editor);
-  color: var(--app-text);
-  font-weight: 600;
-  box-shadow: inset 0 -2px 0 var(--app-accent);
-}
 .spec-empty {
   display: flex;
   flex-direction: column;
