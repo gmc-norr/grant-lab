@@ -104,6 +104,55 @@ def test_try_acquire_is_robust_when_engine_cannot_connect():
     assert try_acquire_scheduler_lock(engine) is None
 
 
+def test_release_actually_frees_advisory_lock_against_real_pg(pg_url):
+    """release() must genuinely drop the session-level advisory lock so a FRESH
+    connection can re-acquire it — WITHOUT disposing the engine.
+
+    Regression guard: previously release() only called conn.close(), which on a
+    pooled engine returns the connection to the pool (ROLLBACK, lock survives)
+    rather than freeing the lock. A second instance would then be locked out
+    until engine.dispose(). release() now runs pg_advisory_unlock first.
+    """
+    from sqlalchemy import create_engine, text
+
+    # First engine takes the lock. Use a normal (pooled) engine so we exercise
+    # the real pool-return-on-close behaviour the fix defends against.
+    engine_a = create_engine(pg_url)
+    # Second engine probes — must be a DIFFERENT pool/connection so it sees the
+    # lock as held while A holds it, and as free after A releases.
+    engine_b = create_engine(pg_url)
+    try:
+        lock = try_acquire_scheduler_lock(engine_a)
+        assert isinstance(lock, SchedulerLock)
+
+        # While A holds the lock, B cannot acquire it.
+        with engine_b.connect() as conn_b:
+            held = conn_b.execute(
+                text("SELECT pg_try_advisory_lock(hashtext('call-manager-scheduler'))")
+            ).scalar()
+            # B failed to take it → release B's (no-op since it didn't get it)
+            assert held is False, "lock should be held by engine_a while it's alive"
+
+        # Release WITHOUT disposing engine_a. The pooled connection returns to
+        # A's pool, but the advisory lock must already be dropped.
+        lock.release()
+
+        # A fresh connection on B must now be able to acquire the lock.
+        with engine_b.connect() as conn_b:
+            reacquired = conn_b.execute(
+                text("SELECT pg_try_advisory_lock(hashtext('call-manager-scheduler'))")
+            ).scalar()
+            assert reacquired is True, (
+                "release() did not free the advisory lock — a second instance "
+                "would be locked out until engine.dispose()"
+            )
+            # Clean up: drop the lock B just took.
+            conn_b.execute(text("SELECT pg_advisory_unlock(hashtext('call-manager-scheduler'))"))
+    finally:
+        engine_a.dispose()
+        engine_b.dispose()
+
+
 # --- Defect 2: executor sizing ----------------------------------------------
 
 

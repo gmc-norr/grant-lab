@@ -257,9 +257,27 @@ async def lifespan(app: FastAPI):
         app.state.engine.dispose()
 
 
+# The pgvector columns in db/models.py are hard-coded `Vector(1024)` (×3).
+# EMBEDDING_DIM is configurable, but a value other than this would only fail
+# LATE, at the first INSERT, with an opaque pgvector dimension error. Assert the
+# two agree at boot so a config-only model swap (e.g. to a 768-dim model) fails
+# FAST with a clear pointer to the required column migration.
+EMBEDDING_COLUMN_DIM = 1024
+
+
 def create_app() -> FastAPI:
     configure_logging()
     settings = Settings()
+
+    if settings.embedding_dim != EMBEDDING_COLUMN_DIM:
+        raise RuntimeError(
+            f"EMBEDDING_DIM={settings.embedding_dim} does not match the hard-coded "
+            f"pgvector column width Vector({EMBEDDING_COLUMN_DIM}) in db/models.py. "
+            "Changing the embedding dimension requires BOTH updating EMBEDDING_DIM "
+            "AND an Alembic migration that ALTERs the embedding columns to the new "
+            f"width; the columns are immovably Vector({EMBEDDING_COLUMN_DIM}) today. "
+            "Set EMBEDDING_DIM=1024 or migrate the columns first."
+        )
 
     # Email sender selection is environment-gated, checked BEFORE we
     # allocate a DB engine so the refuse-to-start path in production
@@ -317,16 +335,27 @@ def create_app() -> FastAPI:
 
     # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
     # referrer-policy). HSTS only when the deployment is https (cookie_secure).
+    _csp = build_csp(dev=settings.spa_mode == "dev")
+    _hsts = settings.cookie_secure
     app.add_middleware(
         SecurityHeadersMiddleware,
-        csp=build_csp(dev=settings.spa_mode == "dev"),
-        hsts=settings.cookie_secure,
+        csp=_csp,
+        hsts=_hsts,
     )
     # Body-size cap. add_middleware prepends, so adding this LAST makes it the
     # outermost layer — an oversized body is rejected (413) before routing,
     # CSRF, or any handler reads it. Skipped entirely when set to 0.
+    #
+    # Pass the SAME csp/hsts used above: the body-cap's early-reject responses
+    # are emitted before SecurityHeadersMiddleware runs, so it stamps the
+    # canonical security header set itself (else 413/400 would omit CSP/HSTS).
     if settings.max_request_body_bytes:
-        app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_body_bytes)
+        app.add_middleware(
+            MaxBodySizeMiddleware,
+            max_bytes=settings.max_request_body_bytes,
+            csp=_csp,
+            hsts=_hsts,
+        )
     # Gzip compression for responses >= 1 kB. Placed after other middlewares
     # so it compresses the final response body (outermost execution order is
     # add_middleware-last = first to execute in the response direction).

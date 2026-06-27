@@ -65,15 +65,28 @@ class SchedulerLock:
         self.acquired = True
 
     def release(self) -> None:
-        """Close the held connection, releasing the session-level lock.
+        """Explicitly drop the session-level advisory lock, then close the connection.
 
-        Session-level advisory locks are released automatically when the
-        owning connection closes, so closing is sufficient and avoids a
-        round-trip to pg_advisory_unlock on a possibly-dead connection.
+        We do NOT rely on `conn.close()` alone to free the lock: the lock was
+        taken on a connection borrowed from the SHARED QueuePool, and on a pool
+        `close()` returns the underlying DBAPI connection to the pool (with a
+        ROLLBACK reset) rather than physically closing it — and a session-level
+        `pg_advisory_lock` survives ROLLBACK. So the lock would actually linger
+        (held by the pooled connection) until `engine.dispose()` physically
+        closes it. To make release reliable and self-contained, we run
+        `pg_advisory_unlock(hashtext(...))` on the held connection FIRST, then
+        close it. The unlock is best-effort (swallowed on a dead connection):
+        if the connection is already gone, Postgres has released the lock
+        server-side anyway.
         """
         if self._connection is None:
             return
         try:
+            with contextlib.suppress(Exception):
+                self._connection.execute(
+                    text("SELECT pg_advisory_unlock(hashtext(:name))"),
+                    {"name": SCHEDULER_LOCK_NAME},
+                )
             self._connection.close()
         except Exception:  # noqa: BLE001
             _logger.warning("scheduler lock release: connection close failed", exc_info=True)
