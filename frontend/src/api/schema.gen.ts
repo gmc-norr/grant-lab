@@ -2311,6 +2311,8 @@ export interface components {
             cap_exceeded: boolean;
             /** Checked */
             checked: number;
+            /** Deferred */
+            deferred: number;
             /** Error Count */
             error_count: number;
             /** Issues */

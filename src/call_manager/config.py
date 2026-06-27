@@ -430,6 +430,18 @@ class Settings(BaseSettings):
         "heuristic (draft sections only). A loose guardrail, not a hard funder limit; "
         "a value <= 0 disables the over-length check.",
     )
+    citation_deep_check_max_per_request: int = Field(
+        default=25,
+        alias="CITATION_DEEP_CHECK_MAX_PER_REQUEST",
+        description=(
+            "Maximum number of FRESH (uncached) semantic LLM calls made per "
+            "POST /citation-audit/deep request. Already-cached verdicts are "
+            "returned without counting against this ceiling. Rows beyond the cap "
+            "are deferred and reported in the response so the client can re-poll "
+            "to continue. Default 25 keeps a single request well within a "
+            "synchronous HTTP timeout budget."
+        ),
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",

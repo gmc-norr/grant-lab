@@ -755,3 +755,239 @@ def validate_citations_semantic(
         )
 
     return issues
+
+
+# =========================================================================== #
+# Capped semantic pass (Defect-2 fix): bounded per-request LLM fan-out.
+# =========================================================================== #
+
+
+def validate_citations_semantic_capped(
+    *,
+    proposal_text: str,
+    ledger: dict,
+    session,
+    session_factory,
+    workspace_id,
+    citation_service,
+    deterministic_issues: list[dict],
+    max_fresh_calls: int = 25,
+    validator_version: str = VALIDATOR_VERSION,
+) -> tuple[list[dict], int, int]:
+    """Capped wrapper around validate_citations_semantic.
+
+    Limits the number of FRESH (uncached) LLM calls to ``max_fresh_calls`` per
+    request. Already-cached verdicts are returned unchanged (they do not count
+    against the cap). Rows that would require a fresh LLM call but cannot be
+    served within the cap are counted as *deferred* — the caller includes the
+    count in the response so the client can re-poll.
+
+    Returns ``(issues, checked, deferred)`` where:
+    - ``issues``   — the combined semantic issue list (only for judged rows).
+    - ``checked``  — number of rows for which a fresh LLM call was made this
+                     request (cached hits are excluded).
+    - ``deferred`` — number of eligible rows that were not judged because the
+                     per-request cap was reached.
+
+    Cached rows never block the cap: a response that has many cached rows and
+    few fresh rows will still report deferred=0 even if total eligible rows
+    exceeds max_fresh_calls.
+    """
+    issues: list[dict] = []
+    checked = 0
+    deferred = 0
+
+    types_by_ev: dict[str, set[str]] = {}
+    for di in deterministic_issues or []:
+        ev = di.get("evidence_id")
+        t = di.get("type")
+        if ev and t:
+            types_by_ev.setdefault(ev, set()).add(t)
+
+    try:
+        marker_by_ev = {m["ev_id"]: m for m in find_markers(proposal_text or "")}
+    except Exception:  # pragma: no cover - find_markers is pure/total
+        logger.exception("find_markers failed during capped semantic citation audit")
+        marker_by_ev = {}
+
+    evidence = (ledger or {}).get("evidence") or []
+    for row in evidence:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        ev_id = row["id"]
+        citekey = row.get("citekey")
+
+        row_types = types_by_ev.get(ev_id, set())
+        if row_types & _SKIP_TYPES:
+            continue
+        marker = marker_by_ev.get(ev_id)
+        if marker is None:
+            continue
+
+        stance = row.get("stance")
+        allowed = _ALLOWED_VERDICTS.get(stance)
+        if allowed is None:
+            logger.info(
+                "capped semantic audit skipping ev %s: unknown stance %r", ev_id, stance
+            )
+            continue
+
+        try:
+            ref_uuid = uuid.UUID(str(row.get("reference_id")))
+        except (ValueError, TypeError):
+            continue
+        chunk = _load_chunk(
+            session,
+            reference_id=ref_uuid,
+            chunk_index=(row.get("locator") or {}).get("chunk_index"),
+            workspace_id=workspace_id,
+        )
+        if chunk is None:
+            continue
+
+        live_claim = claim_sentence_around(
+            proposal_text or "", marker.get("start", 0), marker.get("end", 0)
+        )
+        evidence_quote = row.get("evidence_quote") or ""
+        if not evidence_quote.strip():
+            continue
+        location = f"citekey {citekey} ({ev_id}) at char {marker.get('start')}"
+
+        key = build_cache_key(
+            claim_hash=claim_context_sha(live_claim),
+            chunk_content_hash=chunk_content_sha(chunk.text),
+            evidence_quote_hash=evidence_quote_sha(evidence_quote),
+            stance=stance,
+            validator_version=validator_version,
+        )
+
+        is_drift = "claim_drift" in row_types
+
+        verdict: str | None = None
+        rationale: str | None = None
+
+        # --- cache READ (skipped for drifted claims — always re-judge) --- #
+        if not is_drift:
+            cached = get_verdict(session, workspace_id=workspace_id, cache_key=key)
+            if cached is not None:
+                verdict = cached.verdict
+                rationale = cached.rationale
+
+        # --- enforce per-request cap on fresh LLM calls ------------------- #
+        if verdict is None:
+            if checked >= max_fresh_calls:
+                # Cap reached — count this row as deferred and skip.
+                deferred += 1
+                continue
+
+            try:
+                res = citation_service.complete_json(
+                    workspace_id=workspace_id,
+                    op="validate_citation",
+                    system=_AUDIT_SYSTEM,
+                    user=_build_audit_user(
+                        claim=live_claim,
+                        evidence_quote=evidence_quote,
+                        chunk_text=chunk.text,
+                        stance=stance,
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "capped semantic citation judge failed (workspace=%s ev=%s) — degrading",
+                    workspace_id,
+                    ev_id,
+                    exc_info=True,
+                )
+                issues.append(
+                    _issue(
+                        "audit_unavailable",
+                        "warning",
+                        citekey=citekey,
+                        evidence_id=ev_id,
+                        location=location,
+                        detail="semantic judge unavailable for this citation (transient error)",
+                        reason="transient",
+                    )
+                )
+                checked += 1  # a call was attempted
+                continue
+
+            checked += 1  # fresh call made
+
+            if res.cap_exceeded:
+                issues.append(
+                    _issue(
+                        "audit_unavailable",
+                        "warning",
+                        citekey=citekey,
+                        evidence_id=ev_id,
+                        location=location,
+                        detail=(
+                            "semantic judge unavailable: citation LLM cap exceeded "
+                            f"(scope={res.cap_scope})"
+                        ),
+                        reason="cap",
+                    )
+                )
+                break
+
+            data = res.data or {}
+            verdict = data.get("verdict")
+            rationale = data.get("rationale")
+            if verdict not in allowed:
+                issues.append(
+                    _issue(
+                        "audit_unavailable",
+                        "warning",
+                        citekey=citekey,
+                        evidence_id=ev_id,
+                        location=location,
+                        detail="semantic judge returned an invalid or empty verdict",
+                        reason="invalid",
+                    )
+                )
+                continue
+
+            store_verdict(
+                session_factory,
+                workspace_id=workspace_id,
+                cache_key=key,
+                verdict=verdict,
+                rationale=rationale,
+                validator_version=validator_version,
+            )
+
+        if verdict not in allowed:
+            issues.append(
+                _issue(
+                    "audit_unavailable",
+                    "warning",
+                    citekey=citekey,
+                    evidence_id=ev_id,
+                    location=location,
+                    detail="semantic judge returned an invalid or empty verdict",
+                    reason="invalid",
+                )
+            )
+            continue
+
+        mapped = _VERDICT_ISSUE.get(verdict)
+        if mapped is None:
+            continue
+        issue_type, severity = mapped
+        detail = f"semantic judge: {verdict}"
+        if rationale:
+            detail = f"{detail} — {rationale}"
+        issues.append(
+            _issue(
+                issue_type,
+                severity,
+                citekey=citekey,
+                evidence_id=ev_id,
+                location=location,
+                detail=detail,
+            )
+        )
+
+    return issues, checked, deferred

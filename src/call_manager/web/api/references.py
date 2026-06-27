@@ -323,13 +323,30 @@ def api_approve_metadata(
                 )
             )
             session.commit()
-        except IntegrityError:
+        except IntegrityError as _exc:
+            # Only retry on a citekey unique-constraint violation (SQLSTATE 23505).
+            # An unrelated constraint (FK, check, etc.) is re-raised so it isn't
+            # silently masked as a sanitised 500.
+            _orig = getattr(_exc, "orig", None)
+            _sqlstate = getattr(_orig, "sqlstate", None) or getattr(_orig, "pgcode", None)
+            if _sqlstate != "23505":
+                raise
             session.rollback()
+            # Re-fetch after rollback: a concurrent delete leaves None here.
             ref = session.scalar(select(Reference).where(Reference.id == reference_id))
+            if ref is None:
+                raise HTTPException(status_code=404, detail="reference not found") from None
             ref.csl_json = csl
             if isinstance(csl.get("title"), str) and csl["title"]:
                 ref.title = csl["title"]
             ref.metadata_status = "approved"
+            # Regenerate the citekey: the collision may have left ref.citekey at
+            # its pre-approval value (null or a ref-fallback). Call generate_citekey
+            # again so it resolves to the next available suffix (e.g. "roe2021a").
+            if ref.citekey is None or ref.citekey.startswith("ref-"):
+                new_key = generate_citekey(csl, workspace_id, session)
+                if new_key and not new_key.startswith("ref-"):
+                    ref.citekey = new_key
             session.add(
                 WorkspaceEvent(
                     workspace_id=workspace_id,
