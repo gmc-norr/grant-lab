@@ -170,8 +170,9 @@ def admin_dashboard(
             .order_by(Source.name)
         ).all()
         sources = [
-            SourceOut(name=src.name, slug=src.slug,
-                      last_fetched_at=src.last_fetched_at, call_count=cc)
+            SourceOut(
+                name=src.name, slug=src.slug, last_fetched_at=src.last_fetched_at, call_count=cc
+            )
             for src, cc in rows
         ]
         queue_rows = session.execute(
@@ -193,9 +194,7 @@ def admin_dashboard(
         ).scalar_one()
 
         digest_ctx = _digest_panel_context(session)
-        coverage_ctx = _embedding_coverage_context(
-            session, current_model=settings.embedding_model
-        )
+        coverage_ctx = _embedding_coverage_context(session, current_model=settings.embedding_model)
         digest = DigestPanelOut(
             last_sent_at=digest_ctx["digest_last_sent_at"],
             runs_this_week=digest_ctx["digest_runs_this_week"],
@@ -212,14 +211,13 @@ def admin_dashboard(
 
         report = load_last_report()
         golden = (
-            GoldenSetReportOut(n_fixture=report.n_fixture, n_compared=report.n_compared,
-                               tau=report.tau)
+            GoldenSetReportOut(
+                n_fixture=report.n_fixture, n_compared=report.n_compared, tau=report.tau
+            )
             if report is not None
             else None
         )
-        calibration_warning = getattr(
-            request.app.state, "embedding_calibration_warning", None
-        )
+        calibration_warning = getattr(request.app.state, "embedding_calibration_warning", None)
 
     return AdminDashboardOut(
         sources=sources,
@@ -322,19 +320,31 @@ def admin_drafting(
         ctx = _drafting_panel_context(session, settings)
         cap = ctx["global_cap"]
         per_workspace = [
-            PerWorkspaceOut(id=row.id, title=row.title, owner_email=row.owner_email,
-                            used_in=row.used_in, used_out=row.used_out)
+            PerWorkspaceOut(
+                id=row.id,
+                title=row.title,
+                owner_email=row.owner_email,
+                used_in=row.used_in,
+                used_out=row.used_out,
+            )
             for row in ctx["per_workspace"]
         ]
         recent_events = [
-            RecentEventOut(created_at=e.created_at, workspace_id=e.workspace_id,
-                           kind=e.kind, payload=e.payload)
+            RecentEventOut(
+                created_at=e.created_at, workspace_id=e.workspace_id, kind=e.kind, payload=e.payload
+            )
             for e in ctx["recent_events"]
         ]
         result = AdminDraftingOut(
             drafting_enabled=ctx["drafting_enabled"],
-            global_cap=GlobalCapOut(allowed=cap.allowed, used_in=cap.used_in, used_out=cap.used_out,
-                                    cap_in=cap.cap_in, cap_out=cap.cap_out, reason=cap.reason),
+            global_cap=GlobalCapOut(
+                allowed=cap.allowed,
+                used_in=cap.used_in,
+                used_out=cap.used_out,
+                cap_in=cap.cap_in,
+                cap_out=cap.cap_out,
+                reason=cap.reason,
+            ),
             per_workspace=per_workspace,
             recent_events=recent_events,
         )
