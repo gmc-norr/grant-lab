@@ -16,6 +16,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
+from call_manager.embeddings.client import EmbedResult
 from call_manager.ranking.ollama_client import OllamaClient
 from call_manager.ranking.worker import drain_queue as _drain_queue
 
@@ -294,7 +295,7 @@ def test_e2e_ingest_then_drain_short_circuits_when_embedding_dissimilar(
 
     embed_client = MagicMock()
     embed_client.model = "bge-m3"
-    embed_client.embed.return_value = call_vec
+    embed_client.embed.return_value = EmbedResult(vector=call_vec, embedded_chars=1)
 
     alerter = ConsecutiveFailureTracker(
         threshold=3,
@@ -394,7 +395,7 @@ def test_e2e_ingest_then_drain_invokes_llm_when_embedding_similar(
 
     embed_client = MagicMock()
     embed_client.model = "bge-m3"
-    embed_client.embed.return_value = call_vec
+    embed_client.embed.return_value = EmbedResult(vector=call_vec, embedded_chars=1)
 
     alerter = ConsecutiveFailureTracker(
         threshold=3,

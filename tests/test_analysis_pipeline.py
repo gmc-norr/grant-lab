@@ -99,7 +99,7 @@ def _seed_reference(session, workspace_id, chunk_text):
             workspace_id=workspace_id,
             chunk_index=0,
             text=chunk_text,
-            embedding=embedder.embed(chunk_text),
+            embedding=embedder.embed(chunk_text).vector,
             embedding_model=embedder.model,
         )
     )

@@ -77,6 +77,38 @@ def enqueue_for_pair(session: Session, *, call_id: int, profile_id: int) -> bool
     return result.inserted_primary_key is not None
 
 
+def bulk_enqueue_for_calls(session: Session, call_ids: list[int]) -> int:
+    """Enqueue ranking jobs for every (call_id × active profile) pair in a
+    SINGLE round-trip.  This replaces the N×M per-pair :func:`enqueue_for_pair`
+    loop used by the ingestion orchestrator after Step 1.
+
+    Uses ``CROSS JOIN unnest(:call_ids) AS cid`` so the whole fan-out is one
+    INSERT statement, mirroring :func:`reconcile_missing_rankings`'s pattern.
+    ON CONFLICT … DO NOTHING matches the partial unique index predicate so
+    re-ingest of the same call doesn't produce duplicate jobs.
+
+    Returns the number of rows actually inserted (0 when all pairs already had
+    active jobs).  If ``call_ids`` is empty, returns 0 immediately.
+    """
+    if not call_ids:
+        return 0
+    result = session.execute(
+        text(
+            """
+            INSERT INTO ranking_jobs (call_id, profile_id, status)
+            SELECT cid, p.id, 'pending'
+            FROM unnest(:call_ids) AS cid
+            CROSS JOIN profiles p
+            WHERE p.is_active = true
+            ON CONFLICT (call_id, profile_id)
+              WHERE status IN ('pending', 'running') DO NOTHING
+            """
+        ),
+        {"call_ids": call_ids},
+    )
+    return result.rowcount or 0
+
+
 def reconcile_missing_rankings(session: Session) -> int:
     """Enqueue ranking jobs for (recent call × active profile) pairs that
     have no CallRanking and no active RankingJob. Returns the number of

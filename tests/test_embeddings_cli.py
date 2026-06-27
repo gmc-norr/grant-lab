@@ -9,6 +9,11 @@ from sqlalchemy import select
 
 from call_manager.db.models import Call, Profile, ProfileKind, Source, User
 from call_manager.embeddings.cli import backfill_main
+from call_manager.embeddings.client import EmbedResult
+
+
+def _embed_result(vec: list[float]) -> EmbedResult:
+    return EmbedResult(vector=vec, embedded_chars=1)
 
 
 def _seed(s, *, n_calls: int = 3, n_profiles: int = 2) -> None:
@@ -46,7 +51,7 @@ def test_cli_backfill_embeds_all_null_rows(pg_session_factory, capsys):
 
     fake_client = MagicMock()
     fake_client.model = "bge-m3"
-    fake_client.embed.return_value = [0.5] * 1024
+    fake_client.embed.return_value = _embed_result([0.5] * 1024)
 
     with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
@@ -87,7 +92,7 @@ def test_cli_backfill_loops_until_all_done(pg_session_factory):
 
     fake_client = MagicMock()
     fake_client.model = "bge-m3"
-    fake_client.embed.return_value = [0.5] * 1024
+    fake_client.embed.return_value = _embed_result([0.5] * 1024)
 
     with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
@@ -162,7 +167,7 @@ def test_cli_backfill_force_flag_re_embeds_already_embedded_rows(pg_session_fact
 
     fake_client = MagicMock()
     fake_client.model = "bge-m3"
-    fake_client.embed.return_value = [0.1] * 1024
+    fake_client.embed.return_value = _embed_result([0.1] * 1024)
 
     with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
@@ -201,7 +206,7 @@ def test_cli_backfill_force_terminates_with_small_batch_size(pg_session_factory)
 
     fake_client = MagicMock()
     fake_client.model = "bge-m3"
-    fake_client.embed.return_value = [0.1] * 1024
+    fake_client.embed.return_value = _embed_result([0.1] * 1024)
 
     with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(

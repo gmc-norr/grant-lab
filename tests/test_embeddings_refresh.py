@@ -6,12 +6,19 @@ from unittest.mock import MagicMock
 from sqlalchemy import select
 
 from call_manager.db.models import Call, Profile, ProfileKind, Source, User
+from call_manager.embeddings.client import EmbedResult
 from call_manager.embeddings.refresh import (
     refresh_call_embedding,
     refresh_missing_embeddings_tick,
     refresh_profile_embedding,
 )
 from call_manager.ranking.ollama_client import LLMError
+
+
+def _embed_result(vec: list[float]) -> EmbedResult:
+    """Convenience: wrap a vector in an EmbedResult (embedded_chars=1 — tests
+    don't inspect this field, they only care that the vector was written)."""
+    return EmbedResult(vector=vec, embedded_chars=1)
 
 
 def _seed_call(s, *, source_slug: str = "vinnova", title: str = "T") -> int:
@@ -52,7 +59,7 @@ def _fake_client(vec: list[float] | None = None, *, raises: Exception | None = N
     if raises is not None:
         client.embed.side_effect = raises
     else:
-        client.embed.return_value = vec or [0.1] * 1024
+        client.embed.return_value = _embed_result(vec or [0.1] * 1024)
     return client
 
 
@@ -158,7 +165,7 @@ def test_refresh_missing_embeddings_tick_continues_after_one_failure(pg_session_
 
     client = MagicMock()
     client.model = "bge-m3"
-    client.embed.side_effect = [LLMError("first one fails"), [0.5] * 1024]
+    client.embed.side_effect = [LLMError("first one fails"), _embed_result([0.5] * 1024)]
 
     summary = refresh_missing_embeddings_tick(
         session_factory=pg_session_factory,
@@ -239,7 +246,7 @@ def test_refresh_missing_tick_embeds_profile_with_only_areas(pg_session_factory)
 
     client = MagicMock()
     client.model = "bge-m3"
-    client.embed.return_value = [0.2] * 1024
+    client.embed.return_value = _embed_result([0.2] * 1024)
 
     refresh_missing_embeddings_tick(
         session_factory=pg_session_factory,

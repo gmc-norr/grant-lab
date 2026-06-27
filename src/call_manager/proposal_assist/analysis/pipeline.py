@@ -150,7 +150,7 @@ def _retrieve_and_judge(
     stuck-job reaper does not mistake an active multi-candidate loop for a stale
     job (queue contract: heartbeats BETWEEN LLM calls).
     """
-    query_vec = embedder.embed(claim)
+    query_vec = embedder.embed(claim).vector
     stmt = (
         select(
             ReferenceChunk.reference_id,

@@ -23,10 +23,15 @@ from sqlalchemy import select
 
 from call_manager.auth.email import InMemoryEmailSender
 from call_manager.db.models import Call, RankingJob
+from call_manager.embeddings.client import EmbedResult
 from call_manager.ingestion.alerts import ConsecutiveFailureTracker
 from call_manager.ingestion.orchestrator import run_ingestion
 from call_manager.ranking.ollama_client import LLMError
 from call_manager.sources.types import NormalizedCall
+
+
+def _embed_result(vec: list[float]) -> EmbedResult:
+    return EmbedResult(vector=vec, embedded_chars=1)
 
 
 def _alerter():
@@ -51,7 +56,7 @@ def _embed_client(*, vec=None, raises=None):
     if raises is not None:
         c.embed.side_effect = raises
     else:
-        c.embed.return_value = vec or [0.1] * 1024
+        c.embed.return_value = _embed_result(vec or [0.1] * 1024)
     return c
 
 
@@ -88,7 +93,7 @@ def test_orchestrator_embeds_touched_calls_before_enqueueing_ranking_jobs(
     job_counts_at_embed_time: list[int] = []
     real_embed = embed_client.embed.return_value
 
-    def _capture_then_embed(text):
+    def _capture_then_embed(text, **_kw):
         with pg_session_factory() as s:
             n = s.execute(select(RankingJob)).scalars().all()
         job_counts_at_embed_time.append(len(n))
@@ -285,16 +290,16 @@ def test_orchestrator_step3_failure_invokes_alerter(
     )
     embed_client = _embed_client()
 
-    # Force step 3's enqueue_for_pair to raise a DB-shaped error. We patch
-    # the binding *inside* the orchestrator module (where it's looked up at
-    # call time) — patching call_manager.ranking.queue.enqueue_for_pair
+    # Force step 3's bulk_enqueue_for_calls to raise a DB-shaped error. We
+    # patch the binding *inside* the orchestrator module (where it's looked up
+    # at call time) — patching call_manager.ranking.queue.bulk_enqueue_for_calls
     # would not affect the already-imported reference in orchestrator.
     def _boom(*_a, **_kw):
         raise RuntimeError("simulated step-3 DB failure")
 
     import call_manager.ingestion.orchestrator as orch_mod
 
-    monkeypatch.setattr(orch_mod, "enqueue_for_pair", _boom)
+    monkeypatch.setattr(orch_mod, "bulk_enqueue_for_calls", _boom)
 
     alerter = MagicMock()
 

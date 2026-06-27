@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from call_manager.auth.email import InMemoryEmailSender
 from call_manager.db.models import Call, Source
+from call_manager.embeddings.client import EmbedResult
 from call_manager.ingestion.alerts import ConsecutiveFailureTracker
 from call_manager.ingestion.orchestrator import run_ingestion
 from call_manager.sources.types import AdapterError, NormalizedCall
@@ -16,7 +17,7 @@ def _embed_client():
     own; the rest just need this to satisfy the required parameter."""
     c = MagicMock()
     c.model = "bge-m3"
-    c.embed.return_value = [0.1] * 1024
+    c.embed.return_value = EmbedResult(vector=[0.1] * 1024, embedded_chars=1)
     return c
 
 

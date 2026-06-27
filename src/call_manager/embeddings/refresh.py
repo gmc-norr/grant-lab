@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import httpx
 from sqlalchemy import or_, select
 
 from call_manager.db.models import Call, Profile
@@ -30,6 +31,7 @@ def refresh_call_embedding(
     call_id: int,
     *,
     force: bool = False,
+    _http: httpx.Client | None = None,
 ) -> bool:
     """Embed a single call. Returns True on success, False on LLM error
     or missing call. Caller commits the session.
@@ -43,6 +45,11 @@ def refresh_call_embedding(
     the daily tick retry tomorrow; meanwhile the embedding gate sees None
     → UNKNOWN → falls back to the LLM, which is safer than ranking against
     a known-stale vector.
+
+    ``_http`` — optional persistent :class:`httpx.Client` for batch callers
+    (see :meth:`OllamaEmbedClient.session`). When supplied, the same TCP
+    connection is reused across repeated calls instead of opening a fresh one
+    per call. The caller is responsible for the client's lifetime.
     """
     call = session.get(Call, call_id)
     if call is None:
@@ -52,7 +59,7 @@ def refresh_call_embedding(
         # Nothing to embed; leave embedding NULL.
         return False
     try:
-        vec = embed_client.embed(text)
+        result = embed_client.embed(text, _client=_http)
     except LLMError as e:
         _logger.warning(
             "embeddings.embedding_compute_failed",
@@ -68,7 +75,7 @@ def refresh_call_embedding(
             call.embedding = None
             call.embedding_model = None
         return False
-    call.embedding = vec
+    call.embedding = result.vector
     call.embedding_model = embed_client.model
     return True
 
@@ -79,6 +86,7 @@ def refresh_profile_embedding(
     profile_id: int,
     *,
     force: bool = False,
+    _http: httpx.Client | None = None,
 ) -> bool:
     """Embed a single profile (description only). Returns True on success.
 
@@ -91,6 +99,9 @@ def refresh_profile_embedding(
     Same `force=True` semantics as refresh_call_embedding: on LLMError
     in force mode, NULL both columns so the daily tick can re-pick the
     row up via its NULL filter. See that helper for the full rationale.
+
+    ``_http`` — optional persistent :class:`httpx.Client` for batch callers.
+    See :func:`refresh_call_embedding` for usage notes.
     """
     profile = session.get(Profile, profile_id)
     if profile is None:
@@ -108,7 +119,7 @@ def refresh_profile_embedding(
             )
         return True
     try:
-        vec = embed_client.embed(text)
+        result = embed_client.embed(text, _client=_http)
     except LLMError as e:
         _logger.warning(
             "embeddings.embedding_compute_failed",
@@ -124,7 +135,7 @@ def refresh_profile_embedding(
             profile.embedding = None
             profile.embedding_model = None
         return False
-    profile.embedding = vec
+    profile.embedding = result.vector
     profile.embedding_model = embed_client.model
     return True
 
@@ -281,14 +292,17 @@ def _refresh_missing_embeddings_batch(
         # below, keeping the embeddability rule in one place (no SQL duplicate).
         call_q = call_q.where(Call.id > after_call_id).order_by(Call.id).limit(batch_size)
         call_ids = session.execute(call_q).scalars().all()
-    for cid in call_ids:
-        with session_factory() as session:
-            ok = refresh_call_embedding(session, embed_client, cid, force=force)
-            session.commit()
-        if ok:
-            summary["calls_embedded"] += 1
-        else:
-            summary["calls_failed"] += 1
+    # D2-3 perf: reuse one HTTP connection across the entire call-id batch
+    # instead of opening/closing a fresh TCP socket per embed call.
+    with embed_client.session() as http:
+        for cid in call_ids:
+            with session_factory() as session:
+                ok = refresh_call_embedding(session, embed_client, cid, force=force, _http=http)
+                session.commit()
+            if ok:
+                summary["calls_embedded"] += 1
+            else:
+                summary["calls_failed"] += 1
     if call_ids:
         summary["max_call_id"] = max(call_ids)
 
@@ -317,14 +331,16 @@ def _refresh_missing_embeddings_batch(
             # cursor anyway so the next CLI iteration doesn't re-read the
             # same blank profiles and infinite-loop in force mode.
             summary["max_profile_id"] = max(p.id for p in profiles)
-    for pid in profile_ids:
-        with session_factory() as session:
-            ok = refresh_profile_embedding(session, embed_client, pid, force=force)
-            session.commit()
-        if ok:
-            summary["profiles_embedded"] += 1
-        else:
-            summary["profiles_failed"] += 1
+    # D2-3 perf: one HTTP connection for the whole profile batch too.
+    with embed_client.session() as http:
+        for pid in profile_ids:
+            with session_factory() as session:
+                ok = refresh_profile_embedding(session, embed_client, pid, force=force, _http=http)
+                session.commit()
+            if ok:
+                summary["profiles_embedded"] += 1
+            else:
+                summary["profiles_failed"] += 1
     if profile_ids:
         summary["max_profile_id"] = max(profile_ids)
 
