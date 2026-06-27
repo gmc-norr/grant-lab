@@ -110,6 +110,19 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Persisted failure streak — survives restarts. Incremented on each
+    # ingestion failure, reset to 0 on success. The alerter reads/writes this
+    # column transactionally alongside last_fetched_at so the count is never
+    # stale after an OOM kill or rolling deploy.
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # Set to now() each time an alert is successfully sent for this source.
+    # The alerter gates re-alerting on this so repeated runs after the
+    # threshold don't spam the admin.
+    last_alerted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     calls: Mapped[list[Call]] = relationship(back_populates="source")
 

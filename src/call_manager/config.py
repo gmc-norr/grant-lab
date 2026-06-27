@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     eu_portal_base_url: str = Field(default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL")
     vinnova_base_url: str = Field(default="https://data.vinnova.se", alias="VINNOVA_BASE_URL")
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
+    stale_source_alert_days: int = Field(
+        default=4,
+        alias="STALE_SOURCE_ALERT_DAYS",
+        description=(
+            "A source whose last_fetched_at is older than this many days "
+            "triggers a stale-fetch alert regardless of the consecutive-failure "
+            "streak state. Acts as a restart-independent backstop: catches "
+            "sources that silently stop being fetched (e.g. scheduler crash "
+            "within the 3-day streak window). Default 4 gives one full day of "
+            "slack beyond the 3-day streak threshold."
+        ),
+    )
     ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")

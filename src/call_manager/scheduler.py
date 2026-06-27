@@ -21,7 +21,7 @@ from call_manager.digest.send import run_digest
 from call_manager.email.client import EmailClient
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.embeddings.refresh import refresh_missing_embeddings_tick
-from call_manager.ingestion.alerts import ConsecutiveFailureTracker
+from call_manager.ingestion.alerts import ConsecutiveFailureTracker, check_stale_sources
 from call_manager.ingestion.orchestrator import run_ingestion
 from call_manager.proposal_assist.analysis.pipeline import drain_analysis_queue
 from call_manager.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
@@ -236,6 +236,35 @@ def build_scheduler(
             # entirely. Give daily crons a 6h grace so a late wake still runs.
             misfire_grace_time=6 * 3600,
         )
+
+    # Stale-source backstop: fires once daily (after midnight Stockholm time,
+    # after all per-source ingest jobs have had a chance to run).  Alerts if
+    # any source has not been successfully fetched in settings.stale_source_alert_days
+    # days, regardless of in-memory streak state.  Catches the gap the streak-
+    # based alerter misses when the process restarts more often than once every
+    # threshold days.
+    _stale_sender = alerter._sender  # reuse the same EmailSender wired to the alerter
+    _stale_admin = settings.admin_alert_email
+    _stale_days = settings.stale_source_alert_days
+
+    def _stale_source_check_job() -> None:
+        check_stale_sources(
+            session_factory=session_factory,
+            sender=_stale_sender,
+            admin_email=_stale_admin,
+            stale_days=_stale_days,
+        )
+
+    sched.add_job(
+        _stale_source_check_job,
+        trigger=CronTrigger(hour=2, minute=30),  # 02:30 Stockholm — after all daily ingest jobs
+        id="ingest:stale_check",
+        name="Stale-source fetch backstop alert",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=6 * 3600,
+    )
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
     # Build the remote rank client once if an API key is configured.

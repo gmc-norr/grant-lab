@@ -114,6 +114,7 @@ async def lifespan(app: FastAPI):
         threshold=3,
         sender=app.state.email_sender,
         admin_email=settings.admin_alert_email,
+        session_factory=app.state.session_factory,
     )
     app.state.ingestion_alerter = alerter
 
