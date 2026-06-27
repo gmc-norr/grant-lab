@@ -129,7 +129,7 @@ def register(request: Request, body: RegisterIn) -> RegisterOut:
     if len(body.email) > MAX_EMAIL_LEN:
         return ok
     email_normalized = body.email.strip().lower()
-    if ip_limiter._max <= 0 or not ip_limiter.allow(client_ip(request)):
+    if not ip_limiter.allow(client_ip(request)):
         return ok
     if not domain_allowed(email_normalized, settings.allowed_email_domains):
         return ok
