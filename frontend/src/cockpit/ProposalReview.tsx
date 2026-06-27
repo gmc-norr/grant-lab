@@ -1,3 +1,4 @@
+import { Box, Button, Group, Stack, Text, Title } from "@mantine/core";
 import { useState } from "react";
 
 import { ApiError } from "../api/client";
@@ -8,6 +9,7 @@ import {
   useProposedChanges,
   useRejectProposal,
 } from "../api/proposals";
+import styles from "./CockpitPanels.module.css";
 
 type DiffRow = { tag: "same" | "add" | "del"; text: string };
 
@@ -86,42 +88,44 @@ export function ProposalReview({
   }
 
   return (
-    <section className="proposal-review" aria-label="Pending proposals">
-      <h2 className="proposal-review-title">Pending proposals ({prose.length})</h2>
-      {notice && (
-        <p role="status" className="proposal-review-notice">
-          {notice}
-        </p>
-      )}
-      <ul>
-        {prose.map((p) => (
-          <li key={p.id} className="proposal-item">
-            <p className="proposal-meta">
-              proposed by the assistant{p.created_at ? ` · ${new Date(p.created_at).toLocaleString()}` : ""}
-            </p>
-            <pre className="proposal-diff">
-              {lineDiff(currentFor(p.section_index), p.new_text ?? "").map((r, k) => (
-                <div key={k} className={`diff-${r.tag}`}>
-                  {(r.tag === "add" ? "+ " : r.tag === "del" ? "- " : "  ") + r.text}
-                </div>
-              ))}
-            </pre>
-            <div className="proposal-actions">
-              <button
-                type="button"
-                disabled={locked || accept.isPending}
-                title={locked ? "Unlock the spec to accept" : undefined}
-                onClick={() => onAccept(p)}
-              >
-                Accept
-              </button>
-              <button type="button" disabled={reject.isPending} onClick={() => onReject(p)}>
-                Reject
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
+    <Box component="section" aria-label="Pending proposals" p="sm" style={{ border: "1px solid var(--app-border)", borderRadius: 6 }}>
+      <Stack gap="sm">
+        <Title order={3}>Pending proposals ({prose.length})</Title>
+        {notice && (
+          <Text role="status" size="sm" c="dimmed">
+            {notice}
+          </Text>
+        )}
+        <Stack gap="sm">
+          {prose.map((p) => (
+            <Box key={p.id} style={{ borderTop: "1px solid var(--app-border)", paddingTop: "0.5rem" }}>
+              <Text size="xs" c="dimmed">
+                proposed by the assistant{p.created_at ? ` · ${new Date(p.created_at).toLocaleString()}` : ""}
+              </Text>
+              <pre className={styles.proposalDiff}>
+                {lineDiff(currentFor(p.section_index), p.new_text ?? "").map((r, k) => (
+                  <div key={k} data-diff={r.tag}>
+                    {(r.tag === "add" ? "+ " : r.tag === "del" ? "- " : "  ") + r.text}
+                  </div>
+                ))}
+              </pre>
+              <Group gap="sm">
+                <Button
+                  size="xs"
+                  disabled={locked || accept.isPending}
+                  title={locked ? "Unlock the spec to accept" : undefined}
+                  onClick={() => onAccept(p)}
+                >
+                  Accept
+                </Button>
+                <Button size="xs" variant="default" disabled={reject.isPending} onClick={() => onReject(p)}>
+                  Reject
+                </Button>
+              </Group>
+            </Box>
+          ))}
+        </Stack>
+      </Stack>
+    </Box>
   );
 }
