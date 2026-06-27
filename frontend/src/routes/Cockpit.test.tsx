@@ -641,9 +641,11 @@ it("ScorecardPanel 'Go to §' passes section_index to onNavigate", async () => {
   }) as never);
   const qc = new QueryClient();
   render(
-    <QueryClientProvider client={qc}>
-      <ScorecardPanel id="ws-1" onNavigate={onNavigate} />
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <ScorecardPanel id="ws-1" onNavigate={onNavigate} />
+      </QueryClientProvider>
+    </MantineProvider>,
   );
   fireEvent.click(await screen.findByRole("button", { name: /go to §2/i }));
   expect(onNavigate).toHaveBeenCalledWith({ top_tab: "draft", section_index: 2 });

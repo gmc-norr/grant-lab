@@ -253,24 +253,7 @@
 .coherence-status { font-size: 0.85rem; color: var(--app-muted); }
 .coherence-error { color: var(--app-bad); }
 
-/* Scorecard tab — band pills + readiness/staleness meta + criteria rows. */
-.scorecard-shell { display: flex; flex-direction: column; gap: 0.5rem; }
-.scorecard-header { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-.scorecard-header h1 { margin: 0; }
-.scorecard-meta { margin: 0; font-size: 0.85rem; color: var(--app-muted); }
-.scorecard-summary { margin: 0.25rem 0 0; color: var(--app-muted); }
-.scorecard-empty { margin: 0.5rem 0; color: var(--app-muted); }
-.scorecard-list { list-style: none; padding: 0; margin: 0; }
-.scorecard-name { font-weight: 600; }
-.scorecard-weight { font-size: 0.8rem; color: var(--app-muted); }
-.scorecard-link {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--app-link);
-  cursor: pointer;
-  font-size: 0.85rem;
-}
+/* band pills — shared by Scorecard (Mantine) and other consumers. Task 3 removes. */
 .band-pill {
   display: inline-block;
   font-size: 0.75em;
@@ -284,10 +267,6 @@
 .band-adequate { background: var(--app-hover); color: var(--app-muted); border-color: var(--app-border); }
 .band-at-risk  { background: color-mix(in srgb, var(--app-warn) 16%, transparent); color: var(--app-warn); border-color: color-mix(in srgb, var(--app-warn) 40%, transparent); }
 .band-gap      { background: color-mix(in srgb, var(--app-bad) 16%, transparent); color: var(--app-bad); border-color: color-mix(in srgb, var(--app-bad) 40%, transparent); }
-.scorecard-row { list-style: none; border-top: 1px solid var(--app-border); padding-top: 0.5rem; margin-top: 0.5rem; }
-.scorecard-note { margin: 0.25rem 0 0; white-space: pre-wrap; }
-.scorecard-stale { color: var(--app-warn); }
-.scorecard-error { color: var(--app-bad); }
 
 /* bottom-panel region + Problems dashboard — IDE panel. */
 .bottom-panel {

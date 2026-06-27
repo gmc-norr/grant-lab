@@ -1,8 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { ScorecardPanel } from "./ScorecardPanel";
 
 const h = vi.hoisted(() => ({
@@ -36,7 +38,11 @@ const COMPLETED = {
 
 function wrap(ui: ReactNode) {
   const qc = new QueryClient();
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>{ui}</QueryClientProvider>
+    </MantineProvider>,
+  );
 }
 
 afterEach(() => {
