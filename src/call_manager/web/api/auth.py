@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
+from call_manager.auth.domain import domain_allowed
 from call_manager.auth.passwords import verify_password
 from call_manager.auth.redirects import safe_next
 from call_manager.db.models import User
@@ -20,6 +22,8 @@ router = APIRouter()
 # /login on 401; NOT 429 on rate-limit: non-disclosure). Identical across
 # unknown-email / wrong-password / no-credential / rate-limited.
 _INVALID = "Invalid email or password."
+
+_NAME_MAX = 200  # users.name is VARCHAR(200)
 
 
 class AuthConfigOut(BaseModel):
@@ -35,6 +39,15 @@ class LoginIn(BaseModel):
 
 class LoginOut(BaseModel):
     redirect: str
+
+
+class RegisterIn(BaseModel):
+    email: str
+    name: str | None = None
+
+
+class RegisterOut(BaseModel):
+    ok: bool
 
 
 @router.get("/auth/config", response_model=AuthConfigOut)
@@ -100,3 +113,48 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
     )
     _logger.info("login success", extra={"event": "login_success", "email_fp": email_fp})
     return LoginOut(redirect=safe or "/")
+
+
+@router.post("/auth/register", response_model=RegisterOut)
+def register(request: Request, body: RegisterIn) -> RegisterOut:
+    """Anti-enumeration: ALWAYS 200 {ok: true}. Silent on duplicate / disallowed
+    domain / rate-limit; one dummy argon2 for timing parity on every eligible
+    attempt. Verbatim port of web/routes/register.py."""
+    settings = request.app.state.settings
+    ip_limiter = request.app.state.ip_limiter
+    email_limiter = request.app.state.email_limiter
+    session_factory = request.app.state.session_factory
+    ok = RegisterOut(ok=True)
+
+    if len(body.email) > MAX_EMAIL_LEN:
+        return ok
+    email_normalized = body.email.strip().lower()
+    if ip_limiter._max <= 0 or not ip_limiter.allow(client_ip(request)):
+        return ok
+    if not domain_allowed(email_normalized, settings.allowed_email_domains):
+        return ok
+    if not email_limiter.allow(email_normalized):
+        return ok
+
+    verify_password(None, "timing-parity")  # dummy-hash on BOTH fresh & dup paths
+    name = (body.name or "").strip()[:_NAME_MAX] or None
+    with session_factory() as session:
+        session.add(User(email=email_normalized, name=name, status="pending"))
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            _logger.info(
+                "register: email already exists",
+                extra={
+                    "event": "register_duplicate",
+                    "email_fp": email_fingerprint(email_normalized),
+                },
+            )
+            return ok
+        session.commit()
+    _logger.info(
+        "register: request created",
+        extra={"event": "register_created", "email_fp": email_fingerprint(email_normalized)},
+    )
+    return ok

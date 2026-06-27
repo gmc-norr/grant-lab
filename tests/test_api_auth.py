@@ -149,3 +149,77 @@ def test_login_oversized_email_400_no_limiter_growth(monkeypatch, pg_url, pg_ses
         r = c.post("/api/auth/login", json={"email": huge, "password": "x" * 16})
     assert r.status_code == 400
     assert huge not in app.state.email_limiter._events
+
+
+def test_register_creates_pending_truncates_name(monkeypatch, pg_url, pg_session_factory):
+    from sqlalchemy import select as _select
+
+    app = _app(monkeypatch, pg_url)
+    with TestClient(app) as c:
+        r = c.post("/api/auth/register", json={"email": "new@ki.se", "name": "z" * 300})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    with pg_session_factory() as s:
+        u = s.execute(_select(User).where(User.email == "new@ki.se")).scalar_one()
+        assert u.status == "pending" and u.password_hash is None and len(u.name) == 200
+
+
+def test_register_duplicate_silent_identical_no_second_row(monkeypatch, pg_url, pg_session_factory):
+    from sqlalchemy import select as _select
+
+    app = _app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        s.add(User(email="dupe@ki.se", status="active"))
+        s.commit()
+    with TestClient(app) as c:
+        fresh = c.post("/api/auth/register", json={"email": "fresh@ki.se"})
+        dup = c.post("/api/auth/register", json={"email": "dupe@ki.se"})
+    assert fresh.status_code == dup.status_code == 200
+    assert fresh.json() == dup.json() == {"ok": True}
+    with pg_session_factory() as s:
+        assert len(s.execute(_select(User).where(User.email == "dupe@ki.se")).scalars().all()) == 1
+
+
+def test_register_dummy_hash_on_every_eligible_attempt(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        s.add(User(email="dupe@ki.se", status="active"))
+        s.commit()
+    calls = []
+    real = apiauth.verify_password
+    monkeypatch.setattr(apiauth, "verify_password", lambda h, p: (calls.append(h), real(h, p))[1])
+    with TestClient(app) as c:
+        c.post("/api/auth/register", json={"email": "new2@ki.se"})  # fresh
+        c.post("/api/auth/register", json={"email": "dupe@ki.se"})  # duplicate
+    assert calls == [None, None]  # dummy-hash on BOTH paths (timing parity)
+
+
+def test_register_domain_disallowed_no_row(monkeypatch, pg_url, pg_session_factory):
+    from sqlalchemy import select as _select
+
+    app = _app(monkeypatch, pg_url)
+    with TestClient(app) as c:
+        r = c.post("/api/auth/register", json={"email": "x@evil.com"})
+    assert r.status_code == 200 and r.json() == {"ok": True}  # anti-enumeration
+    with pg_session_factory() as s:
+        assert (
+            s.execute(_select(User).where(User.email == "x@evil.com")).scalar_one_or_none() is None
+        )
+
+
+def test_register_rate_limited_silent_no_row(monkeypatch, pg_url, pg_session_factory):
+    """Rate-limited register stays anti-enumeration: always 200 {ok: true}, NO
+    row created. (Closes the Codex-flagged register rate-limit gap.)"""
+    from sqlalchemy import select as _select
+
+    app = _app(monkeypatch, pg_url)
+    from call_manager.auth.rate_limit import SlidingWindowLimiter
+
+    app.state.ip_limiter = SlidingWindowLimiter(max_requests=0, window_seconds=60)
+    with TestClient(app) as c:
+        r = c.post("/api/auth/register", json={"email": "limited@ki.se"})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    with pg_session_factory() as s:
+        assert (
+            s.execute(_select(User).where(User.email == "limited@ki.se")).scalar_one_or_none()
+            is None
+        )
