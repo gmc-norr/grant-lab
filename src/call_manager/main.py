@@ -154,6 +154,33 @@ async def lifespan(app: FastAPI):
 
     import asyncio as _asyncio
 
+    # Single-instance enforcement (Defect 1): the scheduler is in-process
+    # APScheduler, so two replicas would each fire every job — duplicate
+    # ingests, duplicate digests, duplicate ranking work. Acquire a
+    # SESSION-level Postgres advisory lock on a dedicated long-lived
+    # connection held for the process lifetime. If we get it, start the
+    # scheduler; if another instance holds it, build the scheduler but do NOT
+    # start it (so trigger_job_now / introspection still work) and log loudly.
+    from call_manager.scheduler import try_acquire_scheduler_lock
+
+    scheduler_lock = try_acquire_scheduler_lock(app.state.engine)
+    app.state.scheduler_lock = scheduler_lock
+    start_scheduler = scheduler_lock is not None
+    if not start_scheduler:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "scheduler.lock_not_acquired",
+            extra={
+                "event": "scheduler_lock_not_acquired",
+                "detail": (
+                    "another instance holds the scheduler advisory lock (or the "
+                    "backend does not support it); NOT starting the in-process "
+                    "scheduler in this replica to avoid double-running every job"
+                ),
+            },
+        )
+
     app.state.scheduler = build_scheduler(
         session_factory=app.state.session_factory,
         settings=settings,
@@ -178,7 +205,7 @@ async def lifespan(app: FastAPI):
         citation_service=app.state.citation_service,
         analysis_embedder=analysis_embedder,
         app_loop=_asyncio.get_running_loop(),
-        start=True,
+        start=start_scheduler,
     )
     try:
         yield
@@ -194,6 +221,13 @@ async def lifespan(app: FastAPI):
         # the loop would block the loop waiting for those workers, which are in
         # turn waiting for the loop → self-deadlock until the fut.result timeout.
         await _asyncio.to_thread(app.state.scheduler.shutdown, wait=True)
+        # Release the single-instance advisory lock (closes its dedicated
+        # connection). Done after the scheduler stops so no in-flight job is
+        # still relying on single-instance semantics. Must precede
+        # engine.dispose() below — the lock holds its own connection.
+        _lock = getattr(app.state, "scheduler_lock", None)
+        if _lock is not None:
+            _lock.release()
         # B6-residuals: terminate every live drafting subprocess before
         # disposing the engine. Without this, each `lifespan` exit leaks
         # SDK subprocesses + the per-workspace pg advisory-lock sessions

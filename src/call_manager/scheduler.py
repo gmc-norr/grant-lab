@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
 from typing import Protocol
 
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_STOPPED
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import sessionmaker
 
 from call_manager.auth.rate_limit import SlidingWindowLimiter
@@ -31,6 +34,101 @@ from call_manager.ranking.worker import drain_queue
 from call_manager.sources.registry import SOURCES
 
 _logger = logging.getLogger(__name__)
+
+# APScheduler's default thread pool is 10 workers. Several ticks deliberately
+# block a worker for a full LLM pass via `fut.result(timeout=...)`
+# (_drafting_idle_sweep, _turn_drain_tick, _coherence_tick, _evaluator_tick,
+# _review_tick, _uncited_claims_tick, _compaction_tick, the analysis ticks...).
+# With ~8-10 of those blocked at once, the default pool can be fully consumed,
+# starving the fast crons that MUST run on time — daily ingest, the embedding
+# backfill, the weekly digest. Size the pool well above the blocking count so a
+# burst of LLM passes always leaves headroom for the cron/DB ticks.
+SCHEDULER_EXECUTOR_MAX_WORKERS = 30
+
+# Stable lock key for the single-instance scheduler advisory lock. We hash it
+# in SQL via hashtext() so the actual key passed to pg_try_advisory_lock is a
+# deterministic 32-bit int — see try_acquire_scheduler_lock().
+SCHEDULER_LOCK_NAME = "call-manager-scheduler"
+
+
+class SchedulerLock:
+    """A held Postgres session-level advisory lock for the scheduler.
+
+    The lock is session-level, so it lives exactly as long as the underlying
+    DBAPI connection. We therefore keep the SQLAlchemy connection OPEN for the
+    process lifetime and only `release()` (which closes it, dropping the lock)
+    on app shutdown.
+    """
+
+    def __init__(self, connection) -> None:
+        self._connection = connection
+        self.acquired = True
+
+    def release(self) -> None:
+        """Close the held connection, releasing the session-level lock.
+
+        Session-level advisory locks are released automatically when the
+        owning connection closes, so closing is sufficient and avoids a
+        round-trip to pg_advisory_unlock on a possibly-dead connection.
+        """
+        if self._connection is None:
+            return
+        try:
+            self._connection.close()
+        except Exception:  # noqa: BLE001
+            _logger.warning("scheduler lock release: connection close failed", exc_info=True)
+        finally:
+            self._connection = None
+            self.acquired = False
+
+
+def try_acquire_scheduler_lock(engine: Engine) -> SchedulerLock | None:
+    """Try to acquire the process-wide single-instance scheduler lock.
+
+    Opens a dedicated long-lived connection and calls
+    `pg_try_advisory_lock(hashtext('call-manager-scheduler'))`. The connection
+    is kept open (and returned, wrapped in a SchedulerLock) so the
+    session-level lock is held for the process lifetime.
+
+    Returns:
+        * a SchedulerLock holding the open connection if the lock was acquired;
+        * None if another instance already holds the lock (the probing
+          connection is closed), or if the backend doesn't support advisory
+          locks / is unreachable (the error is swallowed so startup can't
+          crash — only the real Postgres path enforces single-instance).
+    """
+    try:
+        conn = engine.connect()
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "scheduler lock: could not open a connection to acquire the advisory "
+            "lock; proceeding without single-instance enforcement",
+            exc_info=True,
+        )
+        return None
+    try:
+        acquired = bool(
+            conn.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:name))"),
+                {"name": SCHEDULER_LOCK_NAME},
+            ).scalar()
+        )
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "scheduler lock: pg_try_advisory_lock failed (backend may not support "
+            "advisory locks); proceeding without single-instance enforcement",
+            exc_info=True,
+        )
+        with contextlib.suppress(Exception):
+            conn.close()
+        return None
+    if not acquired:
+        # Another instance holds the lock — close the probe connection so we
+        # don't leak it, and signal "do not start the scheduler".
+        with contextlib.suppress(Exception):
+            conn.close()
+        return None
+    return SchedulerLock(conn)
 
 
 class _SafeBackgroundScheduler(BackgroundScheduler):
@@ -92,7 +190,23 @@ def build_scheduler(
     while guaranteeing only one runs each job. Out of scope for v1 —
     flagged here so a future replica-bump deliberately revisits this.
     """
-    sched = _SafeBackgroundScheduler(timezone="Europe/Stockholm")
+    # Size the worker pool above the default 10 so blocking LLM ticks can't
+    # starve the fast cron/DB ticks (see SCHEDULER_EXECUTOR_MAX_WORKERS).
+    sched = _SafeBackgroundScheduler(
+        timezone="Europe/Stockholm",
+        executors={"default": ThreadPoolExecutor(max_workers=SCHEDULER_EXECUTOR_MAX_WORKERS)},
+    )
+    # Guard against a silent regression to the default pool size: the blocking
+    # ticks need this headroom to coexist with the crons.
+    configured_workers = sched._executors["default"]._pool._max_workers
+    assert configured_workers == SCHEDULER_EXECUTOR_MAX_WORKERS, (
+        f"scheduler executor misconfigured: max_workers={configured_workers}, "
+        f"expected {SCHEDULER_EXECUTOR_MAX_WORKERS}"
+    )
+    _logger.info(
+        "scheduler.executor_configured",
+        extra={"event": "scheduler_executor_configured", "max_workers": configured_workers},
+    )
 
     for cfg in SOURCES:
         # Capture cfg by default-arg to avoid late-binding in the closure.
