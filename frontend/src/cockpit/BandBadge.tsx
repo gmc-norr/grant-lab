@@ -18,6 +18,7 @@ const BAND_LABEL: Record<ScorecardCriterion["band"], string> = {
 export function BandBadge({ band }: { band: ScorecardCriterion["band"] }) {
   return (
     <Badge
+      component="span"
       size="sm"
       radius="xl"
       className={`${styles.bandBadge} ${styles[band]}`}
