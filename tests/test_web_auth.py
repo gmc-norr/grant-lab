@@ -116,41 +116,32 @@ def test_untrusted_proxy_ignores_x_forwarded_for(monkeypatch, pg_url, pg_session
     assert "9.9.9.9" not in app.state.ip_limiter._events
 
 
-def test_html_401_get_threads_next(monkeypatch, pg_url):
-    """An unauthenticated browser GET on a protected path redirects to
-    /login carrying the urlencoded relative path (path + query)."""
+def test_api_admin_requires_auth(monkeypatch, pg_url):
+    """An unauthenticated /api caller gets the JSON 401 envelope, no redirect."""
     app, _ = _mk_app(monkeypatch, pg_url)
     with TestClient(app) as client:
-        r = client.get(
-            "/admin?x=1",
-            headers={"Accept": "text/html"},
-            follow_redirects=False,
-        )
-    assert r.status_code == 303
-    assert r.headers["location"] == "/login?next=%2Fadmin%3Fx%3D1"
-
-
-def test_html_401_post_does_not_thread_next(monkeypatch, pg_url):
-    """A POST that 401s must redirect to bare /login (no next) — threading
-    a POST path would 303-GET into a POST-only route and 405."""
-    app, _ = _mk_app(monkeypatch, pg_url)
-    with TestClient(app) as client:
-        r = client.post(
-            "/admin/rerank",
-            headers={"Accept": "text/html"},
-            follow_redirects=False,
-        )
-    assert r.status_code == 303
-    assert r.headers["location"] == "/login"
-
-
-def test_json_401_unaffected_by_next(monkeypatch, pg_url):
-    """A non-HTML caller still gets the raw JSON 401, no redirect."""
-    app, _ = _mk_app(monkeypatch, pg_url)
-    with TestClient(app) as client:
-        r = client.get("/admin", follow_redirects=False)
+        r = client.get("/api/admin/dashboard", follow_redirects=False)
     assert r.status_code == 401
     assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["error"]["code"] == "unauthorized"
+
+
+def test_api_admin_forbidden_for_non_admin(monkeypatch, pg_url, pg_session_factory):
+    """An authenticated non-admin gets 403 (the require_admin backstop)."""
+    app, _ = _mk_app(monkeypatch, pg_url)
+    from call_manager.db.models import User
+
+    with pg_session_factory() as s:
+        u = User(status="active", email="plain@ki.se", is_admin=False)
+        s.add(u)
+        s.commit()
+        s.refresh(u)
+        uid = u.id
+    with TestClient(app) as client:
+        client.cookies.set("session", app.state.session_signer.make(user_id=uid))
+        r = client.get("/api/admin/dashboard")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "forbidden"
 
 
 def test_login_form_shows_configured_domain(monkeypatch, pg_url):

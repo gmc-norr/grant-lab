@@ -32,4 +32,5 @@ export const ACTIVITY_BOTTOM: ActivityItem[] = [
     to: "/profiles",
   },
   { id: "settings", label: "Settings", icon: "gear", kind: "spa", to: "/me" },
+  { id: "admin", label: "Admin", icon: "shield", kind: "spa", to: "/admin" },
 ];

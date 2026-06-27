@@ -1,4 +1,4 @@
-def test_no_jinja_admin_user_routes_remain(monkeypatch, pg_url):
+def test_no_jinja_admin_routes_remain(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
@@ -7,7 +7,7 @@ def test_no_jinja_admin_user_routes_remain(monkeypatch, pg_url):
 
     app = create_app()
     paths = {r.path for r in app.routes}
-    # Jinja user-mgmt routes gone:
+    # Jinja user-mgmt routes (Slice 1) gone:
     for p in [
         "/admin/users",
         "/admin/users/pending",
@@ -19,11 +19,30 @@ def test_no_jinja_admin_user_routes_remain(monkeypatch, pg_url):
         "/admin/users/{user_id}/reset-password",
     ]:
         assert p not in paths, p
+    # Jinja Slice-2 routes gone:
+    for p in [
+        "/admin",
+        "/admin/drafting",
+        "/admin/rerank",
+        "/admin/digest/send",
+        "/admin/digest/reenable",
+        "/admin/sources/{slug}/fetch",
+        "/admin/golden-set",
+        "/admin/golden-set/add",
+        "/admin/golden-set/delete",
+    ]:
+        assert p not in paths, p
     # /api routes present:
-    assert "/api/admin/users" in paths
-    assert "/api/admin/users/pending" in paths
-    assert "/api/admin/users/{user_id}/approve" in paths
-    # Slice-2 admin routes still present (we only removed user-mgmt):
-    assert "/admin" in paths
-    assert "/admin/rerank" in paths
-    assert "/admin/golden-set" in paths
+    for p in [
+        "/api/admin/users",
+        "/api/admin/users/pending",
+        "/api/admin/dashboard",
+        "/api/admin/drafting",
+        "/api/admin/rerank",
+        "/api/admin/digest/send",
+        "/api/admin/digest/reenable",
+        "/api/admin/sources/{slug}/fetch",
+        "/api/admin/golden-set",
+        "/api/admin/golden-set/{triple_id}",
+    ]:
+        assert p in paths, p

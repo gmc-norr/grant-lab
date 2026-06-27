@@ -1,6 +1,7 @@
 import { Tooltip } from "@mantine/core";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
+import { useSession } from "../api/session";
 import { cockpitIdFromPath } from "../cockpit/cockpitNav";
 import styles from "./ActivityBar.module.css";
 import { ACTIVITY_BOTTOM, ACTIVITY_TOP, type ActivityItem } from "./nav-items";
@@ -60,10 +61,11 @@ function Item({ item, active }: { item: ActivityItem; active?: boolean }) {
 
 export function ActivityBar() {
   const { pathname } = useLocation();
+  const { data: session } = useSession();
+  const isAdmin = Boolean(session?.capabilities.admin);
   const wsId = cockpitIdFromPath(pathname);
-  // Workspaces (the list) is active on the non-editor cockpit routes; on the
-  // editor the Current-workspace chip is the active item instead.
   const onCockpitList = pathname.startsWith("/cockpit") && !wsId;
+  const bottom = ACTIVITY_BOTTOM.filter((it) => it.id !== "admin" || isAdmin);
   return (
     <nav className={styles.activitybar} aria-label="Primary">
       <div className={styles.group}>
@@ -88,7 +90,7 @@ export function ActivityBar() {
       </div>
       <div className={styles.spacer} />
       <div className={styles.group}>
-        {ACTIVITY_BOTTOM.map((it) => (
+        {bottom.map((it) => (
           <Item key={it.id} item={it} />
         ))}
       </div>
