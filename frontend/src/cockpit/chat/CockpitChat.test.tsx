@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../../api/client";
@@ -106,6 +106,76 @@ it("streams turns from a running job and invalidates on done", async () => {
   expect(await screen.findByText("streamed!")).toBeInTheDocument();
   // done closes cleanly (no throw).
   captured.done?.({ data: JSON.stringify({ status: "completed" }) } as MessageEvent);
+});
+
+it("remounting on a workspace-id change (per-id key) starts a FRESH stream and does not bleed A's turns into B (Defect 3)", async () => {
+  // The AppShell keys the cockpit subtree by workspace id, so /cockpit/A -> /cockpit/B
+  // REMOUNTS CockpitChat. This test renders CockpitChat with that key and asserts the
+  // remount resets jobId/streamed: B opens its own stream (no leftover A job in the
+  // URL) and A's streamed turn does NOT appear under B.
+  const urls: string[] = [];
+  const captured: { turn?: (e: MessageEvent) => void } = {};
+  class CapES {
+    onerror = null; onopen: (() => void) | null = null; close = vi.fn();
+    addEventListener(type: string, fn: (e: MessageEvent) => void) {
+      if (type === "turn") captured.turn = fn;
+    }
+    constructor(u: string) {
+      urls.push(u);
+    }
+  }
+  vi.stubGlobal("EventSource", CapES as unknown as typeof EventSource);
+  // A has a running job; B has its own different running job.
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((
+    path: string,
+    init?: { params?: { path?: { workspace_id?: string } } },
+  ) => {
+    const ws = init?.params?.path?.workspace_id ?? "";
+    if (path.endsWith("/turns"))
+      return Promise.resolve({
+        data: { turns: [], can_send: true, needs_disclosure: false, phase: "active", is_owner: true, disabled_reason: null, running_job_id: ws === "ws-b" ? "job-B" : "job-A" },
+        error: undefined,
+      });
+    return Promise.resolve({ data: [], error: undefined });
+  }) as never);
+
+  // Mirror AppShell's per-id keying: the chat is keyed by the live workspace id, so a
+  // real param-changing navigation /cockpit/ws-a -> /cockpit/ws-b REMOUNTS it.
+  function KeyedChat() {
+    const { id = "" } = useParams();
+    return <CockpitChat key={`cockpit:${id}`} />;
+  }
+  function GoB() {
+    const navigate = useNavigate();
+    return (
+      <button type="button" onClick={() => navigate("/cockpit/ws-b")}>
+        to-b
+      </button>
+    );
+  }
+  const qc = new QueryClient();
+  render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={["/cockpit/ws-a"]}>
+        <Routes>
+          <Route path="/cockpit/:id" element={<><KeyedChat /><GoB /></>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(captured.turn).toBeDefined());
+  // A streams a turn.
+  captured.turn!({ data: JSON.stringify({ id: "a1", role: "assistant", position: 5, created_at: "", content: { type: "text", text: "A-SECRET-TURN" } }) } as MessageEvent);
+  expect(await screen.findByText("A-SECRET-TURN")).toBeInTheDocument();
+  expect(urls.some((u) => u.includes("ws-a") && u.includes("job-A"))).toBe(true);
+
+  // Navigate to B (param change -> the per-id key changes -> CockpitChat remounts).
+  fireEvent.click(screen.getByRole("button", { name: /to-b/i }));
+  // B opens its OWN stream (job-B on ws-b); the URL never targets A's job under B.
+  await waitFor(() => expect(urls.some((u) => u.includes("ws-b") && u.includes("job-B"))).toBe(true));
+  expect(urls.some((u) => u.includes("ws-b") && u.includes("job-A"))).toBe(false);
+  // A's streamed turn did not bleed into B's transcript.
+  expect(screen.queryByText("A-SECRET-TURN")).toBeNull();
 });
 
 it("footer shows the drafting-disabled message via disabled_reason", async () => {

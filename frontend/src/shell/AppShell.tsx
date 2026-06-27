@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
-import { Outlet, useMatches } from "react-router-dom";
+import { Outlet, useLocation, useMatches } from "react-router-dom";
 
+import { cockpitIdFromPath } from "../cockpit/cockpitNav";
 import { ActivityBar } from "./ActivityBar";
 import styles from "./AppShell.module.css";
 import { Sidebar } from "./Sidebar";
@@ -19,6 +20,7 @@ type RightPaneHandle = { RightPane?: ComponentType };
 // landmark element.
 export function AppShell() {
   const matches = useMatches();
+  const { pathname } = useLocation();
   const SidebarContent = [...matches]
     .reverse()
     .map((m) => (m.handle as SidebarHandle | undefined)?.Sidebar)
@@ -27,6 +29,20 @@ export function AppShell() {
     .reverse()
     .map((m) => (m.handle as RightPaneHandle | undefined)?.RightPane)
     .find((R): R is ComponentType => Boolean(R));
+
+  // Per-workspace remount key for the WHOLE cockpit subtree (main Outlet + right pane).
+  // A param-only nav /cockpit/A → /cockpit/B keeps this layout mounted and would
+  // otherwise reconcile the same Cockpit/CockpitChat instances, leaking A's local
+  // state into B (stale jobId/streamed turns → SSE targeting the wrong workspace;
+  // stale bottomTab/collapsed/openPeek). Keying by the cockpit id forces a fresh
+  // mount on every workspace change, resetting all of it. Non-cockpit routes resolve
+  // to "" → a stable key so they reconcile normally.
+  // The main and right-pane regions are SIBLINGS, so they need DISTINCT keys (a shared
+  // key collides → React warns + reuses one). Both keys carry the same cockpit id, so
+  // both regions remount together on a workspace change but reconcile on a query/section
+  // change. Non-cockpit routes resolve to "" → stable per-region keys.
+  const cockpitId = cockpitIdFromPath(pathname);
+  const idSuffix = cockpitId ? `cockpit:${cockpitId}` : "shell";
 
   return (
     <div className={styles.shell}>
@@ -38,10 +54,10 @@ export function AppShell() {
             <SidebarContent />
           </Sidebar>
         )}
-        <div className={styles.main}>
+        <div className={styles.main} key={`main:${idSuffix}`}>
           <Outlet />
         </div>
-        {RightPaneContent && <RightPaneContent />}
+        {RightPaneContent && <RightPaneContent key={`pane:${idSuffix}`} />}
       </div>
       <StatusBar />
     </div>

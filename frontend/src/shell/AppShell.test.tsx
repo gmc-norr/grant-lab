@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
-import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { RouterProvider, createMemoryRouter, useNavigate } from "react-router-dom";
 import type { RouteObject } from "react-router-dom";
+import { useEffect } from "react";
 import { expect, it } from "vitest";
 
 import { theme } from "../theme/theme";
@@ -75,4 +76,79 @@ it("renders the right-pane region when the active route declares handle.RightPan
     },
   ]);
   expect(screen.getByRole("complementary", { name: /chat/i })).toBeInTheDocument();
+});
+
+it("REMOUNTS the cockpit subtree (main + right pane) on a workspace-id change but not on a query-only change (Defect 3)", () => {
+  // The cockpit right pane (CockpitChat) holds per-turn local state (jobId/streamed)
+  // and the main subtree holds bottomTab/openPeek etc. A param-only nav /cockpit/A ->
+  // /cockpit/B keeps the layout mounted; without a per-id key those instances would
+  // reconcile and bleed A's state into B (SSE targeting the wrong workspace). Keying by
+  // the cockpit id forces a fresh mount on id change. A query-string change must NOT
+  // remount (it's the same workspace — section/tab navigation).
+  let paneMounts = 0;
+  let mainMounts = 0;
+  function PaneProbe() {
+    useEffect(() => {
+      paneMounts += 1;
+    }, []);
+    return <aside aria-label="Chat" />;
+  }
+  function MainProbe() {
+    useEffect(() => {
+      mainMounts += 1;
+    }, []);
+    return (
+      <>
+        <p>COCKPIT BODY</p>
+        <Nav />
+      </>
+    );
+  }
+  function Nav() {
+    const navigate = useNavigate();
+    return (
+      <>
+        <button type="button" onClick={() => navigate("/cockpit/ws-b")}>
+          to-b
+        </button>
+        <button type="button" onClick={() => navigate("/cockpit/ws-a?sec=2")}>
+          same-ws-query
+        </button>
+      </>
+    );
+  }
+  const router = createMemoryRouter(
+    [
+      {
+        element: <AppShell />,
+        children: [
+          {
+            path: "cockpit/:id",
+            element: <MainProbe />,
+            handle: { RightPane: PaneProbe },
+          },
+        ],
+      },
+    ],
+    { initialEntries: ["/cockpit/ws-a"] },
+  );
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <RouterProvider router={router} />
+      </MantineProvider>
+    </QueryClientProvider>,
+  );
+  expect(paneMounts).toBe(1);
+  expect(mainMounts).toBe(1);
+
+  // A query-only navigation on the SAME workspace must NOT remount (same key).
+  fireEvent.click(screen.getByRole("button", { name: /same-ws-query/i }));
+  expect(paneMounts).toBe(1);
+  expect(mainMounts).toBe(1);
+
+  // Switching workspace id MUST remount both halves (fresh local state).
+  fireEvent.click(screen.getByRole("button", { name: /to-b/i }));
+  expect(paneMounts).toBe(2);
+  expect(mainMounts).toBe(2);
 });

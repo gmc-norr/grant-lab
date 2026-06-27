@@ -103,6 +103,11 @@ export function CodeMirrorEditor({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const readOnlyComp = useRef(new Compartment());
+  // history() lives in its own compartment so a controlled full-doc swap (a section
+  // switch) can RESET the undo stack — reconfiguring a compartment discards the
+  // extension's prior state, so a cross-section undo can never reach into the
+  // previous section's text.
+  const historyComp = useRef(new Compartment());
   // Keep the latest onChange/requireHeading/onPillClick without re-creating the
   // view. The pill widget captures a STABLE wrapper at mount that reads this ref,
   // so a changed onPillClick prop takes effect on the next click with no reconfigure
@@ -137,7 +142,7 @@ export function CodeMirrorEditor({
       return tr;
     });
     const extensions = [
-      history(),
+      historyComp.current.of(history()),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       markdown(),
     ];
@@ -229,7 +234,14 @@ export function CodeMirrorEditor({
     if (value !== current) {
       view.dispatch({
         changes: { from: 0, to: current.length, insert: value },
-        annotations: Transaction.remote.of(true),
+        // remote: don't echo back through onChange. addToHistory(false): the swap is
+        // NOT a user edit, so it must not be recorded as undoable — otherwise an undo
+        // after a section switch (A→B) would revert the doc to A's text as a LOCAL
+        // change, which the updateListener would write into B's buffer (silent data
+        // loss). Reconfiguring the history compartment additionally CLEARS the undo
+        // stack so a cross-section undo can't reach into the prior doc at all.
+        annotations: [Transaction.remote.of(true), Transaction.addToHistory.of(false)],
+        effects: historyComp.current.reconfigure(history()),
       });
     }
   }, [value]);

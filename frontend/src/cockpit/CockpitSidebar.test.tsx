@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -28,7 +28,7 @@ vi.mock("../api/rubric", () => ({
 
 import * as clientMod from "../api/client";
 import { CockpitSidebar } from "./CockpitSidebar";
-import { resetEditorStore, setDirty } from "./editorStore";
+import { resetEditorStore, setCursor, setDirty, useEditorDirty } from "./editorStore";
 
 beforeEach(() => {
   m.addMutate.mockReset();
@@ -99,8 +99,29 @@ it("shows a dirty marker for a section the store reports", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
   renderSidebar();
   await screen.findByRole("button", { name: /Methods/ });
-  setDirty([1]);
+  act(() => setDirty([1]));
   expect(await screen.findByLabelText("unsaved")).toBeInTheDocument();
+});
+
+it("a caret-only store update does NOT re-render a dirty subscriber (Defect 4)", () => {
+  // The sidebar subscribes to ONLY the dirty set via useEditorDirty, so a caret move
+  // (cursor updates on EVERY keystroke) must not re-render it. We exercise the exact
+  // subscription the sidebar uses and count renders directly.
+  let renders = 0;
+  function DirtyProbe() {
+    renders += 1;
+    const dirty = useEditorDirty();
+    return <span data-testid="dirty">{dirty.join(",")}</span>;
+  }
+  render(<DirtyProbe />);
+  const before = renders;
+  act(() => setCursor({ line: 3, col: 7 }));
+  act(() => setCursor({ line: 9, col: 2 }));
+  expect(renders).toBe(before); // caret-only updates -> no re-render
+  // A genuine dirty change DOES re-render it.
+  act(() => setDirty([1]));
+  expect(renders).toBe(before + 1);
+  expect(screen.getByTestId("dirty").textContent).toBe("1");
 });
 
 it("renders References and Criteria groups with a band pill", async () => {

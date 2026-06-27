@@ -5,10 +5,12 @@ import { useCockpitMeta } from "../api/workspace";
 import { BottomPanel } from "../cockpit/BottomPanel";
 import { useCockpitNav } from "../cockpit/cockpitNav";
 import { DraftPanel } from "../cockpit/DraftPanel";
-import type { BottomTab, NavTarget } from "../cockpit/nav";
+import { confirmDiscardIfDirty } from "../cockpit/editorStore";
+import type { BottomTab, NavTarget, TopTab } from "../cockpit/nav";
 import { ReviewPanel } from "../cockpit/ReviewPanel";
 import { ScorecardPanel } from "../cockpit/ScorecardPanel";
 import { SpecPanel } from "../cockpit/SpecPanel";
+import { UnsavedChangesGuard } from "../cockpit/UnsavedChangesGuard";
 import { WorkspaceSetup } from "../cockpit/WorkspaceSetup";
 
 export function Cockpit() {
@@ -22,6 +24,15 @@ export function Cockpit() {
   const [collapsed, setCollapsed] = useState(false);
   const peekNonce = useRef(0);
   const [openPeek, setOpenPeek] = useState<{ ev: string; n: number } | null>(null);
+
+  // Switching the artifact tab unmounts the active editor and discards its unsaved
+  // per-section buffers. That is NOT a router navigation (the router blocker can't
+  // see it), so confirm here before discarding. A clean editor → no prompt.
+  const onTab = (t: TopTab) => {
+    if (t === tab) return;
+    if (!confirmDiscardIfDirty()) return;
+    setTab(t);
+  };
 
   const onNavigate = (target: NavTarget) => {
     navigate(target); // ?tab + ?sec
@@ -42,17 +53,18 @@ export function Cockpit() {
 
   return (
     <div className="cockpit-shell">
+      <UnsavedChangesGuard />
       <div role="tablist" aria-label="Artifact">
-        <button type="button" role="tab" aria-selected={tab === "draft"} onClick={() => setTab("draft")}>
+        <button type="button" role="tab" aria-selected={tab === "draft"} onClick={() => onTab("draft")}>
           Draft
         </button>
-        <button type="button" role="tab" aria-selected={tab === "spec"} onClick={() => setTab("spec")}>
+        <button type="button" role="tab" aria-selected={tab === "spec"} onClick={() => onTab("spec")}>
           Spec
         </button>
-        <button type="button" role="tab" aria-selected={tab === "scorecard"} onClick={() => setTab("scorecard")}>
+        <button type="button" role="tab" aria-selected={tab === "scorecard"} onClick={() => onTab("scorecard")}>
           Scorecard
         </button>
-        <button type="button" role="tab" aria-selected={tab === "review"} onClick={() => setTab("review")}>
+        <button type="button" role="tab" aria-selected={tab === "review"} onClick={() => onTab("review")}>
           Panel review
         </button>
       </div>

@@ -1,3 +1,5 @@
+import { undo } from "@codemirror/commands";
+import type { EditorView } from "@codemirror/view";
 import { render, cleanup, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -9,6 +11,49 @@ function getView(container: HTMLElement) {
   // The component stores the EditorView on the mount node for test access.
   return (container.querySelector(".cm-editor") as HTMLElement) ?? null;
 }
+
+it("Ctrl+Z after a controlled section switch does NOT revert to the previous section's text", () => {
+  // Regression (Defect 1): the controlled value-push (A→B section switch) must NOT be
+  // recorded as an undoable history entry, and the swap must CLEAR the undo stack — so
+  // an undo after switching can never revert the doc to section A's text (which the
+  // updateListener would then write into B's buffer as a local change = silent data
+  // loss). The push is tagged Transaction.addToHistory.of(false) AND reconfigures the
+  // history compartment to discard prior history.
+  const onChange = vi.fn();
+  const sectionA = "## A\nalpha body\n";
+  const sectionB = "## B\nbravo body\n";
+  const { container, rerender } = render(
+    <CodeMirrorEditor value={sectionA} onChange={onChange} requireHeading />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: EditorView;
+  }).__cmView!;
+
+  // Switch sections: parent pushes B's text via the controlled value prop.
+  rerender(<CodeMirrorEditor value={sectionB} onChange={onChange} requireHeading />);
+  expect(view.state.doc.toString()).toBe(sectionB);
+
+  // The user makes a local edit on section B (this IS undoable).
+  onChange.mockClear();
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "X" } });
+  expect(view.state.doc.toString()).toBe(sectionB + "X");
+  expect(onChange).toHaveBeenLastCalledWith(sectionB + "X");
+
+  // Undo. It must only undo the local "X" edit — and must NEVER reach across the swap
+  // to resurrect section A's text.
+  onChange.mockClear();
+  undo(view);
+  expect(view.state.doc.toString()).toBe(sectionB);
+  // Crucially, A's text never reappears in the doc or via onChange.
+  expect(view.state.doc.toString()).not.toContain("alpha body");
+  for (const call of onChange.mock.calls) {
+    expect(call[0]).not.toContain("alpha body");
+  }
+
+  // A second undo cannot revert past the cleared boundary into section A either.
+  undo(view);
+  expect(view.state.doc.toString()).not.toContain("alpha body");
+});
 
 it("renders the value as document bytes", () => {
   const { container } = render(

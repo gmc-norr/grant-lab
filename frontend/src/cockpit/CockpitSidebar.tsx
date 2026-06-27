@@ -11,7 +11,7 @@ import { useAddMember, useRemoveMember } from "../api/settings";
 import { useCockpitMeta, useMembers, useVersions } from "../api/workspace";
 import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
-import { useEditorStore } from "./editorStore";
+import { useEditorDirty } from "./editorStore";
 import { RubricEditor } from "./RubricEditor";
 import { SidebarGroup } from "./SidebarGroup";
 
@@ -39,7 +39,9 @@ export function CockpitSidebar() {
   const draft = useDraft(id);
   const spec = useSpec(id);
   const q = artifact === "spec" ? spec : draft;
-  const { dirty } = useEditorStore();
+  // Subscribe to ONLY the dirty set (not cursor) so a caret move does not re-render
+  // the whole sidebar (the cursor updates on every keystroke).
+  const dirty = useEditorDirty();
   const sections = q.data?.sections ?? [];
 
   const references = useReferences(id);

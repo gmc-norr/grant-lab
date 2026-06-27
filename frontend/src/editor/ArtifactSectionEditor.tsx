@@ -117,14 +117,20 @@ export function ArtifactSectionEditor({
     );
   }, [buffers, sections]);
 
-  // Publish save-state for the status bar.
+  // Publish save-state for the status bar. Compute the active section's dirty boolean
+  // INLINE (not via isDirty, whose byIndex closure is omitted from the deps) so a
+  // refetch that mutates `sections`/`byIndex` re-runs this effect — otherwise the
+  // status bar would lag after a refetch canonicalises the served bytes.
+  const activeDirty =
+    activeIndex >= 0 &&
+    buffers[activeIndex] !== undefined &&
+    buffers[activeIndex] !== byIndex.get(activeIndex)?.text;
   useEffect(() => {
     if (save.isPending) setSave("saving");
     else if (saveError) setSave("error");
-    else if (activeIndex >= 0 && isDirty(activeIndex)) setSave("dirty");
+    else if (activeDirty) setSave("dirty");
     else setSave("saved");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [save.isPending, saveError, buffers, activeIndex]);
+  }, [save.isPending, saveError, activeDirty]);
 
   // Clear the store on unmount so a stale cursor/save/dirty never leaks to the status
   // bar of a non-cockpit view or the next artifact.
