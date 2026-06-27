@@ -20,15 +20,11 @@ function dashData() {
   };
 }
 
-it("shows the breadcrumb, the summary counts verbatim, and a logout form", async () => {
+it("shows the breadcrumb and the summary counts verbatim", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData() as never);
   renderWithProviders(<DashboardHeader />, { route: "/" });
-
   expect(screen.getByText("Calls")).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument()); // open_count
-  expect(screen.getByText("5")).toBeInTheDocument(); // high_score (verbatim)
-  expect(screen.getByText("3")).toBeInTheDocument(); // soon_deadline
-
-  const signout = screen.getByRole("button", { name: /sign out/i });
-  expect(signout.closest("form")).toHaveAttribute("action", "/logout");
+  await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument());
+  expect(screen.getByText("5")).toBeInTheDocument();
+  expect(screen.getByText("3")).toBeInTheDocument();
 });

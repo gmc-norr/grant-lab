@@ -23,66 +23,17 @@ def _user(sf, status):
         return u.id
 
 
-def test_active_user_reaches_me(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)
-    uid = _user(app.state.session_factory, "active")
-    with TestClient(app) as c:
-        c.cookies.set("session", app.state.session_signer.make(user_id=uid))
-        assert c.get("/me", headers={"accept": "text/html"}).status_code == 200
-
-
-def test_pending_user_html_redirects_and_clears_cookie(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)
-    uid = _user(app.state.session_factory, "pending")
-    with TestClient(app) as c:
-        c.cookies.set("session", app.state.session_signer.make(user_id=uid))
-        r = c.get("/me", headers={"accept": "text/html"}, follow_redirects=False)
-        assert r.status_code == 303
-        assert r.headers["location"] == "/auth/pending"
-        set_cookie = " ".join(r.headers.get_list("set-cookie"))
-        assert "session=" in set_cookie and (
-            "Max-Age=0" in set_cookie or "expires=" in set_cookie.lower()
-        )
-
-
-def test_disabled_user_api_gets_403(monkeypatch, pg_url, pg_session_factory):
+def test_inactive_api_caller_gets_403(monkeypatch, pg_url, pg_session_factory):
+    """A pending/disabled user hitting an /api route gets the 403 envelope
+    (AccountInactive -> api branch). Browser redirect handling is gone — the SPA
+    drives it client-side off this 403."""
     app = _app(monkeypatch, pg_url)
     uid = _user(app.state.session_factory, "disabled")
     with TestClient(app) as c:
         c.cookies.set("session", app.state.session_signer.make(user_id=uid))
-        assert c.get("/me").status_code == 403  # no Accept: text/html -> API path
-
-
-def test_disabled_mid_session_reaches_no_access_despite_bumped_epoch(
-    monkeypatch, pg_url, pg_session_factory
-):
-    # Canonical disable flow: the user holds a cookie minted while active, then
-    # an admin disables them (status='disabled' AND session_epoch bumped). The
-    # status gate must win over the epoch check so they land on /auth/no-access
-    # (cookie cleared), not the generic 401 -> /login.
-    app = _app(monkeypatch, pg_url)
-    sf = app.state.session_factory
-    with sf() as s:
-        u = User(email="active@ki.se", status="active")
-        s.add(u)
-        s.commit()
-        s.refresh(u)
-        uid = u.id
-    cookie = app.state.session_signer.make(user_id=uid, session_epoch=0)
-    with sf() as s:
-        u = s.get(User, uid)
-        u.status = "disabled"
-        u.session_epoch = 1  # mimics admin disable bumping the epoch
-        s.commit()
-    with TestClient(app) as c:
-        c.cookies.set("session", cookie)
-        r = c.get("/me", headers={"accept": "text/html"}, follow_redirects=False)
-        assert r.status_code == 303
-        assert r.headers["location"] == "/auth/no-access"
-        set_cookie = " ".join(r.headers.get_list("set-cookie"))
-        assert "session=" in set_cookie and (
-            "Max-Age=0" in set_cookie or "expires=" in set_cookie.lower()
-        )
+        r = c.get("/api/me")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "account_inactive"
 
 
 def test_get_current_user_raises_account_inactive(pg_url, pg_session_factory):

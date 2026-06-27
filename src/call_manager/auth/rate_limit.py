@@ -36,6 +36,8 @@ class SlidingWindowLimiter:
         self.name = name
 
     def allow(self, key: str) -> bool:
+        if self._max <= 0:
+            return False
         with self._lock:
             now = self._clock()
             q = self._events.get(key)

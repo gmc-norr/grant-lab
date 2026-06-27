@@ -21,11 +21,8 @@ def build_csp(dev: bool = False) -> str:
     """Content-Security-Policy for the dashboard.
 
     ``script-src 'self'`` (no ``'unsafe-inline'``) is the high-value line —
-    it's the safety net if any XSS sink is ever introduced. It holds because
-    all inline ``<script>`` blocks and ``on*`` handlers were moved to
-    ``/static/app.js``. ``style-src`` keeps ``'unsafe-inline'`` because the
-    templates and Pico.css rely on inline ``style="..."`` attributes; inline
-    styles are a far lower risk than inline scripts. ``frame-ancestors 'none'``
+    it's the safety net if any XSS sink is ever introduced. The React SPA uses
+    no inline scripts (Vite bundles everything). ``frame-ancestors 'none'``
     is the modern clickjacking control (paired with ``X-Frame-Options`` for
     older browsers).
 

@@ -11,7 +11,9 @@ describe("isSpaRoute (shipped manifest = ['/'] after the Plan-3 Task-9 flip)", (
   });
   it("does NOT own backend or unknown paths (they reach FastAPI's real 404)", () => {
     expect(isSpaRoute("/api/me")).toBe(false);
-    expect(isSpaRoute("/login")).toBe(false);
+    expect(isSpaRoute("/login")).toBe(true);
+    expect(isSpaRoute("/auth/pending")).toBe(true);
+    expect(isSpaRoute("/auth/google/start")).toBe(false);
     expect(isSpaRoute("/totally-unknown")).toBe(false);
   });
 });
@@ -61,7 +63,8 @@ describe("shouldServeViaVite (the proxy bypass decision)", () => {
   it("serves SPA routes + Vite assets via Vite; proxies everything else to uvicorn", () => {
     expect(shouldServeViaVite("/")).toBe(true); // SPA shell at the root
     expect(shouldServeViaVite("/@vite/client")).toBe(true); // dev asset
-    expect(shouldServeViaVite("/login")).toBe(false); // backend route -> uvicorn (not Vite's index)
+    expect(shouldServeViaVite("/login")).toBe(true); // SPA route -> Vite
+    expect(shouldServeViaVite("/auth/google/start")).toBe(false); // OAuth -> uvicorn (not shadowed)
     expect(shouldServeViaVite("/api/me")).toBe(false); // backend route -> uvicorn
     expect(shouldServeViaVite("/calls/1")).toBe(true); // owned detail route
     expect(shouldServeViaVite("/me")).toBe(true); // owned settings route

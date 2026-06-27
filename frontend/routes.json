@@ -1,6 +1,6 @@
 {
-  "spa_routes": ["/", "/cockpit", "/calls", "/me", "/profiles", "/admin"],
-  "backend_prefixes": ["/api", "/healthz", "/login", "/logout", "/register",
-    "/auth", "/workspaces", "/static"],
-  "_comment": "spa_routes = SPA-owned page routes, matched EXACTLY (not by prefix). Plan 3 Task 9 flipped this from the temporary ['/app'] scaffold to ['/'] (the React dashboard now owns the root; the Jinja calls_index was retired). The root special-case in is_spa_route owns ONLY '/' — '/calls/1', '/api/x', '/made-up-page' all fall through to FastAPI's real 404. backend_prefixes lists the real top-level prefixes mounted in main.py (golden-set lives under /admin; rubric/sections/annotations/files/references/citations all live under /workspaces; there is no /events route yet). NOTE: backend_prefixes / is_backend_route are currently NOT consulted by the serving or proxy path — the Vite dev proxy is default-to-backend (it forwards everything to FastAPI except SPA routes + Vite assets, see frontend/src/dev-proxy.ts) and the prod catch-all keys off is_spa_route alone. They are retained as the documented prefix set and a future explicit-carve-out helper."
+  "spa_routes": ["/", "/cockpit", "/calls", "/me", "/profiles", "/admin",
+    "/login", "/register", "/auth/pending", "/auth/no-access", "/auth/error"],
+  "backend_prefixes": ["/api", "/healthz", "/auth", "/workspaces", "/static"],
+  "_comment": "spa_routes = SPA-owned page routes, matched EXACTLY (not by prefix). /login, /register and the three /auth/* holding pages are React (auth slice). Bare /auth is NOT an spa_route: it would make is_spa_route('/auth/google/start') True and let the dev Vite proxy shadow the real OAuth endpoints (dev-proxy.ts keys off isSpaRoute with no backend-precedence check); the three explicit leaves avoid that. /auth stays in backend_prefixes (doc-only) because POST /auth/google/start + GET /auth/google/callback live there. backend_prefixes / is_backend_route are NOT consulted by the serving or proxy path."
 }

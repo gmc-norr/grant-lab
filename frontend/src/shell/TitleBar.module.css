@@ -23,10 +23,36 @@
   color: var(--app-muted-chrome);
 }
 .settingsGear {
-  margin-left: auto;
   background: none;
   border: 0;
   cursor: pointer;
   color: var(--app-text);
   font-size: 14px;
+}
+.account {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chip {
+  color: var(--app-muted-chrome);
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.signout {
+  background: none;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 4px;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.signout:disabled {
+  opacity: 0.6;
+  cursor: default;
 }

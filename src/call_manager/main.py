@@ -1,11 +1,9 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import PlainTextResponse
 
@@ -20,7 +18,6 @@ from call_manager.auth.email import (
 from call_manager.auth.oauth_txn import TransactionCipher
 from call_manager.auth.oidc import OIDCClient
 from call_manager.auth.rate_limit import SlidingWindowLimiter
-from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.config import Settings
 from call_manager.db.session import make_engine, make_session_factory
@@ -51,28 +48,17 @@ from call_manager.proposal_assist.web.uncited_claims import (
 )
 from call_manager.web.api import router as api_router
 from call_manager.web.api.errors import api_error, api_request, code_for
-from call_manager.web.filters import (
-    criterion_label,
-    display_date,
-    display_dt,
-    model_label,
-    note_category_heading,
-    phase_label,
-)
 from call_manager.web.middleware import (
     MaxBodySizeMiddleware,
     SecurityHeadersMiddleware,
     build_csp,
 )
 from call_manager.web.routes import (
-    auth,
     health,
     oauth_google,
-    register,
 )
 from call_manager.web.spa_serving import mount_spa
 
-TEMPLATES_DIR = Path(__file__).parent / "web" / "templates"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
 
 
@@ -314,79 +300,18 @@ def create_app() -> FastAPI:
             extra={"event": "startup_trusted_proxy_unset"},
         )
 
-    # Redirect unauthenticated HTML requests to /login instead of returning
-    # the raw JSON 401 from get_current_user. The auth dependency raises
-    # HTTPException(401) for both API-ish and HTML routes; only the browser
-    # case should redirect. Detect via the Accept header — curl / fetch
-    # without Accept: text/html still gets the JSON 401, which keeps
-    # api-ish callers and the test suite happy.
-    # Statuses for which a browser (Accept: text/html) gets a styled HTML
-    # error page instead of a raw JSON body. 401 is handled separately
-    # (redirect to /login). API/non-HTML callers always get JSON.
-    _HTML_ERROR_STATUSES = {400, 403, 404, 409, 413}
-
     @app.exception_handler(StarletteHTTPException)
-    async def _redirect_html_401(request: Request, exc: StarletteHTTPException):
+    async def _http_exception(request: Request, exc: StarletteHTTPException):
         if api_request(request):
-            # Preserve any exception headers (e.g. "Allow" on a 405, "Retry-After"
-            # on a 503) — RFC 7231 §6.5.5 requires Allow on Method Not Allowed.
             hdrs = getattr(exc, "headers", None)
             if exc.status_code >= 500:
-                # Sanitize server errors — never echo exc.detail (it may carry internals),
-                # matching the generic Exception handler below. The body is still
-                # sanitized, so propagating headers never leaks internals.
                 return api_error(
                     exc.status_code, "internal_error", "internal server error", headers=hdrs
                 )
-            # 4xx detail strings (e.g. "not authenticated", "admin required") are
-            # intentional and useful to the SPA — echo them.
             return api_error(exc.status_code, code_for(exc.status_code), exc.detail, headers=hdrs)
-        wants_html = "text/html" in request.headers.get("accept", "")
-        # An htmx PARTIAL request (HX-Request, not a full-page hx-boost
-        # navigation) must always get JSON {"detail": ...} so the global
-        # htmx:responseError handler can render it inline — never a styled
-        # HTML page swapped into a fragment target. Full-page navigations
-        # (no HX-Request, or boosted) keep the styled error page.
-        hx_partial = (
-            request.headers.get("hx-request") == "true"
-            and request.headers.get("hx-boosted") != "true"
-        )
-        # DORMANT after admin Slice 2: no protected non-/api HTML route can 401
-        # any more — every surviving non-/api route is public (auth/register/
-        # oauth/health) or an SPA path served at 200. Kept until the auth slice
-        # (which removes this whole non-/api branch). Not dead-code-removed here
-        # to keep this slice's diff scoped to admin.
-        if exc.status_code == 401 and wants_html:
-            # 401 is intentionally NOT gated on hx_partial: an htmx request
-            # that hits 401 follows the 303 to /login as a full-page
-            # navigation (htmx:responseError does not fire on redirects).
-            # Auth-redirect UX is out of scope for the JSON-detail gate below.
-            # Preserve the originally-requested path so the user lands back
-            # there after sign-in. Only for safe methods: threading a POST
-            # path would produce a final `303 GET` to a POST-only route and
-            # a 405. `safe_next` rejects anything non-local or oversized.
-            if request.method in ("GET", "HEAD"):
-                raw_next = request.url.path
-                if request.url.query:
-                    raw_next = f"{raw_next}?{request.url.query}"
-                target = safe_next(raw_next)
-                if target:
-                    return RedirectResponse(
-                        url=f"/login?{urlencode({'next': target})}",
-                        status_code=303,
-                    )
-            return RedirectResponse(url="/login", status_code=303)
-        if wants_html and not hx_partial and exc.status_code in _HTML_ERROR_STATUSES:
-            # A browser hitting a 403/404/etc. should see a styled page, not
-            # a bare {"detail": ...} JSON blob. JSON is reserved for API
-            # callers (no text/html in Accept) and htmx partial requests.
-            return app.state.templates.TemplateResponse(
-                request=request,
-                name="error.html",
-                context={"status_code": exc.status_code, "message": exc.detail},
-                status_code=exc.status_code,
-                headers=getattr(exc, "headers", None) or None,
-            )
+        # Non-/api: every surviving non-/api route is public (oauth/health) or an
+        # SPA path served at 200; none can 401 a browser any more, so the backend
+        # never redirects browsers. A rare non-/api exception gets a minimal JSON body.
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},
@@ -397,22 +322,6 @@ def create_app() -> FastAPI:
     async def _inactive_account(request: Request, exc: AccountInactive):
         if api_request(request):
             return api_error(403, "account_inactive", "account not active")
-        wants_html = "text/html" in request.headers.get("accept", "")
-        hx_partial = (
-            request.headers.get("hx-request") == "true"
-            and request.headers.get("hx-boosted") != "true"
-        )
-        if wants_html and not hx_partial:
-            target = "/auth/pending" if exc.status == "pending" else "/auth/no-access"
-            resp = RedirectResponse(url=target, status_code=303)
-            resp.delete_cookie(
-                "session",
-                path="/",
-                httponly=True,
-                secure=settings.cookie_secure,
-                samesite="lax",
-            )
-            return resp
         return JSONResponse(status_code=403, content={"detail": "account not active"})
 
     from fastapi.encoders import jsonable_encoder
@@ -467,18 +376,6 @@ def create_app() -> FastAPI:
     app.state.citation_service = build_citation_service(
         settings=settings, session_factory=session_factory
     )
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    # Per design spec: web layer renders all timestamps in Europe/Stockholm.
-    # Templates use `{{ dt | display_dt }}` / `{{ dt | display_date }}` —
-    # NEVER call .strftime() on a raw datetime in templates (it would
-    # render UTC and display 1–2 hours wrong half the year).
-    templates.env.filters["display_dt"] = display_dt
-    templates.env.filters["display_date"] = display_date
-    templates.env.filters["criterion_label"] = criterion_label
-    templates.env.filters["model_label"] = model_label
-    templates.env.filters["note_category_heading"] = note_category_heading
-    templates.env.filters["phase_label"] = phase_label
-    app.state.templates = templates
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(
         max_requests=5, window_seconds=15 * 60, name="email"
@@ -513,15 +410,13 @@ def create_app() -> FastAPI:
         capacity=settings.reference_ingest_concurrency
     )
 
-    # Vendored static assets (htmx.min.js lives here). Serving locally
-    # avoids an unreviewed third-party CDN dependency on every page load,
-    # which in a hospital-internal context is unacceptable — a CDN
-    # compromise would execute attacker JS on every logged-in request.
+    # Vendored static assets (only favicon.svg after htmx/Pico deletion). Serving
+    # locally avoids an unreviewed third-party CDN dependency on every page load,
+    # which in a hospital-internal context is unacceptable — a CDN compromise would
+    # execute attacker JS on every logged-in request.
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     app.include_router(health.router)
-    app.include_router(auth.router)
-    app.include_router(register.router)
     app.include_router(oauth_google.router)
     app.include_router(proposals_router)
     app.include_router(coherence_router)

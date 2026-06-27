@@ -110,7 +110,7 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
 def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):
     _env(monkeypatch, pg_url, SPA_MODE="dev")
     c = TestClient(create_app())
-    csp = c.get("/login").headers.get("content-security-policy", "")
+    csp = c.get("/healthz").headers.get("content-security-policy", "")
     # Dev must allow BOTH Vite relaxations: the HMR WebSocket (connect-src ws:)
     # and the injected inline dev bootstrap (script-src 'unsafe-inline').
     assert "ws:" in csp or "ws://localhost" in csp
@@ -120,5 +120,5 @@ def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):
 def test_disabled_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_factory):
     _env(monkeypatch, pg_url, SPA_MODE="disabled")
     c = TestClient(create_app())
-    csp = c.get("/login").headers.get("content-security-policy", "")
+    csp = c.get("/healthz").headers.get("content-security-policy", "")
     assert "script-src 'self'" in csp and "script-src 'self' 'unsafe-inline'" not in csp

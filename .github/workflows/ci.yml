@@ -64,13 +64,6 @@ jobs:
           # and the node:22 build container) — bump in one place.
           node-version-file: frontend/.nvmrc
 
-      - name: JS unit tests (legacy static app.js)
-        # Quoted glob, not a bare dir: Node >=21 (CI is pinned to Node 22 via
-        # frontend/.nvmrc) treats a directory positional as an entry FILE, not a
-        # discovery root, so `node --test tests/js/` fails MODULE_NOT_FOUND. Node
-        # expands the `**` itself, so the glob must stay quoted from the shell.
-        run: node --test 'tests/js/**/*.test.js'
-
       # --- Frontend SPA (Plan 2): pnpm frozen + scripts-off, scanners, container build ---
       - name: Enable corepack (pnpm pinned via package.json packageManager)
         run: corepack enable

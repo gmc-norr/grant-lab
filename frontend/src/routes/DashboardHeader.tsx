@@ -5,8 +5,8 @@ import styles from "./DashboardHeader.module.css";
 
 // The dashboard header strip: breadcrumb · the 3 summary counts (shown verbatim
 // from the read-model — `high_score` is the server's >=70 top-match count, not
-// recomputed from MatchBadge bands) · sign-out. Reads the shared useDashboard
-// query (deduped with the list + filters).
+// recomputed from MatchBadge bands). Reads the shared useDashboard
+// query (deduped with the list + filters). Sign-out lives in the shell TitleBar.
 export function DashboardHeader() {
   const [sp] = useSearchParams();
   const { data } = useDashboard(dashboardParamsFrom(sp));
@@ -26,11 +26,6 @@ export function DashboardHeader() {
           <strong>{s?.soon_deadline ?? 0}</strong> closing within 30 days
         </span>
       </div>
-      {/* Native POST logout: a full-page nav follows the 303 to /login and
-          carries Origin/CSRF (no client fetch / token plumbing). */}
-      <form className={styles.signout} method="post" action="/logout">
-        <button type="submit">Sign out</button>
-      </form>
     </header>
   );
 }

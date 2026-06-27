@@ -1,8 +1,13 @@
 import type { RouteObject } from "react-router-dom";
+import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import { MantineProvider } from "@mantine/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
 
 import { router } from "./router";
 import { SPA_ROUTES } from "./routes.gen";
+import { theme } from "./theme/theme";
 
 // Collect every concrete LEAF page path the router can match, as an absolute
 // path. A pathless layout route (no `path`) contributes nothing itself; its
@@ -39,4 +44,17 @@ it("router concrete paths are all owned by the SPA_ROUTES manifest (drift guard)
     .filter((p) => !p.includes("*"))
     .map(toOwningPrefix);
   expect(new Set(concrete)).toEqual(new Set(SPA_ROUTES));
+});
+
+it("/login renders the pre-auth Login, not the AppShell soft-404", () => {
+  const r = createMemoryRouter(router.routes, { initialEntries: ["/login"] });
+  render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={new QueryClient()}>
+        <RouterProvider router={r} />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+  expect(screen.getByRole("heading", { name: /sign in/i })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Primary")).not.toBeInTheDocument(); // no ActivityBar
 });
