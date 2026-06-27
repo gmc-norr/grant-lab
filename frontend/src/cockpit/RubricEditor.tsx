@@ -1,3 +1,5 @@
+import { NumberInput, Stack, Table, Text, Textarea, TextInput } from "@mantine/core";
+
 import type { RubricCriterion } from "../api/rubric";
 
 export function RubricEditor({
@@ -18,39 +20,73 @@ export function RubricEditor({
     });
 
   return (
-    <div className="rubric-editor">
-      <table>
-        <thead>
-          <tr><th>Criterion</th><th>Description</th><th>Weight</th><th>%</th><th>Scale max</th></tr>
-        </thead>
-        <tbody>
+    <Stack gap="md">
+      <Table withTableBorder withColumnBorders horizontalSpacing="md" verticalSpacing="sm" layout="fixed">
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th w="22%">Criterion</Table.Th>
+            <Table.Th>Description</Table.Th>
+            <Table.Th w={130}>Weight</Table.Th>
+            <Table.Th w={64}>%</Table.Th>
+            <Table.Th w={120}>Scale max</Table.Th>
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
           {criteria.map((c, i) => (
-            <tr key={i}>
-              <td>
-                <input aria-label={`Name for ${c.name}`} value={c.name}
-                  onChange={(e) => patch(i, "name", e.target.value)} />
-              </td>
-              <td>
-                <textarea aria-label={`Description for ${c.name}`} value={c.description}
-                  onChange={(e) => patch(i, "description", e.target.value)} />
-              </td>
-              <td>
-                <input type="number" min={0} step={0.01} aria-label={`Weight for ${c.name}`}
-                  value={c.weight} onChange={(e) => patch(i, "weight", Number(e.target.value))} />
-              </td>
-              <td>{total > 0 ? Math.round((Number(c.weight) / total) * 100) : 0}%</td>
-              <td>
-                <input type="number" min={1} max={10} aria-label={`Scale max for ${c.name}`}
-                  value={c.scale_max} onChange={(e) => patch(i, "scale_max", Number(e.target.value))} />
-              </td>
-            </tr>
+            <Table.Tr key={i}>
+              <Table.Td>
+                <TextInput
+                  aria-label={`Name for ${c.name}`}
+                  value={c.name}
+                  onChange={(e) => patch(i, "name", e.currentTarget.value)}
+                />
+              </Table.Td>
+              <Table.Td>
+                <Textarea
+                  aria-label={`Description for ${c.name}`}
+                  value={c.description}
+                  autosize
+                  minRows={2}
+                  maxRows={6}
+                  onChange={(e) => patch(i, "description", e.currentTarget.value)}
+                />
+              </Table.Td>
+              <Table.Td>
+                <NumberInput
+                  aria-label={`Weight for ${c.name}`}
+                  value={c.weight}
+                  min={0}
+                  step={0.01}
+                  decimalScale={2}
+                  onChange={(v) => patch(i, "weight", Number(v) || 0)}
+                />
+              </Table.Td>
+              <Table.Td>
+                <Text size="sm" c="dimmed">
+                  {total > 0 ? Math.round((Number(c.weight) / total) * 100) : 0}%
+                </Text>
+              </Table.Td>
+              <Table.Td>
+                <NumberInput
+                  aria-label={`Scale max for ${c.name}`}
+                  value={c.scale_max}
+                  min={1}
+                  max={10}
+                  onChange={(v) => patch(i, "scale_max", Number(v) || 1)}
+                />
+              </Table.Td>
+            </Table.Tr>
           ))}
-        </tbody>
-      </table>
-      <label className="rubric-notes">
-        Funder notes
-        <textarea value={funderNotes} onChange={(e) => onChange({ criteria, funderNotes: e.target.value })} />
-      </label>
-    </div>
+        </Table.Tbody>
+      </Table>
+      <Textarea
+        label="Funder notes"
+        value={funderNotes}
+        autosize
+        minRows={3}
+        maxRows={10}
+        onChange={(e) => onChange({ criteria, funderNotes: e.currentTarget.value })}
+      />
+    </Stack>
   );
 }

@@ -61,3 +61,18 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
+
+// Mantine's autosize <Textarea> subscribes to document.fonts ('loadingdone') to
+// recompute its height once web fonts settle; jsdom doesn't implement
+// FontFaceSet, so document.fonts is undefined and the subscribe throws on mount.
+// Stub it with no-op listeners (height isn't asserted in tests).
+if (typeof document !== "undefined" && !("fonts" in document)) {
+  Object.defineProperty(document, "fonts", {
+    configurable: true,
+    value: {
+      ready: Promise.resolve(),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
+  });
+}
