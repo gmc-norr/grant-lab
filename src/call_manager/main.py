@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import PlainTextResponse
 
 from call_manager.auth.csrf import OriginCSRFMiddleware
@@ -326,6 +327,10 @@ def create_app() -> FastAPI:
     # CSRF, or any handler reads it. Skipped entirely when set to 0.
     if settings.max_request_body_bytes:
         app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_request_body_bytes)
+    # Gzip compression for responses >= 1 kB. Placed after other middlewares
+    # so it compresses the final response body (outermost execution order is
+    # add_middleware-last = first to execute in the response direction).
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
 
     # Deployment-topology warning: when running https (i.e. production, behind
     # a TLS-terminating proxy) without TRUSTED_PROXY, the rate limiter keys off

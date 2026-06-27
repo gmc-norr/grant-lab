@@ -185,3 +185,53 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
         start=False,
     )
     assert sched.get_job("profile_bootstrap_tick") is not None
+
+
+# ---------------------------------------------------------------------------
+# Defect 6: crash-recovery idempotency — skip bootstrap if profile has desc
+# ---------------------------------------------------------------------------
+
+def test_bootstrap_skipped_when_profile_already_has_description(monkeypatch, pg_session_factory):
+    """If a profile already has a non-empty description (a prior run populated it
+    but crashed before marking 'done'), bootstrap_profile must NOT be called again.
+    backfill_profile and the 'done' marker must still run."""
+    pid = _enqueue(pg_session_factory)
+
+    # Pre-populate the profile with a description to simulate a prior crash
+    # after merge but before the 'done' commit.
+    with pg_session_factory() as s:
+        profile = s.get(Profile, pid)
+        profile.description = "Previously bootstrapped description."
+        s.commit()
+
+    bootstrap_calls = {"n": 0}
+    backfill_calls = {"n": 0}
+
+    monkeypatch.setattr(
+        bw,
+        "bootstrap_profile",
+        lambda **_: bootstrap_calls.__setitem__("n", bootstrap_calls["n"] + 1) or None,
+    )
+    monkeypatch.setattr(
+        bw,
+        "refresh_profile_embedding",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        bw,
+        "backfill_profile",
+        lambda **k: backfill_calls.__setitem__("n", backfill_calls["n"] + 1) or 0,
+    )
+
+    run_profile_bootstrap_tick(
+        session_factory=pg_session_factory, pubmed=object(), ollama=object(), embed_client=_Embed()
+    )
+
+    assert bootstrap_calls["n"] == 0, (
+        "bootstrap_profile must NOT be called when profile already has a description"
+    )
+    assert backfill_calls["n"] == 1, "backfill_profile must still be called"
+
+    with pg_session_factory() as s:
+        job = s.query(ProfileBootstrapJob).filter_by(profile_id=pid).one()
+        assert job.status == "done", f"Job should be 'done', got '{job.status}'"

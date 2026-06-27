@@ -669,3 +669,88 @@ def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=uid, now=now)
     assert payload is None
+
+
+# ---------------------------------------------------------------------------
+# Defect 3: DIGEST_TOTAL_MUST_INCLUDE_CAP — whole-payload cap across profiles
+# ---------------------------------------------------------------------------
+
+def test_total_must_include_cap_across_profiles(pg_session_factory, now):
+    """With 3 profiles each having 20 must_include matches the total must_include
+    count across all sections must not exceed DIGEST_TOTAL_MUST_INCLUDE_CAP (50).
+    Non-must_include entries are never trimmed by this cap."""
+    from call_manager.digest.assemble import DIGEST_TOTAL_MUST_INCLUDE_CAP
+
+    with pg_session_factory() as s:
+        # Create a single user subscribed to 3 profiles, each with a distinct
+        # must_include keyword that matches a pool of 20 calls.
+        u = User(email="multicap@ki.se", status="active")
+        s.add(u)
+        s.flush()
+
+        pids = []
+        keywords = ["alphaterm", "betaterm", "gammaterm"]
+        for kw in keywords:
+            p = Profile(
+                name=f"Profile-{kw}",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="",
+                structured={
+                    "areas": [],
+                    "budget_min": None,
+                    "budget_max": None,
+                    "trl_min": None,
+                    "trl_max": None,
+                    "must_include": [kw],
+                    "hard_exclusions": [],
+                },
+                created_by=u.id,
+            )
+            s.add(p)
+            s.flush()
+            s.add(Subscription(user_id=u.id, profile_id=p.id, digest_enabled=True))
+            s.flush()
+            pids.append(p.id)
+
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        # 20 calls per keyword (3 × 20 = 60 total), all matching via title
+        for kw, pid in zip(keywords, pids, strict=True):
+            for i in range(20):
+                c = Call(
+                    source_id=src.id,
+                    external_id=f"{kw}-call-{i}",
+                    url=f"https://x/{kw}-{i}",
+                    title=f"{kw} funding opportunity {i}",
+                    summary="",
+                    keywords=[],
+                    published_at=datetime.now(UTC),
+                )
+                s.add(c)
+                s.flush()
+                # score each call at 20 (below top/borderline) to keep them in must_include only
+                s.add(
+                    CallRanking(
+                        call_id=c.id,
+                        profile_id=pid,
+                        aggregate_score=20,
+                        rationale="r",
+                        model="gemma4:e4b-q8",
+                        prompt_version="v2.0",
+                        ranked_at=datetime.now(UTC),
+                    )
+                )
+        s.commit()
+        uid = u.id
+
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+
+    assert payload is not None
+    total_must_include = sum(
+        sum(1 for e in sec.entries if e.bucket == "must_include")
+        for sec in payload.sections
+    )
+    assert total_must_include <= DIGEST_TOTAL_MUST_INCLUDE_CAP, (
+        f"Expected total must_include entries <= {DIGEST_TOTAL_MUST_INCLUDE_CAP}, "
+        f"got {total_must_include}"
+    )

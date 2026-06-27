@@ -1485,7 +1485,7 @@ class ReviewRun(Base):
     rubric_review_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     waived_from_review_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("review_runs.id"),
+        ForeignKey("review_runs.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

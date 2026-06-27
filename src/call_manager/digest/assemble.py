@@ -33,6 +33,11 @@ DIGEST_BUCKET_SIZE = 5
 # of calls into one email and one DigestRun.included_call_ids. Soonest-deadline
 # calls are kept first; the rest are summarized as "+N more" by the renderer.
 DIGEST_MUST_INCLUDE_CAP = 25
+# Whole-payload cap across all profile sections: prevents M profiles × 25 entries
+# from flooding a multi-profile user's digest. Must-include entries are trimmed
+# in section order (already sorted by profile name) keeping the first
+# DIGEST_TOTAL_MUST_INCLUDE_CAP entries total (soonest-deadline first).
+DIGEST_TOTAL_MUST_INCLUDE_CAP = 50
 
 
 @dataclass
@@ -146,6 +151,10 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         )
 
     excluded = dismissed_ids | prior_ids
+    # Materialize the excluded id set once so it isn't re-iterated per profile
+    # query (a Python set re-iterates in arbitrary order for each in_ call).
+    excluded_list = list(excluded)
+    excl_clause = Call.id.notin_(excluded_list) if excluded_list else True
 
     # 3. For each profile, build candidate entries (pre-dedup)
     # Track: dict[call_id, list[(profile, bucket, ranking_or_none)]]
@@ -187,7 +196,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                     (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile.id),
                 )
                 .where(
-                    Call.id.notin_(excluded) if excluded else True,
+                    excl_clause,
                     or_(Call.deadline.is_(None), Call.deadline > now),
                     or_(
                         *[
@@ -217,7 +226,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
             .where(
                 CallRanking.profile_id == profile.id,
                 CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
-                Call.id.notin_(excluded) if excluded else True,
+                excl_clause,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
             .order_by(
@@ -238,7 +247,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 CallRanking.profile_id == profile.id,
                 CallRanking.aggregate_score >= DIGEST_BORDERLINE_LOWER,
                 CallRanking.aggregate_score < DIGEST_TOP_THRESHOLD,
-                Call.id.notin_(excluded) if excluded else True,
+                excl_clause,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
             .order_by(
@@ -325,6 +334,20 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 entries=ordered,
             )
         )
+
+    # Whole-payload cap: trim must_include entries across all sections
+    # collectively so M profiles don't multiply the per-profile cap.
+    _must_total = sum(
+        sum(1 for e in sec.entries if e.bucket == "must_include") for sec in sections
+    )
+    if _must_total > DIGEST_TOTAL_MUST_INCLUDE_CAP:
+        _remaining = DIGEST_TOTAL_MUST_INCLUDE_CAP
+        for sec in sections:
+            _mi = [e for e in sec.entries if e.bucket == "must_include"]
+            _other = [e for e in sec.entries if e.bucket != "must_include"]
+            _kept = _mi[:_remaining]
+            _remaining = max(0, _remaining - len(_mi))
+            sec.entries = _kept + _other
 
     if not sections:
         return None
