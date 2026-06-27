@@ -41,3 +41,20 @@ it("deadlineLocalView classifies a YYYY-MM-DD local date string correctly", () =
   const open = "2026-08-07";
   expect(deadlineLocalView(open).state).toBe("open");
 });
+
+it("deadlineLocalView: same-day Stockholm deadline is NOT closed after UTC midnight", () => {
+  // The old implementation used `new Date(localDate + "T00:00:00Z").getTime() - Date.now()`
+  // with `ms <= 0 → closed`.  At 01:30 UTC (= 03:30 Stockholm on the same calendar day)
+  // that gave a negative ms for a deadline dated today Stockholm → incorrectly "closed".
+  // The fix compares against today's Europe/Stockholm date string, so "today" is never closed.
+  //
+  // Freeze at 2026-06-23T01:30:00Z — past UTC midnight but still June 23 in Stockholm (UTC+2).
+  const utcMidnightPlus90min = new Date("2026-06-23T01:30:00Z").getTime();
+  vi.setSystemTime(utcMidnightPlus90min);
+  // "2026-06-23" IS today in Stockholm — must NOT be closed.
+  const today = "2026-06-23";
+  expect(deadlineLocalView(today).state).not.toBe("closed");
+  // "2026-06-22" is yesterday in Stockholm — must still be closed.
+  const yesterday = "2026-06-22";
+  expect(deadlineLocalView(yesterday).state).toBe("closed");
+});

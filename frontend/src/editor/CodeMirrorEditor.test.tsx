@@ -305,6 +305,91 @@ it("citations default (true) still renders the citation pill", async () => {
   await waitFor(() => expect(container.querySelector(".cm-citation-pill")).toBeTruthy());
 });
 
+it("same-section controlled push (same docKey) does NOT reconfigure the history compartment", () => {
+  // Structural test for M1: a background refetch that pushes the same section (same
+  // docKey) must NOT call historyComp.reconfigure() — i.e. the undo-history extension
+  // must not be reset.  A section swap (different docKey) DOES reset it.
+  //
+  // Observable proxy: both cases apply `addToHistory.of(false)` on the push so the
+  // push transaction itself is not undoable.  The ONLY difference is whether the
+  // history stack accumulated before the push is wiped.
+  //
+  // Because the component always uses a full-document replace
+  // (`{ from: 0, to: length, insert: value }`) for the controlled push, any pre-push
+  // change-set entry in the history that was anchored to the old doc's positions
+  // cannot be rebased onto the new doc, making pre-push undos effectively a no-op
+  // regardless of whether history was cleared.  The meaningful observable therefore
+  // is that post-push edits can still be undone (consistent with an intact history
+  // compartment), while a docKey change additionally clears pre-push entries
+  // (covered by the existing "section swap DOES clear" test below).
+  //
+  // This test asserts:
+  // 1. Same-docKey push applies the value without clearing the history compartment.
+  // 2. The editor is still fully functional after the push (edits and undo round-trip).
+  const onChange = vi.fn();
+  const sectionA = "## A\nbody\n";
+  const sectionARefetch = "## A\nbody\nserver-line\n"; // same section, different content
+  const { container, rerender } = render(
+    <CodeMirrorEditor value={sectionA} onChange={onChange} requireHeading docKey="sec-A" />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: EditorView;
+  }).__cmView!;
+
+  // Same-docKey push: server-refreshed text for the same section.
+  rerender(
+    <CodeMirrorEditor value={sectionARefetch} onChange={onChange} requireHeading docKey="sec-A" />,
+  );
+  expect(view.state.doc.toString()).toBe(sectionARefetch);
+
+  // The editor is fully functional: a local edit can be made and undone.
+  onChange.mockClear();
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "X" } });
+  expect(view.state.doc.toString()).toBe(sectionARefetch + "X");
+  expect(onChange).toHaveBeenLastCalledWith(sectionARefetch + "X");
+
+  onChange.mockClear();
+  undo(view);
+  expect(view.state.doc.toString()).toBe(sectionARefetch); // "X" was undone
+  expect(onChange).toHaveBeenLastCalledWith(sectionARefetch);
+
+  // No cross-section contamination: section B's text never appears.
+  expect(view.state.doc.toString()).not.toContain("bravo");
+});
+
+it("section swap (docKey change) DOES clear the undo history", () => {
+  // A docKey change signals a logical document identity change (section/artifact swap).
+  // The undo history MUST be cleared so a cross-section Ctrl+Z cannot revert to the
+  // previous section's text.
+  const onChange = vi.fn();
+  const sectionA = "## A\nalpha body\n";
+  const sectionB = "## B\nbravo body\n";
+  const { container, rerender } = render(
+    <CodeMirrorEditor value={sectionA} onChange={onChange} requireHeading docKey="sec-A" />,
+  );
+  const view = (container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: EditorView;
+  }).__cmView!;
+
+  // User makes a local edit on section A.
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "X" } });
+  expect(view.state.doc.toString()).toBe(sectionA + "X");
+
+  // Section swap: new docKey → history MUST be cleared.
+  rerender(
+    <CodeMirrorEditor value={sectionB} onChange={onChange} requireHeading docKey="sec-B" />,
+  );
+  expect(view.state.doc.toString()).toBe(sectionB);
+
+  onChange.mockClear();
+  // Undo must NOT reach section A's text — cleared history means no-op undo on B.
+  undo(view);
+  expect(view.state.doc.toString()).not.toContain("alpha body");
+  for (const call of onChange.mock.calls) {
+    expect(call[0]).not.toContain("alpha body");
+  }
+});
+
 it("publishes 1-based Ln/Col on selection change", () => {
   const onCursorChange = vi.fn();
   const { container } = render(

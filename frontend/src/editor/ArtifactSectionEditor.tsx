@@ -237,6 +237,13 @@ export function ArtifactSectionEditor({
 
         <CodeMirrorEditor
           value={editorValue}
+          // docKey = the section identity. It changes on a section swap (so the
+          // controlled push clears undo history — no cross-section undo
+          // corruption) but stays stable on a same-section save/refetch (so a
+          // background refetch does NOT wipe the user's in-section undo stack).
+          // Each artifact (draft/spec) has its own editor instance, so the
+          // section index alone is a sufficient document identity here.
+          docKey={view === "section" ? activeIndex : "full"}
           onChange={view === "full" ? () => {} : onEditorChange}
           requireHeading={view === "section" && activeIndex > 0}
           readOnly={view === "full" || !canEdit}

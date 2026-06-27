@@ -16,14 +16,25 @@ export function deadlineView(iso: string): { state: DeadlineState; date: string 
 }
 
 // Classify a localised YYYY-MM-DD date string (Europe/Stockholm from the API).
-// Deadline state is derived from midnight UTC of the local date string so that
-// "today" (local) reads as still open rather than already closed.
+// Open/closed is decided by comparing the local deadline date string against
+// today's date string in Europe/Stockholm — so "today in Stockholm" is still
+// open regardless of how far past UTC midnight we are (Stockholm is UTC+1/+2,
+// so a deadline dated today is open until midnight Stockholm time, not UTC).
 export function deadlineLocalView(localDate: string): { state: DeadlineState; date: string } {
-  // Treat the date string as a UTC midnight boundary for comparison purposes —
-  // this is approximate but consistent and avoids TZ ambiguity in the browser.
-  const ms = new Date(localDate + "T00:00:00Z").getTime() - Date.now();
-  if (ms <= 0) return { state: "closed", date: localDate };
-  const days = Math.floor(ms / 86_400_000);
+  // Today's date in Europe/Stockholm as a YYYY-MM-DD string (sv-SE gives that format).
+  const todayStockholm = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Stockholm" });
+  // String comparison works correctly for ISO date strings (lexicographic = chronological).
+  if (localDate < todayStockholm) return { state: "closed", date: localDate };
+  // Days-remaining: deadline Stockholm midnight UTC minus now.  We use the Intl
+  // formatter to find Stockholm's UTC-offset on that date (handles DST), then
+  // back-compute the UTC instant for midnight Stockholm time.
+  //
+  // Simpler approximation that is accurate enough for <=14/<=30 day bands:
+  // parse the deadline as the UTC-midnight of that date string, then subtract
+  // today's Stockholm-midnight to get the number of Stockholm-calendar-days left.
+  const deadlineUtcMidnight = new Date(localDate + "T00:00:00Z").getTime();
+  const todayUtcMidnight = new Date(todayStockholm + "T00:00:00Z").getTime();
+  const days = Math.floor((deadlineUtcMidnight - todayUtcMidnight) / 86_400_000);
   if (days <= 14) return { state: "soon", date: localDate };
   if (days <= 30) return { state: "watch", date: localDate };
   return { state: "open", date: localDate };

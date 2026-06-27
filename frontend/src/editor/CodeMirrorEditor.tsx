@@ -50,6 +50,13 @@ export type CodeMirrorEditorProps = {
    *  draft editor; the Spec passes false for raw, citation-free text. Read once
    *  at mount — stable per editor instance. */
   citations?: boolean;
+  /** Identity key for the current document / section.  The undo history is CLEARED
+   *  only when this key changes (section swap / artifact swap), not on every controlled
+   *  value push.  Same-section background refetches leave the key unchanged, so the
+   *  user's in-section undo stack survives a refetch.  Callers MUST change this key
+   *  on every logical document swap; omitting it degrades to the legacy behaviour of
+   *  clearing undo on every controlled push. */
+  docKey?: string | number;
 };
 
 // VS Code dark editor recolored to our identity. The vscode base + gutter use
@@ -99,6 +106,7 @@ export function CodeMirrorEditor({
   onSelectionChange = () => {},
   onCursorChange = () => {},
   citations = true,
+  docKey,
 }: CodeMirrorEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -108,6 +116,9 @@ export function CodeMirrorEditor({
   // extension's prior state, so a cross-section undo can never reach into the
   // previous section's text.
   const historyComp = useRef(new Compartment());
+  // Track the docKey seen on the last controlled push to detect actual document
+  // identity changes vs same-section background refetches.
+  const lastDocKeyRef = useRef<string | number | undefined>(docKey);
   // Keep the latest onChange/requireHeading/onPillClick without re-creating the
   // view. The pill widget captures a STABLE wrapper at mount that reads this ref,
   // so a changed onPillClick prop takes effect on the next click with no reconfigure
@@ -232,19 +243,26 @@ export function CodeMirrorEditor({
     if (!view) return;
     const current = view.state.doc.toString();
     if (value !== current) {
+      // Determine whether the document IDENTITY changed (section/artifact swap) or
+      // whether this is a same-section background refetch.  When `docKey` is provided
+      // we compare it against the last seen key; if omitted every push is treated as
+      // an identity change (legacy behaviour, safe but over-zealous).
+      const docKeyChanged = docKey === undefined || docKey !== lastDocKeyRef.current;
+      lastDocKeyRef.current = docKey;
       view.dispatch({
         changes: { from: 0, to: current.length, insert: value },
         // remote: don't echo back through onChange. addToHistory(false): the swap is
         // NOT a user edit, so it must not be recorded as undoable — otherwise an undo
         // after a section switch (A→B) would revert the doc to A's text as a LOCAL
         // change, which the updateListener would write into B's buffer (silent data
-        // loss). Reconfiguring the history compartment additionally CLEARS the undo
-        // stack so a cross-section undo can't reach into the prior doc at all.
+        // loss). Reconfiguring the history compartment CLEARS the undo stack — but
+        // only on an actual document-identity swap (docKey change), so same-section
+        // background refetches leave the user's in-section undo history intact.
         annotations: [Transaction.remote.of(true), Transaction.addToHistory.of(false)],
-        effects: historyComp.current.reconfigure(history()),
+        effects: docKeyChanged ? historyComp.current.reconfigure(history()) : undefined,
       });
     }
-  }, [value]);
+  }, [value, docKey]);
 
   // Flip read-only without rebuilding the view.
   useEffect(() => {
