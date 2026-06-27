@@ -1,0 +1,29 @@
+/* frontend/src/cockpit/CockpitPanels.module.css
+   Scoped cockpit visuals Mantine has no prop for. Tokens from theme/theme.css. */
+
+/* Band pill colours — applied to a Mantine <Badge> by <BandBadge>, shared by
+   ScorecardPanel + CockpitSidebar. Badge gives the shape; these override its
+   bg/colour/border per band. */
+.bandBadge {
+  border: 1px solid transparent;
+}
+.strong {
+  background: color-mix(in srgb, var(--app-good) 16%, transparent);
+  color: var(--app-good);
+  border-color: color-mix(in srgb, var(--app-good) 40%, transparent);
+}
+.adequate {
+  background: var(--app-hover);
+  color: var(--app-muted);
+  border-color: var(--app-border);
+}
+.at_risk {
+  background: color-mix(in srgb, var(--app-warn) 16%, transparent);
+  color: var(--app-warn);
+  border-color: color-mix(in srgb, var(--app-warn) 40%, transparent);
+}
+.gap {
+  background: color-mix(in srgb, var(--app-bad) 16%, transparent);
+  color: var(--app-bad);
+  border-color: color-mix(in srgb, var(--app-bad) 40%, transparent);
+}
