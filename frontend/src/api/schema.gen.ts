@@ -351,7 +351,7 @@ export interface paths {
          * Register
          * @description Anti-enumeration: ALWAYS 200 {ok: true}. Silent on duplicate / disallowed
          *     domain / rate-limit; one dummy argon2 for timing parity on every eligible
-         *     attempt. Verbatim port of web/routes/register.py.
+         *     attempt.
          */
         post: operations["register_api_auth_register_post"];
         delete?: never;
