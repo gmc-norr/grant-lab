@@ -344,16 +344,33 @@ def test_duplicate_identical_content_length_passes():
 # ── Fix 6: EMAIL_FROM validation in prod ─────────────────────────────────────
 
 
-def test_https_rejects_example_com_email_from(monkeypatch):
-    """In prod (https), default no-reply@example.com EMAIL_FROM must raise ValueError."""
+def test_transport_configured_rejects_example_com_email_from(monkeypatch):
+    """With a real send transport (Resend) configured, the placeholder
+    no-reply@example.com EMAIL_FROM must raise ValueError — every send would
+    bounce from an IANA-controlled domain."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("RESEND_API_KEY", "re_live_key")
     # EMAIL_FROM left at default (no-reply@example.com) → must raise
     from call_manager.config import Settings
     with pytest.raises(ValueError, match="example.com"):
         Settings()
+
+
+def test_prod_without_transport_allows_default_email_from(monkeypatch):
+    """A prod deploy (https) with NO send transport is valid — it falls back to
+    NoOpEmailSender — so the placeholder EMAIL_FROM must NOT block startup."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    from call_manager.config import Settings
+    s = Settings()
+    assert "example.com" in s.email_from
 
 
 def test_https_real_email_from_ok(monkeypatch):

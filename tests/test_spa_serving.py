@@ -96,8 +96,11 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     wrong_method = c.post("/healthz")
     assert wrong_method.status_code == 405
     assert "GET" in wrong_method.headers.get("allow", "")
-    # The internal SPA catch-all must not leak into the OpenAPI schema.
-    assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
+    # The raw schema route is gated off in non-dev modes (no unauth API map);
+    # but the internal SPA catch-all must still never leak into the in-process
+    # schema (checked via app.openapi(), which is mode-independent).
+    assert c.get("/openapi.json").status_code == 404
+    assert "/{full_path}" not in c.app.openapi()["paths"]
     # PROD must keep the STRICT CSP — the relaxed dev policy must NOT leak to
     # prod. This exercises the prod branch of the
     # build_csp(dev=settings.spa_mode == "dev") wiring (the security-critical

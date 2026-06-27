@@ -632,20 +632,21 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_email_from(self):
-        """Refuse the placeholder EMAIL_FROM address in production.
+        """Refuse the placeholder EMAIL_FROM when a real send transport is set.
 
-        `no-reply@example.com` is the default for local dev/CI. If it reaches
-        a production deploy (https://...) it produces bounces from a domain
-        controlled by IANA; operators must set a real sender address. Gated on
-        `APP_BASE_URL` being https://, the same signal as `cookie_secure` and
-        the strong-secret validator, so plain-HTTP dev/test is unaffected.
+        `no-reply@example.com` is the default for local dev/CI. It only matters
+        once a real transport (Resend API key or SMTP host) is configured — then
+        every send bounces from an IANA-controlled domain. A production deploy
+        with NO transport falls back to NoOpEmailSender (see create_app) and is a
+        valid, supported configuration, so we gate on transport-configured rather
+        than on `APP_BASE_URL` alone — otherwise prod-without-email can't start.
         """
-        is_prod = self.app_base_url.lower().startswith("https://")
-        if is_prod and "example.com" in self.email_from.lower():
+        has_transport = bool(self.resend_api_key or self.smtp_host)
+        if has_transport and "example.com" in self.email_from.lower():
             raise ValueError(
-                f"EMAIL_FROM is set to the placeholder '{self.email_from}'. "
-                "Set a real sender address (e.g. noreply@ki.se) when "
-                "APP_BASE_URL is https:// (production)."
+                f"EMAIL_FROM is set to the placeholder '{self.email_from}' but a "
+                "send transport (RESEND_API_KEY or SMTP_HOST) is configured. Set a "
+                "real sender address (e.g. noreply@ki.se) to avoid bounces."
             )
         return self
 
