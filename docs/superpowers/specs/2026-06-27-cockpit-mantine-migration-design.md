@@ -68,8 +68,10 @@ Deleted at the end: `frontend/src/styles/cockpit.css`.
 ### Out of scope
 
 - `cockpit/CockpitSidebar.tsx` + `cockpit/SidebarGroup.tsx` — already on a CSS
-  Module (`CockpitSidebar.module.css`, zero global classnames); redone in SPA
-  Phase 3a. Leave as-is.
+  Module (`CockpitSidebar.module.css`); redone in SPA Phase 3a. **One
+  exception:** the criteria band pill at `CockpitSidebar.tsx:134` uses the global
+  `band-pill band-*` classes — that single `<span>` is swapped for the shared
+  `<BandBadge>` in Slice 2a (see above). Everything else in the sidebar stays.
 - `editor/CodeMirrorEditor.tsx` + CodeMirror theming (`.cm-editor-host` and the
   `cm-*` styles) — CodeMirror has its own CSS layer; it stays as scoped CSS, not
   migrated to Mantine (consistent with the bar). ArtifactSectionEditor *embeds*
@@ -89,12 +91,16 @@ Holds only what Mantine can't express as a prop, ported from `cockpit.css` with
 bare-element selectors are fine, e.g. `.sourceBody mark`):
 
 - **Band pills** — `strong / adequate / at-risk / gap` colour variants
-  (`color-mix` gradients over `--app-good/-warn/-bad/-hover`). Used by
-  ScorecardPanel. *(Alternative considered: Mantine `Badge` with `color` prop —
+  (`color-mix` gradients over `--app-good/-warn/-bad/-hover`). Extracted as a
+  **shared `cockpit/BandBadge.tsx`** component (Mantine `Badge` for shape/size +
+  a module band class for the colour), because the pill is used by **TWO**
+  consumers: `ScorecardPanel` AND `CockpitSidebar` (the criteria list at
+  `CockpitSidebar.tsx:134` renders `band-pill band-*` via a template literal).
+  Both switch to `<BandBadge band={...} />` in Slice 2a so the band styling has a
+  single owner and the sidebar does NOT regress when the global `.band-*` rules
+  are removed. *(Alternative considered: Mantine `Badge` with `color` prop —
   rejected because the four bands need specific `color-mix` backgrounds + border
-  tints that don't map onto Mantine's palette cleanly. A `Badge` wrapper with a
-  module `className` per band is the chosen middle path: Mantine `Badge` for
-  shape/size, module class for the band colour.)*
+  tints that don't map onto Mantine's palette cleanly.)*
 - **Source-viewer** — `white-space: pre-wrap` body, `<mark>` highlight
   background, stance/tombstone pills, monospace.
 - **Diff rendering** — `.diff-add` / `.diff-del` line backgrounds (ProposalReview
@@ -132,23 +138,68 @@ the concrete fix for the reported margin drift.
 (`import "./styles/cockpit.css";`). As each component migrates, delete that
 component's rules from `cockpit.css`. The file shrinks each task and is deleted
 (with its `main.tsx` import line) in the final task, once `grep` confirms no
-remaining references to any of its classnames. Current referencing files:
-`routes/Cockpit.tsx`, all `cockpit/*.tsx` panels, and
-`editor/ArtifactSectionEditor.tsx`.
+remaining references to any of its classnames.
+
+**Authoritative class → consumer map** (the teardown checklist; built by
+extracting every selector in `cockpit.css` and grepping non-test `.tsx`):
+
+| `cockpit.css` class group | Consumer(s) | Slice |
+|---|---|---|
+| `scorecard-*` | ScorecardPanel | 2a |
+| `band-pill`, `band-strong/-adequate/-at-risk/-gap` | ScorecardPanel **+ CockpitSidebar** (→ shared `BandBadge`) | 2a |
+| `spec-shell/-empty/-lock-banner/-lock-bar`, `coherence-*` | SpecPanel | 2a |
+| `draft-shell` | DraftPanel | 2a |
+| `proposal-*` | ProposalReview | 2a |
+| `cockpit`, `cockpit-main/-peek/-pinned/-composer/-section-actions`, `cite-selection-btn` | ArtifactSectionEditor | 2a |
+| `cockpit-shell` + the `[role=tablist]` artifact-tab rules | routes/Cockpit.tsx | 2a |
+| `bottom-panel*` | BottomPanel | 2b |
+| `inbox-empty` | InboxPanel | 2b |
+| `problem(s)-*` | ProblemsPanel | 2b |
+| `activity-*` | ActivityPanel | 2b |
+| `cite-composer*` | CitationComposer | 2c |
+| `source-viewer*` | SourceViewer | 2c |
+
+**Panels with NO `cockpit.css` classes** — `LibraryPanel`, `CitationsPanel`,
+`ClaimsPanel`, `MetadataModal`, `WorkspaceSettingsModal`. Their classnames
+(`library-*`, etc.) are **orphans styled nowhere** (confirmed: no CSS file
+matches), so they render with browser defaults today. They are still in scope
+for the **Mantine conversion** (raw elements → Mantine, which finally gives them
+real styling) but they remove **no** `cockpit.css` rules. `LibraryPanel`,
+`CitationsPanel`, `ClaimsPanel` go in Slice 2b; the two modals in Slice 2c.
 
 ## Test impact
 
-Cockpit panel tests assert on **text and ARIA roles**, which survive the
-conversion. Two specific couplings + one provider requirement:
+Most cockpit panel tests assert on **text and ARIA roles**, which survive the
+conversion. The classname/DOM-coupled tests (found by grepping `querySelector`,
+`toHaveClass`, `.closest`, and literal class strings across **both** `cockpit/`
+and `routes/`) and the provider requirement:
+
+**Stable-hook rule:** when a global class that a test queries becomes
+module-hashed, replace the test's class selector with a stable contract — a
+`data-*` attribute or an ARIA role/label on the element — and add that attribute
+in the component. The module class is styling only; the `data-*`/role is the
+test contract.
 
 1. **`SourceViewer.test.tsx`** asserts `container.querySelector("mark")` — keep a
    real `<mark>` element for the highlight (styled by the module). No test change.
+   *(Slice 2c.)*
 2. **`ActivityPanel.test.tsx:84`** asserts `document.querySelector(".category-member")`
-   — this global class becomes module-hashed, so the literal selector breaks.
-   Update the test to assert via a stable hook: render the member-category row
-   with `data-category="member"` and query that (`[data-category="member"]`).
-   The `data-` attribute is the stable contract; the module class is styling.
-3. **MantineProvider** — panels using Mantine must be rendered with
+   — add `data-category="member"` to the member-category row; test queries
+   `[data-category="member"]`. *(Slice 2b.)*
+3. **`routes/Cockpit.test.tsx`** asserts (a) `.source-viewer mark` (line 476),
+   (b) `.cockpit-pinned .source-viewer` and `.cockpit-peek` (lines ~490-491).
+   - The peek/pinned panes live in `ArtifactSectionEditor` (**Slice 2a**): add
+     `data-region="peek"` / `data-region="pinned"` to those panes; update the
+     test to `[data-region="pinned"] .source-viewer` / `[data-region="peek"]`.
+   - `SourceViewer` keeps its `.source-viewer` class through 2a, so the nested
+     selector still resolves; in **Slice 2c** SourceViewer gets a
+     `data-testid="source-viewer"` hook and the test's `.source-viewer` / `mark`
+     queries move onto it. (`.cm-citation-pill` on line 472 is CodeMirror — out
+     of scope — and survives untouched.)
+4. **`ProposalReview.test.tsx:73`** asserts `toHaveClass("diff-del")` /
+   `toHaveClass("diff-add")` — add `data-diff="del"` / `data-diff="add"` to the
+   diff lines; test asserts `toHaveAttribute("data-diff", "del")`. *(Slice 2a.)*
+5. **MantineProvider** — panels using Mantine must be rendered with
    `renderWithProviders` (already exists, used by `RubricEditor.test.tsx`). Panel
    tests currently using plain `render` switch to `renderWithProviders`. This is
    the same mechanical fix applied in Slice 1.
@@ -165,11 +216,13 @@ The sweep is split into three mergeable sub-slices to keep reviews tractable.
 Each ends green (tsc + vitest + build) and removes its components' rules from
 `cockpit.css`:
 
-- **Slice 2a — Editor shell + artifact panels:** Cockpit shell + artifact
-  `Tabs`, ScorecardPanel (establishes `CockpitPanels.module.css` + band pills),
-  SpecPanel, DraftPanel, ReviewPanel, ProposalReview, and
-  `editor/ArtifactSectionEditor.tsx` (the `.cockpit` grid → `Flex`). *(This is
-  the surface the user screenshotted.)*
+- **Slice 2a — Editor shell + artifact panels:** the shared `BandBadge` +
+  `CockpitPanels.module.css` foundation (band pills), the **CockpitSidebar
+  band-pill swap** to `BandBadge` (so the sidebar doesn't regress), Cockpit shell
+  + artifact `Tabs`, ScorecardPanel, SpecPanel, DraftPanel, ReviewPanel,
+  ProposalReview (`data-diff` hooks), and `editor/ArtifactSectionEditor.tsx` (the
+  `.cockpit` grid → `Flex`, `data-region` hooks on peek/pinned). *(This is the
+  surface the user screenshotted.)*
 - **Slice 2b — Bottom panel + sub-panels:** BottomPanel `Tabs`, InboxPanel,
   ProblemsPanel, ActivityPanel, LibraryPanel, CitationsPanel, ClaimsPanel.
 - **Slice 2c — Side widgets + teardown:** SourceViewer, CitationComposer,
