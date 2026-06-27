@@ -75,6 +75,14 @@ def claim_sentence_around(text: str, marker_start: int, marker_end: int) -> str:
         start -= 1
     sent_start = start + 1
 
+    # 5. Heading guard: a marker placed right after (or inside) a markdown
+    #    heading line must NOT absorb the heading markup as its claim. Because
+    #    `\n` is a terminator, the candidate sentence never spans a line, so the
+    #    sentence lives entirely on the line that begins at `sent_start`. If that
+    #    line is a heading (`^\s*#`), it has no claim prose — return "".
+    if _HEADING_RE.match(without[sent_start : last + 1]):
+        return ""
+
     sentence = without[sent_start : last + 1]
     return " ".join(sentence.split())
 

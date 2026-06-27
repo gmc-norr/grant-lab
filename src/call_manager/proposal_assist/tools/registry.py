@@ -586,16 +586,29 @@ def _collect_tools(ctx: ToolContext) -> list:
 
     @tool(
         "list_citations",
-        "List every existing citation in this proposal, read-only. Returns each "
+        "List existing citations in this proposal, read-only. Returns each "
         "citation's `ev_id`, `citekey`, the cited reference/chunk "
         "(reference_id, chunk_index, section_path), stance, confidence, the "
-        "claim text the marker attaches to, and the evidence quote. Call this "
-        "before proposing a citation change via propose_citation. "
+        "claim text the marker attaches to, and the evidence quote, plus a "
+        "`truncated` flag. Returns up to `limit` rows (default 100, max 500). "
+        "Call this before proposing a citation change via propose_citation. "
         "Token-cheap — use it at the start of citation work.",
-        {"type": "object", "properties": {}, "required": []},
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 100},
+            },
+            "required": [],
+        },
     )
     async def list_citations(args):
-        return await _safe_tool("list_citations", ctx, list_citations_impl, ctx)
+        return await _safe_tool(
+            "list_citations",
+            ctx,
+            list_citations_impl,
+            ctx,
+            limit=int(args.get("limit", 100)),
+        )
 
     @tool(
         "propose_citation",

@@ -184,7 +184,8 @@ async def test_safe_tool_converts_unexpected_exception_to_envelope():
 async def test_list_citations_closure_returns_envelope():
     """The registered list_citations closure returns the MCP envelope when
     called with empty args. Against a repo with no citations.json the impl
-    returns {"citations": []}, which _wrap turns into a success envelope."""
+    returns {"citations": [], "truncated": False}, which _wrap turns into a
+    success envelope."""
     import json
     import subprocess
     import tempfile
@@ -212,7 +213,7 @@ async def test_list_citations_closure_returns_envelope():
 
     assert result["is_error"] is False
     payload = json.loads(result["content"][0]["text"])
-    assert payload == {"citations": []}
+    assert payload == {"citations": [], "truncated": False}
 
 
 def test_tool_context_has_provenance_defaults():

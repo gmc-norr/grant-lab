@@ -130,6 +130,58 @@ async def test_propose_citation_writes_row_and_maps_section(
 
 
 @pytest.mark.asyncio
+async def test_propose_citation_keys_section_skipping_marker_spans(
+    pg_session_factory, _settings_env, tmp_path
+):
+    # Defect B7-1: the section lookup must use the SAME marker-skipping logic
+    # (markers.anchor_occurrences) the uniqueness check uses. Here the anchor
+    # text ("smith2021") also occurs INSIDE an existing marker in section 0
+    # (## Background). A raw `.find()` would land on that marker-internal
+    # occurrence and key the new row to section 0; the marker-skipping lookup
+    # must instead find the PLAIN-TEXT occurrence in section 1 (## Methods).
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        wsid = ws.id
+    repo = Path(tmp_path) / str(wsid) / "repo"
+    # The marker's visible citekey contains the anchor substring "smith2021".
+    proposal = (
+        "preamble\n\n"
+        "## Background\n"
+        "Prior work [@smith2021]<!-- ev:ev-abc123 --> established the baseline.\n\n"
+        "## Methods\n"
+        "We extend smith2021 in our population.\n"
+    )
+    _init_repo(repo, proposal)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    ctx = ToolContext(
+        workspace_id=wsid,
+        repo_dir=repo,
+        session_factory=pg_session_factory,
+        settings=Settings(),
+    )
+    await read_proposal_impl(ctx)
+
+    result = await propose_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor="smith2021",
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+    )
+    assert "error" not in result, result
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, uuid.UUID(result["proposed_change_id"]))
+        # Section 0 = preamble, 1 = ## Background, 2 = ## Methods. The plain-text
+        # anchor lives in ## Methods (section 2), NOT the marker in Background.
+        assert pc.section_index == 2, (
+            f"row mis-keyed to section {pc.section_index} (raw .find landed in a marker span)"
+        )
+
+
+@pytest.mark.asyncio
 async def test_propose_citation_bad_quote_rejected_no_commit(
     pg_session_factory, _settings_env, tmp_path
 ):

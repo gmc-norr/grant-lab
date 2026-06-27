@@ -102,6 +102,21 @@ def claim_context_sha(claim_text: str) -> str:
     return hashlib.sha256(normalize_for_quote_match(claim_text).encode("utf-8")).hexdigest()
 
 
+def claim_drift_hash(claim: str, anchor: str) -> str:
+    """The drift-detection hash basis shared by insert AND validation.
+
+    A marker at document/section start has no preceding prose, so the extracted
+    claim sentence is ``""``. Hashing the empty string here would make the
+    insert-time hash (which falls back to the anchor) and the validator's
+    re-derivation disagree forever — a permanent spurious ``claim_drift``. By
+    routing BOTH sites through this single helper, the empty-claim case falls
+    back to *anchor* identically on both sides, so an unchanged empty-claim
+    citation never looks drifted. When ``claim`` is non-empty the anchor is
+    unused and the basis is the claim sentence (the normal case).
+    """
+    return claim_context_sha(claim if claim else anchor)
+
+
 def evidence_quote_sha(quote: str) -> str:
     """Bare 64-hex sha256 of the normalized evidence quote.
 
@@ -400,7 +415,14 @@ def _check_live_row(
 
     # --- claim_drift (prose around the marker changed) ------------------- #
     live_claim = claim_sentence_around(proposal_text, marker.get("start", 0), marker.get("end", 0))
-    stored_hash = (row.get("claim_context") or {}).get("hash")
+    claim_context = row.get("claim_context") or {}
+    stored_hash = claim_context.get("hash")
+    # Empty-claim parity: insert hashes the ANCHOR when the extracted claim is
+    # empty. The anchor is not retained in the row, but for an empty-claim insert
+    # the stored claim text IS the anchor (insert's fallback wrote it there), so
+    # routing the live re-derivation through claim_drift_hash with that stored
+    # text as the fallback reproduces insert's exact basis. See claim_drift_hash.
+    stored_claim_text = claim_context.get("text") or ""
     if stored_hash is None:
         issues.append(
             _issue(
@@ -412,7 +434,7 @@ def _check_live_row(
                 detail="claim_context.hash absent; cannot verify the claim snapshot",
             )
         )
-    elif claim_context_sha(live_claim) != stored_hash:
+    elif claim_drift_hash(live_claim, stored_claim_text) != stored_hash:
         issues.append(
             _issue(
                 "claim_drift",

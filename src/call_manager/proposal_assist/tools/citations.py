@@ -34,6 +34,7 @@ from sqlalchemy import select
 
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations import claims
+from call_manager.proposal_assist.citations.audit import claim_drift_hash
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     write_and_commit_files,
@@ -54,6 +55,7 @@ from call_manager.proposal_assist.citations.ledger import (
 from call_manager.proposal_assist.citations.markers import (
     CITEKEY_RE,
     AnchorError,
+    anchor_occurrences,
     find_markers,
     insert_marker,
     remove_marker,
@@ -299,15 +301,19 @@ def _resolve_citekey_for_ref(
 # --- list_citations (read-only discovery) ----------------------------------
 
 
-async def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
-    """List every citation in the ledger so the agent can discover ev-ids/citekeys.
+_LIST_CITATIONS_DEFAULT_LIMIT = 100
+_LIST_CITATIONS_MAX_LIMIT = 500
+
+
+async def list_citations_impl(ctx: ToolContext, *, limit: int = 100) -> dict[str, Any]:
+    """List citations in the ledger so the agent can discover ev-ids/citekeys.
 
     Read-only: reads ``citations.json`` directly (no proposal.md, no DB, no git,
     no workspace lock). Turn serialization (one in-flight turn per workspace via
     ``begin_in_flight_exclusive``) means no mutator runs concurrently with this
     read, so a half-written file can't surface; and even a torn read degrades
     safely because ``load_ledger`` treats empty/blank content as an empty ledger.
-    An absent ledger yields ``{"citations": []}``.
+    An absent ledger yields ``{"citations": [], "truncated": False}``.
 
     Each entry is a flat projection of an evidence row keyed for the agent:
     ``ev_id`` (for remove_citation/update_citation), ``citekey`` (for
@@ -315,7 +321,18 @@ async def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
     claim text, and the verbatim evidence quote. ``.get()`` is used throughout so
     a hand-edited row can't crash the listing; a row with no ``id`` is skipped
     (it cannot be acted on by ev-id anyway). Order = ledger/document order.
+
+    ``limit`` caps how many rows are projected (default 100, hard cap 500) so a
+    workspace with thousands of citations cannot blow up one MCP text block;
+    ``truncated`` is ``True`` when at least one more actionable row exists beyond
+    the returned page. Mirrors ``list_references``' cap-and-flag contract.
     """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = _LIST_CITATIONS_DEFAULT_LIMIT
+    limit = max(1, min(limit, _LIST_CITATIONS_MAX_LIMIT))
+
     citations_path = ctx.repo_dir / CITATIONS_FILENAME
     ledger_text = citations_path.read_text() if citations_path.exists() else None
     try:
@@ -324,11 +341,16 @@ async def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
         return {"error": f"citations.json is invalid: {exc}"}
 
     citations: list[dict[str, Any]] = []
+    truncated = False
     for row in ledger["evidence"]:
         ev_id = row.get("id")
         if not ev_id:
             # A hand-edited row with no id can't be targeted by ev-id — skip it.
             continue
+        if len(citations) >= limit:
+            # At least one more actionable row exists beyond the page.
+            truncated = True
+            break
         locator = row.get("locator") or {}
         claim_context = row.get("claim_context") or {}
         citations.append(
@@ -345,7 +367,7 @@ async def list_citations_impl(ctx: ToolContext) -> dict[str, Any]:
                 "citation_snapshot": row.get("citation_snapshot"),
             }
         )
-    return {"citations": citations}
+    return {"citations": citations, "truncated": truncated}
 
 
 async def insert_citation_impl(
@@ -488,15 +510,16 @@ async def propose_citation_impl(
         # (ctx.agent_view_proposal / ctx.agent_view_sections), so the
         # (section_index, base_section_sha) pair is internally consistent even if a
         # human added/removed a `##` section on disk between read and propose.
-        # NOTE: anchor uniqueness is proven in step 5 via insert_marker, which
-        # SKIPS anchor occurrences overlapping an existing `[@citekey]<!-- ev -->`
-        # marker. The bare `.find(anchor)` below picks the FIRST raw occurrence,
-        # so in a proposal that already contains markers the two could in principle
-        # disagree. This never triggers on a fresh marker-free draft (all the
-        # plan's tests); the overlap-aware occurrence logic is DEFERRED — acceptable
-        # for SP2a-2, do not add the complexity now.
+        # Anchor uniqueness is proven in step 5 via insert_marker, which SKIPS
+        # anchor occurrences overlapping an existing `[@citekey]<!-- ev -->`
+        # marker. The section lookup MUST use the SAME marker-skipping logic
+        # (markers.anchor_occurrences) so it can never key the row to a section
+        # whose only "occurrence" is the anchor text appearing INSIDE a marker
+        # span — a bare `.find()` would land on that marker-internal occurrence
+        # and mis-key the row in a proposal that already contains markers.
         read_view = ctx.agent_view_proposal
-        anchor_offset = read_view.find(anchor)
+        read_occurrences = anchor_occurrences(read_view, anchor)
+        anchor_offset = read_occurrences[0] if read_occurrences else -1
         if anchor_offset < 0:
             # The anchor exists in the LIVE proposal (step 5 passed) but was NOT
             # in what the agent read — a human added/moved it between read and
@@ -655,9 +678,9 @@ def _insert_citation_locked(
         claim_context_text = ""
     if not claim_context_text:
         claim_context_text = anchor
-    claim_context_hash = hashlib.sha256(
-        normalize_for_quote_match(claim_context_text).encode("utf-8")
-    ).hexdigest()
+    # The drift hash MUST be derived via the shared helper so the validator's
+    # re-derivation (audit.claim_drift_hash) agrees on the empty-claim fallback.
+    claim_context_hash = claim_drift_hash(claim_context_text, anchor)
 
     # 10. Citation snapshot (deterministic, no network).
     snapshot = _citation_snapshot(ref.csl_json, citekey)
@@ -969,10 +992,14 @@ def _update_citation_locked(
         fields["evidence_quote"] = new_quote
         fields["evidence_quote_offsets"] = [start, end]
         fields["chunk_content_hash"] = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
-        fields["locator"] = {
-            "chunk_index": new_chunk_index,
-            "section_path": chunk.section_path,
-        }
+        # Overlay only the rebound keys onto a COPY of the existing locator so
+        # any other locator keys (current or future) survive a chunk rebind —
+        # `update_evidence`'s shallow merge would otherwise replace the whole
+        # locator dict and silently drop them.
+        new_locator = dict(locator)
+        new_locator["chunk_index"] = new_chunk_index
+        new_locator["section_path"] = chunk.section_path
+        fields["locator"] = new_locator
 
     # 4. reaccept_claim — re-snapshot the live claim around the marker using the
     # canonical extractor (the SAME one insert_citation uses, so reaccept never
@@ -1166,18 +1193,16 @@ def _rename_citekey_locked(
     ctx.agent_view_head = sha
 
     # 9. DB cache (AFTER git) — best-effort; git ledger is canonical.
+    # Bulk UPDATE so ALL cache rows carrying old_citekey are refreshed: the
+    # duplicate-cache state (several references sharing the key) is exactly what
+    # this backfill is meant to repair, and `.one_or_none()` would raise
+    # MultipleResultsFound there — swallowed + rolled back, leaving it stale.
     try:
-        ref = (
-            session.query(Reference)
-            .filter(
-                Reference.workspace_id == ctx.workspace_id,
-                Reference.citekey == old_citekey,
-            )
-            .one_or_none()
-        )
-        if ref is not None:
-            ref.citekey = new_citekey
-            session.commit()
+        session.query(Reference).filter(
+            Reference.workspace_id == ctx.workspace_id,
+            Reference.citekey == old_citekey,
+        ).update({Reference.citekey: new_citekey}, synchronize_session=False)
+        session.commit()
     except Exception:  # noqa: BLE001 — cache write must never fail the tool
         session.rollback()
         logger.warning(

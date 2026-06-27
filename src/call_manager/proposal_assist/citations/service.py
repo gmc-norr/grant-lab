@@ -30,18 +30,46 @@ class CitationLLMResult:
 
 
 class CitationLLMService:
+    # After this many CONSECUTIVE post-spend ledger-write failures the cap can no
+    # longer see real spend, so we stop calling the LLM (fail CLOSED) and surface
+    # a cap-exceeded result until a record succeeds. A single transient failure
+    # still returns its already-spent result (no double-spend on retry); only a
+    # sustained inability to record trips the breaker.
+    _RECORD_FAILURE_CIRCUIT_BREAK = 3
+
     def __init__(
         self, *, session_factory: sessionmaker, llm: StructuredLLM, settings: Settings
     ) -> None:
         self._session_factory = session_factory
         self._llm = llm
         self._settings = settings
+        self._consecutive_record_failures = 0
 
     def complete_json(
         self, *, workspace_id: uuid.UUID, op: str, system: str, user: str
     ) -> CitationLLMResult:
         if not op or len(op) > 64:
             raise ValueError(f"invalid citation LLM op: {op!r}")
+
+        # Circuit breaker: if the ledger has been unwritable for the last N
+        # successful-spend calls, the cap is blind to real usage — refuse to
+        # spend more rather than fail open unbounded.
+        if self._consecutive_record_failures >= self._RECORD_FAILURE_CIRCUIT_BREAK:
+            logger.error(
+                "citation LLM circuit-broken: %d consecutive ledger-write failures "
+                "(workspace=%s op=%s) — refusing to spend while usage is unaccounted",
+                self._consecutive_record_failures,
+                workspace_id,
+                op,
+            )
+            return CitationLLMResult(
+                data=None,
+                usage=None,
+                model=None,
+                cap_exceeded=True,
+                cap_scope="ledger_unavailable",
+            )
+
         with self._session_factory() as s:
             cap = check_citation_caps(s, workspace_id, settings=self._settings)
         if cap.exceeded:
@@ -63,17 +91,23 @@ class CitationLLMService:
             raise
 
         # Success: record usage. If the ledger write fails here the tokens were
-        # already spent, so we log loudly but still return the valid result
-        # rather than crash the caller (which would otherwise retry and double-spend).
+        # already spent, so we log loudly and still return the valid result
+        # rather than crash the caller (which would otherwise retry and
+        # double-spend) — but we COUNT the failure: a sustained streak trips the
+        # circuit breaker above so spend cannot run unbounded behind a blind cap.
         ok = self._safe_record(
             workspace_id, op, "ok", result.usage.tokens_in, result.usage.tokens_out, result.model
         )
-        if not ok:
+        if ok:
+            self._consecutive_record_failures = 0
+        else:
+            self._consecutive_record_failures += 1
             logger.error(
                 "citation ledger write FAILED after a successful LLM call — "
-                "tokens spent but unaccounted (workspace=%s op=%s)",
+                "tokens spent but unaccounted (workspace=%s op=%s streak=%d)",
                 workspace_id,
                 op,
+                self._consecutive_record_failures,
             )
         return CitationLLMResult(data=result.data, usage=result.usage, model=result.model)
 
