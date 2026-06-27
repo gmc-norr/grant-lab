@@ -39,6 +39,53 @@ def _char_tokens(content: str, *, rating_top_logprobs: list[dict], rating_char: 
     }
 
 
+def test_ev_logs_when_noops_with_logprobs_present(caplog):
+    """B11 Defect 4a: when a logprobs block IS present but EV can't bind (e.g.
+    the model emitted a QUOTED rating `"4"` so the structural integer literal
+    isn't found), EV silently fell back to argmax with no signal. It must now
+    emit a WARNING so the rate of EV no-ops is observable."""
+    import logging
+
+    # Quoted rating → _locate_rating_literal_offset returns None → EV no-ops.
+    content = '{"topic_fit": {"rating": "4", "rationale": "x"}}'
+    # A real logprobs block is present (so this is the logprobs path, not the
+    # no-logprobs short-circuit).
+    env = {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "logprobs": {
+                    "content": [
+                        {"token": "4", "logprob": -0.1, "bytes": [52], "top_logprobs": []}
+                    ]
+                },
+            }
+        ]
+    }
+    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.ev"):
+        ev = extract_topic_expected(env, 4)
+    assert ev is None
+    assert any(
+        "ev_noop" in (r.getMessage() or "") or "ev_noop" in r.message for r in caplog.records
+    )
+
+
+def test_ev_no_log_when_logprobs_absent(caplog):
+    """When there's no logprobs block at all, EV returns None WITHOUT logging a
+    no-op warning — that path is the expected argmax case (e.g. the remote
+    Sonnet path exposes no logprobs), not an anomaly worth a warning."""
+    import logging
+
+    env = {"choices": [{"message": {"content": '{"topic_fit": {"rating": 4}}'}}]}
+    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.ev"):
+        ev = extract_topic_expected(env, 4)
+    assert ev is None
+    assert not any(
+        "ev_noop" in (r.getMessage() or "") or "ev_noop" in r.message for r in caplog.records
+    )
+
+
 def test_expected_value_weights_digits():
     content = '{"topic_fit": {"rating": 4, "rationale": "good"}}'
     top = [

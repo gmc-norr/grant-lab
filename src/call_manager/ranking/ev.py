@@ -11,7 +11,10 @@ caller falls back to argmax — this function never raises.
 
 from __future__ import annotations
 
+import logging
 import math
+
+_logger = logging.getLogger(__name__)
 
 _DIGITS = {"0", "1", "2", "3", "4", "5"}
 
@@ -22,15 +25,29 @@ def extract_topic_expected(envelope: dict, parsed_rating: int) -> float | None:
         content: str = choice["message"]["content"]
         tokens = choice["logprobs"]["content"]
     except (KeyError, IndexError, TypeError):
+        # No logprobs block at all (e.g. the remote Sonnet path). This is the
+        # expected argmax case, NOT an anomaly — stay silent (B11 Defect 4a).
         return None
     if not isinstance(tokens, list) or not content:
         return None
     # Safety net for the never-raises contract: arbitrarily malformed envelopes
     # (non-string content, absurd logprobs, junk token dicts) degrade to None.
     try:
-        return _expected_value(content, tokens, parsed_rating)
+        ev = _expected_value(content, tokens, parsed_rating)
     except (TypeError, ValueError, OverflowError, AttributeError):
-        return None
+        ev = None
+    if ev is None:
+        # A logprobs block WAS present but EV couldn't bind (e.g. the model
+        # emitted a QUOTED rating "4" so the structural integer literal is
+        # absent, or the covering token failed the sanity check). Previously
+        # this silently fell back to argmax with no signal; log it at WARNING
+        # so the rate of EV no-ops on the logprobs path is observable and a
+        # systematic prompt/format regression surfaces (B11 Defect 4a).
+        _logger.warning(
+            "ranking.ev_noop",
+            extra={"event": "ranking_ev_noop", "parsed_rating": parsed_rating},
+        )
+    return ev
 
 
 def _expected_value(content: str, tokens: list, parsed_rating: int) -> float | None:

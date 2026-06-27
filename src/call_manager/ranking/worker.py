@@ -10,10 +10,12 @@ from call_manager.ranking.criteria import GateStatus
 from call_manager.ranking.ollama_client import LLMError, OllamaClient
 from call_manager.ranking.prompt import ParseError
 from call_manager.ranking.queue import (
+    MAX_ATTEMPTS,
     claim_pending_jobs,
     mark_done,
     mark_failed,
     requeue_stuck_running,
+    revert_to_pending,
     touch_running_job,
 )
 from call_manager.ranking.rank_pair import RankResult, rank_pair
@@ -21,17 +23,9 @@ from call_manager.ranking.remote_attempts import count_today, record_attempt
 
 _logger = logging.getLogger(__name__)
 
-# Per spec: 5 attempts before dead-letter.
-#
-# Spec deviation (intentional): the spec describes exponential backoff
-# (30s, 2m, 10m). We ship FLAT retries — a failed job goes back to
-# PENDING and the next scheduler tick (60s default) retries it. So the
-# effective wait is one tick per attempt, regardless of attempt index.
-# Acceptable because failure rates are low (Ollama is local; the
-# JSON-mode contract eliminates parse churn). True exponential backoff
-# would require a `next_attempt_at` column on ranking_jobs and a WHERE
-# clause on `claim_pending_jobs` — straightforward to add when needed.
-MAX_ATTEMPTS = 5
+# MAX_ATTEMPTS is the single source of truth in queue.py (B11 Defect 5) and
+# re-exported here for the worker's terminal-attempt checks below. queue.py
+# carries the full rationale (flat-retry deviation from the spec's backoff).
 
 
 def drain_queue(
@@ -44,10 +38,22 @@ def drain_queue(
     escalation_min_score: int = 45,
     remote_daily_cap: int = 100,
     batch_size: int = 10,
+    tick_budget_seconds: float | None = None,
+    _clock=None,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
     done-or-failed. Returns the number of jobs processed (whether or not
     they succeeded).
+
+    `tick_budget_seconds` is a SOFT per-tick wall-clock budget (B11 Defect 6).
+    A single job can take ~240s (local Gemma + a Sonnet escalation); an
+    escalation-heavy batch_size=10 could otherwise monopolize the scheduler
+    slot for minutes. Once the elapsed time since claiming exceeds the budget,
+    the loop stops processing and reverts the remaining claimed jobs to PENDING
+    (no attempt burned) so the next tick picks them up. The budget is checked
+    BEFORE each job, so a job already in flight always completes — it is a stop
+    line, not a hard kill. None disables the budget (process the whole batch).
+    `_clock` is an injection seam for tests (defaults to time.monotonic).
 
     `embedding_threshold` is the cosine cutoff at which the embedding
     pre-gate PASSES. Sole source of truth:
@@ -87,8 +93,33 @@ def drain_queue(
         claimed = [(job.id, job.call_id, job.profile_id, job.attempts) for job in jobs]
         session.commit()
 
+    if _clock is None:
+        import time
+
+        _clock = time.monotonic
+    tick_start = _clock()
+
     processed = 0
-    for job_id, call_id, profile_id, attempts in claimed:
+    for idx, (job_id, call_id, profile_id, attempts) in enumerate(claimed):
+        # Soft per-tick budget (B11 Defect 6): once exceeded, stop and hand the
+        # remaining claimed-but-untouched jobs back to PENDING (no attempt
+        # burned) so the next tick processes them. Checked BEFORE the job so a
+        # job already in flight always finishes.
+        if tick_budget_seconds is not None and (_clock() - tick_start) > tick_budget_seconds:
+            remaining = [c[0] for c in claimed[idx:]]
+            with session_factory() as session:
+                reverted = revert_to_pending(session, remaining)
+                session.commit()
+            _logger.info(
+                "ranking.tick_budget_exceeded",
+                extra={
+                    "event": "ranking_tick_budget_exceeded",
+                    "processed": processed,
+                    "reverted_to_pending": reverted,
+                    "budget_seconds": tick_budget_seconds,
+                },
+            )
+            break
         processed += 1
         try:
             with session_factory() as session:
@@ -156,22 +187,28 @@ def drain_queue(
                     session.commit()
                     continue
 
-                # Ledger first (same transaction as the ranking write):
-                # one row per attempt rank_pair actually made, success or
-                # failure — the daily cap counts billed calls honestly.
-                # Trade-off: the ledger row commits atomically with the
-                # ranking merge, so a persistence failure after a successful
-                # remote call rolls the row back and that attempt goes
-                # uncounted (billed-but-uncounted is rare and bounded by
-                # MAX_ATTEMPTS).
+                # Ledger in its OWN committed short transaction, BEFORE the
+                # main merge/commit (B11 Defect 2). rank_pair has already made
+                # the billed remote call; if we deferred the ledger row to the
+                # main transaction and that commit then failed (deadlock,
+                # transient connection drop), the row would roll back, the job
+                # would revert to PENDING, and the next tick would re-run the
+                # FULL rank_pair — a SECOND paid Sonnet call — none of them
+                # counted. Committing the ledger here makes spend honest even
+                # when the main commit fails: each actual rank_pair invocation
+                # records exactly one ledger row. Worst case is one already-paid
+                # attempt whose ranking didn't persist (retried next tick) —
+                # bounded by MAX_ATTEMPTS — rather than uncounted re-billing.
                 if result.escalation_attempted and result.escalation_outcome is not None:
-                    record_attempt(
-                        session,
-                        call_id=call_id,
-                        profile_id=profile_id,
-                        model=getattr(remote_client, "model", "") or result.model,
-                        outcome=result.escalation_outcome,
-                    )
+                    with session_factory() as ledger_session:
+                        record_attempt(
+                            ledger_session,
+                            call_id=call_id,
+                            profile_id=profile_id,
+                            model=getattr(remote_client, "model", "") or result.model,
+                            outcome=result.escalation_outcome,
+                        )
+                        ledger_session.commit()
 
                 # Cosine is written verbatim — a None current value
                 # OVERWRITES any stale prior one (Codex R4: once cosine

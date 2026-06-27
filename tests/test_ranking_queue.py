@@ -442,3 +442,18 @@ def test_requeue_stuck_running_leaves_recently_running_alone(pg_session_factory,
     with pg_session_factory() as s:
         row = s.execute(select(RankingJob)).scalar_one()
     assert row.status == RankingJobStatus.RUNNING
+
+
+def test_max_attempts_single_source_of_truth():
+    """B11 Defect 5: MAX_ATTEMPTS must be defined ONCE and shared, not
+    duplicated across queue.py and worker.py where they can drift."""
+    from call_manager.ranking import queue as queue_mod
+    from call_manager.ranking import worker as worker_mod
+
+    # worker.MAX_ATTEMPTS IS queue.MAX_ATTEMPTS — same object, no duplicate literal.
+    assert worker_mod.MAX_ATTEMPTS is queue_mod.MAX_ATTEMPTS
+    # The reaper's default also uses the shared constant.
+    import inspect
+
+    sig = inspect.signature(queue_mod.requeue_stuck_running)
+    assert sig.parameters["max_attempts"].default == queue_mod.MAX_ATTEMPTS

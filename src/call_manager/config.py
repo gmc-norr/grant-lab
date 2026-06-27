@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     )
     ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
+    # Soft per-tick wall-clock budget for the serial ranking drain (B11 Defect
+    # 6). A single job can take ~240s (local Gemma + a Sonnet escalation); an
+    # escalation-heavy batch could monopolize the scheduler slot for minutes.
+    # Once exceeded, the drain stops claiming and leaves the remainder PENDING
+    # for the next tick. Default 240s ≈ one worst-case job, generous enough that
+    # a healthy batch never trips it while still bounding the pathological case.
+    ranking_tick_budget_seconds: float = Field(
+        default=240.0, alias="RANKING_TICK_BUDGET_SECONDS"
+    )
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q4_K_M", alias="GEMMA_MODEL")
     embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")

@@ -290,6 +290,9 @@ def build_scheduler(
             escalation_min_score=ranking_escalation_min_score,
             remote_daily_cap=ranking_remote_daily_cap,
             batch_size=ranking_queue_batch,
+            # Soft per-tick wall-clock budget (B11 Defect 6) so an
+            # escalation-heavy batch can't monopolize the scheduler slot.
+            tick_budget_seconds=settings.ranking_tick_budget_seconds,
         )
 
     sched.add_job(

@@ -332,9 +332,16 @@ def _gate_fail_result(
 
 
 def _call_matches_must_include(profile, call) -> bool:
-    """Case-insensitive substring match of profile.must_include keywords
+    """Case-insensitive WORD-BOUNDARY match of profile.must_include keywords
     against title + summary + full_text + keywords. Same logic as the
-    digest must-include bucket (assemble.py).
+    digest must-include bucket (assemble.py) — both paths share the term
+    normalization (min length) and word-boundary semantics defined in
+    `must_include` so they cannot drift (B11 Defect 1).
+
+    Word-boundary (not bare substring): a short term like 'ai' no longer
+    force-includes a call whose text merely contains 'training'/'brain', which
+    used to drag off-topic calls into the paid LLM/escalation path. Terms
+    shorter than MUST_INCLUDE_MIN_LEN are ignored entirely.
 
     Codex Plan F regression fix: `full_text` MUST be in the haystack —
     after Plan F moved Vinnova's substantive prose out of `summary` and
@@ -342,10 +349,10 @@ def _call_matches_must_include(profile, call) -> bool:
     text would otherwise be silently missed.
 
     Spec line 282: must-include calls bypass the timeline gate (only)."""
+    from call_manager.ranking.must_include import compile_term_pattern, normalize_must_terms
+
     structured = profile.structured or {}
-    must_terms = [
-        t.strip().lower() for t in (structured.get("must_include") or []) if t and t.strip()
-    ]
+    must_terms = normalize_must_terms(structured.get("must_include"))
     if not must_terms:
         return False
     full_text = getattr(call, "full_text", None)
@@ -353,16 +360,16 @@ def _call_matches_must_include(profile, call) -> bool:
         filter(
             None,
             [
-                (call.title or "").lower(),
-                (call.summary or "").lower(),
-                (full_text or "").lower(),
+                call.title or "",
+                call.summary or "",
+                full_text or "",
                 # `keywords` is non-nullable on the real Call ORM model; this hasattr
                 # accommodates duck-typed test doubles that omit it.
-                " ".join(call.keywords or []).lower() if hasattr(call, "keywords") else "",
+                " ".join(call.keywords or []) if hasattr(call, "keywords") else "",
             ],
         )
     )
-    return any(t in haystack for t in must_terms)
+    return any(compile_term_pattern(t).search(haystack) for t in must_terms)
 
 
 def _build_verification_text(call) -> str:

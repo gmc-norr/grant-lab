@@ -580,6 +580,85 @@ def test_assemble_must_include_escapes_like_wildcards(pg_session_factory, now):
     assert "Unrelated call" not in titles
 
 
+def test_assemble_must_include_word_boundary_no_substring(pg_session_factory, now):
+    """B11 Defect 1 (digest side): a must_include term must NOT match as a bare
+    substring inside a longer word — the digest path uses the same word-boundary
+    semantics as the ranking path. The off-topic call that contains the term
+    only inside another word is NOT surfaced; a call with the standalone token
+    IS. (Runs on real Postgres so the ~* word-boundary regex is exercised.)"""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["rna"])
+        # 'rna' appears only inside 'turnaround' / 'internal' — must NOT match.
+        _seed_call(
+            s,
+            title="Internal turnaround programme",
+            summary="An internal study",
+            score=20,
+            profile_id=pid,
+        )
+        # Standalone 'RNA' token (case-insensitive) — MUST match.
+        _seed_call(
+            s,
+            title="RNA sequencing grant",
+            summary="x",
+            score=20,
+            profile_id=pid,
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    must = [e for e in payload.sections[0].entries if e.bucket == "must_include"]
+    titles = [e.title for e in must]
+    assert "RNA sequencing grant" in titles
+    assert "Internal turnaround programme" not in titles
+
+
+def test_assemble_must_include_short_term_ignored(pg_session_factory, now):
+    """B11 Defect 1 (digest side): a sub-minimum-length term ('ai') is ignored
+    so it can never flood the digest (also fixes the <3-char trigram perf
+    finding). The call with a standalone 'AI' token is NOT must-included."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["ai"])
+        _seed_call(s, title="AI funding call", summary="x", score=20, profile_id=pid)
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    # 'ai' term dropped → no must_include match → score 20 < borderline → nothing.
+    assert payload is None
+
+
+def test_assemble_must_include_word_boundary_matches_keywords(pg_session_factory, now):
+    """B11 Defect 1: word-boundary semantics also apply to the keywords field —
+    a standalone keyword token still matches, a substring-only one does not."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["genomics"])
+        _seed_call(
+            s,
+            title="Funding announcement",
+            summary="Generic blurb.",
+            keywords=["genomics", "biobank"],
+            score=20,
+            profile_id=pid,
+        )
+        # 'genomics' only as a substring of 'metagenomics' keyword → no match.
+        _seed_call(
+            s,
+            title="Other announcement",
+            summary="Generic blurb.",
+            keywords=["metagenomicsx"],
+            score=20,
+            profile_id=pid,
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    titles = [e.title for sec in payload.sections for e in sec.entries]
+    assert "Funding announcement" in titles
+    assert "Other announcement" not in titles
+
+
 def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)

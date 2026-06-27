@@ -178,12 +178,23 @@ def touch_running_job(session: Session, job_id: int) -> None:
     )
 
 
-# Mirrors worker.MAX_ATTEMPTS (can't import it — worker imports this module,
-# so the dependency must point one way). Kept in sync deliberately.
-_MAX_ATTEMPTS = 5
+# Single source of truth for the retry cap (B11 Defect 5). Defined HERE
+# because worker imports this module (the dependency points one way), so worker
+# imports MAX_ATTEMPTS from here rather than re-declaring its own literal.
+#
+# Per spec: 5 attempts before dead-letter.
+#
+# Spec deviation (intentional): the spec describes exponential backoff
+# (30s, 2m, 10m). We ship FLAT retries — a failed job goes back to PENDING and
+# the next scheduler tick (60s default) retries it. So the effective wait is
+# one tick per attempt, regardless of attempt index. Acceptable because failure
+# rates are low (Ollama is local; the JSON-mode contract eliminates parse
+# churn). True exponential backoff would require a `next_attempt_at` column on
+# ranking_jobs and a WHERE clause on `claim_pending_jobs`.
+MAX_ATTEMPTS = 5
 
 
-def requeue_stuck_running(session: Session, *, max_attempts: int = _MAX_ATTEMPTS) -> int:
+def requeue_stuck_running(session: Session, *, max_attempts: int = MAX_ATTEMPTS) -> int:
     """Recover jobs stuck in RUNNING longer than _STUCK_AFTER (worker crashed
     mid-tick and never reached mark_done/mark_failed). Returns the number of
     rows touched (requeued + dead-lettered). Called at the start of each drain
@@ -254,6 +265,25 @@ def requeue_stuck_running(session: Session, *, max_attempts: int = _MAX_ATTEMPTS
             },
         )
     return n_requeued + n_dead
+
+
+def revert_to_pending(session: Session, job_ids: list[int]) -> int:
+    """Return claimed-but-unprocessed RUNNING jobs to PENDING WITHOUT bumping
+    attempts (B11 Defect 6). Used when a per-tick wall-clock budget is hit: the
+    jobs were never actually attempted, so they must not burn a retry — they
+    simply wait for the next tick. Scoped to RUNNING so a job that raced to a
+    terminal state isn't resurrected. Returns the number of rows reverted."""
+    if not job_ids:
+        return 0
+    result = session.execute(
+        update(RankingJob)
+        .where(
+            RankingJob.id.in_(job_ids),
+            RankingJob.status == RankingJobStatus.RUNNING,
+        )
+        .values(status=RankingJobStatus.PENDING, updated_at=datetime.now(UTC))
+    )
+    return result.rowcount or 0
 
 
 def mark_done(session: Session, job_id: int) -> None:

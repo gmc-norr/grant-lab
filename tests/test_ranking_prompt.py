@@ -668,3 +668,61 @@ def test_funder_exclusions_routed_to_eligibility_not_topic_exclusions(make_call)
 
 def test_prompt_version_bumped():
     assert PROMPT_VERSION == "v5.0"
+
+
+# ---------------------------------------------------------------------------
+# B11 Defect 3 — content-trust hardening for model-authored free-text fields
+# ---------------------------------------------------------------------------
+
+
+def test_parse_caps_rationale_length():
+    """Model-authored rationale is capped to a sane max (no XSS today, but
+    these flow verbatim into analyst-facing columns + the digest)."""
+    from call_manager.ranking.prompt import _FREE_TEXT_MAX
+
+    long = "x" * (_FREE_TEXT_MAX + 500)
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": long, "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
+    out = parse_response(content)
+    assert len(out.topic_fit_rationale) <= _FREE_TEXT_MAX
+
+
+def test_parse_caps_summary_length():
+    from call_manager.ranking.prompt import _FREE_TEXT_MAX
+
+    long = "y" * (_FREE_TEXT_MAX + 500)
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "summary": long,
+        }
+    )
+    out = parse_response(content)
+    assert out.summary is not None
+    assert len(out.summary) <= _FREE_TEXT_MAX
+
+
+def test_parse_caps_applicant_notes_text_length():
+    from call_manager.ranking.prompt import _ANALYSIS_CATEGORIES, _FREE_TEXT_MAX
+
+    category = next(iter(_ANALYSIS_CATEGORIES))
+    long = "z" * (_FREE_TEXT_MAX + 500)
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "summary": "fine",
+            "applicant_notes": [{"category": category, "text": long}],
+        }
+    )
+    out = parse_response(content)
+    assert out.applicant_notes is not None
+    assert len(out.applicant_notes[0]["text"]) <= _FREE_TEXT_MAX

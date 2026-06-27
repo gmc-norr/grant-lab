@@ -16,15 +16,12 @@ from call_manager.db.models import (
     User,
     UserCallDismissal,
 )
+from call_manager.ranking.must_include import (
+    normalize_must_terms,
+    pg_word_boundary_pattern,
+)
 
 DIGEST_TOP_THRESHOLD = 60
-
-
-def _escape_like(term: str) -> str:
-    """Escape LIKE wildcards (`%`, `_`) so admin-entered terms like '100%'
-    match literally, not as wildcards. The backslash is also escaped in
-    case a term contains one already."""
-    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 DIGEST_BORDERLINE_LOWER = 45
@@ -156,25 +153,27 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     call_objs: dict[int, Call] = {}
 
     for profile in profiles:
-        must_terms = [
-            t.strip().lower()
-            for t in (profile.structured.get("must_include") or [])
-            if t and t.strip()
-        ]
+        # Shared normalization (min length) with the ranking path so the SAME
+        # terms are considered on both sides (B11 Defect 1).
+        must_terms = normalize_must_terms(profile.structured.get("must_include"))
 
         # 3a. must-include candidates (any score, any ranking, even unranked)
-        # Per spec line 417: match against title, summary, AND keywords.
-        # We collapse keywords to a space-joined string and ilike-search;
-        # this keeps the SQL simple and lets PG's text matching handle
-        # case-insensitivity. The leading-wildcard ILIKE on title/summary/
-        # full_text is backed by pg_trgm GIN indexes (migration 0033) so it's
-        # an index lookup, not a sequential scan; the array_to_string(keywords)
-        # term still scans but is cheap relative to full_text.
+        # Per spec line 417: match against title, summary, full_text, AND
+        # keywords. We collapse keywords to a space-joined string and match
+        # each field with Postgres' case-insensitive POSIX regex operator
+        # (~*) anchored at WORD boundaries (\m...\M) instead of a bare-substring
+        # ILIKE. This keeps the digest path SEMANTICALLY IDENTICAL to the
+        # ranking path's Python \b word-boundary match (B11 Defect 1) — a short
+        # term like 'ai' no longer drags in calls that merely contain
+        # 'training'/'brain'. The pg_trgm GIN indexes (migration 0033) still
+        # accelerate ~* the same way they accelerated leading-wildcard ILIKE;
+        # array_to_string(keywords) still scans but is cheap relative to
+        # full_text. Sub-3-char terms are already dropped by normalize_must_terms.
         #
-        # Codex Plan F regression fix: also ilike against `Call.full_text`.
-        # After Plan F moved Vinnova's substantive prose out of `summary`
-        # and into `full_text`, a must-include term that lives only in the
-        # body text would otherwise be silently missed by the digest bucket.
+        # Codex Plan F regression fix: also match `Call.full_text`. After Plan F
+        # moved Vinnova's substantive prose out of `summary` and into
+        # `full_text`, a must-include term that lives only in the body text
+        # would otherwise be silently missed by the digest bucket.
         if must_terms:
             keywords_str = func.array_to_string(Call.keywords, " ")
             # OUTER JOIN against this profile's ranking — must-include calls
@@ -192,11 +191,11 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                     or_(Call.deadline.is_(None), Call.deadline > now),
                     or_(
                         *[
-                            Call.title.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            | Call.summary.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            | Call.full_text.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            | keywords_str.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            for t in must_terms
+                            Call.title.op("~*")(pat)
+                            | Call.summary.op("~*")(pat)
+                            | Call.full_text.op("~*")(pat)
+                            | keywords_str.op("~*")(pat)
+                            for pat in (pg_word_boundary_pattern(t) for t in must_terms)
                         ]
                     ),
                 )
