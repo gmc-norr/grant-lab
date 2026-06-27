@@ -631,6 +631,73 @@ def test_unknown_stance_skipped(pg_session_factory, _settings_env):
     assert issues == []
 
 
+# --------------------------------------------------------------------------- #
+# audit_unavailable carries a `reason` distinguishing cap / transient / invalid
+# so the caller can retry only on cap and degrade-not-fail otherwise.
+# --------------------------------------------------------------------------- #
+def test_audit_unavailable_reason_transient(pg_session_factory, _settings_env):
+    """A per-row LLM exception degrades that row with reason='transient'."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    proposal_text = _proposal_with_marker("Adjuvant therapy cuts recurrence")
+    ledger = append_evidence(empty_ledger(), _row(rid, stance="supports"))
+    stub = _RaisingCitationService(_verdict_result("contradicts"), raise_times=1)
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == "transient"
+
+
+def test_audit_unavailable_reason_cap(pg_session_factory, _settings_env):
+    """A cap-exceeded result degrades the row with reason='cap' (caller retries)."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    proposal_text = _proposal_with_marker("Adjuvant therapy cuts recurrence")
+    ledger = append_evidence(empty_ledger(), _row(rid, stance="supports"))
+    stub = _StubCitationService(_verdict_result(None, cap_exceeded=True, cap_scope="workspace"))
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == "cap"
+
+
+def test_audit_unavailable_reason_invalid(pg_session_factory, _settings_env):
+    """An invalid/empty verdict degrades the row with reason='invalid'."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    proposal_text = _proposal_with_marker("This is background context")
+    ledger = append_evidence(empty_ledger(), _row(rid, stance="background"))
+    stub = _StubCitationService(_verdict_result("supports"))  # invalid for background stance
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == "invalid"
+
+
 def test_no_marker_row_skipped(pg_session_factory, _settings_env):
     """A ledger row with no live marker (no claim to judge) is skipped."""
     wsid = _make_workspace(pg_session_factory)

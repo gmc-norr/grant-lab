@@ -330,7 +330,9 @@ def test_cap_exceeded_marks_failure(pg_session_factory, tmp_path):
         assert "cap" in (job.last_error or "").lower()
 
 
-def test_audit_unavailable_blocks_completion(pg_session_factory, tmp_path, monkeypatch):
+def test_audit_unavailable_cap_blocks_completion(pg_session_factory, tmp_path, monkeypatch):
+    """A CAP audit_unavailable still dead-letters/retries the whole job: further
+    LLM calls would also be capped, so retry the job later."""
     ev = "ev-1111aaaa2222"
     doc = f"# T\nintro\n## S\nCited sentence here[@k]<!-- ev:{ev} -->.\n"
     citations = (
@@ -340,7 +342,7 @@ def test_audit_unavailable_blocks_completion(pg_session_factory, tmp_path, monke
     monkeypatch.setattr(
         pipeline,
         "validate_citations_semantic",
-        lambda **kw: [{"type": "audit_unavailable", "evidence_id": "x"}],
+        lambda **kw: [{"type": "audit_unavailable", "evidence_id": "x", "reason": "cap"}],
     )
 
     with pg_session_factory() as s:
@@ -357,6 +359,128 @@ def test_audit_unavailable_blocks_completion(pg_session_factory, tmp_path, monke
         job = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one()
         assert job.status == "queued"  # retry, not done
         assert s.query(UserClaimAnnotation).filter_by(workspace_id=ws_id).count() == 0
+
+
+def test_audit_unavailable_transient_degrades_not_dead_letters(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """A single transient/invalid audit_unavailable must NOT fail the whole job.
+    The section completes (status done) and that one row is simply degraded — no
+    bad-cited annotation, but the job is not dead-lettered."""
+    ev = "ev-1111aaaa2222"
+    doc = f"# T\nintro\n## S\nCited sentence here[@k]<!-- ev:{ev} -->.\n"
+    citations = (
+        f'{{"version": 2, "evidence": [{{"id": "{ev}", "citekey": "k", "stance": "supports"}}]}}'
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "validate_citations_semantic",
+        lambda **kw: [{"type": "audit_unavailable", "evidence_id": ev, "reason": "transient"}],
+    )
+
+    with pg_session_factory() as s:
+        ws, _ = _ws(s)
+        repo = _init_repo(tmp_path, ws.id, doc, citations_json=citations)
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+        ws_id = ws.id
+
+    counts = _drain(pg_session_factory, tmp_path, FakeCitationService())
+    assert counts["done"] == 1
+    assert counts["failed"] == 0
+    with pg_session_factory() as s:
+        job = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one()
+        assert job.status == "done"
+        # The degraded row produces no cited_unsupported annotation.
+        assert s.query(UserClaimAnnotation).filter_by(workspace_id=ws_id).count() == 0
+
+
+def test_audit_unavailable_invalid_degrades_not_dead_letters(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """reason='invalid' (malformed verdict) likewise degrades that row and the
+    job completes — one bad Gemma verdict must not dead-letter the section."""
+    ev = "ev-1111aaaa2222"
+    doc = f"# T\nintro\n## S\nCited sentence here[@k]<!-- ev:{ev} -->.\n"
+    citations = (
+        f'{{"version": 2, "evidence": [{{"id": "{ev}", "citekey": "k", "stance": "supports"}}]}}'
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "validate_citations_semantic",
+        lambda **kw: [{"type": "audit_unavailable", "evidence_id": ev, "reason": "invalid"}],
+    )
+
+    with pg_session_factory() as s:
+        ws, _ = _ws(s)
+        repo = _init_repo(tmp_path, ws.id, doc, citations_json=citations)
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+        ws_id = ws.id
+
+    counts = _drain(pg_session_factory, tmp_path, FakeCitationService())
+    assert counts["done"] == 1
+    assert counts["failed"] == 0
+    with pg_session_factory() as s:
+        job = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one()
+        assert job.status == "done"
+
+
+def test_classification_progress_survives_later_exception(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """A mid-loop exception AFTER some uncited sentences are classified must not
+    discard those classifications. They are committed in their own short session,
+    so the outer rollback in drain_analysis_queue leaves them cached — a retry
+    skips them rather than re-spending tokens."""
+    # Two distinct uncited claim sentences. The SECOND _retrieve_and_judge call
+    # blows up, after the first sentence has already been classified+cached.
+    doc = (
+        "# T\nintro\n## Body\n"
+        "This is the first factual claim.\n"
+        "This is the second factual claim.\n"
+    )
+    with pg_session_factory() as s:
+        ws, _ = _ws(s)
+        repo = _init_repo(tmp_path, ws.id, doc)
+        _seed_reference(s, ws.id, "verified words here.")
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+        ws_id = ws.id
+
+    # Make the SECOND retrieve-and-judge raise, after sentence 1 is cached.
+    real_rj = pipeline._retrieve_and_judge
+    state = {"n": 0}
+
+    def boom(*args, **kwargs):
+        state["n"] += 1
+        if state["n"] >= 2:
+            raise RuntimeError("synthetic mid-loop failure")
+        return real_rj(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_retrieve_and_judge", boom)
+
+    counts = _drain(pg_session_factory, tmp_path, FakeCitationService())
+    assert counts["failed"] == 1  # the job failed on the synthetic error
+
+    # The first sentence's classification must SURVIVE the outer rollback.
+    with pg_session_factory() as s:
+        from call_manager.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
+
+        first_sha = pipeline._claim_sha("This is the first factual claim")
+        cached = (
+            s.query(ClaimClassification)
+            .filter_by(
+                workspace_id=ws_id,
+                claim_sha=first_sha,
+                prompt_version=ANALYSIS_PROMPT_VERSION,
+            )
+            .one_or_none()
+        )
+        assert cached is not None, "first sentence classification must survive rollback"
+        assert cached.is_claim is True
 
 
 def test_stale_annotation_reopened_not_duplicated(pg_session_factory, tmp_path):

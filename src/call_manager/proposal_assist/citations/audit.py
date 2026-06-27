@@ -121,8 +121,9 @@ def _issue(
     evidence_id: str | None,
     location: str | None,
     detail: str,
+    reason: str | None = None,
 ) -> dict:
-    return {
+    issue = {
         "type": type_,
         "severity": severity,
         "citekey": citekey,
@@ -130,6 +131,13 @@ def _issue(
         "location": location,
         "detail": detail,
     }
+    # `reason` distinguishes WHY an audit_unavailable row is degraded so the
+    # caller can retry only on a true cap and degrade-not-fail on
+    # transient/invalid verdicts. One malformed local-Gemma verdict on one
+    # citation must not dead-letter the whole section.
+    if reason is not None:
+        issue["reason"] = reason
+    return issue
 
 
 def validate_citations_deterministic(
@@ -518,8 +526,12 @@ def validate_citations_semantic(
     Consumes ``deterministic_issues`` to skip un-judgeable rows. Reads a cached
     verdict when the row's content is unchanged (claim_drift rows always
     re-judge). On cap-exceeded the whole pass stops (further calls would also be
-    capped); a transient per-row exception degrades that row to
-    ``audit_unavailable`` and continues. NEVER raises.
+    capped); a transient per-row exception or an invalid/empty verdict degrades
+    that row to ``audit_unavailable`` and continues. NEVER raises.
+
+    Every ``audit_unavailable`` issue carries a ``reason`` so the caller can
+    distinguish a true cap (``reason='cap'`` — retry the job) from a per-row
+    ``transient`` error or ``invalid`` verdict (degrade that row, keep going).
     """
     issues: list[dict] = []
 
@@ -631,6 +643,7 @@ def validate_citations_semantic(
                         evidence_id=ev_id,
                         location=location,
                         detail="semantic judge unavailable for this citation (transient error)",
+                        reason="transient",
                     )
                 )
                 continue
@@ -648,6 +661,7 @@ def validate_citations_semantic(
                             "semantic judge unavailable: citation LLM cap exceeded "
                             f"(scope={res.cap_scope})"
                         ),
+                        reason="cap",
                     )
                 )
                 break
@@ -666,6 +680,7 @@ def validate_citations_semantic(
                         evidence_id=ev_id,
                         location=location,
                         detail="semantic judge returned an invalid or empty verdict",
+                        reason="invalid",
                     )
                 )
                 continue
@@ -691,6 +706,7 @@ def validate_citations_semantic(
                     evidence_id=ev_id,
                     location=location,
                     detail="semantic judge returned an invalid or empty verdict",
+                    reason="invalid",
                 )
             )
             continue

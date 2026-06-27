@@ -268,6 +268,55 @@ def _stale_open_annotations_for_section(session, *, workspace_id, section_sha) -
     ).update({"status": "stale"}, synchronize_session=False)
 
 
+def _persist_classification(
+    session_factory,
+    *,
+    workspace_id,
+    claim_sha: str,
+    is_claim: bool,
+    outcome: str,
+    found: dict | None,
+) -> None:
+    """Commit a single claim-classification cache row in its OWN short session.
+
+    This is the costly-work checkpoint: the classify + retrieve/judge LLM spend
+    for THIS sentence is now durable, so a later mid-loop exception (whose outer
+    rollback discards the per-job transaction) does NOT discard it and a retry
+    sees it as a cache hit instead of re-spending tokens. Mirrors
+    ``verdict_cache.store_verdict``'s short-session commit pattern.
+
+    Upserts on the (workspace_id, claim_sha, prompt_version) unique key so a
+    stale row is refreshed in place and ``stale_at`` is cleared.
+    """
+    values = dict(
+        workspace_id=workspace_id,
+        claim_sha=claim_sha,
+        prompt_version=ANALYSIS_PROMPT_VERSION,
+        is_claim=is_claim,
+        outcome=outcome,
+        reference_id=found["reference_id"] if found else None,
+        chunk_index=found["chunk_index"] if found else None,
+        evidence_quote=found["evidence_quote"] if found else None,
+        verdict_json=found["verdict_json"] if found else None,
+    )
+    stmt = pg_insert(ClaimClassification).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_claim_classifications_ws_sha_pv",
+        set_={
+            "is_claim": stmt.excluded.is_claim,
+            "outcome": stmt.excluded.outcome,
+            "reference_id": stmt.excluded.reference_id,
+            "chunk_index": stmt.excluded.chunk_index,
+            "evidence_quote": stmt.excluded.evidence_quote,
+            "verdict_json": stmt.excluded.verdict_json,
+            "stale_at": None,
+        },
+    )
+    with session_factory() as s:
+        s.execute(stmt)
+        s.commit()
+
+
 def _read_optional(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8")
@@ -335,9 +384,22 @@ def analyze_job(
             citation_service=citation_service,
             deterministic_issues=[],
         )
-        if any(i.get("type") == "audit_unavailable" for i in semantic_issues):
-            # Retry rather than silently lack findings (cap or LLM error).
-            raise RuntimeError("citation audit unavailable (cap or LLM error)")
+        # Distinguish a true token-cap hit (retry the WHOLE job — further LLM
+        # calls would also be capped, so finishing now would silently lack
+        # findings) from a single transient/invalid per-row verdict (degrade
+        # THAT citation and continue). Pre-fix this re-raised on ANY
+        # audit_unavailable, so one malformed local-Gemma verdict on one
+        # citation dead-lettered the whole section after 3 retries.
+        unavailable = [i for i in semantic_issues if i.get("type") == "audit_unavailable"]
+        if any(i.get("reason") == "cap" for i in unavailable):
+            raise AnalysisCapExceeded("citation audit cap exceeded during semantic audit")
+        for i in unavailable:
+            logger.info(
+                "claim-analysis: degrading citation ev=%s (audit_unavailable reason=%s) — "
+                "continuing section",
+                i.get("evidence_id"),
+                i.get("reason"),
+            )
         bad_by_ev = {
             i["evidence_id"]: i
             for i in semantic_issues
@@ -393,32 +455,23 @@ def analyze_job(
         else:
             outcome = "no_match"
 
+        # Persist this sentence's classification in its OWN short session BEFORE
+        # moving on, so the LLM spend that produced it survives a later mid-loop
+        # exception (whose outer rollback would otherwise discard a merely-flushed
+        # row) and a retry sees it cached. Upsert handles both the miss (insert)
+        # and the stale-refresh (update + clear stale_at) cases.
         if existing is not None:
-            existing.is_claim = is_claim
-            existing.outcome = outcome
-            existing.reference_id = found["reference_id"] if found else None
-            existing.chunk_index = found["chunk_index"] if found else None
-            existing.evidence_quote = found["evidence_quote"] if found else None
-            existing.verdict_json = found["verdict_json"] if found else None
-            existing.stale_at = None
-        else:
-            # Concurrent insert of the same (workspace, claim_sha,
-            # prompt_version) would raise a unique violation → job retry;
-            # unreachable under the single-instance constraint.
-            session.add(
-                ClaimClassification(
-                    workspace_id=job.workspace_id,
-                    claim_sha=sha,
-                    prompt_version=ANALYSIS_PROMPT_VERSION,
-                    is_claim=is_claim,
-                    outcome=outcome,
-                    reference_id=found["reference_id"] if found else None,
-                    chunk_index=found["chunk_index"] if found else None,
-                    evidence_quote=found["evidence_quote"] if found else None,
-                    verdict_json=found["verdict_json"] if found else None,
-                )
-            )
-        session.flush()
+            # Keep the outer-session identity-map copy consistent so a same-job
+            # re-read of this row reflects the refreshed values.
+            session.expire(existing)
+        _persist_classification(
+            session_factory,
+            workspace_id=job.workspace_id,
+            claim_sha=sha,
+            is_claim=is_claim,
+            outcome=outcome,
+            found=found,
+        )
         uncited_results[sha] = {
             "outcome": outcome,
             "reference_id": found["reference_id"] if found else None,
