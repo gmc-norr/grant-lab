@@ -59,6 +59,15 @@ class ConsecutiveFailureTracker:
         self._state: dict[str, _SourceState] = defaultdict(_SourceState)
         self._lock = threading.Lock()
 
+    @property
+    def sender(self) -> EmailSender:
+        """The EmailSender this alerter dispatches through.
+
+        Public accessor so collaborators (e.g. the stale-source backstop job
+        in the scheduler) can reuse the same wired sender without reaching
+        into the private attribute."""
+        return self._sender
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

@@ -243,28 +243,32 @@ def build_scheduler(
     # days, regardless of in-memory streak state.  Catches the gap the streak-
     # based alerter misses when the process restarts more often than once every
     # threshold days.
-    _stale_sender = alerter._sender  # reuse the same EmailSender wired to the alerter
-    _stale_admin = settings.admin_alert_email
-    _stale_days = settings.stale_source_alert_days
+    # Reuse the same EmailSender wired to the alerter via its public accessor.
+    # Duck-typed test alerters that don't expose one simply skip the backstop
+    # job (they aren't exercising stale-source alerting).
+    _stale_sender = getattr(alerter, "sender", None)
+    if _stale_sender is not None:
+        _stale_admin = settings.admin_alert_email
+        _stale_days = settings.stale_source_alert_days
 
-    def _stale_source_check_job() -> None:
-        check_stale_sources(
-            session_factory=session_factory,
-            sender=_stale_sender,
-            admin_email=_stale_admin,
-            stale_days=_stale_days,
+        def _stale_source_check_job() -> None:
+            check_stale_sources(
+                session_factory=session_factory,
+                sender=_stale_sender,
+                admin_email=_stale_admin,
+                stale_days=_stale_days,
+            )
+
+        sched.add_job(
+            _stale_source_check_job,
+            trigger=CronTrigger(hour=2, minute=30),  # 02:30 Stockholm — after all daily ingest jobs
+            id="ingest:stale_check",
+            name="Stale-source fetch backstop alert",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=6 * 3600,
         )
-
-    sched.add_job(
-        _stale_source_check_job,
-        trigger=CronTrigger(hour=2, minute=30),  # 02:30 Stockholm — after all daily ingest jobs
-        id="ingest:stale_check",
-        name="Stale-source fetch backstop alert",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=6 * 3600,
-    )
 
     ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
     # Build the remote rank client once if an API key is configured.
