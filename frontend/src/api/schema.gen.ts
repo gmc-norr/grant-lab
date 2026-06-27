@@ -5907,6 +5907,8 @@ export interface operations {
                 limit?: number;
                 page?: number;
                 show_closed?: boolean;
+                q?: string | null;
+                min_score?: number | null;
             };
             header?: never;
             path?: never;
