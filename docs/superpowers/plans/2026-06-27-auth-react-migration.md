@@ -60,7 +60,7 @@ These bind every task; exact values copied from the spec and the codebase.
 - `src/routes/DashboardHeader.tsx` + `.module.css` — remove sign-out form (Task 10).
 - `src/api/client.ts`, `src/api/session.ts` — stale-comment cleanup (Task 11).
 
-**Tests:** new `tests/test_api_auth.py` (Tasks 2–5); new frontend `*.test.tsx` per component; updated `tests/test_web_auth.py`, `tests/test_auth_inactive_enforcement.py`, `tests/test_security_headers.py`, `tests/test_spa_serving.py`, `tests/test_gen_routes.py`, `src/dev-proxy.test.ts`, `src/router.test.tsx`, `src/shell/TitleBar.test.tsx`, `src/routes/DashboardHeader.test.tsx`; deleted `tests/test_web_login_password.py`, `tests/test_web_register.py`, `tests/test_web_login_google_button.py`.
+**Tests + CI:** new `tests/test_api_auth.py` (Tasks 2–5) + `tests/test_auth_teardown_guard.py`; new frontend `*.test.tsx` per component; updated `tests/test_web_auth.py`, `tests/test_auth_inactive_enforcement.py`, `tests/test_security_headers.py`, `tests/test_spa_serving.py`, `tests/test_gen_routes.py`, `src/dev-proxy.test.ts`, `src/router.test.tsx`, `src/shell/TitleBar.test.tsx`, `src/routes/DashboardHeader.test.tsx`; deleted `tests/test_web_login_password.py`, `tests/test_web_register.py`, `tests/test_web_login_google_button.py`, `tests/test_web_me.py`, `tests/test_web_me_subscriptions.py`, and the whole `tests/js/` directory; `.github/workflows/ci.yml` loses its `node --test 'tests/js/**'` step (keeps "Set up Node" for the pnpm steps).
 
 ---
 
@@ -565,6 +565,20 @@ def test_register_domain_disallowed_no_row(monkeypatch, pg_url, pg_session_facto
     assert r.status_code == 200 and r.json() == {"ok": True}  # anti-enumeration
     with pg_session_factory() as s:
         assert s.execute(_select(User).where(User.email == "x@evil.com")).scalar_one_or_none() is None
+
+
+def test_register_rate_limited_silent_no_row(monkeypatch, pg_url, pg_session_factory):
+    """Rate-limited register stays anti-enumeration: always 200 {ok: true}, NO
+    row created. (Closes the Codex-flagged register rate-limit gap.)"""
+    app = _app(monkeypatch, pg_url)
+    from call_manager.auth.rate_limit import SlidingWindowLimiter
+
+    app.state.ip_limiter = SlidingWindowLimiter(max_requests=0, window_seconds=60)
+    with TestClient(app) as c:
+        r = c.post("/api/auth/register", json={"email": "limited@ki.se"})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    with pg_session_factory() as s:
+        assert s.execute(_select(User).where(User.email == "limited@ki.se")).scalar_one_or_none() is None
 ```
 
 - [ ] **Step 2: Run — fails** `uv run pytest tests/test_api_auth.py -k register -q` → 404.
@@ -1725,6 +1739,8 @@ This is the atomic teardown. After it, FastAPI serves pure JSON `/api` + OAuth r
 
 - [ ] **Step 3: Edit `main.py`.** Make these removals/changes:
   - Remove `from urllib.parse import urlencode` (line 3) and `from fastapi.templating import Jinja2Templates` (line 8) and `from call_manager.auth.redirects import safe_next` (line 23) — all become unused.
+  - **Change `from fastapi.responses import JSONResponse, RedirectResponse` (line 6) to `from fastapi.responses import JSONResponse`** — `RedirectResponse`'s only uses (lines 374, 378, 407) live inside the two branches collapsed below, so it orphans and trips `ruff check .` (F401). [VERIFIED empirically via Codex probe — this was a plan miss.] `JSONResponse` stays (used by both collapsed handlers + `_api_validation` + `_api_500`).
+  - Update the now-stale `/static` mount comment (lines 516–520: "Vendored static assets (htmx.min.js lives here)…") — htmx is deleted; the mount now serves only `favicon.svg`. Keep the no-CDN rationale, drop the htmx reference.
   - Remove the filter imports (lines 54–61: `criterion_label, display_date, display_dt, model_label, note_category_heading, phase_label`) — `web/filters.py` STAYS (it's imported by `web/api/calls.py` and `digest/render.py`), but main.py no longer uses these.
   - In `from call_manager.web.routes import (auth, health, oauth_google, register)` (lines 67–72) remove `auth,` and `register,` (keep `health, oauth_google`).
   - Remove `TEMPLATES_DIR = ...` (line 75). Keep `STATIC_DIR` (used by the `/static` mount).
@@ -1775,8 +1791,17 @@ git rm src/call_manager/web/static/pico.min.css src/call_manager/web/static/app.
 
 (Keeps `favicon.svg`. The `/static` mount stays — now serving only the favicon.)
 
+- [ ] **Step 4b: Delete the legacy JS test suite + its CI step (Codex blocker 2).** All four `tests/js/*.test.js` files test the deleted `static/app.js` / `static/dedup.js` (the Jinja-era inline-handler JS) — they hard-fail CI once those files are gone:
+
+```bash
+git rm -r tests/js/
+```
+
+Then in `.github/workflows/ci.yml`, DELETE the entire `- name: JS unit tests (legacy static app.js)` step (the `run: node --test 'tests/js/**/*.test.js'` step, ~lines 66–72). **Keep the `- name: Set up Node` step** — the frontend pnpm/vitest/OpenAPI-drift steps below it depend on Node.
+
 - [ ] **Step 5: Migrate/delete the broken backend tests.**
   - `git rm tests/test_web_login_password.py tests/test_web_register.py tests/test_web_login_google_button.py` — their behavior is fully covered by `tests/test_api_auth.py` (Tasks 2–5).
+  - `git rm tests/test_web_me.py tests/test_web_me_subscriptions.py` — **obsolete Jinja-`/me`-page tests (Codex blocker 3 + verified sibling).** Both target the server-rendered `/me` page (`GET /me` → HTML, `POST /me/name`, `POST /me/subscriptions`) that the account/settings slice already deleted: 5 + 8 of their tests are PRE-EXISTING RED on master (`assert 404 == 200`), and `test_web_me.py::test_static_htmx_is_served_locally` (the only green one) dies when `htmx.min.js` + the Jinja `/login` are deleted. `/me` is now React + `/api/me/*` (covered by `web/api/me.py` + the React `Settings`/`account` tests); the Jinja autoescape guard is moot (React escapes JSX). Deleting already-red obsolete tests regresses nothing.
   - `tests/test_web_auth.py`: DELETE `test_login_form_renders` and `test_login_form_shows_configured_domain` (server no longer renders `/login`; the domain hint is covered by `test_config_reports_domains_and_google_disabled`). REPOINT the infra tests' POST target from `/login` to `/api/auth/login` and switch the form `data=` to `json=`: `test_login_rejects_oversized_email_without_consuming_limiter` (now asserts `r.status_code == 400`), `test_trusted_proxy_reads_x_forwarded_for`, `test_trusted_proxy_picks_rightmost_xff_to_resist_spoofing`, `test_untrusted_proxy_ignores_x_forwarded_for` (these assert limiter `_events` keys, unchanged). Keep `test_api_admin_requires_auth` and `test_api_admin_forbidden_for_non_admin` as-is. Example repoint:
 
 ```python
@@ -1873,21 +1898,36 @@ EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh
 uv run python scripts/gen_routes.py --check   # already regenerated in Task 9; must stay in sync
 ```
 
-- [ ] **Step 9: Run the full affected backend + frontend suites**
+- [ ] **Step 9: Dangling-reference guard, then run the full affected backend + frontend suites**
+
+First, prove nothing still references the deleted assets/modules/tests (this is the gate the plan's earlier grouped run would miss — CI runs everything):
+
+```bash
+# Must print NOTHING (grep exits 1 = clean). References to deleted static/templates/tests:
+grep -rn "pico.min.css\|htmx.min.js\|htmx-sse.js\|dedup.js\|static/app.js\|static/app.css\|base.html\|tests/js\|web.routes.auth\|web.routes.register\|test_web_me\|test_web_login_password\|test_web_register\|test_web_login_google_button" \
+  src tests scripts .github --include=*.py --include=*.js --include=*.yml --include=*.html 2>/dev/null \
+  | grep -v "src/call_manager/web/client_ip.py" || echo "CLEAN"
+```
+
+Then the suites:
 
 ```bash
 # Backend — affected files grouped (avoid the whole-suite flake; group to dodge the first-file UndefinedTable flake)
 uv run pytest tests/test_api_auth.py tests/test_client_ip.py tests/test_web_auth.py \
   tests/test_web_oauth_google.py tests/test_auth_inactive_enforcement.py \
   tests/test_security_headers.py tests/test_spa_serving.py tests/test_gen_routes.py \
-  tests/test_auth_teardown_guard.py -q
+  tests/test_web_me.py tests/test_web_me_subscriptions.py tests/test_auth_teardown_guard.py -q
+# (test_web_me*.py are now DELETED -> pytest reports them as "no tests ran" / file-not-found,
+#  which confirms the deletion; remove them from the command once confirmed gone.)
 # Frontend
 cd frontend && pnpm vitest run && pnpm tsc --noEmit && pnpm build && cd ..
+# JS legacy suite must be GONE (the CI step was deleted): this must error "no test files".
+node --test 'tests/js/**/*.test.js' 2>&1 | tail -2 || echo "tests/js gone (expected)"
 # Lint (whole repo, as CI does)
 uv run ruff check .
 ```
 
-Expected: all green; `ruff check .` clean (run `ruff format` on this slice's new/edited files only if `ruff check` flags anything — it checks lint, not format).
+Expected: dangling-ref grep prints `CLEAN`; pytest green; frontend green + tsc 0 + build ok; `ruff check .` clean (run `ruff format` on this slice's new/edited files only if `ruff check` flags anything — it checks lint, not format).
 
 - [ ] **Step 10: Commit**
 
@@ -1907,3 +1947,5 @@ git commit -m "refactor(spa): delete web Jinja stack, collapse dead redirect bra
 **Type consistency:** `LoginIn/LoginOut/RegisterIn/RegisterOut/LogoutOut/AuthConfigOut` (backend) drive the generated TS body/response types consumed by `useLogin/useRegister/useLogout/useAuthConfig`. The `{redirect}` / `{ok}` / `{google_oidc_enabled, allowed_domains}` shapes match across the stack.
 
 **Known transient state:** between Task 9 (manifest flip) and Task 11 (teardown), `/login` is both a Jinja route and manifest-owned; in prod the explicit Jinja route wins (registered before the catch-all) so the React login only goes live once Task 11 deletes the Jinja route — acceptable for incremental tasks; full integration is verified at Task 11 + the final whole-branch review.
+
+**Codex plan review (applied):** (1) `RedirectResponse` orphan at main.py:6 → Task 11 Step 3 now drops it (was a ruff-fail miss); (2) `tests/js/` + the ci.yml `node --test` step depend on the deleted `app.js`/`dedup.js` → Task 11 Step 4b deletes both; (3) `test_web_me.py::test_static_htmx` (the lone green test) dies on htmx deletion → Task 11 Step 5 deletes `test_web_me.py` + `test_web_me_subscriptions.py` (obsolete Jinja-`/me`, otherwise pre-existing-red); (4) register rate-limit gap → Task 4 adds `test_register_rate_limited_silent_no_row`. A Step-9 dangling-reference grep was added to catch any straggler the grouped run would miss (Codex's "passes the grouped gate, fails full CI" concern).
