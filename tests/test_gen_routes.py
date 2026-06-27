@@ -32,7 +32,9 @@ def test_is_spa_route_is_exact_not_prefix():
     assert is_spa_route("/me") is True  # /me is now an SPA-owned prefix (account/settings)
     assert is_spa_route("/profiles") is True  # /profiles is now an SPA-owned prefix
     assert is_spa_route("/profiles/5/edit") is True
-    assert is_spa_route("/login") is False
+    assert is_spa_route("/login") is True
+    assert is_spa_route("/auth/pending") is True
+    assert is_spa_route("/auth/google/start") is False
 
 
 def test_root_owns_only_itself(monkeypatch):

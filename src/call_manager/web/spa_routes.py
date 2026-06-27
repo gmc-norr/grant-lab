@@ -2,21 +2,24 @@
 from __future__ import annotations
 
 # SPA-owned page routes (EXACT match; React Router owns client sub-paths beneath).
-SPA_ROUTES: tuple[str, ...] = ("/profiles", "/cockpit", "/calls", "/admin", "/me", "/")
+SPA_ROUTES: tuple[str, ...] = (
+    "/auth/no-access",
+    "/auth/pending",
+    "/auth/error",
+    "/profiles",
+    "/register",
+    "/cockpit",
+    "/calls",
+    "/admin",
+    "/login",
+    "/me",
+    "/",
+)
 # Backend prefixes — the real top-level prefixes mounted in main.py. Currently
 # UNUSED by serving/proxy (dev proxy is default-to-backend; prod catch-all uses
 # is_spa_route); kept as a documented set + future carve-out helper. Never used
 # to decide SPA ownership.
-BACKEND_PREFIXES: tuple[str, ...] = (
-    "/workspaces",
-    "/register",
-    "/healthz",
-    "/logout",
-    "/static",
-    "/login",
-    "/auth",
-    "/api",
-)
+BACKEND_PREFIXES: tuple[str, ...] = ("/workspaces", "/healthz", "/static", "/auth", "/api")
 
 
 def is_backend_route(path: str) -> bool:

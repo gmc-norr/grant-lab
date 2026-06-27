@@ -8,12 +8,18 @@ import { AdminGoldenSet } from "./routes/AdminGoldenSet";
 import { AdminLayout } from "./routes/AdminLayout";
 import { AdminPendingUsers } from "./routes/AdminPendingUsers";
 import { AdminUsers } from "./routes/AdminUsers";
+import { AccountNoAccess } from "./routes/AccountNoAccess";
+import { AccountPending } from "./routes/AccountPending";
+import { AuthError } from "./routes/AuthError";
 import { CallDetail } from "./routes/CallDetail";
 import { CallsFilters } from "./routes/CallsFilters";
+import { Login } from "./routes/Login";
+import { PreAuthLayout } from "./routes/PreAuthLayout";
 import { ProfileDetail } from "./routes/ProfileDetail";
 import { ProfileEdit } from "./routes/ProfileEdit";
 import { ProfileNew } from "./routes/ProfileNew";
 import { ProfilesList } from "./routes/ProfilesList";
+import { Register } from "./routes/Register";
 import { Settings } from "./routes/Settings";
 import { Cockpit } from "./routes/Cockpit";
 import { Dashboard } from "./routes/Dashboard";
@@ -63,6 +69,19 @@ export const router = createBrowserRouter([
           </main>
         ),
       },
+    ],
+  },
+  {
+    // Pre-auth pages: a SECOND pathless layout, sibling to AppShell. No IDE shell,
+    // no useSession (the anti-401-loop invariant). An exact path like "login"
+    // out-ranks AppShell's "*" splat, so /login matches HERE, not the soft-404.
+    element: <PreAuthLayout />,
+    children: [
+      { path: "login", element: <Login /> },
+      { path: "register", element: <Register /> },
+      { path: "auth/pending", element: <AccountPending /> },
+      { path: "auth/no-access", element: <AccountNoAccess /> },
+      { path: "auth/error", element: <AuthError /> },
     ],
   },
 ]);
