@@ -570,11 +570,18 @@ class Settings(BaseSettings):
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_user: str | None = Field(default=None, alias="SMTP_USER")
     smtp_password: str | None = Field(default=None, alias="SMTP_PASSWORD")
-    # Session cookie TTL. Drives both the itsdangerous signer's max_age
-    # and the Set-Cookie max-age; keep these in lockstep or a valid
-    # signed session will outlast the cookie (or vice versa). 30 days is
-    # the hospital-internal default; shorten via env for high-security
-    # deployments.
+    # Session cookie TTL. Drives BOTH the itsdangerous signer's max_age
+    # (server-side signature expiry) and the Set-Cookie Max-Age attribute
+    # (client-side cookie expiry). Keep these in lockstep: if the signer's
+    # max_age is longer, a cookie that the browser has already discarded
+    # could still be re-presented and accepted; if shorter, a valid cookie
+    # will be rejected before it expires in the browser. 30 days is the
+    # hospital-internal default (staff log in from shared workstations and
+    # expect single-sign-on-style persistence). High-security roles or
+    # public-facing deployments should shorten via SESSION_MAX_AGE_SECONDS.
+    # Note: logout bumps session_epoch, which invalidates ALL outstanding
+    # cookies for a user regardless of TTL — so the 30-day window is the
+    # idle-session bound, not a hard upper limit on session lifetime.
     session_max_age_seconds: int = Field(default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS")
     # App-level cap on request body size (bytes). Backstop behind a reverse
     # proxy's client_max_body_size. Must exceed the largest legitimate upload:
@@ -621,6 +628,25 @@ class Settings(BaseSettings):
                     "SESSION_SECRET is a known development placeholder; set a "
                     "real random secret in production (APP_BASE_URL is https://)."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_email_from(self):
+        """Refuse the placeholder EMAIL_FROM address in production.
+
+        `no-reply@example.com` is the default for local dev/CI. If it reaches
+        a production deploy (https://...) it produces bounces from a domain
+        controlled by IANA; operators must set a real sender address. Gated on
+        `APP_BASE_URL` being https://, the same signal as `cookie_secure` and
+        the strong-secret validator, so plain-HTTP dev/test is unaffected.
+        """
+        is_prod = self.app_base_url.lower().startswith("https://")
+        if is_prod and "example.com" in self.email_from.lower():
+            raise ValueError(
+                f"EMAIL_FROM is set to the placeholder '{self.email_from}'. "
+                "Set a real sender address (e.g. noreply@ki.se) when "
+                "APP_BASE_URL is https:// (production)."
+            )
         return self
 
     @model_validator(mode="after")

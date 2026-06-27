@@ -12,8 +12,10 @@ from call_manager.auth.passwords import (
 def test_hash_and_verify_roundtrip():
     h = hash_password("correct horse battery")
     assert h != "correct horse battery"
-    assert verify_password(h, "correct horse battery") is True
-    assert verify_password(h, "wrong") is False
+    ok, _ = verify_password(h, "correct horse battery")
+    assert ok is True
+    ok, _ = verify_password(h, "wrong")
+    assert ok is False
 
 
 def test_validate_rejects_short():
@@ -28,9 +30,12 @@ def test_hash_rejects_short():
 
 
 def test_verify_none_hash_is_false_but_runs():
-    assert verify_password(None, "anything") is False
-    assert verify_password(None, "x" * 16) is False
+    ok, _ = verify_password(None, "anything")
+    assert ok is False
+    ok, _ = verify_password(None, "x" * 16)
+    assert ok is False
 
 
 def test_verify_tolerates_malformed_hash():
-    assert verify_password("not-a-real-argon2-hash", "whatever") is False
+    ok, _ = verify_password("not-a-real-argon2-hash", "whatever")
+    assert ok is False

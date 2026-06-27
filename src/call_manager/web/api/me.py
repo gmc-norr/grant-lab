@@ -127,8 +127,10 @@ def update_name(
 
 
 class ChangePasswordIn(BaseModel):
-    current_password: str
-    new_password: str
+    # 1024-char cap mirrors LoginIn.password: argon2 cost is proportional
+    # to password length; reject oversized inputs before hashing.
+    current_password: str = Field(max_length=1024)
+    new_password: str = Field(max_length=1024)
 
 
 class ChangePasswordOut(BaseModel):
@@ -150,9 +152,8 @@ def change_password(
         if db_user is None:
             raise HTTPException(status_code=401, detail="user not found")
         # An OAuth-only account (no hash) can't mint a first password from a session.
-        if db_user.password_hash is None or not verify_password(
-            db_user.password_hash, body.current_password
-        ):
+        ok, _ = verify_password(db_user.password_hash, body.current_password)
+        if db_user.password_hash is None or not ok:
             raise HTTPException(status_code=400, detail="current password is incorrect")
         try:
             db_user.password_hash = hash_password(body.new_password)
