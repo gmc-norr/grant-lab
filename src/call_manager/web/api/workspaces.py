@@ -28,6 +28,7 @@ from call_manager.db.models import (
     User,
     Workspace,
     WorkspaceEvent,
+    WorkspaceSetupJob,
     WorkspaceViewer,
 )
 from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
@@ -828,6 +829,8 @@ class CockpitMetaOut(BaseModel):
     role: str  # "owner" | "member"
     spec_locked: bool
     member_count: int
+    setup_status: str | None  # setup job status if available, None if no job
+    setup_last_error: str | None  # last_error from setup job (owner-only)
 
 
 @router.get("/workspaces/{workspace_id}/cockpit-meta", response_model=CockpitMetaOut)
@@ -847,13 +850,19 @@ def get_cockpit_meta(
             .select_from(WorkspaceViewer)
             .where(WorkspaceViewer.workspace_id == workspace_id)
         )
+        job = session.scalar(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id)
+        )
+        is_owner = ws.owner_id == user.id
         return CockpitMetaOut(
             workspace_title=ws.title,
             workspace_deadline=ws.deadline,
             current_phase=ws.current_phase,
-            role="owner" if ws.owner_id == user.id else "member",
+            role="owner" if is_owner else "member",
             spec_locked=ws.spec_locked_at is not None,
             member_count=1 + int(viewer_count or 0),
+            setup_status=job.status if job is not None else None,
+            setup_last_error=(job.last_error if job is not None else None) if is_owner else None,
         )
 
 
