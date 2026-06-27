@@ -423,6 +423,16 @@ def _check_live_row(
     # routing the live re-derivation through claim_drift_hash with that stored
     # text as the fallback reproduces insert's exact basis. See claim_drift_hash.
     stored_claim_text = claim_context.get("text") or ""
+    # KNOWN LIMITATION (R2-M1): if a citation was inserted with a NON-EMPTY claim
+    # and the marker later migrates to a line/section start so the live claim
+    # becomes "", the validator falls back to ``stored_claim_text`` (= the
+    # original claim), so ``claim_drift_hash("", stored)`` == stored_hash and no
+    # drift is flagged. We deliberately accept this rather than record a separate
+    # "was empty at insert" flag: the row stores the anchor (not "") for genuine
+    # empty-claim inserts, so there is no in-band signal to distinguish a
+    # became-empty claim from an inserted-empty one without a ledger-format
+    # change. The common empty↔empty and C↔C paths are exact; only this rare
+    # marker-migration case under-reports.
     if stored_hash is None:
         issues.append(
             _issue(
@@ -811,7 +821,7 @@ def validate_citations_semantic_capped(
         marker_by_ev = {}
 
     evidence = (ledger or {}).get("evidence") or []
-    for row in evidence:
+    for idx, row in enumerate(evidence):
         if not isinstance(row, dict) or not row.get("id"):
             continue
         ev_id = row["id"]
@@ -930,6 +940,12 @@ def validate_citations_semantic_capped(
                         reason="cap",
                     )
                 )
+                # The daily LLM cap tripped mid-loop: the rows we have not yet
+                # iterated are NOT judged this pass. Count them as deferred so
+                # the response's re-poll signal is accurate (conservative — a
+                # few of the remaining rows might have been skipped/cached, but
+                # honest under-judging is better than reporting deferred=0).
+                deferred += len(evidence) - idx - 1
                 break
 
             data = res.data or {}

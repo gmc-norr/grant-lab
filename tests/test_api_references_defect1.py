@@ -244,3 +244,52 @@ def test_metadata_approve_unrelated_integrity_error_raises(
     assert r.status_code == 500, (
         f"Expected 500 for unrelated IntegrityError, got {r.status_code}: {r.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 4 (R3-M2 / R-#7): DOUBLE citekey collision → clean 409, not 500
+# ---------------------------------------------------------------------------
+
+def test_metadata_approve_double_collision_returns_409_not_500(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A concurrent insert can take the regenerated suffix between our rollback
+    and the RETRY commit, raising a SECOND 23505. The retry commit must be
+    guarded so this double-collision returns a clean 409, not a sanitised 500."""
+    import sqlalchemy.orm
+
+    app = _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s4@ki.se")
+    rid = _seed_ref(pg_session_factory, storage, ws_id)
+
+    class _FakeOrig:
+        sqlstate = "23505"
+        pgcode = "23505"
+        pgerror = (
+            "ERROR:  duplicate key value violates unique constraint "
+            '"uq_references_workspace_citekey"'
+        )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        call_count = {"n": 0}
+
+        def _patched_commit(self, *a, **kw):
+            # BOTH the initial commit and the retry commit raise 23505.
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                from sqlalchemy.exc import IntegrityError
+                self.rollback()
+                raise IntegrityError(statement="INSERT ...", params={}, orig=_FakeOrig())
+            return None
+
+        monkeypatch.setattr(sqlalchemy.orm.Session, "commit", _patched_commit)
+
+        r = _authed(client, app, owner_id).post(
+            f"/api/workspaces/{ws_id}/references/{rid}/metadata",
+            json={"title": "On Widgets", "authors": ["Roe, Jane"], "year": "2021"},
+        )
+
+    assert r.status_code == 409, (
+        f"Expected clean 409 on double collision, got {r.status_code}: {r.text}"
+    )
+    assert call_count["n"] == 2, "both the initial and retry commits should be attempted"

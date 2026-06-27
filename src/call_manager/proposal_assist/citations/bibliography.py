@@ -225,30 +225,34 @@ def _assemble(pieces: list[str]) -> str:
     initial "Smith, J." or title "Outcomes."), a question mark ("Is obesity a
     disease?"), or an exclamation mark ("Surprising results!").
 
-    Handling:
-    - Intermediate pieces have their trailing ``.`` stripped before joining so
-      we never emit a doubled ``..`` (e.g. "Smith, J." becomes "Smith, J" for
-      joining, preserving the mid-string initial).
-    - The LAST piece keeps its terminal ``?`` or ``!`` as the final character
-      of the assembled string (so ``Title?`` stays ``Title?``, not ``Title?.``).
-      A trailing ``.`` on the last piece is stripped; the separator ``"."`` acts
-      as the terminator instead.
+    Handling (applied to EVERY piece, not just the last):
+    - A piece ending in ``.`` has it stripped before joining so we never emit a
+      doubled ``..`` (e.g. "Smith, J." becomes "Smith, J" for joining,
+      preserving the mid-string initial); the ``". "`` separator re-terminates.
+    - A piece ending in ``?`` or ``!`` keeps that terminator as the separator —
+      it is joined to the NEXT piece with a single space (so an intermediate
+      "Is obesity a disease?" yields "...disease? Container.", not
+      "...disease?. Container.").
+    - The final terminator is ``.`` unless the last piece's own terminator is
+      ``?``/``!`` (then that is kept).
     """
     if not pieces:
         return "."
-    # Strip trailing "." from every piece before joining with ". " so that
-    # intermediate initials like "Smith, J." don't produce "Smith, J.. Title".
-    # For "?" and "!" we leave them as-is during the join so they survive in the
-    # assembled text; they are handled separately for the last piece below.
-    cleaned = [p[:-1] if p.endswith(".") else p for p in pieces]
-    joined = ". ".join(cleaned)
-    # Determine the correct final terminator by examining the ORIGINAL last piece.
-    last_char = pieces[-1][-1] if pieces[-1] else ""
-    if last_char in "?!":
-        # The last piece's own terminal is authoritative — keep it. The join
-        # already ended the string with that character (we only stripped ".").
-        return joined
-    return joined + "."
+    out = ""
+    for i, piece in enumerate(pieces):
+        # Strip a single trailing "." (intermediate initials, "Title.") so the
+        # separator re-terminates without a doubled "..". "?"/"!" are kept and
+        # act as the separator-into-next-piece.
+        cleaned = piece[:-1] if piece.endswith(".") else piece
+        if i == 0:
+            out = cleaned
+            continue
+        # Choose the separator based on how the PREVIOUS assembled text ended:
+        # a "?"/"!" terminator is already there → just a space; otherwise ". ".
+        sep = " " if out[-1:] in "?!" else ". "
+        out += sep + cleaned
+    # Final terminator: keep "?"/"!" on the last piece, else add ".".
+    return out if out[-1:] in "?!" else out + "."
 
 
 def format_vancouver(csl: dict, number: int) -> str:

@@ -355,7 +355,24 @@ def api_approve_metadata(
                     payload={"reference_id": str(reference_id)},
                 )
             )
-            session.commit()
+            # Guard the RETRY commit too: a concurrent insert can take the next
+            # suffix between our rollback and this re-commit, raising a SECOND
+            # 23505. Without this guard that double-collision propagates as a
+            # sanitised 500; return a clean 409 instead so the client can retry.
+            try:
+                session.commit()
+            except IntegrityError as _exc2:
+                _orig2 = getattr(_exc2, "orig", None)
+                _sqlstate2 = (
+                    getattr(_orig2, "sqlstate", None) or getattr(_orig2, "pgcode", None)
+                )
+                if _sqlstate2 != "23505":
+                    raise
+                session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="citekey collision; please retry approval.",
+                ) from None
 
         return MetadataOut(citekey=ref.citekey, metadata_status=ref.metadata_status, csl_json=csl)
 

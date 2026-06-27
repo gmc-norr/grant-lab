@@ -716,3 +716,56 @@ def test_no_marker_row_skipped(pg_session_factory, _settings_env):
         )
     assert stub.calls == []
     assert issues == []
+
+
+# --------------------------------------------------------------------------- #
+# Capped variant: daily-cap break counts remaining rows as deferred (R3-M3)
+# --------------------------------------------------------------------------- #
+def test_capped_daily_cap_counts_remaining_rows_as_deferred(
+    pg_session_factory, _settings_env
+):
+    """When the daily LLM cap (res.cap_exceeded) trips mid-loop, the rows not yet
+    iterated must be counted as ``deferred`` so the re-poll signal is accurate."""
+    from call_manager.proposal_assist.citations.audit import (
+        validate_citations_semantic_capped,
+    )
+
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    rid2 = _seed_reference(pg_session_factory, wsid, citekey="jones2020")
+    rid3 = _seed_reference(pg_session_factory, wsid, citekey="lee2019")
+    proposal_text = (
+        "# Proposal\n\n"
+        f"Adjuvant therapy cuts recurrence{build_marker(CITEKEY, EV_ID)}. "
+        f"More evidence here{build_marker('jones2020', 'ev-bbbbbbbbbbbb')}. "
+        f"Yet more here{build_marker('lee2019', 'ev-cccccccccccc')}.\n"
+    )
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _row(rid, stance="supports"))
+    ledger = append_evidence(
+        ledger, _row(rid2, ev_id="ev-bbbbbbbbbbbb", citekey="jones2020", stance="supports")
+    )
+    ledger = append_evidence(
+        ledger, _row(rid3, ev_id="ev-cccccccccccc", citekey="lee2019", stance="supports")
+    )
+
+    # First fresh LLM call trips the daily cap → loop breaks at the first row.
+    stub = _StubCitationService(_verdict_result(None, cap_exceeded=True, cap_scope="workspace"))
+    with pg_session_factory() as s:
+        issues, checked, deferred = validate_citations_semantic_capped(
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            session_factory=pg_session_factory,
+            workspace_id=wsid,
+            citation_service=stub,
+            deterministic_issues=[],
+            max_fresh_calls=25,
+        )
+
+    assert len(stub.calls) == 1, "loop stops after the first cap-tripping call"
+    assert checked == 1, "one fresh call was attempted before the cap"
+    # The two rows after the cap-tripping row must be counted as deferred.
+    assert deferred == 2, f"expected 2 deferred (remaining rows), got {deferred}"
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1

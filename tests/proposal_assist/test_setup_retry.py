@@ -221,6 +221,34 @@ def test_cockpit_meta_exposes_setup_status_failed(
     assert "exploded" in data["setup_last_error"]
 
 
+def test_cockpit_meta_hides_setup_last_error_from_non_owner_member(
+    _client_non_owner,
+    non_owner,
+    owner,
+    pg_session_factory,
+):
+    """R2-M4: setup_last_error may carry internal diagnostics, so it must be
+    HIDDEN (None) from a non-owner MEMBER — while setup_status (a non-PII state)
+    is still visible. The member must be a viewer so they pass require_member;
+    the owner-gate on setup_last_error is the only thing under test."""
+    from call_manager.db.models import WorkspaceViewer
+
+    ws_id = _make_ws_with_failed_job(pg_session_factory, owner)
+    # Add the non-owner as a viewer so cockpit-meta's require_member passes.
+    with pg_session_factory() as s:
+        s.add(WorkspaceViewer(workspace_id=ws_id, user_id=non_owner.id))
+        s.commit()
+
+    resp = _client_non_owner.get(f"/api/workspaces/{ws_id}/cockpit-meta")
+    assert resp.status_code == 200
+    data = resp.json()
+    # Member sees the status (non-PII) ...
+    assert data["setup_status"] == "failed"
+    assert data["role"] == "member"
+    # ... but NOT the internal last_error.
+    assert data["setup_last_error"] is None
+
+
 def test_cockpit_meta_setup_status_waiting_for_rubric_review(
     _client_owner,
     owner,

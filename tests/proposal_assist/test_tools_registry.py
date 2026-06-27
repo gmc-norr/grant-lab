@@ -216,6 +216,43 @@ async def test_list_citations_closure_returns_envelope():
     assert payload == {"citations": [], "truncated": False}
 
 
+@pytest.mark.asyncio
+async def test_list_citations_closure_non_coercible_limit_returns_envelope():
+    """R2-M5: a non-coercible ``limit`` must NOT raise int(...) OUTSIDE the
+    crash-guard — the closure passes the raw value through so list_citations_impl
+    coerces it (defaulting to 100) and returns a normal envelope, never an
+    unhandled exception."""
+    import json
+    import subprocess
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from call_manager.proposal_assist.tools.registry import (
+        ToolContext,
+        _collect_tools,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        ctx = ToolContext(
+            workspace_id=uuid.uuid4(),
+            repo_dir=repo,
+            session_factory=None,  # type: ignore[arg-type]
+            settings=None,  # type: ignore[arg-type]
+        )
+        tools = _collect_tools(ctx)
+        lst = next(t for t in tools if t.name == "list_citations")
+        # A garbage, non-integer-coercible limit must not blow up the handler.
+        result = await lst.handler({"limit": "not-a-number"})
+
+    assert result["is_error"] is False
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {"citations": [], "truncated": False}
+
+
 def test_tool_context_has_provenance_defaults():
     """The new per-turn provenance fields + agent_view_sections default to
     None / empty so existing bare-ctx tests keep constructing ToolContext

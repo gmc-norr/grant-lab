@@ -319,19 +319,50 @@ class SubprocessRegistry:
         its resumable session down would only force a cold relaunch on the next
         drain tick. The scheduler passes a ``has_queued_turn`` predicate (a DB
         lookup) so the sweep is queue-aware; when omitted (tests/legacy) every
-        idle handle is swept as before. The predicate is consulted under the
-        lock; keep it cheap and non-blocking (it's a single indexed SELECT)."""
+        idle handle is swept as before.
+
+        I2 fix: the ``has_queued_turn`` predicate may run a BLOCKING DB query, so
+        it must NOT be consulted while the registry lock is held — that would
+        stall every concurrent launch/turn. We therefore (1) snapshot the
+        candidate idle workspace ids under the lock, (2) RELEASE the lock and run
+        the predicate per candidate, then (3) re-acquire the lock and pop only
+        the still-idle, non-queued entries (re-checking ``last_touched`` /
+        ``in_flight`` so a turn that landed during the predicate window is not
+        torn down out from under itself)."""
         now = time.monotonic()
         cutoff = now - self._idle_seconds
 
+        # (1) Snapshot candidate idle workspace ids under the lock — no IO here.
         async with self._lock:
-            stale_entries: list[tuple[uuid.UUID, _Entry]] = []
-            for wsid, entry in list(self._entries.items()):
-                if entry.last_touched_monotonic > cutoff or entry.in_flight != 0:
-                    continue
-                if has_queued_turn is not None and has_queued_turn(wsid):
+            candidates: list[uuid.UUID] = [
+                wsid
+                for wsid, entry in self._entries.items()
+                if entry.last_touched_monotonic <= cutoff and entry.in_flight == 0
+            ]
+
+        # (2) Run the (possibly blocking) queued-turn predicate WITHOUT the lock.
+        queued: set[uuid.UUID] = set()
+        if has_queued_turn is not None:
+            for wsid in candidates:
+                if has_queued_turn(wsid):
+                    queued.add(wsid)
+
+        # (3) Re-acquire and pop only the entries that are STILL idle and not
+        # queued. Re-check last_touched/in_flight: a turn may have landed during
+        # the predicate window, in which case the entry must not be swept.
+        cutoff = time.monotonic() - self._idle_seconds
+        stale_entries: list[tuple[uuid.UUID, _Entry]] = []
+        async with self._lock:
+            for wsid in candidates:
+                if wsid in queued:
                     # A queued turn will relaunch immediately — keep the warm,
                     # resumable handle instead of tearing it down.
+                    continue
+                entry = self._entries.get(wsid)
+                if entry is None:
+                    continue
+                if entry.last_touched_monotonic > cutoff or entry.in_flight != 0:
+                    # Re-touched / went in-flight while we were off the lock.
                     continue
                 stale_entries.append((wsid, self._entries.pop(wsid)))
 

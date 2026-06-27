@@ -299,3 +299,74 @@ def test_stale_check_zero_failures_independent_of_streak(pg_session_factory):
     assert len(sender.sent) == 1
     assert "eu_portal" in sender.sent[0].text_body
     assert "vinnova" not in sender.sent[0].text_body
+
+
+def test_stale_backstop_suppressed_within_cooldown(pg_session_factory):
+    """A source that stays stale must NOT re-alert every day: the second
+    same-day check_stale_sources call is suppressed because last_alerted_at was
+    stamped on the first send (within the cooldown window)."""
+    five_days_ago = datetime.now(UTC) - timedelta(days=5)
+    with pg_session_factory() as s:
+        s.execute(
+            Source.__table__.update()
+            .where(Source.slug == "vinnova")
+            .values(last_fetched_at=five_days_ago)
+        )
+        # vinnova will alert; make eu_portal recent so only one row is stale.
+        s.execute(
+            Source.__table__.update()
+            .where(Source.slug == "eu_portal")
+            .values(last_fetched_at=datetime.now(UTC) - timedelta(hours=1))
+        )
+        s.commit()
+
+    sender = InMemoryEmailSender()
+    check_stale_sources(
+        session_factory=pg_session_factory,
+        sender=sender,
+        admin_email="root@ki.se",
+        stale_days=3,
+    )
+    assert len(sender.sent) == 1, "first stale check should alert"
+
+    # last_alerted_at must have been stamped for the alerted source.
+    src = _get_source(pg_session_factory, "vinnova")
+    assert src.last_alerted_at is not None
+
+    # Second call the same day: still stale, but suppressed by the cooldown.
+    check_stale_sources(
+        session_factory=pg_session_factory,
+        sender=sender,
+        admin_email="root@ki.se",
+        stale_days=3,
+    )
+    assert len(sender.sent) == 1, "stale backstop must not re-send within cooldown"
+
+
+def test_stale_backstop_re_alerts_after_cooldown(pg_session_factory):
+    """Once the cooldown (the stale window) elapses with the source still stale,
+    the backstop alerts again — it is a nag, not a one-shot."""
+    five_days_ago = datetime.now(UTC) - timedelta(days=5)
+    # last_alerted_at older than stale_days ⇒ cooldown elapsed ⇒ re-alert.
+    long_ago = datetime.now(UTC) - timedelta(days=10)
+    with pg_session_factory() as s:
+        s.execute(
+            Source.__table__.update()
+            .where(Source.slug == "vinnova")
+            .values(last_fetched_at=five_days_ago, last_alerted_at=long_ago)
+        )
+        s.execute(
+            Source.__table__.update()
+            .where(Source.slug == "eu_portal")
+            .values(last_fetched_at=datetime.now(UTC) - timedelta(hours=1))
+        )
+        s.commit()
+
+    sender = InMemoryEmailSender()
+    check_stale_sources(
+        session_factory=pg_session_factory,
+        sender=sender,
+        admin_email="root@ki.se",
+        stale_days=3,
+    )
+    assert len(sender.sent) == 1, "cooldown elapsed ⇒ re-alert"

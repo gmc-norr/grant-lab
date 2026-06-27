@@ -89,23 +89,44 @@ def test_disallowed_plus_allowed_covers_all_mcp_tools():
 
 
 def test_can_use_tool_denies_non_allowlisted():
-    """The can_use_tool callback must deny tools not in the role's allowlist."""
+    """The can_use_tool callback must deny tools not in the role's allowlist.
+
+    The Claude Agent SDK invokes can_use_tool with the FULLY-QUALIFIED MCP name
+    (``mcp__<server>__<tool>``), not the bare name stored in allowed_tools. The
+    callback must normalize both sides to the same shape so the allow-branch
+    genuinely fires for the role's own tool (a real second defense layer), not
+    just the deny-branch."""
     kwargs = _build_options_for_role(["submit_scorecard"])
     callback = kwargs.get("can_use_tool")
     assert callback is not None, "can_use_tool callback must be wired for background roles"
 
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-    # Allowed tool → Allow
-    result_allow = asyncio.run(callback("submit_scorecard", {}, None))
-    assert isinstance(result_allow, PermissionResultAllow)
+    _Q = "mcp__proposal_assist__"  # the prefix the SDK applies to MCP tools
 
-    # Non-allowed tool → Deny
-    result_deny = asyncio.run(callback("fetch_reference", {}, None))
+    # Allowlisted tool, QUALIFIED name (the real SDK call shape) → Allow.
+    result_allow = asyncio.run(callback(f"{_Q}submit_scorecard", {}, None))
+    assert isinstance(result_allow, PermissionResultAllow), (
+        "allowlisted tool (qualified name) must be allowed — the allow-branch "
+        "must work against the SDK's real qualified call shape"
+    )
+
+    # The bare-name shape must also resolve (robust to either form).
+    result_allow_bare = asyncio.run(callback("submit_scorecard", {}, None))
+    assert isinstance(result_allow_bare, PermissionResultAllow)
+
+    # Non-allowlisted tools, QUALIFIED names → Deny.
+    result_deny = asyncio.run(callback(f"{_Q}fetch_reference", {}, None))
     assert isinstance(result_deny, PermissionResultDeny)
 
-    result_deny2 = asyncio.run(callback("propose_edit", {}, None))
+    result_deny2 = asyncio.run(callback(f"{_Q}propose_edit", {}, None))
     assert isinstance(result_deny2, PermissionResultDeny)
+
+    result_deny3 = asyncio.run(callback(f"{_Q}propose_citation", {}, None))
+    assert isinstance(result_deny3, PermissionResultDeny)
+
+    result_deny4 = asyncio.run(callback(f"{_Q}propose_spec_edit", {}, None))
+    assert isinstance(result_deny4, PermissionResultDeny)
 
 
 def test_interactive_adapter_has_no_disallowed_tools():

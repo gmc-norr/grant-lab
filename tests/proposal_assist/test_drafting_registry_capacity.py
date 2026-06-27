@@ -180,3 +180,33 @@ async def test_sweep_idle_default_predicate_sweeps_everything():
     swept = await registry.sweep_idle()
     assert swept == 1
     assert ws not in registry._entries
+
+
+@pytest.mark.asyncio
+async def test_sweep_idle_runs_queued_turn_predicate_outside_the_lock():
+    """I2 regression guard: the (potentially blocking) has_queued_turn DB
+    predicate must NOT run while the registry's asyncio lock is held — it would
+    stall every concurrent launch/turn. The predicate asserts the lock is free
+    when it is consulted."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=0)
+    ws = uuid.uuid4()
+    await _install_handle(registry, ws)
+    await asyncio.sleep(0.01)
+
+    lock_held_during_predicate: list[bool] = []
+
+    def predicate(_wsid):
+        # If the lock is held here, acquiring it would deadlock; locked() lets
+        # us observe non-destructively.
+        lock_held_during_predicate.append(registry._lock.locked())
+        return False  # not queued → still swept
+
+    swept = await registry.sweep_idle(has_queued_turn=predicate)
+
+    assert swept == 1
+    assert ws not in registry._entries
+    assert lock_held_during_predicate == [False], (
+        "has_queued_turn must be consulted with the registry lock RELEASED "
+        f"(observed locked={lock_held_during_predicate})"
+    )

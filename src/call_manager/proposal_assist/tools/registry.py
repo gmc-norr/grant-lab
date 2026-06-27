@@ -602,12 +602,15 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def list_citations(args):
+        # Pass the raw limit through: list_citations_impl coerces it inside its
+        # own try/except, so a non-coercible value returns a tool error envelope
+        # via _safe_tool rather than raising int(...) OUTSIDE the crash-guard.
         return await _safe_tool(
             "list_citations",
             ctx,
             list_citations_impl,
             ctx,
-            limit=int(args.get("limit", 100)),
+            limit=args.get("limit", 100),
         )
 
     @tool(

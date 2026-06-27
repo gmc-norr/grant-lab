@@ -196,16 +196,24 @@ def build_scheduler(
         timezone="Europe/Stockholm",
         executors={"default": ThreadPoolExecutor(max_workers=SCHEDULER_EXECUTOR_MAX_WORKERS)},
     )
-    # Guard against a silent regression to the default pool size: the blocking
-    # ticks need this headroom to coexist with the crons.
-    configured_workers = sched._executors["default"]._pool._max_workers
-    assert configured_workers == SCHEDULER_EXECUTOR_MAX_WORKERS, (
-        f"scheduler executor misconfigured: max_workers={configured_workers}, "
-        f"expected {SCHEDULER_EXECUTOR_MAX_WORKERS}"
-    )
+    # Best-effort observability of the configured pool size. This reaches into
+    # private APScheduler internals (executors -> _pool -> _max_workers), so it
+    # is defensive: an APScheduler upgrade that renames any of these must NOT
+    # crash startup with an AttributeError. The actual configuration is asserted
+    # by the unit test (test_scheduler), so we only LOG here — no runtime assert.
+    configured_workers: int | None = None
+    try:
+        _default_exec = sched._executors.get("default")
+        configured_workers = getattr(getattr(_default_exec, "_pool", None), "_max_workers", None)
+    except Exception:  # noqa: BLE001 — purely observational, never fatal
+        configured_workers = None
     _logger.info(
         "scheduler.executor_configured",
-        extra={"event": "scheduler_executor_configured", "max_workers": configured_workers},
+        extra={
+            "event": "scheduler_executor_configured",
+            "max_workers": configured_workers,
+            "expected_max_workers": SCHEDULER_EXECUTOR_MAX_WORKERS,
+        },
     )
 
     for cfg in SOURCES:

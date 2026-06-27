@@ -585,6 +585,37 @@ def test_vancouver_question_mark_title_no_double_terminator():
     assert "Is this true?" in out
 
 
+def test_vancouver_intermediate_question_title_no_double_terminator():
+    # B6 follow-up: a "?"-ending title that is an INTERMEDIATE piece (a container
+    # follows it) must not render "disease?. Container." — the "?" is the
+    # piece's own terminator and the join must not add a ".".
+    out = format_vancouver(
+        {
+            "author": [{"family": "Smith", "given": "J"}],
+            "title": "Is obesity a disease?",
+            "container-title": "Journal of Things",
+            "issued": {"date-parts": [[2021]]},
+        },
+        1,
+    )
+    assert "?." not in out
+    assert "Is obesity a disease? Journal of Things" in out
+
+
+def test_vancouver_intermediate_exclamation_title_no_double_terminator():
+    out = format_vancouver(
+        {
+            "author": [{"family": "Lee"}],
+            "title": "Surprising results!",
+            "container-title": "Nature",
+            "issued": {"date-parts": [[2020]]},
+        },
+        2,
+    )
+    assert "!." not in out
+    assert "Surprising results! Nature" in out
+
+
 # ---------------------------------------------------------------------------
 # Defect 3: author-year sort is stable in tie cases — secondary key = citekey
 # ---------------------------------------------------------------------------

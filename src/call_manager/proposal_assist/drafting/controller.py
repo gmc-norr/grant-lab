@@ -262,7 +262,10 @@ class WorkspaceController:
         Defect 4: workspaces with a queued turn are skipped so their resumable
         session isn't torn down only to cold-relaunch on the next drain tick.
         The predicate is a single indexed SELECT against turn_jobs in a short-
-        lived session, opened per-call (never threaded through the registry)."""
+        lived session, opened per-call (never threaded through the registry).
+        I2: the registry runs this predicate OUTSIDE its asyncio lock (snapshot
+        candidates → run predicate → re-acquire to pop), so the blocking SELECT
+        never stalls concurrent launches."""
         return await self._registry.sweep_idle(has_queued_turn=self._workspace_has_queued_turn)
 
     def _workspace_has_queued_turn(self, workspace_id: uuid.UUID) -> bool:

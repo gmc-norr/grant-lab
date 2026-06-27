@@ -329,7 +329,16 @@ class ClaudeAgentSDKAdapter:
                     _allowed: frozenset[str] = _allowed_set,
                 ) -> Any:
                     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
-                    if tool_name in _allowed:
+
+                    # The SDK invokes this callback with the FULLY-QUALIFIED MCP
+                    # name (``mcp__<server>__<tool>``), but allowed_tools holds
+                    # BARE names. Normalize the incoming name to its bare form so
+                    # the allow-branch genuinely matches the role's own tool — a
+                    # real second defense layer, not just the disallowed_tools
+                    # deny-branch. Accept the bare form too (robust to either
+                    # shape across SDK versions).
+                    bare = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
+                    if tool_name in _allowed or bare in _allowed:
                         return PermissionResultAllow()
                     return PermissionResultDeny(
                         message=f"tool '{tool_name}' is not in this agent role's allowlist"

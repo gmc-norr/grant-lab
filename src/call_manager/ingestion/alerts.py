@@ -231,49 +231,80 @@ def check_stale_sources(
     The function sends a single consolidated email listing all stale sources.
     It is idempotent — callers can fire it once per day (e.g. from a daily
     cron after all ingest jobs have run) or at scheduler startup.
+
+    Suppression (B2 follow-up): a source that stays stale must NOT re-alert
+    every single day. We only include a stale source whose ``last_alerted_at``
+    is null or older than the cooldown window (= ``stale_days``), and stamp
+    ``last_alerted_at`` on the sources we actually alert about. This also avoids
+    double-channelling with the consecutive-failure streak alert (which stamps
+    the same column): a source streak-alerted recently is suppressed here.
     """
     if admin_email is None:
         return
 
     from call_manager.db.models import Source  # local import avoids circular
 
-    cutoff = datetime.now(UTC) - timedelta(days=stale_days)
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=stale_days)
+    # Cooldown for the daily nag: re-alert only after the stale window has
+    # elapsed since the last alert on this source.
+    alert_cutoff = now - timedelta(days=stale_days)
     try:
         with session_factory() as session:
             stale = (
                 session.execute(
                     select(Source).where(
-                        (Source.last_fetched_at.is_(None))
-                        | (Source.last_fetched_at < cutoff)
+                        (
+                            (Source.last_fetched_at.is_(None))
+                            | (Source.last_fetched_at < cutoff)
+                        )
+                        & (
+                            (Source.last_alerted_at.is_(None))
+                            | (Source.last_alerted_at < alert_cutoff)
+                        )
                     )
                 )
                 .scalars()
                 .all()
             )
+
+            if not stale:
+                return
+
+            lines = "\n".join(
+                f"  • {s.slug}: last fetched "
+                f"{s.last_fetched_at.isoformat() if s.last_fetched_at else 'NEVER'}"
+                for s in stale
+            )
+            try:
+                sender.send(
+                    to=admin_email,
+                    subject=(
+                        f"[call-manager] {len(stale)} source(s) "
+                        f"not fetched in {stale_days}+ days"
+                    ),
+                    text_body=(
+                        f"The following source(s) have not been successfully fetched "
+                        f"in the last {stale_days} days:\n\n{lines}\n\n"
+                        "Check the ingestion logs and confirm the scheduler is running.\n"
+                    ),
+                )
+            except EmailSendFailed as e:
+                _logger.warning(
+                    "alerter.stale_send_failed",
+                    extra={"event": "alerter_stale_send_failed", "exc": str(e)},
+                )
+                return
+
+            # Stamp last_alerted_at on the sources we alerted about so the next
+            # daily run suppresses them until the cooldown elapses.
+            stale_slugs = [s.slug for s in stale]
+            session.execute(
+                Source.__table__.update()
+                .where(Source.slug.in_(stale_slugs))
+                .values(last_alerted_at=now)
+            )
+            session.commit()
     except Exception:  # noqa: BLE001
         _logger.warning("alerter.stale_check_db_failed", exc_info=True)
         return
-
-    if not stale:
-        return
-
-    lines = "\n".join(
-        f"  • {s.slug}: last fetched "
-        f"{s.last_fetched_at.isoformat() if s.last_fetched_at else 'NEVER'}"
-        for s in stale
-    )
-    try:
-        sender.send(
-            to=admin_email,
-            subject=f"[call-manager] {len(stale)} source(s) not fetched in {stale_days}+ days",
-            text_body=(
-                f"The following source(s) have not been successfully fetched "
-                f"in the last {stale_days} days:\n\n{lines}\n\n"
-                "Check the ingestion logs and confirm the scheduler is running.\n"
-            ),
-        )
-    except EmailSendFailed as e:
-        _logger.warning(
-            "alerter.stale_send_failed",
-            extra={"event": "alerter_stale_send_failed", "exc": str(e)},
-        )
