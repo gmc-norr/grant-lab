@@ -18,12 +18,29 @@ def bootstrap_admins(
     allowed_domains: list[str],
     password: str | None = None,
 ) -> None:
-    """Promote or create admin users from INITIAL_ADMIN_EMAIL on startup.
+    """Provision configured admins (INITIAL_ADMIN_EMAIL) on startup — idempotently.
+
+    This runs on EVERY boot, so it must NOT silently override in-app state on a
+    routine redeploy. Two cases:
+
+    * **First-time bootstrap** — a configured email with no `users` row is
+      created as an active admin (and given `INITIAL_ADMIN_PASSWORD` if set).
+    * **Lockout recovery ONLY** — an *existing* configured user is restored to
+      admin+active solely when the system currently has NO active admin (a
+      genuine lockout). When at least one active admin already exists, a
+      configured user is LEFT UNTOUCHED: a deliberate demote/disable via the
+      admin UI is respected across reboots, the configured password is NOT
+      re-applied, and no session epoch is bumped. Manage roles via the admin UI
+      once the system is set up.
+
+    This replaces the previous every-boot promote + password-reset + epoch-bump,
+    which let anyone controlling the deployment env resurrect a demoted admin or
+    overwrite a real user's password and revoke their sessions on each redeploy.
 
     Entries are silently dropped if empty, malformed, or point to a domain
-    outside `allowed_domains` — a WARNING is logged for operator triage.
-    This is defense-in-depth: a stale or typo'd env value should not
-    materialize a working admin at an attacker-controlled address.
+    outside `allowed_domains` — a WARNING is logged for operator triage. This is
+    defense-in-depth: a stale or typo'd env value should not materialize a
+    working admin at an attacker-controlled address.
     """
     normalized = [e.strip().lower() for e in emails if e and e.strip()]
     if not normalized:
@@ -47,12 +64,24 @@ def bootstrap_admins(
         return
 
     with session_factory() as session:
+        # Snapshot the pre-bootstrap active-admin count: lockout recovery (below)
+        # only fires when the system has NO active admin, so a deliberate in-app
+        # demote/disable survives a redeploy as long as another admin remains.
+        active_admin_count = (
+            session.query(User)
+            .filter(User.is_admin.is_(True), User.status == "active")
+            .count()
+        )
         for email in valid:
             user = session.query(User).filter_by(email=email).one_or_none()
             if user is None:
+                # First-time bootstrap: create the admin (with the configured
+                # password if any). A brand-new user has no sessions, so there is
+                # nothing to revoke and no epoch to bump.
                 user = User(email=email, is_admin=True, status="active")
-                session.add(user)
-                if password is None:
+                if password is not None:
+                    user.password_hash = hash_password(password)
+                else:
                     # A freshly-created admin with no password cannot authenticate
                     # by ANY flow: password login fails (no hash), and Google
                     # sign-in treats the pre-created email row as a collision and
@@ -71,15 +100,21 @@ def bootstrap_admins(
                             ),
                         },
                     )
-            else:
-                # Configured admins are the lockout-recovery path: ensure both
-                # admin AND active on every startup. To permanently disable one,
-                # remove them from INITIAL_ADMIN_EMAIL first.
+                session.add(user)
+            elif active_admin_count == 0:
+                # Genuine lockout: no active admin exists anywhere. Restore this
+                # configured user as the break-glass recovery path. We touch ONLY
+                # role/status — never the password or session epoch — so recovery
+                # never clobbers a real credential.
                 user.is_admin = True
                 user.status = "active"
-            if password is not None:
-                # Break-glass: (re)apply the configured password every startup and
-                # bump the epoch so any session under an old password is revoked.
-                user.password_hash = hash_password(password)
-                user.session_epoch = (user.session_epoch or 0) + 1
+                _logger.warning(
+                    "admin bootstrap restored an admin (no active admin existed)",
+                    extra={
+                        "event": "admin_bootstrap_recovered",
+                        "email": email,
+                    },
+                )
+            # else: existing user + a healthy active-admin set → leave untouched
+            # (respect in-app demote/disable; do NOT re-apply the env password).
         session.commit()
