@@ -871,3 +871,57 @@ def test_dismissed_calls_omitted(monkeypatch, pg_url, pg_session_factory):
             ).scalar_one_or_none()
             is not None
         )
+
+
+# --- score floor (min_score) ------------------------------------------------
+
+
+def test_min_score_floor_keeps_only_scored_at_or_above(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _login(app, pg_session_factory, profile=True)
+    _seed_scored(pg_session_factory, pid)  # High=85, Low=15, Unranked=None
+    with c:
+        body = c.get(f"/api/calls?profile={pid}&min_score=60").json()
+    assert _titles(body) == ["High score"]          # 85 >= 60; 15 and unranked dropped
+    assert body["pagination"]["total"] == 1
+
+
+def test_min_score_drops_unranked_keeps_lower_scored(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _login(app, pg_session_factory, profile=True)
+    _seed_scored(pg_session_factory, pid)
+    with c:
+        body = c.get(f"/api/calls?profile={pid}&min_score=10").json()
+    # 85 and 15 both >= 10; the unranked (NULL score) call is dropped under a floor.
+    assert _titles(body) == ["High score", "Low score"]
+    assert body["pagination"]["total"] == 2
+
+
+def test_min_score_ignored_without_profile(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _login(app, pg_session_factory, profile=True)
+    _seed_scored(pg_session_factory, pid)
+    with c:
+        body = c.get("/api/calls?min_score=60").json()  # no ?profile= -> floor ignored
+    assert set(_titles(body)) == {"High score", "Low score", "Unranked"}
+
+
+def test_min_score_out_of_range_is_422(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    c, *_ = _login(app, pg_session_factory)
+    with c:
+        assert c.get("/api/calls?min_score=200").status_code == 422
+        assert c.get("/api/calls?min_score=-1").status_code == 422
+
+
+def test_min_score_does_not_narrow_summary_badges(monkeypatch, pg_url, pg_session_factory):
+    """DELIBERATE (spec): the score floor narrows the LIST, but the summary badges
+    keep describing the full profile feed. If this assertion ever flips, it is a
+    design change, not a bug fix."""
+    app = _app(monkeypatch, pg_url)
+    c, uid, pid = _login(app, pg_session_factory, profile=True)
+    _seed_scored(pg_session_factory, pid)  # all three calls are OPEN (no deadline)
+    with c:
+        body = c.get(f"/api/calls?profile={pid}&min_score=80").json()
+    assert _titles(body) == ["High score"]            # list narrowed by the floor
+    assert body["summary"]["open_count"] == 3         # badge still counts all open calls

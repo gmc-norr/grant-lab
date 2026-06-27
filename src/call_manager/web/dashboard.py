@@ -238,6 +238,7 @@ def build_dashboard_view(
     page: int,
     show_closed: bool,
     q: str | None = None,
+    min_score: int | None = None,
 ) -> DashboardView:
     """Build the dashboard read-model (read-only; no writes).
 
@@ -320,7 +321,17 @@ def build_dashboard_view(
     list_filters = list(base_filters)
     if not show_closed:
         list_filters.append(open_expr)
-    rows = session.execute(stmt.where(*list_filters)).unique().all()
+    # Score floor: ranked branch only (unranked calls have no score). The ranked
+    # `stmt` already has CallRanking in its FROM, so the predicate resolves there;
+    # because `>= min_score` is false for the LEFT-JOIN NULLs, unranked calls drop
+    # out — the intended "matched calls only" behaviour.
+    score_floor_active = (
+        profile_id is not None and profile_obj is not None and min_score is not None
+    )
+    list_where = list(list_filters)
+    if score_floor_active:
+        list_where.append(CallRanking.aggregate_score >= min_score)
+    rows = session.execute(stmt.where(*list_where)).unique().all()
     # Normalize to (Call, CallRanking|None) shape regardless of branch.
     calls: list[tuple[Call, CallRanking | None]] = [
         (row[0], row[1] if profile_id is not None else None) for row in rows
@@ -330,8 +341,26 @@ def build_dashboard_view(
     # (independent of limit/offset), so a corpus larger than one page can't
     # undercount the badges.
 
-    # Pagination total tracks the visible (toggled) set.
-    list_total = session.scalar(select(func.count()).select_from(Call).where(*list_filters)) or 0
+    # Pagination total tracks the visible (toggled) set — including the score
+    # floor, so total/has_next stay correct. A floored count must JOIN CallRanking
+    # (a plain Call count can't see aggregate_score).
+    if score_floor_active:
+        list_total = (
+            session.scalar(
+                select(func.count())
+                .select_from(Call)
+                .outerjoin(
+                    CallRanking,
+                    (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile_id),
+                )
+                .where(*list_where)
+            )
+            or 0
+        )
+    else:
+        list_total = (
+            session.scalar(select(func.count()).select_from(Call).where(*list_filters)) or 0
+        )
     # "Open calls" badge is always the genuine open count, toggle or not.
     open_count = (
         session.scalar(select(func.count()).select_from(Call).where(*base_filters, open_expr)) or 0
