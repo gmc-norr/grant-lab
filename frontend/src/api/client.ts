@@ -37,7 +37,17 @@ export function unwrap<T>(res: { data?: T; error?: unknown; response?: Response 
     throw new ApiError("unauthorized", "session expired");
   }
   if (res.error) {
-    const e = res.error as { error?: { code?: string; message?: string } };
+    const e = res.error as {
+      error?: { code?: string; message?: string; detail?: { redirect?: string } };
+    };
+    // A pending/disabled account mid-session returns 403 account_inactive carrying
+    // the holding-page target ({detail:{redirect}}). Full-page-nav there (mirrors
+    // the 401 -> /login chokepoint); the cookie is already cleared server-side. Only
+    // this code redirects — a plain 403 (forbidden) flows through as an ApiError.
+    if (res.response?.status === 403 && e.error?.code === "account_inactive") {
+      window.location.assign(e.error.detail?.redirect ?? "/auth/no-access");
+      throw new ApiError("account_inactive", "account not active");
+    }
     throw new ApiError(e.error?.code ?? "error", e.error?.message ?? "request failed");
   }
   return res.data as T;

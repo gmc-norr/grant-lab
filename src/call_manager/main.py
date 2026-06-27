@@ -321,7 +321,23 @@ def create_app() -> FastAPI:
     @app.exception_handler(AccountInactive)
     async def _inactive_account(request: Request, exc: AccountInactive):
         if api_request(request):
-            return api_error(403, "account_inactive", "account not active")
+            # The SPA's unwrap routes off this 403: pending -> /auth/pending, any
+            # other non-active status -> /auth/no-access (catch-all), mirroring the
+            # deleted Jinja redirect split. Clear the now-inert session cookie so a
+            # later re-login starts clean (status is gated before the epoch check, so
+            # the cookie already grants zero access — this is hygiene, not security).
+            target = "/auth/pending" if exc.status == "pending" else "/auth/no-access"
+            resp = api_error(
+                403, "account_inactive", "account not active", detail={"redirect": target}
+            )
+            resp.delete_cookie(
+                "session",
+                path="/",
+                httponly=True,
+                secure=settings.cookie_secure,
+                samesite="lax",
+            )
+            return resp
         return JSONResponse(status_code=403, content={"detail": "account not active"})
 
     from fastapi.encoders import jsonable_encoder

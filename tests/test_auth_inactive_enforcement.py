@@ -24,16 +24,35 @@ def _user(sf, status):
 
 
 def test_inactive_api_caller_gets_403(monkeypatch, pg_url, pg_session_factory):
-    """A pending/disabled user hitting an /api route gets the 403 envelope
-    (AccountInactive -> api branch). Browser redirect handling is gone — the SPA
-    drives it client-side off this 403."""
+    """A disabled user hitting an /api route gets the 403 account_inactive envelope
+    carrying the /auth/no-access redirect target + a cleared (now-inert) cookie.
+    The SPA's unwrap routes off this 403 (no server-side browser redirect)."""
     app = _app(monkeypatch, pg_url)
     uid = _user(app.state.session_factory, "disabled")
     with TestClient(app) as c:
         c.cookies.set("session", app.state.session_signer.make(user_id=uid))
         r = c.get("/api/me")
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "account_inactive"
+    body = r.json()
+    assert body["error"]["code"] == "account_inactive"
+    assert body["error"]["detail"]["redirect"] == "/auth/no-access"
+    set_cookie = " ".join(r.headers.get_list("set-cookie"))
+    assert "session=" in set_cookie and (
+        "Max-Age=0" in set_cookie or "expires=" in set_cookie.lower()
+    )
+
+
+def test_pending_api_caller_gets_pending_redirect(monkeypatch, pg_url, pg_session_factory):
+    """Parity with the old pending-vs-no-access split: a pending user's 403 carries
+    the /auth/pending target, every other non-active status the /auth/no-access
+    catch-all."""
+    app = _app(monkeypatch, pg_url)
+    uid = _user(app.state.session_factory, "pending")
+    with TestClient(app) as c:
+        c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+        r = c.get("/api/me")
+    assert r.status_code == 403
+    assert r.json()["error"]["detail"]["redirect"] == "/auth/pending"
 
 
 def test_get_current_user_raises_account_inactive(pg_url, pg_session_factory):
