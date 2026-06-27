@@ -32,26 +32,30 @@ Every task's requirements implicitly include this section.
 - Test: `frontend/src/cockpit/BandBadge.test.tsx`
 
 **Interfaces:**
-- Produces: `BandBadge` — `function BandBadge({ band }: { band: ScorecardCriterion["band"] }): JSX.Element`. `ScorecardCriterion["band"]` = `"strong" | "adequate" | "at_risk" | "gap"` (from `../api/evaluator`). Renders a `<span data-band={band}>` with the label (`Strong`/`Adequate`/`At-risk`/`Gap`). Consumed by Task 2 (ScorecardPanel) and Task 3 (CockpitSidebar).
+- Produces: `BandBadge` — `function BandBadge({ band }: { band: ScorecardCriterion["band"] }): JSX.Element`. `ScorecardCriterion["band"]` = `"strong" | "adequate" | "at_risk" | "gap"` (from `../api/evaluator`). Renders a Mantine `<Badge>` carrying `data-band={band}` and the label (`Strong`/`Adequate`/`At-risk`/`Gap`). Consumed by Task 2 (ScorecardPanel) and Task 3 (CockpitSidebar).
 - Produces: `CockpitPanels.module.css` with class `bandBadge` + band classes `strong`, `adequate`, `at_risk`, `gap`. Later tasks append diff/doc/layout classes to this same file.
 
 - [ ] **Step 1: Write the failing test**
 
 ```tsx
 // frontend/src/cockpit/BandBadge.test.tsx
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { expect, it } from "vitest";
 
+import { renderWithProviders } from "../test-utils";
 import { BandBadge } from "./BandBadge";
 
+// renderWithProviders supplies MantineProvider (Badge needs it). Mantine Badge
+// nests the label in an inner <span>, so assert data-band on the root via
+// querySelector, not on the text node.
 it("renders the human label and a stable data-band hook", () => {
-  render(<BandBadge band="at_risk" />);
-  const el = screen.getByText("At-risk");
-  expect(el).toHaveAttribute("data-band", "at_risk");
+  const { container } = renderWithProviders(<BandBadge band="at_risk" />);
+  expect(screen.getByText("At-risk")).toBeInTheDocument();
+  expect(container.querySelector('[data-band="at_risk"]')).not.toBeNull();
 });
 
 it("maps every band to its label", () => {
-  const { rerender } = render(<BandBadge band="strong" />);
+  const { rerender } = renderWithProviders(<BandBadge band="strong" />);
   expect(screen.getByText("Strong")).toBeInTheDocument();
   rerender(<BandBadge band="gap" />);
   expect(screen.getByText("Gap")).toBeInTheDocument();
@@ -63,20 +67,16 @@ it("maps every band to its label", () => {
 Run: `pnpm test -- --run src/cockpit/BandBadge.test.tsx`
 Expected: FAIL — cannot resolve `./BandBadge`.
 
-- [ ] **Step 3: Create the module CSS** (port the exact band rules from `styles/cockpit.css` lines 274-286; `bandBadge` = old `.band-pill`)
+- [ ] **Step 3: Create the module CSS** (port the band COLOURS from `styles/cockpit.css` lines 283-286; Mantine `Badge` provides the pill shape/size/uppercase, so the module only sets the band colour + border. Module classes are unlayered → they override Mantine's `@layer mantine` Badge background/colour/border without `!important`.)
 
 ```css
 /* frontend/src/cockpit/CockpitPanels.module.css
    Scoped cockpit visuals Mantine has no prop for. Tokens from theme/theme.css. */
 
-/* Band pill — shared by ScorecardPanel + CockpitSidebar via <BandBadge>. */
+/* Band pill colours — applied to a Mantine <Badge> by <BandBadge>, shared by
+   ScorecardPanel + CockpitSidebar. Badge gives the shape; these override its
+   bg/colour/border per band. */
 .bandBadge {
-  display: inline-block;
-  font-size: 0.75em;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 0 0.4rem;
-  border-radius: 999px;
   border: 1px solid transparent;
 }
 .strong {
@@ -101,10 +101,12 @@ Expected: FAIL — cannot resolve `./BandBadge`.
 }
 ```
 
-- [ ] **Step 4: Create the component** (model on `components/MatchBadge.tsx`)
+- [ ] **Step 4: Create the component** (Mantine `Badge` + module band-colour class — the spec's "Badge for shape/size + module class for colour")
 
 ```tsx
 // frontend/src/cockpit/BandBadge.tsx
+import { Badge } from "@mantine/core";
+
 import type { ScorecardCriterion } from "../api/evaluator";
 import styles from "./CockpitPanels.module.css";
 
@@ -116,12 +118,19 @@ const BAND_LABEL: Record<ScorecardCriterion["band"], string> = {
 };
 
 // Banded readiness pill, shared by the Scorecard and the sidebar Criteria list so
-// the band styling has a single owner. data-band is the stable test/contract hook.
+// the band styling has a single owner. Mantine Badge gives the shape/size; the
+// module class overrides bg/colour/border per band. data-band is the stable
+// test/contract hook (forwarded to the Badge root).
 export function BandBadge({ band }: { band: ScorecardCriterion["band"] }) {
   return (
-    <span className={`${styles.bandBadge} ${styles[band]}`} data-band={band}>
+    <Badge
+      size="sm"
+      radius="xl"
+      className={`${styles.bandBadge} ${styles[band]}`}
+      data-band={band}
+    >
       {BAND_LABEL[band]}
-    </span>
+    </Badge>
   );
 }
 ```
@@ -177,17 +186,18 @@ Expected: PASS still (provider added, component unchanged) — this step just ve
 - [ ] **Step 3: Re-skin `ScorecardPanel.tsx`** to Mantine. Replace the render body:
 
 ```tsx
-import { ActionIcon, Anchor, Badge, Box, Button, Group, Stack, Text, Title } from "@mantine/core";
+import { Anchor, Box, Button, Group, Stack, Text, Title } from "@mantine/core";
 // ...keep the existing hooks/imports; ADD:
 import { BandBadge } from "./BandBadge";
 // REMOVE the local BAND_CLASS/BAND_LABEL maps (BandBadge owns them now).
 ```
+(Import only what the mapping below uses — `noUnusedLocals: true` fails tsc on any extra. The overall-band pill + per-row pills use `BandBadge`, the deep-link uses `Anchor`; no `Badge`/`ActionIcon` here.)
 
 Render mapping (preserve all text + the `onNavigate` deep-link button):
 - `<main className="scorecard-shell">` → `<Box component="main" p="md"><Stack gap="sm"> … </Stack></Box>`
 - `.scorecard-header` → `<Group gap="sm" align="center">` containing `<Title order={2}>Scorecard</Title>`, `{data && <BandBadge band={data.scorecard.overall_band} />}`, `<Button size="xs" variant="default" disabled={...} onClick={...}>{running ? "Evaluating…" : "Re-evaluate"}</Button>`, and the two error `<Text c="red" role="status" size="sm">`.
 - `.scorecard-meta`/`.scorecard-summary`/`.scorecard-empty` `<p>` → `<Text size="sm" c="dimmed">` (keep the stale `<span>` as `<Text span c="yellow">`; preserve "⚠ changed since:" text).
-- `<ul className="scorecard-list">` → `<Stack gap="xs" component="ul" style={{ listStyle: "none", padding: 0, margin: 0 }}>` — OR simpler: `<Stack gap="xs">` of plain rows (drop the `<ul>/<li>` semantics; the list is presentational). Each row → `<Group gap="sm" align="flex-start" wrap="nowrap">` with `<BandBadge band={c.band} />`, `<Text fw={600} size="sm">{c.name}</Text>`, `<Text size="xs" c="dimmed">w {c.weight}</Text>`, the deep-link `<Anchor component="button" size="xs" onClick={...}>Go to §{...}</Anchor>`, and the note as `<Text size="sm" style={{ whiteSpace: "pre-wrap" }}>{c.note}</Text>` (put the note on its own line under the group inside a per-row `<Stack gap={2}>`).
+- `<ul className="scorecard-list">` → a plain `<Stack gap="xs">` (drop the `<ul>/<li>` semantics — the list is presentational; this avoids `<li>`-outside-`<ul>` markup). Each row → a per-row `<Stack gap={2}>` whose top line is `<Group gap="sm" align="center" wrap="nowrap">` with `<BandBadge band={c.band} />`, `<Text fw={600} size="sm">{c.name}</Text>`, `<Text size="xs" c="dimmed">w {c.weight}</Text>`, the deep-link `<Anchor component="button" size="xs" onClick={...}>Go to §{...}</Anchor>`; and below it the note as `<Text size="sm" style={{ whiteSpace: "pre-wrap" }}>{c.note}</Text>`. No element is `component="li"`.
 
 Keep the `criteria` sort and all conditional rendering identical.
 
@@ -263,10 +273,9 @@ import { Box, Tabs } from "@mantine/core";
       <Tabs
         value={tab}
         onChange={(v) => v && onTab(v as TopTab)}
-        aria-label="Artifact"
         keepMounted={false}
       >
-        <Tabs.List>
+        <Tabs.List aria-label="Artifact">
           <Tabs.Tab value="draft">Draft</Tabs.Tab>
           <Tabs.Tab value="spec">Spec</Tabs.Tab>
           <Tabs.Tab value="scorecard">Scorecard</Tabs.Tab>
@@ -351,8 +360,8 @@ git commit -m "feat(cockpit): artifact tab strip -> Mantine Tabs"
 - `<section className="cockpit-main">` → `<Box component="section" className={styles.editorMain}>`.
 - View toggle `<div role="tablist" aria-label="View">` (Section / {fullViewLabel}) → Mantine `Tabs`:
   ```tsx
-  <Tabs value={view} onChange={(v) => v && setView(v as "section" | "full")} aria-label="View">
-    <Tabs.List>
+  <Tabs value={view} onChange={(v) => v && setView(v as "section" | "full")}>
+    <Tabs.List aria-label="View">
       <Tabs.Tab value="section">Section</Tabs.Tab>
       <Tabs.Tab value="full">{fullViewLabel}</Tabs.Tab>
     </Tabs.List>
@@ -495,7 +504,7 @@ git commit -m "feat(cockpit): DraftPanel wrapper + states -> Mantine"
 - [ ] **Step 3: Re-skin `ReviewPanel.tsx`**
 
 - Replace `STATUS_CLASS` + `StatusPill` with a Mantine `Badge` mapping: `const STATUS_COLOR: Record<string,string> = { done:"teal", running:"blue", queued:"gray", failed:"red", cancelled:"gray", partial:"yellow" };` and `function StatusPill({status}) { return <Badge size="sm" variant="light" color={STATUS_COLOR[status] ?? "gray"}>{status}</Badge>; }` (keep rendering the raw `status` text — tests/usages key off it).
-- `ItemRow` `<li>` → `<Group gap="sm" component="li" style={{listStyle:"none"}}>` (or a `<Group>` row inside a `<Stack component="ul">`); keep `review-item-kind`/`error` text as `<Text size="sm">`/`<Text size="sm" c="red">`.
+- `ItemRow` `<li>` → `<Group gap="sm">` (plain div row; the rows render inside the items `<Stack gap="xs">` below — drop the `<ul>/<li>` semantics, no `component="li"`); keep `review-item-kind`/`error` text as `<Text size="sm">`/`<Text size="sm" c="red">`.
 - `ReviewDoc`: `<pre className="review-doc">` → `<pre className={styles.reviewDoc}>`; `<h2 className="review-doc-title">` → `<Title order={3}>`; loading `<p>` → `<Text size="sm" c="dimmed">`. Wrap section in `<Stack gap="xs" component="section">`.
 - Main `<main className="review-shell">` → `<Box component="main" p="md"><Stack gap="sm">…</Stack></Box>`. Header `<h1>Panel review</h1>` → `<Title order={2}>`; stale `<span>` → `<Badge color="yellow" variant="light">stale</Badge>`. Controls → `<Group gap="sm">` + `<Button>` "Run full mock-panel review"; disabled-reason/start-error → `<Text role="status"/role="alert" size="sm" c="dimmed"/"red">`. Budget/meta `<p>` → `<Text size="sm" c="dimmed">`. Banners `<div role="status">` → `<Alert role="status" variant="light">`. Items `<ul>` → `<Stack gap="xs">`. Empty `<p>` → `<Text size="sm" c="dimmed">`. Preserve ALL strings + the `<strong>{run.status}</strong>` emphasis (use `<Text span fw={700}>`).
 - Imports: `import { Alert, Badge, Box, Button, Group, Stack, Text, Title } from "@mantine/core";` + `import styles from "./CockpitPanels.module.css";`
@@ -556,7 +565,7 @@ git commit -m "feat(cockpit): ReviewPanel -> Mantine (status Badges + scoped doc
 
 - `<section className="proposal-review" aria-label="Pending proposals">` → `<Box component="section" aria-label="Pending proposals" p="sm" style={{border:"1px solid var(--app-border)", borderRadius:6}}><Stack gap="sm">…</Stack></Box>` (keep the bordered card look via inline tokens — minor).
 - `<h2 className="proposal-review-title">` → `<Title order={3}>`. Notice `<p role="status">` → `<Text role="status" size="sm" c="dimmed">`.
-- `<ul>` → `<Stack gap="sm">`; `.proposal-item` `<li>` → `<Box component="li" style={{listStyle:"none", borderTop:"1px solid var(--app-border)", paddingTop:"0.5rem"}}>` (or a `<Stack gap="xs">`).
+- `<ul>` → `<Stack gap="sm">`; `.proposal-item` `<li>` → `<Box style={{borderTop:"1px solid var(--app-border)", paddingTop:"0.5rem"}}>` (plain div — drop the `<ul>/<li>` semantics, no `component="li"`).
 - `.proposal-meta` `<p>` → `<Text size="xs" c="dimmed">`.
 - The diff: `<pre className="proposal-diff">` → `<pre className={styles.proposalDiff}>`; each `<div className={`diff-${r.tag}`}>` → `<div data-diff={r.tag}>` (drop the className; the module styles by `[data-diff]`). Keep the `(r.tag === "add" ? "+ " : …)` text prefix logic.
 - `.proposal-actions` `<div>` → `<Group gap="sm">`; Accept/Reject `<button>` → `<Button size="xs">` (Accept) / `<Button size="xs" variant="default">` (Reject), preserving `disabled`/`title`/`onClick`.
