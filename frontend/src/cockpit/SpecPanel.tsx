@@ -1,3 +1,4 @@
+import { Alert, Box, Button, Group, Stack, Text, Title } from "@mantine/core";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
@@ -23,12 +24,19 @@ export function SpecPanel({ id }: { id: string }) {
     }
   }, [runStatus, id, qc]);
 
-  if (spec.isLoading) return <main aria-busy="true">Loading spec…</main>;
+  if (spec.isLoading)
+    return (
+      <Box component="main" p="md">
+        <Text aria-busy="true">Loading spec…</Text>
+      </Box>
+    );
   if (spec.isError || !spec.data) {
     return (
-      <main role="alert">
-        <h1>Could not load the spec</h1>
-      </main>
+      <Box component="main" p="md">
+        <Title order={2} role="alert">
+          Could not load the spec
+        </Title>
+      </Box>
     );
   }
   const { head, can_edit, sections, locked, locked_at, locked_by, can_manage_lock } = spec.data;
@@ -37,56 +45,58 @@ export function SpecPanel({ id }: { id: string }) {
   const isEmpty = sections.every((s) => s.text.trim() === "");
   if (isEmpty) {
     return (
-      <main className="spec-empty">
-        <h1>Spec</h1>
-        <p>This proposal has no spec yet.</p>
-        <button type="button" disabled={!can_edit || init.isPending} onClick={() => init.mutate()}>
-          Start spec from skeleton
-        </button>
-      </main>
+      <Box component="main" p="md">
+        <Stack gap="sm" align="flex-start">
+          <Title order={2}>Spec</Title>
+          <Text>This proposal has no spec yet.</Text>
+          <Button disabled={!can_edit || init.isPending} onClick={() => init.mutate()}>
+            Start spec from skeleton
+          </Button>
+        </Stack>
+      </Box>
     );
   }
   const lockedOn = locked_at ? new Date(locked_at).toLocaleDateString() : "";
   return (
-    <div className="spec-shell">
+    <Stack gap="sm">
       {locked && (
-        <p className="spec-lock-banner" role="status">
+        <Alert role="status" color="teal" variant="light">
           🔒 Spec locked{locked_by ? ` by ${locked_by}` : ""}
           {lockedOn ? ` on ${lockedOn}` : ""}
-        </p>
+        </Alert>
       )}
       {can_manage_lock && (
-        <div className="spec-lock-bar">
+        <Group gap="sm">
           {locked ? (
-            <button type="button" disabled={unlock.isPending} onClick={() => unlock.mutate()}>
+            <Button size="xs" variant="default" disabled={unlock.isPending} onClick={() => unlock.mutate()}>
               Unlock spec
-            </button>
+            </Button>
           ) : (
-            <button type="button" disabled={lock.isPending} onClick={() => lock.mutate()}>
+            <Button size="xs" variant="default" disabled={lock.isPending} onClick={() => lock.mutate()}>
               Lock spec
-            </button>
+            </Button>
           )}
-        </div>
+        </Group>
       )}
-      <div className="coherence-bar">
-        <button
-          type="button"
+      <Group gap="sm" align="center">
+        <Button
+          size="xs"
           disabled={checking || startCoherence.isPending}
           onClick={() => startCoherence.mutate()}
         >
           {checking ? "Checking coherence…" : "Check coherence"}
-        </button>
+        </Button>
         {runStatus === "completed" && coherence.data && (
-          <span className="coherence-status" role="status">
+          <Text role="status" size="sm" c="dimmed">
             Last check: {coherence.data.n_proposals} proposal(s)
-          </span>
+          </Text>
         )}
         {runStatus === "failed" && (
-          <span className="coherence-status coherence-error" role="status">
+          <Text role="status" size="sm" c="red">
             {coherence.data?.error ?? "Coherence check failed."}
-          </span>
+          </Text>
         )}
-      </div>
+      </Group>
       <ArtifactSectionEditor
         // Remount on workspace change so index-keyed buffers / peek / selection never
         // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
@@ -101,6 +111,6 @@ export function SpecPanel({ id }: { id: string }) {
         citations={false}
         fullViewLabel="Full spec"
       />
-    </div>
+    </Stack>
   );
 }
