@@ -697,6 +697,62 @@ def test_more_count_zero_when_top_fits(pg_session_factory, now):
         payload = assemble_for_user(s, user_id=uid, now=now)
     section = next(sec for sec in payload.sections if sec.profile_id == pid)
     assert section.more_count == 0
+
+
+def _profile(u, name):
+    return Profile(
+        name=name,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
+        description="",
+        structured={
+            "areas": [], "budget_min": None, "budget_max": None,
+            "trl_min": None, "trl_max": None, "must_include": [], "hard_exclusions": [],
+        },
+        created_by=u.id,
+    )
+
+
+def test_more_count_counts_dashboard_set_not_deduped_section(pg_session_factory, now):
+    """DELIBERATE (spec): more_count is the profile's DASHBOARD strong-match count
+    (all >=60 for the profile), NOT the digest's deduped section. A call ranked
+    strong for two profiles is deduped into exactly one section, but it still
+    contributes to the OTHER profile's more_count — because the dashboard the
+    breadcrumb links to is not deduped."""
+    with pg_session_factory() as s:
+        u = User(email="x@ki.se", status="active")
+        s.add(u)
+        s.flush()
+        pa = _profile(u, "AProfile")  # lower id -> wins the dedup tie-break
+        pb = _profile(u, "BProfile")
+        s.add_all([pa, pb])
+        s.flush()
+        s.add_all([
+            Subscription(user_id=u.id, profile_id=pa.id, digest_enabled=True),
+            Subscription(user_id=u.id, profile_id=pb.id, digest_enabled=True),
+        ])
+        # Shared strong call: score 80 for BOTH profiles -> top bucket in both.
+        # Dedup tie-break (bucket, -score, -cos, profile_id) sends it to pa (lower id).
+        cid = _seed_call(s, title="Shared strong", score=80, profile_id=pa.id,
+                         deadline=now + timedelta(days=40))
+        s.add(CallRanking(call_id=cid, profile_id=pb.id, aggregate_score=80,
+                          rationale="r", model="gemma4:e4b-q8", prompt_version="v2.0",
+                          ranked_at=now))
+        # pb keeps a section via its own borderline call (so it isn't dropped empty).
+        _seed_call(s, title="B borderline", score=50, profile_id=pb.id,
+                   deadline=now + timedelta(days=41))
+        uid = u.id
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    section_a = next(sec for sec in payload.sections if sec.profile_name == "AProfile")
+    section_b = next(sec for sec in payload.sections if sec.profile_name == "BProfile")
+    # pa shows the shared call in top (1 shown, 1 total) -> no surplus.
+    assert [e.title for e in section_a.entries if e.bucket == "top"] == ["Shared strong"]
+    assert section_a.more_count == 0
+    # pb's section shows NO top entry (the shared call deduped to pa), yet the
+    # call still counts toward pb's dashboard strong matches -> more_count == 1.
+    assert [e.title for e in section_b.entries if e.bucket == "top"] == []
+    assert section_b.more_count == 1
 ```
 
 Add to `tests/test_digest_render.py`:
