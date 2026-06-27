@@ -7,6 +7,7 @@ from call_manager.web.api import (
     admin,
     admin_golden_set,
     admin_users,
+    auth,
     calls,
     citation_audit,
     export,
@@ -33,6 +34,7 @@ router = APIRouter(
     prefix="/api",
     responses={code: {"model": ApiError} for code in STATUS_CODES},
 )
+router.include_router(auth.router)
 router.include_router(me.router)
 router.include_router(admin.router)
 router.include_router(admin_users.router)
