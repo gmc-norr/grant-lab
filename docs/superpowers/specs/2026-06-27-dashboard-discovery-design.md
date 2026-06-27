@@ -16,7 +16,7 @@ The review's framing: without search and a score filter, "matches 6–40 are unr
 
 ## Architecture & approach
 
-- **Search mechanism: ILIKE over existing pg_trgm GIN indexes.** `pg_trgm` is already enabled (migration `0033`) with `gin_trgm_ops` indexes on `calls.title`, `calls.summary`, `calls.full_text`. Index-backed substring search needs **no new migration**. The digest's multi-column matcher (`digest/assemble.py`) is the in-repo precedent. A `tsvector` full-text column (relevance ranking, stemming) was considered and rejected: it adds a migration + backfill + sync for a payoff that doesn't justify itself at this data volume (thousands, not millions, of calls). Deferred unless relevance ranking is specifically wanted later.
+- **Search mechanism: ILIKE over existing pg_trgm GIN indexes.** `pg_trgm` is already enabled (migration `0033`) with `gin_trgm_ops` indexes on `calls.title`, `calls.summary`, `calls.full_text`, so substring search on those three columns is index-backed and needs **no new migration**. The fourth searched column, `keywords`, is an `ARRAY(Text)` with only a plain GIN index (`&&`/`@>`, not ILIKE); its leg matches `array_to_string(keywords,' ')` as an **unindexed expression scan**. That is acceptable at this data volume (thousands of calls) — the trigram legs prune most rows first, and a query whose *only* matching term is a keyword still scans cheaply over the small content set. If keyword search ever becomes hot, an expression trigram index on `array_to_string(keywords,' ')` is a clean future migration (noted in Out of scope). The digest's multi-column matcher (`digest/assemble.py`) is the in-repo precedent (it searches the same four columns the same way). A `tsvector` full-text column (relevance ranking, stemming) was considered and rejected: it adds a migration + backfill + sync for a payoff that doesn't justify itself at this data volume. Deferred unless relevance ranking is specifically wanted later.
 - **Filters hook into the existing read-model.** `q` joins the shared `base_filters` (so it narrows the page list *and* the summary badges consistently); `min_score` is a ranked-branch-only predicate shared by the page query and its pagination count.
 - **Frontend follows the established URL-as-source-of-truth pattern.** Both filter panes share a single `["calls", params]` TanStack query; controls write the URL via `updateParam` (which resets `page`); no props cross the shell boundary.
 
@@ -112,13 +112,15 @@ Because `aggregate_score >= min_score` is false for the LEFT-JOIN NULLs, **unran
 
 ### Compute the count (`src/call_manager/digest/assemble.py`)
 
-Factor the "top" bucket's filter conditions (open: `deadline IS NULL OR deadline > now`; not-excluded: the existing `excl_clause`; `aggregate_score >= DIGEST_TOP_THRESHOLD`) into a reusable list so the candidate query and a new count query share one definition (DRY). After the per-section buckets are assembled and capped, run one `count(*)` per profile section over those conditions to get `top_total`, and store:
+Factor the "top" bucket's filter conditions (open: `deadline IS NULL OR deadline > now`; not-excluded: the existing `excl_clause`; `aggregate_score >= DIGEST_TOP_THRESHOLD`) into a reusable list so the candidate query and a new count query share one definition (DRY). After the per-section buckets are assembled and capped, run one `count(*)` per profile section over those conditions to get `top_total` (the profile's total open, non-excluded strong matches — the same set the **dashboard** shows at `?profile=&min_score=60`), and store:
 
 ```python
 more_count = max(0, top_total - len(shown_top))   # shown_top capped at DIGEST_BUCKET_SIZE (5)
 ```
 
 `more_count` is a new field on `DigestProfileSection` (default 0). It does not affect `total_calls` or bucket caps.
+
+**Why count against the dashboard, not the digest's deduped section.** The digest dedups each call into exactly one primary `(profile, bucket)` section (`assemble.py:263-285`), so a call scoring ≥60 for two profiles appears under only one heading. The **dashboard does not dedup** — `?profile=X&min_score=60` shows *every* call scoring ≥60 for profile X. The breadcrumb links to that dashboard, so `top_total` is computed against the dashboard's set (all ≥60 for the profile), making the number honest *for where the link lands*. The trade-offs, made explicit so they don't read as bugs: (a) the count does **not** subtract the recipient's per-user dismissals (the digest is profile-scoped and can't know them), and (b) a strong match that this same email already showed under a *different* profile's heading still counts toward this profile's dashboard total. So `more_count` is "additional strong matches waiting in your dashboard for this profile," an approximate, deliberately-generous directional signal — **not** an exact count of calls hidden from this email.
 
 ### Render (`digest.html.jinja`, `digest.txt.jinja`)
 
@@ -127,7 +129,7 @@ After the borderline block, before the section `{% endfor %}`, **only when `sect
 - HTML: `<a href="{{ dashboard_url }}?profile={{ section.profile_id }}&min_score=60">+{{ section.more_count }} more strong matches in your dashboard →</a>`
 - Text: `+{{ section.more_count }} more strong matches in your dashboard: {{ dashboard_url }}?profile={{ section.profile_id }}&min_score=60`
 
-The deep-link floor `60` equals `DIGEST_TOP_THRESHOLD`, so the link lands on exactly the "60+ Good" dashboard view for that profile — the same calls, the same number.
+The deep-link floor `60` equals `DIGEST_TOP_THRESHOLD`, so the link lands on exactly the "60+ Good" dashboard view for that profile — the same *kind* of calls, and (modulo the recipient's own dismissals) the same set the count was taken over. The wording is "strong matches in your dashboard," not "hidden from this email," precisely because of the dedup/dismissal approximation above.
 
 **v1 limitation (documented, not a bug):** a section whose only matches are in the borderline bucket (45–59) and has no top matches gets no breadcrumb. The breadcrumb is specifically about reachable strong matches. The digest cannot account for the recipient's per-user dismissals, so the count is the profile's top-match surplus, which is the cleanest honest number.
 
@@ -142,12 +144,20 @@ Extend `DashboardParams` and `dashboardParamsFrom`:
 q?: string;
 min_score?: number;
 
-// dashboardParamsFrom
-q: sp.get("q") ?? undefined,
-min_score: sp.get("min_score") ? Number(sp.get("min_score")) : undefined,
+// dashboardParamsFrom — both params are sanitized here so the rest of the app
+// (query key, controls) only ever sees canonical values.
+const rawQ = (sp.get("q") ?? "").trim();
+const rawScore = sp.get("min_score");
+const parsedScore = rawScore != null ? Number(rawScore) : NaN;
+// ...
+q: rawQ || undefined,                                   // trimmed; "" → undefined
+min_score:
+  Number.isFinite(parsedScore) && parsedScore >= 0 && parsedScore <= 100
+    ? parsedScore
+    : undefined,                                        // NaN / out-of-range → undefined
 ```
 
-Both join the `["calls", params]` key automatically; `keepPreviousData` prevents list flicker between debounced commits. No change to `useDashboard`.
+Both join the `["calls", params]` key automatically; `keepPreviousData` prevents list flicker between debounced commits. No change to `useDashboard`. **Sanitizing here is deliberate** (Codex review): a malformed deep link like `?min_score=abc` would otherwise become `NaN` and surface as a bogus `"NaN"` Select value; and trimming `q` at the single read point makes `params.q` canonical so the search-box commit guard below compares like-to-like (no churn on `?q=%20foo%20`). The backend still validates independently (422 on a bad `min_score`), but the client never carries garbage state.
 
 ### Controls (`frontend/src/routes/CallsFilters.tsx`)
 
@@ -168,7 +178,7 @@ useEffect(() => {
 useEffect(() => { setSearchInput(params.q ?? ""); }, [params.q]);
 ```
 
-The `next !== (params.q ?? "")` guard is load-bearing: a URL-driven change (back/forward, a digest breadcrumb landing) flows URL → `setSearchInput` → `debouncedSearch`, and without the guard the commit effect would re-write the same `q` back to the URL, churning history. With it, the commit fires only on genuine user keystrokes.
+The `next !== (params.q ?? "")` guard is load-bearing: a URL-driven change (back/forward, a digest breadcrumb landing) flows URL → `setSearchInput` → `debouncedSearch`, and without the guard the commit effect would re-write the same `q` back to the URL, churning history. With it, the commit fires only on genuine user keystrokes. Because `params.q` is already trimmed in `dashboardParamsFrom`, both sides of the comparison are canonical, so even a `?q=%20foo%20` landing settles to `"foo"` and produces **no** rewrite.
 
 **Score floor** — a static-options `Select` cloned from Sort (`CallsFilters.tsx:81-91`):
 
@@ -210,10 +220,11 @@ Disabled when no profile is resolved (`data.effective.profile_id == null`), sinc
 
 - **Backend** — extend `tests/test_api_calls_feed_behavior.py`:
   - `q`: single-term substring match; multi-term AND; per-column coverage (title, summary, full_text, keywords); literal escaping of `%`/`_`; blank `q` is a no-op; `q` reflected in summary badges.
-  - `min_score`: floor returns only `>= N`; unranked calls dropped under an active floor; floor ignored without a profile; `pagination.total`/`has_next` reflect the floor; summary badges reflect `q` but **not** the floor.
+  - `min_score`: floor returns only `>= N`; unranked calls dropped under an active floor; floor ignored without a profile; `pagination.total`/`has_next` reflect the floor.
+  - **Pin the deliberate badge/floor mismatch** (Codex flagged this as the kind of intentional behavior a future change might "fix"): one test asserting the summary badges reflect `q` **but not** `min_score` — i.e. badges describe the q-filtered profile feed while the floor narrows only the list. A docstring on this test states it is intentional.
   - Regression: existing dismissal/`show_closed`/sort/pagination assertions unchanged.
-- **Digest** — extend the assemble + template tests: `more_count` math (`<=5 → 0`, `>5 → surplus`); both templates render the deep link with `min_score=60` only when `more_count > 0`.
-- **Frontend** — extend `routes/CallsFilters.test.tsx` and `routes/Dashboard.test.tsx`: debounced search commits to the URL and resets `page`; URL `q` re-syncs the box; score `Select` disabled without a profile; both params bind to the URL and into the query key.
+- **Digest** — extend the assemble + template tests: `more_count` math (`<=5 → 0`, `>5 → surplus`); a cross-profile-dedup case asserting `more_count` counts against the **dashboard set** (all ≥60 for the profile), not the deduped section, so a call shown under another profile's heading still contributes; both templates render the deep link with `min_score=60` only when `more_count > 0`.
+- **Frontend** — extend `routes/CallsFilters.test.tsx` and `routes/Dashboard.test.tsx`: debounced search commits to the URL and resets `page`; URL `q` re-syncs the box; a `?q=%20foo%20` landing settles to `"foo"` with no extra history entry (the trim/guard); `dashboardParamsFrom` sanitizes a malformed `?min_score=abc` (and out-of-range) to `undefined` (no `"NaN"` Select value); score `Select` disabled without a profile; both params bind to the URL and into the query key.
 - **Gates** — no DB migration (no schema change); regenerate `frontend/src/api/schema.gen.ts` via `pnpm gen:api`; `ruff check .`, `tsc`, `vitest run`, `pnpm build`, OpenAPI drift, and the `gen_*` `--check` scripts all green.
 
 ## File-by-file change map
@@ -237,4 +248,5 @@ Disabled when no profile is resolved (`data.effective.profile_id == null`), sinc
 - Unifying the four inconsistent score-band definitions across surfaces (`MatchBadge` ≥80/≥60, `CallDetail` ≥70, summary ≥70, digest ≥60/45) — a separate Medium review item.
 - Relevance ranking (`ts_rank`/`tsvector` full-text).
 - Borderline-bucket breadcrumbs.
-- A trigram index on `calls.programme` (search covers the four content columns).
+- A trigram index on `calls.programme` (search covers the four content columns, not `programme`).
+- An expression trigram index on `array_to_string(keywords,' ')` — the keyword search leg is an accepted unindexed scan for v1 (see Architecture); add the index only if keyword search becomes a measured hotspot.
