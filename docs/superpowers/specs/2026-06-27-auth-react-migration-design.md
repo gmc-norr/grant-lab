@@ -196,8 +196,9 @@ the last consumer of `error.html` and the dormant branch carried from admin Slic
 ## Testing
 
 - **Backend** `tests/test_api_auth.py` (psycopg3 fixtures): login (active→cookie + `/`
-  redirect, pending→`/auth/pending`, disabled→`/auth/no-access`, bad creds→401,
-  rate-limit→429, `next` sanitization rejects non-local/oversized), register
+  redirect, pending→`/auth/pending`, disabled→`/auth/no-access`, bad creds→generic
+  `400`, rate-limit→the SAME generic `400` (non-disclosure — never `429`), `next`
+  sanitization rejects non-local/oversized), register
   (always-200 anti-enumeration, domain validation, silent duplicate, timing
   dummy-hash), logout (`session_epoch` bump + cookie cleared). The page-behavior tests
   in `test_web_auth.py` migrate to this `/api` shape (coverage-mapped before deleting
