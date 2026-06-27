@@ -99,7 +99,11 @@ def golden_set_add(
             # Two constraints can fire here: the call/profile FKs vs
             # uq_golden_set_triples_pair. (The 0-100 CheckConstraint is pre-guarded
             # above.) Branch on SQLSTATE so a duplicate isn't mislabeled "unknown".
-            sqlstate = getattr(getattr(e, "orig", None), "sqlstate", None)
+            orig = getattr(e, "orig", None)
+            # `sqlstate or pgcode` mirrors the codebase precedent
+            # (proposal_assist/drafting/locking.py) so this stays correct if the
+            # DBAPI driver ever exposes the code under pgcode instead.
+            sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
             if sqlstate == "23505":  # unique_violation -> duplicate (call, profile)
                 raise HTTPException(
                     status_code=409, detail="triple already exists for this call and profile"
