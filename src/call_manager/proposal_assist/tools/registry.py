@@ -162,6 +162,26 @@ def build_proposal_assist_mcp_server(ctx: ToolContext) -> McpSdkServerConfig:
     return create_sdk_mcp_server(name="proposal_assist", tools=tools)
 
 
+def collect_mcp_tool_names() -> frozenset[str]:
+    """Return the canonical frozenset of ALL tool names the shared MCP server
+    exposes, derived from a minimal ToolContext.
+
+    Used by ClaudeAgentSDKAdapter to compute the hard-deny disallowed_tools
+    set for background sub-agents (evaluator / review / uncited-claims). The
+    set is stable across calls — tool registration is deterministic.
+    """
+    import pathlib
+    import uuid as _uuid
+
+    ctx = ToolContext(
+        workspace_id=_uuid.UUID(int=0),
+        repo_dir=pathlib.Path("/tmp"),
+        session_factory=None,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+    )
+    return frozenset(t.name for t in _collect_tools(ctx))
+
+
 def _wrap(impl_result: dict[str, Any]) -> dict[str, Any]:
     """Translate an *_impl plain-dict return into the MCP envelope."""
     if "error" in impl_result:

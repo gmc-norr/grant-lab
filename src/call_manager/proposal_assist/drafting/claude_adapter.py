@@ -302,6 +302,40 @@ class ClaudeAgentSDKAdapter:
                 # draft/spec section mutation; spec removes only prose+citation)
                 "build_bibliography",
             ]
+            # DEFECT 1 FIX: Defense-in-depth for background sub-agents.
+            # allowed_tools alone gates prompting only. Non-allowlisted MCP
+            # tools are ALSO hard-denied via disallowed_tools (stripped from
+            # the model context) AND a can_use_tool callback so even if the
+            # prompt gate is bypassed (e.g. headless auto-allow), a
+            # prompt-injected background pass cannot reach tools like
+            # fetch_reference or propose_edit. Only applies when the caller
+            # supplies a NON-DEFAULT (role-scoped) allowed_tools list — the
+            # interactive adapter keeps the full MCP surface open.
+            if self._allowed_tools is not None:
+                from call_manager.proposal_assist.tools.registry import (
+                    collect_mcp_tool_names,
+                )
+
+                _allowed_set = frozenset(options_kwargs["allowed_tools"])
+                _all_mcp = collect_mcp_tool_names()
+                _denied = sorted(_all_mcp - _allowed_set)
+                if _denied:
+                    options_kwargs["disallowed_tools"] = _denied
+
+                async def _can_use_tool(
+                    tool_name: str,
+                    tool_input: dict[str, Any],
+                    ctx: Any,
+                    _allowed: frozenset[str] = _allowed_set,
+                ) -> Any:
+                    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+                    if tool_name in _allowed:
+                        return PermissionResultAllow()
+                    return PermissionResultDeny(
+                        message=f"tool '{tool_name}' is not in this agent role's allowlist"
+                    )
+
+                options_kwargs["can_use_tool"] = _can_use_tool
         return options_kwargs
 
     async def send_turn(
