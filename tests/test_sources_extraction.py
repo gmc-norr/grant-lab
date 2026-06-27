@@ -261,6 +261,24 @@ def test_fetch_pdf_does_not_follow_redirects():
     assert text is None
 
 
+def test_fetch_html_main_content_caps_extracted_text():
+    """Output of trafilatura.extract is capped at _MAX_EXTRACTED_TEXT_CHARS;
+    oversized output is truncated with a marker."""
+    from unittest.mock import patch
+
+    from call_manager.sources.extraction import _MAX_EXTRACTED_TEXT_CHARS
+
+    huge_text = "x" * (_MAX_EXTRACTED_TEXT_CHARS + 10_000)
+    with patch("trafilatura.extract", return_value=huge_text):
+        result = fetch_html_main_content(
+            "https://example.com/call",
+            transport=_html_transport(_SAMPLE_HTML),  # content doesn't matter; extract is mocked
+        )
+    assert result is not None
+    assert len(result) <= _MAX_EXTRACTED_TEXT_CHARS + 50  # cap + marker
+    assert "truncated" in result
+
+
 def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
     """Codex Plan F regression: a Trafilatura/lxml exception during
     extract() must NOT propagate — the helper must degrade to None like

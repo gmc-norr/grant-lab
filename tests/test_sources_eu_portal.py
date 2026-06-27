@@ -366,3 +366,71 @@ def test_eu_portal_adapter_full_text_none_on_failure():
     # The rest of the normalized record is unaffected.
     assert nc.external_id == "HORIZON-HLTH-2026-DISEASE-03-15"
     assert nc.summary is not None
+
+
+def test_eu_portal_caps_scrapes_per_tick():
+    """On first run, if needs_body returns True for all items, the per-tick
+    scrape cap limits how many topic-detail pages are scraped — remaining
+    items get full_text=None and pick up bodies next tick."""
+    # Build 5 items all needing bodies; cap is 2.
+    n_items = 5
+    cap = 2
+    body = {
+        "results": [
+            {"identifier": f"ID-{i}", "title": f"call {i}", "url": f"https://ec.europa.eu/topic/{i}"}
+            for i in range(n_items)
+        ],
+        "totalResults": n_items,
+    }
+    scrape_count = [0]
+
+    def counting_html_handler(request):
+        scrape_count[0] += 1
+        return httpx.Response(
+            200,
+            text="<html><body><main><article><p>body text</p></article></main></body></html>",
+        )
+
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(body=body),
+        extraction_transport=httpx.MockTransport(counting_html_handler),
+        max_body_scrapes=cap,
+    )
+    out = list(adapter.fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC),
+        needs_body=lambda _: True,
+    ))
+    assert len(out) == n_items
+    assert scrape_count[0] == cap
+    # Only the first `cap` items have full_text; the rest are None.
+    scraped = [c for c in out if c.full_text is not None]
+    assert len(scraped) == cap
+
+
+def test_eu_portal_wall_clock_budget_stops_scraping():
+    """A zero wall-clock budget means no scrapes happen at all (budget exhausted
+    immediately); all items get full_text=None."""
+    body = {
+        "results": [
+            {"identifier": f"ID-{i}", "title": f"call {i}", "url": f"https://ec.europa.eu/topic/{i}"}
+            for i in range(3)
+        ],
+        "totalResults": 3,
+    }
+
+    def boom_handler(request):
+        raise AssertionError("no scrape should occur when budget is 0")
+
+    adapter = EUPortalAdapter(
+        base_url="https://ec.europa.eu",
+        transport=_mock_transport(body=body),
+        extraction_transport=httpx.MockTransport(boom_handler),
+        body_scrape_wall_clock_s=0.0,
+    )
+    out = list(adapter.fetch_new_calls(
+        since=datetime(2026, 1, 1, tzinfo=UTC),
+        needs_body=lambda _: True,
+    ))
+    assert len(out) == 3
+    assert all(c.full_text is None for c in out)

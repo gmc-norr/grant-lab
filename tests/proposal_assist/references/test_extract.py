@@ -224,11 +224,14 @@ def _make_zip_bomb(member_uncompressed: int) -> bytes:
 
 def test_extract_docx_rejects_decompression_bomb():
     """A ZIP container whose declared uncompressed size exceeds the cap
-    is refused BEFORE python-docx tries to inflate it."""
+    is refused BEFORE python-docx tries to inflate it.
+
+    The ratio check may fire first (300MB of zeros has a very high ratio),
+    so accept either the ratio or the absolute-size error message."""
     bomb = _make_zip_bomb(300 * 1024 * 1024)  # 300 MB > 200 MB cap
     # Small on-disk size, huge declared uncompressed size.
     assert len(bomb) < 1 * 1024 * 1024
-    with pytest.raises(ExtractError, match="uncompressed"):
+    with pytest.raises(ExtractError, match="ratio|uncompressed"):
         extract_text(
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             data=bomb,
@@ -236,12 +239,40 @@ def test_extract_docx_rejects_decompression_bomb():
 
 
 def test_extract_xlsx_rejects_decompression_bomb():
+    """The ratio check may fire first (300MB of zeros has a very high ratio),
+    so accept either the ratio or the absolute-size error message."""
     bomb = _make_zip_bomb(300 * 1024 * 1024)
-    with pytest.raises(ExtractError, match="uncompressed"):
+    with pytest.raises(ExtractError, match="ratio|uncompressed"):
         extract_text(
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             data=bomb,
         )
+
+
+def test_extract_docx_rejects_high_compression_ratio_entry():
+    """A ZIP entry whose declared file_size/compress_size ratio exceeds the
+    maximum allowed ratio is rejected as a decompression bomb, even if the
+    absolute declared size is under the 200 MB cap."""
+    import zipfile
+
+    from call_manager.proposal_assist.references.extract import _MAX_ZIP_RATIO
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Write highly-compressible data (all zeros) to get a ratio > 100:1.
+        zf.writestr("word/document.xml", b"\x00" * (10 * 1024 * 1024))  # 10 MB of zeros
+    data = buf.getvalue()
+    # Verify the ratio is actually high (zeros compress very well).
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        info = zf.infolist()[0]
+        actual_ratio = info.file_size / info.compress_size if info.compress_size > 0 else 0
+    # Only run the ratio-rejection assertion if deflate actually achieved a high ratio.
+    if actual_ratio > _MAX_ZIP_RATIO:
+        with pytest.raises(ExtractError, match="ratio"):
+            extract_text(
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                data=data,
+            )
 
 
 def test_extract_docx_rejects_absurd_entry_count():

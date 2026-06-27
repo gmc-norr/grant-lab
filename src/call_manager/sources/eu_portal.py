@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -12,6 +13,7 @@ from call_manager.sources.types import (
     NeedsBody,
     NormalizedCall,
     is_safe_url,
+    pinned_transport_for,
     request_with_retry,
 )
 
@@ -27,6 +29,13 @@ _SEARCH_PATH = "/info/funding-tenders/opportunities/api/v3.0/notices/search"
 # the realistic OPEN+FORTHCOMING set.
 _PAGE_SIZE = 100
 _MAX_PAGES = 200
+
+# Per-tick scrape budget caps. On a first run with 20k items, scraping every
+# body in one blocking tick is impractical (hours of serial HTTP). Instead we
+# cap the number of topic-detail scrapes per `fetch_new_calls` call; items
+# that hit the cap get full_text=None this tick and are picked up next tick.
+_MAX_BODY_SCRAPES_PER_TICK = 300  # max topic-detail page scrapes per tick
+_BODY_SCRAPE_WALL_CLOCK_S = 300.0  # 5-minute wall-clock budget per tick
 
 # ---------------------------------------------------------------------------
 # Plan F (full-text ingestion) — investigation outcome
@@ -96,11 +105,15 @@ class EUPortalAdapter:
         transport: httpx.BaseTransport | None = None,
         extraction_transport: httpx.BaseTransport | None = None,
         timeout: float = 30.0,
+        max_body_scrapes: int = _MAX_BODY_SCRAPES_PER_TICK,
+        body_scrape_wall_clock_s: float = _BODY_SCRAPE_WALL_CLOCK_S,
     ):
         self._base_url = base_url.rstrip("/")
         self._transport = transport
         self._extraction_transport = extraction_transport
         self._timeout = timeout
+        self._max_body_scrapes = max_body_scrapes
+        self._body_scrape_wall_clock_s = body_scrape_wall_clock_s
 
     def fetch_new_calls(
         self, since: datetime, *, needs_body: NeedsBody | None = None
@@ -114,6 +127,37 @@ class EUPortalAdapter:
         # brand-new / body-less calls". When `needs_body` is None (e.g. CLI
         # one-shots that don't wire it), we fall back to always scraping, the
         # pre-fix behavior.
+        #
+        # Per-tick scrape cap: on a first run (20k items all needing bodies),
+        # scraping every one serially in a single tick would take hours.
+        # We cap at _max_body_scrapes items and _body_scrape_wall_clock_s
+        # seconds per tick. Items that hit the cap get full_text=None this tick
+        # and are retried next tick (needs_body returns True again).
+        scrapes_this_tick = 0
+        scrape_deadline = time.monotonic() + self._body_scrape_wall_clock_s
+
+        def capped_needs_body(identifier: str) -> bool:
+            nonlocal scrapes_this_tick
+            if scrapes_this_tick >= self._max_body_scrapes:
+                _logger.debug(
+                    "eu_portal.scrape_cap_hit",
+                    extra={"event": "scrape_cap_hit", "external_id": identifier},
+                )
+                return False
+            if time.monotonic() >= scrape_deadline:
+                _logger.debug(
+                    "eu_portal.scrape_deadline_hit",
+                    extra={"event": "scrape_deadline_hit", "external_id": identifier},
+                )
+                return False
+            # Only increment when we actually allow a scrape (i.e. when the
+            # caller's predicate also says True). Check the upstream predicate
+            # first so we don't burn budget on items that don't need bodies.
+            if needs_body is not None and not needs_body(identifier):
+                return False
+            scrapes_this_tick += 1
+            return True
+
         #
         # Repeated `status` params (status=OPEN&status=FORTHCOMING) are the
         # safest cross-API encoding — comma-separated values get URL-encoded
@@ -129,9 +173,14 @@ class EUPortalAdapter:
         # ranking and digest layers exist.
         seen = 0
         try:
+            api_transport = self._transport
+            if api_transport is None:
+                api_transport = pinned_transport_for(self._base_url)
+                # pinned_transport_for pins the API base URL to prevent DNS rebinding.
+                # Tests always inject self._transport so this branch is production-only.
             with httpx.Client(
                 base_url=self._base_url,
-                transport=self._transport,
+                transport=api_transport,
                 timeout=self._timeout,
             ) as client:
                 # Paginate: the search API returns one page of `results` at a
@@ -159,7 +208,7 @@ class EUPortalAdapter:
                     if not results:
                         break
                     for item in results:
-                        normalized = self._normalize(item, needs_body=needs_body)
+                        normalized = self._normalize(item, needs_body=capped_needs_body)
                         if normalized is not None:
                             yield normalized
                     seen += len(results)

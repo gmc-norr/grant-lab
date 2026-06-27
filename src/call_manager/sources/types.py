@@ -106,54 +106,6 @@ def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def is_safe_fetch_url(url: str) -> bool:
-    """Stronger check for URLs we are about to *fetch* (not just store).
-
-    On top of the scheme check, resolve the host and reject any address that
-    falls in a private/loopback/link-local/metadata range — closing the SSRF
-    hole where upstream JSON points `url` at an internal service or the cloud
-    metadata endpoint (169.254.169.254). A literal IP host is checked
-    directly; a name is resolved via DNS and every returned address must pass.
-
-    Returns False on a malformed URL, missing host, or DNS failure — callers
-    treat False as "do not fetch".
-    """
-    if not is_safe_url(url):
-        return False
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return False
-    if not host:
-        return False
-
-    # Literal IP host: check directly (no DNS).
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None:
-        return not _ip_is_blocked(ip)
-
-    # Hostname: resolve and require EVERY resolved address to be public,
-    # so a name with both a public and an internal A record can't slip
-    # an internal target past us.
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
-    addrs = {info[4][0] for info in infos}
-    if not addrs:
-        return False
-    for addr in addrs:
-        try:
-            if _ip_is_blocked(ipaddress.ip_address(addr)):
-                return False
-        except ValueError:
-            return False
-    return True
-
-
 def resolve_pinned_ip(url: str) -> str | None:
     """Resolve `url`'s host ONCE and return a validated public IP to connect to,
     or None if the URL is unsafe/unresolvable.
@@ -197,6 +149,18 @@ def resolve_pinned_ip(url: str) -> str | None:
         except ValueError:
             return None
     return addrs[0]
+
+
+def is_safe_fetch_url(url: str) -> bool:
+    """Stronger check for URLs we are about to *fetch* (not just store).
+
+    Returns False on a malformed URL, missing host, unsafe scheme, private IP,
+    or DNS failure.
+
+    Defined in terms of `resolve_pinned_ip` so both functions share a single
+    DNS resolution and a single source of truth for the private-IP check.
+    """
+    return resolve_pinned_ip(url) is not None
 
 
 def _resolve_and_validate_public_ip(host: str, port: int) -> str:

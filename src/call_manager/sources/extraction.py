@@ -29,6 +29,9 @@ from call_manager.sources.types import (
 
 _logger = logging.getLogger(__name__)
 
+# ~200k chars ≈ ~50k tokens; more than enough for a call summary.
+_MAX_EXTRACTED_TEXT_CHARS = 200_000
+
 
 def _resolve_transport(
     url: str, transport: httpx.BaseTransport | None
@@ -157,6 +160,8 @@ def fetch_html_main_content(
             extra={"event": "html_failed", "url": url, "error": str(e)},
         )
         return None
+    if extracted and len(extracted) > _MAX_EXTRACTED_TEXT_CHARS:
+        extracted = extracted[:_MAX_EXTRACTED_TEXT_CHARS] + "\n[extracted text truncated]"
     if not extracted or not extracted.strip():
         _logger.warning(
             "extraction.html_failed",

@@ -13,6 +13,7 @@ from call_manager.sources.types import (
     NeedsBody,
     NormalizedCall,
     is_safe_url,
+    pinned_transport_for,
     request_with_retry,
 )
 
@@ -136,9 +137,14 @@ class VinnovaAdapter:
         programmes_path = f"/api/utlysningar/{date_suffix}"
 
         try:
+            api_transport = self._transport
+            if api_transport is None:
+                api_transport = pinned_transport_for(self._base_url)
+                # pinned_transport_for pins the API base URL to prevent DNS rebinding.
+                # Tests always inject self._transport so this branch is production-only.
             with httpx.Client(
                 base_url=self._base_url,
-                transport=self._transport,
+                transport=api_transport,
                 timeout=self._timeout,
             ) as client:
                 resp = request_with_retry(
@@ -176,7 +182,9 @@ class VinnovaAdapter:
                         # permanently stuck on the same flaky round.
                         round_path = f"/api/ansokningsomgangar/{dnr}"
                         try:
-                            round_resp = client.get(round_path, headers={"Accept": _ACCEPT_V2})
+                            round_resp = request_with_retry(
+                                client, "GET", round_path, headers={"Accept": _ACCEPT_V2}
+                            )
                             round_resp.raise_for_status()
                             round_list = round_resp.json()
                             if not isinstance(round_list, list):
