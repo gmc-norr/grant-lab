@@ -1,5 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
+
+import { renderWithProviders } from "../test-utils";
 import { RubricEditor } from "./RubricEditor";
 
 const CRITERIA = [
@@ -9,7 +11,7 @@ const CRITERIA = [
 
 it("shows normalized weight % and preserves passthrough fields on edit", () => {
   const onChange = vi.fn();
-  render(<RubricEditor criteria={CRITERIA as never} funderNotes="" onChange={onChange} />);
+  renderWithProviders(<RubricEditor criteria={CRITERIA as never} funderNotes="" onChange={onChange} />);
   // 3 / (3+1) = 75%
   expect(screen.getByText(/75\s*%/)).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText(/weight for Impact/i), { target: { value: "5" } });

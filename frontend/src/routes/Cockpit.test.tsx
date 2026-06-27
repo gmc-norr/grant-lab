@@ -852,13 +852,15 @@ it("renders the setup view when the workspace is in setup phase", async () => {
   // phase is returned, allowing useCockpitMeta to read "setup" from the mock.
   const qc = new QueryClient();
   render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
-        <Routes>
-          <Route path="/cockpit/:id" element={<Cockpit />} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+          <Routes>
+            <Route path="/cockpit/:id" element={<Cockpit />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
   );
   expect(await screen.findByText(/setting up your workspace/i)).toBeInTheDocument();
 });
