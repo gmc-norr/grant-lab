@@ -72,14 +72,25 @@ def record_terminal_outcome(
     if row is None:
         return False
     user_turn_id, submitted_by_user_id = row
-    # Clear the submit-time tokens_in pre-count on the user-turn row so a
-    # terminal turn doesn't keep burning daily-cap budget for input it never
-    # actually consumed (mirrors the finalize/reaper behaviour).
+    consumed = tokens_in > 0 or tokens_out > 0
+    # B9 cap-accounting fix: a turn that streamed tokens before failing actually
+    # spent them, so they MUST count against the daily cap (which sums
+    # ChatTurn.tokens_{in,out} for today). Previously the consumed tokens lived
+    # ONLY in the WorkspaceEvent audit payload below — which the cap query never
+    # reads — so a failed turn recorded ZERO against the cap, letting a looping
+    # user burn real spend invisibly. Stamp the consumed tokens onto a chat_turns
+    # row so the cap sees them. When NOTHING was consumed (the common
+    # reaped/orphaned/cancelled case) clear the submit-time pre-count so the
+    # abandoned turn doesn't keep burning budget for input it never used.
     if user_turn_id is not None:
         user_turn = session.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
-        if user_turn is not None:
+        if user_turn is not None and not consumed:
             user_turn.tokens_in = None
     if emit_chat:
+        # Stamp the actually-consumed tokens onto the viewer-safe system outcome
+        # row (the user-turn pre-count is an ESTIMATE the SDK totals supersede, so
+        # we always clear it when consumed and record the truth here instead). The
+        # system row carries None/None when nothing was consumed.
         session.add(
             ChatTurn(
                 workspace_id=workspace_id,
@@ -91,8 +102,25 @@ def record_terminal_outcome(
                     "turn_job_id": str(turn_job_id),
                     "user_turn_id": str(user_turn_id) if user_turn_id is not None else None,
                 },
+                tokens_in=tokens_in or None,
+                tokens_out=tokens_out or None,
             )
         )
+        # The pre-count is now superseded by the system row's truth; clear it so
+        # the cap sum doesn't double-count this turn's input.
+        if consumed and user_turn_id is not None:
+            user_turn = session.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+            if user_turn is not None:
+                user_turn.tokens_in = None
+    elif consumed and user_turn_id is not None:
+        # emit_chat=False (soft-delete: no surface row) but tokens WERE consumed.
+        # There is no system row to carry them, so replace the user-turn pre-count
+        # estimate with the SDK-reported truth on the user-turn row itself rather
+        # than dropping the spend from the cap sum.
+        user_turn = session.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        if user_turn is not None:
+            user_turn.tokens_in = tokens_in or None
+            user_turn.tokens_out = tokens_out or None
     kind = "cloud_turn_failed" if outcome == "failed" else "cloud_turn_cancelled"
     session.add(
         WorkspaceEvent(

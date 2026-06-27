@@ -1,6 +1,8 @@
 import uuid
 
-from call_manager.db.models import EvaluatorJob, Workspace
+from sqlalchemy import select
+
+from call_manager.db.models import EvaluatorJob, Workspace, WorkspaceEvent
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -85,3 +87,29 @@ def test_non_member_403(
     # an unauthenticated client is rejected by get_current_user (401/403)
     r = client_unauth.get(f"/api/workspaces/{ws_id}/scorecard")
     assert r.status_code in (401, 403)
+
+
+def test_enqueue_writes_actor_attributed_trigger_event(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    """Enqueuing an evaluator run must emit an evaluator_run_triggered WorkspaceEvent
+    carrying the triggering actor (mirrors review_run_triggered), and NOT duplicate
+    it on the active-first re-POST."""
+    ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
+    uid = current_user.id
+    a = client_authed_owner.post(f"/api/workspaces/{ws_id}/evaluator-runs")
+    assert a.status_code == 200, a.text
+    job_id = a.json()["id"]
+    b = client_authed_owner.post(f"/api/workspaces/{ws_id}/evaluator-runs")
+    assert b.json()["id"] == job_id  # active-first, no second event
+
+    with pg_session_factory() as s:
+        evs = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == uuid.UUID(ws_id),
+                WorkspaceEvent.kind == "evaluator_run_triggered",
+            )
+        ).all()
+    assert len(evs) == 1
+    assert evs[0].actor_id == uid
+    assert evs[0].payload["job_id"] == job_id

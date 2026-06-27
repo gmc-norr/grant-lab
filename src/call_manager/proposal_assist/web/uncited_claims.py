@@ -84,6 +84,15 @@ def start_uncited_claims_run(
     session: Session = Depends(_session_dep),  # noqa: B008
     user=Depends(get_current_user),  # noqa: B008
 ) -> dict:
+    # AUTHORITY (B9 defect 3 — DELIBERATE): gated on require_member, NOT
+    # require_owner, even though interactive chat turns (submit_turn) are
+    # owner-only. Members triggering this cloud fan-out is an intentional
+    # collaboration affordance, kept accountable by the actor-attributed
+    # uncited_claims_run_triggered WorkspaceEvent below (this route already
+    # emitted one — see `created` branch) and bounded by the per-workspace
+    # uncited-claims daily cap PLUS the org-wide global daily token cap, which
+    # UNIONs uncited_claims_jobs alongside coherence / evaluator / review (B9
+    # defect 2). Do NOT narrow to owner or add a per-actor sub-cap.
     ws: Workspace = require_member(workspace_id=workspace_id, user=user, session=session)
     gate_cloud_llm(
         ws=ws,

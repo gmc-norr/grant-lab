@@ -69,6 +69,11 @@ async def _run_one_call(
                 ReviewRunItem.review_run_id == run_id, ReviewRunItem.kind == kind
             )
         )
+        # Defensive early return (B9 defect 6): the "never raises" contract means
+        # we must not assume the item row exists. If the run's items were never
+        # created (or were pruned), bail instead of dereferencing item.id -> None.
+        if item is None:
+            return
         item_id = item.id
         # Pre-launch live recheck (mirrors evaluator/pass_runner.py:92): a soft-delete
         # cancel or reaper may have flipped the run between step-1's read session and

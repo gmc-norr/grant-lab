@@ -140,6 +140,14 @@ def start_review_run(
     session: Session = Depends(_session_dep),  # noqa: B008
     user=Depends(get_current_user),  # noqa: B008
 ) -> dict:
+    # AUTHORITY (B9 defect 3 — DELIBERATE): gated on require_member, NOT
+    # require_owner, even though interactive chat turns (submit_turn) are
+    # owner-only. This is the most expensive cloud fan-out (multi-persona mock
+    # panel); members triggering it is an intentional collaboration affordance,
+    # kept accountable by the actor-attributed review_run_triggered WorkspaceEvent
+    # (B9 defect 4, written below) and bounded by the per-workspace runs/dollar
+    # caps + the org-wide global daily token cap, which now UNIONs review_runs (B9
+    # defect 2). Do NOT narrow to owner or add a per-actor sub-cap.
     ws = require_member(workspace_id=workspace_id, user=user, session=session)
     gate_cloud_llm(ws=ws, request=request, session=session, user=user,
                    disclosure_action="running a mock-panel review")

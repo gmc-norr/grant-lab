@@ -20,7 +20,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
-from call_manager.db.models import ChatTurn, Workspace
+from call_manager.db.models import (
+    ChatTurn,
+    CoherenceJob,
+    EvaluatorJob,
+    ReviewRun,
+    UncitedClaimsJob,
+    Workspace,
+)
 
 _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 _UTC = ZoneInfo("UTC")
@@ -158,6 +165,22 @@ def check_global_daily_token_cap(
     """Sum today's input/output tokens across ALL workspaces against the
     global ceiling. Read-only; caller (submit_user_turn) raises.
 
+    Coverage (B9): this org-wide backstop UNIONs ALL FIVE cloud-spend tables,
+    not just chat turns. Each of the four background queues — coherence,
+    evaluator, mock-panel review, uncited-claims — tracks its tokens on its OWN
+    table (the member-triggerable fan-outs in web/coherence.py, web/evaluator.py,
+    web/review.py, web/uncited_claims.py), so summing only ChatTurn left the bulk
+    of cloud consumers invisible to the global guardrail. We coalesce-sum each
+    table's today rows and add the five totals:
+      - ChatTurn.tokens_{in,out}              (created_at  >= day start)
+      - CoherenceJob.{input,output}_tokens    (queued_at   >= day start)
+      - EvaluatorJob.{input,output}_tokens    (queued_at   >= day start)
+      - ReviewRun.{input,output}_tokens       (triggered_at >= day start;
+        run-level totals already roll up per-item spend, incl. reaped runs)
+      - UncitedClaimsJob.{input,output}_tokens (queued_at  >= day start)
+    Each table is queried separately (no SQL JOIN) so unrelated row counts can't
+    fan out and multiply the sums.
+
     Concurrency: NO global advisory lock. The cap is a guardrail
     against runaway org-wide spend, not an exact ledger. Two concurrent
     submits in different workspaces can both pass a near-cap global
@@ -167,13 +190,42 @@ def check_global_daily_token_cap(
     on a stable per-day key (e.g. hashtext('global-cap:' || YYYYMMDD)).
     """
     day_start_utc = _stockholm_day_start_utc()
-    sums = session.execute(
+    chat = session.execute(
         select(
             func.coalesce(func.sum(ChatTurn.tokens_in), 0),
             func.coalesce(func.sum(ChatTurn.tokens_out), 0),
         ).where(ChatTurn.created_at >= day_start_utc)
     ).one()
-    used_in, used_out = int(sums[0]), int(sums[1])
+    coherence = session.execute(
+        select(
+            func.coalesce(func.sum(CoherenceJob.input_tokens), 0),
+            func.coalesce(func.sum(CoherenceJob.output_tokens), 0),
+        ).where(CoherenceJob.queued_at >= day_start_utc)
+    ).one()
+    evaluator = session.execute(
+        select(
+            func.coalesce(func.sum(EvaluatorJob.input_tokens), 0),
+            func.coalesce(func.sum(EvaluatorJob.output_tokens), 0),
+        ).where(EvaluatorJob.queued_at >= day_start_utc)
+    ).one()
+    review = session.execute(
+        select(
+            func.coalesce(func.sum(ReviewRun.input_tokens), 0),
+            func.coalesce(func.sum(ReviewRun.output_tokens), 0),
+        ).where(ReviewRun.triggered_at >= day_start_utc)
+    ).one()
+    uncited = session.execute(
+        select(
+            func.coalesce(func.sum(UncitedClaimsJob.input_tokens), 0),
+            func.coalesce(func.sum(UncitedClaimsJob.output_tokens), 0),
+        ).where(UncitedClaimsJob.queued_at >= day_start_utc)
+    ).one()
+    used_in = (
+        int(chat[0]) + int(coherence[0]) + int(evaluator[0]) + int(review[0]) + int(uncited[0])
+    )
+    used_out = (
+        int(chat[1]) + int(coherence[1]) + int(evaluator[1]) + int(review[1]) + int(uncited[1])
+    )
     cap_in = settings.global_daily_token_cap_input
     cap_out = settings.global_daily_token_cap_output
     reason: str | None = None
