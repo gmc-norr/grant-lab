@@ -221,13 +221,34 @@ def _volume_issue_page(csl: dict) -> tuple[str, str, str]:
 def _assemble(pieces: list[str]) -> str:
     """Join sentence pieces with ``". "`` and terminate with a single period.
 
-    Each piece may already end in its own period (an author-year initial like
-    "Smith, J." or a title written "Outcomes."). Stripping at most one trailing
-    period per piece before joining guarantees we never emit a doubled ".."
-    while preserving mid-string initials (the "J." in "Smith, J. T.").
+    Each piece may already end in its own terminator: a period (author-year
+    initial "Smith, J." or title "Outcomes."), a question mark ("Is obesity a
+    disease?"), or an exclamation mark ("Surprising results!").
+
+    Handling:
+    - Intermediate pieces have their trailing ``.`` stripped before joining so
+      we never emit a doubled ``..`` (e.g. "Smith, J." becomes "Smith, J" for
+      joining, preserving the mid-string initial).
+    - The LAST piece keeps its terminal ``?`` or ``!`` as the final character
+      of the assembled string (so ``Title?`` stays ``Title?``, not ``Title?.``).
+      A trailing ``.`` on the last piece is stripped; the separator ``"."`` acts
+      as the terminator instead.
     """
+    if not pieces:
+        return "."
+    # Strip trailing "." from every piece before joining with ". " so that
+    # intermediate initials like "Smith, J." don't produce "Smith, J.. Title".
+    # For "?" and "!" we leave them as-is during the join so they survive in the
+    # assembled text; they are handled separately for the last piece below.
     cleaned = [p[:-1] if p.endswith(".") else p for p in pieces]
-    return ". ".join(cleaned) + "."
+    joined = ". ".join(cleaned)
+    # Determine the correct final terminator by examining the ORIGINAL last piece.
+    last_char = pieces[-1][-1] if pieces[-1] else ""
+    if last_char in "?!":
+        # The last piece's own terminal is authoritative — keep it. The join
+        # already ended the string with that character (we only stripped ".").
+        return joined
+    return joined + "."
 
 
 def format_vancouver(csl: dict, number: int) -> str:
@@ -373,11 +394,14 @@ def render_bibliography(entries: list[tuple[str, dict]], style: str) -> str:
         return ""
 
     if style == "author-year":
-        lines = []
+        pairs: list[tuple[str, str]] = []  # (formatted, citekey)
         for item in entries:
             citekey, csl = _unpack(item)
-            lines.append(format_author_year(csl, citekey))
-        lines.sort(key=lambda s: s.casefold())
+            pairs.append((format_author_year(csl, citekey), citekey))
+        # Sort case-insensitively by formatted text; citekey breaks ties so the
+        # order is fully deterministic even when two entries render identically.
+        pairs.sort(key=lambda p: (p[0].casefold(), p[1]))
+        lines = [fmt for fmt, _ck in pairs]
     else:  # vancouver
         lines = []
         for number, item in enumerate(entries, start=1):
@@ -662,6 +686,47 @@ def _inline_author_year(csl: dict, citekey: str) -> str:
     return f"({citekey})"
 
 
+#: Matches an opening or closing fenced code block delimiter (``` or ~~~).
+_FENCE_LINE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+#: Matches an inline-code span (single backtick — we strip their content to
+#: avoid false bare-marker hits in ``code``, then restore the backtick delimiters).
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def _prose_only(text: str) -> str:
+    """Return *text* with fenced code blocks and inline-code spans blanked out.
+
+    Used by the residual bare-marker scrub in :func:`compose_export` so that a
+    literal ``[@token]`` inside a code context is not mistaken for an unresolved
+    citation marker.  The blanked regions are replaced with the same number of
+    space characters so that all character offsets (and therefore the length of the
+    returned string) are preserved — making it safe to feed the result to a regex
+    without invalidating any position information.
+
+    Fence tracking mirrors ``iter_proposal_sentences`` in ``citations/claims.py``:
+    both the opening and closing ``` / ~~~ fence lines are excluded.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    in_fence = False
+    for line in lines:
+        stripped = line.rstrip("\n")
+        if _FENCE_LINE_RE.match(stripped):
+            in_fence = not in_fence
+            # Fence delimiter lines themselves are blanked (they contain no prose).
+            out.append(" " * len(line))
+            continue
+        if in_fence:
+            out.append(" " * len(line))
+            continue
+        # Prose line: blank inline-code spans so their content is invisible to the
+        # bare-marker regex while keeping the surrounding text intact.
+        blanked = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group()), line)
+        out.append(blanked)
+    return "".join(out)
+
+
 def compose_export(
     *,
     proposal_text: str,
@@ -713,7 +778,12 @@ def compose_export(
     # that bypassed both resolution and substitution and would leak verbatim. The
     # "[@key]" token is reserved for citations here, so any residual one is an
     # unresolved citation — fail closed rather than emit a leaked marker.
-    residual = _BARE_MARKER_RE.findall(composed)
+    #
+    # Code-fence/inline-code awareness: a bare "[@key]" inside a fenced code
+    # block (``` / ~~~) or an inline-code span (`) is literal text and must NOT
+    # block export.  We scan only the PROSE regions (mirroring the fence-tracking
+    # logic from iter_proposal_sentences in citations/claims.py).
+    residual = _BARE_MARKER_RE.findall(_prose_only(composed))
     if residual:
         raise BuildBibliographyBlocked(
             [

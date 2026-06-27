@@ -686,3 +686,93 @@ def test_waived_extracted_ref_renders_from_extracted(pg_session_factory, tmp_pat
     assert result["citekey_count"] == 1
     assert "Smith" in result["bibliography_md"]
     assert "Untitled" not in result["bibliography_md"]
+
+
+# --------------------------------------------------------------------------- #
+# Defect 1: code-fence-aware residual scrub in compose_export.
+#
+# A bare [@token] inside a fenced code block or inline code span must NOT
+# block export.  A bare [@token] in real prose MUST still block (fail-closed).
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_bare_marker_in_fenced_code_block_does_not_block(pg_session_factory, tmp_path):
+    """A [@token] inside a fenced code block is literal text, not a citation."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    # Real marker in prose + bare [@example] inside a fenced block.
+    proposal = (
+        "# Proposal\n\n"
+        f"We argue {build_marker('smith2021', 'ev-aaaaaaaaaaaa')} in our population.\n\n"
+        "```python\n"
+        "# Use pandoc-style [@smith2021] citations\n"
+        "```\n"
+    )
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session:
+        # Must NOT raise BuildBibliographyBlocked.
+        out = compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+        )
+
+    # The fenced code block content is preserved verbatim.
+    assert "[@smith2021]" in out
+    # The real citation was replaced.
+    assert "[1]" in out
+    assert "<!-- ev:" not in out
+
+
+def test_compose_bare_marker_in_inline_code_does_not_block(pg_session_factory, tmp_path):
+    """A [@token] inside an inline code span is literal text, not a citation."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    # Real marker in prose + bare [@jones2019] inside backtick inline-code.
+    proposal = (
+        "# Proposal\n\n"
+        f"Real {build_marker('smith2021', 'ev-aaaaaaaaaaaa')} and inline "
+        "code `[@jones2019]` shows the format.\n"
+    )
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session:
+        out = compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+        )
+
+    assert "[@jones2019]" in out
+    assert "[1]" in out
+    assert "<!-- ev:" not in out
+
+
+def test_compose_bare_marker_in_prose_still_blocks(pg_session_factory, tmp_path):
+    """A [@token] in real prose (not inside code) must still raise BuildBibliographyBlocked."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    # One good marker + one bare marker in PROSE (not inside any code fence/span).
+    proposal = (
+        "# Proposal\n\n"
+        f"Good {build_marker('smith2021', 'ev-aaaaaaaaaaaa')} and a bare [@orphan] here.\n"
+    )
+    ledger = _ledger([_ledger_row(citekey="smith2021", reference_id=rid, ev_id="ev-aaaaaaaaaaaa")])
+
+    with pg_session_factory() as session, pytest.raises(BuildBibliographyBlocked) as exc:
+        compose_export(
+            proposal_text=proposal,
+            ledger=ledger,
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+        )
+
+    reasons = {b["reason"] for b in exc.value.blocked}
+    assert "unresolved_marker" in reasons
+    assert any(b["citekey"] == "orphan" for b in exc.value.blocked)

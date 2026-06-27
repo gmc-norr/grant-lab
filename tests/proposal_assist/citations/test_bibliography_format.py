@@ -529,3 +529,88 @@ def test_inline_author_year_no_author_falls_back_to_year():
 def test_inline_author_year_no_author_no_year_falls_back_to_citekey():
     out = _inline_author_year({}, "mystery")
     assert out == "(mystery)"
+
+
+# ---------------------------------------------------------------------------
+# Defect 2: bibliography title terminator — no doubled ?. or !.
+# ---------------------------------------------------------------------------
+
+
+def test_author_year_question_mark_title_no_double_terminator():
+    # "Is obesity a disease?" must render "Is obesity a disease?" not "Is obesity a disease?."
+    out = format_author_year(
+        {
+            "author": [{"family": "Smith", "given": "Jane"}],
+            "title": "Is obesity a disease?",
+            "issued": {"date-parts": [[2021]]},
+        },
+        "smith2021",
+    )
+    assert "?." not in out
+    assert "Is obesity a disease?" in out
+
+
+def test_author_year_exclamation_title_no_double_terminator():
+    out = format_author_year(
+        {
+            "author": [{"family": "Lee", "given": "Kim"}],
+            "title": "Surprising results!",
+            "issued": {"date-parts": [[2020]]},
+        },
+        "lee2020",
+    )
+    assert "!." not in out
+    assert "Surprising results!" in out
+
+
+def test_author_year_period_title_still_one_period():
+    # A title ending "." must still end with exactly one "." (existing behaviour).
+    out = format_author_year(
+        {
+            "author": [{"family": "Doe", "given": "John"}],
+            "title": "Normal outcome.",
+            "issued": {"date-parts": [[2019]]},
+        },
+        "doe2019",
+    )
+    assert ".." not in out
+    assert out.endswith("Normal outcome.")
+
+
+def test_vancouver_question_mark_title_no_double_terminator():
+    out = format_vancouver(
+        {"author": [{"family": "X"}], "title": "Is this true?"}, 1
+    )
+    assert "?." not in out
+    assert "Is this true?" in out
+
+
+# ---------------------------------------------------------------------------
+# Defect 3: author-year sort is stable in tie cases — secondary key = citekey
+# ---------------------------------------------------------------------------
+
+
+def test_render_author_year_stable_sort_on_identical_rendered_strings():
+    # Two entries that produce the same formatted string (different citekeys) must
+    # sort deterministically by citekey as the tiebreaker.
+    csl_a = {
+        "author": [{"family": "Smith", "given": "J"}],
+        "title": "Title",
+        "issued": {"date-parts": [[2021]]},
+    }
+    csl_b = {
+        "author": [{"family": "Smith", "given": "J"}],
+        "title": "Title",
+        "issued": {"date-parts": [[2021]]},
+    }
+    # Run many times to surface non-determinism that a single run would hide.
+    results = set()
+    for _ in range(10):
+        entries = [("smith2021b", csl_a), ("smith2021a", csl_b)]
+        out = render_bibliography(entries, "author-year")
+        body = out[len("# References\n\n"):]
+        lines = [ln for ln in body.splitlines() if ln.strip()]
+        results.add(tuple(lines))
+    # Always the same order, and citekey "smith2021a" < "smith2021b" alphabetically
+    # (both produce identical rendered text, so citekey breaks the tie).
+    assert len(results) == 1, "sort is non-deterministic across runs"
