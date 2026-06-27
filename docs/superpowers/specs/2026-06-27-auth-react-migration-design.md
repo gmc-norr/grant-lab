@@ -61,17 +61,35 @@ All endpoints reuse the same cookie + CSRF mechanics the rest of the SPA uses
 is set/cleared server-side).
 
 **`POST /api/auth/login`** — body `{email, password, next?}`. IP + email rate-limit,
-argon2 verify, then the server decides the outcome and returns the path React should
-navigate to (so open-redirect sanitization stays server-side via `safe_next`):
+argon2 verify (the dummy-hash path runs even when the user/hash is absent, so timing
+never reveals account existence — preserved verbatim), then the server decides the
+outcome and returns the path React should navigate to (so open-redirect sanitization
+stays server-side via `safe_next`):
 - active → set the signed session cookie, update `last_login_at`, `200 {redirect: safe_next(next) or "/"}`
-- pending → no cookie, `200 {redirect: "/auth/pending"}`
-- disabled → no cookie, `200 {redirect: "/auth/no-access"}`
-- bad credentials → `401` envelope; rate-limited → `429`. React renders these inline
-  (no redirect → no 401→/login loop; the current Jinja hacks around this by returning
-  the error at HTTP 200).
+- non-active: **pending → `200 {redirect: "/auth/pending"}`** (no cookie); **any other
+  status (the catch-all) → `200 {redirect: "/auth/no-access"}`** (no cookie). Mirrors
+  `auth.py:140` (`"/auth/pending" if status=="pending" else "/auth/no-access"`) — the
+  plan must NOT hard-code `status=="disabled"` or it silently drops a future status.
+- **failure → a SINGLE generic `400 {message: "Invalid email or password."}` for
+  unknown-email / wrong-password / no-credential / rate-limited alike**, indistinguishable
+  across all four modes (verbatim parity with the deleted `_denied()`, auth.py:103-127).
+  React renders it inline.
 
-React: on `200`, invalidate the `["me"]` query and navigate to `redirect`; on an
-error envelope, show the message in the form.
+**Why `400`, not `401` — and one bucket for rate-limit (a pinned invariant, not an
+accident):** the SPA's `unwrap` redirects to `/login` on ANY `401` (the single
+session-expiry chokepoint), so a `401` from `/api/auth/login` would bounce the user
+back to `/login` and lose their input — exactly the loop the current Jinja dodges by
+returning failures at HTTP 200 (see the `_denied()` comment: *"Status 200 so the global
+401→/login handler can't loop"*). `400` flows through `unwrap` as a thrown `ApiError`
+with NO redirect, so React shows the message in the form. Rate-limited is folded into
+the same generic `400` (NOT a distinct `429`) to preserve `_denied()`'s deliberate
+non-disclosure — the endpoint must never reveal whether a caller failed on credentials
+vs. the limiter. (A `429` "too many attempts" UX would be an explicit opt-in behavior
+change, not parity.) A test pins: the three credential-failure modes return byte-identical
+status + message.
+
+React: on `200`, invalidate the `["me"]` query and navigate to `redirect`; on the `400`,
+show the generic message in the form (strip the `ApiError` code prefix).
 
 **`POST /api/auth/register`** — body `{email, name?}`. IP rate-limit, domain
 validation, create a pending User. **Anti-enumeration preserved verbatim:** always
@@ -79,9 +97,11 @@ validation, create a pending User. **Anti-enumeration preserved verbatim:** alwa
 dummy argon2 hash for timing parity, exactly as the current route. React shows the
 "request received" state inline (no separate route).
 
-**`POST /api/auth/logout`** — clear the session cookie, bump `session_epoch` (revokes
-all outstanding cookies), delete the `oauth_txn` cookie. `200 {ok: true}`; React then
-full-page-navs to `/login`.
+**`POST /api/auth/logout`** — bump `session_epoch` (revokes all outstanding cookies)
+and clear the `session` cookie, mirroring `logout_submit` (auth.py:160-196) EXACTLY.
+It does NOT touch the `oauth_txn` cookie — the current route doesn't either, and adding
+that would be a (small) behavior change, so it stays out for strict parity. `200 {ok:
+true}`; React then full-page-navs to `/login`.
 
 The old `POST /login` / `POST /logout` / `GET /register` Jinja routes are deleted
 (their logic moves here). `safe_next` is kept as the shared sanitizer (now consumed
@@ -94,16 +114,32 @@ by `/api/auth/login` instead of the deleted `_redirect_html_401` branch).
   background with NO ActivityBar / Sidebar / StatusBar. Children: `/login`,
   `/register`, `/auth/pending`, `/auth/no-access`, `/auth/error`. `AppShell` keeps
   every other route.
+  - **INVARIANT (the slice's single most dangerous failure mode):** PreAuthLayout and
+    its pages make NO authenticated `/api` call on mount (no `useSession`, no protected
+    query). A logged-out `/login` that fired `useSession` would `401` → `unwrap` →
+    `redirectToLogin("/login")` → infinite loop. `PreAuthLayout` is therefore a bare
+    layout — it must NOT render the shell (which calls `useSession`). The Login page's
+    only `/api` call is the `POST /api/auth/login` mutation, on submit (never on mount).
 - **Components:** `Login` (email/password form + "Continue with Google" native POST +
   "Request access" link), `Register` (email/name form → `/api/auth/register` → inline
   "request received"), and three trivial holding-page components
   (`AccountPending`/`AccountNoAccess`/`AuthError`). `api/auth.ts` hooks for
   login/register/logout. CSS Modules + `--app-*` tokens; no bare element selectors.
-- **Sign-out + user chip in `TitleBar`** (top-right): a chip showing the user's email
-  (from `/api/me`'s `UserOut.email`) + a **Sign out** button → `POST /api/auth/logout`
-  → `window.location.assign("/login")` (full-page nav clears SPA state; the next load
-  starts fresh at login). This fills the gap left by deleting `base.html`'s sign-out
-  form — it is a NECESSARY scope addition, not optional.
+- **Sign-out RELOCATED to `TitleBar`** (top-right) + a user-email chip. This is a
+  RELOCATION, not a new feature: the SPA's current sign-out is a native
+  `<form method="post" action="/logout">` in **`DashboardHeader.tsx:31`** (NOT
+  `base.html` — that only backs the retired Jinja pages), and it POSTs to the very
+  `POST /logout` route this slice deletes. So the teardown WOULD break it; the fix is
+  to move the control into the shell's `TitleBar` (visible on every authed route, not
+  just the dashboard) and **remove it from `DashboardHeader`**. Mechanism shifts from
+  native-form-303 to a `useLogout` fetch → `POST /api/auth/logout` → `200 {ok}` →
+  `window.location.assign("/login")` (the native form existed precisely to carry
+  Origin/CSRF without fetch; the same-origin fetch sends `Origin` → `OriginCSRFMiddleware`
+  passes, consistent with the rest of the SPA). The chip reads
+  `useSession().data?.user.email` (`/api/me` returns `MeOut = {user: UserOut, capabilities}`,
+  so it's `MeOut.user.email`). No new request: the shell already calls `useSession`
+  (`ActivityBar`, since admin Slice 2), so the chip reuses the cached `["me"]` query —
+  a deliberate, already-realized universal session check.
 - **Refresh:** the login page reads `?next=` from the URL and threads it to the POST.
 
 ### Serving + the `/auth`-prefix resolution
@@ -144,6 +180,11 @@ the last consumer of `error.html` and the dormant branch carried from admin Slic
   `_redirect_html_401` non-`/api` HTML branch. Keep filter *helper functions* only if
   something else imports them (verify in planning); the digest Jinja env is untouched.
   Keep the `/static` mount (now serving only `favicon.svg`).
+- **Frontend cleanup:** remove the sign-out `<form action="/logout">` from
+  `DashboardHeader.tsx` (relocated to `TitleBar`); update the now-stale comments in
+  `redirectToLogin()` (client.ts) and `session.ts:6` that call `/login`
+  "server-rendered" — mechanism is unchanged (still a full-page nav) but `/login` is
+  React now.
 - **Manifest:** `/login`+`/register` `backend_prefixes`→`spa_routes`; `/auth` added to
   `spa_routes` (stays in `backend_prefixes`, doc-only). Two OpenAPI regens
   (`EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh`) — after `/api/auth`
@@ -163,9 +204,12 @@ the last consumer of `error.html` and the dormant branch carried from admin Slic
   them — the profiles re-embed lesson); the proxy / rate-limit infra tests
   (`X-Forwarded-For`) repoint their POST onto `/api/auth/login`.
 - **Frontend** (vitest + RTL): `Login` / `Register` / the three holding pages /
-  `PreAuthLayout` (asserts NO AppShell chrome) / `TitleBar` sign-out + user chip;
+  `PreAuthLayout` (asserts NO AppShell chrome AND fires NO authenticated `/api` call on
+  mount — no `/api/me` — the anti-loop invariant) / `TitleBar` sign-out + user chip;
   hook tests for `api/auth.ts`; the `router.test.tsx` set-equality update (manifest now
-  includes `/login`, `/register`, `/auth`).
+  includes `/login`, `/register`, `/auth`). The `Login` test pins the anti-enumeration
+  invariant: unknown-email, wrong-password, and no-credential failures all surface the
+  identical generic message.
 - **Full flow**: a headless logged-out → `/login` → authenticate → authed shell →
   sign-out → `/login` render check ([[reference_spa_visual_check]] recipe).
 - **Teardown guard**: a surface-absent test asserting the Jinja auth GET routes
@@ -180,10 +224,16 @@ the last consumer of `error.html` and the dormant branch carried from admin Slic
 
 ## Global constraints
 
-- No DB schema change. No new dependency. Strict parity port (only intended behavior
-  change: the banner/redirect-UX becomes JSON `{redirect}`; anti-enumeration, rate
-  limits, status routing, cookie attributes, `session_epoch` semantics, `safe_next`
-  sanitization all preserved).
+- No DB schema change. No new dependency. Strict parity port. **Intended behavior
+  changes (exhaustive):** (1) the form-POST/redirect/banner UX becomes JSON `{redirect}`
+  + inline errors; (2) login-failure HTTP status `200` → `400` (the generic message and
+  cross-mode indistinguishability are preserved — the `200` was only a Jinja-loop
+  workaround). **Everything else is preserved verbatim:** the generic
+  `"Invalid email or password."` message, the argon2 dummy-hash timing path, IP+email
+  rate-limit keying AND its non-disclosure (rate-limit folded into the same `400`),
+  status routing incl. the `/auth/no-access` catch-all, cookie attributes
+  (`httponly`/`secure`/`samesite=lax`/`max_age`), `session_epoch` revocation, `safe_next`
+  sanitization, register anti-enumeration, and `oauth_txn` left untouched on logout.
 - Errors via `raise HTTPException` → the global `/api` envelope; never hand-built.
 - `OriginCSRFMiddleware` allows an absent Origin; TestClient POST tests pass without an
   Origin header — do not add one. Same-origin browser fetch sends Origin → passes.
