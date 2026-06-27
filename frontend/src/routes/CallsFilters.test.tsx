@@ -121,6 +121,7 @@ it("renders without crashing while the query is loading (facet selects disabled)
   renderWithProviders(<CallsFilters />, { route: "/" });
   expect((await screen.findByLabelText("Profile", { selector: "input" })) as HTMLInputElement).toBeDisabled();
   expect((screen.getByLabelText("Source", { selector: "input" })) as HTMLInputElement).toBeDisabled();
+  expect(screen.getByLabelText("Min score", { selector: "input" })).toBeDisabled();
   // Sort + Show-closed bind to the URL and stay usable.
   expect(screen.getByLabelText("Sort", { selector: "input" })).not.toBeDisabled();
   expect(screen.getByLabelText("Show closed")).toBeInTheDocument();
@@ -153,11 +154,13 @@ it("seeds the Search box from the URL ?q=", async () => {
 it("the score floor is disabled without a profile and enabled with one", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: null }) as never);
   const { unmount } = renderWithProviders(<CallsFilters />, { route: "/" });
-  expect((await screen.findByLabelText("Min score", { selector: "input" })) as HTMLInputElement).toBeDisabled();
+  const el = (await screen.findByLabelText("Min score", { selector: "input" })) as HTMLInputElement;
+  await waitFor(() => expect(el).toBeDisabled());
   unmount();
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(dashData({ profile_id: 7 }) as never);
   renderWithProviders(<CallsFilters />, { route: "/" });
-  expect((await screen.findByLabelText("Min score", { selector: "input" })) as HTMLInputElement).not.toBeDisabled();
+  const el2 = (await screen.findByLabelText("Min score", { selector: "input" })) as HTMLInputElement;
+  await waitFor(() => expect(el2).not.toBeDisabled());
 });
 
 it("selecting a score band writes ?min_score=", async () => {

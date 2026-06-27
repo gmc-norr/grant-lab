@@ -114,22 +114,20 @@ export function CallsFilters() {
         comboboxProps={{ withinPortal: false }}
       />
 
-      {!loading && (
-        <Select
-          label="Min score"
-          description={data?.effective.profile_id == null ? "Select a profile to filter by score" : undefined}
-          data={[
-            { value: "", label: "Any" },
-            { value: "60", label: "60+ (Good)" },
-            { value: "80", label: "80+ (Strong)" },
-          ]}
-          value={params.min_score != null ? String(params.min_score) : ""}
-          onChange={(v) => updateParam("min_score", v ?? "")}
-          disabled={data?.effective.profile_id == null}
-          allowDeselect={false}
-          comboboxProps={{ withinPortal: false }}
-        />
-      )}
+      <Select
+        label="Min score"
+        description={data?.effective.profile_id == null ? "Select a profile to filter by score" : undefined}
+        data={[
+          { value: "", label: "Any" },
+          { value: "60", label: "60+ (Good)" },
+          { value: "80", label: "80+ (Strong)" },
+        ]}
+        value={params.min_score != null ? String(params.min_score) : ""}
+        onChange={(v) => updateParam("min_score", v ?? "")}
+        disabled={loading || data?.effective.profile_id == null}
+        allowDeselect={false}
+        comboboxProps={{ withinPortal: false }}
+      />
 
       <Switch
         label="Show closed"
