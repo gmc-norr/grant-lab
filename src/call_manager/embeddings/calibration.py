@@ -15,10 +15,22 @@ from __future__ import annotations
 # embedding_hard_fail_threshold.
 BGE_M3_DEFAULTS = {"pregate": 0.30, "hard_fail": 0.20}
 
+
+def _normalize_model_name(model: str) -> str:
+    """Strip an Ollama-style ``:tag`` suffix so a tagged name like
+    ``bge-m3:567m`` resolves to the same calibration as the bare ``bge-m3``
+    (B11 Defect 4c). Without this, a tagged model spuriously warns and nulls
+    the cosine gate. Applied at BOTH the registration and lookup sites so the
+    registry can never key on an un-normalized name."""
+    return model.split(":", 1)[0]
+
+
 # Models whose calibration we have validated. Add an entry (with its own
-# default pair) when a new model's distribution is characterized.
+# default pair) when a new model's distribution is characterized. Keys are
+# normalized (tag-stripped) at registration so lookup matches regardless of
+# any ``:tag`` an operator configures.
 THRESHOLD_CALIBRATIONS: dict[str, dict[str, float]] = {
-    "bge-m3": BGE_M3_DEFAULTS,
+    _normalize_model_name("bge-m3"): BGE_M3_DEFAULTS,
 }
 
 
@@ -29,7 +41,7 @@ def check_threshold_calibration(*, model: str, pregate: float, hard_fail: float)
     Per-threshold (R8): an operator who overrides only `pregate` still gets
     warned that `hard_fail` is uncalibrated, and vice versa.
     """
-    if model in THRESHOLD_CALIBRATIONS:
+    if _normalize_model_name(model) in THRESHOLD_CALIBRATIONS:
         return None
     stale: list[str] = []
     if pregate == BGE_M3_DEFAULTS["pregate"]:

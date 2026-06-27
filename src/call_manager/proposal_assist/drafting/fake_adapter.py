@@ -28,7 +28,7 @@ class FakeAgentAdapter:
         (str or list[dict]). None if send_turn has not been called yet.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict: bool = False) -> None:
         self.launches: list[LaunchContext] = []
         self.turns: list[tuple[AgentHandle, str | list[dict[str, Any]]]] = []
         self.terminations: list[AgentHandle] = []
@@ -41,11 +41,22 @@ class FakeAgentAdapter:
         # set_turn_provenance's workspace had already been launch()ed.
         self._launched_workspaces: set = set()
         self.provenance_saw_launch: list[bool] = []
+        # Strict mode: model real-adapter hazards (re-entrant send_turn, leftover
+        # events after a cancelled iteration). Default False preserves existing
+        # test behaviour.
+        self._strict = strict
+        self._in_flight = False
+        self.leftover_events: list[StreamEvent] = []
 
     def script_next_turn(self, events: list[StreamEvent]) -> None:
         """Queue the events the next send_turn() invocation should yield.
         If you don't script, send_turn yields a single bare TurnDoneEvent."""
         self._scripted.append(events)
+
+    def add_leftover(self, events: list[StreamEvent]) -> None:
+        """Queue events to be appended after next scripted turn (strict mode only).
+        Models SDK stream desync: leftover ResultMessages after a cancelled iteration."""
+        self.leftover_events.extend(events)
 
     async def launch(self, context: LaunchContext) -> AgentHandle:
         self.launches.append(context)
@@ -63,6 +74,8 @@ class FakeAgentAdapter:
         handle: AgentHandle,
         user_message: str | list[dict[str, Any]],
     ) -> AsyncIterator[StreamEvent]:
+        if self._strict and self._in_flight:
+            raise RuntimeError("re-entrant send_turn: a turn is already in flight")
         self.last_user_message = user_message
         self.turns.append((handle, user_message))
         if self._scripted:
@@ -75,8 +88,18 @@ class FakeAgentAdapter:
                     model=None,
                 )
             ]
-        for event in scripted:
-            yield event
+        if self._strict:
+            self._in_flight = True
+        try:
+            for event in scripted:
+                yield event
+            if self._strict:
+                for event in self.leftover_events:
+                    yield event
+                self.leftover_events.clear()
+        finally:
+            if self._strict:
+                self._in_flight = False
 
     async def terminate(self, handle: AgentHandle) -> None:
         self.terminations.append(handle)

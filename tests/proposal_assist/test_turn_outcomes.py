@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from call_manager.config import Settings
 from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from call_manager.proposal_assist.turns.caps import check_daily_token_cap
 from call_manager.proposal_assist.turns.outcomes import outcome_message, record_terminal_outcome
 from call_manager.proposal_assist.turns.processor import _finalize_failed
 from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
@@ -249,3 +251,81 @@ def test_finalize_failed_wrapper_noop_on_already_terminal(pg_session_factory):
             s.scalar(select(WorkspaceEvent).where(WorkspaceEvent.kind == "cloud_turn_failed"))
             is None
         )
+
+
+def _daily_tokens(s, ws_id):
+    """Sum today's chat-turn tokens for a workspace the way the cap query does."""
+    return s.execute(
+        select(
+            func.coalesce(func.sum(ChatTurn.tokens_in), 0),
+            func.coalesce(func.sum(ChatTurn.tokens_out), 0),
+        ).where(ChatTurn.workspace_id == ws_id)
+    ).one()
+
+
+def test_failed_turn_with_consumed_tokens_charges_the_daily_cap(
+    pg_session_factory, _settings_env
+):
+    """A turn that streamed N>0 tokens before failing must record N against the
+    daily cap (was 0: the pre-count was cleared and consumed tokens lived only in
+    the audit payload, which the cap query never reads). Otherwise a looping user
+    burns real spend invisibly under the cap."""
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        # User-turn pre-count is an *estimate*; the SDK's reported totals supersede it.
+        job, user_turn = _running_job(s, ws, submitter=owner, tokens_in=42)
+        s.commit()
+        ok = record_terminal_outcome(
+            s,
+            turn_job_id=job.id,
+            workspace_id=ws.id,
+            outcome="failed",
+            expected_status="running",
+            raw_error="sdk_turn_error: boom mid-stream",
+            tokens_in=1200,
+            tokens_out=350,
+        )
+        s.commit()
+        assert ok is True
+        wsid = ws.id
+
+    with pg_session_factory() as s:
+        used_in, used_out = _daily_tokens(s, wsid)
+        # The actually-consumed tokens are now visible to the cap sum.
+        assert int(used_in) == 1200
+        assert int(used_out) == 350
+        settings = Settings()
+        result = check_daily_token_cap(s, wsid, settings=settings)
+        assert result.used_in == 1200
+        assert result.used_out == 350
+
+
+def test_failed_turn_with_zero_tokens_clears_precount(pg_session_factory):
+    """When NOTHING was consumed (the common reaped/orphaned case), the user-turn
+    pre-count is cleared so the abandoned turn doesn't keep burning cap budget for
+    input it never actually used. Net daily usage for the workspace is 0."""
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        job, user_turn = _running_job(s, ws, submitter=owner, tokens_in=42)
+        s.commit()
+        utid, wsid = user_turn.id, ws.id
+        ok = record_terminal_outcome(
+            s,
+            turn_job_id=job.id,
+            workspace_id=ws.id,
+            outcome="failed",
+            expected_status="running",
+            raw_error="orphaned",
+            tokens_in=0,
+            tokens_out=0,
+        )
+        s.commit()
+        assert ok is True
+
+    with pg_session_factory() as s:
+        assert s.get(ChatTurn, utid).tokens_in is None  # pre-count cleared
+        used_in, used_out = _daily_tokens(s, wsid)
+        assert int(used_in) == 0
+        assert int(used_out) == 0

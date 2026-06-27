@@ -163,10 +163,57 @@ async def test_lists_inserted_citations(pg_session_factory, _settings_env, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_list_paginates_and_flags_truncation(pg_session_factory, _settings_env, tmp_path):
+    """Defect B7-6: list_citations caps its output (default 100) and reports a
+    `truncated` flag instead of projecting every row into one MCP block."""
+    ctx, _wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    # 120 hand-built rows (cheaper than 120 real inserts; the cap is pure slicing).
+    ledger = {
+        **empty_ledger(),
+        "evidence": [{"id": f"ev-{i:012x}", "citekey": f"k{i}"} for i in range(120)],
+    }
+    (ctx.repo_dir / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
+
+    # Default cap = 100 → truncated.
+    out = await list_citations_impl(ctx)
+    assert len(out["citations"]) == 100
+    assert out["truncated"] is True
+
+    # Explicit limit below the row count → still truncated, honoured.
+    out = await list_citations_impl(ctx, limit=10)
+    assert len(out["citations"]) == 10
+    assert out["truncated"] is True
+
+    # Limit above the row count → not truncated.
+    out = await list_citations_impl(ctx, limit=500)
+    assert len(out["citations"]) == 120
+    assert out["truncated"] is False
+
+    # Hard cap 500: a larger request is clamped (here rows < 500 so not truncated).
+    out = await list_citations_impl(ctx, limit=10_000)
+    assert len(out["citations"]) == 120
+    assert out["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_below_cap_not_truncated(pg_session_factory, _settings_env, tmp_path):
+    """A workspace under the cap reports truncated=False."""
+    ctx, _wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    ledger = {
+        **empty_ledger(),
+        "evidence": [{"id": f"ev-{i:012x}"} for i in range(3)],
+    }
+    (ctx.repo_dir / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
+    out = await list_citations_impl(ctx)
+    assert len(out["citations"]) == 3
+    assert out["truncated"] is False
+
+
+@pytest.mark.asyncio
 async def test_empty_workspace_returns_empty_list(pg_session_factory, _settings_env, tmp_path):
     ctx, _wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     # No citations.json written at all.
-    assert await list_citations_impl(ctx) == {"citations": []}
+    assert await list_citations_impl(ctx) == {"citations": [], "truncated": False}
 
 
 @pytest.mark.asyncio

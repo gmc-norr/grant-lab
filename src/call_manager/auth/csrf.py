@@ -120,7 +120,12 @@ class OriginCSRFMiddleware(BaseHTTPMiddleware):
                 return _forbidden("referer", referer, path=request.url.path)
             return await call_next(request)
 
-        # Neither header present — allow. See module docstring.
+        # Neither Origin nor Referer present — allow. This is intentional:
+        # browsers send at least one of these on cross-origin requests, so an
+        # absent pair is characteristic of same-origin navigations, curl/API
+        # clients with stripped headers, and health checks. Blocking it would
+        # break legitimate non-browser callers. See module docstring for the
+        # full threat model.
         return await call_next(request)
 
 

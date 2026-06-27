@@ -129,28 +129,39 @@ def run_profile_bootstrap_tick(
         seed_payload = dict(job.seed or {})
         s.commit()
 
+    # Crash-recovery: if this profile already has a description from a previous
+    # run that crashed after merge but before marking 'done', skip the expensive
+    # bootstrap (PubMed + LLM) and go straight to backfill + done.
+    with session_factory() as s:
+        _profile_now = s.get(Profile, profile_id)
+        already_bootstrapped = bool(_profile_now and (_profile_now.description or "").strip())
+
     try:
-        draft = bootstrap_profile(
-            seed=_seed_from_payload(seed_payload), pubmed=pubmed, ollama=ollama
-        )
-        if not draft.llm_succeeded:
-            _finalize_failure(session_factory, job_id, attempts, "llm draft failed or empty")
-            return
-        # Merge + embed in one committed session; mark 'done' only AFTER backfill
-        # completes, so the job stays 'running' (recoverable) while backfill runs.
-        with session_factory() as s:
-            merge_bootstrap_into_profile(s.get(Profile, profile_id), draft)
-            refresh_profile_embedding(s, embed_client, profile_id)
-            s.commit()
+        if not already_bootstrapped:
+            draft = bootstrap_profile(
+                seed=_seed_from_payload(seed_payload), pubmed=pubmed, ollama=ollama
+            )
+            if not draft.llm_succeeded:
+                _finalize_failure(session_factory, job_id, attempts, "llm draft failed or empty")
+                return
+            # Merge + embed in one committed session; mark 'done' only AFTER backfill
+            # completes, so the job stays 'running' (recoverable) while backfill runs.
+            with session_factory() as s:
+                merge_bootstrap_into_profile(s.get(Profile, profile_id), draft)
+                refresh_profile_embedding(s, embed_client, profile_id)
+                s.commit()
         backfill_profile(session_factory=session_factory, profile_id=profile_id)
         with session_factory() as s:
             job = s.get(ProfileBootstrapJob, job_id)
+            if not already_bootstrapped:
+                job.pubmed_status, job.publications_fetched, job.seed = (
+                    draft.pubmed_status,
+                    draft.publications_fetched,
+                    None,
+                )
+            else:
+                job.seed = None
             job.status, job.completed_at = "done", datetime.now(UTC)
-            job.pubmed_status, job.publications_fetched, job.seed = (
-                draft.pubmed_status,
-                draft.publications_fetched,
-                None,
-            )
             s.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning(

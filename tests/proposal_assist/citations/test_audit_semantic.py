@@ -631,6 +631,73 @@ def test_unknown_stance_skipped(pg_session_factory, _settings_env):
     assert issues == []
 
 
+# --------------------------------------------------------------------------- #
+# audit_unavailable carries a `reason` distinguishing cap / transient / invalid
+# so the caller can retry only on cap and degrade-not-fail otherwise.
+# --------------------------------------------------------------------------- #
+def test_audit_unavailable_reason_transient(pg_session_factory, _settings_env):
+    """A per-row LLM exception degrades that row with reason='transient'."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    proposal_text = _proposal_with_marker("Adjuvant therapy cuts recurrence")
+    ledger = append_evidence(empty_ledger(), _row(rid, stance="supports"))
+    stub = _RaisingCitationService(_verdict_result("contradicts"), raise_times=1)
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == "transient"
+
+
+def test_audit_unavailable_reason_cap(pg_session_factory, _settings_env):
+    """A cap-exceeded result degrades the row with reason='cap' (caller retries)."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    proposal_text = _proposal_with_marker("Adjuvant therapy cuts recurrence")
+    ledger = append_evidence(empty_ledger(), _row(rid, stance="supports"))
+    stub = _StubCitationService(_verdict_result(None, cap_exceeded=True, cap_scope="workspace"))
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == "cap"
+
+
+def test_audit_unavailable_reason_invalid(pg_session_factory, _settings_env):
+    """An invalid/empty verdict degrades the row with reason='invalid'."""
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    proposal_text = _proposal_with_marker("This is background context")
+    ledger = append_evidence(empty_ledger(), _row(rid, stance="background"))
+    stub = _StubCitationService(_verdict_result("supports"))  # invalid for background stance
+    with pg_session_factory() as s:
+        issues = _run(
+            stub,
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            pg_session_factory=pg_session_factory,
+            wsid=wsid,
+        )
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1
+    assert unavailable[0]["reason"] == "invalid"
+
+
 def test_no_marker_row_skipped(pg_session_factory, _settings_env):
     """A ledger row with no live marker (no claim to judge) is skipped."""
     wsid = _make_workspace(pg_session_factory)
@@ -649,3 +716,56 @@ def test_no_marker_row_skipped(pg_session_factory, _settings_env):
         )
     assert stub.calls == []
     assert issues == []
+
+
+# --------------------------------------------------------------------------- #
+# Capped variant: daily-cap break counts remaining rows as deferred (R3-M3)
+# --------------------------------------------------------------------------- #
+def test_capped_daily_cap_counts_remaining_rows_as_deferred(
+    pg_session_factory, _settings_env
+):
+    """When the daily LLM cap (res.cap_exceeded) trips mid-loop, the rows not yet
+    iterated must be counted as ``deferred`` so the re-poll signal is accurate."""
+    from call_manager.proposal_assist.citations.audit import (
+        validate_citations_semantic_capped,
+    )
+
+    wsid = _make_workspace(pg_session_factory)
+    rid = _seed_reference(pg_session_factory, wsid)
+    rid2 = _seed_reference(pg_session_factory, wsid, citekey="jones2020")
+    rid3 = _seed_reference(pg_session_factory, wsid, citekey="lee2019")
+    proposal_text = (
+        "# Proposal\n\n"
+        f"Adjuvant therapy cuts recurrence{build_marker(CITEKEY, EV_ID)}. "
+        f"More evidence here{build_marker('jones2020', 'ev-bbbbbbbbbbbb')}. "
+        f"Yet more here{build_marker('lee2019', 'ev-cccccccccccc')}.\n"
+    )
+    ledger = empty_ledger()
+    ledger = append_evidence(ledger, _row(rid, stance="supports"))
+    ledger = append_evidence(
+        ledger, _row(rid2, ev_id="ev-bbbbbbbbbbbb", citekey="jones2020", stance="supports")
+    )
+    ledger = append_evidence(
+        ledger, _row(rid3, ev_id="ev-cccccccccccc", citekey="lee2019", stance="supports")
+    )
+
+    # First fresh LLM call trips the daily cap → loop breaks at the first row.
+    stub = _StubCitationService(_verdict_result(None, cap_exceeded=True, cap_scope="workspace"))
+    with pg_session_factory() as s:
+        issues, checked, deferred = validate_citations_semantic_capped(
+            proposal_text=proposal_text,
+            ledger=ledger,
+            session=s,
+            session_factory=pg_session_factory,
+            workspace_id=wsid,
+            citation_service=stub,
+            deterministic_issues=[],
+            max_fresh_calls=25,
+        )
+
+    assert len(stub.calls) == 1, "loop stops after the first cap-tripping call"
+    assert checked == 1, "one fresh call was attempted before the cap"
+    # The two rows after the cap-tripping row must be counted as deferred.
+    assert deferred == 2, f"expected 2 deferred (remaining rows), got {deferred}"
+    unavailable = [i for i in issues if i["type"] == "audit_unavailable"]
+    assert len(unavailable) == 1

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -436,6 +437,55 @@ def test_explicit_time_deadline_not_bumped():
     out = list(_make().fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
     # _ROUND_OPEN has Stangningsdatum 2099-12-31T14:00:00 (explicit time).
     assert out[0].deadline == datetime(2099, 12, 31, 13, 0, tzinfo=UTC)
+
+
+def test_round_fetch_retries_transient_5xx():
+    """request_with_retry wrapping the round fetch retries a transient 503;
+    the call is yielded normally after the retry succeeds."""
+    call_counts = {"R1": 0}
+    routes = {
+        "/api/ansokningsomgangar/R1": [
+            {
+                "Diarienummer": "R1",
+                "Titel": "Round one",
+                "Beskrivning": "x",
+                "Oppningsdatum": "2026-04-01T00:00:00",
+                "Stangningsdatum": "2099-12-31T14:00:00",
+                "LankLista": [{"URL": "https://www.vinnova.se/e/r1"}],
+                "Publik": 1,
+                "Webbsida": 1,
+            }
+        ],
+    }
+    programmes = [
+        {
+            "Diarienummer": "P",
+            "Titel": "T",
+            "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "R1"}],
+        }
+    ]
+
+    def handler(request):
+        path = str(request.url.path)
+        assert request.headers.get("Accept") == "application/vnd.vinnova.opendata.2.0+json"
+        if "/api/utlysningar/" in path:
+            return httpx.Response(200, json=programmes)
+        if "R1" in path:
+            call_counts["R1"] += 1
+            if call_counts["R1"] == 1:
+                return httpx.Response(503)  # First attempt: transient failure
+            return httpx.Response(200, json=routes["/api/ansokningsomgangar/R1"])
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    adapter = VinnovaAdapter(
+        base_url="https://data.vinnova.se",
+        transport=httpx.MockTransport(handler),
+        sleep_between_rounds=0,
+    )
+    with patch("time.sleep"):  # skip backoff delay
+        out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+    assert [c.external_id for c in out] == ["R1"]
+    assert call_counts["R1"] == 2  # First attempt 503, second succeeds
 
 
 def test_vinnova_adapter_full_text_none_when_no_webtextlista():

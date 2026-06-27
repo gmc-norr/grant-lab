@@ -209,8 +209,8 @@ _FENCE_WHOLE_RE = re.compile(
     re.DOTALL,
 )
 # Embedded fence: a ```json ... ``` block sitting anywhere inside prose
-# ("Here is the JSON:\n```json\n{...}\n```"). Non-greedy body so we take the
-# first complete block.
+# ("Here is the JSON:\n```json\n{...}\n```"). Non-greedy body so each complete
+# block is captured separately; we iterate ALL of them (see below).
 _FENCE_EMBEDDED_RE = re.compile(
     r"```(?:json|JSON)?\s*\n?(?P<body>.*?)```",
     re.DOTALL,
@@ -225,25 +225,42 @@ def _strip_markdown_fence(text: str) -> str:
 
     Recovery, in order:
       1. The whole reply is one fence → return its body.
-      2. A fenced block sits inside a prose preamble/suffix → return the
-         first block's body. This is the common "Here is the JSON: ```...```"
-         case, more likely on the analysis-enabled (Sonnet) path.
+      2. One or more fenced blocks sit inside prose → return the body of the
+         LAST block that parses as JSON. Taking the FIRST block (B11 Defect 4b)
+         could grab a pre-JSON EXAMPLE fence ("Here is the format I'll use:
+         ```json{...}``` ... my answer: ```json{...}```"), discarding the real
+         answer and dead-lettering a valid Sonnet reply through five paid
+         retries. Preferring the last parseable block keeps the actual answer.
+         If no block parses as JSON, fall back to the last block's body (the
+         prior behaviour for a single non-JSON fence) so the parser still gets
+         a chance and produces its own error.
     A response that's already raw JSON (no fence) is returned unchanged.
     """
     if not text:
         return text
     stripped = text.strip()
+    # Enumerate every fenced block first. When several exist, prefer the LAST
+    # one that parses as JSON — this both recovers the real answer past a
+    # pre-JSON example fence AND avoids the whole-reply regex swallowing two
+    # blocks as one (its \Z anchor would span from the first ``` to the last).
+    bodies = [mt.group("body").strip() for mt in _FENCE_EMBEDDED_RE.finditer(stripped)]
+    if len(bodies) >= 2:
+        for body in reversed(bodies):
+            if _is_json_object(body):
+                return body
+        return bodies[-1]
+    # Single block (or none): the whole-reply fence is the precise case.
     m = _FENCE_WHOLE_RE.match(stripped)
     if m:
         return m.group("body").strip()
-    m = _FENCE_EMBEDDED_RE.search(stripped)
-    if m:
-        return m.group("body").strip()
+    if bodies:
+        return bodies[0]
     return text
 
 
 def _is_json_object(text: str) -> bool:
-    """Best-effort JSON-object validity check. Used only by tests."""
+    """Best-effort JSON-object validity check. Used by _strip_markdown_fence to
+    pick the last fenced block that actually parses (B11 Defect 4b)."""
     try:
         return isinstance(json.loads(text), dict)
     except (json.JSONDecodeError, TypeError):

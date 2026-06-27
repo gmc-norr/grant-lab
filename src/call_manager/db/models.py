@@ -110,6 +110,19 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Persisted failure streak — survives restarts. Incremented on each
+    # ingestion failure, reset to 0 on success. The alerter reads/writes this
+    # column transactionally alongside last_fetched_at so the count is never
+    # stale after an OOM kill or rolling deploy.
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # Set to now() each time an alert is successfully sent for this source.
+    # The alerter gates re-alerting on this so repeated runs after the
+    # threshold don't spam the admin.
+    last_alerted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     calls: Mapped[list[Call]] = relationship(back_populates="source")
 
@@ -374,6 +387,14 @@ class RankingJob(Base):
             unique=True,
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
+        # Non-active row query indexes (migration 0057):
+        # ix_ranking_jobs_call_profile — correlated NOT EXISTS on (call_id,
+        # profile_id) for failed rows in reconcile_missing_rankings, and the
+        # _ranking_counts JOIN key.
+        Index("ix_ranking_jobs_call_profile", "call_id", "profile_id"),
+        # ix_ranking_jobs_profile_status — (profile_id, status) grouping used
+        # by _ranking_counts and per-profile status breakdown queries.
+        Index("ix_ranking_jobs_profile_status", "profile_id", "status"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -1464,7 +1485,7 @@ class ReviewRun(Base):
     rubric_review_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     waived_from_review_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("review_runs.id"),
+        ForeignKey("review_runs.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

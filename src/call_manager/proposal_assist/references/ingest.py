@@ -141,19 +141,42 @@ def run_postwrite_phases(
         # and holding a write tx open across them is idle-in-transaction that
         # pins a connection and can block autovacuum. Compute vectors first,
         # then INSERT + flip status in one short tx.
+        #
+        # Defect-1 fix: embed() returns EmbedResult(vector, embedded_chars).
+        # When the shrink-and-retry path fires, embedded_chars < len(text) —
+        # meaning the vector represents only a prefix of the chunk. We MUST
+        # store that prefix as the chunk text; otherwise the DB row has a
+        # vector for ~25-50% of the text but text_status='done' with the full
+        # text visible, silently degrading RAG retrieval quality.
+        def _embed_chunk(i: int, section_path: str, text: str):
+            result = embedder.embed(text)
+            n = result.embedded_chars
+            stored_text = text if n >= len(text) else text[:n]
+            if n < len(text):
+                logger.warning(
+                    "ingest: embed truncated chunk %d from %d to %d chars "
+                    "(workspace=%s reference=%s) — storing truncated prefix",
+                    i,
+                    len(text),
+                    result.embedded_chars,
+                    workspace_id,
+                    reference_id,
+                )
+            return i, section_path, stored_text, result.vector
+
         embedded = [
-            (i, section_path, text, embedder.embed(text))
+            _embed_chunk(i, section_path, text)
             for i, (section_path, text) in enumerate(chunks)
         ]
         with session_factory() as s2:
-            for i, section_path, text, vec in embedded:
+            for i, section_path, stored_text, vec in embedded:
                 s2.add(
                     ReferenceChunk(
                         reference_id=reference_id,
                         workspace_id=workspace_id,
                         chunk_index=i,
                         section_path=section_path,
-                        text=text,
+                        text=stored_text,
                         embedding=vec,
                         embedding_model=embedder.model,
                     )

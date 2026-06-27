@@ -377,6 +377,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/calls/hidden": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Hidden Calls
+         * @description Return the calls the current user has hidden, ordered newest-dismissed first.
+         */
+        get: operations["list_hidden_calls_api_calls_hidden_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/calls/{call_id}": {
         parameters: {
             query?: never;
@@ -405,7 +425,12 @@ export interface paths {
         put?: never;
         /** Hide Call */
         post: operations["hide_call_api_calls__call_id__hide_post"];
-        delete?: never;
+        /**
+         * Unhide Call
+         * @description Remove a dismissal so the call reappears in the feed. Idempotent — 200
+         *     even when the call was not hidden (no dismissal row to delete).
+         */
+        delete: operations["unhide_call_api_calls__call_id__hide_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1416,6 +1441,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/setup/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Setup
+         * @description Owner-only: re-queue a permanently-failed Phase-0 setup job.
+         *
+         *     Resets status='queued', attempts=0, clears started_at/completed_at/last_error
+         *     so the next scheduler tick re-claims it. Returns 404 if no failed job exists
+         *     for this workspace; returns 409 if the job is already queued or running
+         *     (not yet permanently failed).
+         */
+        post: operations["retry_setup_api_workspaces__workspace_id__setup_retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{workspace_id}/spec": {
         parameters: {
             query?: never;
@@ -2000,6 +2050,8 @@ export interface components {
             currency: string | null;
             /** Deadline */
             deadline: string | null;
+            /** Deadline Local Date */
+            deadline_local_date: string | null;
             /** External Id */
             external_id: string | null;
             /** Id */
@@ -2090,6 +2142,8 @@ export interface components {
             aggregate_score: number | null;
             /** Deadline */
             deadline: string | null;
+            /** Deadline Local Date */
+            deadline_local_date: string | null;
             /** Id */
             id: number;
             /** Published At */
@@ -2262,6 +2316,10 @@ export interface components {
             member_count: number;
             /** Role */
             role: string;
+            /** Setup Last Error */
+            setup_last_error: string | null;
+            /** Setup Status */
+            setup_status: string | null;
             /** Spec Locked */
             spec_locked: boolean;
             /** Workspace Deadline */
@@ -2311,6 +2369,8 @@ export interface components {
             cap_exceeded: boolean;
             /** Checked */
             checked: number;
+            /** Deferred */
+            deferred: number;
             /** Error Count */
             error_count: number;
             /** Issues */
@@ -2485,6 +2545,24 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HiddenCallOut */
+        HiddenCallOut: {
+            /** Deadline */
+            deadline: string | null;
+            /** Deadline Local Date */
+            deadline_local_date: string | null;
+            /** Id */
+            id: number;
+            /** Source Name */
+            source_name: string | null;
+            /** Title */
+            title: string;
+        };
+        /** HiddenListOut */
+        HiddenListOut: {
+            /** Items */
+            items: components["schemas"]["HiddenCallOut"][];
         };
         /** IngestResultOut */
         IngestResultOut: {
@@ -3161,6 +3239,13 @@ export interface components {
             status: string;
             /** Title */
             title: string;
+        };
+        /** SetupRetryOut */
+        SetupRetryOut: {
+            /** Attempts */
+            attempts: number;
+            /** Status */
+            status: string;
         };
         /** SetupStatusOut */
         SetupStatusOut: {
@@ -5930,6 +6015,116 @@ export interface operations {
             };
         };
     };
+    list_hidden_calls_api_calls_hidden_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HiddenListOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     get_call_detail_api_calls__call_id__get: {
         parameters: {
             query?: {
@@ -6045,6 +6240,118 @@ export interface operations {
         };
     };
     hide_call_api_calls__call_id__hide_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallHideOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    unhide_call_api_calls__call_id__hide_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -12160,6 +12467,118 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SetupStatusOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    retry_setup_api_workspaces__workspace_id__setup_retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupRetryOut"];
                 };
             };
             /** @description Bad Request */

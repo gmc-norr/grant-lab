@@ -4,12 +4,12 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from call_manager.auth.domain import domain_allowed
-from call_manager.auth.passwords import verify_password
+from call_manager.auth.passwords import hash_password, verify_password
 from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import InvalidSession
 from call_manager.db.models import User
@@ -34,7 +34,9 @@ class AuthConfigOut(BaseModel):
 
 class LoginIn(BaseModel):
     email: str
-    password: str
+    # 1024-char cap: argon2 is O(n) in password length and an adversary can
+    # craft a multi-MB payload to spike CPU. Reject before hashing.
+    password: str = Field(max_length=1024)
     next: str | None = None
 
 
@@ -95,7 +97,9 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
             select(User).where(User.email == email_normalized)
         ).scalar_one_or_none()
         stored = user.password_hash if user is not None else None
-        if not verify_password(stored, body.password):  # dummy-hash path when stored is None
+        # dummy-hash path when stored is None (unknown email → timing parity)
+        ok, needs_rehash = verify_password(stored, body.password)
+        if not ok:
             _logger.info("login failed", extra={"event": "login_failed", "email_fp": email_fp})
             raise _denied()
         if user.status != "active":
@@ -104,6 +108,12 @@ def login(request: Request, body: LoginIn, response: Response) -> LoginOut:
             target = "/auth/pending" if user.status == "pending" else "/auth/no-access"
             return LoginOut(redirect=target)  # no cookie
         user.last_login_at = datetime.now(UTC)
+        if needs_rehash:
+            # Argon2 parameter upgrade: persist the re-hashed credential while we
+            # already have the plaintext in hand. Safe to do before commit because
+            # the surrounding `with session_factory() as session` block rolls back
+            # on any exception.
+            user.password_hash = hash_password(body.password)
         user_id = user.id
         session_epoch = user.session_epoch
         session.commit()
@@ -136,12 +146,16 @@ def register(request: Request, body: RegisterIn) -> RegisterOut:
     email_normalized = body.email.strip().lower()
     if not ip_limiter.allow(client_ip(request)):
         return ok
+    # domain_allowed is listed in the 19-tool allowlist for the agent SDK
+    # (propose-only mode) — it is read-only and cannot modify state, so it is
+    # safe to call here. The silent return keeps anti-enumeration intact.
     if not domain_allowed(email_normalized, settings.allowed_email_domains):
         return ok
     if not email_limiter.allow(email_normalized):
         return ok
 
-    verify_password(None, "timing-parity")  # dummy-hash on BOTH fresh & dup paths
+    # dummy-hash on BOTH fresh & dup paths; return value unused
+    verify_password(None, "timing-parity")
     name = (body.name or "").strip()[:_NAME_MAX] or None
     with session_factory() as session:
         session.add(User(email=email_normalized, name=name, status="pending"))

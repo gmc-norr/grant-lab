@@ -32,6 +32,7 @@ SectionList = list[tuple[str | None, str]]
 # inflated; refuse before handing off to python-docx/openpyxl.
 _MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB total inflated size
 _MAX_ZIP_ENTRIES = 20_000  # absurd entry count → zip bomb / fork bomb
+_MAX_ZIP_RATIO = 100  # 100:1 compression ratio max (zip-bomb heuristic)
 # Cap pages parsed from a PDF and columns kept from CSV/XLSX headers so a
 # crafted file can't exhaust CPU/memory in the synchronous request path.
 _MAX_PDF_PAGES = 100
@@ -41,7 +42,16 @@ _MAX_TABLE_COLUMNS = 100
 def _guard_zip_bomb(data: bytes) -> None:
     """Inspect a ZIP container's central directory and reject obvious
     decompression bombs BEFORE any member is inflated. DOCX and XLSX are
-    ZIP containers, so this runs ahead of python-docx / openpyxl."""
+    ZIP containers, so this runs ahead of python-docx / openpyxl.
+
+    Two checks:
+    1. Per-entry compression ratio: if file_size / compress_size > _MAX_ZIP_RATIO
+       the entry is suspiciously compressible (classic zip-bomb pattern).
+       Skip ratio check when compress_size == 0 (directory entries / empty files).
+    2. Cumulative absolute size: total declared uncompressed bytes across all
+       entries must not exceed _MAX_ZIP_UNCOMPRESSED_BYTES (catches bombs that
+       spread across many entries, each with a plausible ratio).
+    """
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             infos = zf.infolist()
@@ -51,6 +61,16 @@ def _guard_zip_bomb(data: bytes) -> None:
                 )
             total = 0
             for info in infos:
+                # Per-entry ratio check: only meaningful when compress_size > 0.
+                # (compress_size == 0 means a directory entry or empty file —
+                # those legitimately have file_size == 0 too; skip ratio check.)
+                if info.compress_size > 0:
+                    ratio = info.file_size / info.compress_size
+                    if ratio > _MAX_ZIP_RATIO:
+                        raise ExtractError(
+                            f"zip entry {info.filename!r} has suspicious compression ratio "
+                            f"{ratio:.0f}:1 > {_MAX_ZIP_RATIO}:1 (decompression bomb)"
+                        )
                 total += info.file_size
                 if total > _MAX_ZIP_UNCOMPRESSED_BYTES:
                     raise ExtractError(

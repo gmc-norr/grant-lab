@@ -84,3 +84,21 @@ it("saves subscriptions as the checked profile id set", async () => {
   fireEvent.click(screen.getByRole("button", { name: /save subscriptions/i }));
   await waitFor(() => expect(put).toHaveBeenCalledWith("/api/me/subscriptions", { body: { profile_ids: [1, 2] } }));
 });
+
+it("reconciles subscriptions checked-set from the server response after save", async () => {
+  // Scenario: profile 1 is currently subscribed, profile 2 is not. The server
+  // returns { subscribed: [2] } (profile 1 was deactivated between load and save).
+  // The checkbox state must reflect the server's authoritative answer, not the
+  // client's local set.
+  mockGet();
+  vi.spyOn(clientMod.api, "PUT").mockResolvedValue({ data: { subscribed: [2] }, error: undefined } as never);
+  renderWithProviders(<Settings />);
+  await screen.findByRole("checkbox", { name: /Group A/ }); // wait for load
+  fireEvent.click(screen.getByRole("button", { name: /save subscriptions/i }));
+  // After the response, Group A (id=1) should be UNCHECKED (server dropped it)
+  // and Group B (id=2) should be CHECKED (server confirmed it).
+  await waitFor(() =>
+    expect(screen.getByRole("checkbox", { name: /Group A/ })).not.toBeChecked(),
+  );
+  expect(screen.getByRole("checkbox", { name: /Group B/ })).toBeChecked();
+});

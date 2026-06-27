@@ -6,7 +6,18 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { router } from "./router";
 import { theme } from "./theme/theme";
 
-const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: true } } });
+// Global stale time prevents thundering-herd refetches on tab focus for the
+// heavy read-models (calls list, profiles, etc.).  Genuine live pollers
+// (problems, turns) set their own explicit refetchInterval and don't rely on
+// window-focus refetches anyway.
+const qc = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 20_000, // 20 s — data is "fresh" for 20 s; no refetch on focus unless stale
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
 export function App() {
   return (

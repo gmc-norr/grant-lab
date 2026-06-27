@@ -3,6 +3,7 @@
 from fastapi.testclient import TestClient
 
 from call_manager.db.models import WorkspaceViewer
+from call_manager.embeddings.client import EmbedResult
 from call_manager.main import create_app
 
 
@@ -39,4 +40,4 @@ class FakeEmbedClient:
         v = [0.0] * 1024
         if text:
             v[0] = (len(text) % 1024) / 1024.0
-        return v
+        return EmbedResult(vector=v, embedded_chars=len(text))

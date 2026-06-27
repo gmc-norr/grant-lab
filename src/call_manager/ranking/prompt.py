@@ -238,12 +238,30 @@ def build_messages(*, profile, call, enable_analysis: bool = False) -> list[dict
     ]
 
 
+# Cap model-authored free-text (rationale / summary / applicant_notes.text)
+# at a sane length. These fields are accepted verbatim into analyst-facing
+# columns and the weekly digest (B11 Defect 3). No XSS today — the digest is
+# autoescaped — but an unbounded field is a content-trust + storage risk, so we
+# cap it. URLs are also stripped: a model-authored link in a rationale/summary
+# is untrusted and has no place in analyst-facing prose.
+_FREE_TEXT_MAX = 2000
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _harden_free_text(value: str) -> str:
+    """Strip model-authored URLs and cap length. Applied to every
+    model-authored free-text field before it reaches a user-facing column."""
+    return _URL_RE.sub("", value).strip()[:_FREE_TEXT_MAX]
+
+
 def _str_or_empty(value) -> str:
     """Keep a free-text field only if it's actually a string. A hallucinated
     dict/list/number must NOT be stringified into its Python repr (that would
     leak e.g. ``{'k': 'v'}`` into a user-facing rationale column); fall back
-    to "" instead."""
-    return value if isinstance(value, str) else ""
+    to "" instead. Model-authored text is URL-stripped and length-capped
+    (content-trust hardening, B11 Defect 3)."""
+    return _harden_free_text(value) if isinstance(value, str) else ""
 
 
 _QUOTED_EVIDENCE_MAX = 200
@@ -327,12 +345,15 @@ def parse_response(content: str, *, verification_text: str | None = None) -> Par
             return truncated
         return None  # bogus quote — discarded silently
 
-    # Optional analysis fields (Sonnet path only).
+    # Optional analysis fields (Sonnet path only). Model-authored text is
+    # URL-stripped and length-capped (content-trust hardening, B11 Defect 3).
     summary = data.get("summary")
     if summary is not None and not isinstance(summary, str):
         summary = None
-    if isinstance(summary, str) and not summary.strip():
-        summary = None
+    if isinstance(summary, str):
+        summary = _harden_free_text(summary)
+        if not summary:
+            summary = None
 
     applicant_notes = _sanitize_applicant_notes(data.get("applicant_notes"))
 
@@ -375,5 +396,10 @@ def _sanitize_applicant_notes(raw) -> list[dict] | None:
             or not text.strip()
         ):
             continue
-        cleaned.append({"category": category, "text": text.strip()})
+        # Content-trust hardening (B11 Defect 3): URL-strip + length-cap the
+        # model-authored note text before it reaches the analyst column/digest.
+        hardened = _harden_free_text(text)
+        if not hardened:
+            continue
+        cleaned.append({"category": category, "text": hardened})
     return cleaned if cleaned else None

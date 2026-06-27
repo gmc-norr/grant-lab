@@ -15,6 +15,8 @@ def _set_min_env(monkeypatch, database_url):
     # (>=32 char, non-placeholder) SESSION_SECRET — see config validator.
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    # https requires a real EMAIL_FROM (example.com placeholder is rejected in prod).
+    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
 
 
 def test_resend_api_key_selects_resend_email_sender(monkeypatch, pg_url):

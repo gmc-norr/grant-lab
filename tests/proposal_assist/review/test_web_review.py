@@ -273,7 +273,10 @@ def test_review_runs_declare_response_models_with_string_dollars(client_unauth):
     emitted no response schema. Pin the schema here so codegen stays honest:
     the three decimal dollar fields are JSON *strings*, never numbers.
     """
-    schema = client_unauth.get("/openapi.json").json()
+    # Read the schema via app.openapi() (mode-independent): the served
+    # /openapi.json route is gated off in non-dev modes, but the contract this
+    # test pins lives in the generated schema regardless of serving mode.
+    schema = client_unauth.app.openapi()
     comps = schema["components"]["schemas"]
     for name in ("ReviewRunOut", "ReviewRunItemOut", "ReviewBudgetOut", "ReviewFileOut"):
         assert name in comps, f"{name} missing from OpenAPI components"

@@ -170,6 +170,24 @@ def test_pinned_transport_for_safe_builds_pinned_transport(monkeypatch):
     transport.close()
 
 
+def test_is_safe_fetch_url_resolves_dns_once(monkeypatch):
+    """is_safe_fetch_url must trigger at most one DNS resolution (single source
+    of truth via resolve_pinned_ip)."""
+    import socket
+    calls = []
+    orig = socket.getaddrinfo
+    def counting_getaddrinfo(host, *args, **kwargs):
+        calls.append(host)
+        return orig(host, *args, **kwargs)
+    monkeypatch.setattr(socket, "getaddrinfo", counting_getaddrinfo)
+    # Call is_safe_fetch_url with a public hostname
+    from call_manager.sources.types import is_safe_fetch_url
+    is_safe_fetch_url("https://example.com/path")
+    # There should be at most ONE getaddrinfo call (not two)
+    example_calls = [c for c in calls if c == "example.com"]
+    assert len(example_calls) <= 1
+
+
 def test_protocol_check():
     """A class that implements .slug and .fetch_new_calls satisfies SourceAdapter."""
 

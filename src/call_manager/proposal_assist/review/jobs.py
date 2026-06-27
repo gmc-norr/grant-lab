@@ -179,12 +179,18 @@ def review_runs_today(session: Session, *, workspace_id: uuid.UUID) -> int:
 
 
 def review_dollars_today(session: Session, *, workspace_id: uuid.UUID) -> Decimal:
+    # B9 defect 5: INCLUDE cancelled runs in the dollar sum. _run_one_call
+    # deliberately re-rolls a late sub-call's real spend onto a run that was
+    # cancelled mid-flight (pass_runner.py), so a cancelled run CAN carry real
+    # estimated_dollars. Excluding cancelled (as review_runs_today does for the
+    # run *count*) silently undercounts the daily dollar budget. The run count
+    # still excludes cancelled (a cancelled run didn't "use up" a run slot); only
+    # the dollar accounting counts the spend that actually happened.
     day_start = _stockholm_day_start_utc()
     total = session.scalar(
         select(func.coalesce(func.sum(ReviewRun.estimated_dollars), 0)).where(
             ReviewRun.workspace_id == workspace_id,
             ReviewRun.triggered_at >= day_start,
-            ReviewRun.status != "cancelled",
         )
     )
     return Decimal(total or 0)

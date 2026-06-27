@@ -134,6 +134,12 @@ def google_callback(
     # Connect-Google (link mode): revalidate the initiating session, fail closed.
     link_uid = txn.get("link_uid")
     if link_uid is not None:
+        # Enforce domain allowlist on the Google identity being linked. Without
+        # this check an active ki.se user could link a personal@gmail.com account,
+        # which would let them bypass the domain gate on future sign-ins.
+        google_email = email.strip().lower()
+        if not domain_allowed(google_email, settings.allowed_email_domains):
+            return _clean("/auth/error")
         with session_factory() as db:
             u = db.get(User, int(link_uid))
             if u is None or u.status != "active" or u.session_epoch != txn.get("link_epoch"):

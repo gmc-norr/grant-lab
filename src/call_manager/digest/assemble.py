@@ -16,15 +16,12 @@ from call_manager.db.models import (
     User,
     UserCallDismissal,
 )
+from call_manager.ranking.must_include import (
+    normalize_must_terms,
+    pg_word_boundary_pattern,
+)
 
 DIGEST_TOP_THRESHOLD = 60
-
-
-def _escape_like(term: str) -> str:
-    """Escape LIKE wildcards (`%`, `_`) so admin-entered terms like '100%'
-    match literally, not as wildcards. The backslash is also escaped in
-    case a term contains one already."""
-    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 DIGEST_BORDERLINE_LOWER = 45
@@ -36,6 +33,11 @@ DIGEST_BUCKET_SIZE = 5
 # of calls into one email and one DigestRun.included_call_ids. Soonest-deadline
 # calls are kept first; the rest are summarized as "+N more" by the renderer.
 DIGEST_MUST_INCLUDE_CAP = 25
+# Whole-payload cap across all profile sections: prevents M profiles × 25 entries
+# from flooding a multi-profile user's digest. Must-include entries are trimmed
+# in section order (already sorted by profile name) keeping the first
+# DIGEST_TOTAL_MUST_INCLUDE_CAP entries total (soonest-deadline first).
+DIGEST_TOTAL_MUST_INCLUDE_CAP = 50
 
 
 @dataclass
@@ -149,6 +151,10 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         )
 
     excluded = dismissed_ids | prior_ids
+    # Materialize the excluded id set once so it isn't re-iterated per profile
+    # query (a Python set re-iterates in arbitrary order for each in_ call).
+    excluded_list = list(excluded)
+    excl_clause = Call.id.notin_(excluded_list) if excluded_list else True
 
     # 3. For each profile, build candidate entries (pre-dedup)
     # Track: dict[call_id, list[(profile, bucket, ranking_or_none)]]
@@ -156,25 +162,27 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     call_objs: dict[int, Call] = {}
 
     for profile in profiles:
-        must_terms = [
-            t.strip().lower()
-            for t in (profile.structured.get("must_include") or [])
-            if t and t.strip()
-        ]
+        # Shared normalization (min length) with the ranking path so the SAME
+        # terms are considered on both sides (B11 Defect 1).
+        must_terms = normalize_must_terms(profile.structured.get("must_include"))
 
         # 3a. must-include candidates (any score, any ranking, even unranked)
-        # Per spec line 417: match against title, summary, AND keywords.
-        # We collapse keywords to a space-joined string and ilike-search;
-        # this keeps the SQL simple and lets PG's text matching handle
-        # case-insensitivity. The leading-wildcard ILIKE on title/summary/
-        # full_text is backed by pg_trgm GIN indexes (migration 0033) so it's
-        # an index lookup, not a sequential scan; the array_to_string(keywords)
-        # term still scans but is cheap relative to full_text.
+        # Per spec line 417: match against title, summary, full_text, AND
+        # keywords. We collapse keywords to a space-joined string and match
+        # each field with Postgres' case-insensitive POSIX regex operator
+        # (~*) anchored at WORD boundaries (\m...\M) instead of a bare-substring
+        # ILIKE. This keeps the digest path SEMANTICALLY IDENTICAL to the
+        # ranking path's Python \b word-boundary match (B11 Defect 1) — a short
+        # term like 'ai' no longer drags in calls that merely contain
+        # 'training'/'brain'. The pg_trgm GIN indexes (migration 0033) still
+        # accelerate ~* the same way they accelerated leading-wildcard ILIKE;
+        # array_to_string(keywords) still scans but is cheap relative to
+        # full_text. Sub-3-char terms are already dropped by normalize_must_terms.
         #
-        # Codex Plan F regression fix: also ilike against `Call.full_text`.
-        # After Plan F moved Vinnova's substantive prose out of `summary`
-        # and into `full_text`, a must-include term that lives only in the
-        # body text would otherwise be silently missed by the digest bucket.
+        # Codex Plan F regression fix: also match `Call.full_text`. After Plan F
+        # moved Vinnova's substantive prose out of `summary` and into
+        # `full_text`, a must-include term that lives only in the body text
+        # would otherwise be silently missed by the digest bucket.
         if must_terms:
             keywords_str = func.array_to_string(Call.keywords, " ")
             # OUTER JOIN against this profile's ranking — must-include calls
@@ -188,15 +196,15 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                     (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile.id),
                 )
                 .where(
-                    Call.id.notin_(excluded) if excluded else True,
+                    excl_clause,
                     or_(Call.deadline.is_(None), Call.deadline > now),
                     or_(
                         *[
-                            Call.title.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            | Call.summary.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            | Call.full_text.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            | keywords_str.ilike(f"%{_escape_like(t)}%", escape="\\")
-                            for t in must_terms
+                            Call.title.op("~*")(pat)
+                            | Call.summary.op("~*")(pat)
+                            | Call.full_text.op("~*")(pat)
+                            | keywords_str.op("~*")(pat)
+                            for pat in (pg_word_boundary_pattern(t) for t in must_terms)
                         ]
                     ),
                 )
@@ -218,7 +226,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
             .where(
                 CallRanking.profile_id == profile.id,
                 CallRanking.aggregate_score >= DIGEST_TOP_THRESHOLD,
-                Call.id.notin_(excluded) if excluded else True,
+                excl_clause,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
             .order_by(
@@ -239,7 +247,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 CallRanking.profile_id == profile.id,
                 CallRanking.aggregate_score >= DIGEST_BORDERLINE_LOWER,
                 CallRanking.aggregate_score < DIGEST_TOP_THRESHOLD,
-                Call.id.notin_(excluded) if excluded else True,
+                excl_clause,
                 or_(Call.deadline.is_(None), Call.deadline > now),
             )
             .order_by(
@@ -326,6 +334,20 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 entries=ordered,
             )
         )
+
+    # Whole-payload cap: trim must_include entries across all sections
+    # collectively so M profiles don't multiply the per-profile cap.
+    _must_total = sum(
+        sum(1 for e in sec.entries if e.bucket == "must_include") for sec in sections
+    )
+    if _must_total > DIGEST_TOTAL_MUST_INCLUDE_CAP:
+        _remaining = DIGEST_TOTAL_MUST_INCLUDE_CAP
+        for sec in sections:
+            _mi = [e for e in sec.entries if e.bucket == "must_include"]
+            _other = [e for e in sec.entries if e.bucket != "must_include"]
+            _kept = _mi[:_remaining]
+            _remaining = max(0, _remaining - len(_mi))
+            sec.entries = _kept + _other
 
     if not sections:
         return None

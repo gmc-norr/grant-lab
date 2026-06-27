@@ -17,6 +17,8 @@ def _set_https_env(monkeypatch, database_url):
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    # https deploy requires a real EMAIL_FROM (example.com placeholder is rejected).
+    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
     # https deploy requires a real email transport (else create_app refuses).
     monkeypatch.setenv("RESEND_API_KEY", "re_secret")
 

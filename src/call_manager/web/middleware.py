@@ -42,6 +42,11 @@ def build_csp(dev: bool = False) -> str:
         [
             "default-src 'self'",
             script,
+            # 'unsafe-inline' for styles is intentional: Mantine (the UI component
+            # library) injects CSS-in-JS at runtime via style elements. Nonces or
+            # hashes would require per-request CSP headers and a bundler plugin;
+            # blocking inline styles would break the entire UI. This is lower risk
+            # than 'unsafe-inline' on scripts (which is NOT present in prod).
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data:",
             "font-src 'self'",
@@ -122,19 +127,31 @@ class MaxBodySizeMiddleware:
 
         as_json = is_api_path(scope.get("path", ""))
 
+        # Collect all Content-Length header values. RFC 7230 §3.3.2 permits
+        # multiple identical values (proxies may add one) but prohibits
+        # distinct values — an inconsistency is a request-smuggling signal.
+        cl_values: list[int] = []
         for name, value in scope.get("headers", []):
             if name == b"content-length":
                 try:
-                    declared = int(value)
+                    cl_values.append(int(value))
                 except ValueError:
                     await _send_error(send, 400, "bad_request", "malformed content-length", as_json)
                     return
-                if declared > self.max_bytes:
-                    await _send_error(
-                        send, 413, "payload_too_large", "request body too large", as_json
-                    )
-                    return
-                break
+
+        if cl_values:
+            if len(set(cl_values)) > 1:
+                # Two or more distinct values → request smuggling attempt; reject.
+                await _send_error(
+                    send, 400, "bad_request", "conflicting content-length headers", as_json
+                )
+                return
+            declared = cl_values[0]
+            if declared > self.max_bytes:
+                await _send_error(
+                    send, 413, "payload_too_large", "request body too large", as_json
+                )
+                return
 
         total = 0
 
@@ -166,6 +183,12 @@ async def _send_error(send: Send, status: int, code: str, message: str, as_json:
             "headers": [
                 (b"content-type", ctype),
                 (b"content-length", str(len(body)).encode("ascii")),
+                # Minimal security headers on early-reject responses (emitted
+                # before SecurityHeadersMiddleware gets to add its own set, so
+                # we must stamp them here manually).
+                (b"x-content-type-options", b"nosniff"),
+                (b"x-frame-options", b"DENY"),
+                (b"referrer-policy", b"same-origin"),
             ],
         }
     )

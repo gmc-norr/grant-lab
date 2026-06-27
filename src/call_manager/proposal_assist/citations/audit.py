@@ -102,6 +102,21 @@ def claim_context_sha(claim_text: str) -> str:
     return hashlib.sha256(normalize_for_quote_match(claim_text).encode("utf-8")).hexdigest()
 
 
+def claim_drift_hash(claim: str, anchor: str) -> str:
+    """The drift-detection hash basis shared by insert AND validation.
+
+    A marker at document/section start has no preceding prose, so the extracted
+    claim sentence is ``""``. Hashing the empty string here would make the
+    insert-time hash (which falls back to the anchor) and the validator's
+    re-derivation disagree forever — a permanent spurious ``claim_drift``. By
+    routing BOTH sites through this single helper, the empty-claim case falls
+    back to *anchor* identically on both sides, so an unchanged empty-claim
+    citation never looks drifted. When ``claim`` is non-empty the anchor is
+    unused and the basis is the claim sentence (the normal case).
+    """
+    return claim_context_sha(claim if claim else anchor)
+
+
 def evidence_quote_sha(quote: str) -> str:
     """Bare 64-hex sha256 of the normalized evidence quote.
 
@@ -121,8 +136,9 @@ def _issue(
     evidence_id: str | None,
     location: str | None,
     detail: str,
+    reason: str | None = None,
 ) -> dict:
-    return {
+    issue = {
         "type": type_,
         "severity": severity,
         "citekey": citekey,
@@ -130,6 +146,13 @@ def _issue(
         "location": location,
         "detail": detail,
     }
+    # `reason` distinguishes WHY an audit_unavailable row is degraded so the
+    # caller can retry only on a true cap and degrade-not-fail on
+    # transient/invalid verdicts. One malformed local-Gemma verdict on one
+    # citation must not dead-letter the whole section.
+    if reason is not None:
+        issue["reason"] = reason
+    return issue
 
 
 def validate_citations_deterministic(
@@ -392,7 +415,24 @@ def _check_live_row(
 
     # --- claim_drift (prose around the marker changed) ------------------- #
     live_claim = claim_sentence_around(proposal_text, marker.get("start", 0), marker.get("end", 0))
-    stored_hash = (row.get("claim_context") or {}).get("hash")
+    claim_context = row.get("claim_context") or {}
+    stored_hash = claim_context.get("hash")
+    # Empty-claim parity: insert hashes the ANCHOR when the extracted claim is
+    # empty. The anchor is not retained in the row, but for an empty-claim insert
+    # the stored claim text IS the anchor (insert's fallback wrote it there), so
+    # routing the live re-derivation through claim_drift_hash with that stored
+    # text as the fallback reproduces insert's exact basis. See claim_drift_hash.
+    stored_claim_text = claim_context.get("text") or ""
+    # KNOWN LIMITATION (R2-M1): if a citation was inserted with a NON-EMPTY claim
+    # and the marker later migrates to a line/section start so the live claim
+    # becomes "", the validator falls back to ``stored_claim_text`` (= the
+    # original claim), so ``claim_drift_hash("", stored)`` == stored_hash and no
+    # drift is flagged. We deliberately accept this rather than record a separate
+    # "was empty at insert" flag: the row stores the anchor (not "") for genuine
+    # empty-claim inserts, so there is no in-band signal to distinguish a
+    # became-empty claim from an inserted-empty one without a ledger-format
+    # change. The common empty↔empty and C↔C paths are exact; only this rare
+    # marker-migration case under-reports.
     if stored_hash is None:
         issues.append(
             _issue(
@@ -404,7 +444,7 @@ def _check_live_row(
                 detail="claim_context.hash absent; cannot verify the claim snapshot",
             )
         )
-    elif claim_context_sha(live_claim) != stored_hash:
+    elif claim_drift_hash(live_claim, stored_claim_text) != stored_hash:
         issues.append(
             _issue(
                 "claim_drift",
@@ -518,8 +558,12 @@ def validate_citations_semantic(
     Consumes ``deterministic_issues`` to skip un-judgeable rows. Reads a cached
     verdict when the row's content is unchanged (claim_drift rows always
     re-judge). On cap-exceeded the whole pass stops (further calls would also be
-    capped); a transient per-row exception degrades that row to
-    ``audit_unavailable`` and continues. NEVER raises.
+    capped); a transient per-row exception or an invalid/empty verdict degrades
+    that row to ``audit_unavailable`` and continues. NEVER raises.
+
+    Every ``audit_unavailable`` issue carries a ``reason`` so the caller can
+    distinguish a true cap (``reason='cap'`` — retry the job) from a per-row
+    ``transient`` error or ``invalid`` verdict (degrade that row, keep going).
     """
     issues: list[dict] = []
 
@@ -631,6 +675,7 @@ def validate_citations_semantic(
                         evidence_id=ev_id,
                         location=location,
                         detail="semantic judge unavailable for this citation (transient error)",
+                        reason="transient",
                     )
                 )
                 continue
@@ -648,6 +693,7 @@ def validate_citations_semantic(
                             "semantic judge unavailable: citation LLM cap exceeded "
                             f"(scope={res.cap_scope})"
                         ),
+                        reason="cap",
                     )
                 )
                 break
@@ -666,6 +712,7 @@ def validate_citations_semantic(
                         evidence_id=ev_id,
                         location=location,
                         detail="semantic judge returned an invalid or empty verdict",
+                        reason="invalid",
                     )
                 )
                 continue
@@ -691,6 +738,7 @@ def validate_citations_semantic(
                     evidence_id=ev_id,
                     location=location,
                     detail="semantic judge returned an invalid or empty verdict",
+                    reason="invalid",
                 )
             )
             continue
@@ -717,3 +765,245 @@ def validate_citations_semantic(
         )
 
     return issues
+
+
+# =========================================================================== #
+# Capped semantic pass (Defect-2 fix): bounded per-request LLM fan-out.
+# =========================================================================== #
+
+
+def validate_citations_semantic_capped(
+    *,
+    proposal_text: str,
+    ledger: dict,
+    session,
+    session_factory,
+    workspace_id,
+    citation_service,
+    deterministic_issues: list[dict],
+    max_fresh_calls: int = 25,
+    validator_version: str = VALIDATOR_VERSION,
+) -> tuple[list[dict], int, int]:
+    """Capped wrapper around validate_citations_semantic.
+
+    Limits the number of FRESH (uncached) LLM calls to ``max_fresh_calls`` per
+    request. Already-cached verdicts are returned unchanged (they do not count
+    against the cap). Rows that would require a fresh LLM call but cannot be
+    served within the cap are counted as *deferred* — the caller includes the
+    count in the response so the client can re-poll.
+
+    Returns ``(issues, checked, deferred)`` where:
+    - ``issues``   — the combined semantic issue list (only for judged rows).
+    - ``checked``  — number of rows for which a fresh LLM call was made this
+                     request (cached hits are excluded).
+    - ``deferred`` — number of eligible rows that were not judged because the
+                     per-request cap was reached.
+
+    Cached rows never block the cap: a response that has many cached rows and
+    few fresh rows will still report deferred=0 even if total eligible rows
+    exceeds max_fresh_calls.
+    """
+    issues: list[dict] = []
+    checked = 0
+    deferred = 0
+
+    types_by_ev: dict[str, set[str]] = {}
+    for di in deterministic_issues or []:
+        ev = di.get("evidence_id")
+        t = di.get("type")
+        if ev and t:
+            types_by_ev.setdefault(ev, set()).add(t)
+
+    try:
+        marker_by_ev = {m["ev_id"]: m for m in find_markers(proposal_text or "")}
+    except Exception:  # pragma: no cover - find_markers is pure/total
+        logger.exception("find_markers failed during capped semantic citation audit")
+        marker_by_ev = {}
+
+    evidence = (ledger or {}).get("evidence") or []
+    for idx, row in enumerate(evidence):
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        ev_id = row["id"]
+        citekey = row.get("citekey")
+
+        row_types = types_by_ev.get(ev_id, set())
+        if row_types & _SKIP_TYPES:
+            continue
+        marker = marker_by_ev.get(ev_id)
+        if marker is None:
+            continue
+
+        stance = row.get("stance")
+        allowed = _ALLOWED_VERDICTS.get(stance)
+        if allowed is None:
+            logger.info(
+                "capped semantic audit skipping ev %s: unknown stance %r", ev_id, stance
+            )
+            continue
+
+        try:
+            ref_uuid = uuid.UUID(str(row.get("reference_id")))
+        except (ValueError, TypeError):
+            continue
+        chunk = _load_chunk(
+            session,
+            reference_id=ref_uuid,
+            chunk_index=(row.get("locator") or {}).get("chunk_index"),
+            workspace_id=workspace_id,
+        )
+        if chunk is None:
+            continue
+
+        live_claim = claim_sentence_around(
+            proposal_text or "", marker.get("start", 0), marker.get("end", 0)
+        )
+        evidence_quote = row.get("evidence_quote") or ""
+        if not evidence_quote.strip():
+            continue
+        location = f"citekey {citekey} ({ev_id}) at char {marker.get('start')}"
+
+        key = build_cache_key(
+            claim_hash=claim_context_sha(live_claim),
+            chunk_content_hash=chunk_content_sha(chunk.text),
+            evidence_quote_hash=evidence_quote_sha(evidence_quote),
+            stance=stance,
+            validator_version=validator_version,
+        )
+
+        is_drift = "claim_drift" in row_types
+
+        verdict: str | None = None
+        rationale: str | None = None
+
+        # --- cache READ (skipped for drifted claims — always re-judge) --- #
+        if not is_drift:
+            cached = get_verdict(session, workspace_id=workspace_id, cache_key=key)
+            if cached is not None:
+                verdict = cached.verdict
+                rationale = cached.rationale
+
+        # --- enforce per-request cap on fresh LLM calls ------------------- #
+        if verdict is None:
+            if checked >= max_fresh_calls:
+                # Cap reached — count this row as deferred and skip.
+                deferred += 1
+                continue
+
+            try:
+                res = citation_service.complete_json(
+                    workspace_id=workspace_id,
+                    op="validate_citation",
+                    system=_AUDIT_SYSTEM,
+                    user=_build_audit_user(
+                        claim=live_claim,
+                        evidence_quote=evidence_quote,
+                        chunk_text=chunk.text,
+                        stance=stance,
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "capped semantic citation judge failed (workspace=%s ev=%s) — degrading",
+                    workspace_id,
+                    ev_id,
+                    exc_info=True,
+                )
+                issues.append(
+                    _issue(
+                        "audit_unavailable",
+                        "warning",
+                        citekey=citekey,
+                        evidence_id=ev_id,
+                        location=location,
+                        detail="semantic judge unavailable for this citation (transient error)",
+                        reason="transient",
+                    )
+                )
+                checked += 1  # a call was attempted
+                continue
+
+            checked += 1  # fresh call made
+
+            if res.cap_exceeded:
+                issues.append(
+                    _issue(
+                        "audit_unavailable",
+                        "warning",
+                        citekey=citekey,
+                        evidence_id=ev_id,
+                        location=location,
+                        detail=(
+                            "semantic judge unavailable: citation LLM cap exceeded "
+                            f"(scope={res.cap_scope})"
+                        ),
+                        reason="cap",
+                    )
+                )
+                # The daily LLM cap tripped mid-loop: the rows we have not yet
+                # iterated are NOT judged this pass. Count them as deferred so
+                # the response's re-poll signal is accurate (conservative — a
+                # few of the remaining rows might have been skipped/cached, but
+                # honest under-judging is better than reporting deferred=0).
+                deferred += len(evidence) - idx - 1
+                break
+
+            data = res.data or {}
+            verdict = data.get("verdict")
+            rationale = data.get("rationale")
+            if verdict not in allowed:
+                issues.append(
+                    _issue(
+                        "audit_unavailable",
+                        "warning",
+                        citekey=citekey,
+                        evidence_id=ev_id,
+                        location=location,
+                        detail="semantic judge returned an invalid or empty verdict",
+                        reason="invalid",
+                    )
+                )
+                continue
+
+            store_verdict(
+                session_factory,
+                workspace_id=workspace_id,
+                cache_key=key,
+                verdict=verdict,
+                rationale=rationale,
+                validator_version=validator_version,
+            )
+
+        if verdict not in allowed:
+            issues.append(
+                _issue(
+                    "audit_unavailable",
+                    "warning",
+                    citekey=citekey,
+                    evidence_id=ev_id,
+                    location=location,
+                    detail="semantic judge returned an invalid or empty verdict",
+                    reason="invalid",
+                )
+            )
+            continue
+
+        mapped = _VERDICT_ISSUE.get(verdict)
+        if mapped is None:
+            continue
+        issue_type, severity = mapped
+        detail = f"semantic judge: {verdict}"
+        if rationale:
+            detail = f"{detail} — {rationale}"
+        issues.append(
+            _issue(
+                issue_type,
+                severity,
+                citekey=citekey,
+                evidence_id=ev_id,
+                location=location,
+                detail=detail,
+            )
+        )
+
+    return issues, checked, deferred

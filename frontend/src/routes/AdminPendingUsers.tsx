@@ -67,7 +67,7 @@ export function AdminPendingUsers() {
       <p className={styles.nav}>
         <Link to="/admin/users">All users</Link>
         {" · "}
-        <a href="/admin">Admin home</a>
+        <Link to="/admin">Admin home</Link>
       </p>
     </main>
   );

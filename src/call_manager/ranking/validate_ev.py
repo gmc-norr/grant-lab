@@ -28,10 +28,23 @@ from call_manager.ranking.rank_pair import _build_verification_text, _safe_cosin
 _logger = logging.getLogger(__name__)
 
 
-def run_validation(*, session_factory, client, sample: int, data_dir: Path) -> Path:
+def run_validation(
+    *,
+    session_factory,
+    client,
+    sample: int,
+    data_dir: Path,
+    embedding_threshold: float = 0.30,
+    embedding_hard_fail_threshold: float | None = None,
+) -> Path:
     """Sample up to `sample` LLM-scored pairs (stratified by score), re-run the
     local rubric with logprobs in memory, compare EV-score vs argmax-score.
-    Returns the path of the written report. No DB writes."""
+    Returns the path of the written report. No DB writes.
+
+    `embedding_threshold` / `embedding_hard_fail_threshold` are the cosine
+    cutoffs threaded into evaluate_gates so the validation gates on the SAME
+    thresholds production uses (B11 Defect 5). The caller (main) reads both from
+    Settings; the 0.30 default here only keeps direct unit calls working."""
     rows: list[tuple[int, int]] = []
     with session_factory() as session:
         # Stratify: order by score so the sample spans the range, then take a
@@ -60,7 +73,8 @@ def run_validation(*, session_factory, client, sample: int, data_dir: Path) -> P
                 call,
                 now=now,
                 embed_similarity=embed_sim,
-                embedding_threshold=0.30,
+                embedding_threshold=embedding_threshold,
+                embedding_hard_fail_threshold=embedding_hard_fail_threshold,
             )
             try:
                 envelope = client.chat(
@@ -173,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
             client=_build_client(),
             sample=args.sample,
             data_dir=data_dir,
+            embedding_threshold=settings.embedding_pregate_threshold,
+            embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
         )
     finally:
         engine.dispose()

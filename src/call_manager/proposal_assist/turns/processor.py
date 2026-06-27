@@ -64,6 +64,7 @@ from call_manager.proposal_assist.attachments.resolver import (
 )
 from call_manager.proposal_assist.drafting.contract import (
     AssistantTextEvent,
+    DraftingAtCapacity,
     SDKTurnError,
     ToolResultEvent,
     ToolUseEvent,
@@ -152,6 +153,18 @@ async def process_turn_once(
     # claim doesn't trip the unique-running index.
     try:
         await controller.launch(workspace_id_for_launch)
+    except DraftingAtCapacity:
+        # Defect 1 backpressure: the live-subprocess ceiling is reached and
+        # every live handle is mid-turn. This is EXPECTED, not a failure —
+        # leave the turn queued so the next drain tick (or a freed slot) picks
+        # it up. Logged at info level so it doesn't read as an error.
+        logger.info(
+            "process_turn_once: drafting at capacity for workspace %s; "
+            "leaving turn_job %s queued for retry",
+            workspace_id_for_launch,
+            turn_job_id,
+        )
+        return
     except Exception:
         logger.exception(
             "process_turn_once: controller.launch failed for workspace %s; "

@@ -22,7 +22,9 @@ def test_cookie_secure_follows_app_base_url(monkeypatch):
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     assert Settings().cookie_secure is False
 
-    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.example.com")
+    monkeypatch.setenv("APP_BASE_URL", "https://call-manager.ki.se")
+    # Real EMAIL_FROM required in prod (https) — example.com default is rejected.
+    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
     assert Settings().cookie_secure is True
 
 

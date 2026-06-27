@@ -73,6 +73,22 @@ def test_whole_text_is_single_sentence_no_terminator():
     assert _around("A single bare claim", "") == "A single bare claim"
 
 
+def test_marker_right_after_heading_excludes_heading():
+    # Defect B7-2: a cite immediately after `## Aims` must NOT absorb the
+    # heading markup as its claim — the backward scan stops at the heading line.
+    assert _around("## Aims\n", " trailing.") == ""
+
+
+def test_marker_after_heading_then_prose_keeps_only_prose():
+    # Heading, then real claim prose on the next line, then the marker: the
+    # claim is the prose, never the heading.
+    assert _around("## Aims\nWe will cure cancer", ". Next.") == "We will cure cancer"
+
+
+def test_marker_after_atx_heading_with_indent_excludes_heading():
+    assert _around("  ### Background\n", " more.") == ""
+
+
 # --- iter_proposal_sentences ------------------------------------------------
 
 

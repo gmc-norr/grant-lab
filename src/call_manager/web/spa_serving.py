@@ -12,6 +12,20 @@ from call_manager.web.spa_routes import is_spa_route
 SPA_DIR = Path(__file__).resolve().parent / "spa"  # src/call_manager/web/spa
 
 
+class _ImmutableStaticFiles(StaticFiles):
+    """StaticFiles that adds an immutable Cache-Control header to 200 responses.
+
+    Vite hashes all filenames under /assets/ (e.g. main.Bx3kPq2F.js), so
+    public, max-age=31536000, immutable is safe — a content change always
+    produces a new URL. index.html is served separately (no immutable header)."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
     """Serve the built SPA when spa_mode == 'prod'. 'dev' is served by Vite;
     'disabled' mounts nothing. Must be called AFTER all API/HTML routers are
@@ -23,7 +37,7 @@ def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
         raise RuntimeError(f"SPA build missing at {index} (SPA_MODE=prod)")
     assets = SPA_DIR / "assets"
     if assets.exists():
-        app.mount("/assets", StaticFiles(directory=assets), name="spa-assets")
+        app.mount("/assets", _ImmutableStaticFiles(directory=assets), name="spa-assets")
 
     # SPA shell fallback, registered LAST so every real route wins and only
     # unmatched paths reach here. It owns ALL methods on a catch-all path so that
@@ -55,6 +69,13 @@ def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
         # 405 that SPA_MODE=dev/disabled return (no catch-all → Starlette's
         # method-mismatch 405). Collect the methods of any CONCRETE route whose
         # path matches (excluding THIS catch-all and method-less mounts).
+        # Short-circuit: /api/* sub-paths that reach the catch-all are
+        # genuinely unknown (real /api routes always win before us). Skip the
+        # O(routes) walk — they can never be a 405 from here, only a 404.
+        # Other backend prefixes (/healthz, /auth, /workspaces …) still need
+        # the walk so that a real route hit with the wrong method returns 405.
+        if path.startswith("/api/"):
+            raise HTTPException(status_code=404, detail="not found")
         allowed: set[str] = set()
         probe = {"type": "http", "path": path, "method": "GET"}
         for route in app.routes:

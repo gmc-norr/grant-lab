@@ -9,12 +9,12 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from call_manager.db.models import Call, Profile, Source
+from call_manager.db.models import Call, Source
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.embeddings.refresh import refresh_call_embedding
 from call_manager.ingestion.alerts import ConsecutiveFailureTracker
 from call_manager.ingestion.upsert import upsert_call
-from call_manager.ranking.queue import enqueue_for_pair
+from call_manager.ranking.queue import bulk_enqueue_for_calls
 from call_manager.sources.types import AdapterError, SourceAdapter
 
 _logger = logging.getLogger(__name__)
@@ -247,7 +247,12 @@ def run_ingestion(
                 )
                 # Don't abort — enqueue the job anyway. UNKNOWN gate → LLM runs.
 
-        # --- Step 3: enqueue ranking jobs (one transaction) ---
+        # --- Step 3: enqueue ranking jobs (one transaction, one statement) ---
+        # Perf (D2-2): replaced the N×M per-pair enqueue_for_pair loop with a
+        # single bulk INSERT … CROSS JOIN unnest(:call_ids) … active profiles.
+        # Same ON CONFLICT DO NOTHING idempotency as the per-pair helper, same
+        # pattern as reconcile_missing_rankings. Saves (|calls| × |profiles|) - 1
+        # round-trips (e.g. 50 calls × 3 profiles = 150→1 statements).
         # Wrap in try/except so an enqueue-time DB error (lock contention,
         # transient connection drop) is recorded as `error_msg` rather than
         # propagating out and bypassing the alerter below. Recovery on this
@@ -255,18 +260,7 @@ def run_ingestion(
         # in step 1, so the next ingest tick won't re-discover these calls.
         try:
             with session_factory() as session:
-                active_profile_ids = (
-                    session.execute(select(Profile.id).where(Profile.is_active.is_(True)))
-                    .scalars()
-                    .all()
-                )
-                for cid in touched_call_ids:
-                    for pid in active_profile_ids:
-                        enqueue_for_pair(
-                            session,
-                            call_id=cid,
-                            profile_id=pid,
-                        )
+                bulk_enqueue_for_calls(session, touched_call_ids)
                 session.commit()
         except Exception as e:  # noqa: BLE001 — must not crash the scheduler
             error_msg = f"step 3 (enqueue) failed: {e}"

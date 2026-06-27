@@ -129,3 +129,20 @@ def test_runs_today_excludes_cancelled(review_workspace):
     r.status = "cancelled"
     session.flush()
     assert review_runs_today(session, workspace_id=ws_id) == 0
+
+
+def test_dollars_today_includes_cancelled_run_spend(review_workspace):
+    """_run_one_call deliberately re-rolls a late sub-call's real spend onto a
+    cancelled run, so cancelled runs CAN carry estimated_dollars. The dollar query
+    must count them or it consistently undercounts. (The run *count* still excludes
+    cancelled — see test_runs_today_excludes_cancelled — only dollars include them.)"""
+    session, ws_id, *_ = review_workspace
+    r = ReviewRun(
+        workspace_id=ws_id,
+        status="cancelled",
+        draft_sha="a" * 64,
+        estimated_dollars=Decimal("0.0040"),
+    )
+    session.add(r)
+    session.flush()
+    assert review_dollars_today(session, workspace_id=ws_id) == Decimal("0.0040")

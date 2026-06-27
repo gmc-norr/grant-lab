@@ -13,6 +13,11 @@ export function useEventStream(url: string, handlers: Handlers, opts?: Opts) {
   const errors = useRef(0);
   const probing = useRef(false); // single-flight guard
   const backoff = useRef(1000); // capped exponential backoff
+  // Keep a ref to the latest handlers so the EventSource callback always reads
+  // the current closure values without reopening the stream on every render.
+  // The stream lifecycle is still keyed only to `url`.
+  const handlersRef = useRef<Handlers>(handlers);
+  handlersRef.current = handlers;
 
   useEffect(() => {
     // Guard: empty url means "no active stream" (e.g. no running job yet).
@@ -34,13 +39,14 @@ export function useEventStream(url: string, handlers: Handlers, opts?: Opts) {
       if (lastId.current) u.searchParams.set("since", lastId.current);
       es = new EventSource(u.toString(), { withCredentials: true });
 
-      for (const [type, fn] of Object.entries(handlers)) {
+      for (const type of Object.keys(handlers)) {
         es.addEventListener(type, (e) => {
-          // named events don't reach onmessage
+          // named events don't reach onmessage; dispatch through ref so the
+          // current handler closure is always used, not the one from open time.
           const ev = e as MessageEvent;
           if (ev.lastEventId) lastId.current = ev.lastEventId;
           try {
-            fn(JSON.parse(ev.data));
+            handlersRef.current[type]?.(JSON.parse(ev.data));
           } catch {
             /* parse error: skip, keep the stream alive */
           }

@@ -82,3 +82,33 @@ def test_subscriptions_ignores_inactive(monkeypatch, pg_url, pg_session_factory)
         r = client.put("/api/me/subscriptions", json={"profile_ids": [archived]})
     assert r.status_code == 200
     assert r.json() == {"subscribed": []}
+
+
+def test_subscriptions_preserves_inactive_profile_sub(monkeypatch, pg_url, pg_session_factory):
+    """Defect 3: PUT /api/me/subscriptions must NOT delete an existing sub
+    to a temporarily-inactive profile. The sub (and its digest_enabled pref)
+    must survive a save that omits the inactive id (because the UI doesn't
+    show inactive profiles, so the client can't echo them back)."""
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid_active = _profile(pg_session_factory, owner_id=uid, name="Active")
+    pid_inactive = _profile(pg_session_factory, owner_id=uid, name="Inactive", active=False)
+    # Pre-existing sub to the inactive profile with digest_enabled=False.
+    with pg_session_factory() as s:
+        s.add(Subscription(user_id=uid, profile_id=pid_inactive, digest_enabled=False))
+        s.commit()
+    # PUT only contains the active profile (the UI can only show/echo active ones).
+    with client:
+        r = client.put("/api/me/subscriptions", json={"profile_ids": [pid_active]})
+    assert r.status_code == 200
+    # The response subscribed list only reflects active profiles.
+    assert r.json() == {"subscribed": [pid_active]}
+    # The inactive-profile sub MUST survive.
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(Subscription).where(
+                Subscription.user_id == uid, Subscription.profile_id == pid_inactive
+            )
+        ).scalar_one_or_none()
+    assert row is not None, "sub to temporarily-inactive profile was deleted"
+    assert row.digest_enabled is False  # preference also preserved

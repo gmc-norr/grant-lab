@@ -159,6 +159,49 @@ def update_rubric(
         return _rubric_out(ws)
 
 
+class SetupRetryOut(BaseModel):
+    status: str
+    attempts: int
+
+
+@router.post("/workspaces/{workspace_id}/setup/retry", response_model=SetupRetryOut)
+def retry_setup(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> SetupRetryOut:
+    """Owner-only: re-queue a permanently-failed Phase-0 setup job.
+
+    Resets status='queued', attempts=0, clears started_at/completed_at/last_error
+    so the next scheduler tick re-claims it. Returns 404 if no failed job exists
+    for this workspace; returns 409 if the job is already queued or running
+    (not yet permanently failed)."""
+    with request.app.state.session_factory() as session:
+        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        job = session.scalar(
+            select(WorkspaceSetupJob)
+            .where(WorkspaceSetupJob.workspace_id == ws.id)
+            .with_for_update()
+        )
+        if job is None or job.status != "failed":
+            if job is not None and job.status in ("queued", "running"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="setup job is already queued or running",
+                )
+            raise HTTPException(
+                status_code=404,
+                detail="no failed setup job for this workspace",
+            )
+        job.status = "queued"
+        job.attempts = 0
+        job.started_at = None
+        job.completed_at = None
+        job.last_error = None
+        session.commit()
+        return SetupRetryOut(status=job.status, attempts=job.attempts)
+
+
 @router.post("/workspaces/{workspace_id}/activate", response_model=RubricOut)
 def activate(
     workspace_id: uuid.UUID,

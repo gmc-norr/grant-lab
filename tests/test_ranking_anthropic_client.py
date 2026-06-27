@@ -257,6 +257,33 @@ def test_strip_markdown_fence_leaves_raw_json_untouched():
     assert _strip_markdown_fence(text) == text
 
 
+def test_strip_markdown_fence_prefers_last_parseable_block_over_preamble_example():
+    """B11 Defect 4b: when the model emits a pre-JSON EXAMPLE fence followed by
+    the REAL answer fence, taking the FIRST block grabs the example (often
+    truncated/illustrative) and dead-letters a valid reply. Prefer the LAST
+    parseable block — the real answer."""
+    text = (
+        "Here is an example of the format I will use:\n"
+        '```json\n{"example": true}\n```\n'
+        "And here is my actual answer:\n"
+        '```json\n{"topic_fit": {"rating": 4}}\n```'
+    )
+    out = _strip_markdown_fence(text)
+    assert out == '{"topic_fit": {"rating": 4}}'
+
+
+def test_strip_markdown_fence_skips_unparseable_trailing_block():
+    """When the LAST fenced block is not valid JSON but an earlier one is,
+    fall back to the earlier parseable block rather than returning junk."""
+    text = (
+        '```json\n{"topic_fit": {"rating": 4}}\n```\n'
+        "Note: the above is the answer.\n"
+        "```\nnot json at all\n```"
+    )
+    out = _strip_markdown_fence(text)
+    assert out == '{"topic_fit": {"rating": 4}}'
+
+
 def test_chat_strips_markdown_fence_from_response():
     """End-to-end: Sonnet returns ```json{...}``` → envelope content
     is the parseable raw JSON, not the fenced version."""

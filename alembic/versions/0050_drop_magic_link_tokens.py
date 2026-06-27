@@ -21,6 +21,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Schema-only: this table is retired and has no live data. The recreated
+    # table intentionally omits query-serving indexes (the table will never
+    # be queried again in normal operation).
     op.create_table(
         "magic_link_tokens",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),

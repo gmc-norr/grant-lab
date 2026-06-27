@@ -7,10 +7,11 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import CoherenceJob, Workspace
+from call_manager.db.models import CoherenceJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.coherence.jobs import (
     enqueue_coherence_run,
     latest_coherence_job,
@@ -49,9 +50,36 @@ def start_coherence_run(
 ) -> dict:
     # require_member returns the live (non-soft-deleted) workspace, 404 if missing,
     # 403 for a non-member/stranger.
+    #
+    # AUTHORITY (B9 defect 3 — DELIBERATE): this cloud fan-out is gated on
+    # require_member, NOT require_owner, even though interactive chat turns
+    # (submit_turn) are owner-only. Members triggering coherence/evaluator/review
+    # passes is an intentional collaboration affordance. It is kept accountable by
+    # the actor-attributed coherence_run_triggered WorkspaceEvent written below
+    # (B9 defect 4) and bounded by the per-workspace coherence cap + the org-wide
+    # global daily token cap, which now UNIONs this table (B9 defect 2). Do NOT
+    # narrow this to owner or add a per-actor sub-cap.
     ws = require_member(workspace_id=workspace_id, user=user, session=session)
     _gate_cloud_llm(ws=ws, request=request, session=session, user=user)
+    # Detect a freshly-created run BEFORE enqueue (which is create-or-return-active)
+    # so the trigger event fires ONCE per run, never on the active-first re-POST —
+    # mirrors review_run_triggered / uncited_claims_run_triggered.
+    had_active = session.scalar(
+        select(CoherenceJob.id).where(
+            CoherenceJob.workspace_id == workspace_id,
+            CoherenceJob.status.in_(("queued", "running")),
+        )
+    )
     job = enqueue_coherence_run(session, workspace_id=workspace_id, requested_by=user.id)
+    if had_active is None:
+        session.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="coherence_run_triggered",
+                actor_id=user.id,
+                payload={"job_id": str(job.id)},
+            )
+        )
     session.commit()
     return _serialize(job)
 

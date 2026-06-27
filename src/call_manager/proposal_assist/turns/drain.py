@@ -121,10 +121,28 @@ async def drain_turn_queue_tick(
             # (incl. its ResultMessage) stay queued in the persistent client's
             # shared stream. If the cached handle is reused, the NEXT turn reads
             # those leftovers first — mis-attributing transcript rows + token
-            # counts and desyncing every subsequent turn. Terminate the handle so
-            # the next turn cold-launches a fresh, clean subprocess (terminate is
-            # idempotent + releases the advisory lock; guarded so a terminate
-            # failure can't abort the drain tick).
+            # counts and desyncing every subsequent turn.
+            #
+            # Defect 5: first try a SHORT-bounded graceful interrupt() so the SDK
+            # subprocess stops the current turn cleanly (which lets terminate's
+            # disconnect flush + exit normally rather than via SIGTERM/SIGKILL).
+            # interrupt is best-effort and advisory — terminate() below remains
+            # the GUARANTEED backstop that frees the handle + advisory lock. Bound
+            # the interrupt so a wedged subprocess can't stall the drain tick.
+            try:
+                await asyncio.wait_for(controller.interrupt(workspace_id), timeout=2.0)
+            except Exception:
+                # TimeoutError or any interrupt failure — fall straight through to
+                # the terminate backstop. Not even logged at exception level: this
+                # is an expected best-effort path.
+                logger.debug(
+                    "drain_turn_queue_tick: graceful interrupt for workspace %s "
+                    "failed/timed out; falling back to terminate",
+                    workspace_id,
+                )
+            # Terminate the handle so the next turn cold-launches a fresh, clean
+            # subprocess (terminate is idempotent + releases the advisory lock;
+            # guarded so a terminate failure can't abort the drain tick).
             try:
                 await controller.terminate(workspace_id)
             except Exception:

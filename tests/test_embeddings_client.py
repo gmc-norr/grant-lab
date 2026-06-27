@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from call_manager.embeddings.client import OllamaEmbedClient
+from call_manager.embeddings.client import EmbedResult, OllamaEmbedClient
 from call_manager.ranking.ollama_client import LLMError
 
 
@@ -23,9 +23,12 @@ def _client_returning(payload: dict, *, status: int = 200) -> OllamaEmbedClient:
 def test_embed_returns_vector_for_single_input():
     vec = [0.1] * 1024
     client = _client_returning({"embeddings": [vec]})
-    out = client.embed("hello world")
-    assert out == vec
-    assert len(out) == 1024
+    text = "hello world"
+    result = client.embed(text)
+    assert isinstance(result, EmbedResult)
+    assert result.vector == vec
+    assert len(result.vector) == 1024
+    assert result.embedded_chars == len(text)
 
 
 def test_embed_returns_first_vector_when_multiple_returned():
@@ -34,8 +37,9 @@ def test_embed_returns_first_vector_when_multiple_returned():
     a = [0.1] * 1024
     b = [0.2] * 1024
     client = _client_returning({"embeddings": [a, b]})
-    out = client.embed("anything")
-    assert out == a
+    result = client.embed("anything")
+    assert isinstance(result, EmbedResult)
+    assert result.vector == a
 
 
 def test_embed_raises_llm_error_on_http_failure():
@@ -125,8 +129,9 @@ def test_embed_accepts_custom_expected_dim():
         transport=httpx.MockTransport(handler),
         expected_dim=768,
     )
-    out = client.embed("anything")
-    assert len(out) == 768
+    result = client.embed("anything")
+    assert isinstance(result, EmbedResult)
+    assert len(result.vector) == 768
 
 
 # --------------------------------------------------------------------------
@@ -168,10 +173,15 @@ def test_embed_shrinks_and_retries_on_context_length_400():
     client = OllamaEmbedClient(
         base_url="http://x", model="mxbai-embed-large", transport=httpx.MockTransport(handler)
     )
-    out = client.embed("z" * 2500)
-    assert out == vec
+    text = "z" * 2500
+    result = client.embed(text)
+    assert isinstance(result, EmbedResult)
+    assert result.vector == vec
     assert len(seen) >= 2  # retried at least once
     assert seen[-1] <= 1000  # the accepted attempt fit the context window
+    # embedded_chars must reflect the truncated length, not the original
+    assert result.embedded_chars < len(text)
+    assert result.embedded_chars <= 1000
 
 
 def test_embed_retries_on_nonfinite_for_long_input():
@@ -186,8 +196,12 @@ def test_embed_retries_on_nonfinite_for_long_input():
     client = OllamaEmbedClient(
         base_url="http://x", model="bge-m3", transport=httpx.MockTransport(handler)
     )
-    out = client.embed("z" * 2500)
-    assert out == good
+    text = "z" * 2500
+    result = client.embed(text)
+    assert isinstance(result, EmbedResult)
+    assert result.vector == good
+    # Truncation occurred: embedded_chars < original length
+    assert result.embedded_chars < len(text)
 
 
 def test_embed_gives_up_when_length_error_persists():

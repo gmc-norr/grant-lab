@@ -96,8 +96,11 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     wrong_method = c.post("/healthz")
     assert wrong_method.status_code == 405
     assert "GET" in wrong_method.headers.get("allow", "")
-    # The internal SPA catch-all must not leak into the OpenAPI schema.
-    assert "/{full_path}" not in c.get("/openapi.json").json()["paths"]
+    # The raw schema route is gated off in non-dev modes (no unauth API map);
+    # but the internal SPA catch-all must still never leak into the in-process
+    # schema (checked via app.openapi(), which is mode-independent).
+    assert c.get("/openapi.json").status_code == 404
+    assert "/{full_path}" not in c.app.openapi()["paths"]
     # PROD must keep the STRICT CSP — the relaxed dev policy must NOT leak to
     # prod. This exercises the prod branch of the
     # build_csp(dev=settings.spa_mode == "dev") wiring (the security-critical
@@ -122,3 +125,75 @@ def test_disabled_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_f
     c = TestClient(create_app())
     csp = c.get("/healthz").headers.get("content-security-policy", "")
     assert "script-src 'self'" in csp and "script-src 'self' 'unsafe-inline'" not in csp
+
+
+# ---------------------------------------------------------------------------
+# Defect 8b: immutable Cache-Control for /assets/*
+# ---------------------------------------------------------------------------
+
+def test_assets_have_immutable_cache_control(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Vite-hashed assets under /assets/ must carry Cache-Control: public,
+    max-age=31536000, immutable so browsers and CDNs cache them for 1 year."""
+    import call_manager.web.spa_serving as spa_serving
+
+    spa_dir = tmp_path / "spa"
+    (spa_dir / "assets").mkdir(parents=True)
+    (spa_dir / "assets" / "main.AbCdEfGh.js").write_text("console.log('prod');")
+    (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
+    monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
+    _env(monkeypatch, pg_url, SPA_MODE="prod")
+    c = TestClient(create_app())
+
+    resp = c.get("/assets/main.AbCdEfGh.js")
+    assert resp.status_code == 200
+    cc = resp.headers.get("cache-control", "")
+    assert "immutable" in cc, f"Expected 'immutable' in Cache-Control, got: {cc!r}"
+    assert "max-age=31536000" in cc, f"Expected 'max-age=31536000' in Cache-Control, got: {cc!r}"
+    assert "public" in cc, f"Expected 'public' in Cache-Control, got: {cc!r}"
+
+
+def test_index_html_does_not_have_immutable_cache_control(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """index.html is NOT content-hashed so must NOT receive the immutable header.
+    It should be served without a long-lived cache directive."""
+    import call_manager.web.spa_serving as spa_serving
+
+    spa_dir = tmp_path / "spa"
+    (spa_dir / "assets").mkdir(parents=True)
+    (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
+    monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
+    _env(monkeypatch, pg_url, SPA_MODE="prod")
+    c = TestClient(create_app())
+
+    resp = c.get("/")
+    assert resp.status_code == 200
+    cc = resp.headers.get("cache-control", "")
+    assert "immutable" not in cc, f"index.html must NOT have 'immutable', got: {cc!r}"
+
+
+# ---------------------------------------------------------------------------
+# Defect 9: SPA fallback short-circuit for backend paths
+# ---------------------------------------------------------------------------
+
+def test_backend_path_404_does_not_walk_routes(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """An unknown /api/* path must return 404 without walking all app routes
+    (the /api/ short-circuit fires first). Unknown non-SPA, non-/api paths
+    (e.g. /workspaces/unknown) also 404 via the route walk finding no match."""
+    import call_manager.web.spa_serving as spa_serving
+
+    spa_dir = tmp_path / "spa"
+    (spa_dir / "assets").mkdir(parents=True)
+    (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
+    monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
+    _env(monkeypatch, pg_url, SPA_MODE="prod")
+    c = TestClient(create_app())
+
+    # Unknown /api/ subpath must be 404, not 405 or the SPA shell.
+    resp = c.get("/api/totally-unknown-endpoint")
+    assert resp.status_code == 404
+    assert "<title>spa</title>" not in resp.text
+
+    # Unknown /workspaces/* path also a backend prefix → 404.
+    resp = c.get("/workspaces/totally-unknown")
+    assert resp.status_code == 404

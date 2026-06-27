@@ -741,6 +741,64 @@ def test_call_matches_must_include_searches_full_text():
     assert _call_matches_must_include(profile, call) is True
 
 
+def test_call_matches_must_include_word_boundary_no_substring():
+    """B11 Defect 1: a short term like 'ai' must NOT match inside 'training'
+    or 'brain' (bare-substring would have force-included an off-topic call into
+    the paid LLM/escalation path)."""
+    from types import SimpleNamespace
+
+    from call_manager.ranking.rank_pair import _call_matches_must_include
+
+    profile = SimpleNamespace(structured={"must_include": ["pathology"]})
+    # 'pathology' as a term, but the call only contains 'pathological' — a real
+    # word-boundary mismatch is hard for a single term, so test the classic
+    # short-term substring trap with a >=3-char term that is a substring of a
+    # longer word.
+    profile = SimpleNamespace(structured={"must_include": ["rna"]})
+    call = SimpleNamespace(
+        title="Brain training programme",  # contains 'rna' inside 'training'? no — but 'brain'? no
+        summary="A study of learning and memory",
+        full_text="The programme uses turnaround metrics",  # 'rna' inside 'turnaround'
+        keywords=[],
+    )
+    assert _call_matches_must_include(profile, call) is False
+
+
+def test_call_matches_must_include_standalone_token_case_insensitive():
+    """B11 Defect 1: a standalone 'AI' token DOES match (case-insensitive)
+    even though 'ai' is filtered as too short — but a >=3-char real token like
+    'rna' matches as a whole word regardless of case."""
+    from types import SimpleNamespace
+
+    from call_manager.ranking.rank_pair import _call_matches_must_include
+
+    profile = SimpleNamespace(structured={"must_include": ["rna"]})
+    call = SimpleNamespace(
+        title="New RNA sequencing grant",  # standalone 'RNA' token
+        summary="",
+        full_text="",
+        keywords=[],
+    )
+    assert _call_matches_must_include(profile, call) is True
+
+
+def test_call_matches_must_include_short_term_ignored():
+    """B11 Defect 1: a sub-minimum-length term ('ai', 'eu') is ignored entirely
+    so it can never force-include a call — even a standalone 'AI' token."""
+    from types import SimpleNamespace
+
+    from call_manager.ranking.rank_pair import _call_matches_must_include
+
+    profile = SimpleNamespace(structured={"must_include": ["ai", "eu"]})
+    call = SimpleNamespace(
+        title="AI in the EU",  # standalone tokens, but both terms are < 3 chars
+        summary="",
+        full_text="",
+        keywords=[],
+    )
+    assert _call_matches_must_include(profile, call) is False
+
+
 def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     """The Settings field that callers (worker → rank_pair) read is the
     single source of truth — it picks up EMBEDDING_PREGATE_THRESHOLD from

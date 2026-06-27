@@ -59,8 +59,29 @@ class Settings(BaseSettings):
     eu_portal_base_url: str = Field(default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL")
     vinnova_base_url: str = Field(default="https://data.vinnova.se", alias="VINNOVA_BASE_URL")
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
+    stale_source_alert_days: int = Field(
+        default=4,
+        alias="STALE_SOURCE_ALERT_DAYS",
+        description=(
+            "A source whose last_fetched_at is older than this many days "
+            "triggers a stale-fetch alert regardless of the consecutive-failure "
+            "streak state. Acts as a restart-independent backstop: catches "
+            "sources that silently stop being fetched (e.g. scheduler crash "
+            "within the 3-day streak window). Default 4 gives one full day of "
+            "slack beyond the 3-day streak threshold."
+        ),
+    )
     ranking_tick_seconds: int = Field(default=60, alias="RANKING_TICK_SECONDS")
     ranking_queue_batch: int = Field(default=10, alias="RANKING_QUEUE_BATCH")
+    # Soft per-tick wall-clock budget for the serial ranking drain (B11 Defect
+    # 6). A single job can take ~240s (local Gemma + a Sonnet escalation); an
+    # escalation-heavy batch could monopolize the scheduler slot for minutes.
+    # Once exceeded, the drain stops claiming and leaves the remainder PENDING
+    # for the next tick. Default 240s ≈ one worst-case job, generous enough that
+    # a healthy batch never trips it while still bounding the pathological case.
+    ranking_tick_budget_seconds: float = Field(
+        default=240.0, alias="RANKING_TICK_BUDGET_SECONDS"
+    )
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q4_K_M", alias="GEMMA_MODEL")
     embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
@@ -151,6 +172,35 @@ class Settings(BaseSettings):
             "'claude' (default) → ClaudeAgentSDKAdapter; "
             "'fake' → FakeAgentAdapter (for integration tests + local "
             "demos without an API key)."
+        ),
+    )
+    drafting_max_live_subprocesses: int = Field(
+        default=8,
+        alias="DRAFTING_MAX_LIVE_SUBPROCESSES",
+        gt=0,
+        description=(
+            "Hard ceiling on concurrent live drafting subprocesses (Defect 1 "
+            "remediation). Each live subprocess pins ONE pooled DB connection "
+            "for its lifetime (the session-level advisory lock keeps it checked "
+            "out, up to WORKSPACE_IDLE_TIMEOUT_SECONDS). Keep this well below the "
+            "engine pool (pool_size=10 + max_overflow=20 = 30) so drafting can "
+            "never starve web/scheduler connections. In production those lock "
+            "sessions come from a DEDICATED engine (DRAFTING_DB_POOL_SIZE) sized "
+            "to this ceiling, so they don't draw on the request pool at all. At "
+            "the cap, a new launch evicts the least-recently-used IDLE handle; if "
+            "all are mid-turn, it returns a retriable 429."
+        ),
+    )
+    drafting_db_pool_size: int = Field(
+        default=8,
+        alias="DRAFTING_DB_POOL_SIZE",
+        gt=0,
+        description=(
+            "pool_size for the DEDICATED engine that backs drafting advisory-lock "
+            "sessions, isolating long-held drafting connections from the request/"
+            "scheduler engine. Size it to DRAFTING_MAX_LIVE_SUBPROCESSES (+1 head "
+            "room for the brief launch overlap during LRU eviction). max_overflow "
+            "is 1 so the pool can't silently exceed the ceiling."
         ),
     )
     workspace_idle_timeout_seconds: int = Field(
@@ -389,6 +439,18 @@ class Settings(BaseSettings):
         "heuristic (draft sections only). A loose guardrail, not a hard funder limit; "
         "a value <= 0 disables the over-length check.",
     )
+    citation_deep_check_max_per_request: int = Field(
+        default=25,
+        alias="CITATION_DEEP_CHECK_MAX_PER_REQUEST",
+        description=(
+            "Maximum number of FRESH (uncached) semantic LLM calls made per "
+            "POST /citation-audit/deep request. Already-cached verdicts are "
+            "returned without counting against this ceiling. Rows beyond the cap "
+            "are deferred and reported in the response so the client can re-poll "
+            "to continue. Default 25 keeps a single request well within a "
+            "synchronous HTTP timeout budget."
+        ),
+    )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
     citation_llm_model: str = Field(
         default="",
@@ -508,11 +570,18 @@ class Settings(BaseSettings):
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_user: str | None = Field(default=None, alias="SMTP_USER")
     smtp_password: str | None = Field(default=None, alias="SMTP_PASSWORD")
-    # Session cookie TTL. Drives both the itsdangerous signer's max_age
-    # and the Set-Cookie max-age; keep these in lockstep or a valid
-    # signed session will outlast the cookie (or vice versa). 30 days is
-    # the hospital-internal default; shorten via env for high-security
-    # deployments.
+    # Session cookie TTL. Drives BOTH the itsdangerous signer's max_age
+    # (server-side signature expiry) and the Set-Cookie Max-Age attribute
+    # (client-side cookie expiry). Keep these in lockstep: if the signer's
+    # max_age is longer, a cookie that the browser has already discarded
+    # could still be re-presented and accepted; if shorter, a valid cookie
+    # will be rejected before it expires in the browser. 30 days is the
+    # hospital-internal default (staff log in from shared workstations and
+    # expect single-sign-on-style persistence). High-security roles or
+    # public-facing deployments should shorten via SESSION_MAX_AGE_SECONDS.
+    # Note: logout bumps session_epoch, which invalidates ALL outstanding
+    # cookies for a user regardless of TTL — so the 30-day window is the
+    # idle-session bound, not a hard upper limit on session lifetime.
     session_max_age_seconds: int = Field(default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS")
     # App-level cap on request body size (bytes). Backstop behind a reverse
     # proxy's client_max_body_size. Must exceed the largest legitimate upload:
@@ -559,6 +628,26 @@ class Settings(BaseSettings):
                     "SESSION_SECRET is a known development placeholder; set a "
                     "real random secret in production (APP_BASE_URL is https://)."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_email_from(self):
+        """Refuse the placeholder EMAIL_FROM when a real send transport is set.
+
+        `no-reply@example.com` is the default for local dev/CI. It only matters
+        once a real transport (Resend API key or SMTP host) is configured — then
+        every send bounces from an IANA-controlled domain. A production deploy
+        with NO transport falls back to NoOpEmailSender (see create_app) and is a
+        valid, supported configuration, so we gate on transport-configured rather
+        than on `APP_BASE_URL` alone — otherwise prod-without-email can't start.
+        """
+        has_transport = bool(self.resend_api_key or self.smtp_host)
+        if has_transport and "example.com" in self.email_from.lower():
+            raise ValueError(
+                f"EMAIL_FROM is set to the placeholder '{self.email_from}' but a "
+                "send transport (RESEND_API_KEY or SMTP_HOST) is configured. Set a "
+                "real sender address (e.g. noreply@ki.se) to avoid bounces."
+            )
         return self
 
     @model_validator(mode="after")

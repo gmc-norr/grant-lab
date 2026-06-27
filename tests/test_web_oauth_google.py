@@ -253,7 +253,10 @@ def test_connect_google_links_active_user(monkeypatch, pg_url, pg_session_factor
         c.cookies.set("session", app.state.session_signer.make(user_id=uid))
         start = c.post("/auth/google/start", data={"link": "1"}, follow_redirects=False)
         q = parse_qs(urlparse(start.headers["location"]).query)
-        fake.set_code("LC", _claims(sub="g-link", email="whatever@gmail.com", nonce=q["nonce"][0]))
+        # Google identity must also be within ALLOWED_EMAIL_DOMAINS (ki.se) after
+        # Fix 3: link-mode now enforces the domain allowlist so a user can't bypass
+        # the domain gate by linking a personal Gmail to their institutional account.
+        fake.set_code("LC", _claims(sub="g-link", email="link-google@ki.se", nonce=q["nonce"][0]))
         r = c.get(
             f"/auth/google/callback?code=LC&state={q['state'][0]}",
             headers={"accept": "text/html"},

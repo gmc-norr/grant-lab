@@ -50,5 +50,12 @@ export function unwrap<T>(res: { data?: T; error?: unknown; response?: Response 
     }
     throw new ApiError(e.error?.code ?? "error", e.error?.message ?? "request failed");
   }
+  // Catch non-JSON error responses (502/504 gateway, HTML 500, etc.) that
+  // openapi-fetch leaves with res.data=undefined and res.error=undefined because
+  // the body isn't a JSON error envelope.  Without this guard a mutation would
+  // resolve successfully with undefined data and silently swallow the failure.
+  if (res.response && !res.response.ok) {
+    throw new ApiError("network_error", `HTTP ${res.response.status}`);
+  }
   return res.data as T;
 }

@@ -27,6 +27,15 @@ from call_manager.proposal_assist.web._perms import require_member, require_owne
 
 router = APIRouter()
 
+# Anti-buffering headers shared by every SSE endpoint. Without these, Nginx
+# and some reverse-proxies buffer the chunked body and the client sees no
+# events until the buffer is flushed (or the stream closes).
+SSE_HEADERS: dict[str, str] = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
 _DISCLOSURE_ACTION = "sending a message to the drafting assistant"
 
 
@@ -346,4 +355,5 @@ def stream_turn(
             request=request,
         ),
         media_type="text/event-stream",
+        headers=SSE_HEADERS,
     )

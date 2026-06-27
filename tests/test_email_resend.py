@@ -133,3 +133,50 @@ def test_resend_authorization_header_set():
     client = ResendClient(api_key="my-key", from_addr="bot@ki.se", transport=_mock(handler))
     client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
     assert captured["auth"] == "Bearer my-key"
+
+
+# ---------------------------------------------------------------------------
+# Defect 5: word-boundary regex in _is_recipient_validation
+# ---------------------------------------------------------------------------
+
+def test_resend_from_in_recipient_context_is_bounce_not_sender_fault():
+    """A validation_error message that contains the word 'from' in a recipient
+    context (e.g. 'Message from recipient cannot be received') must NOT be
+    mis-classified as a sender-side fault. The old bare-substring approach would
+    match 'from' anywhere and silently classify this as a transport error,
+    never recording the bounce and retrying indefinitely."""
+
+    def handler(req):
+        return httpx.Response(
+            422,
+            json={
+                "name": "validation_error",
+                # 'from' here is NOT about the sender domain — it describes the
+                # direction of the failed delivery (message FROM a recipient).
+                "message": "Message from recipient cannot be received: invalid address",
+            },
+        )
+
+    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    # Should be classified as a recipient bounce, not a sender-side transport error.
+    r = client.send(to="bad@bad", subject="s", html="<p></p>", text="")
+    assert not r.ok, "Expected a bounce (ok=False) for a recipient validation_error"
+    assert r.bounce_reason is not None
+
+
+def test_resend_from_domain_hint_is_sender_fault():
+    """A validation_error mentioning 'from domain' is a sender-side fault and
+    must NOT be counted as a per-recipient bounce."""
+
+    def handler(req):
+        return httpx.Response(
+            422,
+            json={
+                "name": "validation_error",
+                "message": "The from domain ki.se is not verified in your Resend account.",
+            },
+        )
+
+    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    with pytest.raises(EmailTransportError):
+        client.send(to="u@ki.se", subject="s", html="<p></p>", text="")

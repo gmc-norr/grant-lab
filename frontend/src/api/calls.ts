@@ -35,3 +35,13 @@ export function useHideCall() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
   });
 }
+
+// Idempotent unhide — succeeds even when the call was not hidden.
+export function useUnhideCall() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) =>
+      unwrap(await api.DELETE("/api/calls/{call_id}/hide", { params: { path: { call_id: id } } })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
+  });
+}

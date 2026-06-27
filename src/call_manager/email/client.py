@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -42,9 +43,16 @@ _RESEND_BOUNCE_NAMES = {
     "invalid_email",
 }
 
-# Substrings that mark a validation_error as a SENDER-side fault (our config),
-# which must NOT count as a per-recipient bounce.
-_RESEND_SENDER_SIDE_HINTS = ("from", "domain", "api_key", "api key", "verif")
+# Compiled word-boundary patterns for sender-side hints. Using \b avoids
+# misclassifying "from" in "Message from recipient" as a sender fault.
+# The bare-substring approach would match "from" in any recipient error message
+# that mentions the word "from" (e.g. "Rejected from …", "from user input").
+_RESEND_SENDER_SIDE_PATTERNS = [
+    re.compile(r"\bdomain\b", re.I),
+    re.compile(r"\bapi[_\s]key\b", re.I),
+    re.compile(r"\bverif", re.I),
+    re.compile(r"\bfrom\b\s+(?:address|domain|email|field|header)", re.I),
+]
 # Substrings that mark a validation_error as a RECIPIENT-address fault.
 # (`to` is backtick-quoted as Resend renders the field name; bare "to" would
 # match far too many unrelated words.)
@@ -56,9 +64,9 @@ def _is_recipient_validation(message: str) -> bool:
     address (→ bounce) rather than a sender-side payload/config fault
     (→ transport error). Sender-side hints win ties: better to alert on our
     own config than to silently disable a real user."""
-    msg = message.lower()
-    if any(h in msg for h in _RESEND_SENDER_SIDE_HINTS):
+    if any(pat.search(message) for pat in _RESEND_SENDER_SIDE_PATTERNS):
         return False
+    msg = message.lower()
     return any(h in msg for h in _RESEND_RECIPIENT_HINTS)
 
 

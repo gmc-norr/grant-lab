@@ -35,6 +35,12 @@ from call_manager.db.models import (
     UserCallDismissal,
 )
 
+# Score threshold for counting "high match" calls in the dashboard summary.
+# Calls with aggregate_score >= this value are highlighted as top matches.
+# NOTE: full-sort is O(n) — if the dataset grows beyond ~10k calls, consider
+# replacing the sort with a pagination-aware approach or a partial index scan.
+DASHBOARD_HIGH_SCORE_THRESHOLD = 70
+
 # Per design spec: "Sort: score, deadline, newest." Score is the per-profile
 # ranked branch; for the unranked branch we offer the two ordering primitives
 # that don't depend on rankings.
@@ -326,7 +332,7 @@ def build_dashboard_view(
                     *base_filters,
                     open_expr,  # a closed call is never a "top match"
                     CallRanking.profile_id == profile_id,
-                    CallRanking.aggregate_score >= 70,
+                    CallRanking.aggregate_score >= DASHBOARD_HIGH_SCORE_THRESHOLD,
                 )
             )
             or 0

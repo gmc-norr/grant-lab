@@ -7,13 +7,14 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from call_manager.proposal_assist.drafting.contract import (
     AgentHandle,
     DraftingAgent,
+    DraftingAtCapacity,
     StreamEvent,
 )
 
@@ -43,9 +44,29 @@ class SubprocessRegistry:
     launched while sweep_idle is iterating.
     """
 
-    def __init__(self, *, adapter: DraftingAgent, idle_seconds: int) -> None:
+    def __init__(
+        self,
+        *,
+        adapter: DraftingAgent,
+        idle_seconds: int,
+        max_live: int | None = None,
+    ) -> None:
         self._adapter = adapter
         self._idle_seconds = idle_seconds
+        # Defect 1 (resource exhaustion): hard ceiling on concurrent live
+        # subprocesses. Each live handle pins ONE pooled DB connection for its
+        # whole life (the session-level advisory lock holds it checked out, up
+        # to workspace_idle_timeout_seconds). The engine pool is pool_size=10 +
+        # max_overflow=20 = 30 connections shared with the WHOLE app (every web
+        # request, every scheduler tick). Left unbounded, ~30 active workspaces
+        # would consume the entire pool and stall the app. max_live caps the
+        # live set well below 30 (default DRAFTING_MAX_LIVE_SUBPROCESSES=8) so
+        # drafting can never starve the request/scheduler pool. In production
+        # those lock sessions also come from a DEDICATED engine sized to this
+        # ceiling (see db/session.make_drafting_engine + factory.py), so even at
+        # the cap no drafting connection is drawn from the request pool.
+        # None = unbounded (legacy/test path with no ceiling).
+        self._max_live = max_live
         self._entries: dict[uuid.UUID, _Entry] = {}
         # Futures that resolve to AgentHandle once a pending launch completes.
         # Keyed by workspace_id. Only populated between claim_launch_or_wait()
@@ -77,7 +98,18 @@ class SubprocessRegistry:
         Single-loop only: the Future is created on the current running loop.
         All callers must share the same asyncio event loop (guaranteed for
         the FastAPI web layer).
+
+        Capacity (Defect 1): when the caller would be the launcher of a NET-NEW
+        subprocess and the live set is at the ceiling, the LEAST-recently-touched
+        IDLE handle (in_flight == 0) is evicted to make room. If every live
+        handle is mid-turn (none evictable), the launch is refused with
+        :class:`DraftingAtCapacity` so the API layer returns a retriable 429 and
+        the drain tick leaves the queued turn for next time. Cached/already-
+        launching workspaces bypass this entirely — only net-new launches count
+        against the ceiling.
         """
+        victim: _Entry | None = None
+        victim_id: uuid.UUID | None = None
         async with self._lock:
             # Already cached — wrap the handle in a resolved future.
             existing = self._entries.get(workspace_id)
@@ -92,10 +124,73 @@ class SubprocessRegistry:
             if pending is not None:
                 return (False, pending)
 
+            # Net-new launch. Enforce the live-subprocess ceiling. The "in use"
+            # count is live entries + in-flight pending launches (each pending
+            # launch will become a live entry holding a connection). Evict the
+            # LRU idle handle if at the cap; refuse if none are idle.
+            if self._max_live is not None:
+                in_use = len(self._entries) + len(self._pending_launches)
+                if in_use >= self._max_live:
+                    victim_id = self._pick_lru_idle_victim_locked()
+                    if victim_id is None:
+                        # Every live handle is mid-turn — can't free a slot.
+                        raise DraftingAtCapacity(
+                            f"drafting at capacity ({self._max_live} live subprocesses, "
+                            "all mid-turn); retry shortly"
+                        )
+                    victim = self._entries.pop(victim_id)
+
             # We are the launcher — install a new future and return.
             new_future: asyncio.Future[AgentHandle] = asyncio.get_running_loop().create_future()
             self._pending_launches[workspace_id] = new_future
-            return (True, None)
+
+        # Terminate the evicted victim OUTSIDE the lock (adapter.terminate may be
+        # slow) so we don't block other claim/sweep callers. The pending-launch
+        # slot is already installed, so concurrent same-workspace callers coalesce
+        # correctly while this runs.
+        if victim is not None and victim_id is not None:
+            await self._teardown_entry(victim_id, victim, context="capacity-evict")
+        return (True, None)
+
+    def _pick_lru_idle_victim_locked(self) -> uuid.UUID | None:
+        """Return the workspace_id of the least-recently-touched IDLE handle
+        (in_flight == 0), or None if every live handle is mid-turn. Caller must
+        hold self._lock."""
+        idle = [(wsid, entry) for wsid, entry in self._entries.items() if entry.in_flight == 0]
+        if not idle:
+            return None
+        return min(idle, key=lambda kv: kv[1].last_touched_monotonic)[0]
+
+    async def _teardown_entry(
+        self,
+        workspace_id: uuid.UUID,
+        entry: _Entry,
+        *,
+        context: str,
+    ) -> None:
+        """Terminate an already-popped entry's subprocess then release its
+        advisory lock + close its lock_session. Shared by capacity eviction and
+        sweep_idle so the teardown ordering (adapter first, then lock) is
+        identical everywhere. Never raises — failures are logged."""
+        try:
+            await self._adapter.terminate(entry.handle)
+        except Exception:
+            logger.exception("%s: adapter.terminate raised for workspace %s", context, workspace_id)
+        finally:
+            if entry.lock_session is not None:
+                try:
+                    from call_manager.proposal_assist.drafting.locking import (
+                        release_workspace_lock,
+                    )
+
+                    release_workspace_lock(entry.lock_session, workspace_id)
+                    entry.lock_session.close()
+                except Exception:
+                    logger.exception(
+                        "%s: failed to release lock for workspace %s",
+                        context,
+                        workspace_id,
+                    )
 
     async def fulfill_pending_launch(
         self,
@@ -211,45 +306,94 @@ class SubprocessRegistry:
                 release_workspace_lock(entry.lock_session, workspace_id)
                 entry.lock_session.close()
 
-    async def sweep_idle(self) -> int:
+    async def sweep_idle(
+        self,
+        *,
+        has_queued_turn: Callable[[uuid.UUID], bool] | None = None,
+    ) -> int:
         """Terminate any handle untouched for >= idle_seconds. Returns
         the count of swept handles. Intended for periodic scheduler
-        invocation."""
+        invocation.
+
+        Defect 4: a workspace that still has a queued turn is SKIPPED — tearing
+        its resumable session down would only force a cold relaunch on the next
+        drain tick. The scheduler passes a ``has_queued_turn`` predicate (a DB
+        lookup) so the sweep is queue-aware; when omitted (tests/legacy) every
+        idle handle is swept as before.
+
+        I2 fix: the ``has_queued_turn`` predicate may run a BLOCKING DB query, so
+        it must NOT be consulted while the registry lock is held — that would
+        stall every concurrent launch/turn. We therefore (1) snapshot the
+        candidate idle workspace ids under the lock, (2) RELEASE the lock and run
+        the predicate per candidate, then (3) re-acquire the lock and pop only
+        the still-idle, non-queued entries (re-checking ``last_touched`` /
+        ``in_flight`` so a turn that landed during the predicate window is not
+        torn down out from under itself)."""
         now = time.monotonic()
         cutoff = now - self._idle_seconds
 
+        # (1) Snapshot candidate idle workspace ids under the lock — no IO here.
         async with self._lock:
-            stale_ids = [
+            candidates: list[uuid.UUID] = [
                 wsid
                 for wsid, entry in self._entries.items()
                 if entry.last_touched_monotonic <= cutoff and entry.in_flight == 0
             ]
-            stale_entries = [(wsid, self._entries.pop(wsid)) for wsid in stale_ids]
+
+        # (2) Run the (possibly blocking) queued-turn predicate WITHOUT the lock.
+        queued: set[uuid.UUID] = set()
+        if has_queued_turn is not None:
+            for wsid in candidates:
+                if has_queued_turn(wsid):
+                    queued.add(wsid)
+
+        # (3) Re-acquire and pop only the entries that are STILL idle and not
+        # queued. Re-check last_touched/in_flight: a turn may have landed during
+        # the predicate window, in which case the entry must not be swept.
+        cutoff = time.monotonic() - self._idle_seconds
+        stale_entries: list[tuple[uuid.UUID, _Entry]] = []
+        async with self._lock:
+            for wsid in candidates:
+                if wsid in queued:
+                    # A queued turn will relaunch immediately — keep the warm,
+                    # resumable handle instead of tearing it down.
+                    continue
+                entry = self._entries.get(wsid)
+                if entry is None:
+                    continue
+                if entry.last_touched_monotonic > cutoff or entry.in_flight != 0:
+                    # Re-touched / went in-flight while we were off the lock.
+                    continue
+                stale_entries.append((wsid, self._entries.pop(wsid)))
 
         # Terminate outside the lock — adapter.terminate may take a while
         # (subprocess teardown) and we don't want to block claim_launch_or_wait.
-        # Order: terminate the adapter FIRST, then release the advisory lock.
-        # This prevents another caller from acquiring the lock while the old
-        # subprocess is still disconnecting (the same ordering as terminate()).
+        # Order (in _teardown_entry): terminate the adapter FIRST, then release
+        # the advisory lock — so another caller can't acquire the lock while the
+        # old subprocess is still disconnecting (same ordering as terminate()).
         for wsid, entry in stale_entries:
-            try:
-                await self._adapter.terminate(entry.handle)
-            except Exception:
-                logger.exception("sweep_idle: adapter.terminate raised for workspace %s", wsid)
-            finally:
-                if entry.lock_session is not None:
-                    try:
-                        from call_manager.proposal_assist.drafting.locking import (
-                            release_workspace_lock,
-                        )
-
-                        release_workspace_lock(entry.lock_session, wsid)
-                        entry.lock_session.close()
-                    except Exception:
-                        logger.exception(
-                            "sweep_idle: failed to release lock for workspace %s", wsid
-                        )
+            await self._teardown_entry(wsid, entry, context="sweep_idle")
         return len(stale_entries)
+
+    async def interrupt(self, workspace_id: uuid.UUID) -> bool:
+        """Best-effort graceful interrupt of the workspace's in-flight turn
+        (Defect 5). Returns True if an interrupt was attempted, False if there
+        was no live handle or the adapter doesn't support interrupt. Never tears
+        the handle down — the caller still terminates as the guaranteed backstop.
+
+        The adapter's interrupt is OPTIONAL (the Fake doesn't implement it), so
+        we probe via getattr and skip when absent rather than requiring every
+        adapter to provide a no-op."""
+        async with self._lock:
+            entry = self._entries.get(workspace_id)
+            handle = entry.handle if entry is not None else None
+        if handle is None:
+            return False
+        interrupt = getattr(self._adapter, "interrupt", None)
+        if interrupt is None:
+            return False
+        await interrupt(handle)
+        return True
 
     async def send_turn(
         self,

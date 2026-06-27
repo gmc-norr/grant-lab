@@ -215,6 +215,73 @@ async def test_happy_path_renames_both_markers_and_rows(
 
 
 @pytest.mark.asyncio
+async def test_db_cache_backfill_updates_all_matching_refs(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Defect B7-4: the cache backfill uses a bulk ``UPDATE ... WHERE
+    citekey == old_citekey`` so it refreshes EVERY matching reference and can
+    never raise MultipleResultsFound (the old ``.one_or_none()`` did, which was
+    swallowed → rollback → stale cache). Here a duplicate-citekey state is
+    forced at the SQL level (bypassing the partial unique index that normally
+    prevents it) so the multi-match path is genuinely exercised."""
+    from sqlalchemy import text
+
+    # The exact partial unique index DDL (mirrors models.py) so we can restore it
+    # after forcing the duplicate state — it is session-scoped schema, never
+    # recreated by the per-test TRUNCATE, so leaking its absence would corrupt
+    # every later test.
+    _RECREATE_IDX = (
+        'CREATE UNIQUE INDEX uq_references_workspace_citekey '
+        'ON "references" (workspace_id, citekey) WHERE citekey IS NOT NULL'
+    )
+
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid_a = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="dupkey2021"
+    )
+    rid_b = _seed_reference(
+        pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)], citekey="otherkey2021"
+    )
+    try:
+        # Force the duplicate-citekey cache state (the partial unique index
+        # normally prevents it; reconciliation races could still produce it).
+        with pg_session_factory() as s:
+            s.execute(text("DROP INDEX uq_references_workspace_citekey"))
+            s.execute(
+                text('UPDATE "references" SET citekey = \'dupkey2021\' WHERE id = :rid'),
+                {"rid": rid_b},
+            )
+            s.commit()
+
+        # Cite reference A so a marker + ledger row exist under "dupkey2021".
+        r = await insert_citation_impl(
+            ctx,
+            reference_id=str(rid_a),
+            anchor=ANCHOR_A,
+            chunk_index=0,
+            evidence_quote="reduces recurrence by 30%",
+        )
+        assert "error" not in r, r
+
+        result = await rename_citekey_impl(ctx, old_citekey="dupkey2021", new_citekey="dupkey2099")
+        assert "error" not in result, result
+
+        # BOTH references' cache rows were refreshed (not just one, no rollback).
+        with pg_session_factory() as s:
+            assert s.get(Reference, rid_a).citekey == "dupkey2099"
+            assert s.get(Reference, rid_b).citekey == "dupkey2099"
+    finally:
+        # Restore the session-scoped index so later tests keep their constraint.
+        # The forced duplicate rows must be removed first, else the unique index
+        # cannot be recreated (the rename correctly left BOTH on the new key).
+        with pg_session_factory() as s:
+            s.execute(text('TRUNCATE TABLE "references" CASCADE'))
+            s.execute(text("DROP INDEX IF EXISTS uq_references_workspace_citekey"))
+            s.execute(text(_RECREATE_IDX))
+            s.commit()
+
+
+@pytest.mark.asyncio
 async def test_old_citekey_not_present_no_commit(pg_session_factory, _settings_env, tmp_path):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(

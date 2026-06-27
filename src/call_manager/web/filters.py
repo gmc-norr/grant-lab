@@ -34,6 +34,20 @@ def display_date(value: datetime | None) -> str:
     return value.astimezone(_STOCKHOLM).strftime("%Y-%m-%d")
 
 
+def deadline_local_date(value: datetime | None) -> str | None:
+    """Return the ISO-8601 calendar date string (YYYY-MM-DD) for a deadline
+    localized to Europe/Stockholm, or None when the deadline is not set.
+
+    This is the SINGLE shared localization helper used by both the digest
+    (via Jinja filters) and the JSON API (``deadline_local_date`` field on
+    ``CallOut`` / ``CallDetailCallOut``).  Keeping both paths wired to this
+    function prevents them from ever diverging.
+    """
+    if value is None:
+        return None
+    return value.astimezone(_STOCKHOLM).strftime("%Y-%m-%d")
+
+
 # Internal codes used for `CallRanking.aggregate_reason` and the
 # `CallRankingCriterion.criterion` PK. Kept as compact snake-case in the
 # DB; rendered as proper labels for the UI. Unmapped values fall through

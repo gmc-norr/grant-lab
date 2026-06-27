@@ -91,15 +91,71 @@ it("a not-found error shows the not-found alert", async () => {
   expect(screen.getByRole("alert").textContent).toBe("Call not found.");
 });
 
-it("Hide posts and navigates back to /", async () => {
+it("Hide requires confirm before posting", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   const post = vi
     .spyOn(clientMod.api, "POST")
     .mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
   renderDetail();
+  // First click: shows confirm step, does NOT fire POST yet.
   fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  expect(post).not.toHaveBeenCalled();
+  // Confirm button is now visible.
+  expect(screen.getByRole("button", { name: /yes, hide it/i })).toBeInTheDocument();
+  // Cancel goes back to the initial state.
+  fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+  expect(screen.getByRole("button", { name: /hide this call/i })).toBeInTheDocument();
+});
+
+it("Hide posts after confirm and shows undo affordance", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  const post = vi
+    .spyOn(clientMod.api, "POST")
+    .mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  // stub DELETE for unhide (not called in this test, but must resolve cleanly)
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  renderDetail();
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/calls/{call_id}/hide", {
     params: { path: { call_id: 5 } },
   }));
-  await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/"));
+  // After hide: undo + back-to-calls buttons appear; no auto-navigate.
+  expect(await screen.findByRole("button", { name: /undo/i })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /back to all calls/i })).toBeInTheDocument();
+});
+
+it("Undo calls DELETE unhide and reverts to hide button", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  const del = vi
+    .spyOn(clientMod.api, "DELETE")
+    .mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  renderDetail();
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  const undoBtn = await screen.findByRole("button", { name: /undo/i });
+  fireEvent.click(undoBtn);
+  await waitFor(() => expect(del).toHaveBeenCalledWith("/api/calls/{call_id}/hide", {
+    params: { path: { call_id: 5 } },
+  }));
+  // After undo: back to initial hide button.
+  expect(await screen.findByRole("button", { name: /hide this call/i })).toBeInTheDocument();
+});
+
+it("renders deadline_local_date instead of slicing the UTC string", async () => {
+  const withDeadline = {
+    ...RANKED,
+    call: {
+      ...RANKED.call,
+      deadline: "2026-09-15T22:00:00Z",
+      deadline_local_date: "2026-09-16",
+    },
+  };
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: withDeadline, error: undefined } as never);
+  renderDetail();
+  await screen.findByRole("heading", { name: "Genomics Grant" });
+  // The local date (2026-09-16) must appear, not the UTC slice (2026-09-15).
+  expect(screen.getByText("2026-09-16")).toBeInTheDocument();
+  expect(screen.queryByText("2026-09-15")).not.toBeInTheDocument();
 });

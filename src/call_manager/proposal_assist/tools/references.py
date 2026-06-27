@@ -120,7 +120,7 @@ async def search_references_impl(
         )
         embedder = OllamaEmbedderAdapter(client)
 
-    query_vec = embedder.embed(query)
+    query_vec = embedder.embed(query).vector
 
     with ctx.session_factory() as s:
         # HNSW cosine distance via pgvector; lower distance = more

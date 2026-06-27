@@ -18,6 +18,33 @@ def make_engine(database_url: str) -> Engine:
     )
 
 
+def make_drafting_engine(database_url: str, *, pool_size: int) -> Engine:
+    """Dedicated engine for drafting advisory-lock sessions (Defect 1).
+
+    Each live drafting subprocess holds a Postgres SESSION-level advisory lock
+    on a checked-out connection for its whole life (up to
+    WORKSPACE_IDLE_TIMEOUT_SECONDS). On the shared request engine that pins one
+    of its 30 connections per live workspace, so ~30 active workspaces would
+    starve every web request and scheduler tick. Routing those long-held lock
+    sessions through a SEPARATE small pool isolates them: even at the
+    DRAFTING_MAX_LIVE_SUBPROCESSES ceiling no drafting connection is drawn from
+    the request pool.
+
+    pool_size is sized to the ceiling; max_overflow=1 gives a single connection
+    of head room for the brief launch-vs-eviction overlap (the new subprocess
+    connects before the evicted one's connection is fully released) while still
+    capping the pool just above the ceiling — it can't balloon. pool_pre_ping +
+    pool_recycle mirror the request engine's long-lived-connection hygiene.
+    """
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_size=pool_size,
+        max_overflow=1,
+        pool_recycle=1800,
+    )
+
+
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
     # expire_on_commit=False keeps ORM attributes usable after commit (the
     # request-scoped dependency reads response data post-commit). This factory

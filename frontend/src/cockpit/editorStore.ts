@@ -28,6 +28,25 @@ export function getSnapshot(): EditorSnapshot {
   return snapshot;
 }
 
+/** Synchronous, non-reactive read: does the mounted editor hold unsaved buffers?
+ *  Used by the unsaved-changes guard (beforeunload / router blocker / tab-switch
+ *  confirm) — those need the value imperatively, outside React's render cycle. */
+export function hasUnsavedEdits(): boolean {
+  return snapshot.dirty.length > 0;
+}
+
+/** Guard an action (e.g. an internal artifact-tab switch) that would unmount the
+ *  active editor and discard its unsaved buffers. Returns true (proceed) when the
+ *  editor is clean OR the user confirms discarding; false to abort. The artifact-tab
+ *  switch is NOT a router navigation, so the router blocker can't see it — this is
+ *  its dedicated guard. */
+export function confirmDiscardIfDirty(): boolean {
+  if (!hasUnsavedEdits()) return true;
+  return window.confirm(
+    "You have unsaved edits in this section. Switch and discard them?",
+  );
+}
+
 /** Publish the dirty section indices for the mounted artifact editor. A
  *  same-contents set does NOT emit (the buffers effect fires on every keystroke). */
 export function setDirty(indices: number[]): void {
@@ -61,4 +80,16 @@ export function resetEditorStore(): void {
 
 export function useEditorStore(): EditorSnapshot {
   return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+// Selector subscriptions. setCursor/setSave spread a NEW top-level snapshot but keep
+// the `dirty` array reference (setDirty only swaps it when contents change), so a
+// getSnapshot that returns snapshot.dirty is referentially STABLE across caret-only
+// updates — the sidebar that reads it does not re-render on every keystroke.
+function getDirty(): number[] {
+  return snapshot.dirty;
+}
+/** Subscribe to ONLY the dirty section set. Stable across cursor/save changes. */
+export function useEditorDirty(): number[] {
+  return useSyncExternalStore(subscribe, getDirty);
 }

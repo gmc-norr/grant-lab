@@ -580,6 +580,85 @@ def test_assemble_must_include_escapes_like_wildcards(pg_session_factory, now):
     assert "Unrelated call" not in titles
 
 
+def test_assemble_must_include_word_boundary_no_substring(pg_session_factory, now):
+    """B11 Defect 1 (digest side): a must_include term must NOT match as a bare
+    substring inside a longer word — the digest path uses the same word-boundary
+    semantics as the ranking path. The off-topic call that contains the term
+    only inside another word is NOT surfaced; a call with the standalone token
+    IS. (Runs on real Postgres so the ~* word-boundary regex is exercised.)"""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["rna"])
+        # 'rna' appears only inside 'turnaround' / 'internal' — must NOT match.
+        _seed_call(
+            s,
+            title="Internal turnaround programme",
+            summary="An internal study",
+            score=20,
+            profile_id=pid,
+        )
+        # Standalone 'RNA' token (case-insensitive) — MUST match.
+        _seed_call(
+            s,
+            title="RNA sequencing grant",
+            summary="x",
+            score=20,
+            profile_id=pid,
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    must = [e for e in payload.sections[0].entries if e.bucket == "must_include"]
+    titles = [e.title for e in must]
+    assert "RNA sequencing grant" in titles
+    assert "Internal turnaround programme" not in titles
+
+
+def test_assemble_must_include_short_term_ignored(pg_session_factory, now):
+    """B11 Defect 1 (digest side): a sub-minimum-length term ('ai') is ignored
+    so it can never flood the digest (also fixes the <3-char trigram perf
+    finding). The call with a standalone 'AI' token is NOT must-included."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["ai"])
+        _seed_call(s, title="AI funding call", summary="x", score=20, profile_id=pid)
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    # 'ai' term dropped → no must_include match → score 20 < borderline → nothing.
+    assert payload is None
+
+
+def test_assemble_must_include_word_boundary_matches_keywords(pg_session_factory, now):
+    """B11 Defect 1: word-boundary semantics also apply to the keywords field —
+    a standalone keyword token still matches, a substring-only one does not."""
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s, must_include=["genomics"])
+        _seed_call(
+            s,
+            title="Funding announcement",
+            summary="Generic blurb.",
+            keywords=["genomics", "biobank"],
+            score=20,
+            profile_id=pid,
+        )
+        # 'genomics' only as a substring of 'metagenomics' keyword → no match.
+        _seed_call(
+            s,
+            title="Other announcement",
+            summary="Generic blurb.",
+            keywords=["metagenomicsx"],
+            score=20,
+            profile_id=pid,
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    titles = [e.title for sec in payload.sections for e in sec.entries]
+    assert "Funding announcement" in titles
+    assert "Other announcement" not in titles
+
+
 def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
@@ -590,3 +669,88 @@ def test_assemble_skips_when_digest_disabled(pg_session_factory, now):
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=uid, now=now)
     assert payload is None
+
+
+# ---------------------------------------------------------------------------
+# Defect 3: DIGEST_TOTAL_MUST_INCLUDE_CAP — whole-payload cap across profiles
+# ---------------------------------------------------------------------------
+
+def test_total_must_include_cap_across_profiles(pg_session_factory, now):
+    """With 3 profiles each having 20 must_include matches the total must_include
+    count across all sections must not exceed DIGEST_TOTAL_MUST_INCLUDE_CAP (50).
+    Non-must_include entries are never trimmed by this cap."""
+    from call_manager.digest.assemble import DIGEST_TOTAL_MUST_INCLUDE_CAP
+
+    with pg_session_factory() as s:
+        # Create a single user subscribed to 3 profiles, each with a distinct
+        # must_include keyword that matches a pool of 20 calls.
+        u = User(email="multicap@ki.se", status="active")
+        s.add(u)
+        s.flush()
+
+        pids = []
+        keywords = ["alphaterm", "betaterm", "gammaterm"]
+        for kw in keywords:
+            p = Profile(
+                name=f"Profile-{kw}",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description="",
+                structured={
+                    "areas": [],
+                    "budget_min": None,
+                    "budget_max": None,
+                    "trl_min": None,
+                    "trl_max": None,
+                    "must_include": [kw],
+                    "hard_exclusions": [],
+                },
+                created_by=u.id,
+            )
+            s.add(p)
+            s.flush()
+            s.add(Subscription(user_id=u.id, profile_id=p.id, digest_enabled=True))
+            s.flush()
+            pids.append(p.id)
+
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        # 20 calls per keyword (3 × 20 = 60 total), all matching via title
+        for kw, pid in zip(keywords, pids, strict=True):
+            for i in range(20):
+                c = Call(
+                    source_id=src.id,
+                    external_id=f"{kw}-call-{i}",
+                    url=f"https://x/{kw}-{i}",
+                    title=f"{kw} funding opportunity {i}",
+                    summary="",
+                    keywords=[],
+                    published_at=datetime.now(UTC),
+                )
+                s.add(c)
+                s.flush()
+                # score each call at 20 (below top/borderline) to keep them in must_include only
+                s.add(
+                    CallRanking(
+                        call_id=c.id,
+                        profile_id=pid,
+                        aggregate_score=20,
+                        rationale="r",
+                        model="gemma4:e4b-q8",
+                        prompt_version="v2.0",
+                        ranked_at=datetime.now(UTC),
+                    )
+                )
+        s.commit()
+        uid = u.id
+
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+
+    assert payload is not None
+    total_must_include = sum(
+        sum(1 for e in sec.entries if e.bucket == "must_include")
+        for sec in payload.sections
+    )
+    assert total_must_include <= DIGEST_TOTAL_MUST_INCLUDE_CAP, (
+        f"Expected total must_include entries <= {DIGEST_TOTAL_MUST_INCLUDE_CAP}, "
+        f"got {total_must_include}"
+    )

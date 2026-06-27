@@ -165,7 +165,12 @@ function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profile
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          save.mutate([...checked]);
+          save.mutate([...checked], {
+            // Reconcile from the server's authoritative response so any profiles
+            // that were deactivated between load and save are immediately reflected
+            // (rather than leaving the checkbox state diverged from server reality).
+            onSuccess: (res) => setChecked(new Set(res.subscribed)),
+          });
         }}
       >
         <fieldset className={styles.fieldset}>

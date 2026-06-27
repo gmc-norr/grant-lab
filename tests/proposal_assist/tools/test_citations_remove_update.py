@@ -382,6 +382,46 @@ async def test_update_chunk_and_quote_reverifies(pg_session_factory, _settings_e
 
 
 @pytest.mark.asyncio
+async def test_update_chunk_rebind_preserves_extra_locator_keys(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Defect B7-5: a chunk rebind must OVERLAY the changed locator keys onto the
+    existing locator, not replace it with a fresh 2-key dict — so a future third
+    locator key survives the rebind."""
+    ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT), (1, "Discussion", CHUNK_TEXT_2)],
+        citekey="smith2021",
+    )
+    ins = await _insert_one(ctx, rid, chunk_index=0, evidence_quote="reduces recurrence by 30%")
+    ev_id = ins["ev_id"]
+
+    # Doctor the on-disk ledger to add a forward-compat third locator key.
+    ledger_path = ctx.repo_dir / CITATIONS_FILENAME
+    ledger = load_ledger(ledger_path.read_text())
+    find_by_id(ledger, ev_id)["locator"]["page"] = 7
+    ledger_path.write_text(dump_ledger(ledger))
+
+    result = await update_citation_impl(
+        ctx,
+        evidence_id=ev_id,
+        chunk_index=1,
+        evidence_quote="25% reduction across all arms",
+    )
+    assert "error" not in result, result
+
+    ledger = load_ledger(ledger_path.read_text())
+    locator = find_by_id(ledger, ev_id)["locator"]
+    # Changed keys updated...
+    assert locator["chunk_index"] == 1
+    assert locator["section_path"] == "Discussion"
+    # ...and the extra key survived the rebind.
+    assert locator["page"] == 7
+
+
+@pytest.mark.asyncio
 async def test_update_quote_not_in_new_chunk(pg_session_factory, _settings_env, tmp_path):
     ctx, wsid = _build_ctx(pg_session_factory, tmp_path, PROPOSAL)
     rid = _seed_reference(

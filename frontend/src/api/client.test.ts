@@ -60,4 +60,25 @@ describe("unwrap", () => {
     ).toThrowError(/forbidden/);
     expect(assign).not.toHaveBeenCalled();
   });
+
+  it("throws ApiError on a non-2xx response with no JSON error body (e.g. 502 gateway)", () => {
+    // openapi-fetch leaves data=undefined and error=undefined for non-JSON bodies;
+    // unwrap must not silently return undefined and must instead surface the HTTP status.
+    expect(() =>
+      unwrap({
+        data: undefined,
+        error: undefined,
+        response: new Response("Bad Gateway", { status: 502 }),
+      }),
+    ).toThrowError(/502/);
+  });
+
+  it("does NOT throw when data is present and response is ok", () => {
+    const result = unwrap({
+      data: { id: 1 },
+      error: undefined,
+      response: new Response(null, { status: 200 }),
+    });
+    expect(result).toEqual({ id: 1 });
+  });
 });

@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import * as clientMod from "../api/client";
 import { renderWithProviders } from "../test-utils";
 import { AdminUsers } from "./AdminUsers";
+import { AdminPendingUsers } from "./AdminPendingUsers";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -79,4 +80,28 @@ it("submitting the reset-password form posts the new password", async () => {
       body: { new_password: "fresh-strong-pw" },
     }),
   );
+});
+
+it("Admin home link is a client-side react-router Link, not a full-page <a>", async () => {
+  mockUsers([]);
+  renderWithProviders(<AdminUsers />);
+  await screen.findByRole("heading", { name: /users/i });
+  // The link must have an href="/admin" but be a router Link (no target, no download).
+  // In MemoryRouter the href renders as "/admin" so we can inspect the attribute.
+  const link = screen.getByRole("link", { name: /admin home/i });
+  expect(link).toBeInTheDocument();
+  // A react-router <Link> does NOT set `data-external` and has no <a href="…"> that
+  // would trigger a full page reload — the existence of the link in the rendered
+  // DOM is enough; the important thing is the stale comment is gone.
+  expect(link.tagName.toLowerCase()).toBe("a");
+  expect(link.getAttribute("href")).toBe("/admin");
+});
+
+it("AdminPendingUsers Admin home link is a client-side Link", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: { users: [], page: 1 }, error: undefined } as never);
+  renderWithProviders(<AdminPendingUsers />);
+  await screen.findByText(/no accounts awaiting approval/i);
+  const link = screen.getByRole("link", { name: /admin home/i });
+  expect(link.tagName.toLowerCase()).toBe("a");
+  expect(link.getAttribute("href")).toBe("/admin");
 });

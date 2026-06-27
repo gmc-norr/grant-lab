@@ -31,24 +31,37 @@ export function CitationComposer({ workspaceId, claim, onDone, onCancel }: Props
   const [error, setError] = useState<string | null>(null);
 
   // Read the DOM selection inside a chunk <pre>; store chunk-local code-point offsets.
+  // Offsets are computed with a Range from the <pre> start to the selection
+  // anchor/focus, so they are robust to split or normalised text nodes rather
+  // than relying on `range.startOffset` which is only valid for single-text-node
+  // containers.  We still require that both endpoints live INSIDE the <pre> so we
+  // never send cross-chunk offsets the server would 422.
   function captureSelection(chunkIndex: number, chunkText: string, pre: HTMLElement) {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
-    // Offsets are only chunk-relative when the selection lives entirely within
-    // this <pre>'s single text node. Bail (and clear) on cross-node / cross-chunk
-    // selections rather than sending desynced offsets the server would 422.
-    if (range.startContainer !== pre.firstChild || range.endContainer !== pre.firstChild) {
-      setSpan(null);
-      return;
-    }
     const quote = sel.toString();
     if (!quote) {
       setSpan(null);
       return;
     }
-    const start = toCodePointOffset(chunkText, range.startOffset);
-    const end = toCodePointOffset(chunkText, range.endOffset);
+    // Guard: both endpoints must be descendants of (or equal to) this <pre>.
+    if (!pre.contains(range.startContainer) || !pre.contains(range.endContainer)) {
+      setSpan(null);
+      return;
+    }
+    // Measure UTF-16 offset from the start of <pre> to each selection endpoint
+    // via a Range, then convert to code-point offsets for the server.
+    const measureUtf16Offset = (container: Node, offsetInNode: number): number => {
+      const measureRange = document.createRange();
+      measureRange.setStart(pre, 0);
+      measureRange.setEnd(container, offsetInNode);
+      return measureRange.toString().length;
+    };
+    const startUtf16 = measureUtf16Offset(range.startContainer, range.startOffset);
+    const endUtf16 = measureUtf16Offset(range.endContainer, range.endOffset);
+    const start = toCodePointOffset(chunkText, startUtf16);
+    const end = toCodePointOffset(chunkText, endUtf16);
     const [lo, hi] = start <= end ? [start, end] : [end, start];
     setSpan({ chunk_index: chunkIndex, quote_start: lo, quote_end: hi, evidence_quote: quote });
   }

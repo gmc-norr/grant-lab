@@ -798,6 +798,48 @@ it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no 
   expect(document.querySelector(".cm-content")?.textContent).not.toContain("LEAK");
 });
 
+it("switching the artifact tab with a DIRTY buffer prompts to confirm; cancel keeps the edit (Defect 2)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView;
+  }).__cmView!;
+  // Dirty the Methods section.
+  act(() => {
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "UNSAVED" } });
+  });
+  expect(document.querySelector(".cm-content")?.textContent).toContain("UNSAVED");
+
+  // User cancels the discard prompt -> the tab does NOT switch and the edit survives.
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  fireEvent.click(screen.getByRole("tab", { name: /^spec$/i }));
+  expect(confirmSpy).toHaveBeenCalled();
+  expect(screen.getByRole("tab", { name: /^draft$/i })).toHaveAttribute("aria-selected", "true");
+  expect(document.querySelector(".cm-content")?.textContent).toContain("UNSAVED");
+});
+
+it("switching the artifact tab with a CLEAN editor does not prompt (Defect 2)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/cockpit-meta")) return Promise.resolve(activeMeta());
+    if (path.endsWith("/spec"))
+      return Promise.resolve({
+        data: { head: "a".repeat(40), can_edit: true, sections: [{ index: 0, heading: "", text: "", sha: "s0" }], locked: false },
+        error: undefined,
+      });
+    if (path.endsWith("/proposed-changes")) return Promise.resolve({ data: { items: [] }, error: undefined });
+    if (path.endsWith("/problems")) return Promise.resolve({ data: { problems: [], counts: { error: 0, warning: 0 }, scorecard_stale: [] }, error: undefined });
+    return Promise.resolve(draftPayload(true));
+  }) as never);
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  renderCockpit();
+  await screen.findByRole("button", { name: /Methods/ });
+  // No edits -> switching tabs must not prompt.
+  fireEvent.click(screen.getByRole("tab", { name: /^spec$/i }));
+  expect(confirmSpy).not.toHaveBeenCalled();
+  expect(await screen.findByRole("button", { name: /start spec from skeleton/i })).toBeInTheDocument();
+});
+
 it("renders the setup view when the workspace is in setup phase", async () => {
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
     if (path.endsWith("/cockpit-meta"))

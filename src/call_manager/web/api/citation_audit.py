@@ -17,7 +17,7 @@ from call_manager.db.models import User
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.audit import (
     validate_citations_deterministic,
-    validate_citations_semantic,
+    validate_citations_semantic_capped,
 )
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.usage import check_citation_caps
@@ -48,6 +48,7 @@ class CitationAuditOut(BaseModel):
 class DeepCheckOut(BaseModel):
     semantic_available: bool
     checked: int
+    deferred: int
     cap_exceeded: bool
     error_count: int
     warning_count: int
@@ -122,6 +123,7 @@ def citation_audit_deep(
             return DeepCheckOut(
                 semantic_available=semantic_available,
                 checked=0,
+                deferred=0,
                 cap_exceeded=False,
                 error_count=0,
                 warning_count=0,
@@ -132,7 +134,8 @@ def citation_audit_deep(
             proposal_text=proposal_text, ledger=ledger, session=session, workspace_id=workspace_id
         )
         if semantic_available:
-            sem = validate_citations_semantic(
+            max_fresh = settings.citation_deep_check_max_per_request
+            sem, checked, deferred = validate_citations_semantic_capped(
                 proposal_text=proposal_text,
                 ledger=ledger,
                 session=session,
@@ -140,9 +143,8 @@ def citation_audit_deep(
                 workspace_id=workspace_id,
                 citation_service=citation_service,
                 deterministic_issues=det,
+                max_fresh_calls=max_fresh,
             )
-            # Candidate citations the pass considered (evidence rows with an id).
-            checked = len([r for r in (ledger.get("evidence") or []) if r.get("id")])
             # PRECISE cap signal: read the actual daily usage cap. NOT
             # any(audit_unavailable) — the engine emits audit_unavailable for transient
             # errors (audit.py:626) and invalid verdicts (audit.py:660) too, not just
@@ -151,12 +153,14 @@ def citation_audit_deep(
         else:
             sem = []
             checked = 0  # spec: checked == 0 when semantic is unavailable
+            deferred = 0
             cap_exceeded = False
         issues = det + sem
         err, warn = _counts(issues)
         return DeepCheckOut(
             semantic_available=semantic_available,
             checked=checked,
+            deferred=deferred,
             cap_exceeded=cap_exceeded,
             error_count=err,
             warning_count=warn,

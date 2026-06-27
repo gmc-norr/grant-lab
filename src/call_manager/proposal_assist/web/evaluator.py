@@ -7,10 +7,11 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import EvaluatorJob, Workspace
+from call_manager.db.models import EvaluatorJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
 from call_manager.proposal_assist.evaluator.context import content_sha
 from call_manager.proposal_assist.evaluator.jobs import (
@@ -50,9 +51,33 @@ def start_evaluator_run(
     session: Session = Depends(_session_dep),  # noqa: B008
     user=Depends(get_current_user),  # noqa: B008
 ) -> dict:
+    # AUTHORITY (B9 defect 3 — DELIBERATE): gated on require_member, NOT
+    # require_owner, even though interactive chat turns (submit_turn) are
+    # owner-only. Members triggering this cloud fan-out is an intentional
+    # collaboration affordance, kept accountable by the actor-attributed
+    # evaluator_run_triggered WorkspaceEvent below (B9 defect 4) and bounded by
+    # the org-wide global daily token cap, which now UNIONs this table (B9 defect
+    # 2). Do NOT narrow to owner or add a per-actor sub-cap.
     ws = require_member(workspace_id=workspace_id, user=user, session=session)
     _gate_cloud_llm(ws=ws, request=request, session=session, user=user)
+    # Detect a freshly-created run BEFORE enqueue (create-or-return-active) so the
+    # trigger event fires ONCE per run, never on the active-first re-POST.
+    had_active = session.scalar(
+        select(EvaluatorJob.id).where(
+            EvaluatorJob.workspace_id == workspace_id,
+            EvaluatorJob.status.in_(("queued", "running")),
+        )
+    )
     job = enqueue_evaluator_run(session, workspace_id=workspace_id, requested_by=user.id)
+    if had_active is None:
+        session.add(
+            WorkspaceEvent(
+                workspace_id=workspace_id,
+                kind="evaluator_run_triggered",
+                actor_id=user.id,
+                payload={"job_id": str(job.id)},
+            )
+        )
     session.commit()
     return _serialize(job)
 

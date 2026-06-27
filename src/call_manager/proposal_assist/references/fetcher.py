@@ -39,6 +39,7 @@ import ipaddress
 import json
 import logging
 import socket
+import time
 import urllib.parse
 from urllib.parse import urlparse
 
@@ -218,10 +219,23 @@ def _fetch_url_bytes(
     current_url = url
     seen_urls: set[str] = set()
 
+    # Compute a SINGLE deadline for the entire redirect chain — not per hop.
+    # This prevents a stalling server on 5 hops from consuming 5×timeout_s.
+    deadline_time = time.monotonic() + timeout_s
+
+    # Cumulative byte accumulator across ALL redirect hops. Resetting it per
+    # hop would allow 5 hops × (max_bytes-1) bytes = 5× the intended cap.
+    total = 0
+
     for _redirect_num in range(_MAX_REDIRECTS + 1):
         if current_url in seen_urls:
             raise FetchError(f"redirect loop at {current_url!r}")
         seen_urls.add(current_url)
+
+        # Enforce the wall-clock budget BEFORE attempting each hop.
+        remaining_s = deadline_time - time.monotonic()
+        if remaining_s <= 0:
+            raise FetchError(f"fetch budget exhausted for {url!r}")
 
         scheme, host, port, _ = _validate_url(current_url)
         # Resolve + validate ONCE, then pin the connection to that literal
@@ -242,7 +256,7 @@ def _fetch_url_bytes(
             with (
                 httpx.Client(
                     follow_redirects=False,
-                    timeout=timeout_s,
+                    timeout=remaining_s,
                     headers={"User-Agent": user_agent},
                     transport=transport,
                 ) as client,
@@ -267,9 +281,10 @@ def _fetch_url_bytes(
                     )
 
                 # Accumulate chunks, aborting the moment the running
-                # total exceeds max_bytes.
+                # total exceeds max_bytes. `total` is cumulative across
+                # all redirect hops — a bomb can't reset the budget by
+                # redirecting to a fresh hop.
                 chunks: list[bytes] = []
-                total = 0
                 for chunk in response.iter_bytes(chunk_size=_CHUNK_BYTES):
                     total += len(chunk)
                     if total > max_bytes:

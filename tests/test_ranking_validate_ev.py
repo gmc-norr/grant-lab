@@ -98,6 +98,42 @@ def _seed_ranked_pair(s, ext):
     )
 
 
+def test_validation_threads_settings_thresholds_into_gates(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """B11 Defect 5: validate_ev must read the embedding thresholds from
+    Settings (pregate + hard_fail) instead of a hardcoded 0.30, and pass BOTH
+    into evaluate_gates — otherwise the EV validation gates on a different
+    cutoff than production."""
+    monkeypatch.setenv("CALL_MANAGER_DATA_DIR", str(tmp_path))
+    with pg_session_factory() as s:
+        _seed_ranked_pair(s, "x")
+        s.commit()
+
+    from call_manager.ranking import validate_ev as ve_mod
+
+    seen = {}
+    original = ve_mod.evaluate_gates
+
+    def _capture(profile, call, **kwargs):
+        seen["embedding_threshold"] = kwargs.get("embedding_threshold")
+        seen["embedding_hard_fail_threshold"] = kwargs.get("embedding_hard_fail_threshold")
+        return original(profile, call, **kwargs)
+
+    monkeypatch.setattr(ve_mod, "evaluate_gates", _capture)
+
+    run_validation(
+        session_factory=pg_session_factory,
+        client=_FakeOllama(),
+        sample=10,
+        data_dir=tmp_path,
+        embedding_threshold=0.42,
+        embedding_hard_fail_threshold=0.25,
+    )
+    assert seen["embedding_threshold"] == 0.42
+    assert seen["embedding_hard_fail_threshold"] == 0.25
+
+
 def test_validation_writes_report_and_does_not_write_db(pg_session_factory, tmp_path, monkeypatch):
     monkeypatch.setenv("CALL_MANAGER_DATA_DIR", str(tmp_path))
     with pg_session_factory() as s:

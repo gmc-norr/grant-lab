@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { useCallDetail, useHideCall } from "../api/calls";
-import { Deadline } from "./Deadline";
+import { useCallDetail, useHideCall, useUnhideCall } from "../api/calls";
+import { DeadlineLocal } from "./Deadline";
 import styles from "./CallDetail.module.css";
 
 function budgetText(c: { budget_min: number | null; budget_max: number | null; currency: string | null }): string {
@@ -20,6 +21,9 @@ export function CallDetail() {
   const profile = profileParam != null && profileParam !== "" ? Number(profileParam) : null;
   const navigate = useNavigate();
   const hide = useHideCall();
+  const unhide = useUnhideCall();
+  const [confirmHide, setConfirmHide] = useState(false);
+  const [hiddenId, setHiddenId] = useState<number | null>(null);
   const { data, isLoading, isError, error } = useCallDetail(callId, profile);
 
   if (isLoading) return <p>Loading…</p>;
@@ -113,7 +117,11 @@ export function CallDetail() {
           </div>
           <div className={styles.kv}>
             <span className={styles.k}>Deadline</span>
-            <span className={styles.v}>{call.deadline ? <Deadline iso={call.deadline} /> : "—"}</span>
+            <span className={styles.v}>
+              {call.deadline
+                ? <DeadlineLocal localDate={call.deadline_local_date ?? null} isoFallback={call.deadline} />
+                : "—"}
+            </span>
           </div>
           <div className={styles.kv}>
             <span className={styles.k}>Budget</span>
@@ -167,17 +175,63 @@ export function CallDetail() {
       )}
 
       <section className={styles.hideCall} aria-label="Hide this call">
-        <button
-          type="button"
-          className={styles.hideButton}
-          onClick={async () => {
-            await hide.mutateAsync(call.id);
-            navigate("/");
-          }}
-        >
-          Hide this call
-        </button>
-        <small className={styles.muted}>Removes it from your feed permanently. Other users are unaffected.</small>
+        {hiddenId !== null ? (
+          // Undo affordance: call was just hidden; offer a one-click undo before
+          // navigating away.  A full "Hidden calls" view is a follow-up.
+          <p className={styles.muted}>
+            Call hidden.{" "}
+            <button
+              type="button"
+              className={styles.undoButton}
+              disabled={unhide.isPending}
+              onClick={async () => {
+                await unhide.mutateAsync(hiddenId);
+                setHiddenId(null);
+              }}
+            >
+              Undo
+            </button>
+            {" "}
+            <button
+              type="button"
+              onClick={() => navigate("/")}
+            >
+              Back to all calls
+            </button>
+          </p>
+        ) : confirmHide ? (
+          // Confirm step — prevents accidental one-click hide.
+          <p className={styles.muted}>
+            Hide this call from your feed?{" "}
+            <button
+              type="button"
+              className={styles.hideButton}
+              disabled={hide.isPending}
+              onClick={async () => {
+                await hide.mutateAsync(call.id);
+                setConfirmHide(false);
+                setHiddenId(call.id);
+              }}
+            >
+              Yes, hide it
+            </button>
+            {" "}
+            <button type="button" onClick={() => setConfirmHide(false)}>
+              Cancel
+            </button>
+          </p>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={styles.hideButton}
+              onClick={() => setConfirmHide(true)}
+            >
+              Hide this call
+            </button>
+            <small className={styles.muted}>Removes it from your feed. Other users are unaffected.</small>
+          </>
+        )}
       </section>
     </main>
   );

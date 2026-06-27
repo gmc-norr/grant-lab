@@ -206,6 +206,60 @@ async def test_clean_citation_no_errors(pg_session_factory, _settings_env, tmp_p
 
 
 # --------------------------------------------------------------------------- #
+# Defect B7-3: empty-claim insert must NOT report spurious permanent claim_drift.
+# A marker at section start (no preceding prose) extracts an empty claim; insert
+# falls back to hashing the anchor, and the validator must derive the SAME hash.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_empty_claim_insert_has_no_spurious_drift(
+    pg_session_factory, _settings_env, tmp_path
+):
+    wsid = _make_workspace(pg_session_factory)
+    repo_dir = tmp_path / "repo"
+    # The anchor is the heading text itself, so the marker lands inside a heading
+    # line; the heading-aware extractor (defect B7-2) yields an empty claim and
+    # insert falls back to hashing the anchor.
+    anchor = "Aims of the study"
+    proposal = f"## {anchor}\n\nBody prose here.\n"
+    _init_repo(repo_dir, proposal)
+    rid = _seed_reference(
+        pg_session_factory,
+        wsid,
+        chunks=[(0, "Results", CHUNK_TEXT)],
+        csl_json={"author": [{"family": "Smith"}], "issued": {"date-parts": [[2021]]}},
+        original_sha256=hashlib.sha256(b"original bytes").hexdigest(),
+        metadata_status="verified_external",
+    )
+    ctx = ToolContext(
+        workspace_id=wsid,
+        repo_dir=repo_dir,
+        session_factory=pg_session_factory,
+        settings=Settings(),
+    )
+    result = await insert_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=anchor,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+    )
+    assert "error" not in result, result
+
+    proposal_text = (repo_dir / PROPOSAL_FILENAME).read_text()
+    ledger = load_ledger((repo_dir / CITATIONS_FILENAME).read_text())
+    # The live claim around the just-inserted marker is empty (heading excluded).
+    assert _live_claim_for(proposal_text, result["ev_id"]) == ""
+
+    with pg_session_factory() as s:
+        issues = validate_citations_deterministic(
+            proposal_text=proposal_text, ledger=ledger, session=s, workspace_id=wsid
+        )
+    drift = [i for i in issues if i["type"] == "claim_drift"]
+    assert drift == [], f"spurious claim_drift on empty-claim insert: {drift}"
+
+
+# --------------------------------------------------------------------------- #
 # orphan_marker
 # --------------------------------------------------------------------------- #
 def test_orphan_marker(pg_session_factory, _settings_env):

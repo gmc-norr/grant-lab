@@ -51,3 +51,12 @@ def test_update_name_requires_auth(monkeypatch, pg_url):
     with TestClient(app) as client:
         r = client.post("/api/me/name", json={"name": "x"})
     assert r.status_code == 401
+
+
+def test_update_name_too_long_returns_422(monkeypatch, pg_url, pg_session_factory):
+    """Defect 2: a name >200 chars must produce a clean 422, not a 500 DataError."""
+    app = _setup(monkeypatch, pg_url)
+    client, _ = _login(app, pg_session_factory)
+    with client:
+        r = client.post("/api/me/name", json={"name": "A" * 201})
+    assert r.status_code == 422

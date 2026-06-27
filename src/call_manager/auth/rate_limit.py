@@ -54,9 +54,15 @@ class SlidingWindowLimiter:
             return True
 
     def sweep(self) -> int:
-        """Drop keys whose entire event window has expired. Callable from
-        a periodic job if memory pressure becomes a concern; not wired up
-        now since the dict is already bounded by client-IP + per-email."""
+        """Drop keys whose entire event window has expired.
+
+        Callable from a periodic job if memory pressure becomes a concern.
+        Currently not wired to any scheduler because the dict is already
+        bounded: one entry per distinct client-IP or per-email, and both are
+        naturally finite in the hospital-internal deployment. If the app is
+        ever exposed to the public internet, hook this into a low-frequency
+        APScheduler job (e.g. every 5 minutes) to prevent unbounded growth
+        from scan traffic."""
         with self._lock:
             now = self._clock()
             cutoff = now - self._window

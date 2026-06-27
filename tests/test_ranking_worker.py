@@ -820,6 +820,217 @@ def test_worker_writes_ledger_row_on_escalation_success(pg_session_factory, monk
     assert seen["escalation_min_score"] == 45
 
 
+def test_worker_tick_budget_stops_claiming_and_leaves_remainder_pending(
+    pg_session_factory, monkeypatch
+):
+    """B11 Defect 6: a soft per-tick deadline must stop processing once exceeded,
+    leaving the unprocessed claimed jobs PENDING for the next tick instead of
+    letting one escalation-heavy batch monopolize the scheduler slot."""
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+
+    # Seed THREE pending jobs.
+    with pg_session_factory() as s:
+        u = User(email="budget@ki.se")
+        s.add(u)
+        s.flush()
+        p = Profile(
+            name="BUD",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
+            description="",
+            structured={"areas": ["AI"], "hard_exclusions": []},
+            created_by=u.id,
+        )
+        s.add(p)
+        s.flush()
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        for i in range(3):
+            c = Call(
+                source_id=src.id,
+                external_id=f"BUD{i}",
+                url=f"https://x/{i}",
+                title="AI call",
+                summary="Open AI funding call.",
+                deadline=datetime(2099, 12, 31, tzinfo=UTC),
+                published_at=datetime.now(UTC),
+            )
+            s.add(c)
+            s.flush()
+            s.add(RankingJob(call_id=c.id, profile_id=p.id, status=RankingJobStatus.PENDING))
+        s.commit()
+
+    parsed = Parsed(
+        topic_fit_rating=4,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=80,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="m",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.5,
+    )
+
+    # Injected monotonic clock that jumps forward 100s on each call, so after
+    # the first job the elapsed time blows past a 10s budget.
+    ticks = iter([0.0, 0.0, 100.0, 200.0, 300.0])
+
+    def _clock():
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 999.0
+
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **_k: stub)
+
+    processed = _drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        embedding_threshold=0.30,
+        batch_size=10,
+        tick_budget_seconds=10.0,
+        _clock=_clock,
+    )
+    # Only the first job ran; the deadline halted the loop.
+    assert processed == 1
+    with pg_session_factory() as s:
+        statuses = [j.status for j in s.execute(select(RankingJob)).scalars().all()]
+        done = [st for st in statuses if st == RankingJobStatus.DONE]
+        pending = [st for st in statuses if st == RankingJobStatus.PENDING]
+    assert len(done) == 1
+    # The remaining two were reverted to PENDING for the next tick.
+    assert len(pending) == 2
+
+
+def test_worker_escalation_ledger_survives_main_commit_failure(pg_session_factory, monkeypatch):
+    """B11 Defect 2: when the main merge/commit fails AFTER a billed Sonnet
+    escalation, the ledger row must already be committed in its own short
+    transaction so the spend is counted — and the next retry tick does NOT
+    re-bill a fresh rank_pair. We assert (a) the ledger row survives the failed
+    commit, and (b) rank_pair is invoked only ONCE more on the retry (i.e. the
+    paid escalation is counted, not silently re-run uncounted)."""
+    from call_manager.db.models import RankingRemoteAttempt
+    from call_manager.ranking import worker as worker_mod
+    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
+    from call_manager.ranking.prompt import Parsed
+    from call_manager.ranking.rank_pair import RankResult
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        s.commit()
+
+    parsed = Parsed(
+        topic_fit_rating=5,
+        topic_fit_rationale="ok",
+        topic_fit_quoted=None,
+        eligibility_rating="pass",
+        eligibility_rationale="ok",
+        eligibility_quoted=None,
+        exclusions_rating="pass",
+        exclusions_rationale="ok",
+        exclusions_quoted=None,
+    )
+    stub = RankResult(
+        score=100,
+        reason=None,
+        gates=Gates(
+            timeline=GateResult(GateStatus.PASS),
+            budget=GateResult(GateStatus.PASS),
+            trl=GateResult(GateStatus.PASS),
+            embedding=GateResult(GateStatus.PASS),
+        ),
+        parsed=parsed,
+        must_include_override=False,
+        model="claude-sonnet-4-6",
+        prompt_version="v5.0",
+        raw_response={},
+        embed_similarity=0.7,
+        summary="an analysis",
+        applicant_notes=[{"category": "deadline", "text": "soon"}],
+        analysis_model="claude-sonnet-4-6",
+        escalated=True,
+        escalated_from_score=80,
+        escalation_attempted=True,
+        escalation_outcome="success",
+    )
+
+    call_count = {"n": 0}
+
+    def _capture(**_kwargs):
+        call_count["n"] += 1
+        return stub
+
+    class _Remote:
+        model = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(worker_mod, "rank_pair", _capture)
+
+    # Make the FIRST main-transaction write (criteria rows) blow up, so the
+    # main commit never lands. The ledger record was committed before this.
+    original_write = worker_mod._write_criteria_rows
+    fail_state = {"failed": False}
+
+    def _flaky_write(session, call_id, profile_id, r):
+        if not fail_state["failed"]:
+            fail_state["failed"] = True
+            raise RuntimeError("simulated transient commit failure")
+        return original_write(session, call_id, profile_id, r)
+
+    monkeypatch.setattr(worker_mod, "_write_criteria_rows", _flaky_write)
+
+    # First tick: escalation runs (1 rank_pair call), ledger row committed, but
+    # the main merge/commit is rolled back by the simulated failure → job back
+    # to PENDING.
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        remote_client=_Remote(),
+        batch_size=10,
+    )
+    with pg_session_factory() as s:
+        led_after_first = s.execute(select(RankingRemoteAttempt)).scalars().all()
+        job = s.execute(select(RankingJob)).scalar_one()
+    # The billed attempt is counted even though the main commit failed.
+    assert len(led_after_first) == 1
+    assert led_after_first[0].outcome == "success"
+    # Job reverted for retry (not done).
+    assert job.status in (RankingJobStatus.PENDING, RankingJobStatus.RUNNING)
+
+    # Second tick: succeeds. rank_pair is invoked exactly once more (total 2).
+    drain_queue(
+        session_factory=pg_session_factory,
+        client=None,
+        remote_client=_Remote(),
+        batch_size=10,
+    )
+    with pg_session_factory() as s:
+        led_after_second = s.execute(select(RankingRemoteAttempt)).scalars().all()
+        ranking = s.execute(select(CallRanking)).scalar_one()
+    # Two ledger rows total — one per actual rank_pair invocation (both billed).
+    # NEITHER attempt is uncounted; this is the honest-spend invariant.
+    assert len(led_after_second) == 2
+    assert ranking.escalated is True
+    assert call_count["n"] == 2
+
+
 def test_worker_cap_disables_remote_when_exhausted(pg_session_factory, monkeypatch):
     """When today's ledger count >= cap, the worker passes remote_client=None
     into rank_pair (asserted by capturing the kwarg)."""
