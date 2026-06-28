@@ -1,12 +1,20 @@
+import { Anchor, Badge, Box, Button, Card, Group, Text, Title } from "@mantine/core";
 import { Link, useParams } from "react-router-dom";
 
 import type { ProfileDetail as Detail } from "../api/profiles";
 import { useProfile } from "../api/profiles";
-import styles from "./ProfileDetail.module.css";
 
 function Chips({ items }: { items: string[] }) {
   if (items.length === 0) return <>—</>;
-  return <>{items.map((c, i) => <span key={i} className={styles.chip}>{c}</span>)}</>;
+  return (
+    <>
+      {items.map((c, i) => (
+        <Badge key={i} variant="default" tt="none" radius="xl" size="sm" mr={4} mt={4}>
+          {c}
+        </Badge>
+      ))}
+    </>
+  );
 }
 
 function range(min: number | null, max: number | null) {
@@ -17,8 +25,13 @@ function range(min: number | null, max: number | null) {
 export function ProfileDetail() {
   const { id } = useParams();
   const { data, isLoading, isError } = useProfile(Number(id));
-  if (isLoading) return <p>Loading…</p>;
-  if (isError || !data) return <main className={styles.page}><p role="alert">Profile not found.</p></main>;
+  if (isLoading) return <Text p="md">Loading…</Text>;
+  if (isError || !data)
+    return (
+      <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
+        <Text role="alert">Profile not found.</Text>
+      </Box>
+    );
   return <DetailView p={data} />;
 }
 
@@ -28,56 +41,78 @@ function DetailView({ p }: { p: Detail }) {
     p.career_stage || p.applicant_types.length || p.role || p.years_since_phd != null ||
     p.funding_instruments.length || p.funder_exclusions.length || p.country || p.host_institution;
   return (
-    <main className={styles.page}>
-      <Link className={styles.back} to="/profiles">← All profiles</Link>
-      <header className={styles.header}>
-        <hgroup>
-          <h1>{p.name}</h1>
-          <p className={styles.kind}>{p.kind}{p.level ? ` · ${p.level}` : ""}</p>
-        </hgroup>
-        <div className={styles.actions}>
-          <Link className={styles.primary} to={`/?profile=${p.id}`}>Ranked feed →</Link>
-          <Link to={`/profiles/${p.id}/edit`}>Edit</Link>
+    <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
+      <Anchor component={Link} to="/profiles" size="sm">
+        ← All profiles
+      </Anchor>
+      <Group justify="space-between" align="flex-start" wrap="nowrap" gap="md" my="md">
+        <div>
+          <Title order={1}>{p.name}</Title>
+          <Text c="dimmed" size="sm">
+            {p.kind}
+            {p.level ? ` · ${p.level}` : ""}
+          </Text>
         </div>
-      </header>
+        <Group gap="xs" wrap="nowrap">
+          <Button component={Link} to={`/?profile=${p.id}`}>
+            Ranked feed →
+          </Button>
+          <Button component={Link} variant="default" to={`/profiles/${p.id}/edit`}>
+            Edit
+          </Button>
+        </Group>
+      </Group>
 
-      <section className={styles.card}>
-        <h2>Description</h2>
-        <p>{p.description || "— (no description yet)"}</p>
-      </section>
+      <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
+        <Title order={2} size="h5" mb="sm">
+          Description
+        </Title>
+        <Text>{p.description || "— (no description yet)"}</Text>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Ranking rubric</h2>
-        <dl>
-          <dt>Areas</dt><dd><Chips items={p.areas} /></dd>
-          <dt>Budget</dt>
-          <dd>{p.budget_min == null && p.budget_max == null ? "—"
-            : `${p.budget_min?.toLocaleString() ?? "—"} – ${p.budget_max?.toLocaleString() ?? "—"}${p.budget_currency ? ` ${p.budget_currency}` : ""}`}</dd>
-          <dt>Technology Readiness Level</dt><dd>{range(p.trl_min, p.trl_max)}</dd>
-          <dt>Must include</dt><dd><Chips items={p.must_include} /></dd>
-          <dt>Hard exclusions</dt><dd><Chips items={p.hard_exclusions} /></dd>
-        </dl>
-      </section>
+      <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
+        <Title order={2} size="h5" mb="sm">
+          Ranking rubric
+        </Title>
+        <Box component="dl" m={0}>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Areas</Text>
+          <Text component="dd" size="sm" m={0}><Chips items={p.areas} /></Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Budget</Text>
+          <Text component="dd" size="sm" m={0}>
+            {p.budget_min == null && p.budget_max == null
+              ? "—"
+              : `${p.budget_min?.toLocaleString() ?? "—"} – ${p.budget_max?.toLocaleString() ?? "—"}${p.budget_currency ? ` ${p.budget_currency}` : ""}`}
+          </Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Technology Readiness Level</Text>
+          <Text component="dd" size="sm" m={0}>{range(p.trl_min, p.trl_max)}</Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Must include</Text>
+          <Text component="dd" size="sm" m={0}><Chips items={p.must_include} /></Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Hard exclusions</Text>
+          <Text component="dd" size="sm" m={0}><Chips items={p.hard_exclusions} /></Text>
+        </Box>
+      </Card>
 
       {hasProfileFields && (
-        <section className={styles.card}>
-          <h2>Profile</h2>
-          <dl>
-            {p.org_type && (<><dt>Organization type</dt><dd>{p.org_type}</dd></>)}
-            {p.capabilities.length > 0 && (<><dt>Capabilities</dt><dd><Chips items={p.capabilities} /></dd></>)}
-            {p.patient_populations.length > 0 && (<><dt>Patient populations</dt><dd><Chips items={p.patient_populations} /></dd></>)}
-            {p.scale && (<><dt>Scale</dt><dd>{p.scale}</dd></>)}
-            {p.career_stage && (<><dt>Career stage</dt><dd>{p.career_stage}</dd></>)}
-            {p.role && (<><dt>Role</dt><dd>{p.role}</dd></>)}
-            {p.years_since_phd != null && (<><dt>Years since PhD</dt><dd>{p.years_since_phd}</dd></>)}
-            {p.applicant_types.length > 0 && (<><dt>Applicant types</dt><dd><Chips items={p.applicant_types} /></dd></>)}
-            {p.funding_instruments.length > 0 && (<><dt>Funding instruments</dt><dd><Chips items={p.funding_instruments} /></dd></>)}
-            {p.funder_exclusions.length > 0 && (<><dt>Funder exclusions</dt><dd><Chips items={p.funder_exclusions} /></dd></>)}
-            {p.host_institution && (<><dt>Host institution</dt><dd>{p.host_institution}</dd></>)}
-            {p.country && (<><dt>Country</dt><dd>{p.country}</dd></>)}
-          </dl>
-        </section>
+        <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
+          <Title order={2} size="h5" mb="sm">
+            Profile
+          </Title>
+          <Box component="dl" m={0}>
+            {p.org_type && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Organization type</Text><Text component="dd" size="sm" m={0}>{p.org_type}</Text></>)}
+            {p.capabilities.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Capabilities</Text><Text component="dd" size="sm" m={0}><Chips items={p.capabilities} /></Text></>)}
+            {p.patient_populations.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Patient populations</Text><Text component="dd" size="sm" m={0}><Chips items={p.patient_populations} /></Text></>)}
+            {p.scale && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Scale</Text><Text component="dd" size="sm" m={0}>{p.scale}</Text></>)}
+            {p.career_stage && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Career stage</Text><Text component="dd" size="sm" m={0}>{p.career_stage}</Text></>)}
+            {p.role && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Role</Text><Text component="dd" size="sm" m={0}>{p.role}</Text></>)}
+            {p.years_since_phd != null && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Years since PhD</Text><Text component="dd" size="sm" m={0}>{p.years_since_phd}</Text></>)}
+            {p.applicant_types.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Applicant types</Text><Text component="dd" size="sm" m={0}><Chips items={p.applicant_types} /></Text></>)}
+            {p.funding_instruments.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Funding instruments</Text><Text component="dd" size="sm" m={0}><Chips items={p.funding_instruments} /></Text></>)}
+            {p.funder_exclusions.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Funder exclusions</Text><Text component="dd" size="sm" m={0}><Chips items={p.funder_exclusions} /></Text></>)}
+            {p.host_institution && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Host institution</Text><Text component="dd" size="sm" m={0}>{p.host_institution}</Text></>)}
+            {p.country && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Country</Text><Text component="dd" size="sm" m={0}>{p.country}</Text></>)}
+          </Box>
+        </Card>
       )}
-    </main>
+    </Box>
   );
 }
