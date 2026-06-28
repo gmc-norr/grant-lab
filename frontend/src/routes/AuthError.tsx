@@ -1,19 +1,24 @@
+import { Anchor, Text, Title } from "@mantine/core";
 import { Link } from "react-router-dom";
-
-import styles from "./PreAuth.module.css";
 
 export function AuthError() {
   return (
     <>
-      <h1>Sign-in could not be completed</h1>
-      <p>We couldn't sign you in. Please try again.</p>
-      <p>
+      <Title order={1} size="h4" ta="center">
+        Sign-in could not be completed
+      </Title>
+      <Text ta="center" c="dimmed" size="sm">
+        We couldn't sign you in. Please try again.
+      </Text>
+      <Text ta="center" c="dimmed" size="sm">
         If you already have an account with this email, sign in your usual way, then
         connect Google from your account settings.
-      </p>
-      <p className={styles.link}>
-        <Link to="/login">Back to sign in</Link>
-      </p>
+      </Text>
+      <Text ta="center" size="sm">
+        <Anchor component={Link} to="/login">
+          Back to sign in
+        </Anchor>
+      </Text>
     </>
   );
 }

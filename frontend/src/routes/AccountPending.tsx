@@ -1,18 +1,21 @@
+import { Anchor, Text, Title } from "@mantine/core";
 import { Link } from "react-router-dom";
-
-import styles from "./PreAuth.module.css";
 
 export function AccountPending() {
   return (
     <>
-      <h1>Account awaiting approval</h1>
-      <p>
+      <Title order={1} size="h4" ta="center">
+        Account awaiting approval
+      </Title>
+      <Text ta="center" c="dimmed" size="sm">
         Your sign-in worked. An administrator needs to approve your account before
         you can use Call Manager. You'll be able to sign in once approved.
-      </p>
-      <p className={styles.link}>
-        <Link to="/login">Back to sign in</Link>
-      </p>
+      </Text>
+      <Text ta="center" size="sm">
+        <Anchor component={Link} to="/login">
+          Back to sign in
+        </Anchor>
+      </Text>
     </>
   );
 }
