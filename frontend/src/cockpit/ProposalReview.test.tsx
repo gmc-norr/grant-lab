@@ -1,8 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { theme } from "../theme/theme";
 import { ProposalReview } from "./ProposalReview";
 
 afterEach(() => {
@@ -12,14 +14,16 @@ afterEach(() => {
 function renderReview(props: { locked?: boolean } = {}) {
   const qc = new QueryClient();
   render(
-    <QueryClientProvider client={qc}>
-      <ProposalReview
-        workspaceId="ws-1"
-        artifact="spec"
-        currentSections={[{ index: 1, text: "## Aims\norig.\n" }]}
-        locked={props.locked ?? false}
-      />
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <ProposalReview
+          workspaceId="ws-1"
+          artifact="spec"
+          currentSections={[{ index: 1, text: "## Aims\norig.\n" }]}
+          locked={props.locked ?? false}
+        />
+      </QueryClientProvider>
+    </MantineProvider>,
   );
 }
 
@@ -70,8 +74,8 @@ it("renders an add/del line diff of the proposed section", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: { items: [ROW] }, error: undefined } as never);
   renderReview();
   const del = await screen.findByText("- orig.");
-  expect(del).toHaveClass("diff-del");
-  expect(screen.getByText("+ better.")).toHaveClass("diff-add");
+  expect(del).toHaveAttribute("data-diff", "del");
+  expect(screen.getByText("+ better.")).toHaveAttribute("data-diff", "add");
 });
 
 it("surfaces a reject error in the notice", async () => {

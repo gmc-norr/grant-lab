@@ -1,8 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { ReviewPanel } from "./ReviewPanel";
 
 // ---------------------------------------------------------------------------
@@ -67,7 +69,11 @@ function makeRun(over: Record<string, unknown> = {}) {
 
 function wrap(ui: ReactNode) {
   const qc = new QueryClient();
-  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>{ui}</QueryClientProvider>
+    </MantineProvider>,
+  );
 }
 
 afterEach(() => {

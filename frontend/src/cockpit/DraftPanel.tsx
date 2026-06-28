@@ -1,4 +1,4 @@
-import { Button, Menu } from "@mantine/core";
+import { Box, Button, Group, Menu, Stack, Text, Title } from "@mantine/core";
 import { useState } from "react";
 
 import { useDraft, useSaveSection } from "../api/editor";
@@ -23,18 +23,25 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
     else setExportMsg("Export failed.");
   }
 
-  if (draft.isLoading) return <main aria-busy="true">Loading cockpit…</main>;
+  if (draft.isLoading)
+    return (
+      <Box component="main" p="md">
+        <Text aria-busy="true">Loading cockpit…</Text>
+      </Box>
+    );
   if (draft.isError || !draft.data) {
     return (
-      <main role="alert">
-        <h1>Could not load this workspace</h1>
-      </main>
+      <Box component="main" p="md">
+        <Title order={2} role="alert">
+          Could not load this workspace
+        </Title>
+      </Box>
     );
   }
   const { head, can_edit, sections } = draft.data;
   return (
-    <div className="draft-shell">
-      <div className="draft-toolbar">
+    <Stack gap="sm">
+      <Group gap="sm">
         <Menu position="bottom-start">
           <Menu.Target>
             <Button variant="default" size="xs">
@@ -49,11 +56,11 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
           </Menu.Dropdown>
         </Menu>
         {exportMsg && (
-          <span role="status" className="export-msg">
+          <Text role="status" size="sm" c="dimmed">
             {exportMsg}
-          </span>
+          </Text>
         )}
-      </div>
+      </Group>
       <ArtifactSectionEditor
         key={`draft:${id}`}
         workspaceId={id}
@@ -66,6 +73,6 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
         citations
         openPeek={openPeek}
       />
-    </div>
+    </Stack>
   );
 }

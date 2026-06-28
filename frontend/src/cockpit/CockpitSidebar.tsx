@@ -5,28 +5,16 @@ import { Button, Modal } from "@mantine/core";
 
 import { useReferences } from "../api/citations";
 import { useDraft, useSpec } from "../api/editor";
-import { type ScorecardCriterion, useScorecard } from "../api/evaluator";
+import { useScorecard } from "../api/evaluator";
 import { type RubricCriterion, useRubric, useUpdateRubric } from "../api/rubric";
 import { useAddMember, useRemoveMember } from "../api/settings";
 import { useCockpitMeta, useMembers, useVersions } from "../api/workspace";
+import { BandBadge } from "./BandBadge";
 import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
 import { useEditorDirty } from "./editorStore";
 import { RubricEditor } from "./RubricEditor";
 import { SidebarGroup } from "./SidebarGroup";
-
-const BAND_CLASS: Record<ScorecardCriterion["band"], string> = {
-  strong: "band-strong",
-  adequate: "band-adequate",
-  at_risk: "band-at-risk",
-  gap: "band-gap",
-};
-const BAND_LABEL: Record<ScorecardCriterion["band"], string> = {
-  strong: "Strong",
-  adequate: "Adequate",
-  at_risk: "At-risk",
-  gap: "Gap",
-};
 
 // The cockpit's left sidebar (the route's handle.Sidebar). Reads the SAME queries +
 // ?tab/?sec as the editor/panels — React Query dedupes, the URL is the shared channel —
@@ -131,7 +119,7 @@ export function CockpitSidebar() {
                 className={styles.criterion}
                 onClick={() => navigate({ top_tab: "scorecard" })}
               >
-                <span className={`band-pill ${BAND_CLASS[c.band]}`}>{BAND_LABEL[c.band]}</span>
+                <BandBadge band={c.band} />
                 <span className={styles.criterionName}>{c.name}</span>
               </button>
             </li>

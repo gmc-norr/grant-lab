@@ -1,6 +1,8 @@
 import { useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
+import { Box, Tabs } from "@mantine/core";
+
 import { useCockpitMeta } from "../api/workspace";
 import { BottomPanel } from "../cockpit/BottomPanel";
 import { useCockpitNav } from "../cockpit/cockpitNav";
@@ -52,22 +54,20 @@ export function Cockpit() {
   if (meta.data.current_phase === "setup") return <WorkspaceSetup id={id} />;
 
   return (
-    <div className="cockpit-shell">
+    <Box style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
       <UnsavedChangesGuard />
-      <div role="tablist" aria-label="Artifact">
-        <button type="button" role="tab" aria-selected={tab === "draft"} onClick={() => onTab("draft")}>
-          Draft
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "spec"} onClick={() => onTab("spec")}>
-          Spec
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "scorecard"} onClick={() => onTab("scorecard")}>
-          Scorecard
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "review"} onClick={() => onTab("review")}>
-          Panel review
-        </button>
-      </div>
+      <Tabs
+        value={tab}
+        onChange={(v) => v && onTab(v as TopTab)}
+        keepMounted={false}
+      >
+        <Tabs.List aria-label="Artifact">
+          <Tabs.Tab value="draft">Draft</Tabs.Tab>
+          <Tabs.Tab value="spec">Spec</Tabs.Tab>
+          <Tabs.Tab value="scorecard">Scorecard</Tabs.Tab>
+          <Tabs.Tab value="review">Panel review</Tabs.Tab>
+        </Tabs.List>
+      </Tabs>
       {tab === "draft" && <DraftPanel id={id} openPeek={openPeek} />}
       {tab === "spec" && <SpecPanel id={id} />}
       {tab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
@@ -80,6 +80,6 @@ export function Cockpit() {
         onToggleCollapsed={() => setCollapsed((c) => !c)}
         onNavigate={onNavigate}
       />
-    </div>
+    </Box>
   );
 }

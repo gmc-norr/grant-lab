@@ -1,0 +1,72 @@
+/* frontend/src/cockpit/CockpitPanels.module.css
+   Scoped cockpit visuals Mantine has no prop for. Tokens from theme/theme.css. */
+
+/* Band pill colours — applied to a Mantine <Badge> by <BandBadge>, shared by
+   ScorecardPanel + CockpitSidebar. Badge gives the shape; these override its
+   bg/colour/border per band. */
+.bandBadge {
+  border: 1px solid transparent;
+}
+.strong {
+  background: color-mix(in srgb, var(--app-good) 16%, transparent);
+  color: var(--app-good);
+  border-color: color-mix(in srgb, var(--app-good) 40%, transparent);
+}
+.adequate {
+  background: var(--app-hover);
+  color: var(--app-muted);
+  border-color: var(--app-border);
+}
+.at_risk {
+  background: color-mix(in srgb, var(--app-warn) 16%, transparent);
+  color: var(--app-warn);
+  border-color: color-mix(in srgb, var(--app-warn) 40%, transparent);
+}
+.gap {
+  background: color-mix(in srgb, var(--app-bad) 16%, transparent);
+  color: var(--app-bad);
+  border-color: color-mix(in srgb, var(--app-bad) 40%, transparent);
+}
+
+/* --- ArtifactSectionEditor layout (the old .cockpit grid) --- */
+.editorGrid {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.editorMain {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+.sidePane {
+  min-width: 18rem;
+  max-width: 28rem;
+}
+.composerPane {
+  min-width: 20rem;
+  max-width: 30rem;
+}
+
+/* --- ReviewPanel preformatted markdown doc --- */
+.reviewDoc {
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+  margin: 0;
+  padding: 0.5rem;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-sidebar);
+  overflow: auto;
+}
+
+/* --- ProposalReview diff --- */
+.proposalDiff {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+}
+.proposalDiff div[data-diff="add"] { background: rgba(46, 160, 67, 0.15); }
+.proposalDiff div[data-diff="del"] { background: rgba(248, 81, 73, 0.15); }
