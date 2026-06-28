@@ -131,22 +131,34 @@ Replace it with (keep `.editorGrid`, `.editorMain`, `.composerPane` as-is; trim 
 
 - [ ] **Step 2: Write the failing structural tests in `ArtifactSectionEditor.test.tsx`**
 
-The file already has an `openPeek` test that renders the editor with a peek panel and mocks `useCitationSource`. Add two tests after it. The first asserts the resize handle exists when a source pane is open; the second asserts no handle when none is (reuse the existing `renderEditor` helper, which renders with `citations={false}` → no source pane):
+The file already has an `openPeek` test that renders the editor with a peek panel and mocks `useCitationSource`. Add two tests after it.
+
+Both render the editor with `citations={true}` so the negative case actually exercises the citations-enabled path (a `citations={false}` render via the existing `renderEditor` helper can NEVER set `peekEv`, so it would not catch a regression that renders a separator whenever `citations` is on). Factor the citations-enabled render into a small local helper, and use the **current `CitationSourceOut` shape** (matching `sourcePayload` in `Cockpit.test.tsx`) so the `SourceViewer` actually mounts with real content — strengthening the "hooks preserved" coverage:
 
 ```tsx
-it("renders a resize handle between the editor and the source peek", async () => {
-  const fakeSource = {
-    ev_id: "ev-9", citekey: "smith2021", reference_title: "Smith et al. 2021",
-    reference_kind: "paper", chunk_index: 0, section_path: null,
-    evidence_quote: "the azure sky", prev_ev_id: null, next_ev_id: null,
-  };
-  vi.spyOn(citationsApi, "useCitationSource").mockReturnValue({
-    data: fakeSource, isLoading: false, isError: false,
-  } as unknown as ReturnType<typeof citationsApi.useCitationSource>);
+// Current CitationSourceOut shape (mirrors sourcePayload in Cockpit.test.tsx).
+const FAKE_SOURCE = {
+  evidence_id: "ev-9",
+  reference_id: "r1",
+  source_line: "smith2021 · Smith et al. 2021",
+  claim: null,
+  stance: "supports",
+  confidence: null,
+  index: 1,
+  total: 1,
+  prev_ev: null,
+  next_ev: null,
+  tombstoned: false,
+  no_text: false,
+  note: null,
+  text: "The cat sat on the mat.",
+  highlight: [0, 23],
+};
 
+function renderDraftEditor(openPeek?: { ev: string; n: number }) {
   const qc = new QueryClient();
   const save = { mutateAsync: vi.fn(), isPending: false };
-  render(
+  return render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
       <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
         <QueryClientProvider client={qc}>
@@ -163,7 +175,7 @@ it("renders a resize handle between the editor and the source peek", async () =>
                   save={save}
                   refetch={() => {}}
                   citations={true}
-                  openPeek={{ ev: "ev-9", n: 1 }}
+                  openPeek={openPeek}
                 />
               }
             />
@@ -172,14 +184,28 @@ it("renders a resize handle between the editor and the source peek", async () =>
       </MemoryRouter>
     </MantineProvider>,
   );
+}
 
+it("renders a resize handle and the source viewer when a citation peek is open", async () => {
+  vi.spyOn(citationsApi, "useCitationSource").mockReturnValue({
+    data: FAKE_SOURCE, isLoading: false, isError: false,
+  } as unknown as ReturnType<typeof citationsApi.useCitationSource>);
+  const { container } = renderDraftEditor({ ev: "ev-9", n: 1 });
   await waitFor(() =>
     expect(screen.getByRole("separator", { name: "Resize source peek" })).toBeInTheDocument(),
   );
+  // The source pane mounted with real content through the new Panel wrapper.
+  expect(container.querySelector('[data-region="peek"] [data-testid="source-viewer"]')).not.toBeNull();
 });
 
-it("renders no resize handle when no source pane is open", () => {
-  renderEditor([{ index: 0, heading: "", text: "x\n", sha: "s0" }]);
+it("renders no resize handle when citations are on but no source pane is open", () => {
+  // citations={true} with NO openPeek → peekEv/pinnedEv stay null → no source pane,
+  // so the editor is a single full-width panel with no handle. Catches a regression
+  // that would render a separator unconditionally whenever citations is enabled.
+  vi.spyOn(citationsApi, "useCitationSource").mockReturnValue({
+    data: undefined, isLoading: false, isError: false,
+  } as unknown as ReturnType<typeof citationsApi.useCitationSource>);
+  renderDraftEditor();
   expect(screen.queryByRole("separator")).toBeNull();
 });
 ```
@@ -187,7 +213,7 @@ it("renders no resize handle when no source pane is open", () => {
 - [ ] **Step 3: Run them to verify they fail**
 
 Run: `pnpm test -- --run src/editor/ArtifactSectionEditor.test.tsx`
-Expected: the new "renders a resize handle…" test FAILS (no separator yet); "renders no resize handle…" passes trivially (there is none yet). Existing tests still pass.
+Expected: "renders a resize handle and the source viewer when a citation peek is open" FAILS (no separator yet — the editor still renders the old flex row). "renders no resize handle when citations are on but no source pane is open" passes trivially (no separator exists yet). All pre-existing tests still pass.
 
 - [ ] **Step 4: Refactor the `ArtifactSectionEditor` return into a `PanelGroup`**
 
@@ -397,5 +423,6 @@ Run from `frontend/`:
 - **Spec coverage:** editor↔source becomes a nested horizontal `PanelGroup` (Step 4) ✓; handle between editor and source (Step 4 + `.centerHandle`) ✓; full-width editor with no handle when no source open (single-panel group — Step 4, test in Step 2) ✓; composer excluded, stays transient sibling (Step 4) ✓; `data-region`/`data-testid` hooks preserved (Step 4 + Step 6) ✓; persistence via `autoSaveId="cm-cockpit-center"` (Step 4) ✓.
 - **Placeholder scan:** none — full CSS, full JSX, full test code, exact commands.
 - **Type consistency:** `Panel`/`PanelGroup`/`PanelResizeHandle` imported once and all used; `minSize`/`defaultSize` numeric; no `ref`/`collapsible` (resize-only) → no `ImperativePanelHandle` import, no unused locals.
-- **No-collapse invariant:** confirmed there are zero imperative `isCollapsed()/collapse()/expand()` calls, so the jsdom-collapse crash from Slice 1 cannot occur here; the new tests assert only `getByRole("separator")` presence/absence.
+- **No-collapse invariant:** confirmed there are zero imperative `isCollapsed()/collapse()/expand()` calls, so the jsdom-collapse crash from Slice 1 cannot occur here; the new tests assert `getByRole("separator")` presence/absence plus (positive case) the `[data-region="peek"] [data-testid="source-viewer"]` mount.
+- **Test rigor (Codex review applied):** the negative separator test renders `citations={true}` with no `openPeek` (not the `citations={false}` helper), so it actually catches an unconditional-separator regression; the positive test uses the current `CitationSourceOut` shape so the `SourceViewer` truly mounts.
 - **Scope:** only the three named files change; `SourceViewer`/`CitationComposer`/`CodeMirrorEditor` and all editor logic untouched.
