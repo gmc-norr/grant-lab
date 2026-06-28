@@ -62,6 +62,16 @@ window and scales sensibly. Persistence is automatic via `autoSaveId`
 so a route showing `{sidebar, main, rightpane}` and one showing `{sidebar, main}`
 persist independently — no cross-route bleed.
 
+**Persistence scope (decision):** one `autoSaveId="cm-shell"`; layouts are
+**global per panel-arrangement**, NOT per-route. Consequences:
+- The cockpit (`{sidebar, main, rightpane}`) keeps its OWN sidebar width/collapse,
+  independent of the list routes (different arrangement → different storage key).
+- Routes that share `{sidebar, main}` (the calls dashboard + the cockpit list)
+  share one sidebar width/collapse. That is intended (both are list+filter views,
+  and it matches VS Code's single-global-sidebar-width mental model). If we later
+  want per-route widths, switch to route-scoped `autoSaveId`s — explicitly not
+  doing that now.
+
 ### Slice 1 — shell `PanelGroup`
 
 Today `AppShell` renders `<div class=body>` = `ActivityBar` + (conditional)
@@ -70,20 +80,20 @@ structure: keep `ActivityBar` fixed (48px) OUTSIDE the group; wrap the rest in a
 horizontal `PanelGroup`:
 
 ```
-<div class=body>
+<div class=body>                      {/* display:flex (unchanged) */}
   <ActivityBar/>                      {/* fixed 48px, not in the group */}
-  <PanelGroup direction="horizontal" autoSaveId="cm-shell">
+  <PanelGroup direction="horizontal" autoSaveId="cm-shell" className={styles.panes}>
     {SidebarContent && <>
       <Panel id="sidebar" order={1} collapsible collapsedSize={0} minSize={12} defaultSize={18} ref={sidebarRef} onCollapse/onExpand→state>
         <Sidebar><SidebarContent/></Sidebar>
       </Panel>
-      <PanelResizeHandle aria-label="Resize sidebar"/>
+      <PanelResizeHandle className={styles.handle} aria-label="Resize sidebar"/>
     </>}
     <Panel id="main" order={2} minSize={30}>
       <div class=main><Outlet/></div>
     </Panel>
     {RightPaneContent && <>
-      <PanelResizeHandle aria-label="Resize chat"/>
+      <PanelResizeHandle className={styles.handle} aria-label="Resize chat"/>
       <Panel id="rightpane" order={3} collapsible collapsedSize={0} minSize={15} defaultSize={22} ref={rightRef} onCollapse/onExpand→state>
         <RightPaneContent/>
       </Panel>
@@ -92,6 +102,18 @@ horizontal `PanelGroup`:
 </div>
 ```
 
+- **`AppShell.module.css` `.panes`** (new): the `PanelGroup` must become the flex
+  item that fills the row beside the fixed `ActivityBar` (today `.main` owned
+  `flex:1`, but `.main` is now INSIDE the group): `.panes { flex: 1; min-width: 0;
+  min-height: 0; }`. Keep `.main { overflow: auto; }` (it no longer needs
+  `flex:1`).
+- **`AppShell.module.css` `.handle`** (new): `PanelResizeHandle` renders **no
+  visible UI unless styled** (upstream README). Add a thin rail with hover/focus/
+  drag affordance, e.g. `.handle { width: 5px; cursor: col-resize; background:
+  transparent; } .handle:hover, .handle[data-resize-handle-state="hover"],
+  .handle[data-resize-handle-state="drag"] { background: var(--app-accent); }`
+  (the library sets `data-resize-handle-state` to `inactive|hover|drag`). Add a
+  visible focus ring for keyboard users.
 - `shell/Sidebar.module.css`: drop `flex: 0 0 240px`; keep `min-height:0;
   overflow:auto; background; border-right`. The `Panel` owns width; `.sidebar`
   fills it (`height:100%`).
@@ -107,14 +129,27 @@ horizontal `PanelGroup`:
   Clicking the **active ActivityBar item** toggles it (VS Code behaviour). Wire
   it via the Panel's imperative handle: AppShell holds a `sidebarRef`
   (`ImperativePanelHandle`) and a `collapsed` boolean (from `onCollapse`/
-  `onExpand`); it passes `onToggle` + `collapsed` to `ActivityBar`. Collapsed
-  state persists via `autoSaveId`.
-- **Right chat:** the `rightpane` Panel is `collapsible`. A **single persistent
-  toggle in the `TitleBar`** (top bar, always visible — so it works even when the
-  panel is collapsed to 0) both collapses and expands it; the icon/label reflects
-  state. (One control, always reachable — avoids a header-chevron-to-close +
-  separate-reopen split. Exact TitleBar placement finalised in the plan after
-  reading `TitleBar.tsx`.) Same imperative-handle + state pattern.
+  `onExpand`); it passes `onToggleSidebar` + `collapsed` to `ActivityBar`.
+  Collapsed state persists via `autoSaveId`.
+  **Critical:** the active item is currently a `<Link>`/`<NavLink>`
+  (`ActivityBar.tsx:79-89` — "Current workspace" → `/cockpit/${wsId}`; and the
+  "Workspaces" item on the cockpit-list route). When that item is **already
+  active**, its click must `e.preventDefault()` and call `onToggleSidebar`
+  INSTEAD of navigating — otherwise clicking it from `/cockpit/ws1?tab=spec&sec=2`
+  navigates to `/cockpit/ws1` and **drops the `?tab`/`?sec` state**. So the
+  Item's onClick: `if (active) { e.preventDefault(); onToggleSidebar(); }` (inactive
+  items navigate as today).
+- **Right chat:** the `rightpane` Panel is `collapsible`. A **toggle in the
+  `TitleBar`** both collapses and expands it; the icon/label reflects state. It
+  works when the panel is collapsed to 0 (it lives in the always-present TitleBar,
+  not in the chat). **Visibility:** the toggle renders ONLY when the active route
+  actually has a RightPane — AppShell already computes `RightPaneContent` from the
+  route handle, so it passes `hasRightPane` (+ `onToggleChat` + `collapsed`) to
+  `TitleBar`; on dashboard/calls-list/settings/profile (no RightPane) the toggle
+  is absent (no dead control). (One control, always reachable on cockpit routes —
+  avoids a header-chevron-to-close + separate-reopen split. Exact TitleBar
+  placement finalised in the plan after reading `TitleBar.tsx`.) Same
+  imperative-handle + state pattern.
 - Keyboard: `PanelResizeHandle` is focusable and arrow-resizable out of the box;
   add an `aria-label` to each.
 
@@ -145,8 +180,9 @@ in its own plan.
   divs; assert the sidebar/main/right regions + landmarks (`<nav aria-label>`,
   `aside aria-label="Sidebar"`, the chat landmark) still render. Update any
   structural assertion to the new tree without weakening it.
-- `shell/ActivityBar.test.tsx`: add a test that the active-item click calls the
-  collapse toggle.
+- `shell/ActivityBar.test.tsx`: add tests that (a) clicking the **active** item
+  calls `onToggleSidebar` and does NOT navigate (assert `preventDefault` /
+  location unchanged), and (b) clicking an **inactive** item still navigates.
 - `shell/TitleBar.test.tsx`: the chat toggle calls collapse/expand and reflects
   state (label/aria).
 - No API/schema change → no OpenAPI regen.
