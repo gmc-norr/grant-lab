@@ -1,4 +1,4 @@
-import styles from "./Pagination.module.css";
+import { Button, Group, Text } from "@mantine/core";
 
 type Props = {
   page: number;
@@ -9,14 +9,14 @@ type Props = {
 
 export function Pagination({ page, hasPrev, hasNext, onPage }: Props) {
   return (
-    <nav className={styles.pagination} aria-label="Pagination">
-      <button type="button" disabled={!hasPrev} onClick={() => onPage(page - 1)}>
+    <Group component="nav" aria-label="Pagination" gap="sm" align="center">
+      <Button variant="default" size="xs" disabled={!hasPrev} onClick={() => onPage(page - 1)}>
         Previous
-      </button>
-      <span>Page {page}</span>
-      <button type="button" disabled={!hasNext} onClick={() => onPage(page + 1)}>
+      </Button>
+      <Text span size="sm">Page {page}</Text>
+      <Button variant="default" size="xs" disabled={!hasNext} onClick={() => onPage(page + 1)}>
         Next
-      </button>
-    </nav>
+      </Button>
+    </Group>
   );
 }

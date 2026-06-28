@@ -1,9 +1,11 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { theme } from "../theme/theme";
 import { Dashboard } from "./Dashboard";
 
 // Surfaces the live URL search so a test can assert WHEN (not just whether) it changes.
@@ -15,12 +17,14 @@ function LocationProbe() {
 function renderAt(url: string) {
   const qc = new QueryClient();
   return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[url]}>
-        <Dashboard />
-        <LocationProbe />
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[url]}>
+          <Dashboard />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
   );
 }
 

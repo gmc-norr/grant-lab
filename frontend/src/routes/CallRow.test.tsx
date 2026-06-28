@@ -1,8 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { expect, it } from "vitest";
 
 import type { CallItem } from "../api/dashboard";
+import { theme } from "../theme/theme";
 import { CallRow } from "./CallRow";
 
 function call(over: Partial<CallItem> = {}): CallItem {
@@ -19,7 +21,11 @@ function call(over: Partial<CallItem> = {}): CallItem {
 }
 
 function renderRow(ui: React.ReactElement) {
-  return render(<MemoryRouter>{ui}</MemoryRouter>);
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter>{ui}</MemoryRouter>
+    </MantineProvider>,
+  );
 }
 
 it("links the title to the React detail route, shows source + match badge", () => {

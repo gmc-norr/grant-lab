@@ -1,33 +1,33 @@
+import { Box, Text } from "@mantine/core";
 import { useSearchParams } from "react-router-dom";
 
 import { Pagination } from "../components/Pagination";
 import { dashboardParamsFrom, useDashboard } from "../api/dashboard";
 import { CallRow } from "./CallRow";
 import { DashboardHeader } from "./DashboardHeader";
-import styles from "./Dashboard.module.css";
 
 export function Dashboard() {
   const [sp, setSp] = useSearchParams();
   const params = dashboardParamsFrom(sp);
   const { data, isLoading, isError } = useDashboard(params);
 
-  if (isLoading) return <p>Loading…</p>;
-  if (isError || !data) return <p role="alert">Couldn&apos;t load calls.</p>;
+  if (isLoading) return <Text p="md">Loading…</Text>;
+  if (isError || !data) return <Text role="alert" p="md">Couldn&apos;t load calls.</Text>;
 
   return (
-    <main>
+    <Box component="main">
       <DashboardHeader />
 
-      {data.ranking.pending > 0 && <p>Scoring {data.ranking.pending} calls…</p>}
+      {data.ranking.pending > 0 && <Text>Scoring {data.ranking.pending} calls…</Text>}
       {data.ranking.failed > 0 && (
-        <p>{data.ranking.failed} calls couldn&apos;t be scored automatically.</p>
+        <Text>{data.ranking.failed} calls couldn&apos;t be scored automatically.</Text>
       )}
 
-      <ul className={styles.list}>
+      <Box component="ul" p={0} my="xs">
         {data.items.map((c) => (
           <CallRow key={c.id} call={c} profileId={data.effective.profile_id} />
         ))}
-      </ul>
+      </Box>
 
       <Pagination
         page={data.pagination.page}
@@ -41,6 +41,6 @@ export function Dashboard() {
           })
         }
       />
-    </main>
+    </Box>
   );
 }
