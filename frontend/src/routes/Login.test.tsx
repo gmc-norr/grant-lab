@@ -19,7 +19,7 @@ it("renders email/password and the 'Request access' link; no Google button when 
   mockConfig(false);
   renderWithProviders(<Login />, { route: "/login" });
   expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
-  expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/password/i, { selector: "input" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /request access/i })).toHaveAttribute("href", "/register");
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: /continue with google/i })).not.toBeInTheDocument(),
@@ -41,7 +41,7 @@ it("on success invalidates ['me'] and navigates to the server redirect", async (
   } as never);
   renderWithProviders(<Login />, { route: "/login?next=/calls/5" });
   await userEvent.type(screen.getByLabelText(/email/i), "a@ki.se");
-  await userEvent.type(screen.getByLabelText(/password/i), "correct-horse-1");
+  await userEvent.type(screen.getByLabelText(/password/i, { selector: "input" }), "correct-horse-1");
   await userEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
   // threads ?next into the POST
   await waitFor(() =>
@@ -59,7 +59,7 @@ it("shows ONE generic message for every failure mode (anti-enumeration)", async 
   } as never);
   renderWithProviders(<Login />, { route: "/login" });
   await userEvent.type(screen.getByLabelText(/email/i), "ghost@ki.se");
-  await userEvent.type(screen.getByLabelText(/password/i), "whatever-long");
+  await userEvent.type(screen.getByLabelText(/password/i, { selector: "input" }), "whatever-long");
   await userEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent("Invalid email or password.");
