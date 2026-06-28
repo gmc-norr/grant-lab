@@ -1,18 +1,21 @@
+import { Anchor, Text, Title } from "@mantine/core";
 import { Link } from "react-router-dom";
-
-import styles from "./PreAuth.module.css";
 
 export function AccountNoAccess() {
   return (
     <>
-      <h1>No access</h1>
-      <p>
+      <Title order={1} size="h4" ta="center">
+        No access
+      </Title>
+      <Text ta="center" c="dimmed" size="sm">
         This account does not have access. If you think this is a mistake, contact
         an administrator.
-      </p>
-      <p className={styles.link}>
-        <Link to="/login">Back to sign in</Link>
-      </p>
+      </Text>
+      <Text ta="center" size="sm">
+        <Anchor component={Link} to="/login">
+          Back to sign in
+        </Anchor>
+      </Text>
     </>
   );
 }

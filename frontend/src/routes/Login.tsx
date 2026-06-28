@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
+import { Alert, Anchor, Button, PasswordInput, Stack, Text, TextInput, Title } from "@mantine/core";
 
 import { useAuthConfig, useLogin } from "../api/auth";
 import { ApiError } from "../api/client";
-import styles from "./PreAuth.module.css";
 
 function errorMessage(err: unknown): string {
   // unwrap throws ApiError(code, "code: message"); strip the code prefix so the
@@ -25,15 +25,14 @@ export function Login() {
 
   return (
     <>
-      <h1>Sign in</h1>
-      <p>Enter your email and password.</p>
-      {login.isError && (
-        <p className={styles.err} role="alert">
-          {errorMessage(login.error)}
-        </p>
-      )}
+      <Title order={1} size="h4" ta="center">
+        Sign in
+      </Title>
+      <Text ta="center" c="dimmed" size="sm">
+        Enter your email and password.
+      </Text>
+      {login.isError && <Alert color="red">{errorMessage(login.error)}</Alert>}
       <form
-        className={styles.actions}
         onSubmit={(e) => {
           e.preventDefault();
           login.mutate(
@@ -47,45 +46,44 @@ export function Login() {
           );
         }}
       >
-        <label className={styles.field}>
-          Email
-          <input
+        <Stack gap="sm">
+          <TextInput
+            label="Email"
             type="email"
             required
             autoFocus
             autoComplete="email"
             value={email}
             placeholder={`you@${cfg?.allowed_domains[0] ?? "example.org"}`}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => setEmail(e.currentTarget.value)}
           />
-        </label>
-        <label className={styles.field}>
-          Password
-          <input
-            type="password"
+          <PasswordInput
+            label="Password"
             required
             autoComplete="current-password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => setPassword(e.currentTarget.value)}
           />
-        </label>
-        <button type="submit" disabled={login.isPending}>
-          Sign in
-        </button>
+          <Button type="submit" fullWidth disabled={login.isPending}>
+            Sign in
+          </Button>
+        </Stack>
       </form>
       {cfg?.google_oidc_enabled && (
         // Native server-side OAuth start: a full-page POST carries Origin/CSRF and
         // 303s to Google (cannot be a fetch). safe_next is applied server-side.
-        <form method="post" action="/auth/google/start" className={styles.actions}>
+        <form method="post" action="/auth/google/start">
           {next && <input type="hidden" name="next" value={next} />}
-          <button type="submit" className={styles.secondary}>
+          <Button type="submit" variant="default" fullWidth>
             Continue with Google
-          </button>
+          </Button>
         </form>
       )}
-      <p className={styles.link}>
-        <Link to="/register">Request access</Link>
-      </p>
+      <Text ta="center" size="sm">
+        <Anchor component={Link} to="/register">
+          Request access
+        </Anchor>
+      </Text>
     </>
   );
 }

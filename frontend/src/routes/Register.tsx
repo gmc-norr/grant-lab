@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { Anchor, Button, Stack, Text, TextInput, Title } from "@mantine/core";
 
 import { useAuthConfig, useRegister } from "../api/auth";
-import styles from "./PreAuth.module.css";
 
 export function Register() {
   const cfg = useAuthConfig().data;
@@ -14,65 +14,72 @@ export function Register() {
   if (register.isSuccess) {
     return (
       <>
-        <h1>Request received</h1>
-        <p>
+        <Title order={1} size="h4" ta="center">
+          Request received
+        </Title>
+        <Text ta="center" c="dimmed" size="sm">
           Thanks — your access request has been recorded. An administrator will
           review it and set up your account. You'll be able to sign in once it's
           approved.
-        </p>
-        <p className={styles.link}>
-          <Link to="/login">Back to sign in</Link>
-        </p>
+        </Text>
+        <Text ta="center" size="sm">
+          <Anchor component={Link} to="/login">
+            Back to sign in
+          </Anchor>
+        </Text>
       </>
     );
   }
 
   return (
     <>
-      <h1>Request access</h1>
-      <p>
+      <Title order={1} size="h4" ta="center">
+        Request access
+      </Title>
+      <Text ta="center" c="dimmed" size="sm">
         Enter your hospital email. An administrator will review your request and set
         up your account.
-      </p>
+      </Text>
       <form
-        className={styles.actions}
         onSubmit={(e) => {
           e.preventDefault();
           register.mutate({ email, name: name.trim() || null });
         }}
       >
-        <label className={styles.field}>
-          Email
-          <input
+        <Stack gap="sm">
+          <TextInput
+            label="Email"
             type="email"
             required
             autoFocus
             autoComplete="email"
             value={email}
             placeholder={`you@${domains[0] ?? "example.org"}`}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => setEmail(e.currentTarget.value)}
           />
-        </label>
-        <label className={styles.field}>
-          Name (optional)
-          <input
+          <TextInput
+            label="Name (optional)"
             type="text"
             maxLength={200}
             autoComplete="name"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => setName(e.currentTarget.value)}
           />
-        </label>
-        {domains.length > 0 && (
-          <span className={styles.muted}>Use your hospital email ({domains.join(" or ")}).</span>
-        )}
-        <button type="submit" disabled={register.isPending}>
-          Request access
-        </button>
+          {domains.length > 0 && (
+            <Text size="xs" c="dimmed">
+              Use your hospital email ({domains.join(" or ")}).
+            </Text>
+          )}
+          <Button type="submit" fullWidth disabled={register.isPending}>
+            Request access
+          </Button>
+        </Stack>
       </form>
-      <p className={styles.link}>
-        <Link to="/login">Back to sign in</Link>
-      </p>
+      <Text ta="center" size="sm">
+        <Anchor component={Link} to="/login">
+          Back to sign in
+        </Anchor>
+      </Text>
     </>
   );
 }
