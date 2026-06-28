@@ -40,7 +40,7 @@ export function deadlineLocalView(localDate: string): { state: DeadlineState; da
   return { state: "open", date: localDate };
 }
 
-// Domain deadline-urgency colours (parity with the retired Deadline.module.css):
+// Domain deadline-urgency colours (parity with the retired Deadline CSS module):
 // closed=dim, soon=bad+bold, watch=warn, open=muted.
 const DEADLINE_TEXT: Record<DeadlineState, { c: string; fw?: number }> = {
   closed: { c: "var(--app-dim)" },

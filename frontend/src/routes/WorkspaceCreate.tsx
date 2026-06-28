@@ -1,8 +1,8 @@
+import { Anchor, Box, Button, Stack, Text, TextInput, Title } from "@mantine/core";
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { useCreateWorkspace } from "../api/workspace";
-import styles from "./WorkspaceCreate.module.css";
 
 export function WorkspaceCreate() {
   const [sp] = useSearchParams();
@@ -21,11 +21,11 @@ export function WorkspaceCreate() {
   // requires a call). Guard a direct hit / refresh-without-params.
   if (callId === null || Number.isNaN(callId)) {
     return (
-      <main className={styles.guard} role="alert">
-        <h1>Start drafting</h1>
-        <p>Pick a call from the dashboard to start drafting.</p>
-        <Link to="/">← Back to calls</Link>
-      </main>
+      <Box component="main" role="alert" maw="32rem">
+        <Title order={1}>Start drafting</Title>
+        <Text>Pick a call from the dashboard to start drafting.</Text>
+        <Anchor component={Link} to="/">← Back to calls</Anchor>
+      </Box>
     );
   }
 
@@ -42,44 +42,37 @@ export function WorkspaceCreate() {
   }
 
   return (
-    <main className={styles.wrap}>
-      <h1>New workspace</h1>
-      <p className={styles.context}>Drafting for: {callTitle || `call #${callId}`}</p>
-      <form onSubmit={onSubmit} className={styles.form}>
-        <label className={styles.label}>
-          Title
-          <input
-            className={styles.input}
+    <Box component="main" maw="32rem">
+      <Title order={1}>New workspace</Title>
+      <Text c="dimmed" fz="0.9rem" mt="0.25rem" mb="md">Drafting for: {callTitle || `call #${callId}`}</Text>
+      <Box component="form" onSubmit={onSubmit}>
+        <Stack gap="0.85rem" align="flex-start">
+          <TextInput
+            label="Title"
+            w="100%"
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => setTitle(e.currentTarget.value)}
             required
+            withAsterisk={false}
             maxLength={500}
           />
-        </label>
-        <label className={styles.label}>
-          Deadline (optional)
-          <input
-            className={styles.input}
+          <TextInput
+            label="Deadline (optional)"
             type="datetime-local"
+            w="100%"
             value={deadline}
-            onChange={(e) => setDeadline(e.target.value)}
+            onChange={(e) => setDeadline(e.currentTarget.value)}
           />
-        </label>
-        <button
-          className={styles.submit}
-          type="submit"
-          disabled={create.isPending || !title.trim()}
-        >
-          {create.isPending ? "Creating…" : "Start drafting"}
-        </button>
-        {create.isError && (
-          <p role="alert" className={styles.error}>
-            {create.error instanceof Error
-              ? create.error.message
-              : "Couldn't create the workspace."}
-          </p>
-        )}
-      </form>
-    </main>
+          <Button type="submit" variant="default" disabled={create.isPending || !title.trim()}>
+            {create.isPending ? "Creating…" : "Start drafting"}
+          </Button>
+          {create.isError && (
+            <Text role="alert" c="var(--app-danger, #e5484d)" fz="0.85rem">
+              {create.error instanceof Error ? create.error.message : "Couldn't create the workspace."}
+            </Text>
+          )}
+        </Stack>
+      </Box>
+    </Box>
   );
 }
