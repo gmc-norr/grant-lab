@@ -4,7 +4,7 @@
 
 **Goal:** Re-skin the five Profiles surfaces — `ProfilesList`, `ProfileDetail`, the shared `StructuredFields` form, `ProfileNew`, and `ProfileEdit` — to Mantine v9 primitives, and retire their three CSS modules (`ProfilesList.module.css`, `ProfileDetail.module.css`, `ProfileForm.module.css`).
 
-**Architecture:** Pure frontend re-skin. The display routes (`ProfilesList`, `ProfileDetail`) become Mantine `Card`/`Stack`/`Title`/`Text`/`Badge`/`Anchor`/`Button`. The forms (`ProfileNew`, `ProfileEdit`) and the shared `StructuredFields` become Mantine `TextInput`/`Textarea`/`NativeSelect`/`Fieldset`/`Button`/`Alert`. The data layer (`api/profiles.ts`) and the router are untouched. No behaviour, data-flow, API, route, or copy changes. No schema, no OpenAPI regen.
+**Architecture:** Pure frontend re-skin. The display routes (`ProfilesList`, `ProfileDetail`) become Mantine `Card`/`Stack`/`Title`/`Text`/`Badge`/`Anchor`/`Button`. The forms (`ProfileNew`, `ProfileEdit`) and the shared `StructuredFields` become Mantine `TextInput`/`Textarea`/`NativeSelect`/`Fieldset`/`Button` (with `Paper` for ProfileEdit's passive status banners — NOT `Alert`, which would add a live-region role). The data layer (`api/profiles.ts`) and the router are untouched. No behaviour, data-flow, API, route, or copy changes. No schema, no OpenAPI regen.
 
 **Tech Stack:** React 19.2.7, Mantine v9.4.0, react-router-dom, TanStack Query, Vite, Vitest + Testing Library (jsdom), pnpm.
 
@@ -24,6 +24,7 @@ _Every task's requirements implicitly include this section._
 - **Links use `Anchor component={Link} to="…"` (inline links) or `Button component={Link} to="…"` (button-styled links).** The original button-styled links (`.newBtn`, `.empty a`, `.actions a.primary`, `.actions a`) become `Button component={Link}`; the inline links (`.back`, card title, `.links a`, Cancel) become `Anchor component={Link}`. All keep their `to`/`href`.
 - **`e.currentTarget.value`** (repo idiom) in all Mantine change handlers, not `e.target.value`.
 - **Status/error roles preserved:** the create/update error stays `role="alert"` (render as Mantine `Text role="alert" c="red"`); the not-found message stays `role="alert"`.
+- **ProfileEdit status banners stay non-live.** The drafting / done / failed banners are plain `<div>`s with NO ARIA role in the original — passive status, not announcements. Do NOT use Mantine `Alert` for them: `Alert` defaults `role="alert"` (an assertive live region), which would turn passive status into screen-reader announcements — a semantic behaviour change that violates the re-skin bar. Render them as Mantine `Paper` (a non-live surface), preserving the original `var(--app-sidebar)` background and the `var(--app-warn)` border on the failed banner.
 - **Branch / worktree:** isolated worktree `.worktrees/mantine-sweep-profiles` on branch `feat/mantine-sweep-profiles`. Controller merges to LOCAL master `--no-ff` (never push) at the user's review gate, then rebuilds + restages the gitignored bundle.
 - **Whole-suite `vitest` is reliable here** — only backend testcontainers flakes; this slice changes no backend.
 
@@ -554,7 +555,7 @@ Expected: PASS. `getByLabelText(/organization type/i)` present initially; `fireE
 - [ ] **Step 5: Replace `ProfileEdit.tsx`**
 
 ```tsx
-import { Alert, Anchor, Box, Button, Fieldset, Group, NativeSelect, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
+import { Anchor, Box, Button, Fieldset, Group, NativeSelect, Paper, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
@@ -627,18 +628,24 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
         deterministic rubric gates. Saving kicks off a backfill of the last 90 days against this profile.
       </Text>
       {drafting && (
-        <Alert color="gray" mb="md">⏳ Drafting your profile from PubMed and past grants — this can take a minute on the local model.</Alert>
+        <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)">
+          <Text size="sm">⏳ Drafting your profile from PubMed and past grants — this can take a minute on the local model.</Text>
+        </Paper>
       )}
       {p.bootstrap_status === "done" && (
-        <Alert color="gray" mb="md">
-          Draft ready.
-          {p.bootstrap_pubmed_status === "ok" && ` Found ${p.publications_fetched} publications for your members.`}
-          {p.bootstrap_pubmed_status === "empty" && " No publications matched your members on PubMed — the draft rests on your mission text and pasted grants."}
-          {p.bootstrap_pubmed_status === "unavailable" && " PubMed was unavailable, so the draft rests on your mission text and pasted grants."}
-        </Alert>
+        <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)">
+          <Text size="sm">
+            Draft ready.
+            {p.bootstrap_pubmed_status === "ok" && ` Found ${p.publications_fetched} publications for your members.`}
+            {p.bootstrap_pubmed_status === "empty" && " No publications matched your members on PubMed — the draft rests on your mission text and pasted grants."}
+            {p.bootstrap_pubmed_status === "unavailable" && " PubMed was unavailable, so the draft rests on your mission text and pasted grants."}
+          </Text>
+        </Paper>
       )}
       {p.bootstrap_status === "failed" && (
-        <Alert color="yellow" mb="md">We couldn't auto-draft a description (the local model was unavailable). Write one below and save.</Alert>
+        <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)" style={{ borderColor: "var(--app-warn, var(--app-bad))" }}>
+          <Text size="sm">We couldn't auto-draft a description (the local model was unavailable). Write one below and save.</Text>
+        </Paper>
       )}
       <form onSubmit={submit}>
         <Fieldset disabled={locked}>
@@ -680,7 +687,7 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
 - [ ] **Step 6: Run `ProfileEdit.test.tsx` green**
 
 Run (from `frontend/`): `pnpm exec vitest run src/routes/ProfileEdit.test.tsx`
-Expected: PASS. `findByLabelText(/description/i)` resolves the Description `Textarea` (`toHaveValue("Old desc.")`); editing + submit PUTs `objectContaining({ description: "New desc." })` to `/api/profiles/{profile_id}` with `params.path.profile_id === 5` and navigates to `/profiles/5`; with `bootstrap_status:"running"` the Description is disabled (via the `Fieldset disabled` cascade — `toBeDisabled()`) and the drafting `Alert` is matched by `getByText(/drafting/i)`; with `can_edit:false` the Description is disabled. No test edits expected.
+Expected: PASS. `findByLabelText(/description/i)` resolves the Description `Textarea` (`toHaveValue("Old desc.")`); editing + submit PUTs `objectContaining({ description: "New desc." })` to `/api/profiles/{profile_id}` with `params.path.profile_id === 5` and navigates to `/profiles/5`; with `bootstrap_status:"running"` the Description is disabled (via the `Fieldset disabled` cascade — `toBeDisabled()`) and the drafting banner (`Paper`) is matched by `getByText(/drafting/i)`; with `can_edit:false` the Description is disabled. No test edits expected.
 
 - [ ] **Step 7: Delete the orphaned shared module + grep**
 
@@ -711,10 +718,10 @@ git commit -m "feat(frontend): re-skin StructuredFields + ProfileNew + ProfileEd
 ## Verification (whole slice, before merge)
 
 1. `pnpm exec tsc --noEmit` clean.
-2. `pnpm exec vitest run` full green (all five profile test files unchanged).
+2. `pnpm exec vitest run` full green (four profile test files byte-unchanged; `StructuredFields.test.tsx` has only the sanctioned `MantineProvider` harness wrapper).
 3. `pnpm build` succeeds.
 4. Teardown grep: all three profile CSS modules unreferenced (Task 3 Step 9).
-5. **Visual:** the backendless Playwright route-mock harness ([[reference_spa_visual_check]]) over `/profiles`, `/profiles/:id`, `/profiles/new`, `/profiles/:id/edit`. These render inside the authed AppShell, so mock `/api/me` as `{ user: {…}, capabilities: { admin: false } }` plus the per-route endpoint: `/api/profiles` (list — `{ profiles: [...] }`), `/api/profiles/{profile_id}` (detail/edit — the `ProfileDetailOut`/`ProfileListItemOut` shapes from the route tests' fixtures). Confirm: list cards + "+ New profile" button; detail cards/`<dl>`/chips; the New form's Kind→Level/Mission toggle + `NativeSelect`s; the Edit form pre-fill and (with `bootstrap_status:"running"`) the disabled/dimmed `Fieldset` + drafting `Alert`.
+5. **Visual:** the backendless Playwright route-mock harness ([[reference_spa_visual_check]]) over `/profiles`, `/profiles/:id`, `/profiles/new`, `/profiles/:id/edit`. These render inside the authed AppShell, so mock `/api/me` as `{ user: {…}, capabilities: { admin: false } }` plus the per-route endpoint: `/api/profiles` (list — `{ profiles: [...] }`), `/api/profiles/{profile_id}` (detail/edit — the `ProfileDetailOut`/`ProfileListItemOut` shapes from the route tests' fixtures). Confirm: list cards + "+ New profile" button; detail cards/`<dl>`/chips; the New form's Kind→Level/Mission toggle + `NativeSelect`s; the Edit form pre-fill and (with `bootstrap_status:"running"`) the disabled/dimmed `Fieldset` + drafting banner (`Paper`).
 6. Independent diff-vs-parity review before merge: confirm no copy drift (all field labels + their hint text, option labels in ORG_TYPES/CAREER_STAGES/LEVELS/CURRENCIES, lede paragraphs, banner copy, button labels, error strings), the create/update mutation bodies + navigation targets unchanged, `NativeSelect` (not `Select`) on every select, the `Fieldset disabled` cascade preserved, and `React.FormEvent` kept verbatim.
 
 ## Finishing
@@ -731,6 +738,6 @@ Controller-only, at the user's review gate (not a task): merge `feat/mantine-swe
 
 **Type/name consistency:** `StructuredValues` type + the `{ kind, values, onChange, disabled }` props preserved so both consumers keep compiling; `toData`/`LEVELS.map`/`CURRENCIES.map` all produce Mantine `{ value, label }[]`; mutation bodies (`ProfileCreateBody`/`ProfileUpdateBody`) and `create.mutate`/`update.mutate` calls + `onSuccess` navigation unchanged; `e.currentTarget.value` throughout; `type="submit"` on both submit buttons; `React.FormEvent` kept (compiles via the repo's global React namespace, as the originals do).
 
-**Behaviour parity:** loading/error/not-found early-returns preserved; `key={data.bootstrap_status ?? "ready"}` remount preserved; `locked = drafting || !p.can_edit` and the `Fieldset disabled` cascade preserved (verified Mantine spreads `disabled` to the native `<fieldset>`); the kind-toggle conditional rendering preserved; chip rendering via `Badge tt="none"` keeps DOM text and case.
+**Behaviour parity:** loading/error/not-found early-returns preserved; `key={data.bootstrap_status ?? "ready"}` remount preserved; `locked = drafting || !p.can_edit` and the `Fieldset disabled` cascade preserved (verified Mantine spreads `disabled` to the native `<fieldset>`); the kind-toggle conditional rendering preserved; chip rendering via `Badge tt="none"` keeps DOM text and case; the ProfileEdit status banners use `Paper` (no `role="alert"`), so they stay passive — no new live region.
 
 **Test harness:** the only test change is the `StructuredFields.test.tsx` `MantineProvider` wrapper (Mantine v9 throws without it — verified); the four other profile test files stay byte-unchanged. This is the same provider-wrap the other profile tests already use, so it adds no new assertion and cannot mask a regression.
