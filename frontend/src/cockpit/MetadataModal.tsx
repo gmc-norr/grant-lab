@@ -1,4 +1,4 @@
-import { Button, Modal, TextInput, Textarea } from "@mantine/core";
+import { Button, Modal, Text, TextInput, Textarea } from "@mantine/core";
 import { useState } from "react";
 import { useApproveMetadata } from "../api/references";
 
@@ -31,7 +31,7 @@ export function MetadataModal({
       <TextInput label="Year" value={year} onChange={(e) => setYear(e.currentTarget.value)} />
       <TextInput label="Venue" value={venue} onChange={(e) => setVenue(e.currentTarget.value)} />
       <TextInput label="DOI" value={doi} onChange={(e) => setDoi(e.currentTarget.value)} />
-      {approve.isError ? <p className="library-error">Could not save — check the title.</p> : null}
+      {approve.isError ? <Text c="red" size="sm">Could not save — check the title.</Text> : null}
       <Button
         disabled={approve.isPending}
         onClick={() =>
