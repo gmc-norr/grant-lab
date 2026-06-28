@@ -24,7 +24,7 @@ This is a re-skin: **no behaviour, data-flow, API, or copy changes.** Pure front
 - **Auth:** `Login`, `Register`, `PreAuthLayout`, `AccountPending`, `AccountNoAccess`, `AuthError` (+ `PreAuth.module.css`).
 - **Account:** `Settings`.
 - **Profiles:** `ProfilesList`, `ProfileDetail`, `ProfileNew`, `ProfileEdit`, `StructuredFields` (the shared structured-profile form).
-- **Admin:** `AdminDashboard`, `AdminDrafting`, `AdminGoldenSet`, `AdminUsers`, `AdminPendingUsers` (+ `AdminLayout`, `AdminNav`).
+- **Admin:** the five content routes — `AdminDashboard`, `AdminDrafting`, `AdminGoldenSet`, `AdminUsers`, `AdminPendingUsers` (all seven tables + forms/actions/banners; five content modules retired). **`AdminLayout`/`AdminNav` are NOT in scope** — nav chrome handled like the IDE shell (see Out of scope); `AdminNav.module.css` is a sanctioned remaining scoped module.
 - **Dashboard / Calls / Workspaces:** `Dashboard`, `DashboardHeader`, `Deadline`, `CallRow`, `CallDetail`, `WorkspaceList`, `WorkspaceCreate`.
 - **Sidebar filters (partial):** `CallsFilters`, `WorkspacesFilters` — their *controls* are already Mantine (`Select`/`TextInput`/`Switch`), but each still has a hand-rolled `<div className={styles.filters}>` wrapper + `<h2 className={styles.heading}>` (and CallsFilters a raw `<p role="alert">` error) + a CSS module. Convert just the wrapper/heading/error to Mantine (`Stack`/`Box`, `Title`/`Text`, `Text`/`Alert`) and retire the modules. Folded into Slice 5.
 - **Shared fallbacks:** `RouteSpinner` (`router.tsx`) and the soft-404 (`router.tsx`) are raw `<main>` markup rendered INSIDE the providers → convert to Mantine (`Center`/`Loader`, `Alert`/`Title`). Folded into Slice 5 to make the "app-wide non-cockpit" claim crisp.
@@ -34,6 +34,7 @@ This is a re-skin: **no behaviour, data-flow, API, or copy changes.** Pure front
 
 ### Out of scope
 - **IDE shell chrome** — `AppShell`, `ActivityBar`, `Sidebar`, `StatusBar`, `TitleBar`. Deliberate custom IDE layout (flex/grid), already at the bar (Mantine where applicable + scoped `--app-*` modules). Reworking into Mantine `AppShell` is churn for little gain. Untouched (also just gained the resizable-panes `PanelGroup`).
+- **`AdminNav` + `AdminLayout`** — the admin subnav is a router-`NavLink` active-state nav (the same active-`className`-function pattern as the IDE shell, which Mantine's controlled `className` fights, for no test or UX gain). `AdminLayout` has no styled UI (just `RequireAdmin` + `AdminNav` + `Outlet`). Kept as-is; **`AdminNav.module.css` deliberately remains** — the one scoped admin module that survives Slice 4. Decided at Slice 4 plan time (Codex-reviewed). A small Mantine-ification of `AdminNav` is a possible later follow-up.
 - **`ErrorBoundary`** — **deliberate exception.** It WRAPS `MantineProvider` in `App.tsx` (so a catastrophic error, including one in the theme/provider itself, still renders a fallback). Its fallback therefore renders with NO Mantine context and CANNOT use Mantine components without throwing. Keep its fallback framework-free (raw `<main>`/`<h1>`/`<button>`). Moving it inside the provider to "Mantine-ify" it would defeat its last-resort purpose — explicitly not doing that.
 - **`MatchBadge`** — already a clean banded pill (`data-band`, `--app-*`), the idiomatic domain-badge pattern (cf. cockpit `BandBadge`). Keep.
 - **Cockpit** — done.
@@ -46,7 +47,7 @@ One independently-mergeable slice per cluster (mirrors the cockpit's 2a/2b/2c). 
 2. **Slice 2 — Account/Settings.** The name/password/digest forms → Mantine.
 3. **Slice 3 — Profiles.** `StructuredFields` (the large shared select/textarea/input form) → Mantine; `ProfilesList`/`ProfileDetail` → `Card`/`Stack`; `ProfileNew`/`ProfileEdit` wire the Mantine `StructuredFields`.
 4. **Slice 4 — Admin.** **All seven raw `<table>`s** → Mantine `Table` (AdminDashboard ×1, AdminDrafting ×3, AdminGoldenSet ×2, AdminUsers ×1); admin forms/actions/banners → Mantine. The largest table cluster.
-5. **Slice 5 — Dashboard / Calls / Workspaces + shared closers.** Lists/cards/detail/buttons → Mantine; convert `Pagination` (Group-of-Buttons, see above) and delete the wrapper; convert the `CallsFilters`/`WorkspacesFilters` wrapper/heading/error; convert the shared `RouteSpinner` + soft-404 fallbacks. Closes the sweep (after which the only non-cockpit raw UI left is the deliberately-excepted `ErrorBoundary`).
+5. **Slice 5 — Dashboard / Calls / Workspaces + shared closers.** Lists/cards/detail/buttons → Mantine; convert `Pagination` (Group-of-Buttons, see above) and delete the wrapper; convert the `CallsFilters`/`WorkspacesFilters` wrapper/heading/error; convert the shared `RouteSpinner` + soft-404 fallbacks. Closes the sweep (after which the only non-cockpit raw UI left is the deliberately-excepted `ErrorBoundary` plus the scoped nav-chrome modules — the IDE shell and `AdminNav` — so the final "no modules left" check expects exactly those, not zero).
 
 ## Conventions to reuse (from the cockpit sweep)
 

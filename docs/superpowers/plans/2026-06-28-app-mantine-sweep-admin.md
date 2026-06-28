@@ -4,7 +4,7 @@
 
 **Goal:** Re-skin the five Admin content routes — `AdminDrafting`, `AdminGoldenSet`, `AdminUsers`, `AdminPendingUsers`, `AdminDashboard` — to Mantine v9 primitives (all **seven** raw `<table>`s → Mantine `Table`, plus admin forms/actions/banners), and retire their five CSS modules.
 
-**Architecture:** Pure frontend re-skin. Each route's raw `<main>/<section>/<table>/<form>/<input>/<button>` markup becomes Mantine `Box`/`Card`/`Table`/`TextInput`/`PasswordInput`/`Button`/`Group`/`Alert`/`Anchor`/`Text`/`Code`. The data layer (`api/admin.ts`, `api/adminDashboard.ts`, `api/adminGoldenSet.ts`) and the router are untouched. No behaviour, data-flow, API, route, or copy changes. No schema, no OpenAPI regen.
+**Architecture:** Pure frontend re-skin. Each route's raw `<main>/<section>/<article>/<table>/<form>/<ul>/<input>/<button>` markup becomes Mantine `Box`/`Card`/`Table`/`TextInput`/`PasswordInput`/`Button`/`Group`/`Alert`/`Anchor`/`Text`/`Code` — preserving the original elements via the polymorphic `component` prop where they carry semantics (`Box component="main"/"form"/"ul"/"dl"`, `Card component="section"/"article"`). The data layer (`api/admin.ts`, `api/adminDashboard.ts`, `api/adminGoldenSet.ts`) and the router are untouched. No behaviour, data-flow, API, route, or copy changes. No schema, no OpenAPI regen.
 
 **Tech Stack:** React 19.2.7, Mantine v9.4.0, react-router-dom, TanStack Query, Vite, Vitest + Testing Library (jsdom), pnpm.
 
@@ -24,6 +24,11 @@ _Every task's requirements implicitly include this section._
 - **Secondary buttons → `Button variant="default"`** (the neutral bordered `.secondary`); primary actions → default filled `Button` (teal). Use `size="xs"` for the compact admin density on buttons and inline inputs.
 - **Links:** `Anchor component={Link} to="…"` for inline links (preserves `<a href>` + client-side nav — the "Admin home"/"Pending"/cockpit/golden-set links are asserted as real `<a href>`).
 - **`e.currentTarget.value`** in all Mantine change handlers.
+- **Forms → `Box component="form"`.** Every `<form>` becomes `<Box component="form" onSubmit={…}>` — verified to typecheck (Box is polymorphic; `component="form"` infers `React.ComponentProps<"form">`, so `onSubmit` is forwarded) and the `type="submit"` button still fires native submit. No raw `<form>` element remains (satisfies the "Mantine primitive for every UI element" bar). (Codex Finding 1.)
+- **Sectioning parity → `Card component="section"` / `component="article"`.** The originals wrap route panels in `<section>` and pending-user rows in `<article>`; Mantine `Card` defaults to `<div>`. Pass `component="section"` on every route-panel Card and `component="article"` on the pending-user Card to preserve the sectioning/landmark semantics. Card forwards `component`; zero test impact (no test asserts these wrappers). (Codex Finding 2.)
+- **Drafting payload wrap (irreducible override).** The original `.pre` is `white-space: pre-wrap; word-break: break-word` (`AdminDrafting.module.css:9`). Mantine `Code block` renders `<pre>` (so the JSON newlines are preserved) but its CSS defaults to `overflow: auto` (horizontal scroll, NOT wrap). Restore exact parity with an irreducible `style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}` on that one `Code block` — a sanctioned behavioral-parity override (no Mantine prop exists for `white-space`); not `Table.ScrollContainer` (that would change behaviour to scroll). (Codex Finding 3.)
+- **Disabled-user list → `Box component="ul" p={0}`** (NOT an inline `style`, NOT Mantine `List`). Each row is `Group component="li"` (flex), so the `<li>`s render `display:flex` and generate NO list marker — `list-style:none` is redundant; only the default marker-gutter padding needs removal (`p={0}`). Keep the default `<ul>` margin (the original `.disabled` did not reset it). `List`/`List.Item` would nest wrapper spans (a bigger structural change than the original plain `<ul>`/`<li>`) and risk the `getByText("bounced@ki.se")` direct-text-node match. (Codex Finding 1.)
+- **`Table.ScrollContainer` is NOT added** (Codex Finding 4 — declined for parity): the originals had no horizontal-scroll wrapper (`width:100%`); adding one is new responsive behaviour beyond a faithful re-skin. Available as an opt-in follow-up if the user wants the narrow-screen sturdiness.
 - **AdminNav + AdminLayout stay as-is (scope note).** `AdminLayout` has no styled UI (just `RequireAdmin` + `AdminNav` + `Outlet`) — untouched. `AdminNav` is a router-`NavLink` active-state subnav (nav chrome, like the deliberately-out-of-scope IDE shell): converting it fights Mantine's controlled-`className` vs NavLink's active-`className`-function, for no test or UX gain. It stays a scoped `--app-*` module, consistent with how the shell nav is handled. `AdminNav.module.css` is NOT deleted. (If the user later wants it Mantine-ified, that's a small follow-up.)
 - **Branch / worktree:** isolated worktree `.worktrees/mantine-sweep-admin` on branch `feat/mantine-sweep-admin`. Controller merges to LOCAL master `--no-ff` (never push) at the user's review gate, then rebuilds + restages the gitignored bundle.
 - **Whole-suite `vitest` is reliable here** — only backend testcontainers flakes; this slice changes no backend.
@@ -78,13 +83,13 @@ export function AdminDrafting() {
     <Box component="main" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
       <Title order={1}>Drafting (B7/B8) panel</Title>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Kill switch</Title>
         <Text>{d.drafting_enabled ? <Text span fw={700}>Drafting enabled</Text> : <Text span fw={700}>Drafting disabled</Text>}</Text>
         <Text c="dimmed" size="sm">Toggle via env <Code>DRAFTING_ENABLED=true|false</Code> and restart. UI toggling is a backlog item.</Text>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Global daily cap (today, Europe/Stockholm)</Title>
         <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
           <Table.Thead><Table.Tr><Table.Th>Dimension</Table.Th><Table.Th>Used / Cap</Table.Th><Table.Th>Status</Table.Th></Table.Tr></Table.Thead>
@@ -98,7 +103,7 @@ export function AdminDrafting() {
         <Text mt="sm">{cap.allowed ? "Overall status: OK" : <Text span fw={700}>Overall status: EXCEEDED ({cap.reason})</Text>}</Text>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Per-workspace usage today</Title>
         <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
           <Table.Thead><Table.Tr><Table.Th>Title</Table.Th><Table.Th>Owner</Table.Th><Table.Th>Input</Table.Th><Table.Th>Output</Table.Th></Table.Tr></Table.Thead>
@@ -115,7 +120,7 @@ export function AdminDrafting() {
         </Table>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Recent failed / cancelled turns (last 50)</Title>
         {d.recent_events.length === 0 ? (
           <Text c="dimmed" size="sm">No recent failures.</Text>
@@ -127,7 +132,7 @@ export function AdminDrafting() {
                 <Table.Tr key={i}>
                   <Table.Td>{fmtDt(e.created_at)}</Table.Td><Table.Td>{e.workspace_id}</Table.Td>
                   <Table.Td><Code>{e.kind}</Code></Table.Td>
-                  <Table.Td><Code block fz="xs">{JSON.stringify(e.payload, null, 2)}</Code></Table.Td>
+                  <Table.Td><Code block fz="xs" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{JSON.stringify(e.payload, null, 2)}</Code></Table.Td>
                 </Table.Tr>
               ))}
             </Table.Tbody>
@@ -193,7 +198,7 @@ function CandidateRow({ c }: { c: Candidate }) {
       <Table.Td>{c.embed_similarity !== null ? c.embed_similarity.toFixed(3) : "-"}</Table.Td>
       <Table.Td><Code>{c.reason}</Code></Table.Td>
       <Table.Td>
-        <form onSubmit={(e) => {
+        <Box component="form" onSubmit={(e) => {
           e.preventDefault();
           add.mutate({ call_id: c.call_id, profile_id: c.profile_id, expected_score: Number(score) },
             { onSuccess: () => setScore("") });
@@ -203,7 +208,7 @@ function CandidateRow({ c }: { c: Candidate }) {
                        value={score} onChange={(e) => setScore(e.currentTarget.value)} />
             <Button size="xs" type="submit" disabled={add.isPending}>Add candidate</Button>
           </Group>
-        </form>
+        </Box>
       </Table.Td>
     </Table.Tr>
   );
@@ -238,7 +243,7 @@ export function AdminGoldenSet() {
     <Box component="main" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
       <Title order={1}>Golden set</Title>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Curated triples ({data.triples.length})</Title>
         {data.triples.length === 0 ? <Text c="dimmed" size="sm">No triples yet.</Text> : (
           <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
@@ -256,9 +261,9 @@ export function AdminGoldenSet() {
         )}
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Add triple manually</Title>
-        <form onSubmit={submitManual}>
+        <Box component="form" onSubmit={submitManual}>
           <Group gap="xs" align="center">
             <TextInput size="xs" type="number" placeholder="call_id" required value={callId} onChange={(e) => setCallId(e.currentTarget.value)} />
             <TextInput size="xs" type="number" placeholder="profile_id" required value={profileId} onChange={(e) => setProfileId(e.currentTarget.value)} />
@@ -266,10 +271,10 @@ export function AdminGoldenSet() {
             <TextInput size="xs" type="text" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.currentTarget.value)} />
             <Button size="xs" type="submit" disabled={add.isPending}>Add</Button>
           </Group>
-        </form>
+        </Box>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Candidates ({data.candidates.length})</Title>
         {data.candidates.length === 0 ? (
           <Text c="dimmed" size="sm">No candidates — no dismissed-high-score, cosine-disagreement, or escalation-disagreement pairs found.</Text>
@@ -352,7 +357,8 @@ function UserRow({ u }: { u: AdminUser }) {
                       onClick={() => role.mutate({ id: u.id, role: u.is_admin ? "member" : "admin" })}>
                 {u.is_admin ? "Make member" : "Make admin"}
               </Button>
-              <form
+              <Box
+                component="form"
                 onSubmit={(e) => {
                   e.preventDefault();
                   reset.mutate({ id: u.id, new_password: pw }, { onSuccess: () => setPw("") });
@@ -365,7 +371,7 @@ function UserRow({ u }: { u: AdminUser }) {
                     Reset password
                   </Button>
                 </Group>
-              </form>
+              </Box>
             </>
           )}
           {u.status === "disabled" && (
@@ -482,7 +488,7 @@ function PendingRow({ u }: { u: AdminPendingUser }) {
   const doApprove = (role: "member" | "admin") =>
     approve.mutate({ id: u.id, role, initial_password: needsPw ? pw : undefined });
   return (
-    <Card withBorder radius="md" p="md" my="sm" bg="var(--app-sidebar)">
+    <Card component="article" withBorder radius="md" p="md" my="sm" bg="var(--app-sidebar)">
       <Text mb="sm">
         <Text span fw={700}>{u.email}</Text>
         {u.name ? ` — ${u.name}` : ""}
@@ -656,7 +662,7 @@ export function AdminDashboard() {
         </Alert>
       )}
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Source health</Title>
         <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
           <Table.Thead><Table.Tr><Table.Th>Source</Table.Th><Table.Th>Last fetched</Table.Th><Table.Th>Calls</Table.Th><Table.Th>Actions</Table.Th></Table.Tr></Table.Thead>
@@ -678,7 +684,7 @@ export function AdminDashboard() {
         </Table>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Ranking queue</Title>
         <Group gap="lg" mb="sm">
           <Box><Text c="dimmed" size="xs">Pending</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.pending}</Text></Box>
@@ -701,7 +707,7 @@ export function AdminDashboard() {
         </Alert>
       )}
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Embedding coverage</Title>
         <Box component="dl" m={0}>
           <Text component="dt" size="xs" c="dimmed" mt="xs">Calls</Text>
@@ -713,7 +719,7 @@ export function AdminDashboard() {
         </Box>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Digest (weekly)</Title>
         <Box component="dl" m={0}>
           <Text component="dt" size="xs" c="dimmed" mt="xs">Last digest sent</Text>
@@ -722,7 +728,7 @@ export function AdminDashboard() {
           <Text component="dt" size="xs" c="dimmed" mt="xs">Disabled users (3+ bounces)</Text><Text component="dd" size="sm" m={0}>{d.digest.disabled_users}</Text>
         </Box>
         {d.digest.disabled_user_rows.length > 0 ? (
-          <Box component="ul" style={{ listStyle: "none", padding: 0 }}>
+          <Box component="ul" p={0}>
             {d.digest.disabled_user_rows.map((u) => (
               <Group component="li" key={u.id} gap="xs" align="center" mt="xs">
                 {u.email} <Text span c="dimmed">disabled {fmtDt(u.disabled_at)}</Text>
@@ -737,7 +743,7 @@ export function AdminDashboard() {
         </Button>
       </Card>
 
-      <Card withBorder radius="md" p="md" my="md">
+      <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Ranking quality — Kendall's τ (last run)</Title>
         <Text mb="sm"><Anchor component={Link} to="/admin/golden-set">Manage golden set →</Anchor></Text>
         {d.golden_set_report ? (
@@ -790,7 +796,7 @@ git commit -m "feat(frontend): re-skin AdminDashboard to Mantine; drop AdminDash
 3. `pnpm build` succeeds.
 4. Teardown grep: the five admin content modules unreferenced; `AdminNav.module.css` deliberately kept (Task 5 Step 5).
 5. **Visual:** the backendless Playwright route-mock harness ([[reference_spa_visual_check]]) over `/admin`, `/admin/drafting`, `/admin/golden-set`, `/admin/users`, `/admin/users/pending`. These render inside the authed AppShell under `RequireAdmin`, so mock `/api/me` as `{ user: {…}, capabilities: { admin: true } }` (admin TRUE — RequireAdmin gates on it) plus each route's endpoint (mirror the fixtures in each route test: `DASH`, `DRAFT`, `GS`, the users/pending payloads). Confirm: Mantine `Table`s render with borders/headers; the action banners (`/admin` Fetch-now → teal `status` Alert); the disabled/dimmed nothing here; the compact `size="xs"` buttons + `PasswordInput`s.
-6. Independent diff-vs-parity review before merge: confirm no copy drift (all headings, table headers, banner message constants `OK_*`/`ERR_*`, button labels, pager text, "(Google)"/"registered" tags), all mutation calls + confirm()-gate + navigation/links unchanged, the AdminDashboard banner roles preserved (`status`/`alert`), `TextInput type="number"` (not `NumberInput`), `PasswordInput` placeholders intact, and `AdminNav`/`AdminLayout` untouched.
+6. Independent diff-vs-parity review before merge: confirm no copy drift (all headings, table headers, banner message constants `OK_*`/`ERR_*`, button labels, pager text, "(Google)"/"registered" tags), all mutation calls + confirm()-gate + navigation/links unchanged, the AdminDashboard banner roles preserved (`status`/`alert`), `TextInput type="number"` (not `NumberInput`), `PasswordInput` placeholders intact, and `AdminNav`/`AdminLayout` untouched. Also confirm the Codex-review items: no raw `<form>` remains (all `Box component="form"`); route panels are `Card component="section"` and pending-user rows `Card component="article"`; the drafting payload `Code block` keeps the irreducible `white-space: pre-wrap; word-break: break-word`; the disabled-user list is `Box component="ul" p={0}` with no inline `style`; and `Table.ScrollContainer` was deliberately NOT introduced.
 
 ## Finishing
 
@@ -807,3 +813,5 @@ Controller-only, at the user's review gate (not a task): merge `feat/mantine-swe
 **Type/name consistency:** All admin hooks consumed with unchanged signatures; every mutation payload + `onSuccess` reset/navigation unchanged; banner message constants copied verbatim; `e.currentTarget.value` throughout; `React.FormEvent` kept; `size="xs"` density applied consistently; `TextInput type="number"` (string state + `Number()` coercion preserved), `PasswordInput` for password fields.
 
 **Behaviour parity:** loading/error early-returns preserve `role="alert"` + copy; the AdminDashboard action banner preserves its `role={ok?"status":"alert"}` live-region semantics (existing, NOT new); the rerank `window.confirm` gate, the per-row busy/disabled wiring, the pending-user `needsPw` gating, and the pager bounds are all preserved. Mantine `Table` renders real table elements so every cell role/text query survives.
+
+**Codex review (applied):** (1) Forms → `Box component="form"` (no raw `<form>` left); the disabled-user `<ul>` → `Box component="ul" p={0}` (pure Mantine props, no inline `style`). (2) Route panels → `Card component="section"`, pending-user rows → `Card component="article"` (sectioning/landmark parity with the `<section>`/`<article>` originals). (3) Drafting payload `Code block` gets an irreducible `white-space: pre-wrap; word-break: break-word` override to restore the original `.pre` wrap (Mantine `Code block` is a `<pre>` so newlines are already safe; only wrap-vs-`overflow:auto` differed). (4) `Table.ScrollContainer` NOT added — new responsive behaviour beyond a faithful re-skin (declined for parity; opt-in follow-up). (5) Parent spec annotated to sanction `AdminNav.module.css` remaining (done in `2026-06-28-app-mantine-sweep-design.md`), so Slice 5's final "no modules left" gate stays unambiguous. All five are captured verbatim in Global Constraints; none touches any test.
