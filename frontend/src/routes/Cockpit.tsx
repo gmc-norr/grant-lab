@@ -54,7 +54,7 @@ export function Cockpit() {
   if (meta.data.current_phase === "setup") return <WorkspaceSetup id={id} />;
 
   return (
-    <Box className="cockpit-shell-fallback" style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+    <Box style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
       <UnsavedChangesGuard />
       <Tabs
         value={tab}
