@@ -149,7 +149,7 @@ export function CitationComposer({ workspaceId, claim, onDone, onCancel }: Props
               </pre>
             ))}
             {chunks.data && chunks.data.chunks.length === 0 && (
-              <Text c="dimmed" size="sm">This source isn't indexed yet.</Text>
+              <Text c="dimmed" size="sm">This source isn’t indexed yet.</Text>
             )}
             {span && (
               <Box className={styles.citeConfirm}>

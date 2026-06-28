@@ -101,7 +101,7 @@ export function SourceViewer({ source, pinned, onClose, onPin, onNavigate }: Pro
 
       {source.no_text ? (
         <Text c="dimmed" size="sm">
-          The source text isn't available yet.
+          The source text isn’t available yet.
         </Text>
       ) : (
         <Box className={styles.sourceBody}>
