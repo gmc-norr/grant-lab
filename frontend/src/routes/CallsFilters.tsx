@@ -1,10 +1,9 @@
-import { Select, Switch, TextInput } from "@mantine/core";
+import { Select, Stack, Switch, Text, TextInput } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { dashboardParamsFrom, useDashboard, useSetDefaultProfile } from "../api/dashboard";
-import styles from "./CallsFilters.module.css";
 
 // Sidebar filters (declared on the Calls route via `handle.Sidebar`). Reads the
 // SAME useDashboard query + URL as the Dashboard list — React Query dedupes by
@@ -71,8 +70,8 @@ export function CallsFilters() {
   ];
 
   return (
-    <div className={styles.filters}>
-      <h2 className={styles.heading}>Filters</h2>
+    <Stack gap="sm" p="sm">
+      <Text component="h2" tt="uppercase" fz="0.7rem" fw={600} c="dimmed">Filters</Text>
 
       <TextInput
         label="Search"
@@ -90,7 +89,7 @@ export function CallsFilters() {
         allowDeselect={false}
         comboboxProps={{ withinPortal: false }}
       />
-      {setDefault.isError && <p role="alert">Couldn&apos;t save the default profile.</p>}
+      {setDefault.isError && <Text role="alert" size="sm">Couldn&apos;t save the default profile.</Text>}
 
       <Select
         label="Source"
@@ -134,6 +133,6 @@ export function CallsFilters() {
         checked={params.show_closed ?? false}
         onChange={(e) => updateParam("show_closed", e.currentTarget.checked ? "1" : "")}
       />
-    </div>
+    </Stack>
   );
 }
