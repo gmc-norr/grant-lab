@@ -25,13 +25,16 @@ This is a re-skin: **no behaviour, data-flow, API, or copy changes.** Pure front
 - **Account:** `Settings`.
 - **Profiles:** `ProfilesList`, `ProfileDetail`, `ProfileNew`, `ProfileEdit`, `StructuredFields` (the shared structured-profile form).
 - **Admin:** `AdminDashboard`, `AdminDrafting`, `AdminGoldenSet`, `AdminUsers`, `AdminPendingUsers` (+ `AdminLayout`, `AdminNav`).
-- **Dashboard / Calls / Workspaces:** `Dashboard`, `DashboardHeader`, `Deadline`, `CallRow`, `CallDetail`, `WorkspaceList`, `WorkspaceCreate`. (`CallsFilters`/`WorkspacesFilters` already Mantine — leave.)
+- **Dashboard / Calls / Workspaces:** `Dashboard`, `DashboardHeader`, `Deadline`, `CallRow`, `CallDetail`, `WorkspaceList`, `WorkspaceCreate`.
+- **Sidebar filters (partial):** `CallsFilters`, `WorkspacesFilters` — their *controls* are already Mantine (`Select`/`TextInput`/`Switch`), but each still has a hand-rolled `<div className={styles.filters}>` wrapper + `<h2 className={styles.heading}>` (and CallsFilters a raw `<p role="alert">` error) + a CSS module. Convert just the wrapper/heading/error to Mantine (`Stack`/`Box`, `Title`/`Text`, `Text`/`Alert`) and retire the modules. Folded into Slice 5.
+- **Shared fallbacks:** `RouteSpinner` (`router.tsx`) and the soft-404 (`router.tsx`) are raw `<main>` markup rendered INSIDE the providers → convert to Mantine (`Center`/`Loader`, `Alert`/`Title`). Folded into Slice 5 to make the "app-wide non-cockpit" claim crisp.
 - **Shared components:**
   - `Button.tsx`, `Card.tsx`, `Select.tsx` — **DEAD CODE (zero consumers)** → delete the components, their `.module.css`, and `Button.test.tsx`.
-  - `Pagination.tsx` — consumed only by `Dashboard` → convert to Mantine `Pagination` (or a `Group` of `Button`s), delete the module.
+  - `Pagination.tsx` — consumed only by `Dashboard`. Its contract is **prev/next** (`hasPrev`/`hasNext`/`Page N`), and the calls API returns an item `total` + `limit` (not page count). **Default: convert to a `Group` of Mantine `Button`s** to preserve the exact prev/next contract; if a numbered Mantine `Pagination` is chosen at plan time, derive `total={Math.ceil(itemTotal / limit)}`. Delete the module.
 
 ### Out of scope
 - **IDE shell chrome** — `AppShell`, `ActivityBar`, `Sidebar`, `StatusBar`, `TitleBar`. Deliberate custom IDE layout (flex/grid), already at the bar (Mantine where applicable + scoped `--app-*` modules). Reworking into Mantine `AppShell` is churn for little gain. Untouched (also just gained the resizable-panes `PanelGroup`).
+- **`ErrorBoundary`** — **deliberate exception.** It WRAPS `MantineProvider` in `App.tsx` (so a catastrophic error, including one in the theme/provider itself, still renders a fallback). Its fallback therefore renders with NO Mantine context and CANNOT use Mantine components without throwing. Keep its fallback framework-free (raw `<main>`/`<h1>`/`<button>`). Moving it inside the provider to "Mantine-ify" it would defeat its last-resort purpose — explicitly not doing that.
 - **`MatchBadge`** — already a clean banded pill (`data-band`, `--app-*`), the idiomatic domain-badge pattern (cf. cockpit `BandBadge`). Keep.
 - **Cockpit** — done.
 
@@ -42,8 +45,8 @@ One independently-mergeable slice per cluster (mirrors the cockpit's 2a/2b/2c). 
 1. **Slice 1 — Auth.** Login/Register forms → `TextInput`/`PasswordInput`/`Button` (+ Mantine form error/`Alert`); the static status pages → `Text`/`Alert`/`Card`. Self-contained (PreAuth layout, no shell). **Also deletes the dead `Button`/`Card`/`Select` components + CSS + `Button.test.tsx`** (trivial, gets them out of the way and proves the teardown-grep gate early). Establishes the Mantine form vocabulary for later slices.
 2. **Slice 2 — Account/Settings.** The name/password/digest forms → Mantine.
 3. **Slice 3 — Profiles.** `StructuredFields` (the large shared select/textarea/input form) → Mantine; `ProfilesList`/`ProfileDetail` → `Card`/`Stack`; `ProfileNew`/`ProfileEdit` wire the Mantine `StructuredFields`.
-4. **Slice 4 — Admin.** Five raw `<table>`s → Mantine `Table`; admin forms/actions/banners → Mantine. The largest table cluster.
-5. **Slice 5 — Dashboard / Calls / Workspaces.** Lists/cards/detail/buttons → Mantine; convert `Pagination` to Mantine and delete the wrapper. Closes the sweep.
+4. **Slice 4 — Admin.** **All seven raw `<table>`s** → Mantine `Table` (AdminDashboard ×1, AdminDrafting ×3, AdminGoldenSet ×2, AdminUsers ×1); admin forms/actions/banners → Mantine. The largest table cluster.
+5. **Slice 5 — Dashboard / Calls / Workspaces + shared closers.** Lists/cards/detail/buttons → Mantine; convert `Pagination` (Group-of-Buttons, see above) and delete the wrapper; convert the `CallsFilters`/`WorkspacesFilters` wrapper/heading/error; convert the shared `RouteSpinner` + soft-404 fallbacks. Closes the sweep (after which the only non-cockpit raw UI left is the deliberately-excepted `ErrorBoundary`).
 
 ## Conventions to reuse (from the cockpit sweep)
 
