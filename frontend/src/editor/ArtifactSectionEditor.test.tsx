@@ -122,3 +122,82 @@ it("openPeek prop opens the citation source peek panel", async () => {
     expect(screen.getByRole("region", { name: /citation source peek/i })).toBeInTheDocument(),
   );
 });
+
+// Current CitationSourceOut shape (mirrors sourcePayload in Cockpit.test.tsx).
+const FAKE_SOURCE = {
+  evidence_id: "ev-9",
+  reference_id: "r1",
+  source_line: "smith2021 · Smith et al. 2021",
+  claim: null,
+  stance: "supports",
+  confidence: null,
+  index: 1,
+  total: 1,
+  prev_ev: null,
+  next_ev: null,
+  tombstoned: false,
+  no_text: false,
+  note: null,
+  text: "The cat sat on the mat.",
+  highlight: [0, 23],
+};
+
+function renderDraftEditor(openPeek?: { ev: string; n: number }) {
+  const qc = new QueryClient();
+  const save = { mutateAsync: vi.fn(), isPending: false };
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+        <QueryClientProvider client={qc}>
+          <Routes>
+            <Route
+              path="/cockpit/:id"
+              element={
+                <ArtifactSectionEditor
+                  workspaceId="ws-1"
+                  queryKey={["draft", "ws-1"]}
+                  head={"a".repeat(40)}
+                  canEdit={true}
+                  sections={[{ index: 0, heading: "", text: "x\n", sha: "s0" }]}
+                  save={save}
+                  refetch={() => {}}
+                  citations={true}
+                  openPeek={openPeek}
+                />
+              }
+            />
+          </Routes>
+        </QueryClientProvider>
+      </MemoryRouter>
+    </MantineProvider>,
+  );
+}
+
+it("renders a resize handle and the source viewer when a citation peek is open", async () => {
+  vi.spyOn(citationsApi, "useCitationSource").mockReturnValue({
+    data: FAKE_SOURCE,
+    isLoading: false,
+    isError: false,
+  } as unknown as ReturnType<typeof citationsApi.useCitationSource>);
+  const { container } = renderDraftEditor({ ev: "ev-9", n: 1 });
+  await waitFor(() =>
+    expect(screen.getByRole("separator", { name: "Resize source peek" })).toBeInTheDocument(),
+  );
+  // The source pane mounted with real content through the new Panel wrapper.
+  expect(
+    container.querySelector('[data-region="peek"] [data-testid="source-viewer"]'),
+  ).not.toBeNull();
+});
+
+it("renders no resize handle when citations are on but no source pane is open", () => {
+  // citations={true} with NO openPeek → peekEv/pinnedEv stay null → no source pane,
+  // so the editor is a single full-width panel with no handle. Catches a regression
+  // that would render a separator unconditionally whenever citations is enabled.
+  vi.spyOn(citationsApi, "useCitationSource").mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+  } as unknown as ReturnType<typeof citationsApi.useCitationSource>);
+  renderDraftEditor();
+  expect(screen.queryByRole("separator")).toBeNull();
+});
