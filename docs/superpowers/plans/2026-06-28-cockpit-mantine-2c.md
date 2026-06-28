@@ -79,7 +79,7 @@ Every task's requirements implicitly include this section. (Same bar as 2a/2b.)
 import { Box, Button, Group, Text } from "@mantine/core";
 import styles from "./CockpitPanels.module.css";
 ```
-- Root: `<aside className="source-viewer" aria-label="Cited source">` → `<Box component="aside" data-testid="source-viewer" aria-label="Cited source" p="sm" style={{ border: "1px solid var(--app-border)", borderRadius: 8, background: "var(--app-sidebar)", display: "flex", flexDirection: "column", gap: "0.5rem" }}>` (ports the old `.source-viewer` card chrome). **The `data-testid="source-viewer"` is required** (Cockpit.test selectors).
+- Root: `<aside className="source-viewer" aria-label="Cited source">` → `<Box component="aside" data-testid="source-viewer" aria-label="Cited source" p="sm" style={{ border: "1px solid var(--app-border)", borderRadius: 8, background: "var(--app-sidebar)", boxShadow: "var(--app-shadow-sm)", display: "flex", flexDirection: "column", gap: "0.5rem" }}>` (ports the old `.source-viewer` card chrome — incl. its `box-shadow: var(--app-shadow-sm)`). **The `data-testid="source-viewer"` is required** (Cockpit.test selectors).
 - `.source-viewer-head` `<header>` → `<Group gap="sm" align="baseline" wrap="wrap">`; title span → `<Text fw={600}>`; pos span → `<Text size="sm" c="dimmed">`; `.source-viewer-actions` div → `<Group gap={4} ml="auto">` (the old `.source-viewer-actions` had `margin-left:auto`) of `<Button size="xs" variant="default">` for prev/next/pin/close (KEEP each `aria-label` + disabled + onClick + the glyph text ‹ › "⇱ Pin" ✕).
 - tombstone `<p className="source-viewer-tombstoned" role="note">` → `<Text role="note" className={styles.sourceTombstoned}>`.
 - stance: `<p className="source-viewer-meta">` → drop the wrapper `<p>` (or `<Box>`); `<span className={`source-viewer-stance stance-${stance}`}>` → `<Text span className={styles.sourceStance}>{source.stance}</Text>` (the `stance-${x}` modifier was an orphan — drop it).
@@ -90,7 +90,17 @@ import styles from "./CockpitPanels.module.css";
 - Keep the `validHighlight` computation unchanged.
 
 - [ ] **Step 3: Update tests**
-- `SourceViewer.test.tsx`: wrap the two `render(...)` calls' trees in `<MantineProvider theme={theme} defaultColorScheme="dark">` (add imports). The `querySelector("mark")` + `getByText` assertions are unaffected.
+- `SourceViewer.test.tsx`: it has **seven `render(...)` calls plus a `rerender`** (lines ~31, 41, 55, 64, 77, 91, 102+107). Add a single helper and route EVERY render through it (do NOT wrap just a couple — any unwrapped Mantine render crashes with "MantineProvider not found"):
+  ```tsx
+  import { MantineProvider } from "@mantine/core";
+  import { render } from "@testing-library/react";
+  import { theme } from "../theme/theme";
+  const renderSV = (ui: React.ReactElement) =>
+    render(ui, { wrapper: ({ children }) => (
+      <MantineProvider theme={theme} defaultColorScheme="dark">{children}</MantineProvider>
+    ) });
+  ```
+  Replace each `render(<SourceViewer …/>)` with `renderSV(<SourceViewer …/>)`; the `rerender` returned by `renderSV` keeps the wrapper, so the rerender path stays wrapped too. (Or use the shared `renderWithProviders` from `../test-utils` — it already wraps in MantineProvider+QueryClient+Router.) The `querySelector("mark")` + `getByText` assertions are unaffected.
 - `Cockpit.test.tsx`: update the 3 source-viewer selectors:
   - line ~476: `.source-viewer mark` → `[data-testid="source-viewer"] mark`
   - line ~490: `[data-region="pinned"] .source-viewer` → `[data-region="pinned"] [data-testid="source-viewer"]`
@@ -149,7 +159,7 @@ git commit -m "feat(cockpit): SourceViewer -> Mantine + data-testid; drop source
 import { Box, Button, Group, Stack, Text } from "@mantine/core";
 import styles from "./CockpitPanels.module.css";
 ```
-- Root: `<aside className="cite-composer" aria-label="Add a citation">` → `<Box component="aside" aria-label="Add a citation" p="sm" style={{ border: "1px solid var(--app-border)", borderRadius: 8, background: "var(--app-sidebar)" }}><Stack gap="sm">…</Stack></Box>`.
+- Root: `<aside className="cite-composer" aria-label="Add a citation">` → `<Box component="aside" aria-label="Add a citation" p="sm" style={{ border: "1px solid var(--app-border)", borderRadius: 8, background: "var(--app-sidebar)", boxShadow: "var(--app-shadow-sm)" }}><Stack gap="sm">…</Stack></Box>` (ports the old `.cite-composer` card chrome incl. its `box-shadow: var(--app-shadow-sm)`).
 - `.cite-composer-head` `<header>` → `<Group gap="xs" align="baseline">`: keep `<strong>Cite:</strong>`, `.cite-composer-claim` span → `<Text span c="dimmed" fs="italic">{claim.anchor}</Text>`, Cancel `<button>` → `<Button size="xs" variant="subtle" aria-label="Cancel" ml="auto" onClick={onCancel}>✕</Button>` (old `.cite-composer-head button` had `margin-left:auto`).
 - Refs branch `.cite-composer-refs` → `<Stack gap="xs">`: "Pick a reference:" `<p>` → `<Text size="sm">`; loading `<p aria-busy>` → `<Text aria-busy="true">`; `<ul>` → `<Stack component="ul" gap={4} style={{ listStyle: "none", padding: 0, margin: 0 }}>`; each `<li><button>` → `<Box component="li"><Button variant="subtle" size="xs" disabled={r.text_status !== "done"} onClick={() => setRefId(r.id)}>{r.title}{r.text_status !== "done" ? " (not indexed yet)" : ""}</Button></Box>`.
 - Source branch `.cite-composer-source` → `<Stack gap="xs">`: back `<button>` → `<Button size="xs" variant="subtle">‹ back to references</Button>`; "Select the supporting passage:" → `<Text size="sm">`; loading `<p aria-busy>` → `<Text aria-busy="true">`.
@@ -207,10 +217,11 @@ git commit -m "feat(cockpit): modal error lines -> Mantine Text"
 - Delete: `frontend/src/styles/cockpit.css`
 - Modify: `frontend/src/main.tsx` (remove the `import "./styles/cockpit.css";` at line 8)
 
-- [ ] **Step 1: Confirm nothing references any former `cockpit.css` class**
+- [ ] **Step 1: Confirm `cockpit.css` defines no rules (so deleting it removes no styling)**
 
-Run (from repo root): `grep -rnE "source-viewer|cite-composer|scorecard-|band-pill|band-strong|spec-shell|spec-lock|coherence-|draft-shell|proposal-|cockpit-shell|cockpit-main|cockpit-peek|cockpit-pinned|cockpit-composer|cockpit-section-actions|cite-selection-btn|bottom-panel|problem-|problems-|activity-|inbox-empty" frontend/src --include="*.tsx" | grep -v "\.test\."`
-Expected: NO matches (all classes migrated to the module or removed). If any appear in non-test `.tsx`, STOP and migrate them before deleting the file.
+The per-task teardown removed each group as its component migrated, so after Task 2 the file has zero rule blocks. Verify: `grep -cE "^\.[a-z]" frontend/src/styles/cockpit.css` → `0`. That is the real safety gate — deleting an empty stylesheet cannot remove active styling, and the `pnpm build` in Step 3 is the final proof (a still-needed CSS import would fail the build).
+
+(Do NOT grep components for class-name substrings to gate this: 2b intentionally left harmless **orphan** wrappers — `activity-panel`, `citations-panel`, `problems-panel`, `problem-title`, etc. — that were never in `cockpit.css` (styled nowhere), and Task 1 deliberately adds `data-testid="source-viewer"`. A substring grep would false-positive on all of those. Removing those dead classNames is optional tidy, explicitly OUT of scope for this slice.)
 
 - [ ] **Step 2: Delete the file + the import**
 - Delete `frontend/src/styles/cockpit.css`.
@@ -242,3 +253,7 @@ git commit -m "chore(cockpit): delete styles/cockpit.css — cockpit fully on Ma
 **Type/name consistency:** new module classes `.sourceBody`(+`mark`)/`.sourceTombstoned`/`.sourceStance`/`.citeChunk`/`.citeConfirm` are created in T1/T2 and referenced there. `data-testid="source-viewer"` added in T1 matches the three `Cockpit.test.tsx` selector updates in the same task. `cockpit.css` is emptied across T1 (source-viewer*) + T2 (cite-composer*) and only then deleted in T4 — ordering is safe.
 
 **Risk note:** the single highest-risk item is CitationComposer's chunk `<pre>` — its select-to-cite offset math depends on it being a single-text-node `<pre>`. Task 2 swaps only its `className`; it must NOT become a Mantine component or wrap its text. The CitationComposer offset-helper test (builds a raw `<pre>` itself) guards the measurement logic and needs no change. SourceViewer's `data-testid` is the contract that lets Cockpit.test stop depending on the (now module-hashed) `.source-viewer` class.
+
+**Deletion gate (Task 4):** the file-delete is gated on `cockpit.css` having zero rule blocks (`grep -cE "^\.[a-z]" → 0` after Task 2) + a green `pnpm build` — NOT a component-class-substring grep, which would false-positive on the intentional `data-testid="source-viewer"` and on 2b's harmless orphan wrappers (`activity-panel`/`citations-panel`/…). Those orphan classNames are dead (styled nowhere); removing them is out of scope here.
+
+**Test-wrap completeness:** `SourceViewer.test.tsx` has 7 renders + a rerender — wrap ALL via a `renderSV` helper (Task 1 Step 3), not a subset, or unwrapped Mantine renders crash.
