@@ -18,7 +18,8 @@ _Every task's requirements implicitly include this section._
 - **Preserve test hooks verbatim:** `data-band` (the CallDetail score figure), `data-deadline-state` (the `Deadline`/`DeadlineLocal` span), and every `role="alert"` that the ORIGINAL element already carried. Do NOT add `role="alert"` to elements that lacked it, and do NOT drop it from elements that had it.
 - **`role="alert"` errors → `Text role="alert"`** (a single text node, no Mantine `Alert` chrome) wherever the original was a plain `<p role="alert">` — so `getByRole("alert").textContent` stays EXACTLY the message (CallDetail's not-found test asserts `.toBe("Call not found.")`; CallsFilters asserts `toHaveTextContent(/default profile/i)`).
 - **Button-styled links → `Button component={Link}`**; text links → `Anchor component={Link} to="…"`. Both render a real `<a href>` with client-side nav, so `getByRole("link", { name })` + `href` assertions survive. `Button component={Link}` is what keeps CallDetail's "Start drafting workspace" a **link** (the test queries `getByRole("link", { name: /start drafting/i })`).
-- **Irreducible `style` (sanctioned, documented):** two things have no Mantine prop and are kept as inline `style` for exact parity — (a) the **row/header `border-bottom` dividers** (`style={{ borderBottom: "1px solid var(--app-border)" }}`; Mantine `bd` is all-sides only), and (b) the two **`auto-fill minmax` responsive grids** in CallDetail (`style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(…, 1fr))", gap: "…" }}`; `SimpleGrid` can't express auto-fill). Nothing else uses inline `style`.
+- **Irreducible `style` (sanctioned, documented) — and ONLY these four:** (a) the **row/header `border-bottom` dividers** (`style={{ borderBottom: "1px solid var(--app-border)" }}`; Mantine `bd` is all-sides only); (b) the two **`auto-fill minmax` responsive grids** in CallDetail (`style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(…, 1fr))", gap: "…" }}`; `SimpleGrid` can't express auto-fill); (c) the CallRow "Start drafting" link's `style={{ whiteSpace: "nowrap" }}` (Mantine has no white-space style prop); (d) the CallDetail criterion quote's `style={{ borderLeft: "2px solid var(--app-border-strong)" }}` (Mantine `Blockquote`'s default icon/bg chrome diverges from the minimal original — keep the bare left border). **Everything else uses Mantine style props** — `miw={0}`/`miw="3rem"` (min-width), `flex="0 0 auto"` (no-shrink), `lh={1}` (verified to emit a literal `line-height: 1`), plus `mt`/`px`/`py`/`gap`/`fz`/`c`/`bg`. No other inline `style` appears anywhere in the slice.
+- **No raw `<span>` for styled inline text** — use `Text span` (separators keep `aria-hidden`; the source/linked-call/status text nodes stay queryable). Bare structural fragments are fine, but visible inline text is a Mantine primitive.
 - **Lists:** `Box component="ul" p={0}` (drop the marker gutter) with each row `Box component="li"`/`Group component="li"` (flex `<li>` → no marker, so no `list-style:none` needed) — the same pattern as the admin slice's disabled-user list.
 - **Mantine throws without a provider.** `Dashboard.test.tsx` and `CallRow.test.tsx` currently render bare (no `MantineProvider`) because these components use no Mantine today. The re-skin makes them Mantine, so each test's local render helper gets wrapped in `<MantineProvider theme={theme} defaultColorScheme="dark">` — **assertions byte-unchanged**. These are the ONLY two test changes in the slice. Every other test already supplies a provider (`renderWithProviders` / a local `MantineProvider`) or tests pure functions (`Deadline.test` imports `deadlineView`/`deadlineLocalView` only).
 - **`Badge` uppercases via CSS** (`text-transform`), so the DOM text node keeps its original case → `getByText("Setting up")`/`getByText("Shared")` still match. Use `tt="none"` only where a chip must stay mixed-case (the CallDetail `gateTag`/keyword/criteria chips).
@@ -119,7 +120,7 @@ The ONLY edits to `router.tsx`: the `RouteSpinner` function body and the soft-40
 - [ ] **Step 1: Add the Mantine imports** — add a new import line near the top of `router.tsx` (after the `react` import on line 1):
 
 ```tsx
-import { Center, Loader, Title } from "@mantine/core";
+import { Center, Group, Loader, Text, Title } from "@mantine/core";
 ```
 
 - [ ] **Step 2: Replace `RouteSpinner`** (lines 37-43):
@@ -127,8 +128,11 @@ import { Center, Loader, Title } from "@mantine/core";
 ```tsx
 function RouteSpinner() {
   return (
-    <Center component="main" p="xl">
-      <Loader size="sm" />
+    <Center component="main" h="100%" p="xl">
+      <Group gap="sm">
+        <Loader size="sm" />
+        <Text c="dimmed">Loading…</Text>
+      </Group>
     </Center>
   );
 }
@@ -307,7 +311,7 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
       py="xs"
       style={{ borderBottom: "1px solid var(--app-border)" }}
     >
-      <Box style={{ minWidth: 0 }}>
+      <Box miw={0}>
         <Anchor
           component={Link}
           fw={500}
@@ -316,12 +320,12 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
           {call.title}
         </Anchor>
         <Text mt="0.15rem" c="dimmed" fz="0.85rem">
-          {call.source_name && <span>{call.source_name}</span>}
-          {call.source_name && call.deadline && <span aria-hidden> · </span>}
+          {call.source_name && <Text span>{call.source_name}</Text>}
+          {call.source_name && call.deadline && <Text span aria-hidden> · </Text>}
           {call.deadline && <Deadline iso={call.deadline} />}
         </Text>
       </Box>
-      <Stack gap="0.3rem" align="flex-end" style={{ flexShrink: 0 }}>
+      <Stack gap="0.3rem" align="flex-end" flex="0 0 auto">
         <MatchBadge score={call.aggregate_score} />
         <Anchor component={Link} fz="0.8rem" fw={500} to={startHref} style={{ whiteSpace: "nowrap" }}>
           Start drafting
@@ -535,7 +539,7 @@ export function CallDetail() {
         <Box component="section" aria-label="Ranking">
           <Card component="article" withBorder radius="md" p="md" bg="var(--app-sidebar)">
             <Group align="flex-start" gap="md" wrap="nowrap">
-              <Text data-band={band} fz="2.5rem" fw={700} ta="center" c={figureColor} style={{ minWidth: "3rem", lineHeight: 1 }}>
+              <Text data-band={band} fz="2.5rem" fw={700} ta="center" c={figureColor} miw="3rem" lh={1}>
                 {ranking.aggregate_score}
               </Text>
               <Stack gap="0.4rem">
@@ -653,29 +657,27 @@ export function CallDetail() {
 
       <Group component="section" aria-label="Hide this call" align="center" gap="sm">
         {hiddenId !== null ? (
-          <Text c="dimmed">
-            Call hidden.{" "}
-            <Button variant="subtle" size="compact-xs" disabled={unhide.isPending}
+          <>
+            <Text span c="dimmed">Call hidden.</Text>
+            <Button variant="subtle" size="xs" disabled={unhide.isPending}
                     onClick={async () => { await unhide.mutateAsync(hiddenId); setHiddenId(null); }}>
               Undo
             </Button>
-            {" "}
-            <Button variant="subtle" size="compact-xs" onClick={() => navigate("/")}>
+            <Button variant="subtle" size="xs" onClick={() => navigate("/")}>
               Back to all calls
             </Button>
-          </Text>
+          </>
         ) : confirmHide ? (
-          <Text c="dimmed">
-            Hide this call from your feed?{" "}
-            <Button variant="default" size="compact-xs" disabled={hide.isPending}
+          <>
+            <Text span c="dimmed">Hide this call from your feed?</Text>
+            <Button variant="default" size="xs" disabled={hide.isPending}
                     onClick={async () => { await hide.mutateAsync(call.id); setConfirmHide(false); setHiddenId(call.id); }}>
               Yes, hide it
             </Button>
-            {" "}
-            <Button variant="subtle" size="compact-xs" onClick={() => setConfirmHide(false)}>
+            <Button variant="subtle" size="xs" onClick={() => setConfirmHide(false)}>
               Cancel
             </Button>
-          </Text>
+          </>
         ) : (
           <>
             <Button variant="default" size="xs" onClick={() => setConfirmHide(true)}>
@@ -750,7 +752,7 @@ function WorkspaceRow({ ws }: { ws: WsItem }) {
       py="xs"
       style={{ borderBottom: "1px solid var(--app-border)" }}
     >
-      <Box style={{ minWidth: 0 }}>
+      <Box miw={0}>
         <Anchor component={Link} fw={500} to={`/cockpit/${ws.id}`}>
           {ws.title}
         </Anchor>
@@ -758,17 +760,17 @@ function WorkspaceRow({ ws }: { ws: WsItem }) {
           <Text span tt="uppercase" fz="0.72rem" c="var(--app-link)">{STATUS_LABEL[ws.status] ?? ws.status}</Text>
           {ws.linked_call_title && (
             <>
-              <span aria-hidden> · </span>
-              <span>{ws.linked_call_title}</span>
+              <Text span aria-hidden> · </Text>
+              <Text span>{ws.linked_call_title}</Text>
             </>
           )}
           {ws.deadline && (
             <>
-              <span aria-hidden> · </span>
+              <Text span aria-hidden> · </Text>
               <Deadline iso={ws.deadline} />
             </>
           )}
-          <span aria-hidden> · </span>
+          <Text span aria-hidden> · </Text>
           {/* updated_at is an ISO string; slice to YYYY-MM-DD for a stable label. */}
           <Text span>Updated {ws.updated_at.slice(0, 10)}</Text>
           {!ws.is_owner && <Badge variant="default" size="xs">Shared</Badge>}
@@ -909,7 +911,7 @@ Run (from `frontend/`):
 ```bash
 grep -rln "CallsFilters.module.css\|WorkspacesFilters.module.css\|Pagination.module.css\|Deadline.module.css\|DashboardHeader.module.css\|CallRow.module.css\|Dashboard.module.css\|CallDetail.module.css\|WorkspaceList.module.css\|WorkspaceCreate.module.css" src || echo "10 slice-5 modules gone — clean"
 ```
-Expected: clean. Then sanity-check the sweep is closed (only the deliberate exceptions remain): `find src -name "*.module.css"` should list ONLY `CockpitPanels.module.css`, the IDE-shell modules (`AppShell`/`ActivityBar`/`Sidebar`/`StatusBar`/`TitleBar`), `AdminNav.module.css`, `MatchBadge.module.css`, and `ErrorBoundary`'s (if any) — no other content-route modules.
+Expected: clean. Then sanity-check the sweep is closed (only the deliberate exceptions remain): `find src -name "*.module.css" | sort` should list EXACTLY these ten survivors and nothing else — the three cockpit modules (`cockpit/chat/CockpitChat.module.css`, `cockpit/CockpitPanels.module.css`, `cockpit/CockpitSidebar.module.css`), the five IDE-shell modules (`shell/ActivityBar.module.css`, `shell/AppShell.module.css`, `shell/Sidebar.module.css`, `shell/StatusBar.module.css`, `shell/TitleBar.module.css`), `routes/AdminNav.module.css`, and `components/MatchBadge.module.css`. (There is no `ErrorBoundary` module — it uses inline framework-free markup.) Any `routes/`-content or `components/Pagination` module still present is a miss.
 
 - [ ] **Step 6: Gates (from `frontend/`):** `pnpm exec tsc --noEmit` · `pnpm exec vitest run` · `pnpm build` — all green.
 
@@ -927,7 +929,7 @@ git commit -m "feat(frontend): re-skin WorkspaceList + WorkspaceCreate to Mantin
 1. `pnpm exec tsc --noEmit` clean.
 2. `pnpm exec vitest run` full green. Only two test files changed (`Dashboard.test.tsx`, `CallRow.test.tsx`) and ONLY their render helpers gained a `MantineProvider` wrapper — every assertion byte-unchanged. All other Slice-5 test files byte-unchanged.
 3. `pnpm build` succeeds.
-4. Teardown grep: the ten Slice-5 modules unreferenced and deleted; remaining `*.module.css` are only the sanctioned exceptions (cockpit, IDE shell, `AdminNav`, `MatchBadge`).
+4. Teardown grep: the ten Slice-5 modules unreferenced and deleted; `find src -name "*.module.css" | sort` lists EXACTLY the ten sanctioned survivors — 3 cockpit (`CockpitChat`/`CockpitPanels`/`CockpitSidebar`), 5 IDE shell (`ActivityBar`/`AppShell`/`Sidebar`/`StatusBar`/`TitleBar`), `AdminNav`, `MatchBadge` (no `ErrorBoundary` module exists).
 5. **Visual:** the backendless Playwright route-mock harness ([[reference_spa_visual_check]]) over `/` (Dashboard list + header + Pagination + a past/near/far deadline row to confirm the four `data-deadline-state` colours), `/calls/:id` (CallDetail — ranking hero with the `data-band` figure colour, analyst-note + criteria cards, keyword chips, the hide→confirm→undo buttons), `/cockpit` (WorkspaceList — status/Shared/Setting-up badges, empty state), `/cockpit/new?call_id=…&call_title=…` (WorkspaceCreate form + the missing-param guard), and the two sidebars (`CallsFilters`/`WorkspacesFilters` heading + controls). Mock `/api/me` as authed (`{ user: {…}, capabilities: { admin: false } }`) plus each route's endpoint (mirror the fixtures in each route test). Confirm the `RouteSpinner` (`Center`+`Loader`) and soft-404 (`Center`+`Title`, `role="alert"`) by hitting an unknown in-app path.
 6. Independent diff-vs-parity review before merge: no copy drift (headings, count labels "open"/"top matches"/"closing within 30 days", "Start drafting"/"Start drafting workspace", "Hide this call"/"Yes, hide it"/"Undo"/"Back to all calls", "New workspace", "Setting up"/"Shared", "Not found", filter labels); `data-band` + `data-deadline-state` preserved; every original `role="alert"` preserved and none added; mutation calls + hide/confirm/undo state machine + pagination/profile-persist logic unchanged; `router.tsx` manifest/paths/handles byte-unchanged (only `RouteSpinner` + soft-404 element differ); the two test changes are provider-wrapper-only.
 
