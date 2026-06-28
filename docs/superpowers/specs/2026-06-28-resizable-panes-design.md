@@ -53,9 +53,16 @@ This spec covers the whole feature; the **Slice 1 plan is written first**, Slice
 
 ### Library
 
-`react-resizable-panels` (v2). Primitives: `<PanelGroup direction="horizontal"
-autoSaveId="…">`, `<Panel id minSize defaultSize collapsible collapsedSize>`,
-`<PanelResizeHandle>`. Sizes are **percentages of the group** (the library's
+`react-resizable-panels` — **pin exactly `2.1.9`** (the latest 2.x; peer-supports
+React 19). ⚠️ The current major (`4.x`) is a **completely different API**
+(`Group`/`Separator`/`panelRef`/`useDefaultLayout`/`onResize` + `data-separator`
+— no `autoSaveId`, no `onCollapse`/`onExpand`, no `PanelResizeHandle`); everything
+below assumes the 2.x API, so do NOT install `latest`/`^2`. Primitives:
+`<PanelGroup direction="horizontal" autoSaveId="…">`, `<Panel id order minSize
+defaultSize collapsible collapsedSize ref onCollapse onExpand>`,
+`<PanelResizeHandle>` (renders `role="separator"` + `data-resize-handle-state`).
+The imperative handle (`ImperativePanelHandle`) exposes `isCollapsed()` /
+`collapse()` / `expand()`. Sizes are **percentages of the group** (the library's
 model) — not pixels; a `~18%` default reads close to the old 240px on a typical
 window and scales sensibly. Persistence is automatic via `autoSaveId`
 (localStorage), and the library keys saved layouts by the **set of panel ids**,
