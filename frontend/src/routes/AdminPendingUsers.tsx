@@ -1,9 +1,9 @@
+import { Anchor, Box, Button, Card, Group, PasswordInput, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { AdminPendingUser } from "../api/admin";
 import { useAdminPendingUsers, useApproveUser, useDenyUser } from "../api/admin";
-import styles from "./AdminPendingUsers.module.css";
 
 function PendingRow({ u }: { u: AdminPendingUser }) {
   const [pw, setPw] = useState("");
@@ -16,59 +16,65 @@ function PendingRow({ u }: { u: AdminPendingUser }) {
   const doApprove = (role: "member" | "admin") =>
     approve.mutate({ id: u.id, role, initial_password: needsPw ? pw : undefined });
   return (
-    <article className={styles.card}>
-      <p className={styles.head}>
-        <strong>{u.email}</strong>
+    <Card component="article" withBorder radius="md" p="md" my="sm" bg="var(--app-sidebar)">
+      <Text mb="sm">
+        <Text span fw={700}>{u.email}</Text>
         {u.name ? ` — ${u.name}` : ""}
-        {u.google_linked && <small className={styles.tag}> (Google)</small>}
-        <small className={styles.tag}> · registered {new Date(u.created_at).toLocaleDateString()}</small>
-      </p>
+        {u.google_linked && <Text span c="dimmed" size="sm"> (Google)</Text>}
+        <Text span c="dimmed" size="sm"> · registered {new Date(u.created_at).toLocaleDateString()}</Text>
+      </Text>
       {needsPw && (
-        <input
-          type="password"
+        <PasswordInput
+          size="xs"
           value={pw}
-          onChange={(e) => setPw(e.target.value)}
+          onChange={(e) => setPw(e.currentTarget.value)}
           placeholder="initial password"
           required
+          mb="sm"
         />
       )}
-      <div className={styles.actions}>
-        <button type="button" disabled={busy || (needsPw && !pw)} onClick={() => doApprove("member")}>
+      <Group gap="xs" wrap="wrap">
+        <Button size="xs" disabled={busy || (needsPw && !pw)} onClick={() => doApprove("member")}>
           Approve as member
-        </button>
-        <button type="button" disabled={busy || (needsPw && !pw)} onClick={() => doApprove("admin")}>
+        </Button>
+        <Button size="xs" disabled={busy || (needsPw && !pw)} onClick={() => doApprove("admin")}>
           Approve as admin
-        </button>
-        <button type="button" className={styles.secondary} disabled={busy} onClick={() => deny.mutate({ id: u.id })}>
+        </Button>
+        <Button size="xs" variant="default" disabled={busy} onClick={() => deny.mutate({ id: u.id })}>
           Deny
-        </button>
-      </div>
+        </Button>
+      </Group>
       {err && (
-        <span role="alert" className={styles.err}>
+        <Text role="alert" c="red" size="xs" mt="xs">
           {(err as Error).message}
-        </span>
+        </Text>
       )}
-    </article>
+    </Card>
   );
 }
 
 export function AdminPendingUsers() {
   const { data, isLoading, isError } = useAdminPendingUsers(1);
-  if (isLoading) return <p>Loading…</p>;
-  if (isError || !data) return <p role="alert">Couldn't load pending accounts.</p>;
+  if (isLoading) return <Text p="md">Loading…</Text>;
+  if (isError || !data)
+    return (
+      <Text p="md" role="alert">
+        Couldn't load pending accounts.
+      </Text>
+    );
   const users = data.users;
   return (
-    <main className={styles.page}>
-      <h1>Pending accounts</h1>
-      {users.length === 0 && <p>No accounts awaiting approval.</p>}
+    <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
+      <Title order={1}>Pending accounts</Title>
+      {users.length === 0 && <Text>No accounts awaiting approval.</Text>}
       {users.map((u) => (
         <PendingRow key={u.id} u={u} />
       ))}
-      <p className={styles.nav}>
-        <Link to="/admin/users">All users</Link>
+      <Text size="sm" mt="md">
+        <Anchor component={Link} to="/admin/users">All users</Anchor>
         {" · "}
-        <Link to="/admin">Admin home</Link>
-      </p>
-    </main>
+        <Anchor component={Link} to="/admin">Admin home</Anchor>
+      </Text>
+    </Box>
   );
 }
