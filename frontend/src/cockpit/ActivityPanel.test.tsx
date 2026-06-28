@@ -1,8 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { ActivityPanel } from "./ActivityPanel";
 
 const h = vi.hoisted((): { activity: { data: unknown; isError?: boolean; isLoading?: boolean } } => ({
@@ -12,7 +14,11 @@ const h = vi.hoisted((): { activity: { data: unknown; isError?: boolean; isLoadi
 vi.mock("../api/activity", () => ({ useActivity: () => h.activity }));
 
 function wrap(ui: ReactNode) {
-  return render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>
+    </MantineProvider>,
+  );
 }
 
 afterEach(() => {
@@ -81,6 +87,6 @@ describe("ActivityPanel", () => {
     };
     wrap(<ActivityPanel id="ws1" onNavigate={vi.fn()} />);
     expect(screen.getByText(/added collaborator a@ki\.se/i)).toBeInTheDocument();
-    expect(document.querySelector(".category-member")).not.toBeNull();
+    expect(document.querySelector('[data-category="member"]')).not.toBeNull();
   });
 });
