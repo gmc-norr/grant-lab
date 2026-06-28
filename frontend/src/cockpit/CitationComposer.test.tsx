@@ -1,8 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import { theme } from "../theme/theme";
 import { CitationComposer } from "./CitationComposer";
 import { toCodePointOffset } from "./selection";
 
@@ -78,9 +80,11 @@ describe("CitationComposer", () => {
     const onDone = vi.fn();
     const qc = new QueryClient();
     render(
-      <QueryClientProvider client={qc}>
-        <CitationComposer workspaceId="ws-1" claim={claim} onDone={onDone} onCancel={() => {}} />
-      </QueryClientProvider>,
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <CitationComposer workspaceId="ws-1" claim={claim} onDone={onDone} onCancel={() => {}} />
+        </QueryClientProvider>
+      </MantineProvider>,
       { wrapper: undefined },
     );
     // pick the reference
@@ -115,9 +119,11 @@ describe("CitationComposer", () => {
     } as never);
     const qc = new QueryClient();
     render(
-      <QueryClientProvider client={qc}>
-        <CitationComposer workspaceId="ws-1" claim={claim} onDone={() => {}} onCancel={() => {}} />
-      </QueryClientProvider>,
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <CitationComposer workspaceId="ws-1" claim={claim} onDone={() => {}} onCancel={() => {}} />
+        </QueryClientProvider>
+      </MantineProvider>,
     );
     fireEvent.click(await screen.findByRole("button", { name: /Smith/ }));
     const pre = await screen.findByText("the azure sky");
@@ -149,9 +155,11 @@ describe("CitationComposer", () => {
     const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { ev_id: "ev-1", citekey: "smith2021", commit_sha: "a".repeat(40) }, error: undefined } as never);
     const qc = new QueryClient();
     render(
-      <QueryClientProvider client={qc}>
-        <CitationComposer workspaceId="ws-1" claim={claim} onDone={() => {}} onCancel={() => {}} />
-      </QueryClientProvider>,
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <CitationComposer workspaceId="ws-1" claim={claim} onDone={() => {}} onCancel={() => {}} />
+        </QueryClientProvider>
+      </MantineProvider>,
     );
     fireEvent.click(await screen.findByRole("button", { name: /Smith/ }));
     const pre = await screen.findByText("🚀 azure sky");
@@ -196,9 +204,11 @@ describe("CitationComposer", () => {
     const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { ev_id: "ev-2", citekey: "smith2021", commit_sha: "a".repeat(40) }, error: undefined } as never);
     const qc = new QueryClient();
     render(
-      <QueryClientProvider client={qc}>
-        <CitationComposer workspaceId="ws-1" claim={claim} onDone={() => {}} onCancel={() => {}} />
-      </QueryClientProvider>,
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <CitationComposer workspaceId="ws-1" claim={claim} onDone={() => {}} onCancel={() => {}} />
+        </QueryClientProvider>
+      </MantineProvider>,
     );
     fireEvent.click(await screen.findByRole("button", { name: /Smith/ }));
     const pre = await screen.findByText(chunkText);

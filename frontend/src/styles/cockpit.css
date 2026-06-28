@@ -3,44 +3,5 @@
    CockpitPanels.module.css (.editorGrid / .editorMain / .sidePane / .composerPane).
    Tokens come from theme/theme.css (--app-*). */
 
-/* select-to-cite: the composer surface (Save/Cite action row now in Mantine Group;
-   pane sizing now in CockpitPanels.module.css .composerPane). */
-.cite-composer {
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-sidebar);
-  box-shadow: var(--app-shadow-sm);
-  padding: 0.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.cite-composer-head {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-.cite-composer-head button {
-  margin-left: auto;
-}
-.cite-composer-claim {
-  color: var(--app-muted);
-  font-style: italic;
-}
-.cite-composer-chunk {
-  white-space: pre-wrap;
-  border: 1px solid var(--app-border);
-  border-radius: 4px;
-  padding: 0.4rem;
-  font-size: 0.9em;
-  cursor: text;
-  max-height: 40vh;
-  overflow: auto;
-}
-.cite-composer-confirm {
-  background: var(--app-selected);
-  border: 1px solid var(--app-border-strong);
-  border-radius: 4px;
-  padding: 0.4rem;
-}
-
+/* select-to-cite: all cite-composer-* rules moved to CockpitPanels.module.css
+   (.citeChunk / .citeConfirm) in Slice 2c. This file now contains no rule blocks. */

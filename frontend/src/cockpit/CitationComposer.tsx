@@ -1,8 +1,11 @@
 import { useState } from "react";
 
+import { Box, Button, Group, Stack, Text } from "@mantine/core";
+
 import { useAddCitation, useReferenceChunks, useReferences } from "../api/citations";
 import { ApiError } from "../api/client";
 import { toCodePointOffset } from "./selection";
+import styles from "./CockpitPanels.module.css";
 
 export type ClaimContext = {
   section_index: number;
@@ -93,71 +96,73 @@ export function CitationComposer({ workspaceId, claim, onDone, onCancel }: Props
   }
 
   return (
-    <aside className="cite-composer" aria-label="Add a citation">
-      <header className="cite-composer-head">
-        <strong>Cite:</strong> <span className="cite-composer-claim">{claim.anchor}</span>
-        <button type="button" aria-label="Cancel" onClick={onCancel}>
-          ✕
-        </button>
-      </header>
+    <Box component="aside" aria-label="Add a citation" p="sm" style={{ border: "1px solid var(--app-border)", borderRadius: 8, background: "var(--app-sidebar)", boxShadow: "var(--app-shadow-sm)" }}>
+      <Stack gap="sm">
+        <Group gap="xs" align="baseline">
+          <strong>Cite:</strong> <Text span c="dimmed" fs="italic">{claim.anchor}</Text>
+          <Button size="xs" variant="subtle" aria-label="Cancel" ml="auto" onClick={onCancel}>✕</Button>
+        </Group>
 
-      {refId === null ? (
-        <div className="cite-composer-refs">
-          <p>Pick a reference:</p>
-          {refs.isLoading && <p aria-busy="true">Loading references…</p>}
-          <ul>
-            {(refs.data ?? []).map((r) => (
-              <li key={r.id}>
-                <button
-                  type="button"
-                  disabled={r.text_status !== "done"}
-                  onClick={() => setRefId(r.id)}
-                >
-                  {r.title}
-                  {r.text_status !== "done" ? " (not indexed yet)" : ""}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : (
-        <div className="cite-composer-source">
-          <button
-            type="button"
-            onClick={() => {
-              setRefId(null);
-              setSpan(null);
-            }}
-          >
-            ‹ back to references
-          </button>
-          <p>Select the supporting passage:</p>
-          {chunks.isLoading && <p aria-busy="true">Loading source…</p>}
-          {(chunks.data?.chunks ?? []).map((c) => (
-            <pre
-              key={c.chunk_index}
-              className="cite-composer-chunk"
-              // single text node — do not interpolate siblings into this <pre>,
-              // or captureSelection's offsets desync (the guard below would then bail).
-              onMouseUp={(e) => captureSelection(c.chunk_index, c.text, e.currentTarget)}
+        {refId === null ? (
+          <Stack gap="xs">
+            <Text size="sm">Pick a reference:</Text>
+            {refs.isLoading && <Text aria-busy="true">Loading references…</Text>}
+            <Stack component="ul" gap={4} style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {(refs.data ?? []).map((r) => (
+                <Box component="li" key={r.id}>
+                  <Button
+                    variant="subtle"
+                    size="xs"
+                    disabled={r.text_status !== "done"}
+                    onClick={() => setRefId(r.id)}
+                  >
+                    {r.title}
+                    {r.text_status !== "done" ? " (not indexed yet)" : ""}
+                  </Button>
+                </Box>
+              ))}
+            </Stack>
+          </Stack>
+        ) : (
+          <Stack gap="xs">
+            <Button
+              size="xs"
+              variant="subtle"
+              onClick={() => {
+                setRefId(null);
+                setSpan(null);
+              }}
             >
-              {c.text}
-            </pre>
-          ))}
-          {chunks.data && chunks.data.chunks.length === 0 && (
-            <p className="cite-composer-empty">This source isn’t indexed yet.</p>
-          )}
-          {span && (
-            <p className="cite-composer-confirm">
-              Quote: <q>{span.evidence_quote}</q>{" "}
-              <button type="button" disabled={add.isPending} onClick={submit}>
-                Add citation
-              </button>
-            </p>
-          )}
-          {error !== null && <p role="alert">{error}</p>}
-        </div>
-      )}
-    </aside>
+              ‹ back to references
+            </Button>
+            <Text size="sm">Select the supporting passage:</Text>
+            {chunks.isLoading && <Text aria-busy="true">Loading source…</Text>}
+            {(chunks.data?.chunks ?? []).map((c) => (
+              <pre
+                key={c.chunk_index}
+                className={styles.citeChunk}
+                // single text node — do not interpolate siblings into this <pre>,
+                // or captureSelection's offsets desync (the guard below would then bail).
+                onMouseUp={(e) => captureSelection(c.chunk_index, c.text, e.currentTarget)}
+              >
+                {c.text}
+              </pre>
+            ))}
+            {chunks.data && chunks.data.chunks.length === 0 && (
+              <Text c="dimmed" size="sm">This source isn't indexed yet.</Text>
+            )}
+            {span && (
+              <Box className={styles.citeConfirm}>
+                Quote: <q>{span.evidence_quote}</q>{" "}
+                <Button size="xs" disabled={add.isPending} onClick={submit}>
+                  Add citation
+                </Button>
+              </Box>
+            )}
+            {error !== null && <Text role="alert" c="red" size="sm">{error}</Text>}
+          </Stack>
+        )}
+      </Stack>
+    </Box>
   );
 }

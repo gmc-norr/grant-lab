@@ -111,3 +111,21 @@
   color: var(--app-good);
   border: 1px solid color-mix(in srgb, var(--app-good) 40%, transparent);
 }
+
+/* --- CitationComposer (was .cite-composer-*) --- */
+.citeChunk {
+  white-space: pre-wrap;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  padding: 0.4rem;
+  font-size: 0.9em;
+  cursor: text;
+  max-height: 40vh;
+  overflow: auto;
+}
+.citeConfirm {
+  background: var(--app-selected);
+  border: 1px solid var(--app-border-strong);
+  border-radius: 4px;
+  padding: 0.4rem;
+}
