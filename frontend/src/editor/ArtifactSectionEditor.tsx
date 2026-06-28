@@ -2,6 +2,8 @@ import { Box, Button, Group, Tabs, Text } from "@mantine/core";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+
 import { useCitationSource } from "../api/citations";
 import { ApiError } from "../api/client";
 import { useCockpitNav } from "../cockpit/cockpitNav";
@@ -196,111 +198,129 @@ export function ArtifactSectionEditor({
 
   return (
     <Box component="main" className={styles.editorGrid} p="md">
-      <Box component="section" className={styles.editorMain}>
-        <Tabs value={view} onChange={(v) => v && setView(v as "section" | "full")}>
-          <Tabs.List aria-label="View">
-            <Tabs.Tab value="section">Section</Tabs.Tab>
-            <Tabs.Tab value="full">{fullViewLabel}</Tabs.Tab>
-          </Tabs.List>
-        </Tabs>
+      <PanelGroup
+        direction="horizontal"
+        autoSaveId="cm-cockpit-center"
+        className={styles.centerPanes}
+      >
+        <Panel id="editor" order={1} minSize={30}>
+          <Box component="section" className={styles.editorMain}>
+            <Tabs value={view} onChange={(v) => v && setView(v as "section" | "full")}>
+              <Tabs.List aria-label="View">
+                <Tabs.Tab value="section">Section</Tabs.Tab>
+                <Tabs.Tab value="full">{fullViewLabel}</Tabs.Tab>
+              </Tabs.List>
+            </Tabs>
 
-        {staleSection !== null && (
-          <Text role="alert" c="red" size="sm">
-            This section changed underneath you. Your edits are kept.{" "}
-            <Button size="xs" variant="subtle" onClick={() => reloadSection(staleSection)}>
-              Reload (discard my edits)
-            </Button>{" "}
-            <Button size="xs" variant="subtle" onClick={() => setStaleSection(null)}>
-              Keep editing
-            </Button>
-          </Text>
-        )}
-
-        {saveError !== null && (
-          <Text role="alert" c="red" size="sm">
-            {saveError}{" "}
-            <Button size="xs" variant="subtle" onClick={() => setSaveError(null)}>
-              Dismiss
-            </Button>
-          </Text>
-        )}
-
-        <CodeMirrorEditor
-          value={editorValue}
-          // docKey = the section identity. It changes on a section swap (so the
-          // controlled push clears undo history — no cross-section undo
-          // corruption) but stays stable on a same-section save/refetch (so a
-          // background refetch does NOT wipe the user's in-section undo stack).
-          // Each artifact (draft/spec) has its own editor instance, so the
-          // section index alone is a sufficient document identity here.
-          docKey={view === "section" ? activeIndex : "full"}
-          onChange={view === "full" ? () => {} : onEditorChange}
-          requireHeading={view === "section" && activeIndex > 0}
-          readOnly={view === "full" || !canEdit}
-          citations={citations}
-          onPillClick={citations ? onPillClick : undefined}
-          onSelectionChange={citations && view === "section" ? setSelection : undefined}
-          onCursorChange={setCursor}
-        />
-
-        {canEdit && view === "section" && (
-          <Group gap="sm">
-            <Button
-              size="xs"
-              onClick={onSave}
-              disabled={save.isPending || !isDirty(activeIndex)}
-            >
-              Save section
-            </Button>
-            {citations && (
-              <Button
-                size="xs"
-                variant="default"
-                disabled={!selection || isDirty(activeIndex)}
-                title={isDirty(activeIndex) ? "Save this section first" : undefined}
-                onClick={() => setComposerOpen(true)}
-              >
-                Cite selection
-              </Button>
+            {staleSection !== null && (
+              <Text role="alert" c="red" size="sm">
+                This section changed underneath you. Your edits are kept.{" "}
+                <Button size="xs" variant="subtle" onClick={() => reloadSection(staleSection)}>
+                  Reload (discard my edits)
+                </Button>{" "}
+                <Button size="xs" variant="subtle" onClick={() => setStaleSection(null)}>
+                  Keep editing
+                </Button>
+              </Text>
             )}
-          </Group>
+
+            {saveError !== null && (
+              <Text role="alert" c="red" size="sm">
+                {saveError}{" "}
+                <Button size="xs" variant="subtle" onClick={() => setSaveError(null)}>
+                  Dismiss
+                </Button>
+              </Text>
+            )}
+
+            <CodeMirrorEditor
+              value={editorValue}
+              // docKey = the section identity. It changes on a section swap (so the
+              // controlled push clears undo history — no cross-section undo
+              // corruption) but stays stable on a same-section save/refetch (so a
+              // background refetch does NOT wipe the user's in-section undo stack).
+              // Each artifact (draft/spec) has its own editor instance, so the
+              // section index alone is a sufficient document identity here.
+              docKey={view === "section" ? activeIndex : "full"}
+              onChange={view === "full" ? () => {} : onEditorChange}
+              requireHeading={view === "section" && activeIndex > 0}
+              readOnly={view === "full" || !canEdit}
+              citations={citations}
+              onPillClick={citations ? onPillClick : undefined}
+              onSelectionChange={citations && view === "section" ? setSelection : undefined}
+              onCursorChange={setCursor}
+            />
+
+            {canEdit && view === "section" && (
+              <Group gap="sm">
+                <Button
+                  size="xs"
+                  onClick={onSave}
+                  disabled={save.isPending || !isDirty(activeIndex)}
+                >
+                  Save section
+                </Button>
+                {citations && (
+                  <Button
+                    size="xs"
+                    variant="default"
+                    disabled={!selection || isDirty(activeIndex)}
+                    title={isDirty(activeIndex) ? "Save this section first" : undefined}
+                    onClick={() => setComposerOpen(true)}
+                  >
+                    Cite selection
+                  </Button>
+                )}
+              </Group>
+            )}
+          </Box>
+        </Panel>
+
+        {citations && peekEv !== null && (
+          <>
+            <PanelResizeHandle className={styles.centerHandle} aria-label="Resize source peek" />
+            <Panel id="peek" order={2} minSize={16} defaultSize={28} className={styles.sourcePanel}>
+              <Box component="section" className={styles.sidePane} data-region="peek" aria-label="Citation source peek">
+                {peek.isLoading && <Text aria-busy="true">Loading source…</Text>}
+                {peek.isError && <Text role="alert" c="red">Could not load the cited source.</Text>}
+                {peek.data && (
+                  <SourceViewer
+                    source={peek.data}
+                    pinned={false}
+                    onClose={() => setPeekEv(null)}
+                    onPin={() => {
+                      setPinnedEv(peekEv);
+                      setPeekEv(null);
+                    }}
+                    onNavigate={(evId) => setPeekEv(evId)}
+                  />
+                )}
+              </Box>
+            </Panel>
+          </>
         )}
-      </Box>
 
-      {citations && peekEv !== null && (
-        <Box component="section" className={styles.sidePane} data-region="peek" aria-label="Citation source peek">
-          {peek.isLoading && <Text aria-busy="true">Loading source…</Text>}
-          {peek.isError && <Text role="alert" c="red">Could not load the cited source.</Text>}
-          {peek.data && (
-            <SourceViewer
-              source={peek.data}
-              pinned={false}
-              onClose={() => setPeekEv(null)}
-              onPin={() => {
-                setPinnedEv(peekEv);
-                setPeekEv(null);
-              }}
-              onNavigate={(evId) => setPeekEv(evId)}
-            />
-          )}
-        </Box>
-      )}
-
-      {citations && pinnedEv !== null && (
-        <Box component="aside" className={styles.sidePane} data-region="pinned" aria-label="Pinned source">
-          {pinned.isLoading && <Text aria-busy="true">Loading source…</Text>}
-          {pinned.isError && <Text role="alert" c="red">Could not load the cited source.</Text>}
-          {pinned.data && (
-            <SourceViewer
-              source={pinned.data}
-              pinned
-              onClose={() => setPinnedEv(null)}
-              onPin={() => {}}
-              onNavigate={(evId) => setPinnedEv(evId)}
-            />
-          )}
-        </Box>
-      )}
+        {citations && pinnedEv !== null && (
+          <>
+            <PanelResizeHandle className={styles.centerHandle} aria-label="Resize pinned source" />
+            <Panel id="pinned" order={3} minSize={16} defaultSize={28} className={styles.sourcePanel}>
+              <Box component="aside" className={styles.sidePane} data-region="pinned" aria-label="Pinned source">
+                {pinned.isLoading && <Text aria-busy="true">Loading source…</Text>}
+                {pinned.isError && <Text role="alert" c="red">Could not load the cited source.</Text>}
+                {pinned.data && (
+                  <SourceViewer
+                    source={pinned.data}
+                    pinned
+                    onClose={() => setPinnedEv(null)}
+                    onPin={() => {}}
+                    onNavigate={(evId) => setPinnedEv(evId)}
+                  />
+                )}
+              </Box>
+            </Panel>
+          </>
+        )}
+      </PanelGroup>
 
       {citations && composerOpen && selection && activeSection && (
         <Box component="section" className={styles.composerPane}>
