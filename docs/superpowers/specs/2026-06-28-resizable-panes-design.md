@@ -91,7 +91,7 @@ horizontal `PanelGroup`:
   <ActivityBar/>                      {/* fixed 48px, not in the group */}
   <PanelGroup direction="horizontal" autoSaveId="cm-shell" className={styles.panes}>
     {SidebarContent && <>
-      <Panel id="sidebar" order={1} collapsible collapsedSize={0} minSize={12} defaultSize={18} ref={sidebarRef} onCollapse/onExpand→state>
+      <Panel id="sidebar" order={1} collapsible collapsedSize={0} minSize={12} defaultSize={18} ref={sidebarRef}>
         <Sidebar><SidebarContent/></Sidebar>
       </Panel>
       <PanelResizeHandle className={styles.handle} aria-label="Resize sidebar"/>
@@ -101,7 +101,7 @@ horizontal `PanelGroup`:
     </Panel>
     {RightPaneContent && <>
       <PanelResizeHandle className={styles.handle} aria-label="Resize chat"/>
-      <Panel id="rightpane" order={3} collapsible collapsedSize={0} minSize={15} defaultSize={22} ref={rightRef} onCollapse/onExpand→state>
+      <Panel id="rightpane" order={3} collapsible collapsedSize={0} minSize={15} defaultSize={22} ref={chatRef} onCollapse/onExpand→chatCollapsed>
         <RightPaneContent/>
       </Panel>
     </>}
@@ -135,9 +135,13 @@ horizontal `PanelGroup`:
 - **Left sidebar:** the `sidebar` Panel is `collapsible` with `collapsedSize={0}`.
   Clicking the **active ActivityBar item** toggles it (VS Code behaviour). Wire
   it via the Panel's imperative handle: AppShell holds a `sidebarRef`
-  (`ImperativePanelHandle`) and a `collapsed` boolean (from `onCollapse`/
-  `onExpand`); it passes `onToggleSidebar` + `collapsed` to `ActivityBar`.
-  Collapsed state persists via `autoSaveId`.
+  (`ImperativePanelHandle`); the toggle helper reads the handle's LIVE
+  `isCollapsed()` and calls the opposite (`collapse()`/`expand()`), so the action
+  is robust across persisted-layout restore. AppShell passes ONLY
+  `onToggleSidebar` to `ActivityBar` — no `collapsed` boolean: the always-present
+  active item IS the reopen control and (like VS Code) shows no collapse-state
+  affordance, and an unused prop would trip `noUnusedLocals`. Collapsed state
+  persists via `autoSaveId`.
   **Critical:** the active item is currently a `<Link>`/`<NavLink>`
   (`ActivityBar.tsx:79-89` — "Current workspace" → `/cockpit/${wsId}`; and the
   "Workspaces" item on the cockpit-list route). When that item is **already
@@ -147,16 +151,20 @@ horizontal `PanelGroup`:
   Item's onClick: `if (active) { e.preventDefault(); onToggleSidebar(); }` (inactive
   items navigate as today).
 - **Right chat:** the `rightpane` Panel is `collapsible`. A **toggle in the
-  `TitleBar`** both collapses and expands it; the icon/label reflects state. It
-  works when the panel is collapsed to 0 (it lives in the always-present TitleBar,
-  not in the chat). **Visibility:** the toggle renders ONLY when the active route
-  actually has a RightPane — AppShell already computes `RightPaneContent` from the
-  route handle, so it passes `hasRightPane` (+ `onToggleChat` + `collapsed`) to
-  `TitleBar`; on dashboard/calls-list/settings/profile (no RightPane) the toggle
-  is absent (no dead control). (One control, always reachable on cockpit routes —
-  avoids a header-chevron-to-close + separate-reopen split. Exact TitleBar
-  placement finalised in the plan after reading `TitleBar.tsx`.) Same
-  imperative-handle + state pattern.
+  `TitleBar`** both collapses and expands it; the icon/`aria-pressed` reflect
+  state. It works when the panel is collapsed to 0 (it lives in the always-present
+  TitleBar, not in the chat). Here AppShell DOES track a `chatCollapsed` boolean
+  (set from the rightpane Panel's `onCollapse`/`onExpand`) — unlike the sidebar,
+  this one IS consumed, to drive the toggle's icon (`codicon-layout-sidebar-right`
+  ↔ `…-right-off`) and `aria-pressed`. The toggle helper still reads the live
+  `isCollapsed()` for the action. **Visibility:** the toggle renders ONLY when the
+  active route actually has a RightPane — AppShell already computes
+  `RightPaneContent`, so it passes `hasRightPane` (+ `onToggleChat` +
+  `chatCollapsed`) to `TitleBar`; on dashboard/calls-list/settings/profile (no
+  RightPane) the toggle is absent (no dead control). (One control, always
+  reachable on cockpit routes — avoids a header-chevron-to-close +
+  separate-reopen split. Confirmed by reading `TitleBar.tsx`: the toggle is the
+  first child of the right-aligned `.account` cluster.)
 - Keyboard: `PanelResizeHandle` is focusable and arrow-resizable out of the box;
   add an `aria-label` to each.
 
@@ -182,7 +190,14 @@ in its own plan.
 - **jsdom has no layout**, so `react-resizable-panels` can't measure real sizes;
   it renders panels at their `defaultSize` and may emit a benign warning.
   `ResizeObserver` is already stubbed in `test-setup.ts`. **Tests assert
-  structure / landmarks / ARIA / collapse-state — never pixel widths.**
+  structure / landmarks / ARIA / callback wiring — never pixel widths.**
+- **The imperative collapse API (`isCollapsed`/`collapse`/`expand`) throws under
+  jsdom** (`"Panel size not found"` — no measured layout; order-dependent). So the
+  collapse helpers (which live in `AppShell`) are tested only through **mocked**
+  toggle callbacks; the real collapse/expand/persist path is verified manually on
+  `:8000`, NOT in a unit test. (Verified empirically against v2.1.9 in this repo's
+  vitest/jsdom: structural render + `getByRole("separator")` + remount keys work;
+  a real `collapse()` call crashes.)
 - `shell/AppShell.test.tsx`: wrapping the body in a `PanelGroup` adds wrapper
   divs; assert the sidebar/main/right regions + landmarks (`<nav aria-label>`,
   `aside aria-label="Sidebar"`, the chat landmark) still render. Update any

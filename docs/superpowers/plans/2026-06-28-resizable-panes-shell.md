@@ -19,7 +19,8 @@ Every task's requirements implicitly include this section.
 - **Preserve all landmarks/ARIA** — tests assert them: `<nav aria-label="Primary">` (ActivityBar), `<aside aria-label="Sidebar">` (Sidebar), the chat's `<aside aria-label="Chat">`, `<footer aria-label="Status bar">` (StatusBar). New resize handles get `aria-label="Resize sidebar"` / `aria-label="Resize chat"`.
 - **No API/schema/copy change.** No backend touched, no OpenAPI regen. Pure frontend.
 - **Type gate is `tsc`** — there is NO TypeScript ESLint. `tsconfig` has `noUnusedLocals: true` (a destructured-but-unused prop or unused `useState` tuple member is a COMPILE ERROR — only introduce state/props you actually consume). Per task: `pnpm exec tsc --noEmit` + the task's named test file(s). All commands run from `frontend/`.
-- **jsdom has no layout.** `react-resizable-panels` can't measure real sizes under jsdom; it renders panels at `defaultSize` and may emit a benign console warning. `ResizeObserver` is already stubbed in `src/test-setup.ts`. **Tests assert structure / landmarks / ARIA / roles / callback wiring — NEVER pixel widths.**
+- **jsdom has no layout.** `react-resizable-panels` can't measure real sizes under jsdom; it renders panels at `defaultSize` and may emit a benign console warning. `ResizeObserver` is already stubbed in `src/test-setup.ts`. **Tests assert structure / landmarks / ARIA / roles / callback wiring — NEVER pixel widths.** (Verified empirically against v2.1.9 + this repo's vitest/jsdom config: the `PanelGroup`/`Panel`/`PanelResizeHandle` tree mounts cleanly, separators are queryable by `getByRole("separator", { name })`, and the per-id remount keys on inner content still work.)
+- **⚠️ The imperative collapse API throws under jsdom — DO NOT unit-test the real collapse path.** Calling `ImperativePanelHandle.isCollapsed()` / `collapse()` / `expand()` under jsdom raises `Error: Panel size not found for panel "…"` (the library never measured a layout; the failure is order/persistence-dependent — it may pass once and throw the next time). The collapse *helpers live in `AppShell`*; every unit test in this plan exercises them only through **mocked** callbacks (`onToggleSidebar` / `onToggleChat` = `vi.fn()`), never the real handle. **Do NOT add a test that renders the real `AppShell` and clicks a toggle through to a real `collapse()`/`isCollapsed()`** — it will crash the suite. Real collapse/expand/persist behaviour is covered by the manual verification step on `:8000`.
 
 ---
 
@@ -41,7 +42,7 @@ Every task's requirements implicitly include this section.
 Deliverable: the sidebar/chat edges are draggable and widths persist across reload. Panels are NOT yet collapsible (that's Task 2) — this leaves a fully usable, resizable shell.
 
 **Files:**
-- Modify: `frontend/src/package.json` (+ `pnpm-lock.yaml`) — add the dependency.
+- Modify: `frontend/package.json` (+ `frontend/pnpm-lock.yaml`) — add the dependency.
 - Modify: `frontend/src/shell/AppShell.tsx`
 - Modify: `frontend/src/shell/AppShell.module.css`
 - Modify: `frontend/src/shell/Sidebar.module.css`
@@ -391,7 +392,7 @@ function Item({
   // of navigating. preventDefault stops react-router's Link nav (it honours
   // defaultPrevented) so we don't re-navigate to the bare route and drop ?tab/?sec.
   // Only fires when this route actually has a sidebar (onToggleSidebar provided).
-  const handleClick = (e: MouseEvent) => {
+  const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
     if (active && onToggleSidebar) {
       e.preventDefault();
       onToggleSidebar();
