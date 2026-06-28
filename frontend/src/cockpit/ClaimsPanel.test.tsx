@@ -1,6 +1,8 @@
+import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { ClaimsPanel } from "./ClaimsPanel";
 
 const h = vi.hoisted(() => ({
@@ -47,7 +49,7 @@ afterEach(() => {
 describe("ClaimsPanel", () => {
   it("renders a finding with an Insert button for the owner", () => {
     h.ann.data = { is_owner: true, sections: [SECTION()] };
-    render(<ClaimsPanel id="ws1" />);
+    render(<MantineProvider theme={theme} defaultColorScheme="dark"><ClaimsPanel id="ws1" /></MantineProvider>);
     expect(screen.getByText("This is a factual claim")).toBeInTheDocument();
     expect(screen.getByText("Smith 2020")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /insert/i }));
@@ -56,7 +58,7 @@ describe("ClaimsPanel", () => {
 
   it("hides actions for a viewer", () => {
     h.ann.data = { is_owner: false, sections: [SECTION()] };
-    render(<ClaimsPanel id="ws1" />);
+    render(<MantineProvider theme={theme} defaultColorScheme="dark"><ClaimsPanel id="ws1" /></MantineProvider>);
     expect(screen.getByText("This is a factual claim")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /insert/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
@@ -81,7 +83,7 @@ describe("ClaimsPanel", () => {
         }),
       ],
     };
-    render(<ClaimsPanel id="ws1" />);
+    render(<MantineProvider theme={theme} defaultColorScheme="dark"><ClaimsPanel id="ws1" /></MantineProvider>);
     fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
     // Confirm is disabled until a reason is typed.
     const confirm = screen.getByRole("button", { name: /confirm dismiss/i });
@@ -99,7 +101,7 @@ describe("ClaimsPanel", () => {
       is_owner: true,
       sections: [SECTION({ findings: [], job: { status: "pending", error: null } })],
     };
-    render(<ClaimsPanel id="ws1" />);
+    render(<MantineProvider theme={theme} defaultColorScheme="dark"><ClaimsPanel id="ws1" /></MantineProvider>);
     expect(screen.getByText(/analyzing/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /reanalyze/i }));
     expect(h.reanalyze.mutate).toHaveBeenCalledWith(1);
@@ -107,7 +109,7 @@ describe("ClaimsPanel", () => {
 
   it("renders the empty state when there are no sections", () => {
     h.ann.data = { is_owner: true, sections: [] };
-    render(<ClaimsPanel id="ws1" />);
+    render(<MantineProvider theme={theme} defaultColorScheme="dark"><ClaimsPanel id="ws1" /></MantineProvider>);
     expect(screen.getByText(/no draft yet/i)).toBeInTheDocument();
   });
 });
