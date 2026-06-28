@@ -5,7 +5,6 @@ import "@mantine/core/styles.css";
 import "@vscode/codicons/dist/codicon.css";
 
 import { App } from "./App";
-import "./styles/cockpit.css";
 import "./theme/theme.css";
 
 createRoot(document.getElementById("root")!).render(

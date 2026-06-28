@@ -1,7 +1,18 @@
+import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { SourceViewer, type CitationSource } from "./SourceViewer";
+
+const renderSV = (ui: React.ReactElement) =>
+  render(ui, {
+    wrapper: ({ children }) => (
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        {children}
+      </MantineProvider>
+    ),
+  });
 
 function source(over: Partial<CitationSource> = {}): CitationSource {
   return {
@@ -28,7 +39,7 @@ describe("SourceViewer", () => {
   const noop = () => {};
 
   it("wraps the highlight span in a <mark>", () => {
-    const { container } = render(
+    const { container } = renderSV(
       <SourceViewer source={source()} pinned={false} onClose={noop} onPin={noop} onNavigate={noop} />,
     );
     const mark = container.querySelector("mark");
@@ -38,7 +49,7 @@ describe("SourceViewer", () => {
   it("falls back to plain text for a malformed (reversed/out-of-range) highlight", () => {
     // SP2a-4b will derive offsets client-side; a bad span must not duplicate or
     // drop text — render the source whole, with no <mark>.
-    const { container } = render(
+    const { container } = renderSV(
       <SourceViewer
         source={source({ text: "abcNEEDLEdef", highlight: [9, 3] })}
         pinned={false}
@@ -52,7 +63,7 @@ describe("SourceViewer", () => {
   });
 
   it("renders the source line, claim and position", () => {
-    render(
+    renderSV(
       <SourceViewer source={source()} pinned={false} onClose={noop} onPin={noop} onNavigate={noop} />,
     );
     expect(screen.getByText(/The Smith 2021 Study/)).toBeInTheDocument();
@@ -61,7 +72,7 @@ describe("SourceViewer", () => {
   });
 
   it("shows the not-available notice when no_text", () => {
-    render(
+    renderSV(
       <SourceViewer
         source={source({ no_text: true, text: "", highlight: null })}
         pinned={false}
@@ -74,7 +85,7 @@ describe("SourceViewer", () => {
   });
 
   it("renders a tombstoned banner", () => {
-    render(
+    renderSV(
       <SourceViewer
         source={source({ tombstoned: true })}
         pinned={false}
@@ -88,7 +99,7 @@ describe("SourceViewer", () => {
 
   it("fires onNavigate with next_ev and disables prev when prev_ev is null", () => {
     const onNavigate = vi.fn();
-    render(
+    renderSV(
       <SourceViewer source={source()} pinned={false} onClose={noop} onPin={noop} onNavigate={onNavigate} />,
     );
     expect(screen.getByRole("button", { name: /previous citation/i })).toBeDisabled();
@@ -99,7 +110,7 @@ describe("SourceViewer", () => {
   it("shows Pin when not pinned and hides it when pinned; Close always fires", () => {
     const onPin = vi.fn();
     const onClose = vi.fn();
-    const { rerender } = render(
+    const { rerender } = renderSV(
       <SourceViewer source={source()} pinned={false} onClose={onClose} onPin={onPin} onNavigate={noop} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /pin source/i }));

@@ -1,4 +1,7 @@
+import { Box, Button, Group, Text } from "@mantine/core";
+
 import type { components } from "../api/schema.gen";
+import styles from "./CockpitPanels.module.css";
 
 export type CitationSource = components["schemas"]["CitationSourceOut"];
 
@@ -28,62 +31,80 @@ export function SourceViewer({ source, pinned, onClose, onPin, onNavigate }: Pro
       ? highlight
       : null;
   return (
-    <aside className="source-viewer" aria-label="Cited source">
-      <header className="source-viewer-head">
-        <span className="source-viewer-title">{source.source_line}</span>
+    <Box
+      component="aside"
+      data-testid="source-viewer"
+      aria-label="Cited source"
+      p="sm"
+      style={{
+        border: "1px solid var(--app-border)",
+        borderRadius: 8,
+        background: "var(--app-sidebar)",
+        boxShadow: "var(--app-shadow-sm)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.5rem",
+      }}
+    >
+      <Group gap="sm" align="baseline" wrap="wrap">
+        <Text fw={600}>{source.source_line}</Text>
         {source.total > 0 && (
-          <span className="source-viewer-pos">
+          <Text size="sm" c="dimmed">
             {source.index} of {source.total}
-          </span>
+          </Text>
         )}
-        <div className="source-viewer-actions">
-          <button
-            type="button"
+        <Group gap={4} ml="auto">
+          <Button
+            size="xs"
+            variant="default"
             aria-label="Previous citation"
             disabled={!source.prev_ev}
             onClick={() => source.prev_ev && onNavigate(source.prev_ev)}
           >
             ‹
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            size="xs"
+            variant="default"
             aria-label="Next citation"
             disabled={!source.next_ev}
             onClick={() => source.next_ev && onNavigate(source.next_ev)}
           >
             ›
-          </button>
+          </Button>
           {!pinned && (
-            <button type="button" aria-label="Pin source" onClick={onPin}>
+            <Button size="xs" variant="default" aria-label="Pin source" onClick={onPin}>
               ⇱ Pin
-            </button>
+            </Button>
           )}
-          <button type="button" aria-label="Close source" onClick={onClose}>
+          <Button size="xs" variant="default" aria-label="Close source" onClick={onClose}>
             ✕
-          </button>
-        </div>
-      </header>
+          </Button>
+        </Group>
+      </Group>
 
       {source.tombstoned && (
-        <p className="source-viewer-tombstoned" role="note">
+        <Text role="note" className={styles.sourceTombstoned}>
           This reference has been removed.
-        </p>
+        </Text>
       )}
       {source.stance && (
-        <p className="source-viewer-meta">
-          <span className={`source-viewer-stance stance-${source.stance}`}>{source.stance}</span>
-        </p>
+        <Text span className={styles.sourceStance}>
+          {source.stance}
+        </Text>
       )}
       {source.claim && (
-        <p className="source-viewer-claim">
+        <Text size="sm" c="dimmed">
           <strong>Claim:</strong> {source.claim}
-        </p>
+        </Text>
       )}
 
       {source.no_text ? (
-        <p className="source-viewer-empty">The source text isn’t available yet.</p>
+        <Text c="dimmed" size="sm">
+          The source text isn’t available yet.
+        </Text>
       ) : (
-        <div className="source-viewer-body">
+        <Box className={styles.sourceBody}>
           {validHighlight ? (
             <>
               {text.slice(0, validHighlight[0])}
@@ -93,10 +114,14 @@ export function SourceViewer({ source, pinned, onClose, onPin, onNavigate }: Pro
           ) : (
             text
           )}
-        </div>
+        </Box>
       )}
 
-      {source.note && <p className="source-viewer-note">{source.note}</p>}
-    </aside>
+      {source.note && (
+        <Text c="dimmed" size="sm">
+          {source.note}
+        </Text>
+      )}
+    </Box>
   );
 }

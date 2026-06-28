@@ -1,4 +1,4 @@
-import { Button, Modal, Select, TextInput } from "@mantine/core";
+import { Button, Modal, Select, Text, TextInput } from "@mantine/core";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -58,7 +58,7 @@ export function WorkspaceSettingsModal({
         onChange={(v) => setCitationStyle(v ?? "vancouver")}
         allowDeselect={false}
       />
-      {update.isError ? <p className="library-error">Could not save settings.</p> : null}
+      {update.isError ? <Text c="red" size="sm">Could not save settings.</Text> : null}
       <Button
         disabled={update.isPending}
         onClick={() =>
@@ -80,7 +80,7 @@ export function WorkspaceSettingsModal({
           Soft-deletes the workspace and scrubs uploaded file bytes. Audit rows are kept. This
           cannot be undone.
         </p>
-        {del.isError ? <p className="library-error">Could not delete workspace.</p> : null}
+        {del.isError ? <Text c="red" size="sm">Could not delete workspace.</Text> : null}
         <Button
           color="red"
           variant="outline"
