@@ -1,3 +1,5 @@
+import { Box, Button, Group, ScrollArea, Tabs } from "@mantine/core";
+
 import { useCitationAudit } from "../api/audit";
 import { useAnnotations } from "../api/annotations";
 import { useProblems } from "../api/problems";
@@ -36,77 +38,47 @@ export function BottomPanel({
     annotations.data?.sections.reduce((n, s) => n + (s.findings?.length ?? 0), 0) ?? 0;
 
   return (
-    <section className="bottom-panel" aria-label="Workspace panel">
-      <div className="bottom-panel-bar">
-        <div role="tablist" aria-label="Panel" className="bottom-panel-tabs">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "inbox"}
-            onClick={() => onTab("inbox")}
-          >
-            Inbox {inboxCount}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "problems"}
-            onClick={() => onTab("problems")}
-          >
-            Problems {problemsCount}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "activity"}
-            onClick={() => onTab("activity")}
-          >
-            Activity
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "library"}
-            onClick={() => onTab("library")}
-          >
-            Library
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "citations"}
-            onClick={() => onTab("citations")}
-          >
-            Citations {auditCount}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "claims"}
-            onClick={() => onTab("claims")}
-          >
-            Claims {claimsCount}
-          </button>
-        </div>
-        <button
-          type="button"
-          className="bottom-panel-toggle"
+    <Box
+      component="section"
+      aria-label="Workspace panel"
+      style={{ borderTop: "1px solid var(--app-border)", background: "var(--app-editor)" }}
+    >
+      <Group
+        justify="space-between"
+        gap="sm"
+        px="sm"
+        py={4}
+        style={{ background: "var(--app-tabbar)" }}
+      >
+        <Tabs value={activeTab} onChange={(v) => v && onTab(v as BottomTab)}>
+          <Tabs.List aria-label="Panel">
+            <Tabs.Tab value="inbox">Inbox {inboxCount}</Tabs.Tab>
+            <Tabs.Tab value="problems">Problems {problemsCount}</Tabs.Tab>
+            <Tabs.Tab value="activity">Activity</Tabs.Tab>
+            <Tabs.Tab value="library">Library</Tabs.Tab>
+            <Tabs.Tab value="citations">Citations {auditCount}</Tabs.Tab>
+            <Tabs.Tab value="claims">Claims {claimsCount}</Tabs.Tab>
+          </Tabs.List>
+        </Tabs>
+        <Button
+          variant="subtle"
+          size="xs"
           aria-expanded={!collapsed}
           onClick={onToggleCollapsed}
         >
           {collapsed ? "Expand panel" : "Collapse panel"}
-        </button>
-      </div>
+        </Button>
+      </Group>
       {!collapsed && (
-        <div className="bottom-panel-body">
+        <ScrollArea.Autosize mah="14rem" p="sm">
           {activeTab === "inbox" && <InboxPanel id={id} count={inboxCount} />}
           {activeTab === "problems" && <ProblemsPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "activity" && <ActivityPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "library" && <LibraryPanel id={id} />}
           {activeTab === "citations" && <CitationsPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "claims" && <ClaimsPanel id={id} />}
-        </div>
+        </ScrollArea.Autosize>
       )}
-    </section>
+    </Box>
   );
 }

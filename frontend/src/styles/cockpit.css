@@ -127,47 +127,6 @@
   padding: 0.4rem;
 }
 
-/* bottom-panel region + Problems dashboard — IDE panel. */
-.bottom-panel {
-  border-top: 1px solid var(--app-border);
-  margin-top: 0;
-  background: var(--app-editor);
-}
-.bottom-panel-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.25rem 0.5rem;
-  background: var(--app-tabbar);
-}
-.bottom-panel-tabs {
-  display: flex;
-  gap: 0.25rem;
-}
-.bottom-panel-tabs [role="tab"] {
-  border: none;
-  background: transparent;
-  padding: 0.2rem 0.5rem;
-  cursor: pointer;
-  color: var(--app-muted);
-}
-.bottom-panel-tabs [role="tab"][aria-selected="true"] {
-  color: var(--app-text);
-  font-weight: 600;
-  border-bottom: 2px solid var(--app-accent);
-}
-.bottom-panel-toggle {
-  border: none;
-  background: transparent;
-  color: var(--app-muted);
-  cursor: pointer;
-}
-.bottom-panel-body {
-  max-height: 14rem;
-  overflow-y: auto;
-  padding: 0.5rem;
-}
 .problems-group-title {
   font-size: 0.85rem;
   text-transform: uppercase;
