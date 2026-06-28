@@ -311,7 +311,7 @@ function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profile
 
 - [ ] **Step 2: Run the Settings test (expect green, no edits)**
 
-Run: `pnpm exec vitest run src/routes/Settings.test.tsx`
+Run (from `frontend/`): `pnpm exec vitest run src/routes/Settings.test.tsx`
 Expected: PASS (all 8 tests) with NO edits to the test file. Confirms: sections render from the read-model; `findByDisplayValue("Pär")` resolves the name `TextInput`; `getByText("p@ki.se")` resolves the `<Code>`; the two section headings resolve via `getByRole("heading", …)` (Mantine `Title order={2}` → `<h2>`); the checkboxes resolve via `getByRole("checkbox", { name: /Group A|B/ })` (Mantine `Checkbox` label association); the name/password/subscriptions mutations POST/PUT the same bodies; `findByText(/password changed/i)` and `findByText(/current password is incorrect/i)` resolve the `role="status"`/`role="alert"` `Text`. The scoped `/current password/i` and `/new password/i` label queries each match exactly one `PasswordInput` (the toggle's `aria-label="Toggle password visibility"` matches neither).
 
 If — contrary to the analysis — a password query reports a multi-match, the only sanctioned fix is appending `{ selector: "input" }` to that query (as in Slice 1); do not weaken anything else.
@@ -335,7 +335,7 @@ pnpm exec tsc --noEmit
 pnpm exec vitest run
 pnpm build
 ```
-Expected: tsc clean (no orphaned `styles` import; `React.ReactNode` is a global type, no import needed); full vitest green; `tsc && vite build` succeeds.
+Expected: tsc clean (no orphaned `styles` import; `ReactNode` is imported as a type per Step 1); full vitest green; `tsc && vite build` succeeds.
 
 - [ ] **Step 5: Teardown grep (gate)**
 
@@ -360,7 +360,7 @@ git commit -m "feat(frontend): re-skin Account Settings to Mantine; drop Setting
 2. `pnpm exec vitest run` full green (`Settings.test.tsx` unchanged).
 3. `pnpm build` succeeds.
 4. Teardown grep: `Settings.module.css` unreferenced (Task 1 Step 5).
-5. **Visual:** the backendless Playwright route-mock harness ([[reference_spa_visual_check]]) over `/settings`. Mock `/api/me/settings` returning the `AccountSettings` shape `{ name, email, is_admin, google_oidc_enabled, google_linked, has_password, profiles: [{id,name,subscribed}] }` (mirror `Settings.test.tsx`'s `SETTINGS`). Settings is rendered inside the authed AppShell, so also mock `/api/me` as `{ user: {…}, capabilities: { admin: false } }` and provide benign fallbacks so the shell doesn't crash. Confirm the four section cards, the display-name field, the two `PasswordInput` reveal eyes, the subscription checkboxes, and the calm-teal styling.
+5. **Visual:** the backendless Playwright route-mock harness ([[reference_spa_visual_check]]) over `/me` (the Settings route — `router.tsx` mounts `Settings` at `path: "me"`, NOT `/settings`). Mock `/api/me/settings` returning the `AccountSettings` shape `{ name, email, is_admin, google_oidc_enabled, google_linked, has_password, profiles: [{id,name,subscribed}] }` (mirror `Settings.test.tsx`'s `SETTINGS`). Settings is rendered inside the authed AppShell, so also mock `/api/me` as `{ user: {…}, capabilities: { admin: false } }` and provide benign fallbacks so the shell doesn't crash. Confirm the four section cards, the display-name field, the two `PasswordInput` reveal eyes, the subscription checkboxes, and the calm-teal styling.
 6. Independent diff-vs-parity review before merge: confirm no copy drift (section titles, labels, placeholder "e.g. Pär Larsson", "Monday-morning digest" copy, button labels, status/error strings), POST/PUT bodies + the subscriptions reconcile-from-server logic intact, status/error roles preserved, native Google POST `action`/`method`/hidden-input intact, and no Mantine affordance change (`disabled` not `loading`; `Checkbox` not `Checkbox.Group` — the Set<number> state model is preserved).
 
 ## Finishing
