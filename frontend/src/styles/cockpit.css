@@ -1,7 +1,0 @@
-/* Cockpit layout: editor (+ center peek) | pinned source. The Outline moved to the
-   shell sidebar (CockpitSidebar) in Phase 3a. Editor layout now lives in
-   CockpitPanels.module.css (.editorGrid / .editorMain / .sidePane / .composerPane).
-   Tokens come from theme/theme.css (--app-*). */
-
-/* select-to-cite: all cite-composer-* rules moved to CockpitPanels.module.css
-   (.citeChunk / .citeConfirm) in Slice 2c. This file now contains no rule blocks. */
