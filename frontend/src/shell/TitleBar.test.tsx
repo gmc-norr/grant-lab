@@ -68,3 +68,39 @@ it("shows the signed-in email chip and a working sign-out", async () => {
   await waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));
   vi.unstubAllGlobals();
 });
+
+function renderWithProps(path: string, props: {
+  hasRightPane?: boolean;
+  chatCollapsed?: boolean;
+  onToggleChat?: () => void;
+}) {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(ME as never);
+  const qc = new QueryClient();
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[path]}>
+        <TitleBar {...props} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+it("shows a chat-toggle on cockpit routes and calls onToggleChat when clicked", async () => {
+  const onToggleChat = vi.fn();
+  renderWithProps("/cockpit/ws-1", { hasRightPane: true, chatCollapsed: false, onToggleChat });
+  const btn = await screen.findByRole("button", { name: "Toggle chat panel" });
+  expect(btn).toHaveAttribute("aria-pressed", "true"); // expanded → pressed
+  await userEvent.click(btn);
+  expect(onToggleChat).toHaveBeenCalledTimes(1);
+});
+
+it("reflects collapsed state on the chat-toggle (aria-pressed=false when collapsed)", async () => {
+  renderWithProps("/cockpit/ws-1", { hasRightPane: true, chatCollapsed: true, onToggleChat: vi.fn() });
+  const btn = await screen.findByRole("button", { name: "Toggle chat panel" });
+  expect(btn).toHaveAttribute("aria-pressed", "false");
+});
+
+it("omits the chat-toggle when the route has no right pane", () => {
+  renderWithProps("/", { hasRightPane: false, onToggleChat: vi.fn() });
+  expect(screen.queryByRole("button", { name: "Toggle chat panel" })).toBeNull();
+});

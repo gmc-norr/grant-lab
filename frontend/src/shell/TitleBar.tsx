@@ -9,7 +9,15 @@ import { WorkspaceSettingsModal } from "../cockpit/WorkspaceSettingsModal";
 import { BrandMark } from "./BrandMark";
 import styles from "./TitleBar.module.css";
 
-export function TitleBar() {
+export function TitleBar({
+  hasRightPane = false,
+  chatCollapsed = false,
+  onToggleChat,
+}: {
+  hasRightPane?: boolean;
+  chatCollapsed?: boolean;
+  onToggleChat?: () => void;
+} = {}) {
   const { pathname } = useLocation();
   const id = cockpitIdFromPath(pathname);
   const meta = useCockpitMeta(id).data;
@@ -48,6 +56,20 @@ export function TitleBar() {
         <WorkspaceSettingsModal id={id} opened onClose={() => setSettingsOpen(false)} />
       )}
       <span className={styles.account}>
+        {hasRightPane && (
+          <button
+            type="button"
+            className={styles.paneToggle}
+            aria-label="Toggle chat panel"
+            aria-pressed={!chatCollapsed}
+            onClick={onToggleChat}
+          >
+            <span
+              className={`codicon codicon-layout-sidebar-right${chatCollapsed ? "-off" : ""}`}
+              aria-hidden="true"
+            />
+          </button>
+        )}
         {email && <span className={styles.chip} title={email}>{email}</span>}
         <button type="button" className={styles.signout} onClick={signOut} disabled={logout.isPending}>
           Sign out

@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { Tooltip } from "@mantine/core";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
@@ -14,8 +15,26 @@ function Glyph({ icon }: { icon: string }) {
   );
 }
 
-function Item({ item, active }: { item: ActivityItem; active?: boolean }) {
+function Item({
+  item,
+  active,
+  onToggleSidebar,
+}: {
+  item: ActivityItem;
+  active?: boolean;
+  onToggleSidebar?: () => void;
+}) {
   const glyph = <Glyph icon={item.icon} />;
+  // VS-Code behaviour: clicking the ALREADY-ACTIVE item toggles the sidebar instead
+  // of navigating. preventDefault stops react-router's Link nav (it honours
+  // defaultPrevented) so we don't re-navigate to the bare route and drop ?tab/?sec.
+  // Only fires when this route actually has a sidebar (onToggleSidebar provided).
+  const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (active && onToggleSidebar) {
+      e.preventDefault();
+      onToggleSidebar();
+    }
+  };
   let body;
   if (item.kind !== "spa") {
     body = (
@@ -34,6 +53,7 @@ function Item({ item, active }: { item: ActivityItem; active?: boolean }) {
         aria-label={item.label}
         aria-current={active ? "page" : undefined}
         className={cls}
+        onClick={handleClick}
       >
         {glyph}
       </Link>
@@ -59,11 +79,12 @@ function Item({ item, active }: { item: ActivityItem; active?: boolean }) {
   );
 }
 
-export function ActivityBar() {
+export function ActivityBar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const { pathname } = useLocation();
   const { data: session } = useSession();
   const isAdmin = Boolean(session?.capabilities.admin);
   const wsId = cockpitIdFromPath(pathname);
+  const onCalls = pathname === "/";
   const onCockpitList = pathname.startsWith("/cockpit") && !wsId;
   const bottom = ACTIVITY_BOTTOM.filter((it) => it.id !== "admin" || isAdmin);
   return (
@@ -71,7 +92,9 @@ export function ActivityBar() {
       <div className={styles.group}>
         {ACTIVITY_TOP.map((it) =>
           it.id === "workspaces" ? (
-            <Item key={it.id} item={it} active={onCockpitList} />
+            <Item key={it.id} item={it} active={onCockpitList} onToggleSidebar={onToggleSidebar} />
+          ) : it.id === "calls" ? (
+            <Item key={it.id} item={it} active={onCalls} onToggleSidebar={onToggleSidebar} />
           ) : (
             <Item key={it.id} item={it} />
           ),
@@ -85,6 +108,8 @@ export function ActivityBar() {
               kind: "spa",
               to: `/cockpit/${wsId}`,
             }}
+            active
+            onToggleSidebar={onToggleSidebar}
           />
         )}
       </div>

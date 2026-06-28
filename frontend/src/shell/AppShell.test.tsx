@@ -152,3 +152,29 @@ it("REMOUNTS the cockpit subtree (main + right pane) on a workspace-id change bu
   expect(paneMounts).toBe(2);
   expect(mainMounts).toBe(2);
 });
+
+it("renders a resize handle beside the sidebar when a sidebar is present", () => {
+  function TestSidebar() {
+    return <p>SIDEBAR CONTENT</p>;
+  }
+  renderShellWithRoutes("/", [
+    { index: true, element: <p>BODY</p>, handle: { Sidebar: TestSidebar } },
+  ]);
+  expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
+});
+
+it("renders a resize handle beside the right pane when one is present", () => {
+  renderShellWithRoutes("/", [
+    {
+      index: true,
+      element: <p>BODY</p>,
+      handle: { RightPane: () => <aside aria-label="Chat" /> },
+    },
+  ]);
+  expect(screen.getByRole("separator", { name: "Resize chat" })).toBeInTheDocument();
+});
+
+it("renders no resize handle when neither a sidebar nor a right pane is present", () => {
+  renderShellAt("/");
+  expect(screen.queryByRole("separator")).toBeNull();
+});
