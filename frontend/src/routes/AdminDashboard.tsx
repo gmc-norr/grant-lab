@@ -1,3 +1,4 @@
+import { Alert, Anchor, Box, Button, Card, Code, Group, Table, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -8,7 +9,6 @@ import {
   useRerank,
   useSendDigest,
 } from "../api/adminDashboard";
-import styles from "./AdminDashboard.module.css";
 
 // Ported verbatim from admin.html _ok_msgs / _err_msgs (admin.html:23-31).
 const OK_FETCH = "Fetch triggered — the source will refresh shortly.";
@@ -30,8 +30,13 @@ export function AdminDashboard() {
   const reenable = useReenableDigestUser();
   const fetchSource = useFetchSource();
 
-  if (isLoading) return <p>Loading…</p>;
-  if (isError || !data) return <main role="alert"><p>Couldn't load the admin dashboard.</p></main>;
+  if (isLoading) return <Text p="md">Loading…</Text>;
+  if (isError || !data)
+    return (
+      <Box component="main" role="alert" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
+        <Text>Couldn't load the admin dashboard.</Text>
+      </Box>
+    );
 
   const d = data;
 
@@ -61,109 +66,112 @@ export function AdminDashboard() {
       { onSuccess: () => setBanner({ kind: "ok", text: OK_REENABLE }) });
 
   return (
-    <main className={styles.page}>
-      <h1>Operational health</h1>
+    <Box component="main" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
+      <Title order={1}>Operational health</Title>
       {banner && (
-        <div role={banner.kind === "ok" ? "status" : "alert"}
-             className={banner.kind === "ok" ? styles.bannerOk : styles.bannerWarn}>
+        <Alert
+          role={banner.kind === "ok" ? "status" : "alert"}
+          color={banner.kind === "ok" ? "teal" : "red"}
+          mb="md"
+        >
           {banner.text}
-        </div>
+        </Alert>
       )}
 
-      <section className={styles.card}>
-        <h2>Source health</h2>
-        <table className={styles.table}>
-          <thead><tr><th>Source</th><th>Last fetched</th><th>Calls</th><th>Actions</th></tr></thead>
-          <tbody>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Source health</Title>
+        <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
+          <Table.Thead><Table.Tr><Table.Th>Source</Table.Th><Table.Th>Last fetched</Table.Th><Table.Th>Calls</Table.Th><Table.Th>Actions</Table.Th></Table.Tr></Table.Thead>
+          <Table.Tbody>
             {d.sources.map((s) => (
-              <tr key={s.slug}>
-                <td>{s.name} <code className={styles.muted}>{s.slug}</code></td>
-                <td>{fmtDt(s.last_fetched_at) ?? <span className={styles.muted}>never</span>}</td>
-                <td><strong>{s.call_count}</strong></td>
-                <td>
-                  <button type="button" className={styles.secondary} disabled={fetchSource.isPending}
+              <Table.Tr key={s.slug}>
+                <Table.Td>{s.name} <Code>{s.slug}</Code></Table.Td>
+                <Table.Td>{fmtDt(s.last_fetched_at) ?? <Text span c="dimmed">never</Text>}</Table.Td>
+                <Table.Td><Text span fw={700}>{s.call_count}</Text></Table.Td>
+                <Table.Td>
+                  <Button size="xs" variant="default" disabled={fetchSource.isPending}
                           onClick={() => onFetch(s.slug, s.name)}>
                     Fetch now
-                  </button>
-                </td>
-              </tr>
+                  </Button>
+                </Table.Td>
+              </Table.Tr>
             ))}
-          </tbody>
-        </table>
-      </section>
+          </Table.Tbody>
+        </Table>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Ranking queue</h2>
-        <div className={styles.cards}>
-          <div className={styles.summary}><span>Pending</span><strong>{d.queue_counts.pending}</strong></div>
-          <div className={styles.summary}><span>Running</span><strong>{d.queue_counts.running}</strong></div>
-          <div className={styles.summary}><span>Done</span><strong>{d.queue_counts.done}</strong></div>
-          <div className={styles.summary}><span>Failed</span><strong>{d.queue_counts.failed}</strong></div>
-        </div>
-        <button type="button" className={styles.secondary} disabled={rerank.isPending} onClick={onRerank}>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Ranking queue</Title>
+        <Group gap="lg" mb="sm">
+          <Box><Text c="dimmed" size="xs">Pending</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.pending}</Text></Box>
+          <Box><Text c="dimmed" size="xs">Running</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.running}</Text></Box>
+          <Box><Text c="dimmed" size="xs">Done</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.done}</Text></Box>
+          <Box><Text c="dimmed" size="xs">Failed</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.failed}</Text></Box>
+        </Group>
+        <Button size="xs" variant="default" disabled={rerank.isPending} onClick={onRerank}>
           Re-rank everything (last {d.backfill_days} days × active profiles)
-        </button>
-        <p className={styles.muted}>
+        </Button>
+        <Text c="dimmed" size="sm" mt="xs">
           Enqueues up to ~{d.rerank_estimate} ranking jobs ({d.active_profiles_count} active
           profiles × {d.recent_calls_count} recent calls; upper bound).
-        </p>
-      </section>
+        </Text>
+      </Card>
 
       {d.calibration_warning && (
-        <div role="alert" className={styles.bannerWarn}>
-          <strong>Embedding thresholds uncalibrated.</strong> {d.calibration_warning}
-        </div>
+        <Alert role="alert" color="yellow" mb="md">
+          <Text span fw={700}>Embedding thresholds uncalibrated.</Text> {d.calibration_warning}
+        </Alert>
       )}
 
-      <section className={styles.card}>
-        <h2>Embedding coverage</h2>
-        <dl className={styles.dl}>
-          <dt>Calls</dt>
-          <dd><strong>{d.embedding_coverage.call_embedded}/{d.embedding_coverage.call_total} embedded</strong>{" "}
-            <span className={styles.muted}>({d.embedding_coverage.call_stale} stale, model <code>{d.embedding_coverage.current_model}</code>)</span></dd>
-          <dt>Profiles</dt>
-          <dd><strong>{d.embedding_coverage.profile_embedded}/{d.embedding_coverage.profile_total} embedded</strong>{" "}
-            <span className={styles.muted}>({d.embedding_coverage.profile_stale} stale, model <code>{d.embedding_coverage.current_model}</code>)</span></dd>
-        </dl>
-      </section>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Embedding coverage</Title>
+        <Box component="dl" m={0}>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Calls</Text>
+          <Text component="dd" size="sm" m={0}><Text span fw={700}>{d.embedding_coverage.call_embedded}/{d.embedding_coverage.call_total} embedded</Text>{" "}
+            <Text span c="dimmed">({d.embedding_coverage.call_stale} stale, model <Code>{d.embedding_coverage.current_model}</Code>)</Text></Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Profiles</Text>
+          <Text component="dd" size="sm" m={0}><Text span fw={700}>{d.embedding_coverage.profile_embedded}/{d.embedding_coverage.profile_total} embedded</Text>{" "}
+            <Text span c="dimmed">({d.embedding_coverage.profile_stale} stale, model <Code>{d.embedding_coverage.current_model}</Code>)</Text></Text>
+        </Box>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Digest (weekly)</h2>
-        <dl className={styles.dl}>
-          <dt>Last digest sent</dt>
-          <dd>{fmtDt(d.digest.last_sent_at) ?? <span className={styles.muted}>No digests sent</span>}</dd>
-          <dt>Runs this week</dt><dd>{d.digest.runs_this_week}</dd>
-          <dt>Disabled users (3+ bounces)</dt><dd>{d.digest.disabled_users}</dd>
-        </dl>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Digest (weekly)</Title>
+        <Box component="dl" m={0}>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Last digest sent</Text>
+          <Text component="dd" size="sm" m={0}>{fmtDt(d.digest.last_sent_at) ?? <Text span c="dimmed">No digests sent</Text>}</Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Runs this week</Text><Text component="dd" size="sm" m={0}>{d.digest.runs_this_week}</Text>
+          <Text component="dt" size="xs" c="dimmed" mt="xs">Disabled users (3+ bounces)</Text><Text component="dd" size="sm" m={0}>{d.digest.disabled_users}</Text>
+        </Box>
         {d.digest.disabled_user_rows.length > 0 ? (
-          <ul className={styles.disabled}>
+          <Box component="ul" p={0}>
             {d.digest.disabled_user_rows.map((u) => (
-              <li key={u.id}>
-                {u.email} <span className={styles.muted}>disabled {fmtDt(u.disabled_at)}</span>
-                <button type="button" className={styles.secondary} disabled={reenable.isPending}
-                        onClick={() => onReenable(u.id)}>Re-enable</button>
-              </li>
+              <Group component="li" key={u.id} gap="xs" align="center" mt="xs">
+                {u.email} <Text span c="dimmed">disabled {fmtDt(u.disabled_at)}</Text>
+                <Button size="xs" variant="default" disabled={reenable.isPending}
+                        onClick={() => onReenable(u.id)}>Re-enable</Button>
+              </Group>
             ))}
-          </ul>
-        ) : <p className={styles.muted}>No disabled users.</p>}
-        <button type="button" className={styles.secondary} disabled={sendDigest.isPending} onClick={onSendDigest}>
+          </Box>
+        ) : <Text c="dimmed" size="sm">No disabled users.</Text>}
+        <Button size="xs" variant="default" mt="sm" disabled={sendDigest.isPending} onClick={onSendDigest}>
           Send digest now
-        </button>
-      </section>
+        </Button>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Ranking quality — Kendall's τ (last run)</h2>
-        <p><Link to="/admin/golden-set">Manage golden set →</Link></p>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Ranking quality — Kendall's τ (last run)</Title>
+        <Text mb="sm"><Anchor component={Link} to="/admin/golden-set">Manage golden set →</Anchor></Text>
         {d.golden_set_report ? (
-          <dl className={styles.dl}>
-            <dt>Curated triples</dt><dd>{d.golden_set_report.n_fixture}</dd>
-            <dt>τ (n={d.golden_set_report.n_compared})</dt>
-            <dd>{d.golden_set_report.tau !== null ? <strong>{d.golden_set_report.tau.toFixed(3)}</strong> : "—"}</dd>
-          </dl>
+          <Box component="dl" m={0}>
+            <Text component="dt" size="xs" c="dimmed" mt="xs">Curated triples</Text><Text component="dd" size="sm" m={0}>{d.golden_set_report.n_fixture}</Text>
+            <Text component="dt" size="xs" c="dimmed" mt="xs">τ (n={d.golden_set_report.n_compared})</Text>
+            <Text component="dd" size="sm" m={0}>{d.golden_set_report.tau !== null ? <Text span fw={700}>{d.golden_set_report.tau.toFixed(3)}</Text> : "—"}</Text>
+          </Box>
         ) : (
-          <p className={styles.muted}>Golden-set evaluation hasn't run yet — happens Mondays at 06:00 Europe/Stockholm.</p>
+          <Text c="dimmed" size="sm">Golden-set evaluation hasn't run yet — happens Mondays at 06:00 Europe/Stockholm.</Text>
         )}
-      </section>
-    </main>
+      </Card>
+    </Box>
   );
 }
