@@ -1,3 +1,5 @@
+import { Stack, Text } from "@mantine/core";
+
 import { useDraft, useSpec } from "../api/editor";
 import { ProposalReview } from "./ProposalReview";
 
@@ -23,10 +25,10 @@ export function InboxPanel({ id, count }: { id: string; count: number }) {
   const specLocked = Boolean(spec.data?.locked);
 
   if (count === 0) {
-    return <p className="inbox-empty">Nothing pending.</p>;
+    return <Text c="dimmed" p="sm">Nothing pending.</Text>;
   }
   return (
-    <div className="inbox-panel">
+    <Stack gap="md">
       <ProposalReview workspaceId={id} artifact="draft" currentSections={draftSections} />
       <ProposalReview
         workspaceId={id}
@@ -34,6 +36,6 @@ export function InboxPanel({ id, count }: { id: string; count: number }) {
         currentSections={specSections}
         locked={specLocked}
       />
-    </div>
+    </Stack>
   );
 }
