@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import { Outlet, useLocation, useMatches } from "react-router-dom";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
 import { cockpitIdFromPath } from "../cockpit/cockpitNav";
 import { ActivityBar } from "./ActivityBar";
@@ -18,6 +19,12 @@ type RightPaneHandle = { RightPane?: ComponentType };
 // (the 404) render full-width. A route may also declare `handle: { RightPane }`
 // to mount a right-pane region (e.g. CockpitChat); the component renders its own
 // landmark element.
+//
+// The sidebar/main/right-pane regions live inside a horizontal react-resizable
+// PanelGroup so the side edges are draggable; widths persist via autoSaveId
+// (localStorage, keyed by the set of panel ids → cockpit {sidebar,main,rightpane}
+// and the list routes {sidebar,main} persist independently). The ActivityBar stays
+// OUTSIDE the group (fixed 48px, like VS Code — never resizable).
 export function AppShell() {
   const matches = useMatches();
   const { pathname } = useLocation();
@@ -40,7 +47,9 @@ export function AppShell() {
   // The main and right-pane regions are SIBLINGS, so they need DISTINCT keys (a shared
   // key collides → React warns + reuses one). Both keys carry the same cockpit id, so
   // both regions remount together on a workspace change but reconcile on a query/section
-  // change. Non-cockpit routes resolve to "" → stable per-region keys.
+  // change. Non-cockpit routes resolve to "" → stable per-region keys. The keys live on
+  // the INNER content, NOT the <Panel>s, so a workspace switch never remounts the panels
+  // (which would drop their persisted sizes).
   const cockpitId = cockpitIdFromPath(pathname);
   const idSuffix = cockpitId ? `cockpit:${cockpitId}` : "shell";
 
@@ -49,15 +58,31 @@ export function AppShell() {
       <TitleBar />
       <div className={styles.body}>
         <ActivityBar />
-        {SidebarContent && (
-          <Sidebar>
-            <SidebarContent />
-          </Sidebar>
-        )}
-        <div className={styles.main} key={`main:${idSuffix}`}>
-          <Outlet />
-        </div>
-        {RightPaneContent && <RightPaneContent key={`pane:${idSuffix}`} />}
+        <PanelGroup direction="horizontal" autoSaveId="cm-shell" className={styles.panes}>
+          {SidebarContent && (
+            <>
+              <Panel id="sidebar" order={1} minSize={12} defaultSize={18}>
+                <Sidebar>
+                  <SidebarContent />
+                </Sidebar>
+              </Panel>
+              <PanelResizeHandle className={styles.handle} aria-label="Resize sidebar" />
+            </>
+          )}
+          <Panel id="main" order={2} minSize={30}>
+            <div className={styles.main} key={`main:${idSuffix}`}>
+              <Outlet />
+            </div>
+          </Panel>
+          {RightPaneContent && (
+            <>
+              <PanelResizeHandle className={styles.handle} aria-label="Resize chat" />
+              <Panel id="rightpane" order={3} minSize={15} defaultSize={22}>
+                <RightPaneContent key={`pane:${idSuffix}`} />
+              </Panel>
+            </>
+          )}
+        </PanelGroup>
       </div>
       <StatusBar />
     </div>
