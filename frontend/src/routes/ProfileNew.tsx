@@ -1,8 +1,8 @@
+import { Anchor, Box, Button, Group, NativeSelect, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { useCreateProfile, type ProfileCreateBody } from "../api/profiles";
-import styles from "./ProfileForm.module.css";
 import { StructuredFields, type StructuredValues } from "./StructuredFields";
 
 const LEVELS = [
@@ -39,55 +39,53 @@ export function ProfileNew() {
   }
 
   return (
-    <main className={styles.page}>
-      <Link className={styles.back} to="/profiles">← All profiles</Link>
-      <h1>Create a profile</h1>
-      <p className={styles.lede}>
+    <Box component="main" maw="44rem" mx="auto" px="xs" pt="md" pb="xl">
+      <Anchor component={Link} to="/profiles" size="sm">
+        ← All profiles
+      </Anchor>
+      <Title order={1} mt="xs">Create a profile</Title>
+      <Text c="dimmed" size="sm" mb="md">
         Pick a kind, add seed data, and the local LLM drafts a description plus rubric. You can edit before it
         goes live.
-      </p>
-      <form className={styles.form} onSubmit={submit}>
-        <label>Profile name
-          <input type="text" required maxLength={200} value={name}
-                 placeholder="e.g. Digital Pathology Lab" onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label>Kind
-          <select value={kind} onChange={(e) => setKind(e.target.value)}>
-            <option value="organizational_unit">Organizational unit</option>
-            <option value="individual">Individual researcher</option>
-          </select>
-        </label>
-        {kind === "organizational_unit" && (
-          <>
-            <label>Level
-              <select value={level} onChange={(e) => setLevel(e.target.value)}>
-                {LEVELS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            </label>
-            <label>Mission / strategy / capabilities <small>(free text)</small>
-              <textarea rows={4} value={missionText} onChange={(e) => setMissionText(e.target.value)} />
-            </label>
-          </>
-        )}
-        <StructuredFields kind={kind} values={struct} onChange={setS} />
-        <label>Member ORCIDs <small>(one per line; for an individual, your own)</small>
-          <textarea rows={2} value={orcids} placeholder="0000-0001-2345-6789" onChange={(e) => setOrcids(e.target.value)} />
-        </label>
-        <label>Members by name <small>(one per line: Last F | Affiliation)</small>
-          <textarea rows={2} value={namesAffiliations} onChange={(e) => setNamesAffiliations(e.target.value)} />
-        </label>
-        <label>Pasted past grants <small>(optional, titles + abstracts)</small>
-          <textarea rows={4} value={pastedGrants} onChange={(e) => setPastedGrants(e.target.value)} />
-        </label>
-        <div className={styles.actions}>
-          <button type="submit" disabled={create.isPending}>Bootstrap profile</button>
-          {create.isError && (
-            <span className={styles.err} role="alert">
-              {(create.error as Error | null)?.message ?? "Couldn't create the profile."}
-            </span>
+      </Text>
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          <TextInput label="Profile name" required maxLength={200} value={name}
+                     placeholder="e.g. Digital Pathology Lab" onChange={(e) => setName(e.currentTarget.value)} />
+          <NativeSelect
+            label="Kind"
+            data={[
+              { value: "organizational_unit", label: "Organizational unit" },
+              { value: "individual", label: "Individual researcher" },
+            ]}
+            value={kind}
+            onChange={(e) => setKind(e.currentTarget.value)}
+          />
+          {kind === "organizational_unit" && (
+            <>
+              <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
+                            value={level} onChange={(e) => setLevel(e.currentTarget.value)} />
+              <Textarea label="Mission / strategy / capabilities" description="(free text)" rows={4}
+                        value={missionText} onChange={(e) => setMissionText(e.currentTarget.value)} />
+            </>
           )}
-        </div>
+          <StructuredFields kind={kind} values={struct} onChange={setS} />
+          <Textarea label="Member ORCIDs" description="(one per line; for an individual, your own)" rows={2}
+                    value={orcids} placeholder="0000-0001-2345-6789" onChange={(e) => setOrcids(e.currentTarget.value)} />
+          <Textarea label="Members by name" description="(one per line: Last F | Affiliation)" rows={2}
+                    value={namesAffiliations} onChange={(e) => setNamesAffiliations(e.currentTarget.value)} />
+          <Textarea label="Pasted past grants" description="(optional, titles + abstracts)" rows={4}
+                    value={pastedGrants} onChange={(e) => setPastedGrants(e.currentTarget.value)} />
+          <Group gap="sm" align="center">
+            <Button type="submit" disabled={create.isPending}>Bootstrap profile</Button>
+            {create.isError && (
+              <Text role="alert" c="red" size="sm">
+                {(create.error as Error | null)?.message ?? "Couldn't create the profile."}
+              </Text>
+            )}
+          </Group>
+        </Stack>
       </form>
-    </main>
+    </Box>
   );
 }

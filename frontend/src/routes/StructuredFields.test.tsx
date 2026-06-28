@@ -1,6 +1,8 @@
+import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { StructuredFields, type StructuredValues } from "./StructuredFields";
 
 const EMPTY: StructuredValues = {
@@ -9,14 +11,22 @@ const EMPTY: StructuredValues = {
   funding_instruments: "", funder_exclusions: "", country: "", host_institution: "",
 };
 
+function renderSF(kind: string) {
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <StructuredFields kind={kind} values={EMPTY} onChange={vi.fn()} />
+    </MantineProvider>,
+  );
+}
+
 it("shows org fields for an organizational_unit, hides individual fields", () => {
-  render(<StructuredFields kind="organizational_unit" values={EMPTY} onChange={vi.fn()} />);
+  renderSF("organizational_unit");
   expect(screen.getByLabelText(/organization type/i)).toBeInTheDocument();
   expect(screen.queryByLabelText(/career stage/i)).toBeNull();
 });
 
 it("shows individual fields for an individual, hides org fields", () => {
-  render(<StructuredFields kind="individual" values={EMPTY} onChange={vi.fn()} />);
+  renderSF("individual");
   expect(screen.getByLabelText(/career stage/i)).toBeInTheDocument();
   expect(screen.queryByLabelText(/organization type/i)).toBeNull();
 });

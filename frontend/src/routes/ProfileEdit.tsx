@@ -1,8 +1,8 @@
+import { Anchor, Box, Button, Fieldset, Group, NativeSelect, Paper, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { useProfile, useUpdateProfile, type ProfileDetail, type ProfileUpdateBody } from "../api/profiles";
-import styles from "./ProfileForm.module.css";
 import { StructuredFields, type StructuredValues } from "./StructuredFields";
 
 const LEVELS = [
@@ -17,8 +17,13 @@ export function ProfileEdit() {
   const { id } = useParams();
   const pid = Number(id);
   const { data, isLoading, isError } = useProfile(pid);
-  if (isLoading) return <p>Loading…</p>;
-  if (isError || !data) return <main className={styles.page}><p role="alert">Profile not found.</p></main>;
+  if (isLoading) return <Text p="md">Loading…</Text>;
+  if (isError || !data)
+    return (
+      <Box component="main" maw="44rem" mx="auto" px="xs" pt="md" pb="xl">
+        <Text role="alert">Profile not found.</Text>
+      </Box>
+    );
   return <EditForm key={data.bootstrap_status ?? "ready"} p={data} pid={pid} />;
 }
 
@@ -56,75 +61,67 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
   }
 
   return (
-    <main className={styles.page}>
-      <Link className={styles.back} to={`/profiles/${pid}`}>← Back to profile</Link>
-      <h1>Edit {p.name}</h1>
-      <p className={styles.lede}>
+    <Box component="main" maw="44rem" mx="auto" px="xs" pt="md" pb="xl">
+      <Anchor component={Link} to={`/profiles/${pid}`} size="sm">
+        ← Back to profile
+      </Anchor>
+      <Title order={1} mt="xs">Edit {p.name}</Title>
+      <Text c="dimmed" size="sm" mb="md">
         Description feeds the semantic similarity gate. Areas, budgets, TRL, must-include and exclusions feed the
         deterministic rubric gates. Saving kicks off a backfill of the last 90 days against this profile.
-      </p>
+      </Text>
       {drafting && (
-        <div className={styles.banner}>⏳ Drafting your profile from PubMed and past grants — this can take a minute on the local model.</div>
+        <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)">
+          <Text size="sm">⏳ Drafting your profile from PubMed and past grants — this can take a minute on the local model.</Text>
+        </Paper>
       )}
       {p.bootstrap_status === "done" && (
-        <div className={styles.banner}>
-          Draft ready.
-          {p.bootstrap_pubmed_status === "ok" && ` Found ${p.publications_fetched} publications for your members.`}
-          {p.bootstrap_pubmed_status === "empty" && " No publications matched your members on PubMed — the draft rests on your mission text and pasted grants."}
-          {p.bootstrap_pubmed_status === "unavailable" && " PubMed was unavailable, so the draft rests on your mission text and pasted grants."}
-        </div>
+        <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)">
+          <Text size="sm">
+            Draft ready.
+            {p.bootstrap_pubmed_status === "ok" && ` Found ${p.publications_fetched} publications for your members.`}
+            {p.bootstrap_pubmed_status === "empty" && " No publications matched your members on PubMed — the draft rests on your mission text and pasted grants."}
+            {p.bootstrap_pubmed_status === "unavailable" && " PubMed was unavailable, so the draft rests on your mission text and pasted grants."}
+          </Text>
+        </Paper>
       )}
       {p.bootstrap_status === "failed" && (
-        <div className={`${styles.banner} ${styles.bannerWarn}`}>We couldn't auto-draft a description (the local model was unavailable). Write one below and save.</div>
+        <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)" style={{ borderColor: "var(--app-warn, var(--app-bad))" }}>
+          <Text size="sm">We couldn't auto-draft a description (the local model was unavailable). Write one below and save.</Text>
+        </Paper>
       )}
-      <form className={styles.form} onSubmit={submit}>
-        <fieldset disabled={locked}>
-          <label>Description
-            <textarea rows={6} value={description} onChange={(e) => setDescription(e.target.value)} />
-            <small>Changing this triggers a background re-embed.</small>
-          </label>
-          {p.kind === "organizational_unit" && (
-            <label>Level
-              <select value={level} onChange={(e) => setLevel(e.target.value)}>
-                {LEVELS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            </label>
-          )}
-          <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} />
-          <label>Budget min
-            <input type="text" value={budgetMin} onChange={(e) => setBudgetMin(e.target.value)} />
-          </label>
-          <label>Budget max
-            <input type="text" value={budgetMax} onChange={(e) => setBudgetMax(e.target.value)} />
-          </label>
-          <label>Currency
-            <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
-              {CURRENCIES.map((c) => <option key={c} value={c}>{c || "(unknown)"}</option>)}
-            </select>
-          </label>
-          <label>Technology Readiness Level — min <small>(1–9)</small>
-            <input type="text" value={trlMin} onChange={(e) => setTrlMin(e.target.value)} />
-          </label>
-          <label>Technology Readiness Level — max <small>(1–9)</small>
-            <input type="text" value={trlMax} onChange={(e) => setTrlMax(e.target.value)} />
-          </label>
-          <label>Must-include keywords <small>(one per line; bypass the timeline gate)</small>
-            <textarea rows={3} value={mustInclude} onChange={(e) => setMustInclude(e.target.value)} />
-          </label>
-          <label>Hard exclusions <small>(one per line)</small>
-            <textarea rows={3} value={hardExclusions} onChange={(e) => setHardExclusions(e.target.value)} />
-          </label>
-          <div className={styles.actions}>
-            <button type="submit" disabled={locked || update.isPending}>Save and re-rank</button>
-            <Link to={`/profiles/${pid}`}>Cancel</Link>
-            {update.isError && (
-              <span className={styles.err} role="alert">
-                {(update.error as Error | null)?.message ?? "Couldn't save."}
-              </span>
+      <form onSubmit={submit}>
+        <Fieldset disabled={locked}>
+          <Stack gap="sm">
+            <Textarea label="Description" description="Changing this triggers a background re-embed." rows={6}
+                      value={description} onChange={(e) => setDescription(e.currentTarget.value)} />
+            {p.kind === "organizational_unit" && (
+              <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
+                            value={level} onChange={(e) => setLevel(e.currentTarget.value)} />
             )}
-          </div>
-        </fieldset>
+            <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} />
+            <TextInput label="Budget min" value={budgetMin} onChange={(e) => setBudgetMin(e.currentTarget.value)} />
+            <TextInput label="Budget max" value={budgetMax} onChange={(e) => setBudgetMax(e.currentTarget.value)} />
+            <NativeSelect label="Currency" data={CURRENCIES.map((c) => ({ value: c, label: c || "(unknown)" }))}
+                          value={currency} onChange={(e) => setCurrency(e.currentTarget.value)} />
+            <TextInput label="Technology Readiness Level — min" description="(1–9)" value={trlMin} onChange={(e) => setTrlMin(e.currentTarget.value)} />
+            <TextInput label="Technology Readiness Level — max" description="(1–9)" value={trlMax} onChange={(e) => setTrlMax(e.currentTarget.value)} />
+            <Textarea label="Must-include keywords" description="(one per line; bypass the timeline gate)" rows={3}
+                      value={mustInclude} onChange={(e) => setMustInclude(e.currentTarget.value)} />
+            <Textarea label="Hard exclusions" description="(one per line)" rows={3}
+                      value={hardExclusions} onChange={(e) => setHardExclusions(e.currentTarget.value)} />
+            <Group gap="sm" align="center">
+              <Button type="submit" disabled={locked || update.isPending}>Save and re-rank</Button>
+              <Anchor component={Link} to={`/profiles/${pid}`} size="sm">Cancel</Anchor>
+              {update.isError && (
+                <Text role="alert" c="red" size="sm">
+                  {(update.error as Error | null)?.message ?? "Couldn't save."}
+                </Text>
+              )}
+            </Group>
+          </Stack>
+        </Fieldset>
       </form>
-    </main>
+    </Box>
   );
 }
