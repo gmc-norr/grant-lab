@@ -1,4 +1,7 @@
+import { Button, Group, Stack, Text } from "@mantine/core";
+
 import { type ActivityRow, useActivity } from "../api/activity";
+import styles from "./CockpitPanels.module.css";
 import type { NavTarget, OnNavigate } from "./nav";
 
 // null -> undefined normalization. The param stays nullable and uses `?.` because
@@ -31,16 +34,18 @@ export function ActivityPanel({ id, onNavigate }: { id: string; onNavigate: OnNa
   if (q.isError) {
     return (
       <div className="activity-panel">
-        <p role="status" className="activity-error">
+        <Text role="status" c="red" size="sm">
           Could not load activity.
-        </p>
+        </Text>
       </div>
     );
   }
   if (q.isLoading) {
     return (
       <div className="activity-panel">
-        <p className="activity-loading">Loading…</p>
+        <Text c="dimmed" size="sm">
+          Loading…
+        </Text>
       </div>
     );
   }
@@ -48,30 +53,48 @@ export function ActivityPanel({ id, onNavigate }: { id: string; onNavigate: OnNa
   if (rows.length === 0) {
     return (
       <div className="activity-panel">
-        <p className="activity-empty">No activity yet.</p>
+        <Text c="dimmed" size="sm">
+          No activity yet.
+        </Text>
       </div>
     );
   }
   return (
     <div className="activity-panel">
-      <ul className="activity-list">
+      <Stack component="ul" gap={4} style={{ listStyle: "none", padding: 0, margin: 0 }}>
         {rows.map((r) => (
-          <li key={r.id} className={`activity-row category-${r.category}`}>
-            <span className="activity-actor">{r.actor ?? "System"}</span>
-            <span className="activity-summary">{r.summary}</span>
-            <span className="activity-time"> · {formatRelativeTime(r.created_at)}</span>
+          <Group
+            key={r.id}
+            component="li"
+            gap={6}
+            align="baseline"
+            wrap="wrap"
+            data-category={r.category}
+            className={styles.activityRow}
+          >
+            <Text span fw={600} size="sm">
+              {r.actor ?? "System"}
+            </Text>
+            <Text span size="sm">
+              {r.summary}
+            </Text>
+            <Text span c="dimmed" size="sm">
+              {" "}
+              · {formatRelativeTime(r.created_at)}
+            </Text>
             {r.target && (
-              <button
-                type="button"
-                className="activity-act"
+              <Button
+                size="xs"
+                variant="subtle"
+                ml="auto"
                 onClick={() => onNavigate(toNav(r.target))}
               >
                 Go to
-              </button>
+              </Button>
             )}
-          </li>
+          </Group>
         ))}
-      </ul>
+      </Stack>
     </div>
   );
 }

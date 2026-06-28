@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Anchor, Badge, Box, Button, Group, NativeSelect, Stack, Text, TextInput, Title } from "@mantine/core";
 import { useReferences } from "../api/citations";
 import { ApiError } from "../api/client";
 import { useDeleteFile, useFiles, useUploadFile } from "../api/files";
@@ -101,104 +102,100 @@ export function LibraryPanel({ id }: { id: string }) {
     });
   }
 
-  if (refsQ.isError) return <p className="library-msg">Could not load references.</p>;
-  if (refsQ.isLoading) return <p className="library-msg">Loading…</p>;
+  if (refsQ.isError) return <Text c="dimmed" size="sm">Could not load references.</Text>;
+  if (refsQ.isLoading) return <Text c="dimmed" size="sm">Loading…</Text>;
 
   return (
-    <div className="library-panel">
-      <section aria-label="Add references" className="library-add">
-        <input
-          aria-label="Add reference file"
-          type="file"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) uploadOne.mutate({ file: f, kind: pickerKind, autoClassify: false });
-          }}
-        />
-        <select aria-label="New reference kind" value={pickerKind} onChange={(e) => setPickerKind(e.target.value)}>
-          {KINDS.map((k) => (
-            <option key={k} value={k}>{k}</option>
-          ))}
-        </select>
-        <div
-          className="library-dropzone"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            queue.enqueue(Array.from(e.dataTransfer.files), "paper");
-          }}
-        >
-          Drop PDFs here
-        </div>
-        <div className="library-fetch">
+    <Stack gap="md">
+      <section aria-label="Add references">
+        <Stack gap="sm">
           <input
-            aria-label="Fetch by DOI / PMID / arXiv / URL"
-            value={fetchInput}
-            onChange={(e) => setFetchInput(e.target.value)}
+            aria-label="Add reference file"
+            type="file"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) uploadOne.mutate({ file: f, kind: pickerKind, autoClassify: false });
+            }}
           />
-          <button onClick={() => fetchRef.mutate({ input: fetchInput, kind: pickerKind })}>Fetch</button>
-        </div>
+          <NativeSelect
+            aria-label="New reference kind"
+            value={pickerKind}
+            onChange={(e) => setPickerKind(e.target.value)}
+            data={KINDS}
+          />
+          <Box
+            style={{ border: "1px dashed var(--app-border)", borderRadius: 6, padding: "0.75rem", textAlign: "center" }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              queue.enqueue(Array.from(e.dataTransfer.files), "paper");
+            }}
+          >
+            Drop PDFs here
+          </Box>
+          <Group gap="sm">
+            <TextInput
+              aria-label="Fetch by DOI / PMID / arXiv / URL"
+              value={fetchInput}
+              onChange={(e) => setFetchInput(e.target.value)}
+            />
+            <Button onClick={() => fetchRef.mutate({ input: fetchInput, kind: pickerKind })}>Fetch</Button>
+          </Group>
+        </Stack>
       </section>
 
       <section aria-label="References">
-        <h3 className="library-section-title">References</h3>
+        <Title order={4}>References</Title>
         {refs.length === 0 ? (
-          <p className="library-msg">No references yet.</p>
+          <Text c="dimmed" size="sm">No references yet.</Text>
         ) : (
-          <ul className="library-list">
+          <Stack component="ul" gap="xs" style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {refs.map((r) => (
-              <li key={r.id} className="library-row">
-                <span className="library-row-label">{rowLabel(r)}</span>
-                <select
+              <Group component="li" key={r.id} gap="sm" wrap="wrap">
+                <Text size="sm" fw={600}>{rowLabel(r)}</Text>
+                <NativeSelect
                   aria-label={`Kind for ${rowLabel(r)}`}
                   value={r.kind}
                   disabled={updateKind.isPending}
                   onChange={(e) =>
                     updateKind.mutate({ referenceId: r.id, kind: e.target.value })
                   }
-                >
-                  {KINDS.map((k) => (
-                    <option key={k} value={k}>
-                      {k}
-                    </option>
-                  ))}
-                </select>
-                <span className="library-badge" data-status={r.text_status}>
-                  {r.text_status}
-                </span>
-                <span className="library-badge" data-meta={r.metadata_status}>
-                  {r.metadata_status}
-                </span>
-                <a
-                  className="library-dl"
+                  data={KINDS}
+                />
+                <Badge size="sm" variant="light" data-status={r.text_status}>{r.text_status}</Badge>
+                <Badge size="sm" variant="light" data-meta={r.metadata_status}>{r.metadata_status}</Badge>
+                <Anchor
                   href={`/api/workspaces/${id}/references/${r.id}/raw`}
                   target="_blank"
                   rel="noreferrer"
+                  size="sm"
                 >
                   download
-                </a>
-                <button onClick={() => setEditing(r.id)}>Edit</button>
-                <button
+                </Anchor>
+                <Button size="xs" variant="default" onClick={() => setEditing(r.id)}>Edit</Button>
+                <Button
+                  size="xs"
+                  variant="default"
                   onClick={() =>
                     toggleWaiver.mutate({ referenceId: r.id, waiver: !r.metadata_waiver })
                   }
                 >
                   {r.metadata_waiver ? "Remove waiver" : "Waiver"}
-                </button>
+                </Button>
                 {r.text_status === "failed" && (
-                  <button onClick={() => reprocess.mutate(r.id)}>
+                  <Button size="xs" variant="default" onClick={() => reprocess.mutate(r.id)}>
                     Reprocess
-                  </button>
+                  </Button>
                 )}
-                <button onClick={() => onDelete(r.id)}>Delete</button>
-              </li>
+                <Button size="xs" variant="subtle" onClick={() => onDelete(r.id)}>Delete</Button>
+              </Group>
             ))}
-          </ul>
+          </Stack>
         )}
       </section>
 
       <section aria-label="Files">
-        <h3 className="library-section-title">Files</h3>
+        <Title order={4}>Files</Title>
         <input
           aria-label="Add image file"
           type="file"
@@ -211,22 +208,25 @@ export function LibraryPanel({ id }: { id: string }) {
           }}
         />
         {files.isError ? (
-          <p className="library-msg">Could not load files.</p>
+          <Text c="dimmed" size="sm">Could not load files.</Text>
         ) : files.isLoading ? (
-          <p className="library-msg">Loading…</p>
+          <Text c="dimmed" size="sm">Loading…</Text>
         ) : fileRows.length === 0 ? (
-          <p className="library-msg">No files yet.</p>
+          <Text c="dimmed" size="sm">No files yet.</Text>
         ) : (
-          <ul className="library-file-list">
+          <Stack component="ul" gap="xs" style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {fileRows.map((f) => (
-              <li key={f.id} className="library-file-row">
+              <Group component="li" key={f.id} gap="sm">
                 <img
-                  className="library-thumb"
                   src={`/api/workspaces/${id}/files/${f.id}`}
                   alt={f.filename}
+                  width={40}
+                  height={40}
                 />
-                <span className="library-file-name">{f.filename}</span>
-                <button
+                <Text size="sm">{f.filename}</Text>
+                <Button
+                  size="xs"
+                  variant="subtle"
                   aria-label={`Delete ${f.filename}`}
                   disabled={deleteFile.isPending}
                   onClick={() => {
@@ -234,10 +234,10 @@ export function LibraryPanel({ id }: { id: string }) {
                   }}
                 >
                   delete
-                </button>
-              </li>
+                </Button>
+              </Group>
             ))}
-          </ul>
+          </Stack>
         )}
       </section>
 
@@ -249,7 +249,7 @@ export function LibraryPanel({ id }: { id: string }) {
           onClose={() => setEditing(null)}
         />
       )}
-      {note && <p className="library-note">{note}</p>}
-    </div>
+      {note && <Text c="dimmed" size="sm">{note}</Text>}
+    </Stack>
   );
 }

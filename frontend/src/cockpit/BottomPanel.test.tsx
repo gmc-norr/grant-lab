@@ -1,6 +1,9 @@
+import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { BottomPanel } from "./BottomPanel";
 
 const h = vi.hoisted(() => ({
@@ -19,19 +22,25 @@ vi.mock("./ProblemsPanel", () => ({ ProblemsPanel: () => <div>problems-body</div
 vi.mock("./ActivityPanel", () => ({ ActivityPanel: () => <div>activity-body</div> }));
 vi.mock("./CitationsPanel", () => ({ CitationsPanel: () => <div>citations-body</div> }));
 
+function renderBP(props: ComponentProps<typeof BottomPanel>) {
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <BottomPanel {...props} />
+    </MantineProvider>,
+  );
+}
+
 describe("BottomPanel", () => {
   it("renders badges and switches tabs", () => {
     const onTab = vi.fn();
-    render(
-      <BottomPanel
-        id="ws1"
-        activeTab="inbox"
-        onTab={onTab}
-        collapsed={false}
-        onToggleCollapsed={vi.fn()}
-        onNavigate={vi.fn()}
-      />,
-    );
+    renderBP({
+      id: "ws1",
+      activeTab: "inbox",
+      onTab,
+      collapsed: false,
+      onToggleCollapsed: vi.fn(),
+      onNavigate: vi.fn(),
+    });
     // badges
     expect(screen.getByRole("tab", { name: /inbox 3/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /problems 3/i })).toBeInTheDocument(); // 2+1
@@ -43,16 +52,14 @@ describe("BottomPanel", () => {
 
   it("hides the bodies when collapsed and toggles", () => {
     const onToggle = vi.fn();
-    render(
-      <BottomPanel
-        id="ws1"
-        activeTab="inbox"
-        onTab={vi.fn()}
-        collapsed={true}
-        onToggleCollapsed={onToggle}
-        onNavigate={vi.fn()}
-      />,
-    );
+    renderBP({
+      id: "ws1",
+      activeTab: "inbox",
+      onTab: vi.fn(),
+      collapsed: true,
+      onToggleCollapsed: onToggle,
+      onNavigate: vi.fn(),
+    });
     expect(screen.queryByText("inbox-body")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /expand panel/i }));
     expect(onToggle).toHaveBeenCalled();
@@ -60,44 +67,42 @@ describe("BottomPanel", () => {
 
   it("exposes the Activity tab and shows its body when active", () => {
     const onTab = vi.fn();
-    const { rerender } = render(
-      <BottomPanel
-        id="ws1"
-        activeTab="inbox"
-        onTab={onTab}
-        collapsed={false}
-        onToggleCollapsed={vi.fn()}
-        onNavigate={vi.fn()}
-      />,
-    );
+    const { rerender } = renderBP({
+      id: "ws1",
+      activeTab: "inbox",
+      onTab,
+      collapsed: false,
+      onToggleCollapsed: vi.fn(),
+      onNavigate: vi.fn(),
+    });
     const tab = screen.getByRole("tab", { name: /^activity$/i });
     expect(tab).toBeInTheDocument();
     fireEvent.click(tab);
     expect(onTab).toHaveBeenCalledWith("activity");
     rerender(
-      <BottomPanel
-        id="ws1"
-        activeTab="activity"
-        onTab={onTab}
-        collapsed={false}
-        onToggleCollapsed={vi.fn()}
-        onNavigate={vi.fn()}
-      />,
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <BottomPanel
+          id="ws1"
+          activeTab="activity"
+          onTab={onTab}
+          collapsed={false}
+          onToggleCollapsed={vi.fn()}
+          onNavigate={vi.fn()}
+        />
+      </MantineProvider>,
     );
     expect(screen.getByText("activity-body")).toBeInTheDocument();
   });
 
   it("exposes the Citations tab with an error-count badge", () => {
-    render(
-      <BottomPanel
-        id="ws1"
-        activeTab="citations"
-        onTab={vi.fn()}
-        collapsed={false}
-        onToggleCollapsed={vi.fn()}
-        onNavigate={vi.fn()}
-      />,
-    );
+    renderBP({
+      id: "ws1",
+      activeTab: "citations",
+      onTab: vi.fn(),
+      collapsed: false,
+      onToggleCollapsed: vi.fn(),
+      onNavigate: vi.fn(),
+    });
     expect(screen.getByRole("tab", { name: /citations 2/i })).toBeInTheDocument();
     expect(screen.getByText("citations-body")).toBeInTheDocument();
   });

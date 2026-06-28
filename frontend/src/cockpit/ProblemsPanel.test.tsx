@@ -1,7 +1,10 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { theme } from "../theme/theme";
 
 import { ProblemsPanel } from "./ProblemsPanel";
 
@@ -21,7 +24,11 @@ vi.mock("../api/uncitedClaims", () => ({
 }));
 
 function wrap(ui: ReactNode) {
-  return render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>
+    </MantineProvider>,
+  );
 }
 
 afterEach(() => {

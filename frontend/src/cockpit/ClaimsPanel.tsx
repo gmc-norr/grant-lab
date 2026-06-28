@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { Badge, Blockquote, Box, Button, Group, Stack, Text, TextInput, Title } from "@mantine/core";
+
 import {
   type ClaimFinding,
   type ClaimSection,
@@ -21,15 +23,15 @@ export function ClaimsPanel({ id }: { id: string }) {
   const dismiss = useDismissAnnotation(id);
   const reanalyze = useReanalyzeSection(id);
 
-  if (ann.isLoading) return <p aria-busy="true">Loading claims…</p>;
-  if (ann.isError || !ann.data) return <p role="alert">Could not load claims.</p>;
+  if (ann.isLoading) return <Text aria-busy="true">Loading claims…</Text>;
+  if (ann.isError || !ann.data) return <Text role="alert" c="red">Could not load claims.</Text>;
 
   const isOwner = ann.data.is_owner;
   if (ann.data.sections.length === 0)
-    return <p className="claims-empty">No draft yet — claims appear once drafting begins.</p>;
+    return <Text c="dimmed">No draft yet — claims appear once drafting begins.</Text>;
 
   return (
-    <div className="claims-panel">
+    <Stack gap="md">
       {ann.data.sections.map((sec) => (
         <ClaimSectionView
           key={`${sec.section_sha}:${sec.occurrence}`}
@@ -40,7 +42,7 @@ export function ClaimsPanel({ id }: { id: string }) {
           onReanalyze={() => reanalyze.mutate(sec.index)}
         />
       ))}
-    </div>
+    </Stack>
   );
 }
 
@@ -58,29 +60,29 @@ function ClaimSectionView({
   onReanalyze: () => void;
 }) {
   return (
-    <section className="claims-section">
-      <header className="claims-section-head">
-        <h4>{section.heading || "(preamble)"}</h4>
+    <Stack component="section" gap="sm">
+      <Group component="header" gap="sm" align="center">
+        <Title order={4}>{section.heading || "(preamble)"}</Title>
         {section.job.status === "pending" && (
-          <span className="claims-job" role="status">
+          <Text role="status" span size="sm" c="dimmed">
             analyzing…
-          </span>
+          </Text>
         )}
         {section.job.status === "failed" && (
-          <span className="claims-job claims-job-failed" role="status">
+          <Text role="status" span size="sm" c="red">
             analysis failed{section.job.error ? ` — ${section.job.error}` : ""}
-          </span>
+          </Text>
         )}
         {isOwner && (
-          <button type="button" onClick={onReanalyze}>
+          <Button type="button" size="xs" variant="subtle" onClick={onReanalyze}>
             Reanalyze
-          </button>
+          </Button>
         )}
-      </header>
+      </Group>
       {section.findings.length === 0 ? (
-        <p className="claims-none">No open findings</p>
+        <Text c="dimmed" size="sm">No open findings</Text>
       ) : (
-        <ul className="claims-findings">
+        <Stack component="ul" gap="xs" style={{ listStyle: "none", padding: 0, margin: 0 }}>
           {section.findings.map((f) => (
             <FindingRow
               key={f.id}
@@ -90,9 +92,9 @@ function ClaimSectionView({
               onDismiss={(reason) => onDismiss(f.id, reason)}
             />
           ))}
-        </ul>
+        </Stack>
       )}
-    </section>
+    </Stack>
   );
 }
 
@@ -111,42 +113,43 @@ function FindingRow({
   const [reason, setReason] = useState("");
 
   return (
-    <li className={`claims-finding kind-${finding.kind}`}>
-      <span className="claims-kind">{KIND_LABEL[finding.kind] ?? finding.kind}</span>
-      <p className="claims-claim">{finding.claim_text}</p>
-      {finding.evidence_quote && <blockquote className="claims-quote">{finding.evidence_quote}</blockquote>}
-      <span className="claims-ref">{finding.ref_label}</span>
+    <Box component="li">
+      <Badge size="sm" variant="light">{KIND_LABEL[finding.kind] ?? finding.kind}</Badge>
+      <Text size="sm">{finding.claim_text}</Text>
+      {finding.evidence_quote && <Blockquote p="xs">{finding.evidence_quote}</Blockquote>}
+      <Text span size="xs" c="dimmed">{finding.ref_label}</Text>
       {isOwner && (
-        <div className="claims-actions">
+        <Group gap="sm">
           {finding.can_insert && (
-            <button type="button" onClick={onInsert}>
+            <Button type="button" size="xs" onClick={onInsert}>
               Insert
-            </button>
+            </Button>
           )}
           {!dismissing ? (
-            <button type="button" onClick={() => setDismissing(true)}>
+            <Button type="button" size="xs" onClick={() => setDismissing(true)}>
               Dismiss
-            </button>
+            </Button>
           ) : (
-            <span className="claims-dismiss-form">
-              <input
-                type="text"
+            <Group gap="xs">
+              <TextInput
+                size="xs"
                 placeholder="Reason (required)"
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
               />
-              <button
+              <Button
                 type="button"
+                size="xs"
                 aria-label="Confirm dismiss"
                 disabled={reason.trim().length === 0}
                 onClick={() => onDismiss(reason.trim())}
               >
                 Confirm dismiss
-              </button>
-            </span>
+              </Button>
+            </Group>
           )}
-        </div>
+        </Group>
       )}
-    </li>
+    </Box>
   );
 }

@@ -1,3 +1,4 @@
+import { Box, Button, Group, Stack, Text } from "@mantine/core";
 import {
   useDismissClaim,
   useLatestUncitedClaimsRun,
@@ -38,32 +39,34 @@ export function ProblemsPanel({ id, onNavigate }: { id: string; onNavigate: OnNa
   const running = runStatus === "queued" || runStatus === "running";
 
   const runButton = (
-    <button
-      type="button"
-      className="problems-run-uncited"
+    <Button
+      size="xs"
+      variant="default"
       disabled={running || start.isPending}
       onClick={() => start.mutate()}
     >
       {running ? "Checking…" : "Check uncited claims"}
-    </button>
+    </Button>
   );
 
   if (q.isError) {
     return (
-      <div className="problems-panel">
-        <div className="problems-toolbar">{runButton}</div>
-        <p role="status" className="problems-error">
+      <Stack gap="sm">
+        <Group gap="sm">{runButton}</Group>
+        <Text role="status" c="red" size="sm">
           Could not load problems.
-        </p>
-      </div>
+        </Text>
+      </Stack>
     );
   }
   if (q.isLoading) {
     return (
-      <div className="problems-panel">
-        <div className="problems-toolbar">{runButton}</div>
-        <p className="problems-loading">Loading…</p>
-      </div>
+      <Stack gap="sm">
+        <Group gap="sm">{runButton}</Group>
+        <Text c="dimmed" size="sm">
+          Loading…
+        </Text>
+      </Stack>
     );
   }
   const data = q.data;
@@ -76,55 +79,61 @@ export function ProblemsPanel({ id, onNavigate }: { id: string; onNavigate: OnNa
   })).filter((g) => g.items.length > 0);
 
   return (
-    <div className="problems-panel">
-      <div className="problems-toolbar">{runButton}</div>
+    <Stack gap="sm">
+      <Group gap="sm">{runButton}</Group>
       {rows.length === 0 ? (
-        <p className="problems-empty">No problems detected.</p>
+        <Text c="dimmed" size="sm">
+          No problems detected.
+        </Text>
       ) : (
         groups.map((g) => (
-          <section key={g.cat} className="problems-group" aria-label={CATEGORY_LABEL[g.cat]}>
-            <h3 className="problems-group-title">
+          <Box key={g.cat} component="section" aria-label={CATEGORY_LABEL[g.cat]}>
+            <Text component="h3" tt="uppercase" size="xs" fw={600} c="dimmed">
               {CATEGORY_LABEL[g.cat]}
               {g.cat === "criterion_gap" && scorecardStale && (
-                <span className="problems-stale"> · may be outdated</span>
+                <Text span c="yellow" size="xs"> · may be outdated</Text>
               )}
               {g.cat === "uncited_claim" && uncitedStale && (
-                <span className="problems-stale"> · may be outdated</span>
+                <Text span c="yellow" size="xs"> · may be outdated</Text>
               )}
-            </h3>
-            <ul>
+            </Text>
+            <Stack component="ul" gap={4} style={{ listStyle: "none", padding: 0, margin: 0 }}>
               {g.items.map((r, i) => (
-                <li key={`${r.category}-${i}`} className={`problem-row severity-${r.severity}`}>
-                  <span className="problem-sev" aria-hidden="true">
+                <Group key={`${r.category}-${i}`} component="li" gap="sm" align="flex-start" wrap="nowrap">
+                  <Text aria-hidden c={r.severity === "error" ? "red" : "yellow"}>
                     {r.severity === "error" ? "⛔" : "⚠"}
-                  </span>
-                  <span className="problem-title">{r.title}</span>
-                  <span className="problem-detail">{r.detail}</span>
-                  {r.target && (
-                    <button
-                      type="button"
-                      className="problem-act"
-                      onClick={() => onNavigate(toNav(r.target))}
-                    >
-                      Go to {r.title}
-                    </button>
+                  </Text>
+                  <Text size="sm" fw={600}>{r.title}</Text>
+                  <Text size="sm" c="dimmed">{r.detail}</Text>
+                  {(r.target || (r.category === "uncited_claim" && r.claim_hash)) && (
+                    <Group ml="auto" gap="xs">
+                      {r.target && (
+                        <Button
+                          size="xs"
+                          variant="subtle"
+                          onClick={() => onNavigate(toNav(r.target))}
+                        >
+                          Go to {r.title}
+                        </Button>
+                      )}
+                      {r.category === "uncited_claim" && r.claim_hash && (
+                        <Button
+                          size="xs"
+                          variant="subtle"
+                          disabled={dismiss.isPending}
+                          onClick={() => dismiss.mutate(r.claim_hash as string)}
+                        >
+                          Dismiss
+                        </Button>
+                      )}
+                    </Group>
                   )}
-                  {r.category === "uncited_claim" && r.claim_hash && (
-                    <button
-                      type="button"
-                      className="problem-dismiss"
-                      disabled={dismiss.isPending}
-                      onClick={() => dismiss.mutate(r.claim_hash as string)}
-                    >
-                      Dismiss
-                    </button>
-                  )}
-                </li>
+                </Group>
               ))}
-            </ul>
-          </section>
+            </Stack>
+          </Box>
         ))
       )}
-    </div>
+    </Stack>
   );
 }

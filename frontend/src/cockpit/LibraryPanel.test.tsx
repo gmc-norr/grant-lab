@@ -1,7 +1,9 @@
+import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { theme } from "../theme/theme";
 import { LibraryPanel } from "./LibraryPanel";
 
 // Hoisted mock fns (NOT plain factories) so a single Task-10 test can override
@@ -72,7 +74,11 @@ beforeEach(() => {
 });
 
 function wrap(ui: ReactNode) {
-  return render(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>
+    </MantineProvider>,
+  );
 }
 
 describe("LibraryPanel references table", () => {
