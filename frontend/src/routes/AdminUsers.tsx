@@ -43,7 +43,7 @@ function UserRow({ u }: { u: AdminUser }) {
                 }}
               >
                 <Group gap="xs" align="center" wrap="nowrap">
-                  <PasswordInput size="xs" value={pw} onChange={(e) => setPw(e.currentTarget.value)}
+                  <PasswordInput size="xs" w={160} value={pw} onChange={(e) => setPw(e.currentTarget.value)}
                                  placeholder="new password" required />
                   <Button size="xs" variant="default" type="submit" disabled={busy}>
                     Reset password
