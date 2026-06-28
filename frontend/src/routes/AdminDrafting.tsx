@@ -1,76 +1,81 @@
+import { Anchor, Box, Card, Code, Table, Text, Title } from "@mantine/core";
 import { Link } from "react-router-dom";
 
 import { useAdminDrafting } from "../api/adminDashboard";
-import styles from "./AdminDrafting.module.css";
 
 const fmtDt = (s: string) => new Date(s).toLocaleString();
 
 export function AdminDrafting() {
   const { data, isLoading, isError } = useAdminDrafting();
-  if (isLoading) return <p>Loading…</p>;
-  if (isError || !data) return <main role="alert"><p>Couldn't load the drafting panel.</p></main>;
+  if (isLoading) return <Text p="md">Loading…</Text>;
+  if (isError || !data)
+    return (
+      <Box component="main" role="alert" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
+        <Text>Couldn't load the drafting panel.</Text>
+      </Box>
+    );
   const d = data;
   const cap = d.global_cap;
   return (
-    <main className={styles.page}>
-      <h1>Drafting (B7/B8) panel</h1>
+    <Box component="main" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
+      <Title order={1}>Drafting (B7/B8) panel</Title>
 
-      <section className={styles.card}>
-        <h2>Kill switch</h2>
-        <p>{d.drafting_enabled ? <strong>Drafting enabled</strong> : <strong>Drafting disabled</strong>}</p>
-        <p className={styles.muted}>Toggle via env <code>DRAFTING_ENABLED=true|false</code> and restart. UI toggling is a backlog item.</p>
-      </section>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Kill switch</Title>
+        <Text>{d.drafting_enabled ? <Text span fw={700}>Drafting enabled</Text> : <Text span fw={700}>Drafting disabled</Text>}</Text>
+        <Text c="dimmed" size="sm">Toggle via env <Code>DRAFTING_ENABLED=true|false</Code> and restart. UI toggling is a backlog item.</Text>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Global daily cap (today, Europe/Stockholm)</h2>
-        <table className={styles.table}>
-          <thead><tr><th>Dimension</th><th>Used / Cap</th><th>Status</th></tr></thead>
-          <tbody>
-            <tr><td>Input tokens</td><td>{cap.used_in} / {cap.cap_in}</td>
-              <td>{cap.reason === "input_cap_exceeded" ? <strong>EXCEEDED</strong> : "OK"}</td></tr>
-            <tr><td>Output tokens</td><td>{cap.used_out} / {cap.cap_out}</td>
-              <td>{cap.reason === "output_cap_exceeded" ? <strong>EXCEEDED</strong> : "OK"}</td></tr>
-          </tbody>
-        </table>
-        <p>{cap.allowed ? "Overall status: OK" : <strong>Overall status: EXCEEDED ({cap.reason})</strong>}</p>
-      </section>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Global daily cap (today, Europe/Stockholm)</Title>
+        <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
+          <Table.Thead><Table.Tr><Table.Th>Dimension</Table.Th><Table.Th>Used / Cap</Table.Th><Table.Th>Status</Table.Th></Table.Tr></Table.Thead>
+          <Table.Tbody>
+            <Table.Tr><Table.Td>Input tokens</Table.Td><Table.Td>{cap.used_in} / {cap.cap_in}</Table.Td>
+              <Table.Td>{cap.reason === "input_cap_exceeded" ? <Text span fw={700}>EXCEEDED</Text> : "OK"}</Table.Td></Table.Tr>
+            <Table.Tr><Table.Td>Output tokens</Table.Td><Table.Td>{cap.used_out} / {cap.cap_out}</Table.Td>
+              <Table.Td>{cap.reason === "output_cap_exceeded" ? <Text span fw={700}>EXCEEDED</Text> : "OK"}</Table.Td></Table.Tr>
+          </Table.Tbody>
+        </Table>
+        <Text mt="sm">{cap.allowed ? "Overall status: OK" : <Text span fw={700}>Overall status: EXCEEDED ({cap.reason})</Text>}</Text>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Per-workspace usage today</h2>
-        <table className={styles.table}>
-          <thead><tr><th>Title</th><th>Owner</th><th>Input</th><th>Output</th></tr></thead>
-          <tbody>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Per-workspace usage today</Title>
+        <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
+          <Table.Thead><Table.Tr><Table.Th>Title</Table.Th><Table.Th>Owner</Table.Th><Table.Th>Input</Table.Th><Table.Th>Output</Table.Th></Table.Tr></Table.Thead>
+          <Table.Tbody>
             {d.per_workspace.length === 0 ? (
-              <tr><td colSpan={4} className={styles.muted}>No workspaces.</td></tr>
+              <Table.Tr><Table.Td colSpan={4} c="dimmed">No workspaces.</Table.Td></Table.Tr>
             ) : d.per_workspace.map((w) => (
-              <tr key={w.id}>
-                <td><Link to={`/cockpit/${w.id}`}>{w.title}</Link></td>
-                <td>{w.owner_email}</td><td>{w.used_in}</td><td>{w.used_out}</td>
-              </tr>
+              <Table.Tr key={w.id}>
+                <Table.Td><Anchor component={Link} to={`/cockpit/${w.id}`}>{w.title}</Anchor></Table.Td>
+                <Table.Td>{w.owner_email}</Table.Td><Table.Td>{w.used_in}</Table.Td><Table.Td>{w.used_out}</Table.Td>
+              </Table.Tr>
             ))}
-          </tbody>
-        </table>
-      </section>
+          </Table.Tbody>
+        </Table>
+      </Card>
 
-      <section className={styles.card}>
-        <h2>Recent failed / cancelled turns (last 50)</h2>
+      <Card component="section" withBorder radius="md" p="md" my="md">
+        <Title order={2} size="h5" mb="sm">Recent failed / cancelled turns (last 50)</Title>
         {d.recent_events.length === 0 ? (
-          <p className={styles.muted}>No recent failures.</p>
+          <Text c="dimmed" size="sm">No recent failures.</Text>
         ) : (
-          <table className={styles.table}>
-            <thead><tr><th>When</th><th>Workspace</th><th>Kind</th><th>Detail</th></tr></thead>
-            <tbody>
+          <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">
+            <Table.Thead><Table.Tr><Table.Th>When</Table.Th><Table.Th>Workspace</Table.Th><Table.Th>Kind</Table.Th><Table.Th>Detail</Table.Th></Table.Tr></Table.Thead>
+            <Table.Tbody>
               {d.recent_events.map((e, i) => (
-                <tr key={i}>
-                  <td>{fmtDt(e.created_at)}</td><td>{e.workspace_id}</td>
-                  <td><code>{e.kind}</code></td>
-                  <td><pre className={styles.pre}>{JSON.stringify(e.payload, null, 2)}</pre></td>
-                </tr>
+                <Table.Tr key={i}>
+                  <Table.Td>{fmtDt(e.created_at)}</Table.Td><Table.Td>{e.workspace_id}</Table.Td>
+                  <Table.Td><Code>{e.kind}</Code></Table.Td>
+                  <Table.Td><Code block fz="xs" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{JSON.stringify(e.payload, null, 2)}</Code></Table.Td>
+                </Table.Tr>
               ))}
-            </tbody>
-          </table>
+            </Table.Tbody>
+          </Table>
         )}
-      </section>
-    </main>
+      </Card>
+    </Box>
   );
 }
