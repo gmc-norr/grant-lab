@@ -1,6 +1,8 @@
+import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { theme } from "../theme/theme";
 import { CitationsPanel } from "./CitationsPanel";
 
 const h = vi.hoisted(() => ({
@@ -24,7 +26,11 @@ afterEach(() => {
 describe("CitationsPanel", () => {
   it("shows the no-draft empty state", () => {
     h.audit.data = { draft_present: false, issues: [], error_count: 0, warning_count: 0 };
-    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={vi.fn()} />
+      </MantineProvider>,
+    );
     expect(screen.getByText(/no draft yet/i)).toBeInTheDocument();
   });
 
@@ -45,7 +51,11 @@ describe("CitationsPanel", () => {
       ],
     };
     const onNavigate = vi.fn();
-    render(<CitationsPanel id="ws1" onNavigate={onNavigate} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={onNavigate} />
+      </MantineProvider>,
+    );
     expect(screen.getByText("orphan_marker")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /view source/i }));
     expect(onNavigate).toHaveBeenCalledWith({ top_tab: "draft", evidence_id: "ev-1" });
@@ -62,7 +72,11 @@ describe("CitationsPanel", () => {
         { type: "orphan_marker", severity: "error", citekey: "b", evidence_id: null, location: null, detail: "e" },
       ],
     };
-    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={vi.fn()} />
+      </MantineProvider>,
+    );
     const items = screen.getAllByRole("listitem");
     expect(items[0]).toHaveTextContent("orphan_marker");
     expect(items[1]).toHaveTextContent("metadata_unapproved");
@@ -70,7 +84,11 @@ describe("CitationsPanel", () => {
 
   it("shows Deep check for the owner and runs it", () => {
     h.audit.data = { draft_present: true, issues: [], error_count: 0, warning_count: 0 };
-    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={vi.fn()} />
+      </MantineProvider>,
+    );
     fireEvent.click(screen.getByRole("button", { name: /deep check/i }));
     expect(h.deep.mutate).toHaveBeenCalled();
   });
@@ -78,7 +96,11 @@ describe("CitationsPanel", () => {
   it("hides Deep check from a non-owner member", () => {
     h.meta = { data: { role: "member" } }; // the cockpit-meta API returns owner|member, never "viewer"
     h.audit.data = { draft_present: true, issues: [], error_count: 0, warning_count: 0 };
-    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={vi.fn()} />
+      </MantineProvider>,
+    );
     expect(screen.queryByRole("button", { name: /deep check/i })).not.toBeInTheDocument();
   });
 
@@ -101,7 +123,11 @@ describe("CitationsPanel", () => {
         },
       ],
     };
-    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={vi.fn()} />
+      </MantineProvider>,
+    );
     expect(screen.getByText("semantic_contradicts")).toBeInTheDocument();
     expect(screen.getByText(/checked 3/i)).toBeInTheDocument();
     expect(screen.getByText(/budget/i)).toBeInTheDocument();
@@ -117,7 +143,11 @@ describe("CitationsPanel", () => {
       warning_count: 0,
       issues: [],
     };
-    render(<CitationsPanel id="ws1" onNavigate={vi.fn()} />);
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <CitationsPanel id="ws1" onNavigate={vi.fn()} />
+      </MantineProvider>,
+    );
     fireEvent.click(screen.getByRole("button", { name: /re-run/i }));
     expect(h.deep.reset).toHaveBeenCalled();
     expect(h.audit.refetch).toHaveBeenCalled();
