@@ -473,7 +473,7 @@ it("clicking a citation pill opens the source peek", async () => {
   expect(pill).not.toBeNull();
   fireEvent.mouseDown(pill!);
   expect(await screen.findByText(/The Smith 2021 Study/)).toBeInTheDocument();
-  expect(container.querySelector(".source-viewer mark")?.textContent).toBe(
+  expect(container.querySelector('[data-testid="source-viewer"] mark')?.textContent).toBe(
     "The cat sat on the mat.",
   );
 });
@@ -487,7 +487,7 @@ it("pinning moves the source to the pinned pane and closes the center peek", asy
   fireEvent.click(screen.getByRole("button", { name: /pin source/i }));
   // Pinned pane shows it; the Pin button is gone (only the pinned, unpinnable copy remains)
   // AND the center peek has closed (pin does setPinnedEv + setPeekEv(null)).
-  expect(container.querySelector('[data-region="pinned"] .source-viewer')).not.toBeNull();
+  expect(container.querySelector('[data-region="pinned"] [data-testid="source-viewer"]')).not.toBeNull();
   expect(container.querySelector('[data-region="peek"]')).toBeNull();
   expect(screen.queryByRole("button", { name: /pin source/i })).toBeNull();
 });
@@ -499,7 +499,7 @@ it("closing the peek removes the source pane", async () => {
   fireEvent.mouseDown(container.querySelector(".cm-citation-pill")!);
   await screen.findByText(/The Smith 2021 Study/);
   fireEvent.click(screen.getByRole("button", { name: /close source/i }));
-  expect(container.querySelector('[data-region="peek"] .source-viewer')).toBeNull();
+  expect(container.querySelector('[data-region="peek"] [data-testid="source-viewer"]')).toBeNull();
 });
 
 it("Next citation refetches and shows the next reference cite in the peek", async () => {
