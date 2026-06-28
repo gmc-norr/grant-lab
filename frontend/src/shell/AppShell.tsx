@@ -1,6 +1,8 @@
 import type { ComponentType } from "react";
+import { useRef, useState } from "react";
 import { Outlet, useLocation, useMatches } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import type { ImperativePanelHandle } from "react-resizable-panels";
 
 import { cockpitIdFromPath } from "../cockpit/cockpitNav";
 import { ActivityBar } from "./ActivityBar";
@@ -53,15 +55,49 @@ export function AppShell() {
   const cockpitId = cockpitIdFromPath(pathname);
   const idSuffix = cockpitId ? `cockpit:${cockpitId}` : "shell";
 
+  // Collapsible side panels. The toggle helpers read the panel's LIVE collapsed
+  // state (robust across persisted-layout restore), so the action is always correct
+  // even if React state lags. We track `chatCollapsed` only — it drives the TitleBar
+  // toggle's icon/aria-pressed; the sidebar's reopen control is the always-present
+  // active ActivityBar item, which needs no collapse-state affordance.
+  const sidebarRef = useRef<ImperativePanelHandle>(null);
+  const chatRef = useRef<ImperativePanelHandle>(null);
+  const [chatCollapsed, setChatCollapsed] = useState(false);
+
+  const toggleSidebar = () => {
+    const p = sidebarRef.current;
+    if (!p) return;
+    if (p.isCollapsed()) p.expand();
+    else p.collapse();
+  };
+  const toggleChat = () => {
+    const p = chatRef.current;
+    if (!p) return;
+    if (p.isCollapsed()) p.expand();
+    else p.collapse();
+  };
+
   return (
     <div className={styles.shell}>
-      <TitleBar />
+      <TitleBar
+        hasRightPane={Boolean(RightPaneContent)}
+        chatCollapsed={chatCollapsed}
+        onToggleChat={toggleChat}
+      />
       <div className={styles.body}>
-        <ActivityBar />
+        <ActivityBar onToggleSidebar={SidebarContent ? toggleSidebar : undefined} />
         <PanelGroup direction="horizontal" autoSaveId="cm-shell" className={styles.panes}>
           {SidebarContent && (
             <>
-              <Panel id="sidebar" order={1} minSize={12} defaultSize={18}>
+              <Panel
+                id="sidebar"
+                order={1}
+                collapsible
+                collapsedSize={0}
+                minSize={12}
+                defaultSize={18}
+                ref={sidebarRef}
+              >
                 <Sidebar>
                   <SidebarContent />
                 </Sidebar>
@@ -77,7 +113,17 @@ export function AppShell() {
           {RightPaneContent && (
             <>
               <PanelResizeHandle className={styles.handle} aria-label="Resize chat" />
-              <Panel id="rightpane" order={3} minSize={15} defaultSize={22}>
+              <Panel
+                id="rightpane"
+                order={3}
+                collapsible
+                collapsedSize={0}
+                minSize={15}
+                defaultSize={22}
+                ref={chatRef}
+                onCollapse={() => setChatCollapsed(true)}
+                onExpand={() => setChatCollapsed(false)}
+              >
                 <RightPaneContent key={`pane:${idSuffix}`} />
               </Panel>
             </>

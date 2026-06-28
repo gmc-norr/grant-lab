@@ -1,5 +1,6 @@
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { useLocation } from "react-router-dom";
 
 import * as clientMod from "../api/client";
 
@@ -94,4 +95,40 @@ it("hides the Admin entry for a non-admin", async () => {
   // Settings always renders; wait for it, then assert Admin is absent.
   await waitFor(() => expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument());
   expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
+});
+
+function LocationEcho() {
+  const loc = useLocation();
+  return <output data-testid="loc">{loc.pathname + loc.search}</output>;
+}
+
+it("active nav item toggles the sidebar instead of navigating (preserves query state)", () => {
+  const onToggleSidebar = vi.fn();
+  renderWithProviders(
+    <>
+      <ActivityBar onToggleSidebar={onToggleSidebar} />
+      <LocationEcho />
+    </>,
+    { route: "/cockpit/abc?tab=spec&sec=2" },
+  );
+  // "Current workspace" is the active item on the editor route.
+  fireEvent.click(screen.getByRole("link", { name: "Current workspace" }));
+  expect(onToggleSidebar).toHaveBeenCalledTimes(1);
+  // Navigation was prevented → the ?tab/?sec query is NOT dropped.
+  expect(screen.getByTestId("loc").textContent).toBe("/cockpit/abc?tab=spec&sec=2");
+});
+
+it("an inactive nav item still navigates and does not toggle the sidebar", () => {
+  const onToggleSidebar = vi.fn();
+  renderWithProviders(
+    <>
+      <ActivityBar onToggleSidebar={onToggleSidebar} />
+      <LocationEcho />
+    </>,
+    { route: "/" },
+  );
+  // On "/", Workspaces is INACTIVE → clicking it navigates to /cockpit.
+  fireEvent.click(screen.getByRole("link", { name: "Workspaces" }));
+  expect(onToggleSidebar).not.toHaveBeenCalled();
+  expect(screen.getByTestId("loc").textContent).toBe("/cockpit");
 });
