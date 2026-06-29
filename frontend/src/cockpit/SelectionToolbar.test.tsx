@@ -73,6 +73,17 @@ it("Cite delegates to onCite (no turn)", () => {
   expect(post).not.toHaveBeenCalled();
 });
 
+it("free-text Edit is disabled when dirty; free-text Ask remains enabled", async () => {
+  renderTB({ canEdit: true, isDirty: true });
+  fireEvent.change(screen.getByLabelText(/selection instruction/i), { target: { value: "Improve flow" } });
+  // bottom-row free-text Edit button is the last "edit"-labelled button (top Menu.Target is first)
+  const editBtns = screen.getAllByRole("button", { name: /^edit$/i });
+  expect(editBtns.at(-1)).toBeDisabled();
+  // bottom-row free-text Ask button must still be enabled while dirty
+  const askBtns = screen.getAllByRole("button", { name: /^ask$/i });
+  expect(askBtns.at(-1)).toBeEnabled();
+});
+
 it("member: a disclosure 403 shows ack-and-retry, then submits on ack", async () => {
   const post = vi.spyOn(clientMod.api, "POST")
     // 1) the ask -> 403 carrying a "disclosure" message (unwrap throws ApiError)
