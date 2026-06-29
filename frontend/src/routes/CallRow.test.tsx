@@ -1,6 +1,7 @@
+// frontend/src/routes/CallRow.test.tsx
 import { MantineProvider } from "@mantine/core";
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { expect, it } from "vitest";
 
 import type { CallItem } from "../api/dashboard";
@@ -20,27 +21,64 @@ function call(over: Partial<CallItem> = {}): CallItem {
   } as CallItem;
 }
 
-function renderRow(ui: React.ReactElement) {
+function renderRow(ui: React.ReactElement, url = "/") {
   return render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
-      <MemoryRouter>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={[url]}>{ui}</MemoryRouter>
     </MantineProvider>,
   );
 }
 
-it("links the title to the React detail route, shows source + match badge", () => {
+it("links the title to the reading-pane selection URL, shows source + match badge", () => {
   renderRow(<CallRow call={call()} />);
-  expect(screen.getByRole("link", { name: "Grant X" })).toHaveAttribute("href", "/calls/3");
+  const href = screen.getByRole("link", { name: "Grant X" }).getAttribute("href") ?? "";
+  expect(href).toContain("selected=3");
+  expect(href).not.toContain("profile=");
   expect(screen.getByText("Vinnova")).toBeInTheDocument();
   expect(screen.getByText("82")).toHaveAttribute("data-band", "strong");
 });
 
-it("threads the resolved profile into the detail link", () => {
+it("pins the resolved profile into the selection URL", () => {
   renderRow(<CallRow call={call()} profileId={7} />);
-  expect(screen.getByRole("link", { name: "Grant X" })).toHaveAttribute(
-    "href",
-    "/calls/3?profile=7",
+  const href = screen.getByRole("link", { name: "Grant X" }).getAttribute("href") ?? "";
+  expect(href).toContain("selected=3");
+  expect(href).toContain("profile=7");
+});
+
+it("preserves existing list filters/pagination in the selection URL", () => {
+  // Guards the core selectionSearch contract at the CallRow level: a row that
+  // forgot to pass the live `sp` would still pass the helper unit tests.
+  renderRow(<CallRow call={call()} profileId={7} />, "/?source=eu&page=2&q=dna");
+  const href = screen.getByRole("link", { name: "Grant X" }).getAttribute("href") ?? "";
+  expect(href).toContain("selected=3");
+  expect(href).toContain("source=eu");
+  expect(href).toContain("page=2");
+  expect(href).toContain("q=dna");
+  expect(href).toContain("profile=7");
+});
+
+it("marks the row as current when it is the selected call", () => {
+  renderRow(<CallRow call={call()} />, "/?selected=3");
+  expect(screen.getByRole("listitem")).toHaveAttribute("aria-current", "true");
+});
+
+it("is not current when a different call is selected", () => {
+  renderRow(<CallRow call={call()} />, "/?selected=99");
+  expect(screen.getByRole("listitem")).not.toHaveAttribute("aria-current");
+});
+
+it("clicking empty row area selects the call", () => {
+  function Probe() {
+    return <span data-testid="search">{useLocation().search}</span>;
+  }
+  renderRow(
+    <Routes>
+      <Route path="/" element={<><CallRow call={call()} profileId={7} /><Probe /></>} />
+    </Routes>,
   );
+  fireEvent.click(screen.getByRole("listitem"));
+  expect(screen.getByTestId("search").textContent).toContain("selected=3");
+  expect(screen.getByTestId("search").textContent).toContain("profile=7");
 });
 
 it("omits the match badge when the score is null", () => {
