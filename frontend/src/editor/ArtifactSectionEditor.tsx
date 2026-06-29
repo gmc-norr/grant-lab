@@ -10,6 +10,7 @@ import { useCockpitNav } from "../cockpit/cockpitNav";
 import { CitationComposer } from "../cockpit/CitationComposer";
 import { resetEditorStore, setCursor, setDirty, setSave } from "../cockpit/editorStore";
 import styles from "../cockpit/CockpitPanels.module.css";
+import { SelectionToolbar } from "../cockpit/SelectionToolbar";
 import { SourceViewer } from "../cockpit/SourceViewer";
 import { CodeMirrorEditor } from "./CodeMirrorEditor";
 
@@ -248,6 +249,7 @@ export function ArtifactSectionEditor({
               citations={citations}
               onPillClick={citations ? onPillClick : undefined}
               onSelectionChange={citations && view === "section" ? setSelection : undefined}
+              emitSelectionWhenReadOnly={citations}
               onCursorChange={setCursor}
             />
 
@@ -260,18 +262,21 @@ export function ArtifactSectionEditor({
                 >
                   Save section
                 </Button>
-                {citations && (
-                  <Button
-                    size="xs"
-                    variant="default"
-                    disabled={!selection || isDirty(activeIndex)}
-                    title={isDirty(activeIndex) ? "Save this section first" : undefined}
-                    onClick={() => setComposerOpen(true)}
-                  >
-                    Cite selection
-                  </Button>
-                )}
               </Group>
+            )}
+
+            {citations && view === "section" && (
+              <SelectionToolbar
+                workspaceId={workspaceId}
+                selection={selection}
+                editorValue={editorValue}
+                sectionIndex={activeIndex}
+                headSha={head}
+                sectionSha={activeSection?.sha ?? ""}
+                canEdit={canEdit}
+                isDirty={isDirty(activeIndex)}
+                onCite={() => setComposerOpen(true)}
+              />
             )}
           </Box>
         </Panel>

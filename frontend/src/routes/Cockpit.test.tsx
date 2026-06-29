@@ -570,7 +570,7 @@ it("select-to-cite: selecting a saved claim opens the composer and adds a citati
   const f = docText.indexOf("body");
   act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } })); // "body." incl. period
   // the Cite control appears (section is not dirty)
-  fireEvent.click(await screen.findByRole("button", { name: /cite selection/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /^cite$/i }));
   fireEvent.click(await screen.findByRole("button", { name: /Smith/ }));
   const pre = await screen.findByText("the azure sky");
   vi.spyOn(window, "getSelection").mockReturnValue({
@@ -599,18 +599,18 @@ it("select-to-cite gate: dirtying the section disables Cite (must save first)", 
   const docText = view.state.doc.toString();
   const f = docText.indexOf("body");
   act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } }));
-  const cite = await screen.findByRole("button", { name: /cite selection/i });
+  const cite = await screen.findByRole("button", { name: /^cite$/i });
   expect(cite).toBeEnabled();
   // Now dirty the section by inserting at end-of-doc (the held [f,f+5] selection is
   // unaffected and stays non-empty — see the editor's re-emit test). Cite must
   // disable because the anchor isn't yet committed to proposal.md.
   act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "DIRTY" } }));
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: /cite selection/i })).toBeDisabled(),
+    expect(screen.getByRole("button", { name: /^cite$/i })).toBeDisabled(),
   );
-  expect(screen.getByRole("button", { name: /cite selection/i })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: /^cite$/i })).toHaveAttribute(
     "title",
-    "Save this section first",
+    "Save section to edit",
   );
 });
 
@@ -719,7 +719,7 @@ it("select-to-cite: retains the held selection across a background draft refetch
   const docText = view.state.doc.toString();
   const f = docText.indexOf("body");
   act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } }));
-  const cite = await screen.findByRole("button", { name: /cite selection/i });
+  const cite = await screen.findByRole("button", { name: /^cite$/i });
   expect(cite).toBeEnabled();
   // Drive a background refetch that returns the shortened section text. The controlled
   // value-push is a Transaction.remote; the editor SKIPS it, so the held selection is
@@ -729,8 +729,24 @@ it("select-to-cite: retains the held selection across a background draft refetch
   });
   // The section is still clean and the held anchor was retained, so Cite stays enabled.
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: /cite selection/i })).not.toBeDisabled(),
+    expect(screen.getByRole("button", { name: /^cite$/i })).not.toBeDisabled(),
   );
+});
+
+it("selection toolbar: Edit on a clean section submits a modify turn", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { job_id: "j" }, error: undefined } as never);
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView }).__cmView!;
+  const f = view.state.doc.toString().indexOf("body");
+  act(() => view.dispatch({ selection: { anchor: f, head: f + 5 } }));
+  fireEvent.click(await screen.findByRole("button", { name: /^edit$/i }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: /shorten/i }));
+  await waitFor(() => expect(post).toHaveBeenCalled());
+  const body = (post.mock.calls[0][1] as { body: Record<string, any> }).body;
+  expect(body.selection_context?.request_type).toBe("modify");
 });
 
 it("switching workspaces (/cockpit/a -> /cockpit/b) gives a fresh editor — no cross-workspace buffer leak", async () => {
