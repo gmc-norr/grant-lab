@@ -583,6 +583,8 @@ class ClaudeAgentSDKAdapter:
         triggering_prompt: str | None,
         created_by: int | None,
         origin_session_id: str | None,
+        allowed_tool_names: set[str] | None = None,
+        turn_selection: dict | None = None,
     ) -> None:
         """Stamp provenance onto the retained per-workspace ToolContext that the
         MCP tool closures captured at launch. No-op if no ctx is retained (e.g.
@@ -594,6 +596,8 @@ class ClaudeAgentSDKAdapter:
         ctx.triggering_prompt = triggering_prompt
         ctx.created_by = created_by
         ctx.origin_session_id = origin_session_id
+        ctx.allowed_tool_names = allowed_tool_names   # None => no per-turn gate (full list)
+        ctx.turn_selection = turn_selection
 
 
 # ---------------------------------------------------------------------------

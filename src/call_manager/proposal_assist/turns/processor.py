@@ -71,6 +71,10 @@ from call_manager.proposal_assist.drafting.contract import (
     TurnDoneEvent,
 )
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
+from call_manager.proposal_assist.drafting.turn_gating import (
+    allowed_tools_for_content,
+    selection_from_content,
+)
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
 from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 
@@ -276,6 +280,8 @@ async def process_turn_once(
         triggering_prompt=_extract_triggering_prompt(raw_turn_content),
         created_by=submitted_by_user_id,
         origin_session_id=ws_session_id,
+        allowed_tool_names=allowed_tools_for_content(raw_turn_content),
+        turn_selection=selection_from_content(raw_turn_content),
     )
 
     last_assistant_id: uuid.UUID | None = None

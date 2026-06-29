@@ -145,6 +145,14 @@ async def _propose_artifact_edit_impl(
             triggering_prompt=ctx.triggering_prompt,
             created_by=ctx.created_by,
         )
+        if target_artifact == "draft" and ctx.turn_selection:
+            sel = ctx.turn_selection
+            pc.payload = {
+                **pc.payload,
+                "selection_anchor": sel.get("anchor"),
+                "selection_from": sel.get("from_offset"),
+                "selection_to": sel.get("to_offset"),
+            }
         pc_id = str(pc.id)
         session.commit()
     return {"proposed_change_id": pc_id, "status": "pending"}

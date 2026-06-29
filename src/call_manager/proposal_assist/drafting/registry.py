@@ -413,6 +413,8 @@ class SubprocessRegistry:
         triggering_prompt: str | None,
         created_by: int | None,
         origin_session_id: str | None,
+        allowed_tool_names: set[str] | None = None,
+        turn_selection: dict | None = None,
     ) -> None:
         """Pass-through to the adapter so the processor can stamp provenance on
         the cached handle's ToolContext before each turn."""
@@ -422,4 +424,6 @@ class SubprocessRegistry:
             triggering_prompt=triggering_prompt,
             created_by=created_by,
             origin_session_id=origin_session_id,
+            allowed_tool_names=allowed_tool_names,
+            turn_selection=turn_selection,
         )

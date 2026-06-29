@@ -35,6 +35,7 @@ class FakeAgentAdapter:
         self.last_user_message: str | list[dict[str, Any]] | None = None
         self._scripted: deque[list[StreamEvent]] = deque()
         self.provenance: list[tuple[Any, Any, str | None, int | None, str | None]] = []
+        self.provenance_gating: list = []
         # SP2a-2: track which workspaces have been launched, so a test can prove
         # the processor stamps provenance AFTER launch (the cold-launch ordering
         # the plan was revised to fix). provenance_saw_launch[i] is True iff
@@ -112,6 +113,8 @@ class FakeAgentAdapter:
         triggering_prompt,
         created_by,
         origin_session_id,
+        allowed_tool_names=None,
+        turn_selection=None,
     ) -> None:
         self.provenance_saw_launch.append(workspace_id in self._launched_workspaces)
         self.provenance.append(
@@ -123,3 +126,6 @@ class FakeAgentAdapter:
                 origin_session_id,
             )
         )
+        # New (Codex review): record per-turn gating separately so the existing
+        # 5-tuple provenance assertions stay green.
+        self.provenance_gating.append((workspace_id, allowed_tool_names, turn_selection))

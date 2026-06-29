@@ -170,6 +170,8 @@ class DraftingAgent(Protocol):
         triggering_prompt: str | None,
         created_by: int | None,
         origin_session_id: str | None,
+        allowed_tool_names: set[str] | None = None,
+        turn_selection: dict | None = None,
     ) -> None:
         """Stamp server-trusted provenance onto the workspace's retained
         ToolContext before the next send_turn. Called UNCONDITIONALLY every turn
