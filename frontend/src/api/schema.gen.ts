@@ -1573,8 +1573,9 @@ export interface paths {
         put?: never;
         /**
          * Submit Turn
-         * @description Enqueue a user turn (owner-only). Canonical gate order: owner →
-         *     setup/drafting/disclosure (shared gate_cloud_llm) → caps.
+         * @description Enqueue a user turn. Gate order: auth (owner — or any member for a
+         *     selection *ask*, per spec §7) → setup/drafting/disclosure (shared
+         *     gate_cloud_llm, per-actor) → caps. modify / free-chat stay owner-only.
          */
         post: operations["submit_turn_api_workspaces__workspace_id__turns_post"];
         delete?: never;
@@ -3218,6 +3219,32 @@ export interface components {
             /** Text */
             text: string;
         };
+        /** SelectionContextIn */
+        SelectionContextIn: {
+            /** Anchor */
+            anchor: string;
+            /** Base Commit Sha */
+            base_commit_sha: string;
+            /** Base Section Sha */
+            base_section_sha: string;
+            /** From Offset */
+            from_offset: number;
+            /**
+             * Request Type
+             * @enum {string}
+             */
+            request_type: "ask" | "modify";
+            /** Section Index */
+            section_index: number;
+            /**
+             * Target Artifact
+             * @default draft
+             * @constant
+             */
+            target_artifact: "draft";
+            /** To Offset */
+            to_offset: number;
+        };
         /** SettingsOut */
         SettingsOut: {
             /** Citation Style */
@@ -3312,6 +3339,7 @@ export interface components {
              * @default []
              */
             reference_ids: string[];
+            selection_context?: components["schemas"]["SelectionContextIn"] | null;
         };
         /** SubmitTurnResponse */
         SubmitTurnResponse: {
