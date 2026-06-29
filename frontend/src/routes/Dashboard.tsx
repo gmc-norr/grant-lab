@@ -15,7 +15,7 @@ export function Dashboard() {
   if (isError || !data) return <Text role="alert" p="md">Couldn&apos;t load calls.</Text>;
 
   return (
-    <Box component="main">
+    <Box component="main" px="md">
       <DashboardHeader />
 
       {data.ranking.pending > 0 && <Text>Scoring {data.ranking.pending} calls…</Text>}

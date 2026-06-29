@@ -69,7 +69,7 @@ export function WorkspaceList() {
 
   const items = data ?? [];
   return (
-    <Box component="main">
+    <Box component="main" px="md">
       <Group justify="space-between" align="center" gap="sm">
         <Title order={1} fz="1.1rem">Workspaces</Title>
         <Anchor component={Link} fw={500} fz="0.9rem" to="/">
