@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -871,6 +871,32 @@ it("switching the artifact tab with a CLEAN editor does not prompt (Defect 2)", 
   fireEvent.click(screen.getByRole("tab", { name: /^spec$/i }));
   expect(confirmSpy).not.toHaveBeenCalled();
   expect(await screen.findByRole("button", { name: /start spec from skeleton/i })).toBeInTheDocument();
+});
+
+it("renders a pending proposal inline at the section with Accept", async () => {
+  // draftPayload(true) = an editable draft; extend the GET mock so /proposed-changes
+  // returns one pending prose_edit row for the active section (index 1 = Methods per draftPayload).
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((url: string) =>
+    Promise.resolve(
+      url.includes("/proposed-changes")
+        ? { data: { items: [{ id: "pc1", status: "pending", target_artifact: "draft",
+            section_index: 1, kind: "prose_edit", origin_kind: "turn",
+            new_text: "## Methods\nrevised body\n", resulting_commit_sha: null,
+            created_at: null, resolved_by: null, resolved_at: null }] }, error: undefined }
+        : url.endsWith("/cockpit-meta")
+          ? activeMeta()
+          : draftPayload(true),
+    )) as never);
+  const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: "pc1", status: "accepted" }, error: undefined } as never);
+  renderCockpit();
+  fireEvent.click(await screen.findByRole("button", { name: /Methods/ }));
+  // Wait for the inline "Suggested edit" section to appear.
+  const inlineReview = await screen.findByRole("region", { name: /suggested edit/i });
+  expect(inlineReview).toBeInTheDocument();
+  // Scope the Accept click to the inline review section (ProposalReview in the
+  // Inbox tab also renders Accept buttons for all pending proposals).
+  fireEvent.click(within(inlineReview).getByRole("button", { name: /accept/i }));
+  await waitFor(() => expect(post).toHaveBeenCalled());
 });
 
 it("renders the setup view when the workspace is in setup phase", async () => {

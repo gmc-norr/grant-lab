@@ -13,6 +13,7 @@ import styles from "../cockpit/CockpitPanels.module.css";
 import { SelectionToolbar } from "../cockpit/SelectionToolbar";
 import { SourceViewer } from "../cockpit/SourceViewer";
 import { CodeMirrorEditor } from "./CodeMirrorEditor";
+import { InlineProposalReview } from "./InlineProposalReview";
 
 type Section = { index: number; heading: string; text: string; sha: string };
 
@@ -276,6 +277,16 @@ export function ArtifactSectionEditor({
                 canEdit={canEdit}
                 isDirty={isDirty(activeIndex)}
                 onCite={() => setComposerOpen(true)}
+              />
+            )}
+
+            {citations && view === "section" && activeIndex >= 0 && (
+              <InlineProposalReview
+                workspaceId={workspaceId}
+                artifact="draft"
+                sectionIndex={activeIndex}
+                currentText={activeSection?.text ?? ""}
+                canEdit={canEdit}
               />
             )}
           </Box>
