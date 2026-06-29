@@ -1,6 +1,6 @@
 import { undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
-import { render, cleanup, waitFor } from "@testing-library/react";
+import { render, cleanup, waitFor, act } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { CodeMirrorEditor } from "./CodeMirrorEditor";
@@ -406,6 +406,28 @@ it("publishes 1-based Ln/Col on selection change", () => {
   // Caret at index 12 = start of "line two" (9) + 3 -> line 2, col 4.
   view.dispatch({ selection: { anchor: 12 } });
   expect(onCursorChange).toHaveBeenLastCalledWith({ line: 2, col: 4 });
+});
+
+it("emits selection in read-only mode only when emitSelectionWhenReadOnly is set", async () => {
+  const onSel = vi.fn();
+  const doc = "## H\nhello world\n";
+  const { rerender } = render(
+    <CodeMirrorEditor value={doc} onChange={() => {}} requireHeading readOnly citations
+      onSelectionChange={onSel} />,
+  );
+  const view = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView }).__cmView!;
+  act(() => view.dispatch({ selection: { anchor: 8, head: 13 } }));
+  expect(onSel).not.toHaveBeenCalledWith(expect.objectContaining({ text: expect.any(String) }));
+
+  rerender(
+    <CodeMirrorEditor value={doc} onChange={() => {}} requireHeading readOnly citations
+      onSelectionChange={onSel} emitSelectionWhenReadOnly />,
+  );
+  const v2 = (document.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: import("@codemirror/view").EditorView }).__cmView!;
+  act(() => v2.dispatch({ selection: { anchor: 8, head: 13 } }));
+  expect(onSel).toHaveBeenCalledWith(expect.objectContaining({ from: 8, to: 13 }));
 });
 
 it("renders a line-number gutter", () => {
