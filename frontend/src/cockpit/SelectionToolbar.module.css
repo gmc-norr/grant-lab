@@ -1,0 +1,21 @@
+.toolbar {
+  position: absolute;
+  z-index: 30;
+  min-width: 22rem;
+  max-width: 32rem;
+  background: var(--app-editor);
+}
+.hint {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--app-warn);
+}
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--app-muted);
+}
