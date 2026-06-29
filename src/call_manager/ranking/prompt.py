@@ -311,14 +311,19 @@ def parse_response(content: str, *, verification_text: str | None = None) -> Par
     if not isinstance(el, dict):
         raise ParseError("eligibility missing or not an object")
     el_rating = el.get("rating")
-    if el_rating not in {"pass", "fail", "unclear"}:
+    # Tuple membership (==), not set membership (hash): the model occasionally
+    # emits `rating` as a nested object/list. `dict not in {…}` would raise an
+    # unhandled TypeError (unhashable type) that escapes as an unexpected error
+    # and dead-letters the job; `dict not in (…)` compares by value and falls
+    # through to the intended ParseError, which the worker retries cleanly.
+    if el_rating not in ("pass", "fail", "unclear"):
         raise ParseError(f"eligibility.rating must be 'pass'|'fail'|'unclear'; got {el_rating!r}")
 
     ex = data.get("exclusions")
     if not isinstance(ex, dict):
         raise ParseError("exclusions missing or not an object")
     ex_rating = ex.get("rating")
-    if ex_rating not in {"pass", "fail"}:
+    if ex_rating not in ("pass", "fail"):
         raise ParseError(f"exclusions.rating must be 'pass'|'fail'; got {ex_rating!r}")
 
     # Pre-normalize the haystack once. PDF-derived full_text has hard line

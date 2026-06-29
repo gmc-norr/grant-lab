@@ -380,6 +380,40 @@ def test_parse_response_coerces_non_string_rationale_to_empty():
     assert out.exclusions_rationale == ""
 
 
+@pytest.mark.parametrize("bad_rating", [{"value": "pass"}, ["pass"]])
+def test_parse_response_raises_parse_error_for_non_string_eligibility_rating(bad_rating):
+    """A non-string (dict/list) eligibility.rating must raise ParseError, not an
+    unhashable-type TypeError. Regression: set membership (`x in {…}`) hashed
+    the value and crashed the worker with `TypeError: unhashable type: 'dict'`,
+    dead-lettering otherwise-rankable calls."""
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": None},
+            "eligibility": {"rating": bad_rating, "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
+    with pytest.raises(ParseError, match="eligibility.rating must be"):
+        parse_response(content)
+
+
+@pytest.mark.parametrize("bad_rating", [{"value": "pass"}, ["pass"]])
+def test_parse_response_raises_parse_error_for_non_string_exclusions_rating(bad_rating):
+    """A non-string (dict/list) exclusions.rating must raise ParseError, not an
+    unhashable-type TypeError. Regression: this is the exact shape Gemma emitted
+    for call 'Innovativa Startups 2026', which dead-lettered with
+    `TypeError: unhashable type: 'dict'` instead of a clean retryable failure."""
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "good", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+            "exclusions": {"rating": bad_rating, "rationale": "ok", "quoted_evidence": None},
+        }
+    )
+    with pytest.raises(ParseError, match="exclusions.rating must be"):
+        parse_response(content)
+
+
 def test_build_messages_includes_analysis_block_when_enabled():
     """Sonnet path requests summary + applicant_notes via the prompt."""
     from dataclasses import dataclass
