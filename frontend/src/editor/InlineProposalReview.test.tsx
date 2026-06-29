@@ -37,8 +37,37 @@ it("renders the diff for a pending proposal in this section", async () => {
 });
 
 it("renders nothing when no pending proposal targets this section", async () => {
-  renderIPR([{ ...ROW, section_index: 7 }]);
-  await waitFor(() => expect(screen.queryByText(/suggested edit/i)).toBeNull());
+  // Build a section-7 proposal with a distinctive text so we can prove it was loaded.
+  const SECTION_7_ROW = { ...ROW, section_index: 7, new_text: "DISTINCT-PROPOSAL-TEXT\n" };
+
+  // Render for sectionIndex=7 first — proves the GET resolved (data loaded + section 7 matches).
+  const qc = new QueryClient();
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(
+    { data: { items: [SECTION_7_ROW] }, error: undefined } as never,
+  );
+  const { rerender } = render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <InlineProposalReview workspaceId="ws-1" artifact="draft" sectionIndex={7}
+          currentText={"## H\nold body\n"} canEdit />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+  // findBy awaits query resolution — data is definitely loaded when this resolves.
+  await screen.findByText(/suggested edit/i);
+
+  // Rerender same provider tree (cache populated) for sectionIndex=1.
+  rerender(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <InlineProposalReview workspaceId="ws-1" artifact="draft" sectionIndex={1}
+          currentText={"## H\nold body\n"} canEdit />
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+  // Section 1 must show nothing — data is loaded, so this is genuinely non-vacuous.
+  expect(screen.queryByText(/suggested edit/i)).toBeNull();
+  expect(screen.queryByText(/DISTINCT-PROPOSAL-TEXT/)).toBeNull();
 });
 
 it("Accept posts to the accept endpoint", async () => {
