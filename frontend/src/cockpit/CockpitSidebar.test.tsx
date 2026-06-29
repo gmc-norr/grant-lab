@@ -38,7 +38,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  resetEditorStore();
+  // resetEditorStore() emits to still-mounted store subscribers (this afterEach runs
+  // before Testing-Library's auto-cleanup), so flush that re-render inside act().
+  act(() => resetEditorStore());
 });
 
 const draft = {

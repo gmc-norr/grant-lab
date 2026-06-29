@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { RouterProvider, createMemoryRouter, useNavigate } from "react-router-dom";
@@ -9,7 +9,9 @@ import { UnsavedChangesGuard } from "./UnsavedChangesGuard";
 
 afterEach(() => {
   vi.restoreAllMocks();
-  resetEditorStore();
+  // resetEditorStore() emits to a still-mounted guard (this afterEach runs before
+  // Testing-Library's auto-cleanup), so flush that re-render inside act().
+  act(() => resetEditorStore());
 });
 
 it("registers a beforeunload handler ONLY while a buffer is dirty", () => {
@@ -23,8 +25,8 @@ it("registers a beforeunload handler ONLY while a buffer is dirty", () => {
   );
   expect(addSpy.mock.calls.some(([t]) => String(t) === "beforeunload")).toBe(false);
 
-  // Dirty -> the handler is registered.
-  setDirty([1]);
+  // Dirty -> the handler is registered. setDirty emits to the mounted guard, so act().
+  act(() => setDirty([1]));
   rerender(
     <MemoryRouter>
       <UnsavedChangesGuard />
@@ -32,8 +34,8 @@ it("registers a beforeunload handler ONLY while a buffer is dirty", () => {
   );
   expect(addSpy.mock.calls.some(([t]) => String(t) === "beforeunload")).toBe(true);
 
-  // Clean again -> the handler is removed (cleanup ran).
-  setDirty([]);
+  // Clean again -> the handler is removed (cleanup ran). setDirty emits → act().
+  act(() => setDirty([]));
   rerender(
     <MemoryRouter>
       <UnsavedChangesGuard />

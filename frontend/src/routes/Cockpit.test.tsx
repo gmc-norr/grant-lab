@@ -20,7 +20,9 @@ import { Cockpit } from "./Cockpit";
 
 afterEach(() => {
   vi.restoreAllMocks();
-  resetEditorStore();
+  // resetEditorStore() emits to still-mounted store subscribers (CockpitSidebar) — this
+  // afterEach runs before Testing-Library's auto-cleanup — so flush that inside act().
+  act(() => resetEditorStore());
 });
 
 function draftPayload(canEdit: boolean) {
@@ -319,7 +321,11 @@ it("edits to one section survive switching to another section and back", async (
   const view = (document.querySelector(".cm-editor") as HTMLElement & {
     __cmView?: import("@codemirror/view").EditorView;
   }).__cmView!;
-  view.dispatch({ changes: { from: view.state.doc.length, insert: "EDIT" } });
+  // The dispatch fires onChange -> setBuffers (a React state update + the dirty-publish
+  // effect that re-renders the sidebar); wrap it in act() like the other dispatch tests.
+  act(() => {
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "EDIT" } });
+  });
   expect(document.querySelector(".cm-content")?.textContent).toContain("EDIT");
   // Switch to the preamble, then back to Methods — the edit must still be there.
   fireEvent.click(screen.getByRole("button", { name: /preamble/i }));

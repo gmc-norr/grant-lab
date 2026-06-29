@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -8,7 +8,9 @@ import { resetEditorStore, setCursor, setSave } from "../cockpit/editorStore";
 import { StatusBar } from "./StatusBar";
 
 afterEach(() => {
-  resetEditorStore();
+  // resetEditorStore() emits to still-mounted store subscribers (this afterEach runs
+  // before Testing-Library's auto-cleanup), so flush that re-render inside act().
+  act(() => resetEditorStore());
   vi.restoreAllMocks();
 });
 
