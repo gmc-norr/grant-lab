@@ -4,3 +4,16 @@
 export function toCodePointOffset(text: string, utf16Offset: number): number {
   return [...text.slice(0, utf16Offset)].length;
 }
+
+export const MAX_SELECTION_CODEPOINTS = 4000;
+
+export type SelectionContext = {
+  request_type: "ask" | "modify";
+  target_artifact: "draft";
+  section_index: number;
+  base_commit_sha: string;
+  base_section_sha: string;
+  anchor: string;
+  from_offset: number;
+  to_offset: number;
+};
