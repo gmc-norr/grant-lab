@@ -223,6 +223,15 @@ it("renders the Outline from sections", async () => {
   expect(screen.getByRole("button", { name: /preamble/i })).toBeInTheDocument();
 });
 
+it("separates the editor and the bottom panel with a vertical resize handle", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  renderCockpit();
+  await screen.findByRole("button", { name: /Methods/ });
+  // The bottom panel is its own resizable Panel, split off the editor by a
+  // draggable handle (PanelResizeHandle renders role=separator).
+  expect(screen.getByRole("separator", { name: /resize panel/i })).toBeInTheDocument();
+});
+
 it("an owner gets an editable editor; the Full-draft tab is read-only", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   renderCockpit();
