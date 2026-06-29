@@ -53,6 +53,8 @@ it("renders a selection block as a quoted chip, not a raw tag", () => {
   expect(screen.getByText("Shorten this.")).toBeInTheDocument();
   expect(screen.getByText(/We will do the work\./)).toBeInTheDocument();
   expect(screen.queryByText(/<selection/)).toBeNull();
+  // stronger: no raw <selection> element exists in the DOM either
+  expect(document.querySelector("selection")).toBeNull();
 });
 
 it("renders a selection block with 'unsaved' marker when not verified", () => {

@@ -34,7 +34,7 @@ function TurnItem({ id, turn, refs }: { id: string; turn: Turn; refs: Ref[] }) {
           const verified = b.verified as boolean;
           return (
             <blockquote key={`${turn.id}-${i}`} className={styles.selectionChip} data-verb={String(b.request_type)}>
-              <span className={styles.selectionVerb}>{verb} ·{verified ? "" : " unsaved"}</span>
+              <span className={styles.selectionVerb}>{verb}{verified ? "" : " · unsaved"}</span>
               {String(b.anchor ?? "")}
             </blockquote>
           );
