@@ -36,6 +36,16 @@ export function InlineProposalReview({
 
   const pc = pending;
 
+  // Content-aware keys: diff rows are stateless and recomputed each render, so
+  // an array index would be a foot-gun if the diff ever reorders. Key on the
+  // row's tag+text, disambiguating repeated lines by occurrence count.
+  const seen: Record<string, number> = {};
+  const rows = lineDiff(currentText, pc.new_text ?? "").map((r) => {
+    const base = `${r.tag}:${r.text}`;
+    const n = (seen[base] = (seen[base] ?? 0) + 1);
+    return { ...r, key: `${base}#${n}` };
+  });
+
   async function onAccept() {
     setNotice(null);
     try {
@@ -61,8 +71,8 @@ export function InlineProposalReview({
         <Text size="xs" c="dimmed">Suggested edit from the assistant</Text>
         {notice && <Text role="status" size="sm" c="dimmed">{notice}</Text>}
         <pre className={styles.proposalDiff}>
-          {lineDiff(currentText, pc.new_text ?? "").map((r, k) => (
-            <div key={k} data-diff={r.tag}>
+          {rows.map((r) => (
+            <div key={r.key} data-diff={r.tag}>
               {(r.tag === "add" ? "+ " : r.tag === "del" ? "- " : "  ") + r.text}
             </div>
           ))}

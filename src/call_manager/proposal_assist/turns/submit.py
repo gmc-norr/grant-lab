@@ -338,7 +338,17 @@ def submit_user_turn(
                 raise ValueError(f"reference {rid} is not ready (text_status={ref.text_status!r})")
             references.append(ref)
 
-    if tokens_in is None and (attachments or references):
+    # A selection block injects server-side text (the anchored span, up to
+    # MAX_SELECTION_CODEPOINTS, plus its heading) into the prompt beyond what
+    # the user typed. Count it so a large selection can't slip past the daily
+    # cap; the small fixed <selection> wrapper is rounded away by ``// 4``.
+    sel_chars = (
+        len(selection_block.get("anchor") or "") + len(selection_block.get("heading") or "")
+        if selection_block
+        else 0
+    )
+
+    if tokens_in is None and (attachments or references or selection_block):
         # ``text_chars_total`` is NULL for the extracted-but-not-counted
         # edge case — treat as 0 (defensive: the resolver still finds
         # text.txt; the SDK's TurnDoneEvent corrects the running total
@@ -350,6 +360,7 @@ def submit_user_turn(
         tokens_in = (
             sum(att.tokens_estimate or 0 for att in attachments)
             + (ref_chars // 4)
+            + (sel_chars // 4)
             + (len(content_text) // 4)
         )
 

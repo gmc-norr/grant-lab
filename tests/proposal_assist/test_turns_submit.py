@@ -291,3 +291,49 @@ def test_submit_rejected_on_soft_deleted_workspace(pg_session_factory, _settings
             )
             is None
         )
+
+
+def test_submit_with_selection_block_pre_counts_its_chars(
+    pg_session_factory,
+    _settings_env,
+):
+    """A server-built selection block injects the anchored span (+ heading)
+    into the prompt; those chars must be folded into the token pre-count so a
+    large selection can't escape the daily cap (it would otherwise be counted
+    only post-call by the SDK's TurnDoneEvent)."""
+    from call_manager.config import Settings
+
+    settings = Settings()
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+
+    selection_block = {
+        "type": "selection",
+        "request_type": "ask",
+        "section_index": 0,
+        "anchor": "x" * 400,
+        "from_offset": 0,
+        "to_offset": 400,
+        "verified": True,
+        "heading": "Methods",
+    }
+    with pg_session_factory() as s:
+        submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content_text="explain this",
+            submitted_by_user_id=uid,
+            settings=settings,
+            selection_block=selection_block,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        ct = s.scalar(
+            select(ChatTurn).where(ChatTurn.workspace_id == wsid, ChatTurn.role == "user")
+        )
+    # (len(anchor)=400 + len("Methods")=7) // 4 = 101, plus content len(12)//4 = 3.
+    assert ct.tokens_in == ((400 + len("Methods")) // 4) + (len("explain this") // 4)
