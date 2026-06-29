@@ -81,6 +81,23 @@ it("clicking empty row area selects the call", () => {
   expect(screen.getByTestId("search").textContent).toContain("profile=7");
 });
 
+it("clicking an interactive child (Start drafting) does not trigger row selection", () => {
+  function Probe() {
+    const loc = useLocation();
+    return <span data-testid="loc">{loc.pathname + loc.search}</span>;
+  }
+  renderRow(
+    <>
+      <CallRow call={call()} profileId={7} />
+      <Probe />
+    </>,
+  );
+  fireEvent.click(screen.getByRole("link", { name: "Start drafting" }));
+  const loc = screen.getByTestId("loc").textContent ?? "";
+  expect(loc).toContain("/cockpit/new");
+  expect(loc).not.toContain("selected=");
+});
+
 it("omits the match badge when the score is null", () => {
   renderRow(<CallRow call={call({ aggregate_score: null })} />);
   expect(screen.queryByText("82")).toBeNull();
