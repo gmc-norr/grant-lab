@@ -77,8 +77,14 @@ def test_unverified_modify_raises_conflict(tmp_path):
 
 def test_verified_anchor_mismatch_raises(tmp_path):
     repo = _repo(tmp_path, DOC)
-    with pytest.raises(SelectionConflictError):
-        build_selection_block(repo_dir=repo, sel=_sel(repo, DOC, 1, 0, 5, "WRONGTEXT"))
+    with pytest.raises(SelectionConflictError, match="selection changed"):
+        build_selection_block(repo_dir=repo, sel=_sel(repo, DOC, 1, 0, 5, "WRONG"))
+
+
+def test_zero_length_selection_raises_nothing_selected(tmp_path):
+    repo = _repo(tmp_path, DOC)
+    with pytest.raises(SelectionConflictError, match="nothing selected"):
+        build_selection_block(repo_dir=repo, sel=_sel(repo, DOC, 1, 3, 3, ""))
 
 
 def test_offset_out_of_range_raises(tmp_path):

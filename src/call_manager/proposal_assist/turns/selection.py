@@ -48,6 +48,8 @@ def build_selection_block(*, repo_dir: Path, sel: SelectionInput) -> dict:
     if verified:
         text = live.text  # type: ignore[union-attr]
         n = len(text)  # code points (str len)
+        if sel.from_offset == sel.to_offset:
+            raise SelectionConflictError("nothing selected — select some text first")
         if not (0 <= sel.from_offset < sel.to_offset <= n):
             raise SelectionConflictError("selection is out of range — reselect it")
         if sel.to_offset - sel.from_offset > MAX_SELECTION_CODEPOINTS:
