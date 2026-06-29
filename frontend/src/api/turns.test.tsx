@@ -43,5 +43,8 @@ it("forwards selection_context in the POST body", async () => {
     });
   });
   const body = (post.mock.calls[0][1] as { body: Record<string, unknown> }).body;
-  expect(body.selection_context).toMatchObject({ request_type: "modify", section_index: 1 });
+  expect(body.selection_context).toMatchObject({
+    request_type: "modify", target_artifact: "draft", section_index: 1,
+    anchor: "x", from_offset: 0, to_offset: 1,
+  });
 });
