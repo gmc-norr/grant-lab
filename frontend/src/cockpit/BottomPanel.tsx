@@ -41,14 +41,23 @@ export function BottomPanel({
     <Box
       component="section"
       aria-label="Workspace panel"
-      style={{ borderTop: "1px solid var(--app-border)", background: "var(--app-editor)" }}
+      style={{
+        // Fill the resizable bottom Panel: a fixed tab bar over a flex content
+        // area that scrolls internally, so the panel's height follows the drag
+        // handle instead of a fixed cap.
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        borderTop: "1px solid var(--app-border)",
+        background: "var(--app-editor)",
+      }}
     >
       <Group
         justify="space-between"
         gap="sm"
         px="sm"
         py={4}
-        style={{ background: "var(--app-tabbar)" }}
+        style={{ background: "var(--app-tabbar)", flex: "0 0 auto" }}
       >
         <Tabs value={activeTab} onChange={(v) => v && onTab(v as BottomTab)}>
           <Tabs.List aria-label="Panel">
@@ -70,14 +79,14 @@ export function BottomPanel({
         </Button>
       </Group>
       {!collapsed && (
-        <ScrollArea.Autosize mah="14rem" p="sm">
+        <ScrollArea p="sm" style={{ flex: 1, minHeight: 0 }}>
           {activeTab === "inbox" && <InboxPanel id={id} count={inboxCount} />}
           {activeTab === "problems" && <ProblemsPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "activity" && <ActivityPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "library" && <LibraryPanel id={id} />}
           {activeTab === "citations" && <CitationsPanel id={id} onNavigate={onNavigate} />}
           {activeTab === "claims" && <ClaimsPanel id={id} />}
-        </ScrollArea.Autosize>
+        </ScrollArea>
       )}
     </Box>
   );
