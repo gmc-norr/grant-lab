@@ -12,7 +12,7 @@ import { StatusBar } from "./StatusBar";
 import { TitleBar } from "./TitleBar";
 
 type SidebarHandle = { Sidebar?: ComponentType };
-type RightPaneHandle = { RightPane?: ComponentType };
+type RightPaneHandle = { RightPane?: ComponentType; rightPaneLabel?: string };
 
 // The persistent IDE shell: title / activity / [sidebar] / main / [right-pane] / status. A
 // route opts into the contextual sidebar by declaring `handle: { Sidebar }` (a
@@ -38,6 +38,10 @@ export function AppShell() {
     .reverse()
     .map((m) => (m.handle as RightPaneHandle | undefined)?.RightPane)
     .find((R): R is ComponentType => Boolean(R));
+  const rightPaneLabel = [...matches]
+    .reverse()
+    .map((m) => (m.handle as RightPaneHandle | undefined)?.rightPaneLabel)
+    .find((l): l is string => Boolean(l));
 
   // Per-workspace remount key for the WHOLE cockpit subtree (main Outlet + right pane).
   // A param-only nav /cockpit/A → /cockpit/B keeps this layout mounted and would
@@ -83,6 +87,7 @@ export function AppShell() {
         hasRightPane={Boolean(RightPaneContent)}
         chatCollapsed={chatCollapsed}
         onToggleChat={toggleChat}
+        rightPaneLabel={rightPaneLabel}
       />
       <div className={styles.body}>
         <ActivityBar onToggleSidebar={SidebarContent ? toggleSidebar : undefined} />
@@ -112,7 +117,7 @@ export function AppShell() {
           </Panel>
           {RightPaneContent && (
             <>
-              <PanelResizeHandle className={styles.handle} aria-label="Resize chat" />
+              <PanelResizeHandle className={styles.handle} aria-label={`Resize ${rightPaneLabel ?? "chat"}`} />
               <Panel
                 id="rightpane"
                 order={3}

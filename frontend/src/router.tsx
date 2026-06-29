@@ -8,6 +8,7 @@ import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
 import { CallDetail } from "./routes/CallDetail";
+import { CallReadingPane } from "./routes/CallReadingPane";
 import { CallsFilters } from "./routes/CallsFilters";
 import { Login } from "./routes/Login";
 import { PreAuthLayout } from "./routes/PreAuthLayout";
@@ -54,7 +55,7 @@ export const router = createBrowserRouter([
     // (the router.test drift guard enforces it).
     element: <AppShell />,
     children: [
-      { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters } },
+      { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters, RightPane: CallReadingPane, rightPaneLabel: "reading pane" } },
       { path: "cockpit", element: <WorkspaceList />, handle: { Sidebar: WorkspacesFilters } },
       { path: "cockpit/new", element: <WorkspaceCreate /> },
       {

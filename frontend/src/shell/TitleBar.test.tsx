@@ -73,6 +73,7 @@ function renderWithProps(path: string, props: {
   hasRightPane?: boolean;
   chatCollapsed?: boolean;
   onToggleChat?: () => void;
+  rightPaneLabel?: string;
 }) {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(ME as never);
   const qc = new QueryClient();
@@ -103,4 +104,9 @@ it("reflects collapsed state on the chat-toggle (aria-pressed=false when collaps
 it("omits the chat-toggle when the route has no right pane", () => {
   renderWithProps("/", { hasRightPane: false, onToggleChat: vi.fn() });
   expect(screen.queryByRole("button", { name: "Toggle chat panel" })).toBeNull();
+});
+
+it("labels the toggle from rightPaneLabel when provided", async () => {
+  renderWithProps("/", { hasRightPane: true, onToggleChat: vi.fn(), rightPaneLabel: "reading pane" });
+  expect(await screen.findByRole("button", { name: "Toggle reading pane" })).toBeInTheDocument();
 });

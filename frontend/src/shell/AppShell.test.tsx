@@ -178,3 +178,15 @@ it("renders no resize handle when neither a sidebar nor a right pane is present"
   renderShellAt("/");
   expect(screen.queryByRole("separator")).toBeNull();
 });
+
+it("labels the right-pane toggle and resize handle from handle.rightPaneLabel", () => {
+  renderShellWithRoutes("/", [
+    {
+      index: true,
+      element: <p>BODY</p>,
+      handle: { RightPane: () => <aside aria-label="Call preview" />, rightPaneLabel: "reading pane" },
+    },
+  ]);
+  expect(screen.getByRole("separator", { name: "Resize reading pane" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Toggle reading pane" })).toBeInTheDocument();
+});
