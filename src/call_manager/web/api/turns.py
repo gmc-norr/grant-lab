@@ -9,18 +9,24 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ChatTurn, TurnJob, User, WorkspaceEvent
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
 from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
+from call_manager.proposal_assist.turns.selection import (
+    SelectionConflictError,
+    SelectionInput,
+    build_selection_block,
+)
 from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._perms import require_member, require_owner
@@ -47,10 +53,22 @@ class TurnOut(BaseModel):
     position: int
 
 
+class SelectionContextIn(BaseModel):
+    request_type: Literal["ask", "modify"]
+    target_artifact: Literal["draft"] = "draft"
+    section_index: int = Field(ge=0)
+    base_commit_sha: str
+    base_section_sha: str
+    anchor: str = Field(min_length=1)
+    from_offset: int = Field(ge=0)
+    to_offset: int = Field(ge=0)
+
+
 class SubmitTurnIn(BaseModel):
     content: str
     reference_ids: list[str] = []
     attachment_ids: list[str] = []
+    selection_context: SelectionContextIn | None = None
 
 
 class SubmitTurnResponse(BaseModel):
@@ -80,7 +98,13 @@ def submit_turn(
     settings = request.app.state.settings
     sf = request.app.state.session_factory
     with sf() as session:
-        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        sc = body.selection_context
+        if sc is not None and sc.request_type == "ask":
+            # spec §7: Ask = any viewer (member). A member can ONLY submit a
+            # selection ask — modify and free-chat (no selection) stay owner-only.
+            ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        else:
+            ws = require_owner(workspace_id=workspace_id, user=user, session=session)
         try:
             gate_cloud_llm(
                 ws=ws,
@@ -115,6 +139,24 @@ def submit_turn(
         )
         if active is not None:
             raise HTTPException(status_code=409, detail="A turn is already in progress.")
+        selection_block = None
+        if sc is not None:
+            repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+            try:
+                selection_block = build_selection_block(
+                    repo_dir=repo_dir,
+                    sel=SelectionInput(
+                        request_type=sc.request_type,
+                        section_index=sc.section_index,
+                        base_commit_sha=sc.base_commit_sha,
+                        base_section_sha=sc.base_section_sha,
+                        anchor=sc.anchor,
+                        from_offset=sc.from_offset,
+                        to_offset=sc.to_offset,
+                    ),
+                )
+            except SelectionConflictError as e:
+                raise HTTPException(status_code=409, detail=str(e)) from e
         try:
             job = submit_user_turn(
                 session=session,
@@ -125,6 +167,7 @@ def submit_turn(
                 submitted_by_user_id=user.id,
                 settings=settings,
                 workspaces_dir=Path(settings.workspaces_dir),
+                selection_block=selection_block,
             )
         except (TokenCapExceeded, GlobalTokenCapExceeded) as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
