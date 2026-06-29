@@ -897,6 +897,8 @@ it("renders a pending proposal inline at the section with Accept", async () => {
   // Inbox tab also renders Accept buttons for all pending proposals).
   fireEvent.click(within(inlineReview).getByRole("button", { name: /accept/i }));
   await waitFor(() => expect(post).toHaveBeenCalled());
+  // complete the proof: the inline Accept hit the accept endpoint for this proposal
+  expect(String(post.mock.calls[0][0])).toMatch(/proposed-changes\/.*\/accept/);
 });
 
 it("renders the setup view when the workspace is in setup phase", async () => {
