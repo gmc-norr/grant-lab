@@ -719,6 +719,18 @@ it("pins the resolved profile into the selection URL", () => {
   expect(href).toContain("profile=7");
 });
 
+it("preserves existing list filters/pagination in the selection URL", () => {
+  // Guards the core selectionSearch contract at the CallRow level: a row that
+  // forgot to pass the live `sp` would still pass the helper unit tests.
+  renderRow(<CallRow call={call()} profileId={7} />, "/?source=eu&page=2&q=dna");
+  const href = screen.getByRole("link", { name: "Grant X" }).getAttribute("href") ?? "";
+  expect(href).toContain("selected=3");
+  expect(href).toContain("source=eu");
+  expect(href).toContain("page=2");
+  expect(href).toContain("q=dna");
+  expect(href).toContain("profile=7");
+});
+
 it("marks the row as current when it is the selected call", () => {
   renderRow(<CallRow call={call()} />, "/?selected=3");
   expect(screen.getByRole("listitem")).toHaveAttribute("aria-current", "true");
@@ -857,6 +869,7 @@ git commit -m "feat(frontend): CallRow selects into the reading pane (URL ?selec
 - Modify: `frontend/src/shell/TitleBar.tsx` (parameterize the toggle's `aria-label`)
 - Modify: `frontend/src/shell/AppShell.test.tsx` (add a labeled-pane test; existing "Resize chat" tests stay)
 - Modify: `frontend/src/shell/TitleBar.test.tsx` (add a labeled-toggle test; existing "Toggle chat panel" tests stay)
+- Modify: `frontend/src/router.test.tsx` (assert the real `/` index route exposes `CallReadingPane` + `rightPaneLabel`)
 
 **Interfaces:**
 - Consumes: `CallReadingPane` from `./routes/CallReadingPane`.
@@ -892,10 +905,26 @@ it("labels the right-pane toggle and resize handle from handle.rightPaneLabel", 
 });
 ```
 
+Add to `frontend/src/router.test.tsx` — a real-router assertion that the live `/`
+index route actually wires the pane (the synthetic-handle tests above can't catch
+a missed or typoed edit to `router.tsx`). Add the import
+`import { CallReadingPane } from "./routes/CallReadingPane";` (`RouteObject` is
+already imported), then:
+
+```tsx
+it("the / index (calls) route exposes the reading pane via its handle", () => {
+  const shell = (router.routes as RouteObject[]).find((r) => r.children?.some((c) => c.index));
+  const index = shell?.children?.find((c) => c.index);
+  const handle = index?.handle as { RightPane?: unknown; rightPaneLabel?: string } | undefined;
+  expect(handle?.RightPane).toBe(CallReadingPane);
+  expect(handle?.rightPaneLabel).toBe("reading pane");
+});
+```
+
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pnpm exec vitest run src/shell/TitleBar.test.tsx src/shell/AppShell.test.tsx`
-Expected: FAIL — the new tests can't find "Toggle reading pane" / "Resize reading pane" (labels still hard-coded to chat).
+Run: `pnpm exec vitest run src/shell/TitleBar.test.tsx src/shell/AppShell.test.tsx src/router.test.tsx`
+Expected: FAIL — the shell tests can't find "Toggle reading pane" / "Resize reading pane" (labels still hard-coded to chat), and the router test sees `handle.RightPane === undefined` (the index route handle is still `{ Sidebar: CallsFilters }`).
 
 - [ ] **Step 3: Parameterize `TitleBar`'s toggle label**
 
@@ -971,16 +1000,16 @@ Change the index route's handle:
       { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters, RightPane: CallReadingPane, rightPaneLabel: "reading pane" } },
 ```
 
-- [ ] **Step 6: Run the shell tests to verify they pass**
+- [ ] **Step 6: Run the shell + router tests to verify they pass**
 
-Run: `pnpm exec vitest run src/shell/TitleBar.test.tsx src/shell/AppShell.test.tsx`
-Expected: PASS — new labeled tests pass; existing "Toggle chat panel" / "Resize chat" tests still pass (defaults).
+Run: `pnpm exec vitest run src/shell/TitleBar.test.tsx src/shell/AppShell.test.tsx src/router.test.tsx`
+Expected: PASS — new labeled tests pass; the router test confirms the real `/` route exposes `CallReadingPane` + `rightPaneLabel: "reading pane"`; existing "Toggle chat panel" / "Resize chat" tests and the route-drift guard still pass.
 
 - [ ] **Step 7: Typecheck + commit**
 
 ```bash
 pnpm exec tsc --noEmit
-git add src/router.tsx src/shell/AppShell.tsx src/shell/TitleBar.tsx src/shell/AppShell.test.tsx src/shell/TitleBar.test.tsx
+git add src/router.tsx src/shell/AppShell.tsx src/shell/TitleBar.tsx src/shell/AppShell.test.tsx src/shell/TitleBar.test.tsx src/router.test.tsx
 git commit -m "feat(frontend): mount the calls reading pane in the shell with route-correct labels"
 ```
 
@@ -1024,9 +1053,9 @@ git commit -m "chore(frontend): reading-pane verification fixups"
 - Reading pane shows full detail via shared component → Tasks 2 (`CallDetailBody`) + 3 (`CallReadingPane`). ✓
 - Selection in the URL, params preserved, profile pinned → Task 1 (`selectionSearch`) + Task 4 (CallRow uses it). ✓
 - `/calls/:id` full page kept, rendered from the shared body → Task 2 (CallDetail refactor). ✓
-- Row click selects + highlight + whole-row-click + Start-drafting unchanged → Task 4. ✓
+- Row click selects + highlight + whole-row-click + Start-drafting unchanged → Task 4 (incl. a test that selection preserves live filters/pagination). ✓
 - "Open full page ↗" + close/deselect + placeholder/loading/error/not-found → Task 3. ✓
-- Shell `RightPane` handle + resize/toggle labels generalized, cockpit labels preserved → Task 5. ✓
+- Shell `RightPane` handle + resize/toggle labels generalized, cockpit labels preserved → Task 5 (incl. a real-router assertion that `/` wires `CallReadingPane` + `rightPaneLabel`). ✓
 - v1 boundaries (hide on full page only; Calls only; shared pane width; no keyboard nav) → respected; hide stays in `CallDetail` (Task 2), pane has no hide. ✓
 - Testing per spec → each task ships its tests; Task 6 runs the whole suite + build. ✓
 
