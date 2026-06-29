@@ -1,4 +1,4 @@
-import styles from "./Deadline.module.css";
+import { Text } from "@mantine/core";
 
 type DeadlineState = "closed" | "soon" | "watch" | "open";
 
@@ -40,18 +40,24 @@ export function deadlineLocalView(localDate: string): { state: DeadlineState; da
   return { state: "open", date: localDate };
 }
 
+// Domain deadline-urgency colours (parity with the retired Deadline CSS module):
+// closed=dim, soon=bad+bold, watch=warn, open=muted.
+const DEADLINE_TEXT: Record<DeadlineState, { c: string; fw?: number }> = {
+  closed: { c: "var(--app-dim)" },
+  soon: { c: "var(--app-bad)", fw: 600 },
+  watch: { c: "var(--app-warn)" },
+  open: { c: "var(--app-muted)" },
+};
+
 export function Deadline({ iso }: { iso: string }) {
   const { state, date } = deadlineView(iso);
   return (
-    <span className={styles[state]} data-deadline-state={state}>
+    <Text span data-deadline-state={state} {...DEADLINE_TEXT[state]}>
       {state === "closed" ? `Closed · ${date}` : date}
-    </span>
+    </Text>
   );
 }
 
-// Renders the Europe/Stockholm local deadline date from the API field
-// `deadline_local_date` (YYYY-MM-DD). Falls back to the raw UTC iso string if
-// the localised field is null.
 export function DeadlineLocal({
   localDate,
   isoFallback,
@@ -62,11 +68,10 @@ export function DeadlineLocal({
   if (localDate) {
     const { state, date } = deadlineLocalView(localDate);
     return (
-      <span className={styles[state]} data-deadline-state={state}>
+      <Text span data-deadline-state={state} {...DEADLINE_TEXT[state]}>
         {state === "closed" ? `Closed · ${date}` : date}
-      </span>
+      </Text>
     );
   }
-  // Fallback to UTC slice when server omits the localised field.
   return <Deadline iso={isoFallback} />;
 }

@@ -1,7 +1,5 @@
-import { Select } from "@mantine/core";
+import { Select, Stack, Text } from "@mantine/core";
 import { useSearchParams } from "react-router-dom";
-
-import styles from "./WorkspacesFilters.module.css";
 
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
@@ -19,8 +17,8 @@ export function WorkspacesFilters() {
   const [sp, setSp] = useSearchParams();
   const status = sp.get("status") ?? "";
   return (
-    <div className={styles.filters}>
-      <h2 className={styles.heading}>Filters</h2>
+    <Stack gap="sm" p="sm">
+      <Text component="h2" tt="uppercase" fz="0.7rem" fw={600} c="dimmed">Filters</Text>
       <Select
         label="Status"
         data={STATUS_OPTIONS}
@@ -35,6 +33,6 @@ export function WorkspacesFilters() {
           })
         }
       />
-    </div>
+    </Stack>
   );
 }

@@ -1,9 +1,9 @@
+import { Anchor, Box, Group, Stack, Text } from "@mantine/core";
 import { Link } from "react-router-dom";
 
 import type { CallItem } from "../api/dashboard";
 import { MatchBadge } from "../components/MatchBadge";
 import { Deadline } from "./Deadline";
-import styles from "./CallRow.module.css";
 
 // One call in the list: title link (to the React detail route), a muted
 // meta line (source · deadline), the banded match pill, and a "Start drafting"
@@ -14,26 +14,36 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
   if (profileId != null) params.set("profile_id", String(profileId));
   const startHref = `/cockpit/new?${params.toString()}`;
   return (
-    <li className={styles.row}>
-      <div className={styles.body}>
-        <Link
-          className={styles.title}
+    <Group
+      component="li"
+      justify="space-between"
+      align="flex-start"
+      gap="sm"
+      wrap="nowrap"
+      px="0.25rem"
+      py="xs"
+      style={{ borderBottom: "1px solid var(--app-border)" }}
+    >
+      <Box miw={0}>
+        <Anchor
+          component={Link}
+          fw={500}
           to={profileId != null ? `/calls/${call.id}?profile=${profileId}` : `/calls/${call.id}`}
         >
           {call.title}
-        </Link>
-        <div className={styles.meta}>
-          {call.source_name && <span>{call.source_name}</span>}
-          {call.source_name && call.deadline && <span aria-hidden> · </span>}
+        </Anchor>
+        <Text mt="0.15rem" c="dimmed" fz="0.85rem">
+          {call.source_name && <Text span>{call.source_name}</Text>}
+          {call.source_name && call.deadline && <Text span aria-hidden> · </Text>}
           {call.deadline && <Deadline iso={call.deadline} />}
-        </div>
-      </div>
-      <div className={styles.actions}>
+        </Text>
+      </Box>
+      <Stack gap="0.3rem" align="flex-end" flex="0 0 auto">
         <MatchBadge score={call.aggregate_score} />
-        <Link className={styles.start} to={startHref}>
+        <Anchor component={Link} fz="0.8rem" fw={500} to={startHref} style={{ whiteSpace: "nowrap" }}>
           Start drafting
-        </Link>
-      </div>
-    </li>
+        </Anchor>
+      </Stack>
+    </Group>
   );
 }

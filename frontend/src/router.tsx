@@ -1,4 +1,5 @@
 import { lazy, Suspense } from "react";
+import { Center, Group, Loader, Text, Title } from "@mantine/core";
 import { createBrowserRouter } from "react-router-dom";
 
 import { CockpitChat } from "./cockpit/chat/CockpitChat";
@@ -36,9 +37,12 @@ const AdminUsers = lazy(() => import("./routes/AdminUsers").then((m) => ({ defau
 
 function RouteSpinner() {
   return (
-    <main style={{ padding: "2rem", opacity: 0.5 }}>
-      Loading…
-    </main>
+    <Center component="main" h="100%" p="xl">
+      <Group gap="sm">
+        <Loader size="sm" />
+        <Text c="dimmed">Loading…</Text>
+      </Group>
+    </Center>
   );
 }
 
@@ -125,9 +129,9 @@ export const router = createBrowserRouter([
       {
         path: "*",
         element: (
-          <main role="alert">
-            <h1>Not found</h1>
-          </main>
+          <Center component="main" role="alert" p="xl">
+            <Title order={1}>Not found</Title>
+          </Center>
         ),
       },
     ],
