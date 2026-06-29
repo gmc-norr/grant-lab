@@ -35,7 +35,7 @@ class FakeAgentAdapter:
         self.last_user_message: str | list[dict[str, Any]] | None = None
         self._scripted: deque[list[StreamEvent]] = deque()
         self.provenance: list[tuple[Any, Any, str | None, int | None, str | None]] = []
-        self.provenance_gating: list = []
+        self.provenance_gating: list[tuple[Any, set[str] | None, dict | None]] = []
         # SP2a-2: track which workspaces have been launched, so a test can prove
         # the processor stamps provenance AFTER launch (the cold-launch ordering
         # the plan was revised to fix). provenance_saw_launch[i] is True iff
