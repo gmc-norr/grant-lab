@@ -41,7 +41,7 @@ export function StatusBar() {
 
   return (
     <footer className={styles.statusbar} aria-label="Status bar">
-      <span className={styles.item}>Call Manager</span>
+      <span className={styles.item}>Grant Lab</span>
       {onCockpit && dl && (
         <span className={`${styles.item} ${DEADLINE_CLASS[dl.state] ?? ""}`}>
           {dl.state === "closed" ? `Closed · ${dl.date}` : `Due ${dl.date}`}

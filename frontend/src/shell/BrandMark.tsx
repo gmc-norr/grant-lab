@@ -8,7 +8,7 @@ export function BrandMark({ size = 20 }: { size?: number }) {
       height={size}
       viewBox="0 0 256 256"
       role="img"
-      aria-label="Call Manager"
+      aria-label="Grant Lab"
     >
       <path
         d="M128 22 218 74v108l-90 52-90-52V74z"

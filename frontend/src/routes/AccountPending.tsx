@@ -9,7 +9,7 @@ export function AccountPending() {
       </Title>
       <Text ta="center" c="dimmed" size="sm">
         Your sign-in worked. An administrator needs to approve your account before
-        you can use Call Manager. You'll be able to sign in once approved.
+        you can use Grant Lab. You'll be able to sign in once approved.
       </Text>
       <Text ta="center" size="sm">
         <Anchor component={Link} to="/login">

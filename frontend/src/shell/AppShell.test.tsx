@@ -30,7 +30,7 @@ function renderShellAt(route: string) {
 
 it("renders the chrome regions and the routed outlet content", () => {
   renderShellAt("/");
-  // "Funding calls" is the per-route title (unique). NB: "Call Manager" appears
+  // "Funding calls" is the per-route title (unique). NB: "Grant Lab" appears
   // in BOTH the title bar brand and the status bar, so don't getByText it here.
   expect(screen.getByText("Funding calls")).toBeInTheDocument(); // title bar
   expect(screen.getByLabelText("Primary")).toBeInTheDocument(); // activity bar
