@@ -408,7 +408,7 @@ it("publishes 1-based Ln/Col on selection change", () => {
   expect(onCursorChange).toHaveBeenLastCalledWith({ line: 2, col: 4 });
 });
 
-it("emits selection in read-only mode only when emitSelectionWhenReadOnly is set", async () => {
+it("emits selection in read-only mode only when emitSelectionWhenReadOnly is set", () => {
   const onSel = vi.fn();
   const doc = "## H\nhello world\n";
   const { rerender } = render(
@@ -419,6 +419,9 @@ it("emits selection in read-only mode only when emitSelectionWhenReadOnly is set
     __cmView?: import("@codemirror/view").EditorView }).__cmView!;
   act(() => view.dispatch({ selection: { anchor: 8, head: 13 } }));
   expect(onSel).not.toHaveBeenCalledWith(expect.objectContaining({ text: expect.any(String) }));
+  // pin the full contract: read-only WITHOUT the prop emits null (not "nothing"),
+  // so a future removal of the else-arm is caught.
+  expect(onSel).toHaveBeenCalledWith(null);
 
   rerender(
     <CodeMirrorEditor value={doc} onChange={() => {}} requireHeading readOnly citations
