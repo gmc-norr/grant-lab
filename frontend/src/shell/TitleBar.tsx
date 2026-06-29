@@ -41,7 +41,7 @@ export function TitleBar({
     <header className={styles.titlebar}>
       <span className={styles.brand}>
         <BrandMark size={18} />
-        <span className={styles.app}>Call Manager</span>
+        <span className={styles.app}>Grant Lab</span>
       </span>
       <span className={styles.title}>{title}</span>
       {isOwner && (

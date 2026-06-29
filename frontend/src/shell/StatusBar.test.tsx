@@ -33,7 +33,7 @@ function renderAt(path: string) {
 
 it("off the cockpit, shows only the global label", () => {
   renderAt("/");
-  expect(screen.getByText("Call Manager")).toBeInTheDocument();
+  expect(screen.getByText("Grant Lab")).toBeInTheDocument();
   expect(screen.queryByText("Markdown")).not.toBeInTheDocument();
 });
 

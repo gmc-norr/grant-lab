@@ -322,6 +322,7 @@ def create_app() -> FastAPI:
     # does NOT fetch /openapi.json over HTTP — so disabling the route is safe.
     _dev = settings.spa_mode == "dev"
     app = FastAPI(
+        title="Grant Lab",
         lifespan=lifespan,
         docs_url="/docs" if _dev else None,
         redoc_url="/redoc" if _dev else None,
