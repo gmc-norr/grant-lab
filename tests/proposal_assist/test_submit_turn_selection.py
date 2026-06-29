@@ -40,7 +40,9 @@ def _seeded(monkeypatch, pg_url, pg_session_factory, tmp_path):
     repo = workspace_repo_dir(tmp_path, ws_id)
     head = current_head(repo)
     sections = split_sections(_DOC)
-    # section index 1 = "Background"
+    # section index 1 = "Background". NOTE: sec.text INCLUDES the "## Background\n"
+    # heading line (the sha is over the whole section text), so anchor=section["text"]
+    # with to_offset=len(section["text"]) selects the entire section incl. its heading.
     sec = sections[1]
     section = {"index": 1, "sha": sec.sha, "text": sec.text, "heading": sec.heading}
     return app, owner_id, member_id, stranger_id, ws_id, head, section

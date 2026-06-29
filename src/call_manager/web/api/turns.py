@@ -93,8 +93,9 @@ def submit_turn(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> SubmitTurnResponse:
-    """Enqueue a user turn (owner-only). Canonical gate order: owner →
-    setup/drafting/disclosure (shared gate_cloud_llm) → caps."""
+    """Enqueue a user turn. Gate order: auth (owner — or any member for a
+    selection *ask*, per spec §7) → setup/drafting/disclosure (shared
+    gate_cloud_llm, per-actor) → caps. modify / free-chat stay owner-only."""
     settings = request.app.state.settings
     sf = request.app.state.session_factory
     with sf() as session:
