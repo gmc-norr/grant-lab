@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -150,15 +150,18 @@ describe("useReferences / useReferenceChunks / useAddCitation", () => {
     const qc = new QueryClient();
     const invalidate = vi.spyOn(qc, "invalidateQueries");
     const { result } = renderHook(() => useAddCitation("ws-1"), { wrapper: wrapper(qc) });
-    await expect(
-      result.current.mutateAsync({
-        section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
-        anchor: "claim.", reference_id: "r1", chunk_index: 0,
-        evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
-      }),
-    ).rejects.toBeTruthy();
-    // give any async onError a tick; assert it was NOT called with the draft key
-    await new Promise((r) => setTimeout(r, 0));
+    // act() so the mutation's settle (isError state on the hook host) flushes inside act.
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({
+          section_index: 1, base_commit_sha: "a".repeat(40), base_section_sha: "s",
+          anchor: "claim.", reference_id: "r1", chunk_index: 0,
+          evidence_quote: "azure", quote_start: 0, quote_end: 5, stance: "supports",
+        }),
+      ).rejects.toBeTruthy();
+      // give any async onError a tick; assert it was NOT called with the draft key
+      await new Promise((r) => setTimeout(r, 0));
+    });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] });
   });
 });

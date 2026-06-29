@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -101,11 +101,12 @@ it("streams turns from a running job and invalidates on done", async () => {
   // Wait for the data fetch to resolve and the FakeES to be instantiated with the
   // job-1 stream URL (the effect runs after running_job_id is set).
   await waitFor(() => expect(captured.turn).toBeDefined());
-  // Stream one assistant turn → it appears in the transcript.
-  captured.turn!({ data: JSON.stringify({ id: "a1", role: "assistant", position: 5, created_at: "", content: { type: "text", text: "streamed!" } }) } as MessageEvent);
+  // Stream one assistant turn → it appears in the transcript. The handler fires a
+  // React state update (streamed turns), so drive it inside act().
+  act(() => captured.turn!({ data: JSON.stringify({ id: "a1", role: "assistant", position: 5, created_at: "", content: { type: "text", text: "streamed!" } }) } as MessageEvent));
   expect(await screen.findByText("streamed!")).toBeInTheDocument();
   // done closes cleanly (no throw).
-  captured.done?.({ data: JSON.stringify({ status: "completed" }) } as MessageEvent);
+  act(() => captured.done?.({ data: JSON.stringify({ status: "completed" }) } as MessageEvent));
 });
 
 it("remounting on a workspace-id change (per-id key) starts a FRESH stream and does not bleed A's turns into B (Defect 3)", async () => {
@@ -165,7 +166,7 @@ it("remounting on a workspace-id change (per-id key) starts a FRESH stream and d
   );
   await waitFor(() => expect(captured.turn).toBeDefined());
   // A streams a turn.
-  captured.turn!({ data: JSON.stringify({ id: "a1", role: "assistant", position: 5, created_at: "", content: { type: "text", text: "A-SECRET-TURN" } }) } as MessageEvent);
+  act(() => captured.turn!({ data: JSON.stringify({ id: "a1", role: "assistant", position: 5, created_at: "", content: { type: "text", text: "A-SECRET-TURN" } }) } as MessageEvent));
   expect(await screen.findByText("A-SECRET-TURN")).toBeInTheDocument();
   expect(urls.some((u) => u.includes("ws-a") && u.includes("job-A"))).toBe(true);
 
@@ -277,6 +278,6 @@ it("clears the stale 'too late' note when the turn finishes (SSE done)", async (
   expect(await screen.findByText(/too late/i)).toBeInTheDocument();
   // The turn finishes → SSE done fires → the stale note must NOT survive into the next turn.
   await waitFor(() => expect(captured.done).toBeDefined());
-  captured.done!({ data: JSON.stringify({ status: "completed" }) } as MessageEvent);
+  act(() => captured.done!({ data: JSON.stringify({ status: "completed" }) } as MessageEvent));
   await waitFor(() => expect(screen.queryByText(/too late/i)).not.toBeInTheDocument());
 });
