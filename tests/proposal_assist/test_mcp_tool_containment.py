@@ -8,6 +8,14 @@ import asyncio
 import uuid
 from pathlib import Path
 
+import pytest
+
+from call_manager.proposal_assist.tools.registry import (
+    ToolContext,
+    _deny_if_out_of_turn,
+    _safe_tool,
+)
+
 
 def _build_options_for_role(allowed_tools: list[str]) -> dict:
     """Build ClaudeAgentOptions kwargs for a background role with a
@@ -167,3 +175,52 @@ def test_background_agents_use_role_scoped_allowlist():
     assert evaluator_allowed_tools() == ["submit_scorecard"]
     assert review_allowed_tools() == ["submit_review"]
     assert uncited_claims_allowed_tools() == ["submit_uncited_claims"]
+
+
+# ---------------------------------------------------------------------------
+# Per-turn runtime gate tests (Task 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tool_ctx() -> ToolContext:
+    # Built inline exactly like the existing containment tests (_build_options_for_role):
+    # no DB needed — these tests only exercise the runtime gate.
+    return ToolContext(
+        workspace_id=uuid.UUID(int=0),
+        repo_dir=Path("/tmp"),
+        session_factory=None,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+    )
+
+
+def test_deny_helper_gates_only_when_list_set(tool_ctx):
+    tool_ctx.allowed_tool_names = None
+    assert _deny_if_out_of_turn("propose_edit", tool_ctx) is None  # no per-turn list
+    tool_ctx.allowed_tool_names = {"read_proposal"}
+    assert _deny_if_out_of_turn("read_proposal", tool_ctx) is None
+    assert _deny_if_out_of_turn("propose_edit", tool_ctx) is not None  # denied
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_denies_out_of_turn_tool(tool_ctx):
+    tool_ctx.allowed_tool_names = {"read_proposal"}
+
+    async def _impl():
+        return {"ok": True}
+
+    denied = await _safe_tool("propose_edit", tool_ctx, _impl)
+    assert "not allowed" in str(denied).lower()
+    allowed = await _safe_tool("read_proposal", tool_ctx, _impl)
+    assert "not allowed" not in str(allowed).lower()
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_no_gate_when_none(tool_ctx):
+    tool_ctx.allowed_tool_names = None
+
+    async def _impl():
+        return {"ok": True}
+
+    out = await _safe_tool("propose_edit", tool_ctx, _impl)
+    assert "not allowed" not in str(out).lower()

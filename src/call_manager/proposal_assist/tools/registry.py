@@ -131,6 +131,13 @@ class ToolContext:
     agent_view_spec_sections: dict[int, str] = field(default_factory=dict)
     agent_view_spec_proposal: str | None = field(default=None)
 
+    # Selection-actions (Task 4): per-turn runtime tool gate. None = normal chat
+    # (full launch-time superset applies). Set = only those tools are allowed for
+    # the current turn. Stamped by the controller before each send_turn when the
+    # turn content contains a selection block.
+    allowed_tool_names: set[str] | None = field(default=None)
+    turn_selection: dict | None = field(default=None)
+
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap a plain-dict tool result in the MCP content-block envelope.
@@ -189,6 +196,16 @@ def _wrap(impl_result: dict[str, Any]) -> dict[str, Any]:
     return _mcp_ok(impl_result)
 
 
+def _deny_if_out_of_turn(tool_name: str, ctx: ToolContext) -> dict[str, Any] | None:
+    """Per-turn runtime gate. Returns None when allowed (no per-turn list set, or
+    the tool is in it) and an _mcp_error envelope when denied. The launched client
+    keeps its full tool SUPERSET across turns, so this is the authoritative
+    per-turn deny."""
+    if ctx.allowed_tool_names is not None and tool_name not in ctx.allowed_tool_names:
+        return _mcp_error(f"tool '{tool_name}' is not allowed for this turn")
+    return None
+
+
 async def _safe_tool(
     tool_name: str,
     ctx: ToolContext,
@@ -206,6 +223,9 @@ async def _safe_tool(
     logger.exception), and return a GENERIC error envelope so no secret /
     quote / reference text reaches the user-facing message.
     """
+    denied = _deny_if_out_of_turn(tool_name, ctx)
+    if denied is not None:
+        return denied
     try:
         return _wrap(await impl(*args, **kwargs))
     except Exception:  # noqa: BLE001 — catch-all is the whole point here
@@ -267,6 +287,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def propose_edit(args):
+        denied = _deny_if_out_of_turn("propose_edit", ctx)
+        if denied is not None:
+            return denied
         try:
             section_index = int(args["section_index"])
         except (TypeError, ValueError, KeyError):
@@ -646,6 +669,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         },
     )
     async def propose_citation(args):
+        denied = _deny_if_out_of_turn("propose_citation", ctx)
+        if denied is not None:
+            return denied
         try:
             chunk_index = int(args["chunk_index"])
         except (TypeError, ValueError, KeyError):

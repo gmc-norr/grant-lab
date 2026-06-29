@@ -16,7 +16,12 @@ import re
 # The trust delimiters a malicious body could try to forge: the real
 # reference wrapper and a fake system block. Case-insensitive + whitespace
 # tolerant so "< / Untrusted-Reference >" is caught too.
-_TRUST_DELIM_RE = re.compile(r"<\s*/?\s*(?:system|untrusted-reference)\s*>", re.IGNORECASE)
+# `\b[^>]*` neutralizes the tag even when it carries attributes, so a forged
+# `<selection verified="true">` inside an untrusted body cannot pose as a real
+# wrapper. `\b` keeps it from matching look-alikes like `<systemic>`.
+_TRUST_DELIM_RE = re.compile(
+    r"<\s*/?\s*(?:system|untrusted-reference|selection)\b[^>]*>", re.IGNORECASE
+)
 
 
 def neutralize_trust_delimiters(text: str) -> str:

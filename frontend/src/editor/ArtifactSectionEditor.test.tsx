@@ -68,7 +68,7 @@ it("resolves the active section by section.index, not array position", async () 
 
 it("citations={false} renders no Cite control", () => {
   renderEditor([{ index: 0, heading: "", text: "x\n", sha: "s0" }]);
-  expect(screen.queryByRole("button", { name: /cite selection/i })).toBeNull();
+  expect(screen.queryByRole("toolbar", { name: /selection actions/i })).toBeNull();
 });
 
 it("openPeek prop opens the citation source peek panel", async () => {

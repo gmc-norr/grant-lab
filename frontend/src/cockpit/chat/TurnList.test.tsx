@@ -36,6 +36,44 @@ it("falls back to a muted chip for an unknown reference id", () => {
   expect(screen.getByText(/reference/i)).toBeInTheDocument();
 });
 
+it("renders a selection block as a quoted chip, not a raw tag", () => {
+  render(
+    <TurnList
+      id="ws1"
+      refs={[] as never}
+      turns={[
+        { id: "t1", role: "user", position: 1, created_at: "", content: [
+          { type: "text", text: "Shorten this." },
+          { type: "selection", request_type: "modify", section_index: 2, verified: true,
+            anchor: "We will do the work.", from_offset: 0, to_offset: 20 },
+        ] },
+      ] as never}
+    />,
+  );
+  expect(screen.getByText("Shorten this.")).toBeInTheDocument();
+  expect(screen.getByText(/We will do the work\./)).toBeInTheDocument();
+  expect(screen.queryByText(/<selection/)).toBeNull();
+  // stronger: no raw <selection> element exists in the DOM either
+  expect(document.querySelector("selection")).toBeNull();
+});
+
+it("renders a selection block with 'unsaved' marker when not verified", () => {
+  render(
+    <TurnList
+      id="ws1"
+      refs={[] as never}
+      turns={[
+        { id: "t2", role: "user", position: 1, created_at: "", content: [
+          { type: "selection", request_type: "ask", section_index: 0, verified: false,
+            anchor: "Some text.", from_offset: 0, to_offset: 10 },
+        ] },
+      ] as never}
+    />,
+  );
+  expect(screen.getByText(/Some text\./)).toBeInTheDocument();
+  expect(screen.getByText(/unsaved/)).toBeInTheDocument();
+});
+
 it("renders an image block as an img pointing at the files serve route", () => {
   render(
     <TurnList

@@ -109,3 +109,55 @@ async def test_propose_edit_rejects_section_read_but_not_in_view(
     result = await propose_edit_impl(ctx, section_index=5, new_text="## Ghost\nx.\n")
     assert "error" in result
     assert "read_proposal" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_propose_edit_records_selection_provenance(
+    pg_session_factory, _settings_env, tmp_path
+):
+    import uuid as _uuid
+
+    content = "preamble\n\n## Methods\noriginal.\n"
+    ctx, wsid, repo = _build_ctx(pg_session_factory, tmp_path, content)
+    await read_proposal_impl(ctx)
+
+    ctx.turn_selection = {
+        "anchor": "the bit", "from_offset": 5, "to_offset": 12, "section_index": 1
+    }
+    result = await propose_edit_impl(ctx, section_index=1, new_text="## Methods\nnew body\n")
+    assert "error" not in result, result
+    pc_id = result["proposed_change_id"]
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, _uuid.UUID(pc_id))
+        assert pc.payload["selection_anchor"] == "the bit"
+        assert pc.payload["selection_from"] == 5
+        assert pc.payload["selection_to"] == 12
+
+
+@pytest.mark.asyncio
+async def test_propose_edit_plain_turn_omits_selection_keys(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """When ctx.turn_selection is None (a plain chat turn) the ProposedChange
+    payload must NOT contain selection_anchor / selection_from / selection_to.
+    Guards the `and ctx.turn_selection` short-circuit in propose_edit_impl."""
+    import uuid as _uuid
+
+    content = "preamble\n\n## Methods\noriginal.\n"
+    ctx, wsid, repo = _build_ctx(pg_session_factory, tmp_path, content)
+    await read_proposal_impl(ctx)
+
+    # Explicitly None — plain chat turn with no text selection.
+    ctx.turn_selection = None
+
+    result = await propose_edit_impl(ctx, section_index=1, new_text="## Methods\nnew body\n")
+    assert "error" not in result, result
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, _uuid.UUID(result["proposed_change_id"]))
+        assert "selection_anchor" not in pc.payload
+        assert "selection_from" not in pc.payload
+        assert "selection_to" not in pc.payload
+        # The normal new_text payload key is present (sanity check).
+        assert "new_text" in pc.payload

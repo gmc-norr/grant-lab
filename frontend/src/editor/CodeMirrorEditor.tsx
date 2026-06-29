@@ -57,6 +57,10 @@ export type CodeMirrorEditorProps = {
    *  on every logical document swap; omitting it degrades to the legacy behaviour of
    *  clearing undo on every controlled push. */
   docKey?: string | number;
+  /** Opt-in: emit `onSelectionChange` even when the editor is read-only.
+   *  Default `false` — existing callers (draft editors) are unaffected.
+   *  Set `true` on viewer/member panes so the "Ask" toolbar works for readers. */
+  emitSelectionWhenReadOnly?: boolean;
 };
 
 // VS Code dark editor recolored to our identity. The vscode base + gutter use
@@ -107,6 +111,7 @@ export function CodeMirrorEditor({
   onCursorChange = () => {},
   citations = true,
   docKey,
+  emitSelectionWhenReadOnly = false,
 }: CodeMirrorEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -128,11 +133,13 @@ export function CodeMirrorEditor({
   const onPillClickRef = useRef(onPillClick);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onCursorChangeRef = useRef(onCursorChange);
+  const emitReadOnlyRef = useRef(emitSelectionWhenReadOnly);
   onChangeRef.current = onChange;
   requireHeadingRef.current = requireHeading;
   onPillClickRef.current = onPillClick;
   onSelectionChangeRef.current = onSelectionChange;
   onCursorChangeRef.current = onCursorChange;
+  emitReadOnlyRef.current = emitSelectionWhenReadOnly;
 
   // Mount ONCE: build EditorView, destroy on unmount.
   useEffect(() => {
@@ -192,7 +199,7 @@ export function CodeMirrorEditor({
           if ((u.selectionSet || u.docChanged) && !remoteEcho) {
             const sel = u.state.selection.main;
             const text = u.state.sliceDoc(sel.from, sel.to);
-            if (text && !u.state.facet(EditorState.readOnly)) {
+            if (text && (!u.state.facet(EditorState.readOnly) || emitReadOnlyRef.current)) {
               onSelectionChangeRef.current?.({ from: sel.from, to: sel.to, text });
             } else {
               onSelectionChangeRef.current?.(null);

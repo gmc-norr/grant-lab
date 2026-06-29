@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import type { SelectionContext } from "../cockpit/selection";
 import { api, unwrap } from "./client";
 
 export function useTurns(id: string) {
@@ -14,11 +15,19 @@ export function useTurns(id: string) {
 export function useSubmitTurn(id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { content: string; reference_ids?: string[]; attachment_ids?: string[] }) =>
+    mutationFn: async (vars: {
+      content: string; reference_ids?: string[]; attachment_ids?: string[];
+      selection_context?: SelectionContext;
+    }) =>
       unwrap(
         await api.POST("/api/workspaces/{workspace_id}/turns", {
           params: { path: { workspace_id: id } },
-          body: { content: vars.content, reference_ids: vars.reference_ids ?? [], attachment_ids: vars.attachment_ids ?? [] },
+          body: {
+            content: vars.content,
+            reference_ids: vars.reference_ids ?? [],
+            attachment_ids: vars.attachment_ids ?? [],
+            ...(vars.selection_context ? { selection_context: vars.selection_context } : {}),
+          },
         }),
       ),
     // onSettled (not onSuccess): a backstop 4xx/5xx (drafting-disabled race,

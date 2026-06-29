@@ -94,18 +94,22 @@ def _build_user_content(
     content_text: str,
     attachment_ids: list[uuid.UUID] | None,
     reference_ids: list[uuid.UUID] | None = None,
+    selection_block: dict[str, Any] | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Shape the ``ChatTurn.content`` payload.
 
     Text-only submits keep the legacy dict shape so existing renderers
     and adapters don't have to special-case the common path. When
-    either ``attachment_ids`` or ``reference_ids`` is non-empty, we
-    emit a list of blocks: the user text first, then image blocks
-    (one per attachment), then reference blocks (one per reference).
+    either ``attachment_ids``, ``reference_ids``, or ``selection_block``
+    is non-empty/non-None, we emit a list of blocks: the user text first,
+    then the selection block (if any), then image blocks (one per
+    attachment), then reference blocks (one per reference).
     """
-    if not attachment_ids and not reference_ids:
+    if not attachment_ids and not reference_ids and selection_block is None:
         return {"type": "text", "text": content_text}
     blocks: list[dict[str, Any]] = [{"type": "text", "text": content_text}]
+    if selection_block is not None:
+        blocks.append(selection_block)
     for aid in attachment_ids or []:
         blocks.append({"type": "image", "attachment_id": str(aid)})
     for rid in reference_ids or []:
@@ -183,6 +187,7 @@ def submit_user_turn(
     settings: Settings,
     tokens_in: int | None = None,
     workspaces_dir: Path | None = None,
+    selection_block: dict[str, Any] | None = None,
 ) -> TurnJob:
     """Insert chat_turns(role='user') + turn_jobs(status='queued') +
     workspace_events(cloud_turn_sent, phase='queued') atomically.
@@ -333,7 +338,17 @@ def submit_user_turn(
                 raise ValueError(f"reference {rid} is not ready (text_status={ref.text_status!r})")
             references.append(ref)
 
-    if tokens_in is None and (attachments or references):
+    # A selection block injects server-side text (the anchored span, up to
+    # MAX_SELECTION_CODEPOINTS, plus its heading) into the prompt beyond what
+    # the user typed. Count it so a large selection can't slip past the daily
+    # cap; the small fixed <selection> wrapper is rounded away by ``// 4``.
+    sel_chars = (
+        len(selection_block.get("anchor") or "") + len(selection_block.get("heading") or "")
+        if selection_block
+        else 0
+    )
+
+    if tokens_in is None and (attachments or references or selection_block):
         # ``text_chars_total`` is NULL for the extracted-but-not-counted
         # edge case — treat as 0 (defensive: the resolver still finds
         # text.txt; the SDK's TurnDoneEvent corrects the running total
@@ -345,6 +360,7 @@ def submit_user_turn(
         tokens_in = (
             sum(att.tokens_estimate or 0 for att in attachments)
             + (ref_chars // 4)
+            + (sel_chars // 4)
             + (len(content_text) // 4)
         )
 
@@ -375,6 +391,7 @@ def submit_user_turn(
         content_text=content_text,
         attachment_ids=attachment_ids,
         reference_ids=reference_ids,
+        selection_block=selection_block,
     )
 
     user_turn = ChatTurn(

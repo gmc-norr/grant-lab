@@ -22,6 +22,20 @@
 .outcome { color: var(--app-accent); font-weight: 600; }
 .refChip { display: inline-block; background: var(--app-selected); color: var(--app-link); border-radius: 10px; padding: 0 6px; margin: 0 2px; font-size: 0.85em; }
 .chatImage { max-width: 100%; border-radius: 6px; display: block; margin: 4px 0; }
+.selectionChip {
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0.5rem;
+  border-left: 2px solid var(--app-accent);
+  background: var(--app-hover);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+.selectionVerb {
+  display: block;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
 
 /* Footer */
 .footer {
