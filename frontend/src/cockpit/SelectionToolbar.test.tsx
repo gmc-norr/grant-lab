@@ -43,7 +43,9 @@ it("Ask stays enabled when dirty; Edit/Cite disabled when dirty", () => {
   renderTB({ isDirty: true });
   expect(screen.getByRole("button", { name: /ask/i })).toBeEnabled();
   expect(screen.getByRole("button", { name: /edit/i })).toBeDisabled();
-  expect(screen.getByRole("button", { name: /cite/i })).toBeDisabled();
+  const cite = screen.getByRole("button", { name: /cite/i });
+  expect(cite).toBeDisabled();
+  expect(cite).toHaveAttribute("title", "Save section to cite");
 });
 
 it("non-writer sees Ask only", () => {

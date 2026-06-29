@@ -610,7 +610,7 @@ it("select-to-cite gate: dirtying the section disables Cite (must save first)", 
   );
   expect(screen.getByRole("button", { name: /^cite$/i })).toHaveAttribute(
     "title",
-    "Save section to edit",
+    "Save section to cite",
   );
 });
 

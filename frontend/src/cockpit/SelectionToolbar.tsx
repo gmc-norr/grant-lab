@@ -77,6 +77,7 @@ export function SelectionToolbar(props: SelectionToolbarProps) {
   }
 
   const editTitle = isDirty ? "Save section to edit" : undefined;
+  const citeTitle = isDirty ? "Save section to cite" : undefined;
 
   return (
     <Paper className={styles.toolbar} withBorder p="xs" role="toolbar" aria-label="Selection actions">
@@ -102,7 +103,7 @@ export function SelectionToolbar(props: SelectionToolbarProps) {
           </Menu>
         )}
         {canEdit && (
-          <Button size="xs" variant="default" disabled={isDirty || tooLong} title={editTitle} onClick={props.onCite}>
+          <Button size="xs" variant="default" disabled={isDirty || tooLong} title={citeTitle} onClick={props.onCite}>
             Cite
           </Button>
         )}
