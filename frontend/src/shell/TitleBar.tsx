@@ -13,10 +13,12 @@ export function TitleBar({
   hasRightPane = false,
   chatCollapsed = false,
   onToggleChat,
+  rightPaneLabel,
 }: {
   hasRightPane?: boolean;
   chatCollapsed?: boolean;
   onToggleChat?: () => void;
+  rightPaneLabel?: string;
 } = {}) {
   const { pathname } = useLocation();
   const id = cockpitIdFromPath(pathname);
@@ -60,7 +62,7 @@ export function TitleBar({
           <button
             type="button"
             className={styles.paneToggle}
-            aria-label="Toggle chat panel"
+            aria-label={`Toggle ${rightPaneLabel ?? "chat panel"}`}
             aria-pressed={!chatCollapsed}
             onClick={onToggleChat}
           >

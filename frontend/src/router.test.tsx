@@ -6,6 +6,7 @@ import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
 
 import { router } from "./router";
+import { CallReadingPane } from "./routes/CallReadingPane";
 import { SPA_ROUTES } from "./routes.gen";
 import { theme } from "./theme/theme";
 
@@ -44,6 +45,14 @@ it("router concrete paths are all owned by the SPA_ROUTES manifest (drift guard)
     .filter((p) => !p.includes("*"))
     .map(toOwningPrefix);
   expect(new Set(concrete)).toEqual(new Set(SPA_ROUTES));
+});
+
+it("the / index (calls) route exposes the reading pane via its handle", () => {
+  const shell = (router.routes as RouteObject[]).find((r) => r.children?.some((c) => c.index));
+  const index = shell?.children?.find((c) => c.index);
+  const handle = index?.handle as { RightPane?: unknown; rightPaneLabel?: string } | undefined;
+  expect(handle?.RightPane).toBe(CallReadingPane);
+  expect(handle?.rightPaneLabel).toBe("reading pane");
 });
 
 it("/login renders the pre-auth Login, not the AppShell soft-404", () => {

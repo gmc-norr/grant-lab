@@ -17,6 +17,7 @@ import { ProfileNew } from "./routes/ProfileNew";
 import { ProfilesList } from "./routes/ProfilesList";
 import { Register } from "./routes/Register";
 import { Settings } from "./routes/Settings";
+import { CallReadingPane } from "./routes/CallReadingPane";
 import { Dashboard } from "./routes/Dashboard";
 import { WorkspaceCreate } from "./routes/WorkspaceCreate";
 import { WorkspaceList } from "./routes/WorkspaceList";
@@ -54,7 +55,7 @@ export const router = createBrowserRouter([
     // (the router.test drift guard enforces it).
     element: <AppShell />,
     children: [
-      { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters } },
+      { index: true, element: <Dashboard />, handle: { Sidebar: CallsFilters, RightPane: CallReadingPane, rightPaneLabel: "reading pane" } },
       { path: "cockpit", element: <WorkspaceList />, handle: { Sidebar: WorkspacesFilters } },
       { path: "cockpit/new", element: <WorkspaceCreate /> },
       {
