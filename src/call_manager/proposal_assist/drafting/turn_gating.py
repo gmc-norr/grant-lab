@@ -10,7 +10,10 @@ list applies.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "read_proposal", "read_spec", "get_artifact_history", "read_artifact_at",
@@ -20,6 +23,11 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "validate_citations", "list_unsupported_claims",
 })
 MODIFY_TOOLS: frozenset[str] = READ_ONLY_TOOLS | {"propose_edit"}
+
+_ALLOWED_BY_REQUEST: dict[str, frozenset[str]] = {
+    "ask": READ_ONLY_TOOLS,
+    "modify": MODIFY_TOOLS,
+}
 
 
 def _selection_block(content: Any) -> dict | None:
@@ -35,7 +43,14 @@ def allowed_tools_for_content(content: Any) -> set[str] | None:
     sel = _selection_block(content)
     if sel is None:
         return None
-    return set(MODIFY_TOOLS) if sel.get("request_type") == "modify" else set(READ_ONLY_TOOLS)
+    rt = sel.get("request_type")
+    allowed = _ALLOWED_BY_REQUEST.get(rt)
+    if allowed is None:
+        # Fail closed: an unrecognized request_type denies ALL tools this turn
+        # rather than silently granting the read-only set.
+        logger.warning("unknown selection request_type %r — denying all tools this turn", rt)
+        return set()
+    return set(allowed)
 
 
 def selection_from_content(content: Any) -> dict | None:

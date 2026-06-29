@@ -27,6 +27,13 @@ def test_allowed_tools_for_content():
     assert allowed_tools_for_content(plain) is None  # normal chat -> full list
 
 
+def test_allowed_tools_unknown_request_type_fails_closed():
+    blk = [{"type": "text", "text": "q"}, {"type": "selection", "request_type": "execute"}]
+    assert allowed_tools_for_content(blk) == set()   # deny all, not READ_ONLY
+    missing = [{"type": "text", "text": "q"}, {"type": "selection"}]  # no request_type
+    assert allowed_tools_for_content(missing) == set()
+
+
 def test_selection_from_content():
     mod = [{"type": "text", "text": "q"},
            {"type": "selection", "request_type": "modify", "anchor": "a",
