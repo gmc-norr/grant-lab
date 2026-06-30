@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.collab.schema import SCHEMA, CITATION_NODE
+from call_manager.proposal_assist.collab.schema import CITATION_NODE, SCHEMA
 
 
 def test_schema_has_constrained_nodes():
