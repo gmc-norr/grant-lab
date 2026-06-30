@@ -1,0 +1,132 @@
+{
+  "markdown": "## Plan\n\n- **bold item** with a [link](https://example.org)\n  - nested item\n- second\n\n1. one\n2. two\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Plan"
+          }
+        ]
+      },
+      {
+        "type": "bullet_list",
+        "content": [
+          {
+            "type": "list_item",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "bold item",
+                    "marks": [
+                      {
+                        "type": "strong",
+                        "attrs": {}
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " with a "
+                  },
+                  {
+                    "type": "text",
+                    "text": "link",
+                    "marks": [
+                      {
+                        "type": "link",
+                        "attrs": {
+                          "href": "https://example.org",
+                          "title": null
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "bullet_list",
+                "content": [
+                  {
+                    "type": "list_item",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "nested item"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "list_item",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "second"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "ordered_list",
+        "attrs": {
+          "order": 1
+        },
+        "content": [
+          {
+            "type": "list_item",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "one"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "list_item",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "two"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "ASKb3vFtAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwCb3vFtAAYEAJve8W0BBFBsYW4oAJve8W0ABWxldmVsAX0Ch5ve8W0AAwtidWxsZXRfbGlzdAcAm97xbQcDCWxpc3RfaXRlbQcAm97xbQgDCXBhcmFncmFwaAcAm97xbQkGBgCb3vFtCgZzdHJvbmcCe32Em97xbQsJYm9sZCBpdGVthpve8W0UBnN0cm9uZwRudWxshJve8W0VCCB3aXRoIGEghpve8W0dBGxpbmsreyJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLm9yZyIsInRpdGxlIjpudWxsfYSb3vFtHgRsaW5rhpve8W0iBGxpbmsEbnVsbIeb3vFtCQMLYnVsbGV0X2xpc3QHAJve8W0kAwlsaXN0X2l0ZW0HAJve8W0lAwlwYXJhZ3JhcGgHAJve8W0mBgQAm97xbScLbmVzdGVkIGl0ZW2Hm97xbQgDCWxpc3RfaXRlbQcAm97xbTMDCXBhcmFncmFwaAcAm97xbTQGBACb3vFtNQZzZWNvbmSHm97xbQcDDG9yZGVyZWRfbGlzdAcAm97xbTwDCWxpc3RfaXRlbQcAm97xbT0DCXBhcmFncmFwaAcAm97xbT4GBACb3vFtPwNvbmWHm97xbT0DCWxpc3RfaXRlbQcAm97xbUMDCXBhcmFncmFwaAcAm97xbUQGBACb3vFtRQN0d28oAJve8W08BW9yZGVyAX0BAA=="
+}

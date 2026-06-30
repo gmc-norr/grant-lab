@@ -1,0 +1,103 @@
+{
+  "markdown": "## Novelty\n\nThis is **bold**, *italic*, ~~struck~~, `code`, and a [link](https://example.org).\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Novelty"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "This is "
+          },
+          {
+            "type": "text",
+            "text": "bold",
+            "marks": [
+              {
+                "type": "strong",
+                "attrs": {}
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "text": "italic",
+            "marks": [
+              {
+                "type": "em",
+                "attrs": {}
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "text": "struck",
+            "marks": [
+              {
+                "type": "strikethrough",
+                "attrs": {}
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", "
+          },
+          {
+            "type": "text",
+            "text": "code",
+            "marks": [
+              {
+                "type": "code",
+                "attrs": {}
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": ", and a "
+          },
+          {
+            "type": "text",
+            "text": "link",
+            "marks": [
+              {
+                "type": "link",
+                "attrs": {
+                  "href": "https://example.org",
+                  "title": null
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "ARvUhI2zDwAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcA1ISNsw8ABgQA1ISNsw8BB05vdmVsdHkoANSEjbMPAAVsZXZlbAF9AofUhI2zDwADCXBhcmFncmFwaAcA1ISNsw8KBgQA1ISNsw8LCFRoaXMgaXMghtSEjbMPEwZzdHJvbmcCe32E1ISNsw8UBGJvbGSG1ISNsw8YBnN0cm9uZwRudWxshNSEjbMPGQIsIIbUhI2zDxsCZW0Ce32E1ISNsw8cBml0YWxpY4bUhI2zDyICZW0EbnVsbITUhI2zDyMCLCCG1ISNsw8lDXN0cmlrZXRocm91Z2gCe32E1ISNsw8mBnN0cnVja4bUhI2zDywNc3RyaWtldGhyb3VnaARudWxshNSEjbMPLQIsIIbUhI2zDy8EY29kZQJ7fYTUhI2zDzAEY29kZYbUhI2zDzQEY29kZQRudWxshNSEjbMPNQgsIGFuZCBhIIbUhI2zDz0EbGluayt7ImhyZWYiOiJodHRwczovL2V4YW1wbGUub3JnIiwidGl0bGUiOm51bGx9hNSEjbMPPgRsaW5rhtSEjbMPQgRsaW5rBG51bGyE1ISNsw9DAS4A"
+}

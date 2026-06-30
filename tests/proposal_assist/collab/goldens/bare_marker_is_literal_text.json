@@ -1,0 +1,30 @@
+{
+  "markdown": "## Background\n\nold body [@x9] stays literal text.\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Background"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "old body [@x9] stays literal text."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQfF6e2ZAgAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcAxentmQIABgQAxentmQIBCkJhY2tncm91bmQoAMXp7ZkCAAVsZXZlbAF9AofF6e2ZAgADCXBhcmFncmFwaAcAxentmQINBgQAxentmQIOIm9sZCBib2R5IFtAeDldIHN0YXlzIGxpdGVyYWwgdGV4dC4A"
+}

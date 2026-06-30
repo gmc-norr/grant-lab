@@ -1,0 +1,33 @@
+{
+  "markdown": "## Figure\n\n![alt text](https://example.org/fig.png)\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Figure"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "src": "https://example.org/fig.png",
+              "alt": "alt text"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQi57sXLDwAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcAue7Fyw8ABgQAue7Fyw8BBkZpZ3VyZSgAue7Fyw8ABWxldmVsAX0Ch7nuxcsPAAMJcGFyYWdyYXBoBwC57sXLDwkDBWltYWdlKAC57sXLDwoDc3JjAXcbaHR0cHM6Ly9leGFtcGxlLm9yZy9maWcucG5nKAC57sXLDwoDYWx0AXcIYWx0IHRleHQA"
+}
