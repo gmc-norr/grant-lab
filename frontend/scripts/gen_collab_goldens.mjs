@@ -4,8 +4,8 @@
  * PATH: PRIMARY — markdown is parsed entirely in JS using prosemirror-markdown's
  * MarkdownParser configured for our collab-schema, with a custom markdown-it
  * inline rule that consumes full citation markers ([@key]<!-- ev:ev-… -->) into
- * citation atom nodes.  The pm_json comes from doc.toJSON(), so it is
- * independent of the Python markdown_to_pm() implementation.
+ * citation atom nodes.  The pm_json comes from yDocToProsemirrorJSON(ydoc, ...),
+ * the Yjs round-trip output, independent of the Python markdown_to_pm() implementation.
  *
  * Each golden is self-verified before being written: the JS round-trip
  *   prosemirrorToYDoc  →  yDocToProsemirrorJSON
@@ -74,6 +74,7 @@ function citationInlineRule(state, silent) {
 // Configure markdown-it + MarkdownParser
 // ---------------------------------------------------------------------------
 const md = new MarkdownIt('commonmark', { html: true }).enable('strikethrough');
+// Note: strikethrough is provided by prosemirror-markdown's bundled markdown-it tokenizer; .enable() ensures it's active.
 // Register before "link" — both trigger on "[", and we must win.
 md.inline.ruler.before('link', 'citation', citationInlineRule);
 
@@ -152,6 +153,7 @@ const results = [];
 
 for (const [name, markdown] of CORPUS) {
   let pm_json, ydoc, ydoc_update_b64, roundtrip;
+  let firstRoundtrip, secondRoundtrip;
 
   try {
     // 1. Parse markdown → ProseMirror doc
@@ -183,20 +185,21 @@ for (const [name, markdown] of CORPUS) {
     roundtrip = yDocToProsemirrorJSON(ydoc, 'prosemirror');
     // Normalise through JSON to convert null-prototype objects → plain objects.
     const normalise = obj => JSON.parse(JSON.stringify(obj));
-    pm_json = normalise(roundtrip);
+    firstRoundtrip = normalise(roundtrip);
+    pm_json = firstRoundtrip;
 
     // Stability check: encode → decode the ydoc a second time to confirm
     // the round-trip is stable (a non-stable encoding would indicate a y-prosemirror bug).
     const ydoc2 = new Y.Doc();
     Y.applyUpdate(ydoc2, Y.encodeStateAsUpdate(ydoc));
-    const roundtrip2 = normalise(yDocToProsemirrorJSON(ydoc2, 'prosemirror'));
-    deepStrictEqual(roundtrip2, pm_json);
+    secondRoundtrip = normalise(yDocToProsemirrorJSON(ydoc2, 'prosemirror'));
+    deepStrictEqual(secondRoundtrip, pm_json);
 
   } catch (err) {
     console.error(`\n[FAIL] fixture "${name}": ${err.message}`);
     if (err.actual !== undefined) {
-      console.error('  roundtrip1:', JSON.stringify(pm_json, null, 2).slice(0, 500));
-      console.error('  roundtrip2:', JSON.stringify(roundtrip, null, 2).slice(0, 500));
+      console.error('  firstRoundtrip:', JSON.stringify(firstRoundtrip, null, 2).slice(0, 500));
+      console.error('  secondRoundtrip:', JSON.stringify(secondRoundtrip, null, 2).slice(0, 500));
     }
     allOk = false;
     results.push({ name, ok: false, error: err.message });
