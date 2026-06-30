@@ -51,6 +51,19 @@ def test_h1_title_in_preamble_survives():
     assert out.lstrip().startswith("# Proposal Title")
 
 
+def test_inline_code_with_backtick_roundtrips():
+    md = "## X\n\nuse `` a`b `` here.\n"
+    once = pm_to_markdown(markdown_to_pm(md))
+    twice = pm_to_markdown(markdown_to_pm(once))
+    assert once == twice
+    # the backtick survives inside an inline-code span:
+    pm = markdown_to_pm(once)
+    # find the code-marked text node and assert it contains a backtick
+    import json
+
+    assert "a`b" in json.dumps(pm)
+
+
 def test_production_layout_hydrates():
     # The exact tests/test_editing_save.py doc (H1 + bare marker + tight layout)
     # must round-trip idempotently and preserve its H2 sections.

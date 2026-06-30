@@ -7,8 +7,9 @@ Two pure functions:
   constrained :data:`SCHEMA`. A custom inline rule recognises the FULL citation
   marker (``[@key]<!-- ev:ev-… -->``) and emits a ``citation`` atom node, so the
   marker never survives as text. A BARE ``[@x9]`` (no ev comment) is left as
-  plain literal text. The result is validated by ``SCHEMA.node_from_json`` —
-  an out-of-schema doc raises.
+  plain literal text. The result is validated in two steps — node TYPES/ATTRS
+  via ``SCHEMA.node_from_json`` and the CONTENT MODEL via the constructed node's
+  ``.check()`` — so an out-of-schema doc raises.
 - :func:`pm_to_markdown` serialises the constrained schema back to markdown.
   ``prosemirror-py-converter`` is NOT installed (and prosemirror-py ships only a
   DOM serializer), so this is a focused hand-written serializer over our small
@@ -18,6 +19,20 @@ Two pure functions:
 The serializer's output is the canonical normal form: ``markdown_to_pm`` is
 many-to-one (tight and loose source both normalise to the same doc), so applying
 the round-trip twice is a no-op.
+
+Raw HTML is INTENTIONALLY unrepresentable. The constrained :data:`SCHEMA`
+models no raw-HTML node or mark, so ``markdown_to_pm`` *drops* every kind of
+non-citation HTML it encounters: block-level HTML, inline HTML tags, and HTML
+comments. The ONE HTML construct we recognise is the FULL citation marker
+(``[@key]<!-- ev:ev-… -->``), consumed by ``_citation_rule`` into a ``citation``
+atom before the generic HTML tokens ever fire. Consequently a MALFORMED or
+PARTIAL citation marker — an orphan ``<!-- ev:… -->`` comment with no preceding
+``[@key]``, or a bare unparsed fragment — does NOT match the marker rule and is
+therefore dropped as ordinary HTML. (A bare ``[@key]`` with no ev comment is the
+exception: it is plain text, not HTML, so it survives as literal text.) This is a
+known hydration consideration: any document whose meaning depends on raw HTML, or
+on a half-written citation marker, will lose that HTML on the round-trip. The
+drops are deliberate, not accidental; the drop sites below restate this.
 """
 
 from __future__ import annotations
@@ -143,8 +158,15 @@ def _inline_to_pm(tokens: list[Any]) -> list[dict]:
                 if marks[i]["type"] == mark_type:
                     marks.pop(i)
                     break
-        # Unknown inline tokens (e.g. html_inline) are dropped: nothing in our
-        # corpus produces them because the citation rule claims the only HTML.
+        # INTENTIONAL DROP. Any inline token we don't model — notably
+        # ``html_inline`` (raw inline HTML tags, HTML comments) — is dropped on
+        # purpose: the constrained schema has no raw-HTML node/mark, so there is
+        # nowhere to put it. The full citation marker is already claimed upstream
+        # by ``_citation_rule`` into a ``citation`` atom; what reaches here is
+        # therefore non-citation HTML OR a malformed/partial citation marker
+        # (e.g. an orphan ``<!-- ev:… -->`` comment with no preceding ``[@key]``).
+        # Both are dropped. This is a known hydration consideration — see the
+        # module docstring. We do NOT add raw-HTML support.
     return out
 
 
@@ -204,7 +226,12 @@ def _block_to_pm(tokens: list[Any], i: int) -> tuple[dict | None, int]:
     if ttype == "hr":
         return {"type": "horizontal_rule"}, i + 1
 
-    # Skip anything we don't model.
+    # INTENTIONAL DROP. Any block token we don't model — notably ``html_block``
+    # (a raw block of HTML, including block-level HTML comments) — is dropped on
+    # purpose: the constrained schema models no raw-HTML node, so there is
+    # nowhere to put it. A block-level malformed/partial citation marker falls
+    # here too and is likewise dropped. This is a known hydration consideration —
+    # see the module docstring. We do NOT add raw-HTML support.
     return None, i + 1
 
 
@@ -239,9 +266,16 @@ def markdown_to_pm(md: str) -> dict:
         if node is not None:
             content.append(node)
     doc = {"type": "doc", "content": content}
-    # Validate (and normalise) by constructing the node; raises on a doc that
-    # does not satisfy the schema's content model.
-    SCHEMA.node_from_json(doc)
+    # Validate in two steps:
+    #   1. ``node_from_json`` constructs the node, checking node TYPES and ATTRS
+    #      (an unknown node type or a missing required attr raises here).
+    #   2. ``.check()`` then verifies the CONTENT MODEL — that every node's
+    #      children satisfy its content expression (e.g. doc holds block+,
+    #      list_item holds "paragraph block*"). ``node_from_json`` alone does NOT
+    #      enforce this, so without the check an out-of-schema arrangement of
+    #      otherwise-valid nodes would slip through.
+    node = SCHEMA.node_from_json(doc)
+    node.check()
     return doc
 
 
@@ -256,7 +290,11 @@ _MARK_DELIM = {
     "strong": ("**", "**"),
     "em": ("*", "*"),
     "strikethrough": ("~~", "~~"),
-    "code": ("`", "`"),
+    # NOTE: ``code`` is intentionally NOT here. Its delimiter is a *variable*
+    # run of backticks chosen from the body text (CommonMark "code span" rule),
+    # so it cannot be a fixed open/close pair. It is serialized as a whole unit
+    # in ``_serialize_inline_atom`` (see ``_wrap_inline_code``); the generic
+    # mark open/close logic emits nothing for it.
 }
 
 # Characters that begin a markdown construct and so must be escaped when they
@@ -329,14 +367,43 @@ def _close_mark(m: dict) -> str:
     return ""
 
 
+def _wrap_inline_code(text: str) -> str:
+    """Wrap *text* as a CommonMark inline code span with a backtick-safe delimiter.
+
+    The delimiter is a run of backticks ONE LONGER than the longest run of
+    backticks appearing in *text*, so a backtick inside the code never collides
+    with the delimiter (the code body is otherwise emitted verbatim — code spans
+    have no backslash escaping). If the body begins or ends with a backtick (or
+    is entirely backticks/whitespace), a single space is padded on each side so
+    the leading/trailing backtick is not eaten as part of the delimiter; one of
+    those padding spaces is stripped again on parse, leaving the body intact and
+    keeping the round-trip idempotent.
+    """
+    longest = 0
+    run = 0
+    for ch in text:
+        if ch == "`":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    fence = "`" * (longest + 1)
+    body = text
+    if body.startswith("`") or body.endswith("`") or body.strip("`") == "":
+        body = f" {body} "
+    return f"{fence}{body}{fence}"
+
+
 def _serialize_inline_atom(node: dict) -> str:
     ntype = node["type"]
     if ntype == "text":
-        # code-marked text is escaped differently (the `code` delimiter is the
-        # only active mark for it); the delimiters are emitted by mark open/close.
+        # code-marked text is its own self-contained span: the ``code`` mark is
+        # NOT a fixed-delimiter mark (see ``_MARK_DELIM``), so we emit the whole
+        # backtick-delimited span here with a body-safe delimiter run. The body
+        # is verbatim (code spans have no backslash escaping).
         marks = node.get("marks", [])
         if any(m["type"] == "code" for m in marks):
-            return node["text"]  # backticks supplied by mark; do not escape body
+            return _wrap_inline_code(node["text"])
         return _escape_text(node["text"])
     if ntype == CITATION_NODE:
         attrs = node["attrs"]
