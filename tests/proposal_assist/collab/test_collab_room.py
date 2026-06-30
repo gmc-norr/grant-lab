@@ -199,6 +199,25 @@ async def test_malformed_update_is_dropped_without_persist_or_broadcast():
 
 
 @pytest.mark.anyio
+async def test_malformed_frame_is_dropped_without_persist_or_broadcast():
+    # A frame that classifies as a SYNC write ([SYNC][SYNC_UPDATE] header) but whose
+    # varuint-prefixed payload is truncated: extract_update raises. The room must drop
+    # it (no persist, no broadcast, no exception out of handle).
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    writer, other = FakeClient(), FakeClient()
+    room.clients.update({writer, other})
+    log, persist = _persist_sink()
+
+    bad_frame = bytes([0, 2, 0xFF, 0xFF, 0xFF])  # [SYNC][SYNC_UPDATE][truncated varuint]
+    await room.handle(
+        sender=writer, user_id=1, can_write=True, message=bad_frame, persist=persist
+    )
+    assert log == []
+    assert other.sent == []
+
+
+@pytest.mark.anyio
 async def test_broadcast_isolates_a_failing_client():
     class BoomClient(FakeClient):
         async def send_bytes(self, data):

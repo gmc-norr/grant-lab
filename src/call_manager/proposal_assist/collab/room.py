@@ -74,7 +74,14 @@ class Room:
         if P.is_sync_write(message):
             if not can_write:
                 return  # silently drop — non-writer cannot mutate the room
-            update = P.extract_update(message)
+            try:
+                update = P.extract_update(message)
+            except Exception:
+                logger.warning(
+                    "collab.malformed_frame",
+                    extra={"event": "collab_malformed_frame", "room": str(self.key)},
+                )
+                return  # drop malformed frame: not decoded, not persisted, not broadcast
             if not update or update == _EMPTY_UPDATE:
                 return
             async with self._lock:
