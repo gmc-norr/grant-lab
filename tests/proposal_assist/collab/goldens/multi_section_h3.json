@@ -1,0 +1,63 @@
+{
+  "markdown": "## Approach\n\n### Phase 1\n\nDo the first part.\n\n### Phase 2\n\nThen the second.\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Approach"
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Phase 1"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Do the first part."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 3
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Phase 2"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Then the second."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "ARLhraLuCwAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcA4a2i7gsABgQA4a2i7gsBCEFwcHJvYWNoKADhraLuCwAFbGV2ZWwBfQKH4a2i7gsAAwdoZWFkaW5nBwDhraLuCwsGBADhraLuCwwHUGhhc2UgMSgA4a2i7gsLBWxldmVsAX0Dh+Gtou4LCwMJcGFyYWdyYXBoBwDhraLuCxUGBADhraLuCxYSRG8gdGhlIGZpcnN0IHBhcnQuh+Gtou4LFQMHaGVhZGluZwcA4a2i7gspBgQA4a2i7gsqB1BoYXNlIDIoAOGtou4LKQVsZXZlbAF9A4fhraLuCykDCXBhcmFncmFwaAcA4a2i7gszBgQA4a2i7gs0EFRoZW4gdGhlIHNlY29uZC4A"
+}

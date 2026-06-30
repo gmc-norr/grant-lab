@@ -1,0 +1,30 @@
+{
+  "markdown": "## Aims\n\nWe aim to do the thing.\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Aims"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "We aim to do the thing."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQeXiPaXDQAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcAl4j2lw0ABgQAl4j2lw0BBEFpbXMoAJeI9pcNAAVsZXZlbAF9AoeXiPaXDQADCXBhcmFncmFwaAcAl4j2lw0HBgQAl4j2lw0IF1dlIGFpbSB0byBkbyB0aGUgdGhpbmcuAA=="
+}

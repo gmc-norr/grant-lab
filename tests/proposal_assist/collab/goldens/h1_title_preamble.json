@@ -1,0 +1,51 @@
+{
+  "markdown": "# Proposal Title\n\nIntro under an H1 title.\n\n## Aims\n\nBody.\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 1
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Proposal Title"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Intro under an H1 title."
+          }
+        ]
+      },
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Aims"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Body."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQ7Ui6joBwAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcA1Iuo6AcABgQA1Iuo6AcBDlByb3Bvc2FsIFRpdGxlKADUi6joBwAFbGV2ZWwBfQGH1Iuo6AcAAwlwYXJhZ3JhcGgHANSLqOgHEQYEANSLqOgHEhhJbnRybyB1bmRlciBhbiBIMSB0aXRsZS6H1Iuo6AcRAwdoZWFkaW5nBwDUi6joBysGBADUi6joBywEQWltcygA1Iuo6AcrBWxldmVsAX0Ch9SLqOgHKwMJcGFyYWdyYXBoBwDUi6joBzIGBADUi6joBzMFQm9keS4A"
+}

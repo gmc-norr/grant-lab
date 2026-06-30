@@ -1,0 +1,18 @@
+{
+  "markdown": "Intro paragraph with no heading.\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Intro paragraph with no heading."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQOLoejBCgAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwCLoejBCgAGBACLoejBCgEgSW50cm8gcGFyYWdyYXBoIHdpdGggbm8gaGVhZGluZy4A"
+}

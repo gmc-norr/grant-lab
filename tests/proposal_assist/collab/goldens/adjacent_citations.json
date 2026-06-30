@@ -1,0 +1,48 @@
+{
+  "markdown": "## Key Claims\n\nMultiple sources agree [@smith2021]<!-- ev:ev-0a1b2c3d4e5f -->[@jones2020]<!-- ev:ev-9f8e7d6c5b4a --> on this.\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Key Claims"
+          }
+        ]
+      },
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Multiple sources agree "
+          },
+          {
+            "type": "citation",
+            "attrs": {
+              "citekey": "smith2021",
+              "ev_id": "ev-0a1b2c3d4e5f"
+            }
+          },
+          {
+            "type": "citation",
+            "attrs": {
+              "citekey": "jones2020",
+              "ev_id": "ev-9f8e7d6c5b4a"
+            }
+          },
+          {
+            "type": "text",
+            "text": " on this."
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQ/6hKfmAgAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcA+oSn5gIABgQA+oSn5gIBCktleSBDbGFpbXMoAPqEp+YCAAVsZXZlbAF9Aof6hKfmAgADCXBhcmFncmFwaAcA+oSn5gINBgQA+oSn5gIOF011bHRpcGxlIHNvdXJjZXMgYWdyZWUgh/qEp+YCDgMIY2l0YXRpb24oAPqEp+YCJgdjaXRla2V5AXcJc21pdGgyMDIxKAD6hKfmAiYFZXZfaWQBdw9ldi0wYTFiMmMzZDRlNWaH+oSn5gImAwhjaXRhdGlvbigA+oSn5gIpB2NpdGVrZXkBdwlqb25lczIwMjAoAPqEp+YCKQVldl9pZAF3D2V2LTlmOGU3ZDZjNWI0YYf6hKfmAikGBAD6hKfmAiwJIG9uIHRoaXMuAA=="
+}

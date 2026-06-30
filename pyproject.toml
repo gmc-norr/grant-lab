@@ -32,6 +32,8 @@ dependencies = [
     "striprtf>=0.0.26",
     "openpyxl>=3.1.0",
     "defusedxml>=0.7.1",
+    "prosemirror>=0.6.1",
+    "pycrdt>=0.14.0",
 ]
 
 [dependency-groups]
@@ -102,6 +104,7 @@ no-build-package = [
     "colorama",
     "courlan",
     "cryptography",
+    "cssselect",
     "cyclonedx-python-lib",
     "dateparser",
     "defusedxml",
@@ -150,10 +153,12 @@ no-build-package = [
     "pip-requirements-parser",
     "platformdirs",
     "pluggy",
+    "prosemirror",
     "psycopg",
     "psycopg-binary",
     "py-serializable",
     "pycparser",
+    "pycrdt",
     "pydantic",
     "pydantic-core",
     "pydantic-settings",
