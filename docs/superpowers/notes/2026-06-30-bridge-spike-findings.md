@@ -8,9 +8,17 @@
 
 ## Verdict: GO
 
-Pure-Python `pycrdt` reads a real `y-prosemirror`-encoded document byte-identically to `y-prosemirror` itself, across all 16 fixtures (16/16 fidelity + 16/16 round-trip, byte-identical even before the `_canonical` safety net; independently re-verified by review).
+Pure-Python `pycrdt` reads a real `y-prosemirror`-encoded document byte-identically to `y-prosemirror` itself, across all 16 fixtures (16/16 fidelity + 16/16 round-trip, byte-identical even before the `_canonical` safety net; confirmed by review).
 
 The server-authoritative design (Approach 1 in the spec) is viable with **no Node sidecar**. Markdown ↔ ProseMirror ↔ Yjs all run in pure Python.
+
+### Read vs write path
+
+The fidelity gate validates the **READ direction** only: `ydoc_to_pm_json` (Python) produces output that is byte-identical to what y-prosemirror itself would read from the same Yjs state. The **WRITE direction** — `pm_json_to_ydoc` (Python) produces a Yjs update that a real y-prosemirror reader in a browser decodes correctly — is **not yet validated**. `pm_json_to_ydoc` is currently exercised only in a closed Python loop (Python writes → Python reads) and in the end-to-end test; no JS-side reader verifies Python's encoded output. Byte-equality of the encoded update cannot serve as the check because Yjs updates legitimately differ by client-id and clock.
+
+Because the server-authoritative design has the server seed the Yjs document that browsers consume, this write path is load-bearing. **Validating it is a Slice-1 task**: add a Node-side test that feeds a `pm_json_to_ydoc` update through y-prosemirror and asserts the resulting PM JSON matches the input.
+
+The GO verdict is sound for the read/serialize path. The write path has this one named gap to close before browsers receive server-authored Yjs state.
 
 ---
 
@@ -57,7 +65,7 @@ Every constrained-schema node and mark:
 
 Markdown is re-normalized on the first checkpoint; the serializer is the single canonical writer. The following input shapes are rewritten:
 
-1. **Non-citation HTML is dropped** — block HTML, inline HTML tags, HTML comments, and **malformed/orphan citation markers** (a `<!-- ev:… -->` with no preceding `[@key]`, or a `[@key]` split from its ev-comment) are silently removed. This is the **main hydration risk**: the app encodes citations as HTML comments, so a partial or edited marker would vanish on first checkpoint. The drop is intentional and explicit in the code — the constrained schema has no raw-HTML node.
+1. **Non-citation HTML is dropped** — block HTML, generic HTML comments, and **fully orphan citation markers** (a `<!-- ev:… -->` with no associated `[@key]` anywhere) are dropped entirely. A **split** valid marker — `[@key]` separated from its `<!-- ev:… -->` comment (e.g. by an edit) — behaves differently: the `[@key]` text **survives** as a bare (unlinked) marker; only the orphaned `<!-- ev:… -->` comment is dropped. The result degrades to a bare marker, which the existing `find_bare_markers` scan will flag — it does not vanish silently. Inline HTML tags drop the markup but **preserve the inner text** (e.g. `<b>keep me</b>` → `keep me`). This is the **main hydration risk**: the app encodes citations as HTML comments, so an orphan or misplaced `<!-- ev:… -->` would be lost on first checkpoint. The drop is intentional and explicit in the code — the constrained schema has no raw-HTML node.
 
 2. **Code-fence language is dropped** — ` ```python ` becomes ` ``` `. The constrained `code_block` carries no language attr.
 
@@ -106,19 +114,19 @@ Hand-written, focused serializer over the constrained schema. `prosemirror-py-co
 
 **However, the first checkpoint is a normalizing rewrite.** It will:
 - **(a)** Reflow whitespace from tight to loose (cosmetic).
-- **(b)** Drop any non-citation HTML, malformed/orphan citation markers, and code-fence language tags (these are the real risk, not the whitespace).
+- **(b)** Drop any fully-orphan `<!-- ev:… -->` comments, generic HTML comments, block HTML, and code-fence language tags; degrade split `[@key]/<!-- ev:… -->` pairs to bare markers (caught by the bare-marker scan); preserve inner text of inline HTML tags. These are the real risk, not the whitespace.
 
 ### Slice-1 Prerequisites Before Enabling the New Editor on Live Workspaces
 
 1. **Decide on the whitespace reflow.** It is cosmetic and idempotent after the first save, but it will produce a noisy git diff for tight existing documents. Either (i) accept it as a one-time event logged in the workspace activity feed, or (ii) run a one-time normalization commit per workspace document before opening it in the new editor.
 
-2. **Audit existing live documents for non-citation HTML and malformed/orphan citation markers.** A `<!-- ev:… -->` comment with no preceding `[@key]`, or a `[@key]` split across an edit from its ev-comment, will vanish silently on first checkpoint. This is the single genuine content-loss risk, and it must be addressed (via audit + repair or a migration script) before enabling the editor on any workspace that contains such content.
+2. **Audit existing live documents for non-citation HTML and orphan/split citation markers.** A fully orphan `<!-- ev:… -->` comment (no associated `[@key]`) is dropped silently on first checkpoint — genuine content loss. A split valid marker (where `[@key]` and `<!-- ev:… -->` have been separated by an edit) degrades to a bare unlinked marker rather than disappearing, and the bare-marker scan will flag it; but the ev-comment is still lost. Generic HTML comments and block HTML are also dropped. This is the single genuine content-loss risk, and it must be addressed (via audit + repair or a migration script) before enabling the editor on any workspace that contains such content.
 
 ---
 
 ## Raw Fidelity Test Result
 
-`test_fidelity_byte_identical_raw` passes for all 16 goldens: `ydoc_to_pm_json(ydoc)` equals `json.loads(golden["pm_json"])` with **no canonicalization** — byte-identical JSON. This is the strongest possible fidelity claim and was independently re-verified by review.
+`test_fidelity_byte_identical_raw` passes for all 16 goldens: `ydoc_to_pm_json(ydoc)` equals `json.loads(golden["pm_json"])` with **no canonicalization** — byte-identical JSON. This is the strongest possible fidelity claim and was confirmed by review.
 
 Full suite: **21/21 passed** (`uv run pytest tests/proposal_assist/collab/ -v`, 2026-06-30).
 
