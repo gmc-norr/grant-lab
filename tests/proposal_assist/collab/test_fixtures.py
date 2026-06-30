@@ -1,4 +1,5 @@
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+
 from .fixtures import CORPUS
 
 

@@ -1,5 +1,5 @@
-from call_manager.proposal_assist.citations.markers import build_marker
 from call_manager.proposal_assist.artifacts import SPEC_SKELETON
+from call_manager.proposal_assist.citations.markers import build_marker
 
 _CITE = build_marker("smith2021", "ev-0a1b2c3d4e5f")   # full marker → citation node
 _CITE2 = build_marker("jones2020", "ev-9f8e7d6c5b4a")
@@ -12,7 +12,8 @@ CORPUS: list[tuple[str, str]] = [
     ("marks_and_links",
      "## Novelty\n\nThis is **bold**, *italic*, ~~struck~~, `code`, and a [link](https://example.org).\n"),
     ("nested_marked_list",
-     "## Plan\n\n- **bold item** with a [link](https://example.org)\n  - nested item\n- second\n\n1. one\n2. two\n"),
+     "## Plan\n\n- **bold item** with a [link](https://example.org)\n"
+     "  - nested item\n- second\n\n1. one\n2. two\n"),
     ("blockquote_and_code",
      "## Notes\n\n> a quote\n\n```python\nprint('hi')\n```\n"),
     ("horizontal_rule", "## Sep\n\nabove\n\n---\n\nbelow\n"),
