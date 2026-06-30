@@ -16,6 +16,7 @@
 - **Single-instance backend.** All clients of a room reach the same process; an in-process room registry is correct (consistent with the existing single-instance scheduler constraint). No horizontal scaling.
 - **Sync DB in async handler.** Reuse the existing **sync** `Session`/`session_factory`; never call it directly on the event loop — wrap each DB op in `run_in_threadpool`.
 - **Per-update actor tagging.** Every persisted Yjs update row records the authenticated `user_id` that sent it (for authorship in later slices).
+- **Security & failure-path invariants (from the Codex pre-implementation review).** (a) WebSocket **Origin check** (CSWSH defense — the HTTP CSRF middleware does NOT cover WS handshakes) before auth/accept, reusing the canonical `csrf._hostport`. (b) **Durable-log-first integrity:** apply → persist → broadcast; a persist failure leaves memory ahead of the log, so the room is **poisoned and evicted** and rebuilt from the log (the CRDT client re-offers its update on reconnect). (c) **Broadcast error-isolation:** a broken client is dropped without starving others. (d) **Inbound frame-size bound** (no HTTP body-size middleware on WS frames). Malformed updates are dropped (never persisted/broadcast).
 - **Test location.** All tests go under `tests/proposal_assist/collab/` (cockpit `/api`/proposal-assist tests live under `tests/proposal_assist/`). Whole-suite runs may flake on testcontainers PG under load — verify via grouped dir runs (`pytest tests/proposal_assist/collab/`).
 - **Lint/format gate:** `ruff check .` must pass (CI runs `ruff check .`, not format).
 - **Frontend untouched** in this slice (Tiptap is Slice 3).
@@ -50,20 +51,24 @@ def append_update(session, *, workspace_id: uuid.UUID, artifact: str, actor_id: 
 def load_updates(session, *, workspace_id: uuid.UUID, artifact: str) -> list[bytes]
 
 # room.py
+class PersistError(Exception): ...                  # durable write failed -> room poisoned -> evict
 class Room:
     key: tuple[uuid.UUID, str]
     doc: pycrdt.Doc
     clients: set
+    poisoned: bool
     def initial_message(self) -> bytes              # server SYNC_STEP1
     async def handle(self, *, sender, user_id: int, can_write: bool, message: bytes,
-                     persist: Callable[[int, bytes], Awaitable[None]]) -> None
+                     persist: Callable[[int, bytes], Awaitable[None]]) -> None   # raises PersistError
 class RoomManager:
     async def acquire(self, key, *, load: Callable[[], Awaitable[list[bytes]]], client) -> Room
     async def release(self, key, *, client) -> None
+    async def evict(self, key) -> None              # force-remove (poison recovery)
 
 # ws_auth.py
 def user_from_cookie(cookie: str | None, *, signer, session_factory) -> User   # raises WSAuthError
 async def resolve_ws_user(websocket) -> User
+def check_origin(websocket) -> bool                 # CSWSH defense (reuses csrf._hostport)
 def resolve_access(session, *, user: User, workspace_id: uuid.UUID, artifact: str) -> tuple[bool, bool]  # (is_member, can_write)
 class WSAuthError(Exception): ...
 ```
@@ -679,6 +684,64 @@ async def test_manager_evicts_room_when_last_client_leaves():
     assert mgr.has_room(key)            # still one client
     await mgr.release(key, client=c2)
     assert not mgr.has_room(key)        # evicted
+
+
+@pytest.mark.anyio
+async def test_persist_failure_poisons_room_and_does_not_broadcast():
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    writer, other = FakeClient(), FakeClient()
+    room.clients.update({writer, other})
+
+    async def persist_boom(user_id, update):
+        raise RuntimeError("db down")
+
+    from call_manager.proposal_assist.collab.room import PersistError
+
+    frame = _update_frame("doomed")
+    with pytest.raises(PersistError):
+        await room.handle(
+            sender=writer, user_id=1, can_write=True, message=frame, persist=persist_boom
+        )
+    assert room.poisoned is True
+    assert other.sent == []   # persist failed before broadcast -> not published
+
+
+@pytest.mark.anyio
+async def test_malformed_update_is_dropped_without_persist_or_broadcast():
+    # A SYNC_UPDATE frame whose payload is not a valid Y update: apply raises,
+    # the room drops it (no persist, no broadcast, no exception out of handle).
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    writer, other = FakeClient(), FakeClient()
+    room.clients.update({writer, other})
+    log, persist = _persist_sink()
+
+    garbage = P.create_update_message(b"\xde\xad\xbe\xef\xde\xad")  # not a real update
+    await room.handle(
+        sender=writer, user_id=1, can_write=True, message=garbage, persist=persist
+    )
+    assert log == []
+    assert other.sent == []
+
+
+@pytest.mark.anyio
+async def test_broadcast_isolates_a_failing_client():
+    class BoomClient(FakeClient):
+        async def send_bytes(self, data):
+            raise RuntimeError("socket closed")
+
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    writer, good, boom = FakeClient(), FakeClient(), BoomClient()
+    room.clients.update({writer, good, boom})
+    _, persist = _persist_sink()
+
+    await room.handle(
+        sender=writer, user_id=1, can_write=True, message=_update_frame("x"), persist=persist
+    )
+    assert good.sent                  # healthy client still received the update
+    assert boom not in room.clients   # broken client dropped from the room
 ```
 
 Note: the test module needs `anyio` mode. If the repo's `tests/conftest.py` does not already set `anyio_backend`, add a local fixture at the top of this test file:
@@ -716,6 +779,7 @@ for the live doc and Postgres is the durable replay log.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -731,11 +795,24 @@ LoadFn = Callable[[], Awaitable[list[bytes]]]
 _EMPTY_UPDATE = b"\x00\x00"
 
 
+logger = logging.getLogger(__name__)
+
+
+class PersistError(Exception):
+    """Durable persistence of an applied update failed.
+
+    The in-memory doc is now AHEAD of the durable log, so the room is poisoned
+    and must be evicted and rebuilt from the log (the route does this). The
+    sender's CRDT client re-offers its update on reconnect, so no data is lost.
+    """
+
+
 class Room:
     def __init__(self, key: RoomKey) -> None:
         self.key = key
         self.doc = Doc()
         self.clients: set = set()
+        self.poisoned = False
         self._lock = asyncio.Lock()
 
     def initial_message(self) -> bytes:
@@ -765,16 +842,45 @@ class Room:
             if not update or update == _EMPTY_UPDATE:
                 return
             async with self._lock:
-                self.doc.apply_update(update)
-                await persist(user_id, update)
-            frame = P.create_update_message(update)
-            for client in list(self.clients):
-                if client is not sender:
-                    await client.send_bytes(frame)
+                # Apply FIRST so we never persist an update that won't replay
+                # (keeps the durable log clean by construction). apply_update is
+                # atomic: a malformed update raises without mutating the doc.
+                try:
+                    self.doc.apply_update(update)
+                except Exception:
+                    logger.warning(
+                        "collab.malformed_update",
+                        extra={"event": "collab_malformed_update", "room": str(self.key)},
+                    )
+                    return  # drop malformed: not persisted, not broadcast
+                # Then persist DURABLY. If this fails the doc is ahead of the
+                # log: poison the room so it is evicted and rebuilt from the log.
+                try:
+                    await persist(user_id, update)
+                except Exception as e:
+                    self.poisoned = True
+                    raise PersistError(str(self.key)) from e
+            # Broadcast outside the lock (CRDT tolerates reordering; a slow
+            # client must not block other writers).
+            await self._broadcast(P.create_update_message(update), exclude=sender)
             return
 
         # AWARENESS and anything else: ignored in Slice 1 (presence is Slice 3).
         return
+
+    async def _broadcast(self, frame: bytes, *, exclude) -> None:
+        """Send to every client except `exclude`, isolating per-client failures:
+        a broken/closed socket is dropped and the rest still receive the frame."""
+        dead = []
+        for client in list(self.clients):
+            if client is exclude:
+                continue
+            try:
+                await client.send_bytes(frame)
+            except Exception:
+                dead.append(client)
+        for client in dead:
+            self.clients.discard(client)
 
 
 class RoomManager:
@@ -808,6 +914,12 @@ class RoomManager:
             if not room.clients:
                 del self._rooms[key]
 
+    async def evict(self, key: RoomKey) -> None:
+        """Force-remove a room regardless of connected clients (poison recovery).
+        The next acquire rebuilds it from the durable log."""
+        async with self._lock:
+            self._rooms.pop(key, None)
+
 
 # Module-global registry (single-instance backend).
 MANAGER = RoomManager()
@@ -816,7 +928,7 @@ MANAGER = RoomManager()
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/proposal_assist/collab/test_collab_room.py -q`
-Expected: PASS (7 tests).
+Expected: PASS (10 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -965,6 +1077,30 @@ def test_access_locked_spec_is_owner_only(pg_session_factory):
         assert resolve_access(s, user=owner, workspace_id=wid, artifact="spec") == (True, True)
         # draft unaffected by spec lock
         assert resolve_access(s, user=member, workspace_id=wid, artifact="draft") == (True, True)
+
+
+class _FakeWS:
+    def __init__(self, origin, base_url="http://testserver"):
+        self.headers = {} if origin is None else {"origin": origin}
+
+        class _State:
+            pass
+
+        class _Settings:
+            app_base_url = base_url
+
+        self.app = type("A", (), {})()
+        self.app.state = _State()
+        self.app.state.settings = _Settings()
+
+
+def test_check_origin_matrix():
+    from call_manager.proposal_assist.collab.ws_auth import check_origin
+
+    assert check_origin(_FakeWS("http://testserver")) is True      # same origin
+    assert check_origin(_FakeWS(None)) is True                     # non-browser (no Origin)
+    assert check_origin(_FakeWS("http://evil.example")) is False   # cross-site
+    assert check_origin(_FakeWS("null")) is False                  # sandboxed/opaque
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1039,6 +1175,34 @@ async def resolve_ws_user(websocket) -> User:
     )
 
 
+def check_origin(websocket) -> bool:
+    """Cross-site WebSocket hijacking (CSWSH) defense.
+
+    The HTTP CSRF middleware does not protect WS handshakes (the upgrade is a
+    GET — a safe method — so it passes straight through). A cookie-authenticated
+    WS would otherwise be a CSRF write hole: a malicious page could open
+    ws(s)://our-app/... and the browser would attach the victim's session cookie.
+
+    Mirror the CSRF middleware's Origin semantics EXACTLY by reusing its
+    canonical host normalizer (single source of truth — do not reimplement
+    origin parsing): reject a present-but-mismatched Origin (and `null`); allow
+    a matching Origin; allow an ABSENT Origin (non-browser clients — TestClient,
+    server-to-server, our pycrdt test clients — don't send one, and a browser
+    always does on a cross-site handshake, so absence is not the attack vector).
+    """
+    from call_manager.auth.csrf import _hostport
+
+    expected = _hostport(websocket.app.state.settings.app_base_url)
+    if not expected:
+        return True
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True
+    if origin == "null":
+        return False
+    return _hostport(origin) == expected
+
+
 def resolve_access(
     session: Session, *, user: User, workspace_id: uuid.UUID, artifact: str
 ) -> tuple[bool, bool]:
@@ -1078,7 +1242,7 @@ def resolve_access(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/proposal_assist/collab/test_collab_ws_auth.py -q`
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1255,6 +1419,96 @@ def test_invalid_artifact_is_rejected(_app, pg_session_factory):
                 wsconn.receive_bytes()
     finally:
         client.__exit__(None, None, None)
+
+
+def _recv_until_write(wsconn, tries: int = 10) -> bytes:
+    """Read frames until a SYNC write (STEP2/UPDATE) arrives; the server may
+    send a STEP1 first."""
+    for _ in range(tries):
+        frame = wsconn.receive_bytes()
+        if P.is_sync_write(frame):
+            return frame
+    raise AssertionError("no SYNC write frame received")
+
+
+def test_foreign_origin_is_rejected(_app, pg_session_factory):
+    import pytest
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="origin-owner@ki.se")
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        wid, oid = ws.id, owner.id
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"/api/ws/workspaces/{wid}/draft", headers={"origin": "http://evil.example"}
+            ) as wsconn:
+                wsconn.receive_bytes()
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_oversized_frame_closes_the_connection(_app, pg_session_factory):
+    import pytest
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="big-owner@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, owner.id
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            wsconn.receive_bytes()  # STEP1
+            wsconn.send_bytes(b"\x00" * 1_000_001)  # over _MAX_FRAME_BYTES
+            with pytest.raises(WebSocketDisconnect):
+                wsconn.receive_bytes()
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_two_connections_converge_through_the_route(_app, pg_session_factory):
+    # Both connections use the SAME authenticated owner so they share one
+    # TestClient event loop (two TestClients = two loops sharing an asyncio.Lock
+    # = undefined). This proves the route's apply+broadcast path A->B; multi-user
+    # authorization is covered by the ws_auth tests, and two-distinct-client
+    # convergence by the socket-free room test.
+    from fastapi.testclient import TestClient
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="conv-owner@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, owner.id
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    url = f"/api/ws/workspaces/{wid}/draft"
+    try:
+        with client.websocket_connect(url) as a, client.websocket_connect(url) as b:
+            a.receive_bytes()  # A's STEP1 (drain)
+            b.receive_bytes()  # B's STEP1 (drain)
+            a.send_bytes(_update_frame("shared edit"))
+            frame = _recv_until_write(b)
+            mirror = Doc()
+            mirror["body"] = Text()
+            mirror.apply_update(P.extract_update(frame))
+            assert "shared edit" in str(mirror.get("body", type=Text))
+    finally:
+        client.__exit__(None, None, None)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1282,9 +1536,10 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
 from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.collab.room import MANAGER
+from call_manager.proposal_assist.collab.room import MANAGER, PersistError
 from call_manager.proposal_assist.collab.ws_auth import (
     WSAuthError,
+    check_origin,
     resolve_access,
     resolve_ws_user,
 )
@@ -1292,12 +1547,23 @@ from call_manager.proposal_assist.collab.ws_auth import (
 router = APIRouter()
 
 _VALID_ARTIFACTS = {"draft", "spec"}
-_WS_POLICY_VIOLATION = 1008  # RFC 6455 close code
+_WS_POLICY_VIOLATION = 1008  # RFC 6455: policy violation
+_WS_MESSAGE_TOO_BIG = 1009  # RFC 6455: message too big
+_WS_INTERNAL_ERROR = 1011  # RFC 6455: server error
+# Cap a single inbound frame. A proposal doc is small; legitimate CRDT updates
+# are far under this. HTTP body-size middleware does NOT protect WS frames, so
+# bound them here to deny memory-exhaustion / abusive payloads.
+_MAX_FRAME_BYTES = 1_000_000
 
 
 @router.websocket("/api/ws/workspaces/{workspace_id}/{artifact}")
 async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str) -> None:
     if artifact not in _VALID_ARTIFACTS:
+        await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+
+    # 0. CSWSH defense: reject cross-site Origin before doing anything else.
+    if not check_origin(websocket):
         await websocket.close(code=_WS_POLICY_VIOLATION)
         return
 
@@ -1348,6 +1614,9 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
     try:
         await websocket.send_bytes(room.initial_message())
         async for message in websocket.iter_bytes():
+            if len(message) > _MAX_FRAME_BYTES:
+                await websocket.close(code=_WS_MESSAGE_TOO_BIG)
+                break
             await room.handle(
                 sender=websocket,
                 user_id=user.id,
@@ -1357,6 +1626,12 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
             )
     except WebSocketDisconnect:
         pass
+    except PersistError:
+        # Durable write failed: the in-memory doc is ahead of the log. Evict the
+        # room so the next connection rebuilds from the log (the CRDT client
+        # re-offers its update on reconnect). Close this socket as a server error.
+        await MANAGER.evict(key)
+        await websocket.close(code=_WS_INTERNAL_ERROR)
     finally:
         await MANAGER.release(key, client=websocket)
 ```
@@ -1376,7 +1651,7 @@ app.include_router(collab_ws.router)
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/proposal_assist/collab/test_collab_ws_route.py -q`
-Expected: PASS (5 tests).
+Expected: PASS (8 tests).
 
 If `iter_bytes()` does not surface the sent update before the client context closes (a timing race in TestClient), have the server echo nothing but ensure the test sends the update and then performs one `wsconn.receive` with a short timeout OR closes the connection (the `finally`/`release` path drains). The committed test closes the context after `send_bytes`, which flushes the queued message to the server task before disconnect; if flakiness appears, add `wsconn.send_bytes(...)` followed by `wsconn.close()` explicitly before asserting on the DB.
 
@@ -1427,6 +1702,14 @@ def _update_frame(text):
     return P.create_update_message(cap[-1])
 
 
+def _recv_until_write(wsconn, tries: int = 10) -> bytes:
+    for _ in range(tries):
+        frame = wsconn.receive_bytes()
+        if P.is_sync_write(frame):
+            return frame
+    raise AssertionError("no SYNC write frame received")
+
+
 def test_state_survives_room_eviction_and_reconnect(_app, pg_session_factory):
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
@@ -1452,9 +1735,49 @@ def test_state_survives_room_eviction_and_reconnect(_app, pg_session_factory):
             mirror = Doc()
             mirror["body"] = Text()
             wsconn.send_bytes(P.create_sync_message(mirror))  # our STEP1
-            reply = wsconn.receive_bytes()                    # server STEP2
+            reply = _recv_until_write(wsconn)                 # server STEP2
             mirror.apply_update(P.extract_update(reply))
             assert "durable edit" in str(mirror["body"])
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_xmlfragment_doc_survives_recovery_via_the_bridge(_app, pg_session_factory):
+    # Exercise the REAL Slice-0 bridge surface (the 'prosemirror' XmlFragment),
+    # not a toy Text: seed a proposal doc, persist it through the route, evict
+    # the room, reconnect, and confirm the recovered state reconstructs the
+    # exact ProseMirror JSON.
+    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="xml-recover@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    pm_json = markdown_to_pm("## Background\n\nHello **world**.\n")
+    seed = pm_json_to_ydoc(pm_json)
+    seed_frame = P.create_update_message(seed.get_update())
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    url = f"/api/ws/workspaces/{wid}/draft"
+    try:
+        with client.websocket_connect(url) as wsconn:
+            wsconn.receive_bytes()       # STEP1
+            wsconn.send_bytes(seed_frame)
+        assert not MANAGER.has_room((wid, "draft"))  # evicted
+
+        with client.websocket_connect(url) as wsconn:
+            wsconn.receive_bytes()       # server STEP1 (drain)
+            mirror = Doc()
+            wsconn.send_bytes(P.create_sync_message(mirror))  # our STEP1
+            reply = _recv_until_write(wsconn)                 # server STEP2 (recovered)
+            mirror.apply_update(P.extract_update(reply))
+            assert ydoc_to_pm_json(mirror) == pm_json
     finally:
         client.__exit__(None, None, None)
 ```
@@ -1469,8 +1792,9 @@ Expected: PASS. (If the second `receive_bytes` returns the STEP1 and the STEP2 a
 Create `docs/superpowers/notes/2026-06-30-collab-slice1-sync-server-notes.md` capturing:
 - What shipped: hand-rolled room on `pycrdt` (zero new deps — codec is core `pycrdt._sync`), `/api/ws/workspaces/{id}/{artifact}`, Postgres `yjs_updates` log (migration 0059), connect-time cookie auth + cached per-update write gate, restart recovery by replay, in-process registry with evict-on-empty.
 - Why hand-rolled (the `YRoom.on_message`/`BaseYStore.write` limitations).
-- Concurrency model: per-room `asyncio.Lock` around apply+persist; sync DB offloaded via `run_in_threadpool`.
-- **Deferred (named):** git→room hydration AND checkpoint-to-git → Slice 2; mid-session permission downgrade/notify → Slice 2; awareness/presence/cursors → Slice 3; Tiptap frontend → Slice 3; the spike's **write-path Node validation** (Python `pm_json_to_ydoc` → real browser `y-prosemirror` read) → Slice 2 (first git-hydration consumer); **Yjs update-log compaction/squash** (unbounded append-only growth) → follow-up optimization.
+- Security/robustness (from the Codex pre-implementation review): **Origin check** (CSWSH defense, reusing the CSRF `_hostport` normalizer) before auth/accept; **apply-then-persist ordering with poison/evict** on persist failure so the durable log stays the source of truth (the CRDT client re-offers its update on reconnect); **broadcast error-isolation** (a dead socket is dropped, others still receive); **inbound frame-size bound** (HTTP body-size middleware doesn't cover WS frames).
+- Concurrency model: per-room `asyncio.Lock` around apply+persist; broadcast outside the lock (CRDT tolerates reordering, slow clients don't block writers); sync DB offloaded via `run_in_threadpool`.
+- **Deferred (named):** git→room hydration AND checkpoint-to-git → Slice 2; mid-session permission downgrade/notify → Slice 2; awareness/presence/cursors → Slice 3; Tiptap frontend → Slice 3; the spike's **write-path Node validation** (Python `pm_json_to_ydoc` → real browser `y-prosemirror` read) → Slice 2 (first git-hydration consumer); **Yjs update-log compaction/squash** (unbounded append-only growth) → follow-up optimization; **full poison-broadcast** (proactively disconnecting *all* clients of a poisoned room, not just the offending socket — other clients keep talking to the orphaned in-memory doc until they disconnect) → follow-up (rare DB-failure path; new connections already rebuild cleanly from the log).
 
 - [ ] **Step 4: Commit**
 
@@ -1500,4 +1824,6 @@ The whole testcontainers suite may flake under load; verify via the grouped `tes
 
 **3. Type consistency:** `Room.handle` signature, `persist: Callable[[int, bytes], Awaitable[None]]`, `RoomManager.acquire(load=, client=)`, `store.append_update`/`load_updates` kwargs, and `resolve_access -> (is_member, can_write)` are used identically in Tasks 4/5/6. `artifact` is the string `"draft"`/`"spec"` throughout (table CHECK, route validation, room key, permission rules).
 
-**4. Known risk flagged for the implementer:** Starlette `TestClient` websocket timing — the Task-6/7 steps include the fallback (explicit close / read-until-write-frame) if message delivery races the context exit. The two-client *convergence* proof lives at the socket-free Room layer (Task 4) precisely to avoid TestClient concurrency fragility.
+**4. Known risk flagged for the implementer:** Starlette `TestClient` websocket timing — the Task-6/7 steps use a `_recv_until_write` read-loop and explicit context close to avoid races against message delivery. The robust two-distinct-client *convergence* proof lives at the socket-free Room layer (Task 4); the route-level two-connection test (Task 6) shares ONE authenticated user / one TestClient event loop on purpose (two TestClients = two event loops sharing a `Room.asyncio.Lock` = undefined behavior).
+
+**5. Codex pre-implementation review incorporated (round 1):** all five findings folded into the tasks — WS Origin check (Task 5 `check_origin` + Task 6 route + tests); apply→persist→broadcast ordering with poison/evict on persist failure (Task 4 `Room`/`PersistError`/`RoomManager.evict` + persist-failure test + Task 6 route handling); broadcast error-isolation (Task 4 `_broadcast` + failing-client test); inbound frame-size bound + malformed-frame drop (Task 6 `_MAX_FRAME_BYTES` + Task 4 malformed test); route-level two-connection convergence + an XmlFragment recovery case over the real Slice-0 bridge (Tasks 6/7).
