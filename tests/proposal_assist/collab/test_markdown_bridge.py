@@ -64,6 +64,26 @@ def test_inline_code_with_backtick_roundtrips():
     assert "a`b" in json.dumps(pm)
 
 
+def test_multi_paragraph_list_item_roundtrips():
+    # A list item with two paragraphs is schema-valid ("paragraph block*").
+    # pm_to_markdown is the canonical git-checkpoint writer, so it MUST keep the
+    # paragraph break: a single newline between the blocks re-parses as ONE
+    # soft-broken paragraph = silent content loss. Covers both list kinds.
+    for md in ("- one\n\n  two\n", "1. one\n\n   two\n"):
+        pm = markdown_to_pm(md)
+        item = pm["content"][0]["content"][0]  # list > list_item
+        assert [c["type"] for c in item["content"]] == ["paragraph", "paragraph"], md
+
+        # Round-trip through the serializer preserves the two distinct paragraphs.
+        pm2 = markdown_to_pm(pm_to_markdown(pm))
+        item2 = pm2["content"][0]["content"][0]
+        assert [c["type"] for c in item2["content"]] == ["paragraph", "paragraph"], md
+
+        # ... and the canonical normal form stays idempotent.
+        once = pm_to_markdown(pm)
+        assert pm_to_markdown(markdown_to_pm(once)) == once, md
+
+
 def test_production_layout_hydrates():
     # The exact tests/test_editing_save.py doc (H1 + bare marker + tight layout)
     # must round-trip idempotently and preserve its H2 sections.

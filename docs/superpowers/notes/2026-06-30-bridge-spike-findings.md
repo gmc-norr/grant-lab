@@ -59,6 +59,8 @@ Every constrained-schema node and mark:
 
 **Existing-document shapes:** H1 title, bare `[@key]` marker staying literal plain text, tight production layout (`# T\nintro\n## Background\n…`), spec skeleton.
 
+**Multi-block list items** (a `list_item` holding more than one block, e.g. two paragraphs) also round-trip without content loss — the serializer keeps them loose. (See Normalization Inventory item 6.)
+
 ---
 
 ## Normalization Inventory
@@ -75,7 +77,7 @@ Markdown is re-normalized on the first checkpoint; the serializer is the single 
 
 5. **Autolink → link** — `<https://x>` becomes `[https://x](https://x)`.
 
-6. **Loose list → tight list.**
+6. **Loose single-paragraph list items → tight.** A list item whose only block is a paragraph (optionally followed by a nested list) is emitted tight. A list item with **multiple block-level children** (e.g. two paragraphs) keeps a blank-line separator between them, so each block survives as a distinct node on re-parse — without it CommonMark folds a trailing paragraph into the previous one as a soft break (content loss, since `list_item` content is `paragraph block*`). Nested lists stay tight. (An independent pre-merge review caught the multi-block case originally collapsing; the serializer now preserves it — see `test_multi_paragraph_list_item_roundtrips`.)
 
 Note: inline-code with backtick content was a real corruption prior to Task 3; it is now fixed via CommonMark delimiter sizing and is NOT a normalization — it round-trips cleanly.
 

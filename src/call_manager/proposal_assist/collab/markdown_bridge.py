@@ -470,14 +470,21 @@ def _serialize_list(node: dict) -> str:
 
 
 def _serialize_item_blocks(blocks: list[dict]) -> str:
-    """Serialize the blocks inside a single list item. The leading paragraph is
-    tight (no blank line); a nested list follows on the next line."""
+    """Serialize the blocks inside a single list item.
+
+    Consecutive blocks in a list item need a blank line between them to remain
+    distinct on re-parse — without it CommonMark folds a following paragraph
+    into the previous one as a soft line-break (silent content loss, since
+    ``list_item`` content is ``paragraph block*``). The ONE exception is a
+    following list: a list marker interrupts a paragraph on its own, so it stays
+    tight — which also keeps single-paragraph + nested-list items byte-identical.
+    """
     parts: list[str] = []
-    for b in blocks:
-        if b["type"] in ("bullet_list", "ordered_list"):
-            parts.append(_serialize_list(b))
-        else:
-            parts.append(_serialize_block(b))
+    for i, b in enumerate(blocks):
+        is_list = b["type"] in ("bullet_list", "ordered_list")
+        if i > 0 and not is_list:
+            parts.append("")  # blank-line separator -> distinct block on re-parse
+        parts.append(_serialize_list(b) if is_list else _serialize_block(b))
     return "\n".join(parts)
 
 
