@@ -46,3 +46,20 @@ def load_updates(session: Session, *, workspace_id: uuid.UUID, artifact: str) ->
         .all()
     )
     return list(rows)
+
+
+def load_rows(
+    session: Session, *, workspace_id: uuid.UUID, artifact: str
+) -> list[tuple[int, int | None, bytes]]:
+    """One ordered snapshot of the room's log as (id, actor_id, update_bytes).
+
+    The checkpoint path builds the doc, computes max_id, and derives authors
+    from this single read so they are mutually consistent (a concurrent
+    append landing after this SELECT is simply excluded from the snapshot).
+    """
+    rows = session.execute(
+        select(YjsUpdate.id, YjsUpdate.actor_id, YjsUpdate.update_bytes)
+        .where(YjsUpdate.workspace_id == workspace_id, YjsUpdate.artifact == artifact)
+        .order_by(YjsUpdate.id)
+    ).all()
+    return [(int(r[0]), (int(r[1]) if r[1] is not None else None), r[2]) for r in rows]
