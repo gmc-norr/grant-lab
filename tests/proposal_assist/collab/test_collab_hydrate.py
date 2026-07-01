@@ -6,9 +6,11 @@ from pycrdt import Doc
 
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+from call_manager.proposal_assist.collab.hydrate import _EMPTY_DOC, build_doc, load_or_hydrate
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from call_manager.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_recovery import _canonical
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -60,6 +62,53 @@ def test_no_hydrate_when_flag_off(pg_session_factory, tmp_path):
             == []
         )
         assert store.load_updates(s, workspace_id=wid, artifact="draft") == []  # nothing persisted
+
+
+def test_hydrates_empty_paragraph_when_head_is_blank(pg_session_factory, tmp_path):
+    # A whitespace-only HEAD has no valid ProseMirror representation (a `doc`
+    # node needs `block+`), so hydration must seed the canonical empty-paragraph
+    # doc rather than crash on markdown_to_pm(""). (Finding D.)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="hy-blank@ki.se"))
+        s.commit()
+        wid = ws.id
+    _init_repo(Path(tmp_path) / str(wid) / "repo", "   \n")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+        )
+        s.commit()
+        assert len(updates) == 1  # seeded, did not crash
+    with pg_session_factory() as s:
+        assert len(store.load_updates(s, workspace_id=wid, artifact="draft")) == 1
+    doc = build_doc(updates)
+    assert _canonical(ydoc_to_pm_json(doc)) == _canonical(_EMPTY_DOC)
+    # the empty seed is checkpoint-safe: it serializes and preserves the
+    # split_sections join invariant.
+    md = serialize_doc_to_markdown(doc)
+    assert "".join(sec.text for sec in split_sections(md)) == md
+
+
+def test_no_hydrate_when_enabled_but_artifact_file_missing(pg_session_factory, tmp_path):
+    # Collab enabled but the artifact was never committed (no git HEAD to seed
+    # from): stay Slice-1 empty rather than persist a synthetic seed. (Finding D.)
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="hy-missing@ki.se"))
+        s.commit()
+        wid = ws.id
+    # deliberately do NOT init a repo / write proposal.md
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    with pg_session_factory() as s:
+        assert (
+            load_or_hydrate(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+            == []
+        )
+        assert store.load_updates(s, workspace_id=wid, artifact="draft") == []
 
 
 def test_existing_updates_are_replayed_not_rehydrated(pg_session_factory, tmp_path):

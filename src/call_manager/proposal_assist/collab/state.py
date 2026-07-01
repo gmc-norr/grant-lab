@@ -30,7 +30,11 @@ def enable_collab(session: Session, *, workspace_id: uuid.UUID, artifact: str) -
 
 def get_checkpoint_watermark(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
     row = _get(session, workspace_id, artifact)
-    return row.last_checkpoint_update_id if row and row.last_checkpoint_update_id else 0
+    return (
+        row.last_checkpoint_update_id
+        if row and row.last_checkpoint_update_id is not None
+        else 0
+    )
 
 
 def advance_checkpoint(

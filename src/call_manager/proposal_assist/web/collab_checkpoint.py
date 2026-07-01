@@ -32,13 +32,15 @@ async def save_version(
 
     def _do():
         with session_factory() as s:
-            if not collab_state.is_collab_enabled(s, workspace_id=workspace_id, artifact=artifact):
-                raise HTTPException(status_code=409, detail="collab not enabled for this artifact")
+            # Membership FIRST so a non-member cannot distinguish "exists but
+            # collab-off" (409) from "not found" (404) — no existence oracle.
             is_member, can_write = resolve_access(
                 s, user=user, workspace_id=workspace_id, artifact=artifact
             )
             if not is_member:
                 raise HTTPException(status_code=404, detail="workspace not found")
+            if not collab_state.is_collab_enabled(s, workspace_id=workspace_id, artifact=artifact):
+                raise HTTPException(status_code=409, detail="collab not enabled for this artifact")
             if not can_write:
                 raise HTTPException(status_code=403, detail="read-only")
             # checkpoint_artifact rebuilds the doc from the durable log itself
