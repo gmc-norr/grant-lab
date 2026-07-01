@@ -25,6 +25,8 @@ from call_manager.proposal_assist.collab.yjs_bridge import (
     ydoc_to_pm_json,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotFound
+from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -253,3 +255,46 @@ def test_kernel_accept_noop_proposal_accepts_without_new_commit(pg_session_facto
             .all()
         )
         assert av == []  # no new version
+
+
+def test_proposed_change_not_found_in_clean_errors():
+    """ProposedChangeNotFound must be in _CLEAN_ACCEPT_ERRORS so that a missing row
+    on the kernel path does not trigger an unnecessary room eviction."""
+    assert ProposedChangeNotFound in _CLEAN_ACCEPT_ERRORS
+
+
+def test_kernel_accept_raises_proposed_change_not_found_for_missing_pc(
+    pg_session_factory, tmp_path
+):
+    """kernel_accept_prose raises ProposedChangeNotFound (not any other error) when
+    the proposed_changes row does not exist — and it does so BEFORE any doc mutation."""
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        o = make_user(s, email="k-notfound@ki.se")
+        ws = make_workspace(s, owner=o, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, o.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    with pg_session_factory() as s:
+        room_doc = _live_room(s, wid, str(tmp_path))
+
+    nonexistent_pc_id = uuidlib.uuid4()
+    with pg_session_factory() as s:
+        approver = s.get(type(o), oid)
+        try:
+            kernel_accept_prose(
+                s,
+                room_doc=room_doc,
+                proposed_change_id=nonexistent_pc_id,
+                workspace_id=wid,
+                approver=approver,
+                workspaces_dir=str(tmp_path),
+            )
+        except ProposedChangeNotFound:
+            pass
+        else:
+            raise AssertionError("expected ProposedChangeNotFound")

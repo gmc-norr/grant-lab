@@ -18,16 +18,23 @@ from call_manager.proposal_assist.collab.kernel import (
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
-from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotPending
+from call_manager.proposal_assist.proposals.accepting import (
+    ProposedChangeNotFound,
+    ProposedChangeNotPending,
+)
 
 # These are all raised BEFORE any fragment mutation (validation guards, plus the
 # commit-mutex acquire that precedes the spec-lock guard — Codex H3), so the room
 # doc is untouched and there is nothing to evict. Every OTHER exception may have
 # left room.doc mutated while the txn rolled back → evict to rebuild from the log.
+# ProposedChangeNotFound is raised by _load_scoped as the very first thing it does
+# (a TOCTOU between _route's s.get and the kernel's FOR UPDATE load), so the room
+# doc is always untouched when it propagates.
 _CLEAN_ACCEPT_ERRORS = (
     SpecLockedError,
     SectionStructureError,
     CitationKernelDeferred,
+    ProposedChangeNotFound,
     ProposedChangeNotPending,
     CommitMutexTimeout,
     IndexError,

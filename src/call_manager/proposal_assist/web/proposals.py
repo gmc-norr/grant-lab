@@ -166,6 +166,8 @@ async def accept(
                 session_factory=session_factory, workspaces_dir=workspaces_dir,
                 workspace_id=workspace_id, pc_id=pc_id, approver=user, artifact=artifact,
             )
+        except ProposedChangeNotFound as exc:
+            raise HTTPException(status_code=404, detail="proposed change not found") from exc
         except CitationKernelDeferred as exc:
             raise HTTPException(
                 status_code=409,
