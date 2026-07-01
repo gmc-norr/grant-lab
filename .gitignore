@@ -39,7 +39,7 @@ api_key.txt
 # Frontend (React SPA, Plan 2): deps + build outputs. The container-emitted SPA
 # bundle (src/call_manager/web/spa/) is gitignored too — it is built by the
 # secretless container (Task 6) and packaged via hatch `artifacts`, never committed.
-frontend/node_modules/
+frontend/node_modules
 frontend/dist/
 src/call_manager/web/spa/
 # Playwright e2e outputs (Plan 3 Task 9; the dual-mode run is deferred but these

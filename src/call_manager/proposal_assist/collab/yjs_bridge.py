@@ -222,6 +222,33 @@ def pm_json_to_ydoc(doc: dict, *, client_id: int | None = None) -> pycrdt.Doc:
     return ydoc
 
 
+def apply_pm_json_to_fragment(doc: pycrdt.Doc, pm_json: dict) -> bytes:
+    """Replace the doc's ``"prosemirror"`` XmlFragment content with ``pm_json``
+    (a ProseMirror ``doc`` node) in one transaction, returning the INCREMENTAL
+    Yjs update that effects the change.
+
+    Used by the room-aware write kernel to apply a whole-doc replacement (the
+    section-scoped edit reassembled into the full doc) to a LIVE room: a client
+    synced to the pre-edit state converges by applying this update. The update
+    is captured via an observer (NOT ``get_update()``, which encodes full state).
+    """
+    if pm_json.get("type") != "doc":
+        raise ValueError(f"expected a ProseMirror doc node, got type={pm_json.get('type')!r}")
+    captured: list[bytes] = []
+    sub = doc.observe(lambda event: captured.append(event.update))
+    try:
+        fragment = doc.get(_FRAGMENT_KEY, type=pycrdt.XmlFragment)
+        with doc.transaction():
+            while len(fragment.children) > 0:
+                del fragment.children[0]
+            for block in pm_json.get("content") or []:
+                _append_node(fragment, block)
+    finally:
+        doc.unobserve(sub)
+    # One transaction => one observer callback with the coalesced incremental update.
+    return captured[-1] if captured else b""
+
+
 # ---------------------------------------------------------------------------
 # Yjs -> PM JSON
 # ---------------------------------------------------------------------------
