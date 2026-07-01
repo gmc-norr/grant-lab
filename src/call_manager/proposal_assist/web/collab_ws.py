@@ -7,6 +7,7 @@ update log; restart recovery by replay. No git, no awareness/presence yet.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, WebSocket
@@ -15,6 +16,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
+from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.room import MANAGER, PersistError
 from call_manager.proposal_assist.collab.ws_auth import (
@@ -23,6 +25,8 @@ from call_manager.proposal_assist.collab.ws_auth import (
     resolve_access,
     resolve_ws_user,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -105,6 +109,31 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
 
         await run_in_threadpool(_write)
 
+    async def _checkpoint_on_evict(_room) -> None:
+        def _cp():
+            with session_factory() as s:
+                try:
+                    checkpoint_artifact(
+                        s,
+                        workspace_id=workspace_id,
+                        artifact=artifact,
+                        workspaces_dir=workspaces_dir,
+                    )
+                    s.commit()
+                except Exception:
+                    # Best-effort: the room is already evicted and the durable log
+                    # survives, so the next trigger (explicit endpoint or next
+                    # last-leave) retries. Never let a teardown-time checkpoint
+                    # failure (mutex timeout, missing repo, git error) escape.
+                    logger.warning(
+                        "collab.checkpoint_on_evict_failed",
+                        extra={"event": "collab_checkpoint_on_evict_failed", "room": str(key)},
+                        exc_info=True,
+                    )
+                    s.rollback()
+
+        await run_in_threadpool(_cp)
+
     room = await MANAGER.acquire(key, load=_load, client=websocket)
     try:
         await websocket.send_bytes(room.initial_message())
@@ -128,4 +157,4 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         await MANAGER.evict(key)
         await websocket.close(code=_WS_INTERNAL_ERROR)
     finally:
-        await MANAGER.release(key, client=websocket)
+        await MANAGER.release(key, client=websocket, on_evict=_checkpoint_on_evict)

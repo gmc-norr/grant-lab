@@ -26,7 +26,7 @@ from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.references.admission import IngestLimiter
-from call_manager.proposal_assist.web import collab_ws
+from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
 from call_manager.proposal_assist.web.activity import (
     router as activity_router,
 )
@@ -524,6 +524,7 @@ def create_app() -> FastAPI:
     app.include_router(uncited_claims_router)
     app.include_router(activity_router)
     app.include_router(collab_ws.router)
+    app.include_router(collab_checkpoint.router)
     app.include_router(api_router)
 
     # Dev-only SSE validation endpoint (/events/ping). Mounted ONLY in dev so it

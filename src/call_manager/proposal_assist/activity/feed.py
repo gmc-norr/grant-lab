@@ -63,6 +63,7 @@ _PROBLEMS = ActivityTarget(bottom_tab="problems")
 _RENDER: dict[str, tuple[str, str, ActivityTarget | None]] = {
     "created": ("created", "created the workspace", None),
     "user_citation_insert": ("citation", "added a citation", _DRAFT),
+    "collab_checkpoint": ("edit", "saved a version", _DRAFT),
     "cloud_turn_completed": ("turn", "ran the assistant", None),
     "cloud_turn_failed": ("turn", "had an assistant turn fail", None),
     "cloud_turn_cancelled": ("turn", "cancelled an assistant turn", None),

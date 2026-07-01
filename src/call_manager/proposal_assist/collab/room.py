@@ -182,15 +182,21 @@ class RoomManager:
                 room.clients.add(client)
             return room
 
-    async def release(self, key: RoomKey, *, client) -> None:
-        """Deregister a client; evict the room when the last one leaves."""
+    def get(self, key: RoomKey) -> Room | None:
+        return self._rooms.get(key)
+
+    async def release(self, key: RoomKey, *, client, on_evict=None) -> None:
+        """Deregister a client; evict the room when the last one leaves. If a
+        room is evicted and `on_evict` is given, call it (e.g. to checkpoint)
+        OUTSIDE the manager lock — never hold the global lock across I/O."""
         async with self._lock:
             room = self._rooms.get(key)
             if room is None:
                 return
             room.clients.discard(client)
-            if not room.clients:
-                del self._rooms[key]
+            evicted = self._rooms.pop(key) if not room.clients else None
+        if evicted is not None and on_evict is not None:
+            await on_evict(evicted)
 
     async def evict(self, key: RoomKey) -> None:
         """Force-remove a room regardless of connected clients (poison recovery).
