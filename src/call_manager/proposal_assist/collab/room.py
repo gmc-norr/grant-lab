@@ -18,6 +18,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from pycrdt import Doc
 
@@ -48,6 +49,7 @@ class Room:
         self.key = key
         self.doc = Doc()
         self.clients: set = set()
+        self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
         self._lock = asyncio.Lock()
 
@@ -69,14 +71,17 @@ class Room:
             # malformed STEP1 body (truncated/garbage state vector) must be
             # dropped, not raised — symmetric with the write-path guard below,
             # and reachable by any connected member (the read path is ungated).
-            try:
-                reply = P.handle_sync_message(message[1:], self.doc)
-            except Exception:
-                logger.warning(
-                    "collab.malformed_step1",
-                    extra={"event": "collab_malformed_step1", "room": str(self.key)},
-                )
-                return
+            # Lock the doc read so a concurrent kernel accept (worker thread, under
+            # this same lock) cannot mutate room.doc while we read it (Codex H2).
+            async with self._lock:
+                try:
+                    reply = P.handle_sync_message(message[1:], self.doc)
+                except Exception:
+                    logger.warning(
+                        "collab.malformed_step1",
+                        extra={"event": "collab_malformed_step1", "room": str(self.key)},
+                    )
+                    return
             if reply is not None:
                 await sender.send_bytes(reply)
             return
@@ -120,6 +125,15 @@ class Room:
 
         # AWARENESS and anything else: ignored in Slice 1 (presence is Slice 3).
         return
+
+    # --- public accessors for the kernel (Step 1c) ---
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        return self._lock
+
+    async def broadcast(self, frame: bytes) -> None:
+        await self._broadcast(frame, exclude=None)
 
     async def _broadcast(self, frame: bytes, *, exclude) -> None:
         """Send to every client except `exclude`, isolating per-client failures:
@@ -182,6 +196,40 @@ class RoomManager:
                 room.clients.add(client)
             return room
 
+    @asynccontextmanager
+    async def operate(self, key: RoomKey, *, load: LoadFn):
+        """Get-or-create a room for a SERVER operation (no client registered).
+        Tracks an in-flight server-op count so eviction is deferred until BOTH
+        no clients AND no other server op remain (Codex H1). Does NOT checkpoint
+        on evict — the kernel op already checkpointed within its transaction."""
+        async with self._lock:
+            room = self._rooms.get(key)
+            if room is not None:
+                room.ops += 1
+            else:
+                keylock = self._keylocks.setdefault(key, asyncio.Lock())
+        if room is None:
+            async with keylock:
+                async with self._lock:
+                    room = self._rooms.get(key)
+                if room is None:
+                    room = Room(key)
+                    for update in await load():   # OUTSIDE the manager lock
+                        room.doc.apply_update(update)
+                    async with self._lock:
+                        self._rooms[key] = room
+                        room.ops += 1
+                else:
+                    async with self._lock:
+                        room.ops += 1
+        try:
+            yield room
+        finally:
+            async with self._lock:
+                room.ops -= 1
+                if not room.clients and room.ops == 0 and self._rooms.get(key) is room:
+                    self._rooms.pop(key, None)
+
     def get(self, key: RoomKey) -> Room | None:
         return self._rooms.get(key)
 
@@ -194,7 +242,7 @@ class RoomManager:
             if room is None:
                 return
             room.clients.discard(client)
-            evicted = self._rooms.pop(key) if not room.clients else None
+            evicted = self._rooms.pop(key) if (not room.clients and room.ops == 0) else None
         if evicted is not None and on_evict is not None:
             await on_evict(evicted)
 
