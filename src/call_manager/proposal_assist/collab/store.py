@@ -21,8 +21,14 @@ def append_update(
     artifact: str,
     actor_id: int | None,
     update: bytes,
+    commit: bool = True,
 ) -> None:
-    """Append one Yjs update for a room, tagged with the sending user."""
+    """Append one Yjs update for a room, tagged with the sending user.
+
+    ``commit=True`` (default) commits immediately — the Slice-1 ``room.handle``
+    per-update persistence contract. ``commit=False`` stages the row on the
+    caller's transaction (the write kernel commits the update + checkpoint +
+    accept status flip together, atomically)."""
     session.add(
         YjsUpdate(
             workspace_id=workspace_id,
@@ -31,7 +37,10 @@ def append_update(
             update_bytes=update,
         )
     )
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
 
 
 def load_updates(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> list[bytes]:
