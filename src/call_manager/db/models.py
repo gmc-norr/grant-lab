@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -1893,3 +1894,34 @@ class UserClaimAnnotation(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class YjsUpdate(Base):
+    """Append-only Yjs update log for the collaborative editor.
+
+    One row per persisted CRDT update, keyed by (workspace_id, artifact) =
+    the room. `actor_id` is the authenticated user who sent the update (for
+    authorship in later slices). Ordering is by the autoincrement `id`.
+    """
+
+    __tablename__ = "yjs_updates"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    artifact: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    update_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("artifact IN ('draft','spec')", name="ck_yjs_updates_artifact"),
+        Index("ix_yjs_updates_room", "workspace_id", "artifact", "id"),
+    )
