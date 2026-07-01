@@ -201,14 +201,20 @@ def _is_inline_atom(node_type: str | None) -> bool:
     return bool(spec is not None and spec.is_inline and not spec.is_text)
 
 
-def pm_json_to_ydoc(doc: dict) -> pycrdt.Doc:
+def pm_json_to_ydoc(doc: dict, *, client_id: int | None = None) -> pycrdt.Doc:
     """Build a ``pycrdt.Doc`` whose ``"prosemirror"`` XmlFragment mirrors ``doc``.
 
     ``doc`` is a ProseMirror ``doc`` node (``{"type": "doc", "content": [...]}``).
+
+    ``client_id`` (when given) is forwarded to ``pycrdt.Doc`` so callers can pin
+    the doc's client id. This makes the *logical* CRDT content reproducible; note
+    that it does NOT make ``get_update()`` byte-stable across builds (pycrdt's
+    update serialization is not byte-deterministic even with a fixed client id —
+    see the write-path test), so callers must not rely on byte equality.
     """
     if doc.get("type") != "doc":
         raise ValueError(f"expected a ProseMirror doc node, got type={doc.get('type')!r}")
-    ydoc = pycrdt.Doc()
+    ydoc = pycrdt.Doc() if client_id is None else pycrdt.Doc(client_id=client_id)
     fragment = ydoc.get(_FRAGMENT_KEY, type=pycrdt.XmlFragment)
     with ydoc.transaction():
         for block in doc.get("content") or []:
