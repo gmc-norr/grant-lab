@@ -204,6 +204,31 @@ def test_explicit_endpoint_owner_commits(_app, pg_session_factory, tmp_path):
         assert len(av) == 1
 
 
+def test_explicit_endpoint_repo_missing_is_clean_noop(_app, pg_session_factory, tmp_path):
+    # Review #3: collab enabled but the workspace repo does not exist yet (e.g.
+    # enabled before the setup job inits the repo). The explicit checkpoint must
+    # return a clean 200 no-op, NOT an unhandled 500 from current_head().
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        owner = make_user(s, email="trig-norepo@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+    # deliberately NO _init_repo under tmp_path
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        r = client.post(f"/api/workspaces/{wid}/collab/draft/checkpoint")
+    finally:
+        client.__exit__(None, None, None)
+    assert r.status_code == 200, r.text  # clean no-op, NOT a 500
+    assert r.json()["committed"] is False
+
+
 def test_explicit_endpoint_read_only_member_is_forbidden(_app, pg_session_factory, tmp_path):
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)

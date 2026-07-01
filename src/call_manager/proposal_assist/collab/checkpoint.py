@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import ArtifactVersion, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import Artifact, filename_for
-from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
+from call_manager.proposal_assist.citations.gitio import (
+    GitCommitError,
+    current_head,
+    write_and_commit_files,
+)
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.hydrate import build_doc
 from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
@@ -34,46 +38,78 @@ def serialize_doc_to_markdown(doc: Doc) -> str:
     return pm_to_markdown(ydoc_to_pm_json(doc))
 
 
+def _head_or_empty(repo) -> str:
+    """Current HEAD SHA, or ``""`` when the workspace has no committable git repo
+    yet (missing repo dir / no commits). Lets a checkpoint of a repo-less but
+    collab-enabled workspace resolve to a clean no-op instead of raising."""
+    try:
+        return current_head(repo)
+    except GitCommitError:
+        return ""
+
+
 def checkpoint_artifact(
     session: Session, *, workspace_id: uuid.UUID, artifact: str, workspaces_dir
 ) -> CheckpointResult:
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
 
+    # Acquire the per-workspace commit mutex FIRST, so the whole
+    # read -> decide -> commit -> advance sequence below is serialized against
+    # concurrent checkpoints AND the still-live git-first paths (save_section,
+    # human_cite, agent tools). Reading the watermark/log BEFORE the mutex would
+    # let a racing checkpoint commit and advance the watermark between our read
+    # and our write — we could then rewrite git HEAD backwards and regress the
+    # watermark. Released at the caller's COMMIT/ROLLBACK; we never commit here.
+    acquire_commit_mutex(session, workspace_id)
+
     # ONE atomic snapshot of the log: doc, max_id, and authors all derive from
-    # these rows. A concurrent append landing after this SELECT is excluded and
-    # caught by the next checkpoint — the watermark never passes an unserialized
-    # update (fixes the load-doc-then-read-max TOCTOU).
+    # these rows (fixes the load-doc-then-read-max TOCTOU).
     rows = store.load_rows(session, workspace_id=workspace_id, artifact=artifact)
     watermark = state.get_checkpoint_watermark(
         session, workspace_id=workspace_id, artifact=artifact
     )
     max_id = rows[-1][0] if rows else 0
+    head = _head_or_empty(repo)
 
-    if max_id <= watermark:
-        return CheckpointResult(committed=False, commit_sha=current_head(repo), authors=[])
+    # Nothing new since the last checkpoint, or no git repo to commit into yet
+    # (collab enabled before the workspace repo exists): clean no-op. Returning
+    # here — rather than falling through to write_and_commit_files — keeps a
+    # repo-less explicit checkpoint a 200/no-op instead of an unhandled 500.
+    if max_id <= watermark or head == "":
+        return CheckpointResult(committed=False, commit_sha=head, authors=[])
 
     authors = sorted({a for (rid, a, _) in rows if rid > watermark and a is not None})
+    if not authors:
+        # The only updates since the watermark are unauthored — i.e. the git-HEAD
+        # hydration seed (actor_id=None). git already holds that content, so
+        # committing it would merely re-serialize HEAD (dropping any non-schema
+        # markup) and record a spurious system-authored version for a session
+        # nobody edited. Advance past the seed WITHOUT committing, so a no-edit
+        # open/close is a true no-op; the first real edit checkpoints the whole
+        # doc, attributed to its author.
+        state.advance_checkpoint(
+            session,
+            workspace_id=workspace_id,
+            artifact=artifact,
+            up_to_update_id=max_id,
+            commit_sha=head,
+        )
+        return CheckpointResult(committed=False, commit_sha=head, authors=[])
+
     doc = build_doc([b for (_, _, b) in rows])
     md = serialize_doc_to_markdown(doc)
     fname = filename_for(_ARTIFACT[artifact])
-
-    # Serialize against every other git mutation of this workspace (save_section,
-    # human_cite, agent tools) — the git-first paths stay live until 2b. Released
-    # at the caller's COMMIT/ROLLBACK; checkpoint_artifact never commits itself.
-    acquire_commit_mutex(session, workspace_id)
-
-    head_before = current_head(repo)
-    author_tag = ",".join(str(a) for a in authors) or "system"
+    author_tag = ",".join(str(a) for a in authors)
     commit_sha = write_and_commit_files(
         repo, {fname: md}, f"collab checkpoint: {artifact} (authors:{author_tag})"
     )
-    changed = commit_sha != head_before
+    changed = commit_sha != head
     if changed:
         session.add(
             ArtifactVersion(
                 workspace_id=workspace_id,
                 commit_sha=commit_sha,
-                created_by="user" if authors else "system",
+                created_by="user",  # authors is non-empty on this path
                 message=f"collab checkpoint: {artifact}",
             )
         )

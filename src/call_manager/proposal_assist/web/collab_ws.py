@@ -14,6 +14,7 @@ from fastapi import APIRouter, WebSocket
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
+from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
@@ -25,6 +26,7 @@ from call_manager.proposal_assist.collab.ws_auth import (
     resolve_access,
     resolve_ws_user,
 )
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +122,23 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
                         workspaces_dir=workspaces_dir,
                     )
                     s.commit()
-                except Exception:
-                    # Best-effort: the room is already evicted and the durable log
-                    # survives, so the next trigger (explicit endpoint or next
-                    # last-leave) retries. Never let a teardown-time checkpoint
-                    # failure (mutex timeout, missing repo, git error) escape.
+                except (GitCommitError, CommitMutexTimeout):
+                    # Expected + benign at teardown: another writer holds the
+                    # commit mutex, or a transient git failure. The durable log
+                    # survives, so the next trigger (explicit endpoint / next
+                    # last-leave) retries. Don't let it escape the disconnect path.
                     logger.warning(
-                        "collab.checkpoint_on_evict_failed",
-                        extra={"event": "collab_checkpoint_on_evict_failed", "room": str(key)},
+                        "collab.checkpoint_on_evict_skipped",
+                        extra={"event": "collab_checkpoint_on_evict_skipped", "room": str(key)},
+                    )
+                    s.rollback()
+                except Exception:
+                    # Unexpected: surface loudly (ERROR + traceback) instead of
+                    # masking a real bug as a routine skip, but still keep a
+                    # teardown checkpoint failure from escaping the disconnect path.
+                    logger.error(
+                        "collab.checkpoint_on_evict_error",
+                        extra={"event": "collab_checkpoint_on_evict_error", "room": str(key)},
                         exc_info=True,
                     )
                     s.rollback()

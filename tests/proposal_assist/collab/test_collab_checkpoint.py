@@ -121,3 +121,71 @@ def test_second_checkpoint_with_no_new_updates_is_noop(pg_session_factory, tmp_p
             .all()
         )
         assert len(av) == 1  # no second version
+
+
+def test_seed_only_open_close_does_not_checkpoint(pg_session_factory, tmp_path):
+    # Review #2: opening a collab room hydrates an unauthored seed (actor_id=None)
+    # from git HEAD. A last-leave / explicit checkpoint with NO human edits must
+    # NOT commit a spurious system version (that would just re-serialize HEAD,
+    # dropping non-schema markup) — but it should advance the watermark past the
+    # seed so it isn't re-evaluated forever.
+    with pg_session_factory() as s:
+        o = make_user(s, email="cp-seedonly@ki.se")
+        ws = make_workspace(s, owner=o)
+        s.commit()
+        wid = ws.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, "## Background\noriginal.\n")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    # an unauthored seed (as hydration persists on first open)
+    _seed_room_with_edit(pg_session_factory, wid, None, "## Background\n\noriginal.\n")
+
+    with pg_session_factory() as s:
+        res = checkpoint_artifact(
+            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+        )
+        s.commit()
+    assert res.committed is False
+    # git HEAD is untouched — no spurious commit
+    assert (repo / PROPOSAL_FILENAME).read_text() == "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        av = (
+            s.execute(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid))
+            .scalars()
+            .all()
+        )
+        assert av == []  # no version recorded for a no-edit session
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == rows[-1][0]
+
+
+def test_checkpoint_repo_missing_is_clean_noop(pg_session_factory, tmp_path):
+    # Review #3: an authored update exists but the workspace has no git repo yet
+    # (collab enabled before the repo is created). checkpoint_artifact must resolve
+    # to a clean no-op (commit_sha="") instead of raising GitCommitError -> 500.
+    with pg_session_factory() as s:
+        o = make_user(s, email="cp-norepo@ki.se")
+        ws = make_workspace(s, owner=o)
+        s.commit()
+        wid, oid = ws.id, o.id
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    # authored update, but NO git repo on disk under tmp_path
+    _seed_room_with_edit(pg_session_factory, wid, oid, "## X\n\nedited.\n")
+    with pg_session_factory() as s:
+        res = checkpoint_artifact(
+            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+        )
+        s.commit()
+    assert res.committed is False
+    assert res.commit_sha == ""  # no HEAD to report; did not raise
+    with pg_session_factory() as s:
+        av = (
+            s.execute(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid))
+            .scalars()
+            .all()
+        )
+        assert av == []

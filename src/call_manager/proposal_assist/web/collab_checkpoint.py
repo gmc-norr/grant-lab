@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User
+from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
@@ -54,6 +55,13 @@ async def save_version(
                 s.commit()
             except CommitMutexTimeout as exc:
                 raise HTTPException(status_code=503, detail=BUSY_ERROR_MESSAGE) from exc
+            except GitCommitError as exc:
+                # A genuine git failure while committing (a repo-less workspace
+                # is already a clean no-op in checkpoint_artifact). Surface a
+                # structured retriable status rather than a raw 500.
+                raise HTTPException(
+                    status_code=503, detail="checkpoint failed — try again"
+                ) from exc
             return {
                 "committed": res.committed,
                 "commit_sha": res.commit_sha,
