@@ -862,9 +862,11 @@ Mount in `main.py` (before `mount_spa`, near `collab_ws`): `from ...web import c
 
 Mirror the `client_authed_owner`/`_cookie`/`_init_repo` patterns from `test_collab_ws_route.py`. Point `_app.state.settings.workspaces_dir` at `tmp_path` (patch it on the app, as the route reads `app.state.settings.workspaces_dir`).
 
-- [ ] **Step 6: Run** the triggers suite + the full `tests/proposal_assist/collab/` suite green.
+- [ ] **Step 6: Regenerate OpenAPI types** — the new POST endpoint is the first collab **HTTP** route (Slice-1's WS route does not appear in OpenAPI), so it adds a path to the schema. Run `cd frontend && pnpm gen:api` (hermetic: `scripts/gen_openapi_types.sh` pins `EMBEDDING_MODEL=bge-m3` and needs no server/DB). Confirm `git diff --name-only` shows **only** `frontend/src/api/schema.gen.ts` changed, and it now contains the `/api/workspaces/{workspace_id}/collab/{artifact}/checkpoint` path. Then `cd frontend && pnpm exec tsc --noEmit` stays green (no consumer references it yet).
 
-- [ ] **Step 7: Commit** (`feat(collab): checkpoint triggers (last-leave + explicit endpoint) + activity feed`).
+- [ ] **Step 7: Run** the triggers suite + the full `tests/proposal_assist/collab/` suite green.
+
+- [ ] **Step 8: Commit** (`feat(collab): checkpoint triggers (last-leave + explicit endpoint) + activity feed + OpenAPI regen`) — include the regenerated `frontend/src/api/schema.gen.ts`.
 
 ---
 
@@ -898,6 +900,7 @@ Closes the spike finding: a ydoc built by Python `pm_json_to_ydoc` must be read 
 uv run pytest tests/proposal_assist/collab/ -q     # Slice 0 + 1 + 2a green
 uv run ruff check .
 cd frontend && pnpm vitest run writepath && pnpm exec tsc --noEmit
+pnpm gen:api && git diff --exit-code src/api/schema.gen.ts   # OpenAPI in sync (regen already committed in Task 5)
 ```
 
 ---
