@@ -242,6 +242,9 @@ def test_live_client_converges(_app, pg_session_factory, tmp_path):
             update = P.extract_update(update_frame)
             observer_doc.apply_update(update)
 
+            # The observer callback must have fired (the update was applied to our doc)
+            assert len(received_updates) >= 1
+
         # After applying the broadcast update, the observer doc matches accepted content
         md_after = pm_to_markdown(ydoc_to_pm_json(observer_doc))
         assert "converged content." in md_after
@@ -435,3 +438,69 @@ def test_flag_off_parity_git_first(_app, pg_session_factory, tmp_path):
 
     disk = (repo / PROPOSAL_FILENAME).read_text()
     assert "accepted via git-first." in disk
+
+
+# ---------------------------------------------------------------------------
+# Case 6: accept-race — second accept of the same pending proposal is rejected
+# ---------------------------------------------------------------------------
+
+
+def test_accept_race_second_accept_is_rejected(_app, pg_session_factory, tmp_path):
+    """Serialized invariant: after two sequential accepts of the SAME pending
+    proposal, the FIRST succeeds (status=accepted, 1 ArtifactVersion) and the
+    SECOND returns HTTP 409 (ProposedChangeNotPending).  The FOR UPDATE row lock
+    + status gate inside kernel_accept_prose guarantees this without a real race.
+
+    No double-apply: exactly ONE ArtifactVersion row exists after both attempts,
+    and the proposal status stays 'accepted'."""
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ka-route-race@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+
+    live_sections = _live_sections_from_md(pg_session_factory, wid, str(tmp_path))
+    base_sha = live_sections[1].sha
+    head = _git_head(repo)
+
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(
+            s, wid,
+            section_index=1,
+            new_text="## Background\nrace accepted.\n",
+            base_commit_sha=head,
+            base_section_sha=base_sha,
+        )
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        # First accept: must succeed.
+        r1 = client.post(f"/api/workspaces/{wid}/proposed-changes/{pc_id}/accept")
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["status"] == "accepted"
+
+        # Second accept of the SAME (now-accepted) proposal: status gate fires → 409.
+        r2 = client.post(f"/api/workspaces/{wid}/proposed-changes/{pc_id}/accept")
+        assert r2.status_code == 409, r2.text
+    finally:
+        client.__exit__(None, None, None)
+
+    # Exactly ONE ArtifactVersion landed — no double-apply.
+    with pg_session_factory() as s:
+        av = s.execute(
+            select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid)
+        ).scalars().all()
+        assert len(av) == 1
+
+        pc = s.get(ProposedChange, pc_id)
+        assert pc.status == "accepted"
