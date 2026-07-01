@@ -4,6 +4,7 @@ from pycrdt import Doc, Text
 
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.proposal_assist.collab import protocol as P
+from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.room import MANAGER
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -36,6 +37,7 @@ def test_state_survives_room_eviction_and_reconnect(_app, pg_session_factory):
     with pg_session_factory() as s:
         owner = make_user(s, email="recover-owner@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, oid = ws.id, owner.id
 
@@ -99,6 +101,7 @@ def test_xmlfragment_doc_survives_recovery_via_the_bridge(_app, pg_session_facto
     with pg_session_factory() as s:
         owner = make_user(s, email="xml-recover@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, oid = ws.id, owner.id
 

@@ -1925,3 +1925,23 @@ class YjsUpdate(Base):
         CheckConstraint("artifact IN ('draft','spec')", name="ck_yjs_updates_artifact"),
         Index("ix_yjs_updates_room", "workspace_id", "artifact", "id"),
     )
+
+
+class CollabArtifactState(Base):
+    """Per-(workspace, artifact) collaborative-editing state: the feature flag
+    (`enabled_at`, NULL = off) plus the checkpoint watermark (the highest
+    yjs_updates.id already checkpointed to git) and last checkpoint commit."""
+
+    __tablename__ = "collab_artifact_state"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    artifact: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_checkpoint_update_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_checkpoint_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("artifact IN ('draft','spec')", name="ck_collab_artifact_state_artifact"),
+    )

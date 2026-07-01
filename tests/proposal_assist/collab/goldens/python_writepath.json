@@ -1,0 +1,854 @@
+[
+  {
+    "name": "preamble_only",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro paragraph with no heading."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQMBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgSW50cm8gcGFyYWdyYXBoIHdpdGggbm8gaGVhZGluZy4A"
+  },
+  {
+    "name": "single_section",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Aims"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "We aim to do the thing."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQcBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgRBaW1zhwEAAwlwYXJhZ3JhcGgHAAEHBgQAAQgXV2UgYWltIHRvIGRvIHRoZSB0aGluZy4A"
+  },
+  {
+    "name": "multi_section_h3",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Approach"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 3
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Phase 1"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Do the first part."
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 3
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Phase 2"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Then the second."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ARIBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAghBcHByb2FjaIcBAAMHaGVhZGluZygAAQsFbGV2ZWwBfQMHAAELBgQAAQ0HUGhhc2UgMYcBCwMJcGFyYWdyYXBoBwABFQYEAAEWEkRvIHRoZSBmaXJzdCBwYXJ0LocBFQMHaGVhZGluZygAASkFbGV2ZWwBfQMHAAEpBgQAASsHUGhhc2UgMocBKQMJcGFyYWdyYXBoBwABMwYEAAE0EFRoZW4gdGhlIHNlY29uZC4A"
+  },
+  {
+    "name": "marks_and_links",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Novelty"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "This is "
+            },
+            {
+              "type": "text",
+              "text": "bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {}
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "text": "italic",
+              "marks": [
+                {
+                  "type": "em",
+                  "attrs": {}
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "text": "struck",
+              "marks": [
+                {
+                  "type": "strikethrough",
+                  "attrs": {}
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "code",
+                  "attrs": {}
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", and a "
+            },
+            {
+              "type": "text",
+              "text": "link",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.org",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ARsBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgdOb3ZlbHR5hwEAAwlwYXJhZ3JhcGgHAAEKBgQAAQsIVGhpcyBpcyCGARMGc3Ryb25nAnt9hAEUBGJvbGSGARgGc3Ryb25nBG51bGyEARkCLCCGARsCZW0Ce32EARwGaXRhbGljhgEiAmVtBG51bGyEASMCLCCGASUNc3RyaWtldGhyb3VnaAJ7fYQBJgZzdHJ1Y2uGASwNc3RyaWtldGhyb3VnaARudWxshAEtAiwghgEvBGNvZGUCe32EATAEY29kZYYBNARjb2RlBG51bGyEATUILCBhbmQgYSCGAT0EbGluayt7ImhyZWYiOiJodHRwczovL2V4YW1wbGUub3JnIiwidGl0bGUiOm51bGx9hAE+BGxpbmuGAUIEbGluawRudWxshAFDAS4A"
+  },
+  {
+    "name": "nested_marked_list",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Plan"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "bold item",
+                      "marks": [
+                        {
+                          "type": "strong",
+                          "attrs": {}
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "text": " with a "
+                    },
+                    {
+                      "type": "text",
+                      "text": "link",
+                      "marks": [
+                        {
+                          "type": "link",
+                          "attrs": {
+                            "href": "https://example.org",
+                            "title": null
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "nested item"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "second"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ASIBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgRQbGFuhwEAAwtidWxsZXRfbGlzdAcAAQcDCWxpc3RfaXRlbQcAAQgDCXBhcmFncmFwaAcAAQkGBgABCgZzdHJvbmcCe32EAQsJYm9sZCBpdGVthgEUBnN0cm9uZwRudWxshAEVCCB3aXRoIGEghgEdBGxpbmsreyJ0aXRsZSI6bnVsbCwiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5vcmcifYQBHgRsaW5rhgEiBGxpbmsEbnVsbIcBCQMLYnVsbGV0X2xpc3QHAAEkAwlsaXN0X2l0ZW0HAAElAwlwYXJhZ3JhcGgHAAEmBgQAAScLbmVzdGVkIGl0ZW2HAQgDCWxpc3RfaXRlbQcAATMDCXBhcmFncmFwaAcAATQGBAABNQZzZWNvbmSHAQcDDG9yZGVyZWRfbGlzdCgAATwFb3JkZXIBfQEHAAE8AwlsaXN0X2l0ZW0HAAE+AwlwYXJhZ3JhcGgHAAE/BgQAAUADb25lhwE+AwlsaXN0X2l0ZW0HAAFEAwlwYXJhZ3JhcGgHAAFFBgQAAUYDdHdvAA=="
+  },
+  {
+    "name": "blockquote_and_code",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Notes"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a quote"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "content": [
+            {
+              "type": "text",
+              "text": "print('hi')"
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQsBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgVOb3Rlc4cBAAMKYmxvY2txdW90ZQcAAQgDCXBhcmFncmFwaAcAAQkGBAABCgdhIHF1b3RlhwEIAwpjb2RlX2Jsb2NrBwABEgYEAAETC3ByaW50KCdoaScpAA=="
+  },
+  {
+    "name": "horizontal_rule",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Sep"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "above"
+            }
+          ]
+        },
+        {
+          "type": "horizontal_rule"
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "below"
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQsBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgNTZXCHAQADCXBhcmFncmFwaAcAAQYGBAABBwVhYm92ZYcBBgMPaG9yaXpvbnRhbF9ydWxlhwENAwlwYXJhZ3JhcGgHAAEOBgQAAQ8FYmVsb3cA"
+  },
+  {
+    "name": "image",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Figure"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.org/fig.png",
+                "alt": "alt text"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQgBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgZGaWd1cmWHAQADCXBhcmFncmFwaAcAAQkDBWltYWdlKAABCgNzcmMBdxtodHRwczovL2V4YW1wbGUub3JnL2ZpZy5wbmcoAAEKA2FsdAF3CGFsdCB0ZXh0AA=="
+  },
+  {
+    "name": "hard_break",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Address"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "line one"
+            },
+            {
+              "type": "hard_break"
+            },
+            {
+              "type": "text",
+              "text": "line two after a hard break."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQoBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgdBZGRyZXNzhwEAAwlwYXJhZ3JhcGgHAAEKBgQAAQsIbGluZSBvbmWHAQsDCmhhcmRfYnJlYWuHARQGBAABFRxsaW5lIHR3byBhZnRlciBhIGhhcmQgYnJlYWsuAA=="
+  },
+  {
+    "name": "fenced_h2_not_a_section",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Methods"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "content": [
+            {
+              "type": "text",
+              "text": "## not a heading"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Real body."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQoBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgdNZXRob2RzhwEAAwpjb2RlX2Jsb2NrBwABCgYEAAELECMjIG5vdCBhIGhlYWRpbmeHAQoDCXBhcmFncmFwaAcAARwGBAABHQpSZWFsIGJvZHkuAA=="
+  },
+  {
+    "name": "citation",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Key Claims"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "The sky is blue "
+            },
+            {
+              "type": "citation",
+              "attrs": {
+                "citekey": "smith2021",
+                "ev_id": "ev-0a1b2c3d4e5f"
+              }
+            },
+            {
+              "type": "text",
+              "text": " and well studied."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQwBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgpLZXkgQ2xhaW1zhwEAAwlwYXJhZ3JhcGgHAAENBgQAAQ4QVGhlIHNreSBpcyBibHVlIIcBDgMIY2l0YXRpb24oAAEfB2NpdGVrZXkBdwlzbWl0aDIwMjEoAAEfBWV2X2lkAXcPZXYtMGExYjJjM2Q0ZTVmhwEfBgQAASISIGFuZCB3ZWxsIHN0dWRpZWQuAA=="
+  },
+  {
+    "name": "adjacent_citations",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Key Claims"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Multiple sources agree "
+            },
+            {
+              "type": "citation",
+              "attrs": {
+                "citekey": "smith2021",
+                "ev_id": "ev-0a1b2c3d4e5f"
+              }
+            },
+            {
+              "type": "citation",
+              "attrs": {
+                "citekey": "jones2020",
+                "ev_id": "ev-9f8e7d6c5b4a"
+              }
+            },
+            {
+              "type": "text",
+              "text": " on this."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQ8BAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgpLZXkgQ2xhaW1zhwEAAwlwYXJhZ3JhcGgHAAENBgQAAQ4XTXVsdGlwbGUgc291cmNlcyBhZ3JlZSCHAQ4DCGNpdGF0aW9uKAABJgdjaXRla2V5AXcJc21pdGgyMDIxKAABJgVldl9pZAF3D2V2LTBhMWIyYzNkNGU1ZocBJgMIY2l0YXRpb24oAAEpB2NpdGVrZXkBdwlqb25lczIwMjAoAAEpBWV2X2lkAXcPZXYtOWY4ZTdkNmM1YjRhhwEpBgQAASwJIG9uIHRoaXMuAA=="
+  },
+  {
+    "name": "bare_marker_is_literal_text",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Background"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "old body [@x9] stays literal text."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQcBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgpCYWNrZ3JvdW5khwEAAwlwYXJhZ3JhcGgHAAENBgQAAQ4ib2xkIGJvZHkgW0B4OV0gc3RheXMgbGl0ZXJhbCB0ZXh0LgA="
+  },
+  {
+    "name": "h1_title_preamble",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 1
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Proposal Title"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro under an H1 title."
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Aims"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Body."
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQ4BAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AQcAAQAGBAABAg5Qcm9wb3NhbCBUaXRsZYcBAAMJcGFyYWdyYXBoBwABEQYEAAESGEludHJvIHVuZGVyIGFuIEgxIHRpdGxlLocBEQMHaGVhZGluZygAASsFbGV2ZWwBfQIHAAErBgQAAS0EQWltc4cBKwMJcGFyYWdyYXBoBwABMgYEAAEzBUJvZHkuAA=="
+  },
+  {
+    "name": "production_layout",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 1
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "T"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "intro"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Background"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "old body [@x9]"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Aims"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "aims"
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ARUBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AQcAAQAGBAABAgFUhwEAAwlwYXJhZ3JhcGgHAAEEBgQAAQUFaW50cm+HAQQDB2hlYWRpbmcoAAELBWxldmVsAX0CBwABCwYEAAENCkJhY2tncm91bmSHAQsDCXBhcmFncmFwaAcAARgGBAABGQ5vbGQgYm9keSBbQHg5XYcBGAMHaGVhZGluZygAASgFbGV2ZWwBfQIHAAEoBgQAASoEQWltc4cBKAMJcGFyYWdyYXBoBwABLwYEAAEwBGFpbXMA"
+  },
+  {
+    "name": "spec_skeleton",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Aims"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Approach"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Novelty & Significance"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Expected Impact"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Key Claims"
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ARQBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgRBaW1zhwEAAwdoZWFkaW5nKAABBwVsZXZlbAF9AgcAAQcGBAABCQhBcHByb2FjaIcBBwMHaGVhZGluZygAARIFbGV2ZWwBfQIHAAESBgQAARQWTm92ZWx0eSAmIFNpZ25pZmljYW5jZYcBEgMHaGVhZGluZygAASsFbGV2ZWwBfQIHAAErBgQAAS0PRXhwZWN0ZWQgSW1wYWN0hwErAwdoZWFkaW5nKAABPQVsZXZlbAF9AgcAAT0GBAABPwpLZXkgQ2xhaW1zAA=="
+  }
+]
