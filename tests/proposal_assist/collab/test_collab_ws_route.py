@@ -4,6 +4,7 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import WorkspaceViewer, YjsUpdate
 from call_manager.proposal_assist.collab import protocol as P
+from call_manager.proposal_assist.collab import state as collab_state
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -51,6 +52,7 @@ def test_owner_can_connect_and_persist_an_update(_app, pg_session_factory):
     with pg_session_factory() as s:
         owner = make_user(s, email="route-owner@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, oid = ws.id, owner.id
     client = TestClient(_app)
@@ -109,6 +111,7 @@ def test_read_only_member_update_is_not_persisted(_app, pg_session_factory):
         member = make_user(s, email="ro-member@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, mid = ws.id, member.id
     client = TestClient(_app)
@@ -192,6 +195,7 @@ def test_oversized_frame_closes_the_connection(_app, pg_session_factory):
     with pg_session_factory() as s:
         owner = make_user(s, email="big-owner@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, oid = ws.id, owner.id
     client = TestClient(_app)
@@ -219,6 +223,7 @@ def test_two_connections_converge_through_the_route(_app, pg_session_factory):
     with pg_session_factory() as s:
         owner = make_user(s, email="conv-owner@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid, oid = ws.id, owner.id
     client = TestClient(_app)
