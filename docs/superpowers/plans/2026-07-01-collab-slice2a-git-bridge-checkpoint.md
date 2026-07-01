@@ -19,6 +19,10 @@
 - **The `split_sections` invariant** (`"".join(s.text) == doc`, `##` boundaries) must hold on every checkpoint's markdown output — property-tested.
 - **Hydration idempotency** relies on the Slice-1 per-key creation lock in `RoomManager.acquire` (the seed is persisted exactly once per cold start). Do not remove it.
 - **Sync DB in async WS handler** → `run_in_threadpool` (as Slice 1). Checkpoint on the event loop (last-client-leaving) likewise offloads DB+git.
+- **The WS route is flag-gated at connect.** A connection to a collab-**disabled** artifact is closed with `1008` **before `accept()`** — so flag-off is fully dormant: no room, no writes, no `yjs_updates` rows. This is the substantive gate behind the "flag off = no prod behavior change" claim (Slice 1 otherwise persists every update regardless of any flag). The Slice-1 route/recovery tests that connect predate the flag and are updated to `enable_collab` in setup (Task 3).
+- **Checkpoint git writes hold the commit mutex.** `checkpoint_artifact` calls `acquire_commit_mutex(session, workspace_id)` (from `drafting.locking`) before any git read/write — identical to `save_section`/`human_cite` — because the git-first paths stay live until 2b and would otherwise interleave working-tree writes/staging. The checkpoint session is **caller-committed** (the xact mutex releases at COMMIT/ROLLBACK; `checkpoint_artifact` never commits internally). `CommitMutexTimeout` → the explicit endpoint maps to `503` (`BUSY_ERROR_MESSAGE`); the last-leave path logs and skips (the next trigger retries — the room is already gone and rebuilds from the log).
+- **Checkpoint reads its own atomic snapshot.** `checkpoint_artifact` loads one ordered `(id, actor_id, bytes)` snapshot from the log (`store.load_rows`) and derives the serialized doc, `max_id`, and authors from *that same snapshot* — never a separate `max()` read after building the doc elsewhere. A concurrent update landing mid-checkpoint is simply excluded (caught by the next checkpoint), and the watermark never advances past an update the committed markdown never saw.
+- **2a checkpoint is provenance-only.** It serializes → mutex → commit → `ArtifactVersion` + `WorkspaceEvent`. The spec's post-checkpoint **Tier-1 citation validation + Tier-2 claim enqueue** (design `2026-06-30-...-design.md` line 86) are **DEFERRED to 2b's write kernel**, which owns the mutating paths (accept/cite/save) and knows the touched section — a raw whole-doc checkpoint from arbitrary collaborative edits does not map cleanly to the per-section Tier-2 enqueue. **2a therefore does not yet satisfy the full checkpoint contract**; recorded explicitly in the Slice-2a notes (Task 6).
 - **Tests** under `tests/proposal_assist/collab/`; a workspace git repo is set up with the `_init_repo` pattern from `tests/proposal_assist/proposals/test_accepting.py` (`git init -b main`, config user, commit `proposal.md`), `repo = tmp_path/str(ws.id)/"repo"`, `workspaces_dir=str(tmp_path)`. Whole-suite testcontainers may flake — verify via grouped dir runs.
 - `ruff check .` must pass.
 
@@ -29,11 +33,12 @@
 - Modify `src/call_manager/db/models.py` — add `CollabArtifactState`.
 - Create `alembic/versions/0060_collab_artifact_state.py`.
 - Create `src/call_manager/proposal_assist/collab/state.py` — flag + checkpoint-watermark accessors.
-- Modify `src/call_manager/proposal_assist/collab/store.py` — add `max_update_id`, `distinct_actors_since`.
+- Modify `src/call_manager/proposal_assist/collab/store.py` — add `load_rows` (atomic checkpoint snapshot).
 - Create `src/call_manager/proposal_assist/collab/hydrate.py` — `load_or_hydrate` + `build_doc`.
 - Create `src/call_manager/proposal_assist/collab/checkpoint.py` — `serialize_doc_to_markdown`, `checkpoint_artifact`.
 - Modify `src/call_manager/proposal_assist/collab/room.py` — `RoomManager.release(..., on_evict=None)` + `get`.
-- Modify `src/call_manager/proposal_assist/web/collab_ws.py` — hydrate in `_load`; checkpoint on last-leave.
+- Modify `src/call_manager/proposal_assist/web/collab_ws.py` — flag-gate the connection (close `1008` when disabled); hydrate in `_load`; checkpoint on last-leave.
+- Modify `tests/proposal_assist/collab/test_collab_ws_route.py` + `test_collab_recovery.py` — `enable_collab` in the setup of every connecting test (the route is now flag-gated).
 - Create `src/call_manager/proposal_assist/web/collab_checkpoint.py` — explicit "Save a version" endpoint; mount in `main.py`.
 - Modify `src/call_manager/proposal_assist/activity/feed.py` — render `"collab_checkpoint"`.
 - Create `frontend/scripts/verify_python_writepath.mjs` + `frontend/scripts/writepath.test.mjs` + committed `tests/proposal_assist/collab/goldens/python_writepath.json`.
@@ -51,8 +56,7 @@ def get_checkpoint_watermark(session, *, workspace_id: uuid.UUID, artifact: str)
 def advance_checkpoint(session, *, workspace_id, artifact, up_to_update_id: int, commit_sha: str) -> None
 
 # store.py (added)
-def max_update_id(session, *, workspace_id: uuid.UUID, artifact: str) -> int               # 0 if none
-def distinct_actors_since(session, *, workspace_id, artifact, after_id: int) -> list[int]   # non-null, sorted
+def load_rows(session, *, workspace_id, artifact) -> list[tuple[int, int | None, bytes]]   # (id, actor_id, update_bytes), ordered by id — the atomic checkpoint snapshot
 
 # hydrate.py
 def load_or_hydrate(session, *, workspace_id, artifact, workspaces_dir) -> list[bytes]
@@ -61,7 +65,9 @@ def build_doc(updates: list[bytes]) -> pycrdt.Doc
 # checkpoint.py
 def serialize_doc_to_markdown(doc: pycrdt.Doc) -> str
 @dataclass CheckpointResult: committed: bool; commit_sha: str; authors: list[int]
-def checkpoint_artifact(session, *, workspace_id, artifact, doc, workspaces_dir) -> CheckpointResult
+# self-contained: loads its own atomic (id, actor_id, bytes) snapshot, builds the doc,
+# holds the commit mutex, adds provenance rows; the CALLER commits the session:
+def checkpoint_artifact(session, *, workspace_id, artifact, workspaces_dir) -> CheckpointResult
 
 # room.py (added / changed)
 class RoomManager:
@@ -235,11 +241,11 @@ def advance_checkpoint(
 
 ---
 
-### Task 2: store helpers — `max_update_id`, `distinct_actors_since`
+### Task 2: store helper — `load_rows` (atomic checkpoint snapshot)
 
 **Files:** Modify `collab/store.py`; Test `tests/proposal_assist/collab/test_collab_store_checkpoint.py`.
 
-**Interfaces:** Produces `max_update_id`, `distinct_actors_since` used by `checkpoint.py`.
+**Interfaces:** Produces `load_rows(session, *, workspace_id, artifact) -> list[tuple[int, int | None, bytes]]` used by `checkpoint.py`. One ordered read returning `(id, actor_id, update_bytes)` per row so the checkpoint derives the doc, `max_id`, and authors from a single consistent snapshot (fixes the TOCTOU where a separate `max()` read could advance the watermark past an update the serialized doc never saw).
 
 - [ ] **Step 1: Failing test**
 
@@ -249,67 +255,59 @@ from call_manager.proposal_assist.collab import store
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
-def test_max_update_id_and_distinct_actors(pg_session_factory):
+def test_load_rows_returns_ordered_id_actor_bytes(pg_session_factory):
     with pg_session_factory() as s:
-        o = make_user(s, email="mx-o@ki.se")
-        u2 = make_user(s, email="mx-2@ki.se")
+        o = make_user(s, email="lr-o@ki.se")
+        u2 = make_user(s, email="lr-2@ki.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid, u2id = ws.id, o.id, u2.id
     with pg_session_factory() as s:
-        assert store.max_update_id(s, workspace_id=wid, artifact="draft") == 0
+        assert store.load_rows(s, workspace_id=wid, artifact="draft") == []
         store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None, update=b"\x01")  # seed
         store.append_update(s, workspace_id=wid, artifact="draft", actor_id=oid, update=b"\x02")
         store.append_update(s, workspace_id=wid, artifact="draft", actor_id=u2id, update=b"\x03")
-        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=oid, update=b"\x04")
+        # a different artifact must not leak into the snapshot:
+        store.append_update(s, workspace_id=wid, artifact="spec", actor_id=oid, update=b"\xff")
         s.commit()
-        mx = store.max_update_id(s, workspace_id=wid, artifact="draft")
-        assert mx == 4
-        # distinct non-null actors after the seed (id 1):
-        assert store.distinct_actors_since(s, workspace_id=wid, artifact="draft", after_id=1) == sorted([oid, u2id])
-        # after id 4: none
-        assert store.distinct_actors_since(s, workspace_id=wid, artifact="draft", after_id=4) == []
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+        assert [r[2] for r in rows] == [b"\x01", b"\x02", b"\x03"]        # ordered by id, draft only
+        assert [r[1] for r in rows] == [None, oid, u2id]                  # actor_id (nullable) preserved
+        ids = [r[0] for r in rows]
+        assert ids == sorted(ids)                                        # monotonic ids
+        # callers derive max_id + authors from THIS snapshot (no second query):
+        max_id = rows[-1][0]
+        watermark = 1  # pretend the seed (id of rows[0]) is already checkpointed
+        authors = sorted({a for (i, a, _) in rows if i > ids[0] and a is not None})
+        assert max_id == ids[-1]
+        assert authors == sorted([oid, u2id])
 ```
 
-- [ ] **Step 2: Run — expect FAIL** (AttributeError: no `max_update_id`).
+- [ ] **Step 2: Run — expect FAIL** (AttributeError: no `load_rows`).
 
 - [ ] **Step 3: Implement (append to `store.py`)**
 
 ```python
-from sqlalchemy import func
+def load_rows(
+    session: Session, *, workspace_id: uuid.UUID, artifact: str
+) -> list[tuple[int, int | None, bytes]]:
+    """One ordered snapshot of the room's log as (id, actor_id, update_bytes).
 
-def max_update_id(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
-    val = session.execute(
-        select(func.max(YjsUpdate.id)).where(
-            YjsUpdate.workspace_id == workspace_id, YjsUpdate.artifact == artifact
-        )
-    ).scalar_one_or_none()
-    return int(val) if val is not None else 0
-
-
-def distinct_actors_since(
-    session: Session, *, workspace_id: uuid.UUID, artifact: str, after_id: int
-) -> list[int]:
-    rows = (
-        session.execute(
-            select(YjsUpdate.actor_id)
-            .where(
-                YjsUpdate.workspace_id == workspace_id,
-                YjsUpdate.artifact == artifact,
-                YjsUpdate.id > after_id,
-                YjsUpdate.actor_id.is_not(None),
-            )
-            .distinct()
-        )
-        .scalars()
-        .all()
-    )
-    return sorted(int(a) for a in rows)
+    The checkpoint path builds the doc, computes max_id, and derives authors
+    from this single read so they are mutually consistent (a concurrent
+    append landing after this SELECT is simply excluded from the snapshot).
+    """
+    rows = session.execute(
+        select(YjsUpdate.id, YjsUpdate.actor_id, YjsUpdate.update_bytes)
+        .where(YjsUpdate.workspace_id == workspace_id, YjsUpdate.artifact == artifact)
+        .order_by(YjsUpdate.id)
+    ).all()
+    return [(int(r[0]), (int(r[1]) if r[1] is not None else None), r[2]) for r in rows]
 ```
 
 - [ ] **Step 4: Run — expect PASS.**
 
-- [ ] **Step 5: Commit** (`feat(collab): store helpers for checkpoint (max id + distinct actors)`).
+- [ ] **Step 5: Commit** (`feat(collab): store.load_rows atomic checkpoint snapshot`).
 
 ---
 
@@ -455,11 +453,41 @@ def load_or_hydrate(session, *, workspace_id: uuid.UUID, artifact: str, workspac
     return [seed]
 ```
 
-- [ ] **Step 4: Wire into the WS route** — in `web/collab_ws.py`, change the `_load` closure to hydrate. Replace the `store.load_updates` call:
+- [ ] **Step 4: Flag-gate the connection + wire hydration into `_load`** — in `web/collab_ws.py`.
+
+  **(a)** Fold the collab flag into the connect-time `_access` read and reject flag-off connections **before `accept()`** (this is the High-severity gate: without it, Slice 1 persists every update regardless of the flag, so "flag off = no prod behavior change" is false). Replace the existing `_access` block:
 
 ```python
+from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 
+    def _access():
+        with session_factory() as s:
+            is_member, can_write = resolve_access(
+                s, user=user, workspace_id=workspace_id, artifact=artifact
+            )
+            enabled = collab_state.is_collab_enabled(
+                s, workspace_id=workspace_id, artifact=artifact
+            )
+            return is_member, can_write, enabled
+
+    is_member, can_write, collab_enabled = await run_in_threadpool(_access)
+    if not is_member:
+        await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+    if not collab_enabled:
+        # Feature dormant for this artifact: no room, no writes, no yjs_updates rows.
+        await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+
+    await websocket.accept()
+```
+
+  (`collab_enabled` is `True` for every accepted connection; Task 5 reuses it — unconditionally — for the checkpoint-on-evict hook.)
+
+  **(b)** Change the `_load` closure to hydrate. Add `workspaces_dir` and replace the `store.load_updates` call:
+
+```python
     workspaces_dir = websocket.app.state.settings.workspaces_dir
 
     async def _load() -> list[bytes]:
@@ -476,9 +504,21 @@ from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 
 (The per-key creation lock in `RoomManager.acquire` guarantees `_load` runs once per cold start, so the seed is persisted exactly once.)
 
-- [ ] **Step 5: Run — expect PASS** (`test_collab_hydrate.py`), and re-run `test_collab_ws_route.py` + `test_collab_recovery.py` to confirm no regression (flag off by default → those tests, which never enable collab, still get empty rooms).
+- [ ] **Step 5: Update the Slice-1 route/recovery tests to opt into the flag** — the route is now flag-gated, so every test that expects to *connect* must `enable_collab` first (tests that assert a connection is *rejected* — unauthenticated, non-member, invalid-artifact, foreign-origin — are unaffected: they close at or before the membership check, ahead of the flag gate).
 
-- [ ] **Step 6: Commit** (`feat(collab): git->room hydration (seed from HEAD markdown, persist as update #1)`).
+  In `tests/proposal_assist/collab/test_collab_ws_route.py`, add `state.enable_collab(...)` in the workspace-setup block of: `test_owner_can_connect_and_persist_an_update`, `test_read_only_member_update_is_not_persisted`, `test_oversized_frame_closes_the_connection`, `test_two_connections_converge_through_the_route`. In `test_collab_recovery.py`, add it to both `test_state_survives_room_eviction_and_reconnect` and `test_xmlfragment_doc_survives_recovery_via_the_bridge`. Pattern (in each test's first `pg_session_factory()` setup block, after the workspace is created and before `s.commit()` — the artifact matches the URL, `"draft"`):
+
+```python
+    from call_manager.proposal_assist.collab import state as collab_state
+    # ... after make_workspace(...), still holding wid:
+    collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+```
+
+  (`test_read_only_member_update_is_not_persisted` still asserts the write is dropped — now proving the *membership* gate, not the feature flag, rejects the write; enabling collab is what lets it reach that gate.)
+
+- [ ] **Step 6: Run — expect PASS** (`test_collab_hydrate.py`), then re-run `test_collab_ws_route.py` + `test_collab_recovery.py` and confirm green with the `enable_collab` edits (connections that opt in still sync; the four rejection tests still reject).
+
+- [ ] **Step 7: Commit** (`feat(collab): flag-gate WS route + git->room hydration (seed from HEAD as update #1)`).
 
 ---
 
@@ -486,7 +526,7 @@ from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 
 **Files:** Create `collab/checkpoint.py`; Test `tests/proposal_assist/collab/test_collab_checkpoint.py`.
 
-**Interfaces:** Consumes the bridge (`ydoc_to_pm_json`, `pm_to_markdown`), `store.max_update_id`/`distinct_actors_since`, `state.get_checkpoint_watermark`/`advance_checkpoint`, `gitio.write_and_commit_files`/`current_head`, `paths.workspace_repo_dir`, `artifacts.filename_for`, `db.models.ArtifactVersion`/`WorkspaceEvent`. Produces `serialize_doc_to_markdown`, `checkpoint_artifact`, `CheckpointResult`.
+**Interfaces:** Consumes the bridge (`ydoc_to_pm_json`, `pm_to_markdown`), `store.load_rows`, `hydrate.build_doc`, `state.get_checkpoint_watermark`/`advance_checkpoint`, `drafting.locking.acquire_commit_mutex`, `gitio.write_and_commit_files`/`current_head`, `paths.workspace_repo_dir`, `artifacts.filename_for`, `db.models.ArtifactVersion`/`WorkspaceEvent`. Produces `serialize_doc_to_markdown`, `checkpoint_artifact`, `CheckpointResult`. **`checkpoint_artifact` takes no `doc`** — it loads its own atomic snapshot, rebuilds the doc from the log, and holds the commit mutex; the caller commits.
 
 - [ ] **Step 1: Failing test**
 
@@ -550,7 +590,7 @@ def test_checkpoint_commits_serialized_doc_with_provenance(pg_session_factory, t
 
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", doc=doc, workspaces_dir=str(tmp_path)
+            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
         )
         s.commit()
     assert res.committed is True
@@ -581,12 +621,12 @@ def test_second_checkpoint_with_no_new_updates_is_noop(pg_session_factory, tmp_p
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
         s.commit()
-    doc = _seed_room_with_edit(pg_session_factory, wid, oid, "## X\n\nedited.\n")
+    _seed_room_with_edit(pg_session_factory, wid, oid, "## X\n\nedited.\n")
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", doc=doc, workspaces_dir=str(tmp_path))
+        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
         s.commit()
     with pg_session_factory() as s:
-        res2 = checkpoint_artifact(s, workspace_id=wid, artifact="draft", doc=doc, workspaces_dir=str(tmp_path))
+        res2 = checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
         s.commit()
     assert res2.committed is False  # watermark already at max update id -> no-op
     with pg_session_factory() as s:
@@ -616,8 +656,10 @@ from call_manager.db.models import ArtifactVersion, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import Artifact, filename_for
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.collab import state, store
+from call_manager.proposal_assist.collab.hydrate import build_doc
 from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
 _ARTIFACT = {"draft": Artifact.DRAFT, "spec": Artifact.SPEC}
@@ -635,20 +677,31 @@ def serialize_doc_to_markdown(doc: Doc) -> str:
 
 
 def checkpoint_artifact(
-    session: Session, *, workspace_id: uuid.UUID, artifact: str, doc: Doc, workspaces_dir
+    session: Session, *, workspace_id: uuid.UUID, artifact: str, workspaces_dir
 ) -> CheckpointResult:
-    max_id = store.max_update_id(session, workspace_id=workspace_id, artifact=artifact)
-    watermark = state.get_checkpoint_watermark(session, workspace_id=workspace_id, artifact=artifact)
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
+
+    # ONE atomic snapshot of the log: doc, max_id, and authors all derive from
+    # these rows. A concurrent append landing after this SELECT is excluded and
+    # caught by the next checkpoint — the watermark never passes an unserialized
+    # update (fixes the load-doc-then-read-max TOCTOU).
+    rows = store.load_rows(session, workspace_id=workspace_id, artifact=artifact)
+    watermark = state.get_checkpoint_watermark(session, workspace_id=workspace_id, artifact=artifact)
+    max_id = rows[-1][0] if rows else 0
 
     if max_id <= watermark:
         return CheckpointResult(committed=False, commit_sha=current_head(repo), authors=[])
 
-    authors = store.distinct_actors_since(
-        session, workspace_id=workspace_id, artifact=artifact, after_id=watermark
-    )
+    authors = sorted({a for (rid, a, _) in rows if rid > watermark and a is not None})
+    doc = build_doc([b for (_, _, b) in rows])
     md = serialize_doc_to_markdown(doc)
     fname = filename_for(_ARTIFACT[artifact])
+
+    # Serialize against every other git mutation of this workspace (save_section,
+    # human_cite, agent tools) — the git-first paths stay live until 2b. Released
+    # at the caller's COMMIT/ROLLBACK; checkpoint_artifact never commits itself.
+    acquire_commit_mutex(session, workspace_id)
+
     head_before = current_head(repo)
     author_tag = ",".join(str(a) for a in authors) or "system"
     commit_sha = write_and_commit_files(
@@ -710,33 +763,33 @@ def checkpoint_artifact(
 
 (Existing callers that pass no `on_evict` are unaffected — default `None`.)
 
-- [ ] **Step 2: Route — checkpoint on last leave** (in `web/collab_ws.py`): after resolving `is_member`/`can_write`, resolve `collab_enabled`, and pass an `on_evict` checkpoint closure to `release`:
+- [ ] **Step 2: Route — checkpoint on last leave** (in `web/collab_ws.py`): `collab_enabled` is already resolved — and guaranteed `True` — by Task 3's connect gate, so pass the checkpoint closure to `release` **unconditionally**. The closure takes the evicted room but no longer needs `room.doc` (`checkpoint_artifact` rebuilds from the durable log), and swallows a mutex timeout:
 
 ```python
-from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 
-    def _enabled():
-        with session_factory() as s:
-            return collab_state.is_collab_enabled(s, workspace_id=workspace_id, artifact=artifact)
-
-    collab_enabled = await run_in_threadpool(_enabled)
-
-    async def _checkpoint_on_evict(room) -> None:
+    async def _checkpoint_on_evict(_room) -> None:
         def _cp():
             with session_factory() as s:
-                checkpoint_artifact(
-                    s, workspace_id=workspace_id, artifact=artifact, doc=room.doc, workspaces_dir=workspaces_dir
-                )
-                s.commit()
+                try:
+                    checkpoint_artifact(
+                        s, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
+                    )
+                    s.commit()
+                except CommitMutexTimeout:
+                    # Another git writer holds the mutex; the room is already gone
+                    # and rebuilds from the log — the next trigger retries.
+                    s.rollback()
         await run_in_threadpool(_cp)
 
-    # ... in the finally:
+    # ... in the finally (on_evict is unconditional: a flag-off connection was
+    # already rejected before accept, so every live room is collab-enabled):
     finally:
-        await MANAGER.release(
-            key, client=websocket, on_evict=_checkpoint_on_evict if collab_enabled else None
-        )
+        await MANAGER.release(key, client=websocket, on_evict=_checkpoint_on_evict)
 ```
+
+(The existing `except PersistError:` branch calls `MANAGER.evict(key)` **first**, which pops the room, so the subsequent `release` finds nothing and does **not** checkpoint a poisoned doc — intended.)
 
 - [ ] **Step 3: Explicit endpoint** (`web/collab_checkpoint.py`):
 
@@ -755,8 +808,8 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
+from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 
 router = APIRouter()
 _VALID = {"draft", "spec"}
@@ -782,17 +835,17 @@ async def save_version(
                 raise HTTPException(status_code=404, detail="workspace not found")
             if not can_write:
                 raise HTTPException(status_code=403, detail="read-only")
-            # Store is always in sync with the live room (Slice 1 persists every
-            # update), so rebuilding the doc from the store is equivalent to the
-            # live room.doc and works whether or not a room is currently open.
-            updates = load_or_hydrate(
-                s, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
-            )
-            doc = build_doc(updates)
-            res = checkpoint_artifact(
-                s, workspace_id=workspace_id, artifact=artifact, doc=doc, workspaces_dir=workspaces_dir
-            )
-            s.commit()
+            # checkpoint_artifact rebuilds the doc from the durable log itself
+            # (Slice 1 persists every update, so the log == the live room),
+            # holds the commit mutex, and no-ops when nothing new needs saving —
+            # so this works whether or not a room is currently open.
+            try:
+                res = checkpoint_artifact(
+                    s, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
+                )
+                s.commit()
+            except CommitMutexTimeout as exc:
+                raise HTTPException(status_code=503, detail=BUSY_ERROR_MESSAGE) from exc
             return {"committed": res.committed, "commit_sha": res.commit_sha, "authors": res.authors}
 
     return await run_in_threadpool(_do)
@@ -803,9 +856,9 @@ Mount in `main.py` (before `mount_spa`, near `collab_ws`): `from ...web import c
 - [ ] **Step 4: Activity feed** — render the new kind. In `activity/feed.py`, add a `_RENDER` entry for `"collab_checkpoint"` (category/summary consistent with the existing `"user_edit"` entry — e.g. category "edit", summary "saved a version"). Follow the exact `_RENDER` shape used by neighbouring kinds; a checkpoint payload has `{artifact, commit_sha, authors}` (no `section_index`/`heading`).
 
 - [ ] **Step 5: Tests** (`test_collab_checkpoint_triggers.py`): use the WS `TestClient` + a workspace git repo + `state.enable_collab`. Cases:
-  - **last-leave checkpoint:** enable collab; connect as owner; send an update; disconnect; assert a commit + `ArtifactVersion` + `collab_checkpoint` event now exist and the room is evicted.
-  - **explicit endpoint:** enable collab; seed an update via the store; `POST /api/workspaces/{id}/collab/draft/checkpoint` with the owner cookie → 200 `committed=True`; a read-only member (setup phase) → 403; collab-disabled artifact → 409; non-member → 404.
-  - **flag off → no checkpoint on disconnect:** without `enable_collab`, connect/disconnect produces no commit/version (Slice-1 behavior preserved).
+  - **last-leave checkpoint:** enable collab; connect as owner; send a real bridge-built update; disconnect; assert a commit + `ArtifactVersion` + `collab_checkpoint` event now exist and the room is evicted.
+  - **explicit endpoint:** enable collab; seed a real bridge-built update via the store (as `_seed_room_with_edit` does — a top-level `Text` would serialize to empty markdown and no-op); `POST /api/workspaces/{id}/collab/draft/checkpoint` with the owner cookie → 200 `committed=True`; a read-only member (setup phase) → 403; collab-disabled artifact → 409; non-member → 404.
+  - **flag off → connection rejected (High-severity gate):** without `enable_collab`, `websocket_connect` closes with `1008` before accept — assert no room is created, no `yjs_updates` row is written, and no commit/`ArtifactVersion` results. This is the regression test for "flag off = fully dormant" (Codex High #1).
 
 Mirror the `client_authed_owner`/`_cookie`/`_init_repo` patterns from `test_collab_ws_route.py`. Point `_app.state.settings.workspaces_dir` at `tmp_path` (patch it on the app, as the route reads `app.state.settings.workspaces_dir`).
 
@@ -833,7 +886,7 @@ Closes the spike finding: a ydoc built by Python `pm_json_to_ydoc` must be read 
   - `uv run pytest tests/proposal_assist/collab/test_collab_writepath.py -q` → PASS.
   - `cd frontend && pnpm vitest run writepath` → PASS (all fixtures read back identical). Also run `node scripts/verify_python_writepath.mjs` and confirm exit 0.
 
-- [ ] **Step 6: Slice-2a notes** (`docs/superpowers/notes/2026-07-01-collab-slice2a-notes.md`): what shipped (hydration seed-as-update-#1; checkpoint core + provenance + co-authorship via watermark; triggers last-leave + explicit; `collab_artifact_state` flag; Node write-path GO); the **off-by-default flag MUST stay off in prod until 2b** (no write kernel yet); deferrals — **write kernel + accept/cite/spec-lock routing + git-canonical switchover + sticky-forward enforcement → 2b**; **mid-session permission downgrade → 2c**; **debounced-idle checkpoint trigger, Tier-1/Tier-2 post-checkpoint re-validation, Yjs-log compaction → follow-ups**; raw-HTML-dropped-on-hydration caveat.
+- [ ] **Step 6: Slice-2a notes** (`docs/superpowers/notes/2026-07-01-collab-slice2a-notes.md`): what shipped (WS route now **flag-gated at connect**; hydration seed-as-update-#1; checkpoint core = **atomic snapshot** + **commit mutex** + provenance + co-authorship via watermark; triggers last-leave + explicit; `collab_artifact_state` flag; Node write-path GO); the **off-by-default flag MUST stay off in prod until 2b** (no write kernel yet); **2a checkpoint is provenance-only — Tier-1 citation validation + Tier-2 claim enqueue (design line 86) are NOT yet run, so the full checkpoint contract is deferred to 2b's write kernel** (which owns the mutating paths and the touched-section identity); other deferrals — **write kernel + accept/cite/spec-lock routing + git-canonical switchover + sticky-forward enforcement → 2b**; **mid-session permission downgrade → 2c**; **debounced-idle checkpoint trigger, Yjs-log compaction → follow-ups**; raw-HTML-dropped-on-hydration caveat.
 
 - [ ] **Step 7: Commit** (`test(collab): Node write-path validation + Slice-2a notes`).
 
@@ -851,10 +904,19 @@ cd frontend && pnpm vitest run writepath && pnpm exec tsc --noEmit
 
 ## Self-Review (author checklist — completed)
 
-**1. Spec coverage (Slice-2a subset):** hydration git→room (Task 3) ✓; checkpoint room→git with ArtifactVersion+WorkspaceEvent co-authorship (Task 4) ✓; triggers last-leave + explicit (Task 5) ✓; off-by-default per-artifact flag (Task 1) ✓; split_sections invariant on output (Task 4 test) ✓; Node write-path validation (Task 6) ✓. Deferred-and-documented: write kernel/consumers/switchover (2b), mid-session downgrade (2c), debounced-idle + Tier-1/2 re-fire + compaction (follow-ups).
+**1. Spec coverage (Slice-2a subset):** hydration git→room (Task 3) ✓; checkpoint room→git with ArtifactVersion+WorkspaceEvent co-authorship (Task 4) ✓; triggers last-leave + explicit (Task 5) ✓; off-by-default per-artifact flag **+ connect-time route gate** (Tasks 1/3) ✓; split_sections invariant on output (Task 4 test) ✓; Node write-path validation (Task 6) ✓. Deferred-and-documented: the checkpoint contract's **Tier-1/Tier-2 post-checkpoint re-fire → 2b** (2a checkpoint is provenance-only); write kernel/consumers/switchover (2b), mid-session downgrade (2c), debounced-idle + compaction (follow-ups).
 
 **2. Placeholder scan:** every code step carries complete code; the two "confirm/adjust" notes (pycrdt byte-determinism under fixed client_id; vitest `.mjs` globbing) are explicit verification points, not hand-waves.
 
-**3. Type consistency:** `load_or_hydrate`/`build_doc`, `checkpoint_artifact(doc=...)`/`CheckpointResult`, `state.*` signatures, `store.max_update_id`/`distinct_actors_since`, `RoomManager.release(on_evict=)`/`get` are used identically across Tasks 3–5. `artifact` is the string `"draft"`/`"spec"` throughout, mapped to `Artifact` only at the git-filename boundary (`_ARTIFACT`).
+**3. Type consistency:** `load_or_hydrate`/`build_doc`, `checkpoint_artifact` (no `doc` arg — self-loads)/`CheckpointResult`, `state.*` signatures, `store.load_rows`, `RoomManager.release(on_evict=)`/`get` are used identically across Tasks 3–5. `artifact` is the string `"draft"`/`"spec"` throughout, mapped to `Artifact` only at the git-filename boundary (`_ARTIFACT`).
 
 **4. Safety invariant flagged for the implementer:** the flag stays OFF by default; enabling it in prod before 2b would let the old git-first write paths (`save_section`/`human_cite`/spec-lock) fight checkpoints — 2a is a substrate, verified only via tests that opt in with `enable_collab`.
+
+## Codex review round (folded in before execution)
+
+Codex reviewed the first draft (commit `a9b95eb`) and raised 3 High + 1 Medium; all four were verified against the current source and folded in:
+
+- **High #1 — the flag did not gate WS writes.** Slice 1 persists every update regardless of any flag; the draft only consulted `collab_enabled` for the checkpoint-on-evict decision, and `load_or_hydrate` returned existing rows before checking the flag. **Fix:** the WS route now reads `is_collab_enabled` in the connect-time `_access` and closes `1008` **before `accept()`** for a disabled artifact (Task 3 Step 4a) — flag-off is fully dormant. Regression test added (Task 5 Step 5); the six connecting Slice-1 tests now `enable_collab` in setup.
+- **High #2 — explicit checkpoint could skip a concurrent update (TOCTOU).** The draft built the doc, then `checkpoint_artifact` re-read `max_update_id` separately, so an update landing between could be excluded from the doc yet passed by the watermark. **Fix:** `checkpoint_artifact` now loads one atomic `(id, actor_id, bytes)` snapshot (`store.load_rows`, Task 2) and derives the doc, `max_id`, and authors from it; the `doc` parameter is gone (Task 4).
+- **High #3 — checkpoint wrote git without the commit mutex.** `save_section`/`human_cite` serialize through `acquire_commit_mutex`; the draft called `current_head`/`write_and_commit_files` raw, racing the live git-first paths. **Fix:** `checkpoint_artifact` acquires the mutex before any git I/O; caller-committed release; `CommitMutexTimeout` → 503 (endpoint) / log-and-skip (last-leave) (Task 4/5).
+- **Medium #4 — Tier-1/Tier-2 not run at checkpoint (spec line 86).** **Resolution (documented, not built):** 2a checkpoint is **provenance-only**; the post-checkpoint validation tiers move to **2b's write kernel**, which owns the mutating paths and the touched-section identity a whole-doc checkpoint lacks. Recorded as a Global Constraint and in the Slice-2a notes — 2a explicitly does not yet satisfy the full checkpoint contract.
