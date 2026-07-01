@@ -13,10 +13,10 @@
 - **Flag stays OFF in prod (unchanged from 2a); 2b-1 is validated only via tests that call `enable_collab`.** The kernel path is taken **only** when `is_collab_enabled(workspace, artifact)`. Flag-off ⇒ the existing git-first `accept_proposed_change` runs, unchanged. The prod flag-flip is Slice 3 (needs the Tiptap editor).
 - **Atomicity is mandatory.** The accept's FOR UPDATE row lock, the staged Yjs update, the checkpoint commit + provenance, and the `accepted` status flip **must commit in a single transaction** (one `session.commit()` at the top). This requires a **non-committing** update-staging call (`store.append_update(..., commit=False)`); the default `commit=True` preserves the Slice-1 `room.handle` behavior.
 - **Validation source = the serialized live room, never git.** The staleness check compares `ProposedChange.base_section_sha` to the **live** section SHA (from `split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))`). This is the key regression guard (spec Testing §): an edit that is *live but not yet checkpointed* (so git HEAD still equals `base_commit_sha`) must still be detected as stale.
-- **Lock order (deadlock-free): `ProposedChange` FOR UPDATE (DB) → room `asyncio.Lock` → commit mutex (DB, inside `checkpoint_artifact`).** The git-first writers (`save_section`, `human_cite`) never take the room lock, so no cycle. The async endpoint holds the room lock across a single `run_in_threadpool` sync body; the sync body mutates `room.doc` from the worker thread **under that lock** (single-threaded access, GIL-serialized).
+- **Lock order (deadlock-free): `ProposedChange` FOR UPDATE (DB) → room `asyncio.Lock` → commit mutex (DB, acquired in the kernel before the spec-lock guard; re-entered by `checkpoint_artifact`).** The git-first writers (`save_section`, `human_cite`) never take the room lock, so no cycle. The async endpoint holds the room lock across a single `run_in_threadpool` sync body that mutates `room.doc` from the worker thread. **The room `asyncio.Lock` alone is NOT sufficient (Codex H2):** it only serializes coroutines on the event loop, while the kernel mutates the doc on a *worker thread*, and the GIL does not make a multi-step pycrdt mutation atomic against a concurrent read. Therefore **every** `room.doc` access — including the SYNC_STEP1 read in `Room.handle` and `Room.initial_message()` at connect — MUST hold the room lock; the kernel holding it across the threadpool call then excludes all doc reads for the mutation's duration.
 - **On any failure after the room doc is mutated, EVICT the room** (Slice-1 poison-recovery): the in-memory doc is ahead of the rolled-back log, so the next open rebuilds cleanly from the log.
 - **2b-1 scope = `prose_edit` accept only (draft + spec).** For a collab-enabled artifact, a `citation_insert` accept must raise a clear **deferred-to-2b-2** error (409) rather than fall through to the git-first `_accept_citation_insert` (which would write git while Yjs is canonical → divergence). The spec-**lock** *operation* is also 2b-2; 2b-1 only honors the spec-lock **guard** (reject an accept when the spec is locked).
-- **Reuse, don't reinvent:** `_load_scoped` (FOR UPDATE + status gate), `split_sections`/`Section.sha`, `save.py`'s structure-guard helper (`is_h2_heading_line`) and exceptions (`StaleSectionError`, `SpecLockedError`, `SectionStructureError`), `checkpoint_artifact`, `_append_node`. The kernel reuses `write_and_commit_files`/`ArtifactVersion`/`WorkspaceEvent` **transitively via `checkpoint_artifact`** (it does not write git directly).
+- **Reuse, don't reinvent:** `_load_scoped` (FOR UPDATE + status gate), `split_sections`/`Section.sha` and the structure-guard helper `is_h2_heading_line` (all in `editing.sectionizer`), `save.py`'s exceptions (`SpecLockedError`, `SectionStructureError`), `acquire_commit_mutex` (`drafting.locking`), `checkpoint_artifact`, `_append_node`. The kernel reuses `write_and_commit_files`/`ArtifactVersion`/`WorkspaceEvent` **transitively via `checkpoint_artifact`** (it does not write git directly). It does **not** reuse `StaleSectionError` — the kernel *returns* a `stale` status rather than raising.
 - **Tests** under `tests/proposal_assist/collab/` (kernel) and reuse `tests/proposal_assist/proposals/` fixtures for the accept contract. Whole-suite testcontainers may flake — verify via grouped dir runs. `ruff check .` must pass.
 
 ---
@@ -26,7 +26,8 @@
 - Modify `src/call_manager/proposal_assist/collab/yjs_bridge.py` — add `apply_pm_json_to_fragment(doc, pm_json) -> bytes` (in-place fragment replace + incremental-update capture), factored to share `_append_node`.
 - Modify `src/call_manager/proposal_assist/collab/store.py` — `append_update(..., commit: bool = True)`.
 - Create `src/call_manager/proposal_assist/collab/kernel.py` — the sync kernel core (`kernel_accept_prose`) + `KernelAcceptResult` + `CitationKernelDeferred`.
-- Modify `src/call_manager/proposal_assist/collab/room.py` — `RoomManager.operate(key, *, load)` async context manager (server-op room lifecycle) + expose `broadcast`.
+- Modify `src/call_manager/proposal_assist/collab/room.py` — `Room.ops` refcount + `Room.lock`/`Room.broadcast`; lock the SYNC_STEP1 read in `Room.handle` (Codex H2); `RoomManager.operate(key, *, load)` async context manager (server-op room lifecycle, ops-aware eviction); `RoomManager.release` defers eviction while `room.ops > 0` (Codex H1).
+- Modify `src/call_manager/proposal_assist/web/collab_ws.py` — compute `room.initial_message()` under `room.lock` at connect (Codex H2 read-lock).
 - Create `src/call_manager/proposal_assist/proposals/kernel_accept.py` — async `accept_via_kernel(...)` orchestration.
 - Modify `src/call_manager/proposal_assist/web/proposals.py` — make `accept` async; route to the kernel when collab-enabled, else the git-first path (unchanged) via `run_in_threadpool`.
 - Tests: `test_collab_apply_fragment.py`, `test_collab_store_stage.py`, `test_collab_kernel_accept.py` (sync core), `test_collab_kernel_accept_route.py` (async + route + convergence), plus edits to existing accept tests only if the endpoint signature change requires (it must not change behavior).
@@ -61,12 +62,17 @@ def kernel_accept_prose(
     # FOR UPDATE load + status gate; validate vs serialized room_doc; mutate room_doc;
     # stage update (commit=False); checkpoint_artifact; flip status. Caller COMMITS.
 
-# room.py (added)
+# room.py (added / changed)
+class Room:
+    ops: int                                       # in-flight server-op refcount (Codex H1)
+    @property
+    def lock(self) -> asyncio.Lock: ...            # public view of the mutation lock
+    async def broadcast(self, frame: bytes) -> None  # to all clients of THIS room
 class RoomManager:
     @asynccontextmanager
     async def operate(self, key, *, load) -> AsyncIterator[Room]
-        # get-or-create the room WITHOUT registering a client; evict on exit iff no clients.
-    async def broadcast(self, key, message: bytes) -> None   # to all clients of a live room
+        # get-or-create the room WITHOUT registering a client; bumps room.ops;
+        # on exit evicts iff no clients AND room.ops == 0 (Codex H1).
 
 # proposals/kernel_accept.py
 async def accept_via_kernel(
@@ -253,7 +259,7 @@ def append_update(
 
 **Files:** Create `collab/kernel.py`; Test `tests/proposal_assist/collab/test_collab_kernel_accept.py`.
 
-**Interfaces:** Consumes `_load_scoped` (proposals.accepting), `is_h2_heading_line`/`StaleSectionError`/`SpecLockedError`/`SectionStructureError` (editing.save), `split_sections` (editing.sectionizer), `ydoc_to_pm_json`/`apply_pm_json_to_fragment` (yjs_bridge), `pm_to_markdown`/`markdown_to_pm` (markdown_bridge), `store.append_update(commit=False)`, `checkpoint_artifact` (collab.checkpoint). Produces `kernel_accept_prose`, `KernelAcceptResult`, `CitationKernelDeferred`.
+**Interfaces:** Consumes `_load_scoped` (proposals.accepting), `SpecLockedError`/`SectionStructureError` (editing.save), `is_h2_heading_line`/`split_sections` (editing.sectionizer), `acquire_commit_mutex` (drafting.locking), `ydoc_to_pm_json`/`apply_pm_json_to_fragment` (yjs_bridge), `pm_to_markdown`/`markdown_to_pm` (markdown_bridge), `store.append_update(commit=False)`, `checkpoint_artifact` (collab.checkpoint). Produces `kernel_accept_prose`, `KernelAcceptResult`, `CitationKernelDeferred`.
 
 **The sequence** (all on ONE caller session; caller commits): FOR UPDATE load + status gate → confirm `kind`/artifact routing (defer citation) → serialize `room_doc` → `split_sections` → **stale check vs live section SHA** → spec-lock guard → structure guard → **no-op check** → mutate `room_doc` (capture update) → stage update (`commit=False`, actor=approver) → `checkpoint_artifact` → flip `accepted` + `resulting_commit_sha`.
 
@@ -274,7 +280,6 @@ from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydra
 from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment, ydoc_to_pm_json
-from call_manager.proposal_assist.editing.save import StaleSectionError
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -471,11 +476,8 @@ from call_manager.proposal_assist.collab.yjs_bridge import (
     apply_pm_json_to_fragment,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.editing.save import (
-    SectionStructureError,
-    SpecLockedError,
-    StaleSectionError,
-)
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.proposals.accepting import _load_scoped
@@ -530,6 +532,17 @@ def kernel_accept_prose(
         pc.resolved_at = datetime.now(UTC)
         session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
+
+    # Acquire the commit mutex NOW — before reading spec_locked_at (Codex H3).
+    # post_lock_spec (workspaces.py:487) sets the lock UNDER this same mutex; checking
+    # spec_locked_at before taking the mutex would let a concurrent lock commit between
+    # our guard and our checkpoint, accepting into a spec that just got locked. Taking
+    # it here freezes the lock state for the rest of our transaction. checkpoint_artifact
+    # re-acquires the same xact lock later — Postgres advisory xact locks are re-entrant
+    # within a transaction, so that is an instant no-op (no deadlock, no second timeout).
+    # Raised BEFORE any doc mutation, so a CommitMutexTimeout needs no room eviction
+    # (it is in _CLEAN_ACCEPT_ERRORS).
+    acquire_commit_mutex(session, workspace_id)
 
     # Spec-lock guard (the lock OPERATION is 2b-2; here we only honor an existing lock).
     if artifact == "spec":
@@ -596,9 +609,41 @@ def kernel_accept_prose(
 
 **Files:** Modify `collab/room.py`; Create `proposals/kernel_accept.py`; Modify `web/proposals.py`; Test `tests/proposal_assist/collab/test_collab_kernel_accept_route.py`.
 
-**Interfaces:** `RoomManager.operate(key, *, load)` (async CM), `RoomManager.broadcast(key, message)`; `accept_via_kernel(*, session_factory, workspaces_dir, workspace_id, pc_id, approver, artifact)`.
+**Interfaces:** `RoomManager.operate(key, *, load)` (async CM, ops-aware eviction), `Room.lock`/`Room.broadcast(frame)`; `accept_via_kernel(*, session_factory, workspaces_dir, workspace_id, pc_id, approver, artifact)`.
 
-- [ ] **Step 1: Room accessors + `RoomManager.operate`** (in `room.py`). Add `from contextlib import asynccontextmanager` to the module imports. Give `Room` a public `lock` property and `broadcast` method (the kernel serializes against `Room.handle` on the same `_lock`, and broadcasts the accept to clients):
+- [ ] **Step 1: Room read-locking + `ops` refcount + accessors + `RoomManager.operate`** (in `room.py`). Add `from contextlib import asynccontextmanager` to the module imports.
+
+  **(a) `Room.__init__`** — add a server-op refcount beside the client set:
+
+```python
+    def __init__(self, key: RoomKey) -> None:
+        self.key = key
+        self.doc = Doc()
+        self.clients: set = set()
+        self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
+        self.poisoned = False
+        self._lock = asyncio.Lock()
+```
+
+  **(b) Lock the SYNC_STEP1 read path** (Codex H2). The kernel now mutates `self.doc` from a *worker thread* under `self._lock`; an unlocked read on the event-loop thread would race it. Wrap the STEP1 doc read in the lock (the write path already holds it at `room.py:97`); keep the `send_bytes` OUTSIDE the lock:
+
+```python
+        if P.is_sync_step1(message):
+            async with self._lock:
+                try:
+                    reply = P.handle_sync_message(message[1:], self.doc)
+                except Exception:
+                    logger.warning(
+                        "collab.malformed_step1",
+                        extra={"event": "collab_malformed_step1", "room": str(self.key)},
+                    )
+                    return
+            if reply is not None:
+                await sender.send_bytes(reply)
+            return
+```
+
+  **(c) Public accessors** — the kernel serializes against `Room.handle` on the same `_lock`, and broadcasts the accept to clients:
 
 ```python
     # --- add to class Room ---
@@ -610,18 +655,22 @@ def kernel_accept_prose(
         await self._broadcast(frame, exclude=None)
 ```
 
-  `operate` mirrors `acquire`'s exact get-or-create (create under the per-key lock, register under `_lock`) but registers **no client**, and on exit evicts iff no client connected meanwhile. Do NOT refactor `acquire` — replicate its create block so the atomic register+client-add path is left untouched:
+  **(d) `RoomManager.operate`** mirrors `acquire`'s exact get-or-create (create under the per-key lock, register under `_lock`) but registers **no client**; it bumps `room.ops` where `acquire` would `clients.add`, and on exit evicts iff **no client AND no other server op** remains. The `ops` guard closes Codex H1: without it, op A's `finally` could pop the room while op B still runs on it, so a client connecting in that window would hydrate a *fresh* room from the log and miss B's not-yet-committed update. Do NOT refactor `acquire`:
 
 ```python
     @asynccontextmanager
     async def operate(self, key: RoomKey, *, load: LoadFn):
         """Get-or-create a room for a SERVER operation (no client registered).
-        On exit, evict iff no client connected meanwhile — so a server op on an
-        idle artifact never leaks a room, but a live co-editing room survives."""
+        Tracks an in-flight server-op count so eviction is deferred until BOTH
+        no clients AND no other server op remain (Codex H1). Does NOT checkpoint
+        on evict — the kernel op already checkpointed within its transaction."""
         async with self._lock:
             room = self._rooms.get(key)
-            keylock = None if room is not None else self._keylocks.setdefault(key, asyncio.Lock())
-        if keylock is not None:
+            if room is not None:
+                room.ops += 1
+            else:
+                keylock = self._keylocks.setdefault(key, asyncio.Lock())
+        if room is None:
             async with keylock:
                 async with self._lock:
                     room = self._rooms.get(key)
@@ -631,15 +680,39 @@ def kernel_accept_prose(
                         room.doc.apply_update(update)
                     async with self._lock:
                         self._rooms[key] = room
+                        room.ops += 1
+                else:
+                    async with self._lock:
+                        room.ops += 1
         try:
             yield room
         finally:
             async with self._lock:
-                if not room.clients and self._rooms.get(key) is room:
+                room.ops -= 1
+                if not room.clients and room.ops == 0 and self._rooms.get(key) is room:
                     self._rooms.pop(key, None)
 ```
 
-  **Implementer note:** `@asynccontextmanager` requires `operate` to be an async generator (`yield` the room, never `return` a value). `Room(key)`, `LoadFn`, and `RoomKey` are the exact idioms from `acquire` (`room.py:152-183`) — the `Room` constructor takes the key positionally and builds its own `Doc`; `room.doc.apply_update` replays the log. Confirm before writing.
+  **(e) `RoomManager.release`** — defer client-eviction while a server op is in flight, so a last-client-leave during an accept cannot pop the room out from under the op (the op's own `operate` exit evicts once `ops` reaches 0). Change only the `evicted =` line:
+
+```python
+            room.clients.discard(client)
+            evicted = self._rooms.pop(key) if (not room.clients and room.ops == 0) else None
+```
+
+  **(f) Connect-site read-lock** (in `web/collab_ws.py`, Codex H2). The connect sends `room.initial_message()` (currently at `collab_ws.py:150`, an unlocked `self.doc` read). Compute it under the room lock, then send outside:
+
+```python
+    room = await MANAGER.acquire(key, load=_load, client=websocket)
+    try:
+        async with room.lock:
+            initial = room.initial_message()
+        await websocket.send_bytes(initial)
+        async for message in websocket.iter_bytes():
+            ...
+```
+
+  **Implementer note:** `@asynccontextmanager` requires `operate` to be an async generator (`yield` the room, never `return` a value). `Room(key)`, `LoadFn`, and `RoomKey` are the exact idioms from `acquire` (`room.py:152-183`) — the `Room` constructor takes the key positionally and builds its own `Doc`; `room.doc.apply_update` replays the log. The `else: room.ops += 1` branch handles another creator finishing while we waited on `keylock` (mirrors `acquire`'s final `clients.add`). `keylock` is only referenced under `if room is None:`, the same branch that binds it — no unbound-name risk. Confirm against the actual `acquire`/`release` before writing.
 
 - [ ] **Step 2: `proposals/kernel_accept.py`** (async orchestration; holds the room lock across one threadpool sync body; evict-on-failure)
 
@@ -662,17 +735,20 @@ from call_manager.proposal_assist.collab.kernel import (
     kernel_accept_prose,
 )
 from call_manager.proposal_assist.collab.room import MANAGER
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotPending
 
-# Validation errors are raised BEFORE any fragment mutation, so the room doc is
-# untouched and there is nothing to evict. Every OTHER exception may have left
-# room.doc mutated while the txn rolled back → evict to rebuild from the log.
+# These are all raised BEFORE any fragment mutation (validation guards, plus the
+# commit-mutex acquire that precedes the spec-lock guard — Codex H3), so the room
+# doc is untouched and there is nothing to evict. Every OTHER exception may have
+# left room.doc mutated while the txn rolled back → evict to rebuild from the log.
 _CLEAN_ACCEPT_ERRORS = (
     SpecLockedError,
     SectionStructureError,
     CitationKernelDeferred,
     ProposedChangeNotPending,
+    CommitMutexTimeout,
     IndexError,
 )
 
@@ -737,9 +813,9 @@ async def accept(workspace_id: uuid.UUID, pc_id: uuid.UUID, request: Request, us
             if pc is None or pc.workspace_id != workspace_id:
                 raise HTTPException(status_code=404, detail="proposed change not found")
             enabled = collab_state.is_collab_enabled(s, workspace_id=workspace_id, artifact=pc.target_artifact)
-            return enabled, pc.target_artifact, pc.kind
+            return enabled, pc.target_artifact
 
-    enabled, artifact, kind = await run_in_threadpool(_route)
+    enabled, artifact = await run_in_threadpool(_route)
 
     if enabled:
         try:
@@ -798,11 +874,16 @@ async def accept(workspace_id: uuid.UUID, pc_id: uuid.UUID, request: Request, us
 
 - [ ] **Step 1: Accept-race test** — two concurrent kernel accepts of the same pending proposal: the `FOR UPDATE` row lock + status gate makes the second a clean `409 not pending` (no double apply, one `ArtifactVersion`). Drive it with two threads against the sync `kernel_accept_prose` sharing a workspace (mirror any existing concurrency test; if deterministic threading is impractical under testcontainers, assert the serialized invariant: after two sequential accepts of the same row, the second raises `ProposedChangeNotPending` and no second commit lands).
 
-- [ ] **Step 2: OpenAPI** — the accept route's signature/shape is unchanged (same path, same `dict` response), so `pnpm gen:api` should show **no** `schema.gen.ts` drift. Run `cd frontend && pnpm gen:api && git diff --exit-code src/api/schema.gen.ts` and confirm clean; if the async change altered the response model, regen + commit.
+- [ ] **Step 2: `RoomManager.operate`/`release` ops-refcount unit tests** (`tests/proposal_assist/collab/test_collab_room_operate.py`, pure asyncio — no DB — so they are deterministic and fast). Assert Codex H1 is closed. Use a fresh `RoomManager()` per test (not the module `MANAGER`) and an async no-op loader `async def _load(): return []`:
+  - **overlapping ops share one room, deferred evict:** enter two overlapping `operate(key)` contexts on the same key; assert both yield the *same* `Room` object and `room.ops == 2`; exit the first (`__aexit__`) — assert the room is STILL registered (`mgr.has_room(key)`) because `ops == 1`; exit the second — assert it is now evicted (`not mgr.has_room(key)`).
+  - **release during an op does not evict:** inside one `operate(key)` context (`ops == 1`), `await mgr.acquire(key, load=_load, client=c)` then `await mgr.release(key, client=c)`; assert the room survives (a server op is in flight); on `operate` exit assert it is evicted.
+  - Drive the overlapping contexts with explicit `__aenter__()`/`__aexit__()` calls (or `AsyncExitStack`) so the interleaving is deterministic — do not rely on `async with` nesting timing.
 
-- [ ] **Step 3: Regression sweep** — `uv run pytest tests/proposal_assist/collab/ tests/proposal_assist/proposals/ -q` green; `uv run ruff check .`.
+- [ ] **Step 3: OpenAPI** — the accept route's signature/shape is unchanged (same path, same `dict` response), so `pnpm gen:api` should show **no** `schema.gen.ts` drift. Run `cd frontend && pnpm gen:api && git diff --exit-code src/api/schema.gen.ts` and confirm clean; if the async change altered the response model, regen + commit.
 
-- [ ] **Step 4: Commit** (`test(collab): accept-race + kernel-accept regression sweep`).
+- [ ] **Step 4: Regression sweep** — `uv run pytest tests/proposal_assist/collab/ tests/proposal_assist/proposals/ -q` green; `uv run ruff check .`.
+
+- [ ] **Step 5: Commit** (`test(collab): accept-race + room-op refcount + kernel-accept regression sweep`).
 
 ---
 
@@ -810,8 +891,9 @@ async def accept(workspace_id: uuid.UUID, pc_id: uuid.UUID, request: Request, us
 
 **Files:** Create `docs/superpowers/notes/2026-07-01-collab-slice2b1-notes.md`.
 
-- [ ] **Step 1: Write the notes** — what shipped (the write-kernel prose-accept path; validation vs live room; atomic single-txn accept = FOR UPDATE + staged Yjs update + checkpoint + status; `apply_pm_json_to_fragment` incremental capture; `RoomManager.operate` server-op lifecycle; evict-on-failure); the invariants proven by tests (stale-vs-live regression guard, no-op accepts, race, client convergence); **flag still OFF in prod**; deferrals — **citation-insert accept + spec-lock operation → 2b-2**; **git-canonical switchover for `save_section` (human edit path) + flag flip → Slice 3**; **Tier-1/Tier-2 post-checkpoint validation** still deferred (the kernel checkpoints via `checkpoint_artifact`, which is provenance-only); agent direct-commit paths (coherence/evaluator) unaffected and out of scope.
+- [ ] **Step 1: Write the notes** — what shipped (the write-kernel prose-accept path; validation vs live room; atomic single-txn accept = FOR UPDATE + staged Yjs update + checkpoint + status; `apply_pm_json_to_fragment` incremental capture; `RoomManager.operate` server-op lifecycle; evict-on-failure; **concurrency hardening from the Codex plan review — room-doc read-locking on the STEP1 read + connect send (H2), `Room.ops` refcount so a concurrent op / last-client-leave never evicts a room out from under an in-flight accept (H1), and commit-mutex-acquired-before-the-spec-lock-guard so a racing `/spec/lock` cannot slip in between the guard and the checkpoint (H3)**); the invariants proven by tests (stale-vs-live regression guard, no-op accepts, race, client convergence, ops-refcount deferred eviction); **flag still OFF in prod**; deferrals — **citation-insert accept + spec-lock operation → 2b-2**; **git-canonical switchover for `save_section` (human edit path) + flag flip → Slice 3**; **Tier-1/Tier-2 post-checkpoint validation** still deferred (the kernel checkpoints via `checkpoint_artifact`, which is provenance-only); agent direct-commit paths (coherence/evaluator) unaffected and out of scope.
   - **Known limitation to record (whole-fragment replace):** the kernel applies an accept by **clearing and repopulating the entire `prosemirror` fragment**, so the captured update deletes every existing CRDT node and creates new ones. A client edit that was made against the pre-accept doc but arrives *after* the accept releases the room lock references now-deleted nodes and is effectively **lost** on merge. This is invisible in 2b-1 (flag off → no concurrent editing clients; the room lock serializes server ops) but must be replaced with a **targeted section-subtree replace** (or accept-rebase) when real co-editing lands in **Slice 3**. Record it as the top Slice-3 kernel follow-up.
+  - **Known limitation to record (evict does not disconnect clients — Codex open question):** `MANAGER.evict(key)` (the failure-path recovery) only drops the room from the registry; any already-connected WS tasks keep their reference to the now-orphaned room object (accepted Slice-1 poison debt). The kernel's evict-on-failure leans on this harder, but it is still unreachable in 2b-1 (flag off → no connected clients during a kernel accept). Slice 3 (flag on, live co-editing) must make `evict` actively close/re-sync connected clients. Record it as a Slice-3 prerequisite alongside the whole-fragment-replace follow-up.
 
 - [ ] **Step 2: Commit** (`docs(collab): Slice 2b-1 notes`).
 
@@ -836,3 +918,16 @@ cd frontend && pnpm gen:api && git diff --exit-code src/api/schema.gen.ts
 **3. Type consistency:** `apply_pm_json_to_fragment(doc, pm_json)->bytes`, `append_update(..., commit=bool)`, `kernel_accept_prose(...)->KernelAcceptResult(pc, update, committed, evict)`, `accept_via_kernel(...)->ProposedChange`, `RoomManager.operate/broadcast` are used identically across Tasks 1–5. `artifact` is the string `"draft"`/`"spec"` throughout.
 
 **4. Atomicity invariant flagged for the implementer:** the kernel writes (staged update + checkpoint provenance + accept status) MUST ride the caller's single transaction — `store.append_update(commit=False)` + `checkpoint_artifact` (caller-committed) + one `session.commit()` in `_body`. A stray commit mid-sequence would release the FOR UPDATE lock early and split the accept. This is the single most important correctness property of the slice.
+
+---
+
+## Codex plan review — folded in (2026-07-01)
+
+Four findings from a Codex review of the committed plan, all verified against the actual code and folded into the tasks above:
+
+- **H1 — `operate`/`release` evict while a concurrent server op still holds the room.** Op A's `finally` (or a last-client `release`) could pop the room while op B is still running on it; a client connecting in that window hydrates a *fresh* room from the log and misses B's not-yet-committed update. **Fix:** `Room.ops` refcount; `operate` bumps it in the same places `acquire` adds a client, and both `operate`-exit and `release` defer eviction until `not clients and ops == 0`. Deterministic asyncio unit test added (Task 5 Step 2).
+- **H2 — "single-threaded room doc access" was false for reads.** The kernel mutates `room.doc` on a worker thread under the asyncio lock, but the SYNC_STEP1 read (`Room.handle`) and `Room.initial_message()` at connect read the doc unlocked on the event-loop thread — a genuine cross-thread pycrdt race once the threadpool mutation exists (Slice-1 was safe only because everything ran on one thread). **Fix:** guard both reads with the room lock (Task 4 Step 1 b+f); the kernel holding the lock across the threadpool call then excludes all reads for the mutation. Global-constraint claim corrected.
+- **H3 — spec-lock guard read before the commit mutex.** `post_lock_spec` sets the lock *under* the commit mutex; the kernel checked `spec_locked_at` before `checkpoint_artifact` took the mutex, so a lock committed in between was missed. **Fix:** the kernel acquires the commit mutex right after the staleness early-return, before the spec-lock guard; `checkpoint_artifact` re-acquires the same advisory **xact** lock later, which is re-entrant within the transaction (instant no-op, no deadlock/second-timeout). `CommitMutexTimeout` (raised before any doc mutation) added to `_CLEAN_ACCEPT_ERRORS` so it does not trigger a room eviction.
+- **L4 — ruff.** Dropped the unused `StaleSectionError` import from `kernel.py` (the stale path *returns*, never raises) and made `_route` return a 2-tuple `(enabled, artifact)` (dead `kind` removed — dispatch happens inside the kernel).
+
+Open question raised by the review — `MANAGER.evict()` does not disconnect already-connected clients — is accepted Slice-1 debt, unreachable in 2b-1 (flag off), and recorded as a Slice-3 prerequisite in the Task 6 notes.
