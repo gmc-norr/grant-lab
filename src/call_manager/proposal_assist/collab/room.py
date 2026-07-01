@@ -65,8 +65,18 @@ class Room:
         persist: PersistFn,
     ) -> None:
         if P.is_sync_step1(message):
-            # Read path: always answer with our state (a SYNC_STEP2 reply).
-            reply = P.handle_sync_message(message[1:], self.doc)
+            # Read path: always answer with our state (a SYNC_STEP2 reply). A
+            # malformed STEP1 body (truncated/garbage state vector) must be
+            # dropped, not raised — symmetric with the write-path guard below,
+            # and reachable by any connected member (the read path is ungated).
+            try:
+                reply = P.handle_sync_message(message[1:], self.doc)
+            except Exception:
+                logger.warning(
+                    "collab.malformed_step1",
+                    extra={"event": "collab_malformed_step1", "room": str(self.key)},
+                )
+                return
             if reply is not None:
                 await sender.send_bytes(reply)
             return
@@ -130,21 +140,46 @@ class RoomManager:
     def __init__(self) -> None:
         self._rooms: dict[RoomKey, Room] = {}
         self._lock = asyncio.Lock()
+        # Per-key creation locks so cold-start hydration is serialized only
+        # per room, never process-wide. Retained after use (bounded by the
+        # number of distinct rooms — tiny for this app); not popped, because a
+        # concurrent acquirer may still hold a reference.
+        self._keylocks: dict[RoomKey, asyncio.Lock] = {}
 
     def has_room(self, key: RoomKey) -> bool:
         return key in self._rooms
 
     async def acquire(self, key: RoomKey, *, load: LoadFn, client) -> Room:
         """Get-or-create the room, replaying persisted updates on cold start,
-        and register `client`."""
+        and register `client`.
+
+        The cold-start replay (`await load()`) runs OUTSIDE the manager-global
+        lock, serialized only by a per-key lock — so hydrating one room never
+        blocks connections to unrelated rooms (no process-wide head-of-line
+        blocking as the update log grows).
+        """
         async with self._lock:
             room = self._rooms.get(key)
+            if room is not None:
+                room.clients.add(client)
+                return room
+            keylock = self._keylocks.setdefault(key, asyncio.Lock())
+
+        async with keylock:
+            # Re-check under the per-key lock: another creator may have finished
+            # while we waited.
+            async with self._lock:
+                room = self._rooms.get(key)
             if room is None:
                 room = Room(key)
-                for update in await load():
+                for update in await load():  # runs OUTSIDE the manager lock
                     room.doc.apply_update(update)
-                self._rooms[key] = room
-            room.clients.add(client)
+                async with self._lock:
+                    self._rooms[key] = room
+                    room.clients.add(client)
+                return room
+            async with self._lock:
+                room.clients.add(client)
             return room
 
     async def release(self, key: RoomKey, *, client) -> None:

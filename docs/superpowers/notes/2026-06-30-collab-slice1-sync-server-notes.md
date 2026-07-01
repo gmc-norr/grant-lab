@@ -9,7 +9,7 @@
 ## What shipped
 
 - **Hand-rolled room on `pycrdt`** — zero new dependencies. The Yjs wire codec comes from `pycrdt._sync` (already in the dependency graph for Slice 0). We do not pull in `pycrdt-websocket` or any websocket room library.
-- **WebSocket route** at `/api/ws/workspaces/{id}/{artifact}` (artifact ∈ `{"draft","spec"}`), mounted on the FastAPI app in `src/call_manager/web/api/ws/collab.py`.
+- **WebSocket route** at `/api/ws/workspaces/{id}/{artifact}` (artifact ∈ `{"draft","spec"}`), mounted on the FastAPI app (before the SPA catch-all) in `src/call_manager/proposal_assist/web/collab_ws.py`.
 - **Postgres `yjs_updates` log** — migration 0059 adds the `yjs_updates` table (columns: `id`, `workspace_id`, `artifact`, `actor_id`, `update_bytes`, `created_at`). Every inbound SYNC_UPDATE from an authorised writer is appended here with its actor tag.
 - **Connect-time cookie auth + cached per-update write gate** — session cookie is validated once on connect via `resolve_access`; the resulting `(is_member, can_write)` tuple is closed over for the life of the connection so the DB is not hit on every frame.
 - **Restart recovery by replay** — on a cold-start acquire (`RoomManager.acquire`), all `yjs_updates` rows for the `(workspace_id, artifact)` pair are loaded from Postgres in insertion order and applied to a fresh `pycrdt.Doc`. The in-memory room is then fully reconstructed without any external coordination.

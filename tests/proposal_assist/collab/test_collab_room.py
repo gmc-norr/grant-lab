@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 import pytest
@@ -234,3 +235,80 @@ async def test_broadcast_isolates_a_failing_client():
     )
     assert good.sent                  # healthy client still received the update
     assert boom not in room.clients   # broken client dropped from the room
+
+
+@pytest.mark.anyio
+async def test_malformed_step1_frame_is_dropped_without_raising():
+    # A frame that classifies as SYNC_STEP1 (starts \x00\x00) but has a
+    # truncated/garbage state-vector body must be dropped, NOT raised out of
+    # handle (which would crash the connection). Reachable by any member — the
+    # read path is ungated.
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    reader = FakeClient()
+    room.clients.add(reader)
+    _, persist = _persist_sink()
+
+    for bad in (b"\x00\x00", b"\x00\x00\xff\xff\xff", b"\x00\x00\x01"):
+        await room.handle(
+            sender=reader, user_id=1, can_write=False, message=bad, persist=persist
+        )  # must not raise
+    assert reader.sent == []  # malformed STEP1 produced no reply
+
+
+@pytest.mark.anyio
+async def test_acquire_does_not_serialize_unrelated_rooms():
+    # A slow cold-start for room A must NOT block acquisition of unrelated room
+    # B (no process-wide head-of-line blocking).
+    mgr = RoomManager()
+    a_started = asyncio.Event()
+    a_release = asyncio.Event()
+
+    async def slow_load_a():
+        a_started.set()
+        await a_release.wait()
+        return []
+
+    async def fast_load_b():
+        return []
+
+    key_a = (uuid.uuid4(), "draft")
+    key_b = (uuid.uuid4(), "draft")
+    ca, cb = FakeClient(), FakeClient()
+
+    task_a = asyncio.create_task(mgr.acquire(key_a, load=slow_load_a, client=ca))
+    await a_started.wait()  # A is mid-load, blocked on a_release
+    # B must complete without waiting for A's load:
+    room_b = await asyncio.wait_for(mgr.acquire(key_b, load=fast_load_b, client=cb), timeout=1.0)
+    assert room_b.key == key_b
+
+    a_release.set()
+    room_a = await task_a
+    assert room_a.key == key_a
+
+
+@pytest.mark.anyio
+async def test_same_key_concurrent_acquire_loads_once():
+    # Two concurrent acquirers of the SAME new room hydrate it exactly once and
+    # both get the same Room instance.
+    mgr = RoomManager()
+    calls = 0
+    gate = asyncio.Event()
+
+    async def load():
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return []
+
+    key = (uuid.uuid4(), "draft")
+    c1, c2 = FakeClient(), FakeClient()
+    t1 = asyncio.create_task(mgr.acquire(key, load=load, client=c1))
+    t2 = asyncio.create_task(mgr.acquire(key, load=load, client=c2))
+    await asyncio.sleep(0)  # let both enter acquire
+    gate.set()
+    r1 = await t1
+    r2 = await t2
+    assert r1 is r2
+    assert calls == 1
+    assert {c1, c2} <= r1.clients
