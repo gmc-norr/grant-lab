@@ -19,6 +19,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from pycrdt import Doc
 
@@ -44,11 +45,20 @@ class PersistError(Exception):
     """
 
 
+@dataclass
+class ClientState:
+    """Per-connection state the room tracks for a client socket. `can_write` is
+    MUTABLE: mid-session permission reconciliation (Slice 2c) flips it in place,
+    and the WS route reads it per message."""
+    user_id: int
+    can_write: bool
+
+
 class Room:
     def __init__(self, key: RoomKey) -> None:
         self.key = key
         self.doc = Doc()
-        self.clients: set = set()
+        self.clients: dict = {}
         self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
         self._lock = asyncio.Lock()
@@ -61,8 +71,7 @@ class Room:
         self,
         *,
         sender,
-        user_id: int,
-        can_write: bool,
+        state: ClientState,
         message: bytes,
         persist: PersistFn,
     ) -> None:
@@ -87,8 +96,8 @@ class Room:
             return
 
         if P.is_sync_write(message):
-            if not can_write:
-                return  # silently drop — non-writer cannot mutate the room
+            if not state.can_write:
+                return  # cheap early reject for a known non-writer
             try:
                 update = P.extract_update(message)
             except Exception:
@@ -100,6 +109,13 @@ class Room:
             if not update or update == _EMPTY_UPDATE:
                 return
             async with self._lock:
+                # LIVE re-check under the lock: a concurrent revoke/downgrade
+                # (Slice-2c refresh_permissions, same event loop) may have flipped
+                # state.can_write AFTER the early check while this frame waited on
+                # the lock. There is NO await between this check and apply_update,
+                # so check→apply is atomic. (Codex High #1)
+                if not state.can_write:
+                    return
                 # Apply FIRST so we never persist an update that won't replay
                 # (keeps the durable log clean by construction). apply_update is
                 # atomic: a malformed update raises without mutating the doc.
@@ -114,7 +130,7 @@ class Room:
                 # Then persist DURABLY. If this fails the doc is ahead of the
                 # log: poison the room so it is evicted and rebuilt from the log.
                 try:
-                    await persist(user_id, update)
+                    await persist(state.user_id, update)
                 except Exception as e:
                     self.poisoned = True
                     raise PersistError(str(self.key)) from e
@@ -147,7 +163,7 @@ class Room:
             except Exception:
                 dead.append(client)
         for client in dead:
-            self.clients.discard(client)
+            self.clients.pop(client, None)
 
 
 class RoomManager:
@@ -163,9 +179,9 @@ class RoomManager:
     def has_room(self, key: RoomKey) -> bool:
         return key in self._rooms
 
-    async def acquire(self, key: RoomKey, *, load: LoadFn, client) -> Room:
+    async def acquire(self, key: RoomKey, *, load: LoadFn, client, state: ClientState) -> Room:
         """Get-or-create the room, replaying persisted updates on cold start,
-        and register `client`.
+        and register `client` with its per-connection `state`.
 
         The cold-start replay (`await load()`) runs OUTSIDE the manager-global
         lock, serialized only by a per-key lock — so hydrating one room never
@@ -175,7 +191,7 @@ class RoomManager:
         async with self._lock:
             room = self._rooms.get(key)
             if room is not None:
-                room.clients.add(client)
+                room.clients[client] = state
                 return room
             keylock = self._keylocks.setdefault(key, asyncio.Lock())
 
@@ -188,14 +204,14 @@ class RoomManager:
             async with self._lock:
                 room = self._rooms.get(key)
                 if room is not None:
-                    room.clients.add(client)
+                    room.clients[client] = state
             if room is None:
                 room = Room(key)
                 for update in await load():  # runs OUTSIDE the manager lock
                     room.doc.apply_update(update)
                 async with self._lock:
                     self._rooms[key] = room
-                    room.clients.add(client)
+                    room.clients[client] = state
             return room
 
     @asynccontextmanager
@@ -247,7 +263,7 @@ class RoomManager:
             room = self._rooms.get(key)
             if room is None:
                 return
-            room.clients.discard(client)
+            room.clients.pop(client, None)
             evicted = self._rooms.pop(key) if (not room.clients and room.ops == 0) else None
         if evicted is not None and on_evict is not None:
             await on_evict(evicted)

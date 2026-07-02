@@ -10,7 +10,7 @@ functions run under pytest-asyncio automatically (no decorator needed).
 import asyncio
 import uuid
 
-from call_manager.proposal_assist.collab.room import RoomManager
+from call_manager.proposal_assist.collab.room import ClientState, RoomManager
 
 
 async def _load() -> list[bytes]:
@@ -63,7 +63,7 @@ async def test_release_during_op_does_not_evict():
     (ops drops to 0) should the room be evicted.
 
     A client here is a bare object() — RoomManager.acquire/release only ever
-    checks `room.clients`, which is a plain set; send_bytes is never called.
+    checks `room.clients`, which is a dict keyed by client; send_bytes is never called.
     """
     mgr = RoomManager()
     key = (uuid.uuid4(), "draft")
@@ -75,7 +75,7 @@ async def test_release_during_op_does_not_evict():
 
     # Register a client
     c = object()
-    await mgr.acquire(key, load=_load, client=c)
+    await mgr.acquire(key, load=_load, client=c, state=ClientState(user_id=1, can_write=True))
     assert c in room.clients
 
     # Release the client — clients is now empty, but ops == 1 → room must survive

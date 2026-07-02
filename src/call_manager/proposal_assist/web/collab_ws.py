@@ -19,7 +19,7 @@ from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.room import MANAGER, PersistError
+from call_manager.proposal_assist.collab.room import MANAGER, ClientState, PersistError
 from call_manager.proposal_assist.collab.ws_auth import (
     WSAuthError,
     check_origin,
@@ -145,7 +145,8 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
 
         await run_in_threadpool(_cp)
 
-    room = await MANAGER.acquire(key, load=_load, client=websocket)
+    state = ClientState(user_id=user.id, can_write=can_write)
+    room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
     try:
         async with room.lock:
             initial = room.initial_message()
@@ -156,8 +157,7 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
                 break
             await room.handle(
                 sender=websocket,
-                user_id=user.id,
-                can_write=can_write,
+                state=state,
                 message=message,
                 persist=_persist,
             )
