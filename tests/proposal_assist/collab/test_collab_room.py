@@ -386,3 +386,19 @@ async def test_write_blocked_on_lock_rechecks_live_permission():
     await task                      # lock released → handle proceeds, must re-check live state
     assert log == []                                            # NOT persisted
     assert "late" not in str(room.doc.get("body", type=Text))  # NOT applied
+
+
+@pytest.mark.anyio
+async def test_evict_closes_all_client_sockets():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    a, b = FakeClient(), FakeClient()
+
+    async def _load():
+        return []
+
+    await mgr.acquire(key, load=_load, client=a, state=ClientState(user_id=1, can_write=True))
+    await mgr.acquire(key, load=_load, client=b, state=ClientState(user_id=2, can_write=True))
+    await mgr.evict(key)
+    assert a.closed == 1011 and b.closed == 1011      # server-error close on poison evict
+    assert mgr.get(key) is None                        # room removed

@@ -18,7 +18,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from pycrdt import Doc
@@ -31,6 +31,9 @@ LoadFn = Callable[[], Awaitable[list[bytes]]]
 
 # An empty Yjs update is two zero bytes; nothing to apply/persist/broadcast.
 _EMPTY_UPDATE = b"\x00\x00"
+
+# RFC 6455 close code: server error (used for poison-room eviction)
+_WS_INTERNAL_ERROR = 1011
 
 
 logger = logging.getLogger(__name__)
@@ -282,10 +285,17 @@ class RoomManager:
                 self._rooms.pop(key, None)
 
     async def evict(self, key: RoomKey) -> None:
-        """Force-remove a room regardless of connected clients (poison recovery).
-        The next acquire rebuilds it from the durable log."""
+        """Force-remove a room regardless of connected clients (poison recovery),
+        and CLOSE every client socket so no client keeps editing an orphaned
+        in-memory doc — the next connection rebuilds cleanly from the durable log.
+        (Closes the Slice-1 residual where evict left other clients connected.)"""
         async with self._lock:
-            self._rooms.pop(key, None)
+            room = self._rooms.pop(key, None)
+        if room is None:
+            return
+        for client in list(room.clients):
+            with suppress(Exception):
+                await client.close(code=_WS_INTERNAL_ERROR)
 
 
 # Module-global registry (single-instance backend).
