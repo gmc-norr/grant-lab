@@ -20,6 +20,8 @@ from typing import Any
 
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
+from call_manager.proposal_assist.collab import canonical
+from call_manager.proposal_assist.collab.state import is_collab_enabled
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.tools.registry import ToolContext
 
@@ -58,14 +60,29 @@ async def _read_artifact_impl(
     view=H1/content=H2 — the next mutation sees HEAD!=view and correctly fails
     stale. Fail-safe.
     """
+    artifact = "spec" if filename == SPEC_FILENAME else "draft"
     path = ctx.repo_dir / filename
-    if not path.exists():
-        return {"error": f"{filename} does not exist in this workspace"}
-    try:
-        setattr(ctx, head_attr, current_head(ctx.repo_dir))
-    except GitCommitError:
-        setattr(ctx, head_attr, None)
-    content = path.read_text()
+    with ctx.session_factory() as _s:
+        _collab = is_collab_enabled(_s, workspace_id=ctx.workspace_id, artifact=artifact)
+        # Flag-off: disk is authoritative — keep the existence guard. Collab-on:
+        # the durable log is canonical, so don't gate on the on-disk file.
+        if not _collab and not path.exists():
+            return {"error": f"{filename} does not exist in this workspace"}
+        # HEAD snapshot stays (concurrent-save detection on the flag-off path; moot
+        # on the collab path, which keys staleness on section SHA). Resolve HEAD
+        # BEFORE reading content (fail-safe ordering invariant).
+        try:
+            setattr(ctx, head_attr, current_head(ctx.repo_dir))
+        except GitCommitError:
+            setattr(ctx, head_attr, None)
+        if _collab:
+            # Room-canonical (normalized) content so the captured base section shas
+            # match the kernel's accept-time live.sha (Slice 3a C1).
+            content = canonical.canonical_artifact_markdown(
+                _s, workspace_id=ctx.workspace_id, artifact=artifact, repo_dir=ctx.repo_dir
+            )
+        else:
+            content = path.read_text()   # raw HEAD, byte-for-byte (parity)
     # SP2a-2 §3: record the per-section shas the agent saw, so a later propose
     # takes its base_section_sha from this READ-time snapshot (anti-clobber)
     # rather than a live recompute. Built from the same `content` we return, so
