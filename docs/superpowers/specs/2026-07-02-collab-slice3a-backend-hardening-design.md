@@ -43,7 +43,7 @@ their notes and in memory):
 
 | # | Defect | Class | If unfixed when flag flips |
 |---|--------|-------|-----------------------------|
-| 1 | Staleness-normalization: base SHA from raw git HEAD vs `live.sha` from normalized round-trip | Blocker | Silently rejects legitimate proposals as "stale"; never self-heals |
+| 1 | Staleness-normalization: base SHA from raw git HEAD vs normalized live SHA — across THREE consumers (read snapshot, proactive `refresh_staleness` sweep, citation anchor probe) | Blocker | Silently rejects legitimate proposals as "stale"; never self-heals |
 | 2 | Whole-fragment replace clobbers concurrent edits | Blocker | A kernel accept deletes a client's concurrent typing (data loss) |
 | 3 | (a) Unserialized reconciliation | Blocker | Rapid unlock→lock leaves a stale `can_write` (permission leak) |
 | 4 | (b) Connect-straddle TOCTOU | Blocker | Client mid-`acquire` misses a reconciliation signal (permission leak) |
@@ -51,65 +51,111 @@ their notes and in memory):
 | 6 | (c) Ops-straddle checkpoint skip | Robustness | A last-leave checkpoint is silently lost when a kernel op straddles the last departure |
 | 7 | (e) Kernel-accept evict blast-radius | UX | One accept failure disconnects all clients (they reconnect clean) |
 
-## Component 1 — Room-aware proposal reads (fixes #1)
+## Component 1 — Room-canonical artifact representation (fixes #1, via a shared helper across THREE consumers)
 
 ### Root cause
 
 `base_section_sha` on a proposal is captured **HEAD-first**: `_read_artifact_impl`
 (`tools/proposal.py`) does `content = path.read_text()` on the raw git file, then
 `setattr(ctx, sections_attr, {s.index: s.sha for s in split_sections(content)})`.
-The kernel's accept-time staleness check compares that against
-`live.sha`, where `_live_sections(room_doc)` =
-`split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))` — the **normalized**
-round-tripped form (`pm_to_markdown` inserts a blank line after each block,
-loosens lists, etc.). Whenever the committed markdown is not already in that
-canonical form, `base_section_sha != live.sha` for unchanged content →
-`kernel.py:71` (prose) and `kernel.py:183` (citation) reject a legitimate
-proposal as stale, and the first accept that *would* normalize HEAD is itself
-the one rejected → never self-heals.
+Any code that later recomputes a "live section SHA" and compares it to that base
+instead reads the **normalized** round-tripped form —
+`split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))` (`pm_to_markdown`
+inserts a blank line after each block, loosens lists, etc.). Whenever the
+committed markdown is not already in that canonical form,
+`base_section_sha != live_sha` for unchanged content → the proposal is falsely
+flagged stale, and the first accept that *would* normalize HEAD is itself the
+one rejected → never self-heals.
 
-### Fix: read the room-canonical form when collab is enabled
+### This is NOT a single choke point — there are three consumers
 
-When `is_collab_enabled(session, workspace_id, artifact)` is true, the agent's
-read snapshot must come from the **room-canonical** representation, so its
-section SHAs are normalized and match `live.sha`.
+The base-vs-live comparison happens in **three** places, all of which must use
+the same representation when collab is on. Capturing the base normalized in
+`_read_artifact_impl` alone is insufficient — a normalized base compared against
+a **raw-git** live SHA is just the same bug with the sides swapped:
 
-**Mechanism — log-derived, synchronous, side-effect-free.** The durable Yjs
-update log (`yjs_updates`) IS the room's canonical committed state: every
-accepted edit (client `handle` or kernel `checkpoint`) persists before it is
-broadcast. So the read does not touch the live in-memory room or the event loop
-at all:
+1. **`_read_artifact_impl`** (`tools/proposal.py:68`) — captures the agent's
+   read-time base (`agent_view_sections` / `agent_view_proposal`).
+2. **`refresh_staleness`** (`proposals/staleness.py:27-31`) — the review-inbox
+   list endpoint (`web/proposals.py:63`) calls this **proactively before
+   listing**; it recomputes live section SHAs from **raw git**
+   (`split_sections(path.read_text())`) and flips pending rows to `stale`. A
+   log-normalized base would be flipped stale here *before* accept is ever
+   reached. **(Codex High #1)**
+3. **`propose_citation_impl`** (`tools/citations.py:485-488`) — reads raw disk
+   `proposal.md` for the anchor-uniqueness probe (`insert_marker`, step 5),
+   while keying the section off the read-time snapshot. Once reads are
+   log-canonical, an anchor present in the durable log but not yet on disk
+   (uncheckpointed edits) false-rejects as "anchor not found". **(Codex Medium
+   #3)**
 
-1. If `is_collab_enabled` and the log is non-empty:
-   build a transient `pycrdt.Doc` from `load_rows(session, workspace_id, artifact)`,
-   apply the updates, then
-   `content = pm_to_markdown(ydoc_to_pm_json(doc))`.
-2. If `is_collab_enabled` and the log is empty (flag just enabled, no edits yet):
-   read git HEAD and normalize it through the same round-trip
-   (`pm_to_markdown(markdown_to_pm(raw_head))`) so it matches what a future room
-   would serialize.
-3. If `not is_collab_enabled`: **unchanged** — `content = path.read_text()`
-   (raw HEAD), exactly as today.
+The kernel's own accept-time check (`_live_sections`, `kernel.py:71/183`) is
+already room-canonical (Slice 2b) — it is the fourth comparison and the reason
+the base capture must move to match it.
 
-The single choke point is `_read_artifact_impl` in `tools/proposal.py` (both
-`read_proposal_impl` and `read_spec_impl` delegate to it). Only the source of
-`content` changes when collab is on; the downstream `sections_attr` /
-`proposal_attr` population flows from that `content` unchanged, so the
-`(section_index, base_section_sha)` internal-consistency invariant is preserved.
-`head_attr` continues to be `current_head(ctx.repo_dir)` (the checkpoint HEAD);
-the collab accept path keys staleness on `base_section_sha` vs `live.sha`, not
-on `base_commit_sha`, so HEAD tracking is unaffected.
+### Fix: a centralized `canonical_artifact_markdown` helper
 
-The DB read (`is_collab_enabled` + `load_rows`) uses a synchronous session from
-`ctx.session_factory`, consistent with the existing synchronous `path.read_text()`
-in this async function.
+Add ONE read-only, synchronous, side-effect-free helper (in `collab/`, beside
+`hydrate.py`) that returns the room-canonical markdown for an artifact, and
+route all three consumers through it when `is_collab_enabled` is true:
+
+```
+canonical_artifact_markdown(session, *, workspace_id, artifact, repo_dir) -> str
+```
+
+- **Log non-empty:** build a transient `pycrdt.Doc` from the durable updates
+  (`store.load_updates` / `build_doc`) — the log IS the room's canonical
+  committed state (every accepted edit persists before broadcast) — then
+  `pm_to_markdown(ydoc_to_pm_json(doc))`. No live-room / event-loop coupling.
+- **Log empty** (flag just enabled, no edits): **reuse hydration's canonicalizer,
+  not raw `markdown_to_pm`.** `markdown_to_pm` raises `ValueError` on
+  whitespace-only / empty HEAD, whereas hydration maps that to a single empty
+  paragraph (`hydrate._markdown_to_pm` → `_EMPTY_DOC`). The helper reads HEAD
+  (`_read_head_markdown`) and, when present, returns
+  `pm_to_markdown(_markdown_to_pm(md))`; when the artifact file is absent
+  (`md is None`), returns the empty-document canonical form (no sections) — the
+  same "leave the room empty" semantics as `load_or_hydrate`. **This requires
+  extracting/sharing `hydrate._markdown_to_pm` + `_EMPTY_DOC`** so the read path
+  and hydration cannot diverge. **(Codex High #2)**
+- The helper **never persists** (unlike `load_or_hydrate`, which appends the
+  seed as update #1) — it is a pure projection.
+
+Consumer wiring (each guarded by `is_collab_enabled`, flag-off unchanged):
+
+- `_read_artifact_impl`: when collab-on, `content = canonical_artifact_markdown(...)`;
+  the downstream `sections_attr` / `proposal_attr` population flows from it
+  unchanged, preserving the `(section_index, base_section_sha)` consistency
+  invariant. `head_attr` stays `current_head(repo_dir)` (the collab accept keys
+  staleness on section SHA, not `base_commit_sha`).
+- `refresh_staleness`: when collab-on for an artifact, build that artifact's
+  `live` section map from `split_sections(canonical_artifact_markdown(...))`
+  instead of `split_sections(path.read_text())`.
+- `propose_citation_impl`: when collab-on, the step-3 "read the live proposal"
+  for the anchor probe uses `canonical_artifact_markdown(...)` so the anchor is
+  probed against the same text the agent read.
 
 ### Parity
 
-Flag-off reads keep the raw-HEAD path byte-for-byte. The
-`_read_artifact_impl` HEAD-before-content ordering invariant (fail-safe against a
-concurrent user save) is retained on the flag-off path and is moot on the
-collab path (staleness is section-SHA based).
+All three consumers keep the **raw `read_text()`** path byte-for-byte when the
+flag is off (hard gate). The DB reads the helper adds (`is_collab_enabled` +
+`load_updates`) are output-neutral; the `_read_artifact_impl` HEAD-before-content
+ordering invariant is retained on the flag-off path and is moot on the collab
+path (section-SHA staleness).
+
+### Out of 3a scope (flag-off-only write paths the kernel already replaces)
+
+These read a live artifact too, but are the **git-first human write paths** whose
+collab siblings already exist (the kernel), or are frontend/background — their
+collab-on coherence is later work, not 3a:
+
+- `capture_base` (`proposing.py`) + `save.py` (git-first `save_section`) and
+  `_read_proposal_and_ledger` (`citations.py`) + `human_cite.py` (git-first human
+  citation): retired by the documented **3b `save_section` git-canonical
+  switchover**.
+- `build_selection_block` (`turns/selection.py`, select-to-cite): frontend-driven
+  (pending plan); sources from the room naturally in **3b**.
+- `analysis/*` claim section-keying: background on checkpointed content; the **3b
+  Tier-1/2 post-checkpoint re-fire** non-goal.
 
 ## Component 2 — Section-scoped fragment replace (fixes #2)
 
@@ -232,11 +278,23 @@ Document the blast radius. Re-hydrate-in-place is explicitly out of scope for
 All server-side; no frontend, no live sockets required (the `Room`/`RoomManager`
 + kernel harnesses and `FakeClient` cover it).
 
-- **Component 1:** with collab enabled and a durable log whose normalized form
-  diverges from raw git HEAD, a proposal read yields a base that the kernel
-  **accepts** (not false-stale) — the exact #1 regression. Plus: flag-off read
-  still returns raw HEAD (parity); empty-log-enabled read returns
-  normalized-HEAD.
+- **Component 1** (all three consumers + the shared helper):
+  - **Read consumer:** with collab enabled and a durable log whose normalized
+    form diverges from raw git HEAD, a proposal read yields a base that the
+    kernel **accepts** (not false-stale) — the exact #1 regression. Flag-off read
+    still returns raw HEAD (parity).
+  - **Staleness sweep (Codex #1):** `refresh_staleness` over a collab-enabled
+    artifact does **not** flip a log-normalized-base pending row to `stale`;
+    flag-off sweep still uses raw HEAD (parity).
+  - **Citation anchor probe (Codex #3):** `propose_citation_impl` accepts an
+    anchor present in the durable log but not yet checkpointed to disk; flag-off
+    probe still reads raw disk (parity).
+  - **Empty-doc canonicalizer (Codex #2):** the helper on a whitespace-only or
+    empty HEAD returns the empty-document canonical form (no crash), matching
+    hydration; on an absent artifact file returns no sections.
+  - **Shared-helper divergence guard:** a test asserting the read helper and
+    `hydrate` produce the same canonical markdown for the same input (they must
+    share `_markdown_to_pm` / `_EMPTY_DOC`).
 - **Component 2:** a two-client room where client B has a concurrent edit in
   section 2 while a kernel accept lands on section 1 — assert B's section-2 edit
   survives. Plus boundary cases (preamble, last section, block-count change,
@@ -268,9 +326,18 @@ All server-side; no frontend, no live sockets required (the `Room`/`RoomManager`
 ## Open risks / to validate in the plan
 
 - **Component 1 in an async fn:** the synchronous `is_collab_enabled` +
-  `load_rows` DB read inside `_read_artifact_impl` is consistent with the
+  `load_updates` DB read inside `_read_artifact_impl` is consistent with the
   existing synchronous `path.read_text()`, but confirm no event-loop blocking
   concern at agent-read cadence (reads are infrequent; acceptable).
+- **Shared canonicalizer extraction (Codex #2):** `hydrate._markdown_to_pm` +
+  `_EMPTY_DOC` are currently private to `hydrate.py`. The plan must extract them
+  to a shared location (or have the new helper import them) so the read
+  projection and hydration seed cannot diverge — a divergence would reintroduce
+  the false-stale bug on the empty/whitespace-HEAD path. Add the divergence-guard
+  test above.
+- **Three-consumer parity (Codex #1/#3):** each of the three consumers needs its
+  own flag-off parity assertion; the shared helper must be the ONLY collab-on
+  branch so the raw path stays byte-for-byte identical in all three.
 - **Section-boundary mapping (Component 2):** the fragment walk must use exactly
   the `split_sections` boundary rule so `section_index` maps identically on the
   read side (Component 1) and the apply side (Component 2). A single shared
