@@ -13,7 +13,8 @@ from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.proposals.staleness import refresh_staleness
-from call_manager.proposal_assist.tools.proposal import _read_artifact_impl
+from call_manager.proposal_assist.tools.citations import propose_citation_impl
+from call_manager.proposal_assist.tools.proposal import _read_artifact_impl, read_proposal_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _git_head,
@@ -22,6 +23,11 @@ from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _mk_pc,
 )
 from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.tools.test_propose_citation import (
+    ANCHOR,
+    CHUNK_TEXT,
+    _seed_reference,
+)
 
 
 @pytest.fixture
@@ -173,3 +179,71 @@ def test_sweep_flag_off_uses_raw_head(pg_session_factory, tmp_path):
         s.commit()
     with pg_session_factory() as s:
         assert s.get(ProposedChange, pc_id).status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# C1 citation consumer — anchor probe reads log-canonical text when collab-on
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_citation_anchor_probe_reads_log_canonical_collab_on(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Collab-on: anchor in durable log but NOT on disk → probe reads log → no error."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="cite-collab@ki.se"))
+        s.commit()
+        wid = ws.id
+
+    # Disk proposal lacks the anchor.
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, "preamble\n\n## Methods\nNo citable anchor on disk.\n")
+
+    # Seed the durable Yjs log with anchor-bearing text.
+    anchor_md = "preamble\n\n## Methods\nWe argue that " + ANCHOR + " in our population.\n"
+    seed = pm_json_to_ydoc(markdown_to_pm(anchor_md)).get_update()
+    with pg_session_factory() as s:
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None, update=seed)
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+
+    rid = _seed_reference(pg_session_factory, wid, chunks=[(0, "Results", CHUNK_TEXT)])
+    ctx = _ctx(wid, repo, pg_session_factory, _settings_env)
+
+    await read_proposal_impl(ctx)
+    result = await propose_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote=CHUNK_TEXT[:40],
+    )
+    assert "error" not in result, result
+
+
+@pytest.mark.anyio
+async def test_citation_anchor_probe_reads_raw_disk_flag_off(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Flag-off: anchor absent from disk → probe reads raw disk → anchor not found (parity)."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="cite-flagoff@ki.se"))
+        s.commit()
+        wid = ws.id
+
+    # Disk proposal lacks the anchor (same divergence as collab-on test).
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, "preamble\n\n## Methods\nNo citable anchor on disk.\n")
+
+    rid = _seed_reference(pg_session_factory, wid, chunks=[(0, "Results", CHUNK_TEXT)])
+    ctx = _ctx(wid, repo, pg_session_factory, _settings_env)
+
+    await read_proposal_impl(ctx)
+    result = await propose_citation_impl(
+        ctx,
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote=CHUNK_TEXT[:40],
+    )
+    assert "anchor not found" in result["error"]
