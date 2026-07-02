@@ -10,20 +10,24 @@
 # pm_to_markdown inserts a blank line between heading and paragraph).
 import subprocess
 import uuid as uuidlib
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import ArtifactVersion, ProposedChange
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.db.models import ArtifactVersion, ProposedChange, User, Workspace
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, Artifact, filename_for
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
 from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import (
     apply_pm_json_to_fragment,
+    pm_json_to_ydoc,
     ydoc_to_pm_json,
 )
+from call_manager.proposal_assist.editing.save import SpecLockedError
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotFound
 from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
@@ -298,3 +302,89 @@ def test_kernel_accept_raises_proposed_change_not_found_for_missing_pc(
             pass
         else:
             raise AssertionError("expected ProposedChangeNotFound")
+
+
+def _init_spec_repo(repo: Path, content: str) -> None:
+    """Init a repo whose committed HEAD holds the SPEC artifact file."""
+    fname = filename_for(Artifact.SPEC)
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / fname).write_text(content)
+    subprocess.run(["git", "add", fname], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+
+def test_kernel_rejects_accept_into_locked_spec(pg_session_factory, tmp_path):
+    """A prose accept against a LOCKED spec raises SpecLockedError (kernel spec-lock
+    guard, kernel.py). The guard runs AFTER acquire_commit_mutex (Codex H3) and BEFORE
+    any git I/O, so it needs no repo — the kernel takes the room_doc directly."""
+    spec_md = "## Aims\noriginal aims.\n"
+    room_doc = pm_json_to_ydoc(markdown_to_pm(spec_md))
+    base_sha = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))[1].sha
+    with pg_session_factory() as s:
+        o = make_user(s, email="k-speclock@ki.se")
+        ws = make_workspace(s, owner=o, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, o.id
+    with pg_session_factory() as s:  # lock the spec
+        ws = s.get(Workspace, wid)
+        ws.spec_locked_at = datetime.now(UTC)
+        ws.spec_locked_by = oid
+        s.commit()
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(
+            s, wid, section_index=1, new_text="## Aims\nedited aims.\n",
+            base_commit_sha="0" * 40, base_section_sha=base_sha, artifact="spec",
+        )
+    with pg_session_factory() as s:
+        approver = s.get(User, oid)
+        with pytest.raises(SpecLockedError):
+            kernel_accept_prose(
+                s, room_doc=room_doc, proposed_change_id=pc_id,
+                workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
+            )
+    # The rejected proposal was NOT resolved (still pending — the guard raised).
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"
+
+
+def test_kernel_accepts_unlocked_spec_and_checkpoints(pg_session_factory, tmp_path):
+    """A prose accept against an UNLOCKED spec succeeds and checkpoints — exercises the
+    H3 ordering (acquire_commit_mutex BEFORE the spec-lock guard) on a real spec
+    artifact and confirms the spec file is updated in git."""
+    spec_md = "## Aims\noriginal aims.\n"
+    with pg_session_factory() as s:
+        o = make_user(s, email="k-specok@ki.se")
+        ws = make_workspace(s, owner=o, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, o.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_spec_repo(repo, spec_md)
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="spec")
+        s.commit()
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s, workspace_id=wid, artifact="spec", workspaces_dir=str(tmp_path)
+        )
+        s.commit()
+        room_doc = build_doc(updates)
+    base_sha = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))[1].sha
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(
+            s, wid, section_index=1, new_text="## Aims\nACCEPTED spec body.\n",
+            base_commit_sha=_git_head(repo), base_section_sha=base_sha, artifact="spec",
+        )
+    with pg_session_factory() as s:
+        approver = s.get(User, oid)
+        res = kernel_accept_prose(
+            s, room_doc=room_doc, proposed_change_id=pc_id,
+            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+        assert res.pc.status == "accepted"
+        assert res.committed is True and res.update is not None
+    disk = (repo / filename_for(Artifact.SPEC)).read_text()
+    assert "ACCEPTED spec body." in disk

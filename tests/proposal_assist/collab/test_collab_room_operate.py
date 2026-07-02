@@ -7,6 +7,7 @@ asyncio_mode = "auto" is configured in pyproject.toml, so bare `async def test_*
 functions run under pytest-asyncio automatically (no decorator needed).
 """
 
+import asyncio
 import uuid
 
 from call_manager.proposal_assist.collab.room import RoomManager
@@ -90,3 +91,54 @@ async def test_release_during_op_does_not_evict():
     assert not mgr.has_room(key), (
         "room must be evicted once the last server op exits and no clients remain"
     )
+
+
+async def test_operate_else_branch_bumps_ops_atomically():
+    """Force operate()'s cold-race ELSE branch — a second op that saw room=None at
+    the first check, then found the room already created after waiting on the keylock
+    — and assert ops is bumped ATOMICALLY with the re-fetch (Codex H1 slow-path fix).
+
+    Interleaving (deterministic via a gated load):
+      - op1 enters, cold-creates, and BLOCKS inside load() while holding the keylock
+        (the room is NOT yet registered).
+      - op2 enters: first check sees room=None (op1 hasn't registered), so it goes to
+        the keylock and BLOCKS (op1 holds it).
+      - op1's load is released → op1 registers the room (ops=1) and releases the keylock.
+      - op2 acquires the keylock, re-fetches → FINDS the room → takes the else branch
+        and bumps ops to 2 in the SAME lock section as the re-fetch.
+
+    Before the fix, op2 re-fetched and bumped ops in two separate lock sections, so a
+    concurrent op1 exit could pop the room in the gap and hand op2 a zombie. With the
+    fix, both ops share one live room and it is evicted exactly once after both exit.
+    """
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def _blocking_load() -> list[bytes]:
+        entered.set()          # op1 is inside cold-create load(), keylock held, unregistered
+        await gate.wait()      # block until released
+        return []
+
+    cm1 = mgr.operate(key, load=_blocking_load)
+    t1 = asyncio.create_task(cm1.__aenter__())
+    await entered.wait()       # op1 now blocked in load() — room not yet registered
+
+    cm2 = mgr.operate(key, load=_load)
+    t2 = asyncio.create_task(cm2.__aenter__())
+    await asyncio.sleep(0.05)  # let op2 reach the keylock await (op1 still holds it)
+
+    gate.set()                 # release op1: it registers the room and frees the keylock
+    room1 = await t1
+    room2 = await t2
+
+    assert room1 is room2, "the else-branch op must share op1's room, not a zombie"
+    assert room1.ops == 2, f"else-branch must bump ops atomically to 2, got {room1.ops}"
+    assert mgr.has_room(key) and mgr.get(key) is room1
+
+    await cm1.__aexit__(None, None, None)
+    assert room1.ops == 1 and mgr.has_room(key)
+    await cm2.__aexit__(None, None, None)
+    assert room1.ops == 0 and not mgr.has_room(key)

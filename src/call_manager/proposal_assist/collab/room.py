@@ -181,9 +181,14 @@ class RoomManager:
 
         async with keylock:
             # Re-check under the per-key lock: another creator may have finished
-            # while we waited.
+            # while we waited. Register the client in the SAME lock section as the
+            # re-fetch so a concurrent operate()-exit cannot evict the room in the
+            # gap between fetch and client-add (Codex H1 — the ops-refcount eviction
+            # now makes this window reachable; keep register atomic with the fetch).
             async with self._lock:
                 room = self._rooms.get(key)
+                if room is not None:
+                    room.clients.add(client)
             if room is None:
                 room = Room(key)
                 for update in await load():  # runs OUTSIDE the manager lock
@@ -191,9 +196,6 @@ class RoomManager:
                 async with self._lock:
                     self._rooms[key] = room
                     room.clients.add(client)
-                return room
-            async with self._lock:
-                room.clients.add(client)
             return room
 
     @asynccontextmanager
@@ -210,17 +212,21 @@ class RoomManager:
                 keylock = self._keylocks.setdefault(key, asyncio.Lock())
         if room is None:
             async with keylock:
+                # Re-fetch AND bump ops in ONE lock section: a concurrent
+                # operate()-exit must not be able to pop the room between our
+                # re-fetch and our ops bump, or it would defeat the very H1
+                # invariant this refcount adds (never evict while an op is live)
+                # and hand back a zombie room detached from the registry.
                 async with self._lock:
                     room = self._rooms.get(key)
+                    if room is not None:
+                        room.ops += 1
                 if room is None:
                     room = Room(key)
                     for update in await load():   # OUTSIDE the manager lock
                         room.doc.apply_update(update)
                     async with self._lock:
                         self._rooms[key] = room
-                        room.ops += 1
-                else:
-                    async with self._lock:
                         room.ops += 1
         try:
             yield room

@@ -68,14 +68,22 @@ async def accept_via_kernel(
                             workspaces_dir=workspaces_dir,
                         )
                         # Commit the ONE transaction, then detach the pc for return.
+                        # expire_on_commit=False keeps the pc's columns populated
+                        # after commit and _serialize reads only columns, so no
+                        # refresh is needed (mirrors the git-first path, which
+                        # serializes post-commit without one).
                         s.commit()
-                        s.refresh(res.pc)
                         s.expunge(res.pc)
                         return res
 
                 result = await run_in_threadpool(_body)
-                if result.update is not None:
-                    await room.broadcast(P.create_update_message(result.update))
+            # Broadcast OUTSIDE room.lock (mirror Room.handle's write path,
+            # room.py: "a slow client must not block other writers"). The update is
+            # already committed and CRDT tolerates reordering, so releasing the lock
+            # before the sequential per-client sends avoids head-of-line stalling
+            # every concurrent read/write on this room behind one backpressured client.
+            if result.update is not None:
+                await room.broadcast(P.create_update_message(result.update))
             return result.pc
         except _CLEAN_ACCEPT_ERRORS:
             raise  # validation error before any mutation — room doc untouched

@@ -114,6 +114,30 @@ The kernel applies an accept by **clearing and repopulating the entire `prosemir
 
 **Required fix:** Make `evict()` actively close the broadcast channel and signal connected WS tasks to disconnect and re-connect. Record as **Slice-3 prerequisite alongside whole-fragment-replace**.
 
+### 3. Staleness compares NORMALIZED live SHA vs RAW-git base SHA → spurious "stale" (TOP Slice-3 blocker)
+
+`kernel_accept_prose`'s staleness guard compares `live.sha` — computed from the room's **normalized** serialization (`pm_to_markdown(ydoc_to_pm_json(room_doc))`, which inserts a blank line after each block) — against `pc.base_section_sha`, which every real propose path derives from **raw git-HEAD** markdown (`split_sections(read_text())` in `tools/proposal.py` / `proposing.capture_base` / the raw section reads in `web/api/workspaces.py`). Because the room hydrates from raw HEAD but re-serializes with the blank-line normalization, `live.sha != base_section_sha` **even when nobody edited the section**, so the accept is marked terminally `stale`. Worse, the only thing that would normalize HEAD is a successful checkpoint, and the first prose accept — the very thing that would checkpoint — is the one rejected, so it **never self-heals**. Reproduced end-to-end (raw sha vs normalized live sha differ).
+
+**Invisible in 2b-1:** flag off ⇒ the kernel path never runs in prod; git-first accept (which compares `base_commit_sha` to git HEAD) is used and is unaffected.
+
+**Masked by the tests:** the kernel/route tests deliberately compute `base_section_sha` from the live room round-trip (see `_live_sections_from_md`), which no real propose path does — so the suite is green while the real-world path would fail.
+
+**Required fix (Slice 3, before the flag flip):** make the base and live SHAs share one basis. Either make the propose path **room-aware** (capture `base_section_sha` from the live room — the natural outcome once proposals originate in the Tiptap WYSIWYG editor), or **normalize git at hydrate time** (seed a `pm_to_markdown(markdown_to_pm(HEAD))` checkpoint so raw-git and room serializations agree). Add a kernel test whose `base_section_sha` comes from RAW git HEAD (via `capture_base` on the git-first file) with collab enabled, asserting the accept **succeeds**. **This is the #1 correctness prerequisite for turning the flag on.**
+
+---
+
+## Post-merge code review (2026-07-02) — adversarial multi-agent pass
+
+A 7-angle adversarial review (find → refute/reachability verify → synthesize) ran over the branch diff. **No production-reachable defect** (flag off; git-first path byte-for-byte intact); H1/H2/H3 confirmed correctly implemented. Findings resolved on-branch before merge:
+
+- **Fixed — `RoomManager.operate` cold-race (Important):** the slow-path `else` branch bumped `room.ops` in a *separate* lock section from the re-fetch, so a concurrent `operate`-exit could evict the room in the gap (defeating the H1 invariant). Now the re-fetch + `ops` bump share one lock section; the identical pattern in `acquire` (client-add) was hardened too, since the ops-eviction newly widens that window. New test: `test_operate_else_branch_bumps_ops_atomically`.
+- **Fixed — broadcast held `room.lock` (Minor liveness):** `accept_via_kernel` broadcast the accept update inside `async with room.lock`, so one backpressured client could stall every reader/writer on the room. Moved the broadcast outside the lock (mirrors `Room.handle`'s write path); the `operate` context still keeps the room alive across it.
+- **Fixed — redundant post-commit `s.refresh` (Minor):** removed (`expire_on_commit=False` + columns-only `_serialize` make it a wasted SELECT; the git-first path proves it unnecessary).
+- **Fixed — plan lock-order doc (Minor):** the plan's Global-Constraint line stated `FOR UPDATE → room.lock → mutex`; the real order is `room.lock → FOR UPDATE → mutex`. Corrected, with the deadlock-freedom argument restated (git-first writers never take `room.lock`).
+- **Coverage added (Minor gaps):** spec-lock kernel path — reject into a locked spec + succeed on an unlocked spec (exercises the H3 mutex-before-guard order); commit-mutex-timeout → 429; and evict-on-failure (post-mutation `GitCommitError` → 500 + room evicted + transaction rolled back).
+- **Deferred (documented above):** the staleness normalization issue (#3) — genuinely requires a room-aware propose path or hydrate-time normalization = Slice-3 scope, and is the top prerequisite for the flag flip.
+- **Refuted / dropped:** empty-update crash and partial-mutation-on-malformed-pm (both unreachable — the sole caller passes schema-validated `markdown_to_pm` output); double `require_member` on the git-first path (harmless, arguably safer for authz freshness); the sequential accept-race test (plan-sanctioned; the row lock is independently covered); the `.gitignore` trailing-slash change (load-bearing for the worktree `node_modules` symlink the project convention relies on).
+
 ---
 
 ## References

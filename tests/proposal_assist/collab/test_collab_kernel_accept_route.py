@@ -26,12 +26,16 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import ArtifactVersion, ProposedChange
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.citations.gitio import GitCommitError
+from call_manager.proposal_assist.collab import kernel as kernel_mod
 from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -504,3 +508,98 @@ def test_accept_race_second_accept_is_rejected(_app, pg_session_factory, tmp_pat
 
         pc = s.get(ProposedChange, pc_id)
         assert pc.status == "accepted"
+
+
+def test_kernel_commit_mutex_timeout_maps_to_429(_app, pg_session_factory, tmp_path, monkeypatch):
+    """A CommitMutexTimeout on the kernel accept path → 429 + Retry-After. It is raised
+    BEFORE any fragment mutation (it's in _CLEAN_ACCEPT_ERRORS), so the proposal stays
+    pending and no accept update is staged (only the hydration seed remains)."""
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ka-route-429@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    base_sha = _live_sections_from_md(pg_session_factory, wid, str(tmp_path))[1].sha
+    head = _git_head(repo)
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(
+            s, wid, section_index=1, new_text="## Background\nnever applied.\n",
+            base_commit_sha=head, base_section_sha=base_sha,
+        )
+
+    def _boom(*a, **k):
+        raise CommitMutexTimeout("busy")
+
+    monkeypatch.setattr(kernel_mod, "acquire_commit_mutex", _boom)
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        r = client.post(f"/api/workspaces/{wid}/proposed-changes/{pc_id}/accept")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert r.status_code == 429, r.text
+    assert r.headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"
+        # mutex raised before any mutation → only the hydration seed row exists
+        assert len(store.load_rows(s, workspace_id=wid, artifact="draft")) == 1
+
+
+def test_kernel_evicts_room_on_post_mutation_failure(
+    _app, pg_session_factory, tmp_path, monkeypatch
+):
+    """A GitCommitError from checkpoint (AFTER the fragment mutation) → 500; the single
+    transaction rolls back (proposal stays pending, no accept update committed) and the
+    room is evicted so the next open rebuilds cleanly from the durable log."""
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ka-route-evict@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    base_sha = _live_sections_from_md(pg_session_factory, wid, str(tmp_path))[1].sha
+    head = _git_head(repo)
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(
+            s, wid, section_index=1, new_text="## Background\nwill roll back.\n",
+            base_commit_sha=head, base_section_sha=base_sha,
+        )
+
+    def _boom(*a, **k):
+        raise GitCommitError("disk full")
+
+    monkeypatch.setattr(kernel_mod, "checkpoint_artifact", _boom)
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        r = client.post(f"/api/workspaces/{wid}/proposed-changes/{pc_id}/accept")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert r.status_code == 500, r.text
+    # Poison recovery: the room whose doc was mutated then rolled back is evicted.
+    assert MANAGER.get((wid, "draft")) is None
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"  # transaction rolled back
+        # the staged accept update was rolled back — only the hydration seed remains
+        assert len(store.load_rows(s, workspace_id=wid, artifact="draft")) == 1
