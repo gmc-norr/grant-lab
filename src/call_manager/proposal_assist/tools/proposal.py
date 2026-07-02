@@ -65,6 +65,7 @@ async def _read_artifact_impl(
     # Unit-test harnesses construct ToolContext(session_factory=None, settings=None)
     # to exercise the flag-off path without a database; prod always passes a factory.
     # Treat a missing factory as flag-off so those parity tests keep working.
+    content: str | None = None
     if ctx.session_factory is not None:
         with ctx.session_factory() as _s:
             _collab = is_collab_enabled(_s, workspace_id=ctx.workspace_id, artifact=artifact)
@@ -81,20 +82,17 @@ async def _read_artifact_impl(
                 content = canonical.canonical_artifact_markdown(
                     _s, workspace_id=ctx.workspace_id, artifact=artifact, repo_dir=ctx.repo_dir
                 )
-                # Skip the flag-off block below.
-                setattr(ctx, sections_attr, {s.index: s.sha for s in split_sections(content)})
-                setattr(ctx, proposal_attr, content)
-                return {"content": content}
-    # Flag-off path (or no session factory): disk is authoritative.
-    # Existence guard + HEAD-before-content ordering invariant preserved exactly.
-    if not path.exists():
-        return {"error": f"{filename} does not exist in this workspace"}
-    # Resolve HEAD BEFORE reading content (fail-safe ordering invariant — see docstring).
-    try:
-        setattr(ctx, head_attr, current_head(ctx.repo_dir))
-    except GitCommitError:
-        setattr(ctx, head_attr, None)
-    content = path.read_text()  # raw HEAD, byte-for-byte (parity)
+    if content is None:
+        # Flag-off path (or no session factory): disk is authoritative.
+        # Existence guard + HEAD-before-content ordering invariant preserved exactly.
+        if not path.exists():
+            return {"error": f"{filename} does not exist in this workspace"}
+        # Resolve HEAD BEFORE reading content (fail-safe ordering invariant — see docstring).
+        try:
+            setattr(ctx, head_attr, current_head(ctx.repo_dir))
+        except GitCommitError:
+            setattr(ctx, head_attr, None)
+        content = path.read_text()  # raw HEAD, byte-for-byte (parity)
     # SP2a-2 §3: record the per-section shas the agent saw, so a later propose
     # takes its base_section_sha from this READ-time snapshot (anti-clobber)
     # rather than a live recompute. Built from the same `content` we return, so

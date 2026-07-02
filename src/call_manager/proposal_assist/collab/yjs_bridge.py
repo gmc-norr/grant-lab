@@ -52,7 +52,8 @@ from typing import Any
 
 import pycrdt
 
-from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line
+from call_manager.proposal_assist.editing.save import SectionStructureError
+from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 
 from .markdown_bridge import pm_to_markdown
 from .schema import SCHEMA
@@ -62,6 +63,14 @@ _FRAGMENT_KEY = "prosemirror"
 # Mark types in a fixed, deterministic order (schema declaration order). Used to
 # order the marks emitted for a text chunk that carries more than one mark.
 _MARK_ORDER: dict[str, int] = {name: i for i, name in enumerate(SCHEMA.marks)}
+
+
+class SectionMapDivergenceError(SectionStructureError):
+    """The doc's split_sections line-boundaries cannot be expressed at
+    top-level-block granularity (e.g. a ``## …`` line INSIDE a multi-line block
+    via hard_break, or a fence-state flip from a literal ``` in inline text).
+    Raised BEFORE any mutation — the accept fails clean (no evict, pc stays
+    pending) instead of splicing the wrong section (silent data loss)."""
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +301,8 @@ def apply_pm_section_to_fragment(
     sub = doc.observe(lambda event: captured.append(event.update))
     try:
         fragment = doc.get(_FRAGMENT_KEY, type=pycrdt.XmlFragment)
-        blocks_json = ydoc_to_pm_json(doc).get("content") or []
+        pm_json = ydoc_to_pm_json(doc)
+        blocks_json = pm_json.get("content") or []
         # Section boundaries via the SAME rule as split_sections. The preamble
         # (section 0) is ALWAYS present — split_sections emits Section 0 even when
         # empty — so section k spans [starts[k], starts[k+1]). NO dedupe: a
@@ -301,6 +311,19 @@ def apply_pm_section_to_fragment(
         # kernel passes (dropping the leading 0 shifts every section — silent
         # wrong-section corruption).
         starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
+        # Cross-check the block-granularity map against the line-scan truth the
+        # kernel validated section_index against. A mismatch means some boundary
+        # falls INSIDE a block (hard_break + "## …", or a fence flip) — replacing
+        # a block range would splice the wrong section. Refuse pre-mutation.
+        # (A compensating double-divergence — one phantom boundary AND one hidden
+        # real one — would slip a count check; line-attribution is 3b hardening.)
+        n_line_sections = len(split_sections(pm_to_markdown(pm_json)))
+        if len(starts) != n_line_sections:
+            raise SectionMapDivergenceError(
+                f"section map divergence: {n_line_sections} line-scan sections vs "
+                f"{len(starts)} block-boundary sections — a section boundary falls "
+                "inside a multi-line block; re-edit the offending paragraph"
+            )
         if not 0 <= section_index < len(starts):
             raise IndexError(
                 f"section_index {section_index} out of range ({len(starts)} sections)"

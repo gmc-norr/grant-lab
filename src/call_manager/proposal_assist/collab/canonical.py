@@ -57,12 +57,19 @@ def canonical_artifact_markdown(
     """Room-canonical (normalized) markdown for a collab-enabled artifact.
 
     Log non-empty -> serialize the durable log (canonical committed state).
-    Log empty -> normalize HEAD through the SAME canonicalizer hydration uses
-    (whitespace/absent -> empty doc). NEVER writes. Callers MUST gate on
-    ``is_collab_enabled``; the flag-off path keeps reading raw git.
+    Log empty, absent file -> ``""`` — matches the un-seeded room's serialization
+    (hydration does NOT seed for an absent file; the empty room round-trips to "").
+    Log empty, whitespace-only existing file -> the canonical empty doc, matching
+    the hydration seed (``markdown_to_pm_or_empty`` maps whitespace to ``_EMPTY_DOC``).
+    NEVER writes. Callers MUST gate on ``is_collab_enabled``; the flag-off path
+    keeps reading raw git.
     """
     updates = store.load_updates(session, workspace_id=workspace_id, artifact=artifact)
     if updates:
         return pm_to_markdown(ydoc_to_pm_json(build_doc(updates)))
     md = read_head_markdown(repo_dir, artifact)
+    if md is None:
+        # Absent file: mirror hydration's no-seed rule. An empty room serializes to
+        # "" (no blocks), so the base captured here is byte-identical to the live SHA.
+        return ""
     return pm_to_markdown(markdown_to_pm_or_empty(md))

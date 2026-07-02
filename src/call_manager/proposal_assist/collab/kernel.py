@@ -257,6 +257,10 @@ def kernel_accept_citation(
     update = apply_pm_section_to_fragment(
         room_doc, section_index=pc.section_index, blocks=section_blocks
     )
+    # No `if not update:` guard here (unlike the prose path above). A citation
+    # insert always adds at least one marker-bearing block to a non-empty section
+    # (the idempotent early-return above already handled the no-op case), so
+    # apply_pm_section_to_fragment always yields a non-empty update here.
     # From here on room_doc is mutated: any failure must evict the room.
     store.append_update(
         session, workspace_id=workspace_id, artifact=artifact,

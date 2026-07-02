@@ -2,6 +2,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from call_manager.config import Settings
 from call_manager.db.models import ProposedChange, User
@@ -36,6 +37,9 @@ def anyio_backend():
 
 
 def _ctx(wid, repo_dir, pg_session_factory, _settings_env):
+    # _settings_env is received but not used directly — the parameter exists only
+    # to force the Settings-env fixture side-effect (e.g. WORKSPACES_DIR env var)
+    # before Settings() is instantiated below.
     return ToolContext(
         workspace_id=wid, repo_dir=repo_dir,
         session_factory=pg_session_factory, settings=Settings(),
@@ -219,6 +223,14 @@ async def test_citation_anchor_probe_reads_log_canonical_collab_on(
         evidence_quote=CHUNK_TEXT[:40],
     )
     assert "error" not in result, result
+    # A pending ProposedChange row must have been created for this workspace.
+    with pg_session_factory() as s:
+        rows = s.scalars(
+            select(ProposedChange).where(ProposedChange.workspace_id == wid)
+        ).all()
+    assert len(rows) == 1
+    assert rows[0].status == "pending"
+    assert rows[0].kind == "citation_insert"
 
 
 @pytest.mark.anyio

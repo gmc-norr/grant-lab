@@ -53,12 +53,16 @@ def test_canonical_empty_log_whitespace_head_no_crash(pg_session_factory, tmp_pa
 
 
 def test_canonical_absent_file(pg_session_factory, tmp_path):
+    # Absent file must return "" (not the empty-doc markdown) so the captured base
+    # is byte-identical to an un-seeded room's serialization (""). The final review
+    # adjudicated the original pm_to_markdown(_EMPTY_DOC) behaviour wrong because
+    # hydration does NOT seed for an absent file — a false-stale mismatch resulted.
     wid = uuid.uuid4()
     with pg_session_factory() as s:
         out = canonical.canonical_artifact_markdown(
             s, workspace_id=wid, artifact="draft", repo_dir=tmp_path
         )
-    assert out == pm_to_markdown(canonical._EMPTY_DOC)
+    assert out == ""
 
 
 def test_markdown_to_pm_or_empty_maps_blank_to_empty_doc():

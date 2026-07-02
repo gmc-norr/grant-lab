@@ -91,7 +91,13 @@ async def reconcile_client(session_factory, workspaces_dir, room, client, state,
                           workspace_id: uuid.UUID, artifact: str) -> None:
     """Re-resolve ONE client's access and apply the delta. Caller holds
     room.recon_lock. On a resolve error, fail CLOSED (downgrade to read-only) —
-    never leave stale write access (Slice 3a d)."""
+    never leave stale write access (Slice 3a d).
+
+    ``room`` is currently unused in the function body but is part of the contract:
+    the caller must hold ``room.recon_lock`` before invoking this function, and
+    passing ``room`` explicitly makes that obligation visible at call sites — a
+    caller cannot reconcile a client without naming the room whose lock it holds.
+    """
     try:
         is_member, can_write, ws_deleted = await run_in_threadpool(
             _resolve, session_factory, state.user_id, workspace_id, artifact
