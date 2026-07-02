@@ -212,7 +212,11 @@ def kernel_accept_citation(
         anchor=p["anchor"],
         chunk_index=p["chunk_index"],
         evidence_quote=p["evidence_quote"],
-        stance=p.get("stance") or "supports",
+        # Match the git-first accept EXACTLY (accepting.py: `payload.get("stance",
+        # "supports")`) — a key-absent default, NOT `or`. A present-but-None stance
+        # (the propose-time validator permits None) must map identically on both
+        # paths, else flag-on and flag-off diverge (parity is the point of 2b-2).
+        stance=p.get("stance", "supports"),
         confidence=p.get("confidence"),
     )
     if "error" in result:
