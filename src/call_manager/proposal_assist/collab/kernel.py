@@ -34,12 +34,6 @@ from call_manager.proposal_assist.tools.citations import (
 )
 
 
-class CitationKernelDeferred(Exception):
-    """A citation_insert accept on a collab-enabled artifact. Routing this through
-    the kernel is Slice 2b-2; until then it must NOT fall through to the git-first
-    path (which would write git while Yjs is canonical). Endpoint maps to 409."""
-
-
 @dataclass
 class KernelAcceptResult:
     pc: ProposedChange
@@ -66,9 +60,6 @@ def kernel_accept_prose(
         from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotPending
 
         raise ProposedChangeNotPending(pc.status)
-    if pc.kind != "prose_edit":
-        # citation_insert (and any future kind) is 2b-2 on the collab path.
-        raise CitationKernelDeferred(pc.kind)
 
     artifact = pc.target_artifact
     sections = _live_sections(room_doc)

@@ -11,8 +11,8 @@ from call_manager.db.models import ProposedChange, User
 from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.kernel import (
-    CitationKernelDeferred,
     KernelAcceptResult,
+    kernel_accept_citation,
     kernel_accept_prose,
 )
 from call_manager.proposal_assist.collab.room import MANAGER
@@ -21,6 +21,7 @@ from call_manager.proposal_assist.editing.save import SectionStructureError, Spe
 from call_manager.proposal_assist.proposals.accepting import (
     ProposedChangeNotFound,
     ProposedChangeNotPending,
+    UnsupportedKernelKind,
 )
 
 # These are all raised BEFORE any fragment mutation (validation guards, plus the
@@ -33,7 +34,7 @@ from call_manager.proposal_assist.proposals.accepting import (
 _CLEAN_ACCEPT_ERRORS = (
     SpecLockedError,
     SectionStructureError,
-    CitationKernelDeferred,
+    UnsupportedKernelKind,
     ProposedChangeNotFound,
     ProposedChangeNotPending,
     CommitMutexTimeout,
@@ -62,11 +63,22 @@ async def accept_via_kernel(
             async with room.lock:
                 def _body() -> KernelAcceptResult:
                     with session_factory() as s:
-                        res = kernel_accept_prose(
-                            s, room_doc=room.doc, proposed_change_id=pc_id,
-                            workspace_id=workspace_id, approver=approver,
-                            workspaces_dir=workspaces_dir,
-                        )
+                        pc0 = s.get(ProposedChange, pc_id)
+                        kind = pc0.kind if pc0 is not None else None
+                        if kind == "citation_insert":
+                            res = kernel_accept_citation(
+                                s, room_doc=room.doc, proposed_change_id=pc_id,
+                                workspace_id=workspace_id, approver=approver,
+                                workspaces_dir=workspaces_dir)
+                        elif kind == "prose_edit":
+                            res = kernel_accept_prose(
+                                s, room_doc=room.doc, proposed_change_id=pc_id,
+                                workspace_id=workspace_id, approver=approver,
+                                workspaces_dir=workspaces_dir)
+                        else:
+                            # citation_remove / citation_update / unknown — no kernel path.
+                            # Raised BEFORE any room mutation → non-evicting (Codex Low).
+                            raise UnsupportedKernelKind(kind)
                         # Commit the ONE transaction, then detach the pc for return.
                         # expire_on_commit=False keeps the pc's columns populated
                         # after commit and _serialize reads only columns, so no
