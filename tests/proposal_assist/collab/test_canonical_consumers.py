@@ -4,13 +4,15 @@ from pathlib import Path
 import pytest
 
 from call_manager.config import Settings
-from call_manager.db.models import User
+from call_manager.db.models import ProposedChange, User
 from call_manager.proposal_assist.artifacts import Artifact, filename_for
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.proposals.staleness import refresh_staleness
 from call_manager.proposal_assist.tools.proposal import _read_artifact_impl
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.collab.test_collab_kernel_accept import (
@@ -113,3 +115,61 @@ async def test_read_then_accept_end_to_end_not_false_stale(
                                   workspaces_dir=str(tmp_path))
         s.commit()
         assert res.pc.status == "accepted"        # NOT "stale"
+
+
+def _seed_ws_with_proposal(pg_session_factory, tmp_path, *, collab, base_from):
+    """Workspace + a pending prose proposal on section 1 (the '## A' section — its
+    sha DIFFERS raw vs normalized; section 0 the empty-ish preamble would be
+    identical and the test vacuous). Writes tight raw HEAD to the real workspace
+    repo dir (<tmp_path>/<wid>/repo); seeds the normalized log when collab=True."""
+    raw = "Preamble.\n\n## A\nBody a.\n"           # tight: no blank line after '##'
+    norm = pm_to_markdown(markdown_to_pm(raw))
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email=f"stale-{uuid.uuid4().hex[:8]}@ki.se"))
+        s.commit()
+        wid = ws.id
+    repo_dir = workspace_repo_dir(str(tmp_path), wid)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / filename_for(Artifact.DRAFT)).write_text(raw)
+    base_md = norm if base_from == "norm" else raw
+    base_sha = split_sections(base_md)[1].sha        # section 1 = "## A"
+    with pg_session_factory() as s:
+        if collab:
+            seed = pm_json_to_ydoc(markdown_to_pm(norm)).get_update()
+            store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None, update=seed)
+            state.enable_collab(s, workspace_id=wid, artifact="draft")
+        pc = ProposedChange(
+            workspace_id=wid, target_artifact="draft", section_index=1,
+            base_section_sha=base_sha, base_commit_sha="0" * 40,  # NOT NULL; sweep never reads it
+            origin_kind="human",                                  # NOT NULL
+            status="pending", kind="prose_edit", payload={"new_text": "## A\n\nEdited.\n"},
+        )
+        s.add(pc)
+        s.commit()
+        return wid, pc.id
+
+
+def test_sweep_collab_on_does_not_false_flag_normalized_base(pg_session_factory, tmp_path):
+    # Collab-on, base captured from the NORMALIZED log form → the sweep must NOT
+    # flip it stale (raw HEAD differs from normalized, which is the #1 bug).
+    ws_id, pc_id = _seed_ws_with_proposal(
+        pg_session_factory, tmp_path, collab=True, base_from="norm"
+    )
+    with pg_session_factory() as s:
+        refresh_staleness(session=s, workspace_id=ws_id, workspaces_dir=str(tmp_path))
+        s.commit()
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"
+
+
+def test_sweep_flag_off_uses_raw_head(pg_session_factory, tmp_path):
+    # Flag-off, base captured from RAW head → matches raw sweep → stays pending
+    # (proves the sweep still reads raw git when collab is off; parity).
+    ws_id, pc_id = _seed_ws_with_proposal(
+        pg_session_factory, tmp_path, collab=False, base_from="raw"
+    )
+    with pg_session_factory() as s:
+        refresh_staleness(session=s, workspace_id=ws_id, workspaces_dir=str(tmp_path))
+        s.commit()
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"
