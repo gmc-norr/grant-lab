@@ -3,7 +3,7 @@ from pathlib import Path
 import pycrdt
 
 from call_manager.db.models import User
-from call_manager.proposal_assist.collab import state
+from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
 from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
@@ -17,6 +17,7 @@ from tests.proposal_assist.collab.test_collab_kernel_accept import (
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 _DOC = "Preamble.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n"
+_NO_PREAMBLE = "## A\n\nBody a.\n\n## B\n\nBody b.\n"
 
 
 def _fork_edit_last_paragraph(room_doc, text: str) -> bytes:
@@ -106,3 +107,27 @@ def test_normal_single_section_accept_unchanged(pg_session_factory, tmp_path):
         s.commit()
     secs = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))
     assert "Plain edit." in secs[1].text and "Body b." in secs[2].text
+
+
+def test_blank_clear_of_already_empty_preamble_is_noop_accept(pg_session_factory, tmp_path):
+    # Reaches the kernel's `if not update:` guard: newline glue turns "" into "\n"
+    # (dodging the new_text == live.text short-circuit), blocks=[] on the already-
+    # empty preamble range [0,0) yields b"" — which must be accepted as a no-op,
+    # NOT persisted (a b"" row would poison the next hydration).
+    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _NO_PREAMBLE, "k-noop@ki.se")
+    before = pm_to_markdown(ydoc_to_pm_json(room_doc))
+    base_sha = split_sections(before)[0].sha    # section 0 = the EMPTY preamble
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(s, wid, section_index=0, new_text="",
+                       base_commit_sha=_git_head(repo), base_section_sha=base_sha)
+    with pg_session_factory() as s:
+        approver = s.get(User, oid)
+        res = kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
+                                  workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        s.commit()
+        assert res.pc.status == "accepted"
+        assert res.update is None and res.committed is False
+    with pg_session_factory() as s:
+        rows = store.load_updates(s, workspace_id=wid, artifact="draft")
+        assert b"" not in rows                       # no poison row persisted
+    assert pm_to_markdown(ydoc_to_pm_json(room_doc)) == before   # doc untouched
