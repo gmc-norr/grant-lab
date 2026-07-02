@@ -65,6 +65,7 @@ class Room:
         self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
         self._lock = asyncio.Lock()
+        self._pending_on_evict = None   # deferred last-leave checkpoint (Slice 3a c)
         # Serialize permission reconciliation per-room (Slice 3a cluster a/b).
         # Lock-acquisition ORDER (deadlock-freedom):
         #   recon_lock → (manager._lock via MANAGER.release/drop_client)
@@ -238,8 +239,9 @@ class RoomManager:
     async def operate(self, key: RoomKey, *, load: LoadFn):
         """Get-or-create a room for a SERVER operation (no client registered).
         Tracks an in-flight server-op count so eviction is deferred until BOTH
-        no clients AND no other server op remain (Codex H1). Does NOT checkpoint
-        on evict — the kernel op already checkpointed within its transaction."""
+        no clients AND no other server op remain (Codex H1). Does not create its
+        OWN checkpoint on evict, but runs any checkpoint `release` deferred
+        because this op held `ops > 0` (Slice 3a c)."""
         async with self._lock:
             room = self._rooms.get(key)
             if room is not None:
@@ -267,10 +269,15 @@ class RoomManager:
         try:
             yield room
         finally:
+            pending = None
             async with self._lock:
                 room.ops -= 1
                 if not room.clients and room.ops == 0 and self._rooms.get(key) is room:
                     self._rooms.pop(key, None)
+                    pending = room._pending_on_evict
+                    room._pending_on_evict = None
+            if pending is not None:
+                await pending(room)   # OUTSIDE the manager lock (mirrors release)
 
     def get(self, key: RoomKey) -> Room | None:
         return self._rooms.get(key)
@@ -278,13 +285,24 @@ class RoomManager:
     async def release(self, key: RoomKey, *, client, on_evict=None) -> None:
         """Deregister a client; evict the room when the last one leaves. If a
         room is evicted and `on_evict` is given, call it (e.g. to checkpoint)
-        OUTSIDE the manager lock — never hold the global lock across I/O."""
+        OUTSIDE the manager lock — never hold the global lock across I/O.
+
+        If the room is client-empty but a server op is still in flight (ops>0),
+        the eviction (and checkpoint) are deferred: `on_evict` is stashed on the
+        room and run by `operate()`-exit when it evicts (Slice 3a c)."""
         async with self._lock:
             room = self._rooms.get(key)
             if room is None:
                 return
             room.clients.pop(client, None)
-            evicted = self._rooms.pop(key) if (not room.clients and room.ops == 0) else None
+            if not room.clients and room.ops == 0:
+                evicted = self._rooms.pop(key)
+            else:
+                evicted = None
+                if not room.clients and on_evict is not None:
+                    # Client-empty but an op is in flight: defer the checkpoint to
+                    # operate()-exit so a straddling op cannot swallow it (Slice 3a c).
+                    room._pending_on_evict = on_evict
         if evicted is not None and on_evict is not None:
             await on_evict(evicted)
 
