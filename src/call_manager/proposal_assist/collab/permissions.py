@@ -7,6 +7,8 @@ membership. DB-touching (unlike room.py) — it reaches MANAGER + resolve_access
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextlib
 import logging
 import uuid
@@ -124,3 +126,42 @@ async def refresh_permissions(session_factory, workspaces_dir, *,
                 )
         else:
             state.can_write = can_write   # soft up/downgrade, in place
+
+
+def _log_signal_result(fut) -> None:
+    try:
+        exc = fut.exception()
+    except concurrent.futures.CancelledError:
+        return  # a cancelled reconciliation is not an error to report
+    if exc is not None:
+        logger.warning("collab.signal_permission_change_failed", exc_info=exc)
+
+
+def signal_permission_change(loop, session_factory, workspaces_dir, *,
+                             workspace_id: uuid.UUID, artifacts: list[str]) -> list:
+    """Fire-and-forget: schedule refresh_permissions on the app event loop for
+    each artifact, from a SYNC route (threadpool thread). Returns the futures
+    (prod ignores them; tests may await via asyncio.wrap_future). A missing/closed
+    loop degrades to a logged no-op — reconciliation is best-effort and MUST NOT
+    raise into the mutation route (Codex Medium #1)."""
+    if loop is None:
+        return []
+    futures = []
+    for artifact in artifacts:
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                refresh_permissions(session_factory, workspaces_dir,
+                                    workspace_id=workspace_id, artifact=artifact),
+                loop,
+            )
+        except Exception:
+            logger.warning(
+                "collab.signal_schedule_failed",
+                extra={"event": "collab_signal_schedule_failed",
+                       "room": str((workspace_id, artifact))},
+                exc_info=True,
+            )
+            continue
+        fut.add_done_callback(_log_signal_result)
+        futures.append(fut)
+    return futures

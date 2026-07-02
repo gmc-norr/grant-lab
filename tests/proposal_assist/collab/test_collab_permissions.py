@@ -1,12 +1,16 @@
 # tests/proposal_assist/collab/test_collab_permissions.py
 """Task 2: refresh_permissions reconciliation tests (Slice 2c)."""
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
 import pytest
 
 from call_manager.db.models import User, Workspace, WorkspaceViewer
-from call_manager.proposal_assist.collab.permissions import refresh_permissions
+from call_manager.proposal_assist.collab.permissions import (
+    refresh_permissions,
+    signal_permission_change,
+)
 from call_manager.proposal_assist.collab.room import MANAGER, ClientState
 from tests.proposal_assist.collab.test_collab_room import FakeClient  # reuse the fake
 
@@ -224,3 +228,50 @@ async def test_refresh_is_noop_when_no_room(pg_session_factory, tmp_path):
     await refresh_permissions(
         pg_session_factory, str(tmp_path), workspace_id=uuid.uuid4(), artifact="draft"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3: signal_permission_change bridge tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_signal_no_loop_is_safe_noop(pg_session_factory, tmp_path):
+    futs = signal_permission_change(None, pg_session_factory, str(tmp_path),
+                                    workspace_id=uuid.uuid4(), artifacts=["draft", "spec"])
+    assert futs == []
+
+
+@pytest.mark.anyio
+async def test_signal_closed_loop_never_raises(pg_session_factory, tmp_path):
+    # A closed loop makes run_coroutine_threadsafe raise; signal must swallow it
+    # (fail-closed) so a mutation route can never see an exception. Codex Medium #1.
+    dead = asyncio.new_event_loop()
+    dead.close()
+    futs = signal_permission_change(dead, pg_session_factory, str(tmp_path),
+                                    workspace_id=uuid.uuid4(), artifacts=["draft"])
+    assert futs == []   # scheduling failed, but no exception escaped
+
+
+@pytest.mark.anyio
+async def test_signal_schedules_refresh_on_loop(pg_session_factory, tmp_path):
+    ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
+    key = (ws_id, "spec")
+    member_c = FakeClient()
+
+    async def _load():
+        return []
+
+    await MANAGER.acquire(key, load=_load, client=member_c,
+                          state=ClientState(user_id=member_id, can_write=True))
+    try:
+        _lock_spec(pg_session_factory, ws_id, owner_id)
+        loop = asyncio.get_running_loop()
+        futs = signal_permission_change(loop, pg_session_factory, str(tmp_path),
+                                        workspace_id=ws_id, artifacts=["spec"])
+        assert len(futs) == 1
+        # run_coroutine_threadsafe returns a concurrent.futures.Future; give the
+        # loop a turn so the scheduled coroutine runs, then confirm the effect.
+        await asyncio.wrap_future(futs[0])
+        assert MANAGER.get(key).clients[member_c].can_write is False
+    finally:
+        await MANAGER.evict(key)

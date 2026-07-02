@@ -210,6 +210,7 @@ async def lifespan(app: FastAPI):
         app_loop=_asyncio.get_running_loop(),
         start=start_scheduler,
     )
+    app.state.app_loop = _asyncio.get_running_loop()
     try:
         yield
     finally:
