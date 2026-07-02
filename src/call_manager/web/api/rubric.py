@@ -231,5 +231,7 @@ def activate(
         )
         session.commit()
         result = _rubric_out(ws)   # build INSIDE the block (session still open)
-    signal_from_request(request, workspace_id=workspace_id, artifacts=["draft"])
+    # setup gates BOTH artifacts to owner-only (resolve_access), so activating
+    # lifts the write-gate for the draft AND an unlocked spec — reconcile both.
+    signal_from_request(request, workspace_id=workspace_id, artifacts=["draft", "spec"])
     return result

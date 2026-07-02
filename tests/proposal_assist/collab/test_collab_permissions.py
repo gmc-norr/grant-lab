@@ -223,11 +223,34 @@ async def test_refresh_soft_delete_revokes_all_without_checkpoint(
 
 
 @pytest.mark.anyio
+async def test_checkpoint_on_evict_skips_soft_deleted_workspace(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # Robustness for the ws_deleted split (Codex High #2 review follow-up): even when
+    # the WS route's own finally-release wins the last-leave race and passes this
+    # callback for a soft-deleted workspace, the callback itself must NOT checkpoint.
+    import call_manager.proposal_assist.collab.permissions as perm
+
+    called = {"n": 0}
+    monkeypatch.setattr(perm, "checkpoint_artifact",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
+    _soft_delete_ws(pg_session_factory, ws_id)
+
+    cb = perm.make_checkpoint_on_evict(pg_session_factory, str(tmp_path), ws_id, "draft")
+    await cb(None)                    # invoke the on_evict callback directly
+    assert called["n"] == 0           # soft-deleted workspace → checkpoint skipped
+
+
+@pytest.mark.anyio
 async def test_refresh_is_noop_when_no_room(pg_session_factory, tmp_path):
-    # No room registered for this key → clean no-op (the prod flag-off path).
+    # No room registered for this key → clean no-op (the prod flag-off path):
+    # returns without raising and creates no room.
+    wid = uuid.uuid4()
     await refresh_permissions(
-        pg_session_factory, str(tmp_path), workspace_id=uuid.uuid4(), artifact="draft"
+        pg_session_factory, str(tmp_path), workspace_id=wid, artifact="draft"
     )
+    assert MANAGER.get((wid, "draft")) is None
 
 
 # ---------------------------------------------------------------------------

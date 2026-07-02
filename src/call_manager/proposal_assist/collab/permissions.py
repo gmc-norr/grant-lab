@@ -35,6 +35,13 @@ def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, arti
     async def _on_evict(_room) -> None:
         def _cp():
             with session_factory() as s:
+                # Skip checkpointing a soft-deleted (gone) workspace. This keeps the
+                # ws_deleted "no checkpoint" split (Codex High #2) robust EVEN WHEN the
+                # WS route's own finally-release — which always passes this callback —
+                # wins the last-leave race over refresh_permissions' drop_client.
+                ws = s.get(Workspace, workspace_id)
+                if ws is None or ws.soft_deleted_at is not None:
+                    return
                 try:
                     checkpoint_artifact(
                         s,
@@ -169,13 +176,15 @@ def signal_permission_change(loop, session_factory, workspaces_dir, *,
         return []
     futures = []
     for artifact in artifacts:
+        # Build the coroutine first so we can close() it if scheduling fails —
+        # otherwise a closed/failed loop leaves it un-awaited ("coroutine was never
+        # awaited" RuntimeWarning + leaked frame).
+        coro = refresh_permissions(session_factory, workspaces_dir,
+                                   workspace_id=workspace_id, artifact=artifact)
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                refresh_permissions(session_factory, workspaces_dir,
-                                    workspace_id=workspace_id, artifact=artifact),
-                loop,
-            )
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except Exception:
+            coro.close()
             logger.warning(
                 "collab.signal_schedule_failed",
                 extra={"event": "collab_signal_schedule_failed",

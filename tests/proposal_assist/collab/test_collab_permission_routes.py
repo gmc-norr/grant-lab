@@ -169,11 +169,12 @@ def test_soft_delete_route_signals_both_artifacts(
 
 
 # ---------------------------------------------------------------------------
-# activate (rubric.py) → signal(workspace_id, artifacts=["draft"])
+# activate (rubric.py) → signal(workspace_id, artifacts=["draft", "spec"])
 # ---------------------------------------------------------------------------
 
 def test_activate_route_signals_draft(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    """POST /workspaces/{id}/activate calls signal_from_request with artifacts=["draft"]."""
+    """POST /workspaces/{id}/activate signals BOTH artifacts: setup gates draft AND
+    spec to owner-only, so activation lifts the write-gate for both."""
     import call_manager.web.api.rubric as rubmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
@@ -198,7 +199,7 @@ def test_activate_route_signals_draft(monkeypatch, pg_url, pg_session_factory, t
     assert resp.status_code == 200, resp.text
     assert len(calls) == 1
     assert calls[0][0] == ws_id
-    assert calls[0][1] == ["draft"]
+    assert calls[0][1] == ["draft", "spec"]
 
 
 def test_activate_no_signal_on_wrong_phase(monkeypatch, pg_url, pg_session_factory, tmp_path):

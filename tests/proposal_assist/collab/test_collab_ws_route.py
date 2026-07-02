@@ -78,6 +78,47 @@ def test_owner_can_connect_and_persist_an_update(_app, pg_session_factory):
         assert "owner edit" in str(d["body"])
 
 
+def test_persist_failure_closes_socket_without_double_close_crash(
+    _app, pg_session_factory, monkeypatch
+):
+    # Regression (Slice-2c): on a durable-write failure the route hits PersistError,
+    # calls MANAGER.evict(key) — which since Slice-2c closes THIS socket — then closes
+    # the websocket AGAIN. A 2nd close on a real Starlette socket raises RuntimeError;
+    # the route must suppress it and end cleanly (close 1011), not crash the handler.
+    import pytest
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from call_manager.proposal_assist.collab import store
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="route-persistfail@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("durable write failed")
+
+    monkeypatch.setattr(store, "append_update", _boom)
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
+            f"/api/ws/workspaces/{wid}/draft"
+        ) as wsconn:
+            assert P.is_sync_step1(wsconn.receive_bytes())  # initial SYNC_STEP1
+            wsconn.send_bytes(_update_frame("boom"))         # → persist raises → PersistError
+            wsconn.receive_bytes()                            # server evicts + closes (1011)
+        assert exc.value.code == 1011  # clean server-error close, no unhandled RuntimeError
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_non_member_connection_is_rejected(_app, pg_session_factory):
     import pytest
     from fastapi.testclient import TestClient

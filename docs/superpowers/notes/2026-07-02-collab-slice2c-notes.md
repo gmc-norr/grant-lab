@@ -75,3 +75,21 @@ Per-task commits (all on `collab-slice2c`):
 - **Downgrade / eviction UX** — a downgraded client silently drops writes (existing non-writer behavior); a revoked client's socket just closes. Toast/redirect messaging is Slice 3.
 - **Awareness / presence** — still deferred.
 - **Carried-over Slice-3 prereqs** (from Slice 2b): staleness normalization (normalized-live-SHA vs raw-git-base-SHA → room-aware propose or hydrate-normalize) and whole-fragment→targeted-subtree replace. The flag flip is BLOCKED on the staleness-normalization prereq.
+
+## Post-merge code review (2026-07-02, 4-angle finder + verify)
+
+**Fixed on master (follow-up commit):**
+- **Double-close crash (`collab_ws.py` PersistError path)** — since 2c's `evict()` closes every socket, the handler's own `await websocket.close()` was a 2nd close → `RuntimeError` on a real Starlette socket (tests missed it: `FakeClient.close()` is idempotent). Wrapped the explicit close in `contextlib.suppress`; added a real-route regression test (`test_persist_failure_closes_socket_without_double_close_crash`) that injects a persist failure and asserts a clean 1011 close.
+- **`activate` under-signalled** — it signalled only `['draft']`, but `setup` gates BOTH artifacts to owner-only (`resolve_access`), so activation also lifts the spec write-gate. Now `['draft','spec']`; test updated.
+- **`ws_deleted` split defeatable** — the WS route's own `finally`-release passes `make_checkpoint_on_evict` unconditionally, so it could checkpoint a soft-deleted workspace if it won the last-leave race over `refresh`'s `drop_client`. Guarded the callback itself on `ws.soft_deleted_at` (robust regardless of which release path wins); added a test.
+- **Orphaned-coroutine RuntimeWarning** (the nit noted above) — now FIXED: bind `coro = refresh_permissions(...)` and `coro.close()` on schedule failure.
+- Test hygiene: hardened `test_refresh_is_noop_when_no_room` with an assertion.
+
+**Deferred to Slice 3 — reconciliation-robustness cluster (all reachable ONLY with the flag ON + live WS clients; best solved together at the flag-flip, and they need the live-client flow to test end-to-end):**
+- **Unserialized reconciliation** — two rapid mutations on the same room (e.g. unlock→lock) whose threadpool `_resolve` reads resolve out of order can leave `state.can_write` contradicting the committed DB (member writable on a locked spec). Fix: per-`(workspace,artifact)` reconcile lock (serialize refresh) or a generation/epoch guard so a stale refresh can't clobber a newer one.
+- **Connect-straddle TOCTOU** — a client whose connect-time `resolve_access` read the pre-commit DB, but which registers in `room.clients` AFTER `refresh` took its snapshot, keeps a stale permission. Fix: re-resolve at registration, or a room permission-generation checked on register.
+- **Live-revoke checkpoint skipped when `ops>0`** — if a kernel op holds the room (`RoomManager.operate`), a live-workspace revoke's `release` sees `room.ops>0` → no evict → the intended last-leave checkpoint is skipped, and `operate`'s later eviction does not checkpoint. Narrow + benign (git lags the durable log until the next checkpoint), but violates the "git is a checkpoint of the room" intent under that interleave.
+- **Resolve-failure fails OPEN for a revocation** — in `refresh_permissions`, a transient `_resolve` exception `continue`s and leaves `state.can_write` unchanged, so a just-revoked member keeps write until a later signal/reconnect. For a security-relevant downgrade this should fail *closed* (retry, re-signal, or close the socket) rather than leave the higher permission.
+- **`kernel_accept.py` `evict` blast-radius** — 2c's evict-closes-all means a post-mutation kernel-accept failure now force-disconnects every connected editor (1011). This is the *correct* dirty-room recovery (don't leave clients editing a doc ahead of the rolled-back log), but it's untested with a live client — add a Slice-3 test.
+
+The reconciliation mechanism's contract is explicitly **best-effort convergence; a reconnect always re-resolves correctly** — so none of the deferred items lose data or are prod-reachable while the flag is OFF; they are correctness-hardening for the flag-flip.

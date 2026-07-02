@@ -7,6 +7,7 @@ update log; restart recovery by replay. No git, no awareness/presence yet.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 
@@ -132,7 +133,11 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         # room so the next connection rebuilds from the log (the CRDT client
         # re-offers its update on reconnect). Close this socket as a server error.
         await MANAGER.evict(key)
-        await websocket.close(code=_WS_INTERNAL_ERROR)
+        # evict() (Slice-2c) already closed THIS socket if it was still registered;
+        # a second close on an already-closed Starlette WebSocket raises RuntimeError.
+        # Suppress it — the close still runs (and matters) if evict found no room.
+        with contextlib.suppress(Exception):
+            await websocket.close(code=_WS_INTERNAL_ERROR)
     finally:
         await MANAGER.release(
             key,
