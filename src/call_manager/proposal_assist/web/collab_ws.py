@@ -147,7 +147,9 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
 
     room = await MANAGER.acquire(key, load=_load, client=websocket)
     try:
-        await websocket.send_bytes(room.initial_message())
+        async with room.lock:
+            initial = room.initial_message()
+        await websocket.send_bytes(initial)
         async for message in websocket.iter_bytes():
             if len(message) > _MAX_FRAME_BYTES:
                 await websocket.close(code=_WS_MESSAGE_TOO_BIG)
