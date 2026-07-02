@@ -14,19 +14,17 @@ from fastapi import APIRouter, WebSocket
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
-from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.room import MANAGER, PersistError
+from call_manager.proposal_assist.collab.permissions import make_checkpoint_on_evict
+from call_manager.proposal_assist.collab.room import MANAGER, ClientState, PersistError
 from call_manager.proposal_assist.collab.ws_auth import (
     WSAuthError,
     check_origin,
     resolve_access,
     resolve_ws_user,
 )
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -111,41 +109,8 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
 
         await run_in_threadpool(_write)
 
-    async def _checkpoint_on_evict(_room) -> None:
-        def _cp():
-            with session_factory() as s:
-                try:
-                    checkpoint_artifact(
-                        s,
-                        workspace_id=workspace_id,
-                        artifact=artifact,
-                        workspaces_dir=workspaces_dir,
-                    )
-                    s.commit()
-                except (GitCommitError, CommitMutexTimeout):
-                    # Expected + benign at teardown: another writer holds the
-                    # commit mutex, or a transient git failure. The durable log
-                    # survives, so the next trigger (explicit endpoint / next
-                    # last-leave) retries. Don't let it escape the disconnect path.
-                    logger.warning(
-                        "collab.checkpoint_on_evict_skipped",
-                        extra={"event": "collab_checkpoint_on_evict_skipped", "room": str(key)},
-                    )
-                    s.rollback()
-                except Exception:
-                    # Unexpected: surface loudly (ERROR + traceback) instead of
-                    # masking a real bug as a routine skip, but still keep a
-                    # teardown checkpoint failure from escaping the disconnect path.
-                    logger.error(
-                        "collab.checkpoint_on_evict_error",
-                        extra={"event": "collab_checkpoint_on_evict_error", "room": str(key)},
-                        exc_info=True,
-                    )
-                    s.rollback()
-
-        await run_in_threadpool(_cp)
-
-    room = await MANAGER.acquire(key, load=_load, client=websocket)
+    state = ClientState(user_id=user.id, can_write=can_write)
+    room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
     try:
         async with room.lock:
             initial = room.initial_message()
@@ -156,8 +121,7 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
                 break
             await room.handle(
                 sender=websocket,
-                user_id=user.id,
-                can_write=can_write,
+                state=state,
                 message=message,
                 persist=_persist,
             )
@@ -170,4 +134,10 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         await MANAGER.evict(key)
         await websocket.close(code=_WS_INTERNAL_ERROR)
     finally:
-        await MANAGER.release(key, client=websocket, on_evict=_checkpoint_on_evict)
+        await MANAGER.release(
+            key,
+            client=websocket,
+            on_evict=make_checkpoint_on_evict(
+                session_factory, workspaces_dir, workspace_id, artifact
+            ),
+        )

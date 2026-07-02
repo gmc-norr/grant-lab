@@ -5,7 +5,7 @@ import pytest
 from pycrdt import Doc, Text
 
 from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab.room import Room, RoomManager
+from call_manager.proposal_assist.collab.room import ClientState, Room, RoomManager
 
 
 @pytest.fixture
@@ -18,9 +18,13 @@ class FakeClient:
 
     def __init__(self):
         self.sent: list[bytes] = []
+        self.closed: int | None = None   # records the close code, or None
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent.append(data)
+
+    async def close(self, code: int = 1000) -> None:
+        self.closed = code
 
 
 def _update_frame(text: str) -> bytes:
@@ -48,12 +52,14 @@ async def test_writer_update_is_applied_persisted_and_broadcast_to_others():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     writer, reader = FakeClient(), FakeClient()
-    room.clients.update({writer, reader})
+    st = ClientState(user_id=7, can_write=True)
+    room.clients[writer] = st
+    room.clients[reader] = ClientState(user_id=1, can_write=True)
     log, persist = _persist_sink()
 
     frame = _update_frame("hello")
 
-    await room.handle(sender=writer, user_id=7, can_write=True, message=frame, persist=persist)
+    await room.handle(sender=writer, state=st, message=frame, persist=persist)
 
     # applied to the room doc
     assert "hello" in str(room.doc.get("body", type=Text))
@@ -68,12 +74,14 @@ async def test_non_writer_update_is_dropped_not_persisted_not_broadcast():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     bad, other = FakeClient(), FakeClient()
-    room.clients.update({bad, other})
+    st = ClientState(user_id=9, can_write=False)
+    room.clients[bad] = st
+    room.clients[other] = ClientState(user_id=1, can_write=True)
     log, persist = _persist_sink()
 
     frame = _update_frame("nope")
 
-    await room.handle(sender=bad, user_id=9, can_write=False, message=frame, persist=persist)
+    await room.handle(sender=bad, state=st, message=frame, persist=persist)
 
     assert log == []                      # not persisted
     assert other.sent == []               # not broadcast
@@ -88,14 +96,15 @@ async def test_step1_is_answered_for_any_client_even_read_only():
     room.doc["body"] = Text()
     room.doc["body"] += "seeded"
     reader = FakeClient()
-    room.clients.add(reader)
+    st = ClientState(user_id=3, can_write=False)
+    room.clients[reader] = st
     log, persist = _persist_sink()
 
     client_doc = Doc()
     client_doc["body"] = Text()
     step1 = P.create_sync_message(client_doc)
 
-    await room.handle(sender=reader, user_id=3, can_write=False, message=step1, persist=persist)
+    await room.handle(sender=reader, state=st, message=step1, persist=persist)
 
     # the read path is always allowed: reader received a STEP2 it can apply
     assert reader.sent
@@ -109,14 +118,16 @@ async def test_two_clients_converge_through_the_room():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     a, b = FakeClient(), FakeClient()
-    room.clients.update({a, b})
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[a] = st
+    room.clients[b] = ClientState(user_id=1, can_write=True)
     _, persist = _persist_sink()
 
     db = Doc()
     db["body"] = Text()
     frame = _update_frame("from A")
 
-    await room.handle(sender=a, user_id=1, can_write=True, message=frame, persist=persist)
+    await room.handle(sender=a, state=st, message=frame, persist=persist)
     # b receives the broadcast and applies it
     db.apply_update(P.extract_update(b.sent[-1]))
     assert str(db["body"]) == "from A"
@@ -138,7 +149,9 @@ async def test_manager_replays_persisted_updates_on_cold_acquire():
     mgr = RoomManager()
     key = (uuid.uuid4(), "draft")
     client = FakeClient()
-    room = await mgr.acquire(key, load=load, client=client)
+    room = await mgr.acquire(
+        key, load=load, client=client, state=ClientState(user_id=1, can_write=True)
+    )
     assert "recovered state" in str(room.doc.get("body", type=Text))
     assert client in room.clients
 
@@ -152,8 +165,10 @@ async def test_manager_evicts_room_when_last_client_leaves():
     async def load():
         return []
 
-    await mgr.acquire(key, load=load, client=c1)
-    await mgr.acquire(key, load=load, client=c2)  # same room, second client
+    await mgr.acquire(key, load=load, client=c1, state=ClientState(user_id=1, can_write=True))
+    await mgr.acquire(
+        key, load=load, client=c2, state=ClientState(user_id=1, can_write=True)
+    )  # same room, second client
     await mgr.release(key, client=c1)
     assert mgr.has_room(key)            # still one client
     await mgr.release(key, client=c2)
@@ -165,7 +180,9 @@ async def test_persist_failure_poisons_room_and_does_not_broadcast():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     writer, other = FakeClient(), FakeClient()
-    room.clients.update({writer, other})
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[writer] = st
+    room.clients[other] = ClientState(user_id=1, can_write=True)
 
     async def persist_boom(user_id, update):
         raise RuntimeError("db down")
@@ -175,7 +192,7 @@ async def test_persist_failure_poisons_room_and_does_not_broadcast():
     frame = _update_frame("doomed")
     with pytest.raises(PersistError):
         await room.handle(
-            sender=writer, user_id=1, can_write=True, message=frame, persist=persist_boom
+            sender=writer, state=st, message=frame, persist=persist_boom
         )
     assert room.poisoned is True
     assert other.sent == []   # persist failed before broadcast -> not published
@@ -188,12 +205,14 @@ async def test_malformed_update_is_dropped_without_persist_or_broadcast():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     writer, other = FakeClient(), FakeClient()
-    room.clients.update({writer, other})
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[writer] = st
+    room.clients[other] = ClientState(user_id=1, can_write=True)
     log, persist = _persist_sink()
 
     garbage = P.create_update_message(b"\xde\xad\xbe\xef\xde\xad")  # not a real update
     await room.handle(
-        sender=writer, user_id=1, can_write=True, message=garbage, persist=persist
+        sender=writer, state=st, message=garbage, persist=persist
     )
     assert log == []
     assert other.sent == []
@@ -207,12 +226,14 @@ async def test_malformed_frame_is_dropped_without_persist_or_broadcast():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     writer, other = FakeClient(), FakeClient()
-    room.clients.update({writer, other})
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[writer] = st
+    room.clients[other] = ClientState(user_id=1, can_write=True)
     log, persist = _persist_sink()
 
     bad_frame = bytes([0, 2, 0xFF, 0xFF, 0xFF])  # [SYNC][SYNC_UPDATE][truncated varuint]
     await room.handle(
-        sender=writer, user_id=1, can_write=True, message=bad_frame, persist=persist
+        sender=writer, state=st, message=bad_frame, persist=persist
     )
     assert log == []
     assert other.sent == []
@@ -227,11 +248,14 @@ async def test_broadcast_isolates_a_failing_client():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     writer, good, boom = FakeClient(), FakeClient(), BoomClient()
-    room.clients.update({writer, good, boom})
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[writer] = st
+    room.clients[good] = ClientState(user_id=1, can_write=True)
+    room.clients[boom] = ClientState(user_id=1, can_write=True)
     _, persist = _persist_sink()
 
     await room.handle(
-        sender=writer, user_id=1, can_write=True, message=_update_frame("x"), persist=persist
+        sender=writer, state=st, message=_update_frame("x"), persist=persist
     )
     assert good.sent                  # healthy client still received the update
     assert boom not in room.clients   # broken client dropped from the room
@@ -246,12 +270,13 @@ async def test_malformed_step1_frame_is_dropped_without_raising():
     key = (uuid.uuid4(), "draft")
     room = Room(key)
     reader = FakeClient()
-    room.clients.add(reader)
+    st = ClientState(user_id=1, can_write=False)
+    room.clients[reader] = st
     _, persist = _persist_sink()
 
     for bad in (b"\x00\x00", b"\x00\x00\xff\xff\xff", b"\x00\x00\x01"):
         await room.handle(
-            sender=reader, user_id=1, can_write=False, message=bad, persist=persist
+            sender=reader, state=st, message=bad, persist=persist
         )  # must not raise
     assert reader.sent == []  # malformed STEP1 produced no reply
 
@@ -276,10 +301,16 @@ async def test_acquire_does_not_serialize_unrelated_rooms():
     key_b = (uuid.uuid4(), "draft")
     ca, cb = FakeClient(), FakeClient()
 
-    task_a = asyncio.create_task(mgr.acquire(key_a, load=slow_load_a, client=ca))
+    st = ClientState(user_id=1, can_write=True)
+    task_a = asyncio.create_task(
+        mgr.acquire(key_a, load=slow_load_a, client=ca, state=st)
+    )
     await a_started.wait()  # A is mid-load, blocked on a_release
     # B must complete without waiting for A's load:
-    room_b = await asyncio.wait_for(mgr.acquire(key_b, load=fast_load_b, client=cb), timeout=1.0)
+    room_b = await asyncio.wait_for(
+        mgr.acquire(key_b, load=fast_load_b, client=cb, state=st),
+        timeout=1.0,
+    )
     assert room_b.key == key_b
 
     a_release.set()
@@ -303,12 +334,71 @@ async def test_same_key_concurrent_acquire_loads_once():
 
     key = (uuid.uuid4(), "draft")
     c1, c2 = FakeClient(), FakeClient()
-    t1 = asyncio.create_task(mgr.acquire(key, load=load, client=c1))
-    t2 = asyncio.create_task(mgr.acquire(key, load=load, client=c2))
+    t1 = asyncio.create_task(
+        mgr.acquire(key, load=load, client=c1, state=ClientState(user_id=1, can_write=True))
+    )
+    t2 = asyncio.create_task(
+        mgr.acquire(key, load=load, client=c2, state=ClientState(user_id=1, can_write=True))
+    )
     await asyncio.sleep(0)  # let both enter acquire
     gate.set()
     r1 = await t1
     r2 = await t2
     assert r1 is r2
     assert calls == 1
-    assert {c1, c2} <= r1.clients
+    assert {c1, c2} <= r1.clients.keys()
+
+
+@pytest.mark.anyio
+async def test_acquire_stores_client_state_and_state_is_mutable():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    client = FakeClient()
+    state = ClientState(user_id=7, can_write=False)
+
+    async def _load():
+        return []
+
+    room = await mgr.acquire(key, load=_load, client=client, state=state)
+    # the stored state is the SAME object the caller holds
+    assert room.clients[client] is state
+    # a later flip is visible via the room mapping (reconciliation relies on this)
+    state.can_write = True
+    assert room.clients[client].can_write is True
+
+
+@pytest.mark.anyio
+async def test_write_blocked_on_lock_rechecks_live_permission():
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    client = FakeClient()
+    state = ClientState(user_id=7, can_write=True)
+    room.clients[client] = state
+    log, persist = _persist_sink()
+    frame = _update_frame("late")
+    # Hold the room lock so the write frame blocks INSIDE handle at `async with self._lock`.
+    async with room.lock:
+        task = asyncio.create_task(
+            room.handle(sender=client, state=state, message=frame, persist=persist)
+        )
+        await asyncio.sleep(0)      # let handle pass the early check and block on the lock
+        state.can_write = False     # revoke WHILE the frame waits for the lock
+    await task                      # lock released → handle proceeds, must re-check live state
+    assert log == []                                            # NOT persisted
+    assert "late" not in str(room.doc.get("body", type=Text))  # NOT applied
+
+
+@pytest.mark.anyio
+async def test_evict_closes_all_client_sockets():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    a, b = FakeClient(), FakeClient()
+
+    async def _load():
+        return []
+
+    await mgr.acquire(key, load=_load, client=a, state=ClientState(user_id=1, can_write=True))
+    await mgr.acquire(key, load=_load, client=b, state=ClientState(user_id=2, can_write=True))
+    await mgr.evict(key)
+    assert a.closed == 1011 and b.closed == 1011      # server-error close on poison evict
+    assert mgr.get(key) is None                        # room removed
