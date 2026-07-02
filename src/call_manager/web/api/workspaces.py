@@ -48,6 +48,7 @@ from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledge
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -543,6 +544,7 @@ def post_lock_spec(
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
         locked_by = _locker_email(session, locked_by_id)
+        signal_from_request(request, workspace_id=workspace_id, artifacts=["spec"])
     return SpecLockOut(locked=True, locked_at=locked_at, locked_by=locked_by)
 
 
@@ -608,6 +610,7 @@ def post_unlock_spec(
                 ) from e
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+    signal_from_request(request, workspace_id=workspace_id, artifacts=["spec"])
     return SpecLockOut(locked=False, locked_at=None, locked_by=None)
 
 
@@ -1227,4 +1230,5 @@ def soft_delete_workspace_api(
         soft_delete_workspace(
             session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir)
         )
+    signal_from_request(request, workspace_id=workspace_id, artifacts=["draft", "spec"])
     return Response(status_code=204)

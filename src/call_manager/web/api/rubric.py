@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User, WorkspaceEvent, WorkspaceSetupJob
+from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()
@@ -229,4 +230,6 @@ def activate(
             )
         )
         session.commit()
-        return _rubric_out(ws)
+        result = _rubric_out(ws)   # build INSIDE the block (session still open)
+    signal_from_request(request, workspace_id=workspace_id, artifacts=["draft"])
+    return result

@@ -20,6 +20,7 @@ from call_manager.db.models import User, WorkspaceEvent, WorkspaceViewer
 from call_manager.proposal_assist.citations.bibliography import (
     CITATION_STYLES as _CITATION_STYLES,
 )
+from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.web._perms import require_owner
 from call_manager.proposal_assist.web.workspace_meta import (
     _MAX_WORKSPACE_TITLE_LEN,
@@ -126,6 +127,8 @@ def add_member(
             )
         )
         session.commit()
+        # No permission signal: a newly-added member has no live connection to
+        # reconcile (connect requires is_member), so connect-time resolution handles them.
         return MemberOut(user_id=target.id, email=target.email, role="member")
 
 
@@ -155,4 +158,5 @@ def remove_member(
                 )
             )
         session.commit()
+    signal_from_request(request, workspace_id=workspace_id, artifacts=["draft", "spec"])
     return Response(status_code=204)

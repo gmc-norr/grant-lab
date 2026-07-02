@@ -128,6 +128,27 @@ async def refresh_permissions(session_factory, workspaces_dir, *,
             state.can_write = can_write   # soft up/downgrade, in place
 
 
+def signal_from_request(request, *, workspace_id: uuid.UUID, artifacts: list[str]) -> None:
+    """Route-side convenience: fire signal_permission_change using the app's
+    captured loop + session_factory + workspaces_dir. NEVER raises — a mutation
+    route must not fail because reconciliation couldn't be scheduled (Codex Medium #1)."""
+    try:
+        loop = getattr(request.app.state, "app_loop", None)
+        signal_permission_change(
+            loop,
+            request.app.state.session_factory,
+            request.app.state.settings.workspaces_dir,
+            workspace_id=workspace_id,
+            artifacts=artifacts,
+        )
+    except Exception:
+        logger.warning(
+            "collab.signal_from_request_failed",
+            extra={"event": "collab_signal_from_request_failed", "workspace_id": str(workspace_id)},
+            exc_info=True,
+        )
+
+
 def _log_signal_result(fut) -> None:
     try:
         exc = fut.exception()
