@@ -62,27 +62,39 @@ async def _read_artifact_impl(
     """
     artifact = "spec" if filename == SPEC_FILENAME else "draft"
     path = ctx.repo_dir / filename
-    with ctx.session_factory() as _s:
-        _collab = is_collab_enabled(_s, workspace_id=ctx.workspace_id, artifact=artifact)
-        # Flag-off: disk is authoritative — keep the existence guard. Collab-on:
-        # the durable log is canonical, so don't gate on the on-disk file.
-        if not _collab and not path.exists():
-            return {"error": f"{filename} does not exist in this workspace"}
-        # HEAD snapshot stays (concurrent-save detection on the flag-off path; moot
-        # on the collab path, which keys staleness on section SHA). Resolve HEAD
-        # BEFORE reading content (fail-safe ordering invariant).
-        try:
-            setattr(ctx, head_attr, current_head(ctx.repo_dir))
-        except GitCommitError:
-            setattr(ctx, head_attr, None)
-        if _collab:
-            # Room-canonical (normalized) content so the captured base section shas
-            # match the kernel's accept-time live.sha (Slice 3a C1).
-            content = canonical.canonical_artifact_markdown(
-                _s, workspace_id=ctx.workspace_id, artifact=artifact, repo_dir=ctx.repo_dir
-            )
-        else:
-            content = path.read_text()   # raw HEAD, byte-for-byte (parity)
+    # Unit-test harnesses construct ToolContext(session_factory=None, settings=None)
+    # to exercise the flag-off path without a database; prod always passes a factory.
+    # Treat a missing factory as flag-off so those parity tests keep working.
+    if ctx.session_factory is not None:
+        with ctx.session_factory() as _s:
+            _collab = is_collab_enabled(_s, workspace_id=ctx.workspace_id, artifact=artifact)
+            if _collab:
+                # Flag-on: durable log is canonical — skip disk-existence guard.
+                # Resolve HEAD BEFORE canonical read (ordering moot on collab path
+                # which keys staleness on section SHA, but kept for symmetry).
+                try:
+                    setattr(ctx, head_attr, current_head(ctx.repo_dir))
+                except GitCommitError:
+                    setattr(ctx, head_attr, None)
+                # Room-canonical (normalized) content so the captured base section
+                # shas match the kernel's accept-time live.sha (Slice 3a C1).
+                content = canonical.canonical_artifact_markdown(
+                    _s, workspace_id=ctx.workspace_id, artifact=artifact, repo_dir=ctx.repo_dir
+                )
+                # Skip the flag-off block below.
+                setattr(ctx, sections_attr, {s.index: s.sha for s in split_sections(content)})
+                setattr(ctx, proposal_attr, content)
+                return {"content": content}
+    # Flag-off path (or no session factory): disk is authoritative.
+    # Existence guard + HEAD-before-content ordering invariant preserved exactly.
+    if not path.exists():
+        return {"error": f"{filename} does not exist in this workspace"}
+    # Resolve HEAD BEFORE reading content (fail-safe ordering invariant — see docstring).
+    try:
+        setattr(ctx, head_attr, current_head(ctx.repo_dir))
+    except GitCommitError:
+        setattr(ctx, head_attr, None)
+    content = path.read_text()  # raw HEAD, byte-for-byte (parity)
     # SP2a-2 §3: record the per-section shas the agent saw, so a later propose
     # takes its base_section_sha from this READ-time snapshot (anti-clobber)
     # rather than a live recompute. Built from the same `content` we return, so
