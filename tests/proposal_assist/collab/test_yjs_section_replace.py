@@ -108,6 +108,9 @@ def test_clear_section_to_empty_blocks():
     doc = pm_json_to_ydoc(markdown_to_pm(_DOC))
     update = apply_pm_section_to_fragment(doc, section_index=0, blocks=[])
     assert update
-    secs = split_sections(pm_to_markdown(ydoc_to_pm_json(doc)))
-    assert secs[1].heading == "A"   # preamble gone → first section is now A
+    out = pm_to_markdown(ydoc_to_pm_json(doc))
+    assert "Preamble." not in out               # the cleared text is actually gone
+    secs = split_sections(out)
+    assert secs[0].text == ""                   # section 0 = now-empty preamble
+    assert secs[1].heading == "A"
     assert "Body b." in secs[-1].text
