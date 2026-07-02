@@ -268,6 +268,19 @@ class RoomManager:
         if evicted is not None and on_evict is not None:
             await on_evict(evicted)
 
+    async def drop_client(self, key: RoomKey, client) -> None:
+        """Deregister a client WITHOUT checkpointing, evicting the room if it
+        becomes empty. Used by permission revocation and teardown where a
+        last-leave checkpoint is wrong (the workspace may be soft-deleted / the
+        member just lost access). release() is the checkpointing counterpart."""
+        async with self._lock:
+            room = self._rooms.get(key)
+            if room is None:
+                return
+            room.clients.pop(client, None)
+            if not room.clients and room.ops == 0 and self._rooms.get(key) is room:
+                self._rooms.pop(key, None)
+
     async def evict(self, key: RoomKey) -> None:
         """Force-remove a room regardless of connected clients (poison recovery).
         The next acquire rebuilds it from the durable log."""

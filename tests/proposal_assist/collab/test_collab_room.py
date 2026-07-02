@@ -18,9 +18,13 @@ class FakeClient:
 
     def __init__(self):
         self.sent: list[bytes] = []
+        self.closed: int | None = None   # records the close code, or None
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent.append(data)
+
+    async def close(self, code: int = 1000) -> None:
+        self.closed = code
 
 
 def _update_frame(text: str) -> bytes:
