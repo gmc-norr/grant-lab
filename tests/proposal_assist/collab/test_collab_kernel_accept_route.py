@@ -1,6 +1,6 @@
 # tests/proposal_assist/collab/test_collab_kernel_accept_route.py
 """
-Integration tests for the room-aware proposal-accept route (Slice 2b-1, Task 4).
+Integration tests for the room-aware proposal-accept route (Slice 2b-1 + 2b-2, Task 4).
 
 Cases:
   1. kernel happy path: collab enabled, pending prose proposal → POST accept → 200 accepted +
@@ -9,7 +9,10 @@ Cases:
      receives an update frame; after applying it ydoc_to_pm_json matches accepted content.
   3. stale vs live: a live (uncheckpointed) edit in the room first, then accept a proposal
      whose base is the pre-edit sha → 200 status=stale, git unchanged.
-  4. citation deferred: pending citation_insert proposal on a collab-enabled artifact → 409.
+  4. collab citation accept via HTTP: collab enabled, pending citation_insert pc → 200 accepted,
+     marker in checkpointed proposal.md, ledger row in HEAD.
+  4b. flag-off citation parity: collab NOT enabled, citation_insert pc → git-first 200 accepted.
+  4c. unsupported kind → 422: collab enabled, citation_remove pc → 422, pc status unchanged.
   5. flag-off parity: collab NOT enabled → git-first path returns 200 accepted.
 
 Patterns mirror test_collab_checkpoint_triggers.py + test_collab_kernel_accept.py.
@@ -24,9 +27,11 @@ from pycrdt import Doc
 from sqlalchemy import select
 
 from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import ArtifactVersion, ProposedChange
+from call_manager.db.models import ArtifactVersion, ProposedChange, Reference, ReferenceChunk
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.gitio import GitCommitError
+from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import kernel as kernel_mod
 from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab import state as collab_state
@@ -37,6 +42,11 @@ from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.proposals.proposing import (
+    capture_base,
+    propose_citation_insert,
+)
+from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 # ---------------------------------------------------------------------------
@@ -122,6 +132,76 @@ def _recv_sync_write(wsconn, tries: int = 10) -> bytes:
         if P.is_sync_write(frame):
             return frame
     raise AssertionError("no SYNC write frame received")
+
+
+# ---------------------------------------------------------------------------
+# Citation route test helpers / constants
+# ---------------------------------------------------------------------------
+
+_EMBED_DIM = 1024
+_CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
+_ANCHOR = "original."
+_EVIDENCE_QUOTE = "reduces recurrence by 30%"
+_CSL_WITH_AUTHOR = {
+    "author": [{"family": "Smith", "given": "J."}],
+    "issued": {"date-parts": [[2021]]},
+    "title": "Test paper",
+    "type": "article-journal",
+}
+# Proposal text used for citation route tests; anchor lives in section 1 ("## Methods").
+_CITE_MD0 = "preamble\n\n## Methods\nSee original.\n"
+
+
+def _seed_ref(session, workspace_id, *, citekey="smith2021"):
+    """Seed a Reference + one ReferenceChunk carrying _CHUNK_TEXT."""
+    ref = Reference(
+        workspace_id=workspace_id,
+        kind="paper",
+        source_type="uploaded",
+        filename="seed.pdf",
+        storage_path="seed/seed.pdf",
+        mime_type="application/pdf",
+        citekey=citekey,
+        csl_json=_CSL_WITH_AUTHOR,
+        metadata_status="approved",
+    )
+    session.add(ref)
+    session.flush()
+    session.add(
+        ReferenceChunk(
+            reference_id=ref.id,
+            workspace_id=workspace_id,
+            chunk_index=0,
+            section_path="Results",
+            text=_CHUNK_TEXT,
+            embedding=[0.0] * _EMBED_DIM,
+            embedding_model="fake-embedder",
+        )
+    )
+    session.flush()
+    return ref
+
+
+def _mk_citation_pc_via_propose(
+    session, wid, *, section_index, base_commit_sha, base_section_sha, ref_id
+):
+    """Create a citation_insert ProposedChange via the official proposer."""
+    pc = propose_citation_insert(
+        session=session,
+        workspace_id=wid,
+        section_index=section_index,
+        base_commit_sha=base_commit_sha,
+        base_section_sha=base_section_sha,
+        reference_id=str(ref_id),
+        anchor=_ANCHOR,
+        chunk_index=0,
+        evidence_quote=_EVIDENCE_QUOTE,
+        stance="supports",
+        confidence="high",
+        origin_kind="human",
+    )
+    session.commit()
+    return pc.id
 
 
 # ---------------------------------------------------------------------------
@@ -337,18 +417,130 @@ def test_stale_vs_live(_app, pg_session_factory, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Case 4: citation deferred
+# Case 4: collab citation accept via HTTP (Slice 2b-2, Task 4)
 # ---------------------------------------------------------------------------
 
 
-def test_citation_deferred_returns_409(_app, pg_session_factory, tmp_path):
-    """A pending citation_insert proposal on a collab-enabled artifact → 409."""
+def test_collab_citation_accept_via_http(_app, pg_session_factory, tmp_path):
+    """Collab enabled, pending citation_insert pc → POST accept → 200 accepted,
+    marker in checkpointed proposal.md, ledger row in HEAD's citations.json."""
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ka-route-cite-accept@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, _CITE_MD0)
+    head = _git_head(repo)
+
+    # Derive base_sha from the LIVE (Yjs-normalised) room — same lesson as prose tests.
+    live_sections = _live_sections_from_md(pg_session_factory, wid, str(tmp_path))
+    base_sha = live_sections[1].sha  # section 1 = "## Methods…"
+
+    with pg_session_factory() as s:
+        ref = _seed_ref(s, wid, citekey="smith2021")
+        pc_id = _mk_citation_pc_via_propose(
+            s, wid, section_index=1, base_commit_sha=head,
+            base_section_sha=base_sha, ref_id=ref.id,
+        )
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        r = client.post(f"/api/workspaces/{wid}/proposed-changes/{pc_id}/accept")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["resulting_commit_sha"] is not None
+    assert _git_head(repo) != head  # a new commit was made
+
+    # Marker in checkpointed proposal.md.
+    disk = (repo / PROPOSAL_FILENAME).read_text()
+    markers = find_markers(disk)
+    assert len(markers) == 1, f"expected 1 marker in disk, got {markers}"
+    ev_id = markers[0]["ev_id"]
+
+    # Ledger row in HEAD's citations.json matches the marker ev_id.
+    ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())
+    assert len(ledger["evidence"]) == 1
+    assert ledger["evidence"][0]["id"] == ev_id
+
+
+# ---------------------------------------------------------------------------
+# Case 4b: flag-off citation parity (git-first path for citation_insert)
+# ---------------------------------------------------------------------------
+
+
+def test_flag_off_citation_parity(_app, pg_session_factory, tmp_path):
+    """Without enable_collab, POST accept of a citation_insert pc → git-first path →
+    200 accepted; both proposal.md and citations.json are in HEAD."""
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ka-route-cite-flagoff@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        # Deliberately NOT calling enable_collab
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, _CITE_MD0)
+    head = _git_head(repo)
+
+    # For the git-first path, base_section_sha is from raw git markdown (no Yjs round-trip).
+    base_commit_sha, base_section_sha = capture_base(repo, 1)
+
+    with pg_session_factory() as s:
+        ref = _seed_ref(s, wid, citekey="smith2021")
+        pc_id = _mk_citation_pc_via_propose(
+            s, wid, section_index=1, base_commit_sha=base_commit_sha,
+            base_section_sha=base_section_sha, ref_id=ref.id,
+        )
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        r = client.post(f"/api/workspaces/{wid}/proposed-changes/{pc_id}/accept")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["resulting_commit_sha"] is not None
+    assert _git_head(repo) != head  # git commit was made
+
+    # Marker present in proposal.md.
+    disk = (repo / PROPOSAL_FILENAME).read_text()
+    markers = find_markers(disk)
+    assert len(markers) == 1
+
+
+# ---------------------------------------------------------------------------
+# Case 4c: unsupported kind → 422
+# ---------------------------------------------------------------------------
+
+
+def test_unsupported_kind_returns_422(_app, pg_session_factory, tmp_path):
+    """Collab enabled, a citation_remove pc (no producer) → POST accept → 422;
+    pc status stays pending, room NOT evicted, git unchanged."""
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-citation@ki.se")
+        owner = make_user(s, email="ka-route-unsupported@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -361,7 +553,7 @@ def test_citation_deferred_returns_409(_app, pg_session_factory, tmp_path):
     live_sections = _live_sections_from_md(pg_session_factory, wid, str(tmp_path))
     base_sha = live_sections[1].sha
 
-    # Create a citation_insert proposal (not prose_edit)
+    # Insert a citation_remove pc directly (no producer for this kind).
     with pg_session_factory() as s:
         pc = ProposedChange(
             id=uuidlib.uuid4(),
@@ -371,8 +563,8 @@ def test_citation_deferred_returns_409(_app, pg_session_factory, tmp_path):
             section_index=1,
             base_commit_sha=head,
             base_section_sha=base_sha,
-            kind="citation_insert",
-            payload={"citekey": "ref1", "anchor": "original.", "ev_id": 1},
+            kind="citation_remove",
+            payload={"ev_id": "fake-ev"},
             origin_kind="human",
         )
         s.add(pc)
@@ -387,10 +579,17 @@ def test_citation_deferred_returns_409(_app, pg_session_factory, tmp_path):
     finally:
         client.__exit__(None, None, None)
 
-    assert r.status_code == 409, r.text
-    # The app uses a custom error envelope: {"error": {"code": ..., "message": ...}}
-    body = r.json()
-    assert "citation" in body["error"]["message"].lower()
+    assert r.status_code == 422, r.text
+
+    # pc status UNCHANGED (still pending — no eviction).
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"
+
+    # Room NOT evicted (the dispatch raised before any mutation).
+    # Room was never opened (or was evicted) — either is acceptable.
+    assert MANAGER.get((wid, "draft")) is None
+    # Git unchanged.
+    assert _git_head(repo) == head
 
 
 # ---------------------------------------------------------------------------

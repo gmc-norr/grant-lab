@@ -563,29 +563,42 @@ async def propose_citation_impl(
     return {"proposed_change_id": pc_id, "status": "pending"}
 
 
-def _insert_citation_locked(
-    ctx: ToolContext,
+def compute_citation_insert(
     session: Session,
     *,
+    workspace_id: uuid.UUID,
+    proposal_text: str,
+    ledger: dict,
     ref_uuid: uuid.UUID,
     anchor: str,
     chunk_index: int,
     evidence_quote: str,
     stance: str,
     confidence: str | None,
-    owns_txn: bool = True,
 ) -> dict[str, Any]:
-    # 0. Serialize against every other git mutation of this workspace (spec
-    # 2026-06-10 §1). Transaction-scoped: released by this session's
-    # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
-    try:
-        acquire_commit_mutex(session, ctx.workspace_id)
-    except CommitMutexTimeout:
-        return {"error": _BUSY_ERROR}
+    """Pure DB-and-compute core of a citation insert (steps 1–12).
 
+    Contract:
+    - Takes ``proposal_text`` and ``ledger`` as inputs — no disk reads.
+    - Does NOT acquire the commit mutex (caller's responsibility).
+    - Does NOT call ``write_and_commit_files`` — no git commit, no disk write.
+    - Does NOT mutate ``ref.citekey`` — that is ``_write_citekey_cache``'s job,
+      called by the caller AFTER the git commit/checkpoint (Codex High).
+    - MAY read ``Reference``/``ReferenceChunk`` rows and resolve the citekey via
+      the session.
+
+    Return values:
+    - Idempotent hit:  ``{"idempotent": True, "ev_id": str, "citekey": str|None}``
+      (no ``ref``, no ``commit_sha`` — caller stamps HEAD).
+    - Verify failure:  ``{"error": "<message>"}`` (exact strings preserved).
+    - Success:         ``{"new_proposal_text": str, "new_ledger": dict,
+                          "ev_id": str, "citekey": str, "ref": Reference}``
+      The ``ref`` is the session-attached ``Reference`` so the caller can pass it
+      straight to ``_write_citekey_cache``.
+    """
     # 1. Load + workspace-scope the Reference.
     ref = session.get(Reference, ref_uuid)
-    if ref is None or ref.workspace_id != ctx.workspace_id:
+    if ref is None or ref.workspace_id != workspace_id:
         return {"error": "reference not found"}
 
     # 1a. A tombstoned reference (soft-deleted) cannot be newly cited — reject
@@ -599,18 +612,12 @@ def _insert_citation_locked(
         .filter(
             ReferenceChunk.reference_id == ref_uuid,
             ReferenceChunk.chunk_index == chunk_index,
-            ReferenceChunk.workspace_id == ctx.workspace_id,
+            ReferenceChunk.workspace_id == workspace_id,
         )
         .one_or_none()
     )
     if chunk is None:
         return {"error": "chunk not found"}
-
-    # 3. Read proposal.md + the (possibly absent) ledger.
-    read = _read_proposal_and_ledger(ctx)
-    if isinstance(read, dict):
-        return read
-    proposal_text, ledger = read
 
     # 4. Quote-verify against the raw chunk text.
     try:
@@ -632,24 +639,18 @@ def _insert_citation_locked(
         proposal_text=proposal_text,
     )
     if existing is not None:
-        # commit_sha on the idempotent path is the current HEAD (informational —
-        # no new commit was made) and may be "" if HEAD resolution fails.
         # existing["id"] is safe: _find_idempotent_row only matches rows with a
-        # present, truthy id.
-        head = _current_head(ctx.repo_dir)
-        if head:
-            ctx.agent_view_head = head
+        # present, truthy id. No ref or commit_sha here — caller stamps HEAD.
         return {
+            "idempotent": True,
             "ev_id": existing["id"],
             "citekey": existing.get("citekey"),
-            "commit_sha": head,
-            "idempotent": True,
         }
 
     # 6. Citekey — the shared resolver: reuse the ref's if set; else generate
     # and self-heal against any ledger/DB collision (see _resolve_citekey_for_ref).
     citekey = _resolve_citekey_for_ref(
-        session, ledger=ledger, ref=ref, workspace_id=ctx.workspace_id
+        session, ledger=ledger, ref=ref, workspace_id=workspace_id
     )
 
     # 7. Build the new proposal text (validates anchor uniqueness; nothing written yet).
@@ -709,21 +710,104 @@ def _insert_citation_locked(
     )
     new_ledger = append_evidence(ledger, row)
 
+    return {
+        "new_proposal_text": new_proposal_text,
+        "new_ledger": new_ledger,
+        "ev_id": ev_id,
+        "citekey": citekey,
+        "ref": ref,
+    }
+
+
+def _write_citekey_cache(session: Session, ref: Reference, citekey: str, *, owns_txn: bool) -> None:
+    """DB cache of the resolved citekey (AFTER git/checkpoint — git ledger is canonical).
+
+    Best-effort: a failure logs and never propagates. owns_txn=True commits here (tool
+    path); owns_txn=False uses a SAVEPOINT + flush so a racing IntegrityError cannot
+    poison the caller's accept/kernel transaction (the caller commits once).
+    """
+    if ref.citekey == citekey:
+        return
+    try:
+        if owns_txn:
+            ref.citekey = citekey
+            session.commit()
+        else:
+            with session.begin_nested():
+                ref.citekey = citekey
+                session.flush()
+    except Exception:  # noqa: BLE001 — cache write must never fail the caller
+        if owns_txn:
+            session.rollback()
+        logger.warning(
+            "insert_citation: references.citekey cache update failed for workspace "
+            "%s ref %s citekey %s — reconciliation will backfill",
+            ref.workspace_id, ref.id, citekey, exc_info=True,
+        )
+
+
+def _insert_citation_locked(
+    ctx: ToolContext,
+    session: Session,
+    *,
+    ref_uuid: uuid.UUID,
+    anchor: str,
+    chunk_index: int,
+    evidence_quote: str,
+    stance: str,
+    confidence: str | None,
+    owns_txn: bool = True,
+) -> dict[str, Any]:
+    # 0. Serialize against every other git mutation of this workspace (spec
+    # 2026-06-10 §1). Transaction-scoped: released by this session's
+    # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
+    try:
+        acquire_commit_mutex(session, ctx.workspace_id)
+    except CommitMutexTimeout:
+        return {"error": _BUSY_ERROR}
+
+    # 3. Read proposal.md + the (possibly absent) ledger.
+    read = _read_proposal_and_ledger(ctx)
+    if isinstance(read, dict):
+        return read
+    proposal_text, ledger = read
+
+    result = compute_citation_insert(
+        session,
+        workspace_id=ctx.workspace_id,
+        proposal_text=proposal_text,
+        ledger=ledger,
+        ref_uuid=ref_uuid,
+        anchor=anchor,
+        chunk_index=chunk_index,
+        evidence_quote=evidence_quote,
+        stance=stance,
+        confidence=confidence,
+    )
+    if "error" in result:
+        return result
+    if result.get("idempotent"):
+        # commit_sha on the idempotent path is the current HEAD (informational —
+        # no new commit was made) and may be "" if HEAD resolution fails.
+        head = _current_head(ctx.repo_dir)
+        if head:
+            ctx.agent_view_head = head
+        return {"ev_id": result["ev_id"], "citekey": result.get("citekey"),
+                "commit_sha": head, "idempotent": True}
+
     # 13. Atomic commit — proposal.md + citations.json in ONE commit (git first).
     try:
         sha = write_and_commit_files(
             ctx.repo_dir,
-            {
-                PROPOSAL_FILENAME: new_proposal_text,
-                CITATIONS_FILENAME: dump_ledger(new_ledger),
-            },
-            f"cite: add {citekey} [{ev_id}]",
+            {PROPOSAL_FILENAME: result["new_proposal_text"],
+             CITATIONS_FILENAME: dump_ledger(result["new_ledger"])},
+            f"cite: add {result['citekey']} [{result['ev_id']}]",
         )
     except GitCommitError:
         logger.exception(
             "insert_citation: atomic commit failed for workspace %s (ev %s)",
             ctx.workspace_id,
-            ev_id,
+            result["ev_id"],
         )
         return {"error": _GIT_COMMIT_FAILED_ERROR}
 
@@ -738,39 +822,9 @@ def _insert_citation_locked(
     ctx.agent_view_head = sha
 
     # 14. DB cache (AFTER git) — best-effort; git ledger is canonical.
-    if ref.citekey != citekey:
-        try:
-            if owns_txn:
-                # This function owns the txn — commit the cache write here.
-                ref.citekey = citekey
-                session.commit()
-            else:
-                # The CALLER owns the txn (accept replay). A SAVEPOINT keeps a
-                # surprise IntegrityError (a concurrent same-citekey assignment
-                # racing _resolve_citekey_for_ref's SELECT) from poisoning the
-                # caller's accept transaction: begin_nested auto-rolls-back to the
-                # savepoint on raise, leaving the outer txn usable for the status
-                # flip + the endpoint's single commit. Mirrors reconcile.py.
-                with session.begin_nested():
-                    ref.citekey = citekey
-                    session.flush()
-        except Exception:  # noqa: BLE001 — cache write must never fail the tool
-            # Only roll back when we own the txn; the begin_nested above already
-            # unwound the savepoint for the owns_txn=False case without touching
-            # the outer accept transaction.
-            if owns_txn:
-                session.rollback()
-            logger.warning(
-                "insert_citation: references.citekey cache update failed for "
-                "workspace %s ref %s citekey %s — reconciliation will backfill",
-                ctx.workspace_id,
-                ref_uuid,
-                citekey,
-                exc_info=True,
-            )
+    _write_citekey_cache(session, result["ref"], result["citekey"], owns_txn=owns_txn)  # step 14
 
-    # 15. Success.
-    return {"ev_id": ev_id, "citekey": citekey, "commit_sha": sha}
+    return {"ev_id": result["ev_id"], "citekey": result["citekey"], "commit_sha": sha}
 
 
 # --- remove_citation -------------------------------------------------------

@@ -20,11 +20,11 @@ from call_manager.proposal_assist.proposals.accepting import (
     CitationAcceptBusy,
     ProposedChangeNotFound,
     ProposedChangeNotPending,
+    UnsupportedKernelKind,
     accept_proposed_change,
     reject_proposed_change,
 )
 from call_manager.proposal_assist.proposals.kernel_accept import (
-    CitationKernelDeferred,
     accept_via_kernel,
 )
 from call_manager.proposal_assist.proposals.staleness import refresh_staleness
@@ -168,10 +168,10 @@ async def accept(
             )
         except ProposedChangeNotFound as exc:
             raise HTTPException(status_code=404, detail="proposed change not found") from exc
-        except CitationKernelDeferred as exc:
+        except UnsupportedKernelKind as exc:
             raise HTTPException(
-                status_code=409,
-                detail="citation accept on the collab editor lands in a later slice",
+                status_code=422,
+                detail=f"cannot accept a {exc.args[0]!r} proposal (unsupported)",
             ) from exc
         except SpecLockedError as exc:
             raise HTTPException(

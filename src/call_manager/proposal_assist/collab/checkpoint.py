@@ -49,7 +49,12 @@ def _head_or_empty(repo) -> str:
 
 
 def checkpoint_artifact(
-    session: Session, *, workspace_id: uuid.UUID, artifact: str, workspaces_dir
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    artifact: str,
+    workspaces_dir,
+    extra_files: dict[str, str] | None = None,
 ) -> CheckpointResult:
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
 
@@ -100,8 +105,11 @@ def checkpoint_artifact(
     md = serialize_doc_to_markdown(doc)
     fname = filename_for(_ARTIFACT[artifact])
     author_tag = ",".join(str(a) for a in authors)
+    files = {fname: md}
+    if extra_files:
+        files.update(extra_files)
     commit_sha = write_and_commit_files(
-        repo, {fname: md}, f"collab checkpoint: {artifact} (authors:{author_tag})"
+        repo, files, f"collab checkpoint: {artifact} (authors:{author_tag})"
     )
     changed = commit_sha != head
     if changed:

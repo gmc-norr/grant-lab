@@ -162,6 +162,12 @@ class CitationAcceptBusy(Exception):
     Distinct from a terminal verification failure (which flips the row stale)."""
 
 
+class UnsupportedKernelKind(Exception):
+    """A ProposedChange.kind the kernel has no accept path for (citation_remove /
+    citation_update — DB-allowed but no producers). Raised at dispatch BEFORE any room
+    mutation, so it is non-evicting; the route maps it to 422."""
+
+
 def _accept_citation_insert(
     *,
     session: Session,
