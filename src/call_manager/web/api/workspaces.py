@@ -46,6 +46,8 @@ from call_manager.proposal_assist.citations.human_cite import (
 )
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
+from call_manager.proposal_assist.collab import state as collab_state
+from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -483,8 +485,24 @@ def post_lock_spec(
         spec_path = repo_dir / SPEC_FILENAME
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        is_collab = collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="spec")
         try:
             acquire_commit_mutex(session, ws.id)
+            if is_collab:
+                cp = checkpoint_artifact(
+                    session,
+                    workspace_id=ws.id,
+                    artifact="spec",
+                    workspaces_dir=settings.workspaces_dir,
+                )
+                frozen_sha = cp.commit_sha
+                if not frozen_sha:
+                    # No committable HEAD (unborn / repo-less): checkpoint_artifact
+                    # returns commit_sha="" WITHOUT raising.  Mirror the flag-off
+                    # current_head -> GitCommitError -> 404 mapping rather than
+                    # stamping an empty SHA and locking anyway (Codex Medium).
+                    session.rollback()
+                    raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
             # Re-read under the lock: a concurrent toggle may have committed
             # while we waited on the mutex.
             session.refresh(ws, ["spec_locked_at", "spec_locked_by"])
@@ -493,12 +511,16 @@ def post_lock_spec(
                     raise HTTPException(status_code=409, detail="cannot lock an empty spec")
                 ws.spec_locked_at = datetime.now(UTC)
                 ws.spec_locked_by = user.id
+                # Compute the SHA conditionally AT THE SpecLockEvent SITE so that on
+                # the flag-off path current_head is still evaluated lazily inside the
+                # transition (after the empty-check), EXACTLY as before.
+                sha = frozen_sha if is_collab else current_head(repo_dir)
                 session.add(
                     SpecLockEvent(
                         workspace_id=ws.id,
                         action="lock",
                         actor_id=user.id,
-                        artifact_commit_sha=current_head(repo_dir),
+                        artifact_commit_sha=sha,
                     )
                 )
             locked_at, locked_by_id = ws.spec_locked_at, ws.spec_locked_by
@@ -509,9 +531,15 @@ def post_lock_spec(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
         except GitCommitError as e:
+            # collab checkpoint write failure is a 500 (mirror collab_checkpoint.py),
+            # NOT the flag-off "no committable HEAD" 404.  Distinguish by is_collab.
+            session.rollback()
+            if is_collab:
+                raise HTTPException(
+                    status_code=500, detail="lock failed — try again"
+                ) from e
             # Spec file present but no committable HEAD (unborn branch): mirror
             # the /spec read/save routes' 404 rather than a sanitized 500.
-            session.rollback()
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
         locked_by = _locker_email(session, locked_by_id)
@@ -533,18 +561,35 @@ def post_unlock_spec(
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        is_collab = collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="spec")
         try:
             acquire_commit_mutex(session, ws.id)
+            if is_collab:
+                cp = checkpoint_artifact(
+                    session,
+                    workspace_id=ws.id,
+                    artifact="spec",
+                    workspaces_dir=settings.workspaces_dir,
+                )
+                frozen_sha = cp.commit_sha
+                if not frozen_sha:
+                    # No committable HEAD (unborn / repo-less): same 404 guard as lock.
+                    session.rollback()
+                    raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
             session.refresh(ws, ["spec_locked_at", "spec_locked_by"])
             if ws.spec_locked_at is not None:
                 ws.spec_locked_at = None
                 ws.spec_locked_by = None
+                # Compute the SHA conditionally AT THE SpecLockEvent SITE so that on
+                # the flag-off path current_head is still evaluated lazily inside the
+                # transition, EXACTLY as before.
+                sha = frozen_sha if is_collab else current_head(repo_dir)
                 session.add(
                     SpecLockEvent(
                         workspace_id=ws.id,
                         action="unlock",
                         actor_id=user.id,
-                        artifact_commit_sha=current_head(repo_dir),
+                        artifact_commit_sha=sha,
                     )
                 )
             session.commit()
@@ -554,7 +599,13 @@ def post_unlock_spec(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
         except GitCommitError as e:
+            # collab checkpoint write failure is a 500 (mirror collab_checkpoint.py),
+            # NOT the flag-off "no committable HEAD" 404.  Distinguish by is_collab.
             session.rollback()
+            if is_collab:
+                raise HTTPException(
+                    status_code=500, detail="unlock failed — try again"
+                ) from e
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
     return SpecLockOut(locked=False, locked_at=None, locked_by=None)
