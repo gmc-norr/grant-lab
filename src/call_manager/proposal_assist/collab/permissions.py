@@ -87,52 +87,59 @@ def _resolve(session_factory, user_id: int, workspace_id: uuid.UUID,
         return (is_member, can_write, ws_deleted)
 
 
+async def reconcile_client(session_factory, workspaces_dir, room, client, state, *,
+                          workspace_id: uuid.UUID, artifact: str) -> None:
+    """Re-resolve ONE client's access and apply the delta. Caller holds
+    room.recon_lock. On a resolve error, fail CLOSED (downgrade to read-only) —
+    never leave stale write access (Slice 3a d)."""
+    try:
+        is_member, can_write, ws_deleted = await run_in_threadpool(
+            _resolve, session_factory, state.user_id, workspace_id, artifact
+        )
+    except Exception:
+        logger.warning(
+            "collab.refresh_permissions_resolve_failed",
+            extra={"event": "collab_refresh_resolve_failed", "room": str((workspace_id, artifact))},
+            exc_info=True,
+        )
+        state.can_write = False   # fail-closed downgrade (Slice 3a d)
+        return
+    if not is_member:
+        # Gate any in-flight frame from this client BEFORE closing: a write
+        # already waiting on room._lock will see can_write=False under the lock
+        # and drop (interlocks with the Task-1 under-lock recheck, Codex High #1).
+        state.can_write = False
+        with contextlib.suppress(Exception):
+            await client.close(code=_WS_POLICY_VIOLATION)
+        key = (workspace_id, artifact)
+        if ws_deleted:
+            # Workspace gone → no checkpoint (a checkpoint could error / is
+            # pointless). Codex High #2.
+            await MANAGER.drop_client(key, client)
+        else:
+            # Live workspace, member lost access → preserve the last-leave
+            # checkpoint semantics of a normal disconnect. Codex High #2.
+            on_evict = make_checkpoint_on_evict(
+                session_factory, workspaces_dir, workspace_id, artifact
+            )
+            await MANAGER.release(key, client=client, on_evict=on_evict)
+    else:
+        state.can_write = can_write
+
+
 async def refresh_permissions(session_factory, workspaces_dir, *,
                               workspace_id: uuid.UUID, artifact: str) -> None:
     """Reconcile every client in room (workspace_id, artifact). No-op if the room
-    isn't live (flag off in prod, or nobody connected)."""
+    isn't live. Serialized per-room via room.recon_lock so overlapping signals
+    (e.g. unlock then lock) cannot interleave into a stale can_write (Slice 3a a)."""
     key = (workspace_id, artifact)
     room = MANAGER.get(key)
     if room is None:
         return
-    # Snapshot before any close/deregister so mutation can't corrupt iteration.
-    # All room.clients mutations run on THIS event loop, so the snapshot is atomic
-    # (no await between get and list).
-    for client, state in list(room.clients.items()):
-        try:
-            is_member, can_write, ws_deleted = await run_in_threadpool(
-                _resolve, session_factory, state.user_id, workspace_id, artifact
-            )
-        except Exception:
-            logger.warning(
-                "collab.refresh_permissions_resolve_failed",
-                extra={"event": "collab_refresh_resolve_failed", "room": str(key)},
-                exc_info=True,
-            )
-            continue  # isolate per-client failure; leave this client as-is
-        if not is_member:
-            # Gate any in-flight frame from this client BEFORE closing: a write
-            # already waiting on room._lock will see can_write=False under the lock
-            # and drop (interlocks with the Task-1 under-lock recheck, Codex High #1).
-            state.can_write = False
-            with contextlib.suppress(Exception):
-                await client.close(code=_WS_POLICY_VIOLATION)
-            if ws_deleted:
-                # Workspace gone → no checkpoint (a checkpoint could error / is
-                # pointless). Codex High #2.
-                await MANAGER.drop_client(key, client)
-            else:
-                # Live workspace, member lost access → preserve the last-leave
-                # checkpoint semantics of a normal disconnect. Codex High #2.
-                await MANAGER.release(
-                    key,
-                    client=client,
-                    on_evict=make_checkpoint_on_evict(
-                        session_factory, workspaces_dir, workspace_id, artifact
-                    ),
-                )
-        else:
-            state.can_write = can_write   # soft up/downgrade, in place
+    async with room.recon_lock:
+        for client, state in list(room.clients.items()):
+            await reconcile_client(session_factory, workspaces_dir, room, client, state,
+                                   workspace_id=workspace_id, artifact=artifact)
 
 
 def signal_from_request(request, *, workspace_id: uuid.UUID, artifacts: list[str]) -> None:

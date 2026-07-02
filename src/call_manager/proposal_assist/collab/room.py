@@ -65,6 +65,19 @@ class Room:
         self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
         self._lock = asyncio.Lock()
+        # Serialize permission reconciliation per-room (Slice 3a cluster a/b).
+        # Lock-acquisition ORDER (deadlock-freedom):
+        #   recon_lock → (manager._lock via MANAGER.release/drop_client)
+        # No path acquires recon_lock while holding manager._lock or room._lock.
+        # No path acquires room._lock while holding recon_lock — the WS route
+        # takes recon_lock for the self-reconcile, releases it, THEN takes room._lock
+        # for the initial message; refresh_permissions holds only recon_lock across
+        # its pass. Therefore there is no lock cycle → deadlock-free.
+        # Note: reconcile_client may run checkpoint on_evict (a threadpool git commit
+        # + advisory commit-mutex wait) while holding recon_lock, briefly serializing
+        # connects to the same room — acceptable (revokes are rare; connects to OTHER
+        # rooms are unaffected).
+        self._recon_lock = asyncio.Lock()
 
     def initial_message(self) -> bytes:
         """The SYNC_STEP1 the server sends a client on connect."""
@@ -150,6 +163,10 @@ class Room:
     @property
     def lock(self) -> asyncio.Lock:
         return self._lock
+
+    @property
+    def recon_lock(self) -> asyncio.Lock:
+        return self._recon_lock
 
     async def broadcast(self, frame: bytes) -> None:
         await self._broadcast(frame, exclude=None)

@@ -254,6 +254,103 @@ async def test_refresh_is_noop_when_no_room(pg_session_factory, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Task 7: Slice-3a cluster a/b/d — serialize + connect self-reconcile + fail-closed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_refresh_permissions_holds_recon_lock_during_pass(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # cluster (a): the reconcile pass runs UNDER room.recon_lock, so overlapping
+    # signals serialize (a second pass cannot interleave into a stale can_write).
+    import call_manager.proposal_assist.collab.permissions as perm
+    ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
+    key = (ws_id, "spec")
+    member_c = FakeClient()
+
+    async def _load():
+        return []
+
+    room = await MANAGER.acquire(key, load=_load, client=member_c,
+                                 state=ClientState(user_id=member_id, can_write=True))
+    held = {"locked": None}
+    real_resolve = perm._resolve
+
+    def _spy_resolve(sf, uid, wid, art):
+        held["locked"] = room.recon_lock.locked()   # observed DURING the pass
+        return real_resolve(sf, uid, wid, art)
+
+    monkeypatch.setattr(perm, "_resolve", _spy_resolve)
+    try:
+        await refresh_permissions(
+            pg_session_factory, str(tmp_path), workspace_id=ws_id, artifact="spec"
+        )
+        assert held["locked"] is True   # pass ran while holding the recon lock
+    finally:
+        await MANAGER.evict(key)
+
+
+@pytest.mark.anyio
+async def test_reconcile_client_downgrades_on_locked_spec(pg_session_factory, tmp_path):
+    # (b) The connect self-reconcile helper flips a just-registered client's
+    # can_write when the DB says it should be read-only.
+    from call_manager.proposal_assist.collab.permissions import reconcile_client
+    ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
+    key = (ws_id, "spec")
+    member_c = FakeClient()
+
+    async def _load():
+        return []
+
+    room = await MANAGER.acquire(key, load=_load, client=member_c,
+                                 state=ClientState(user_id=member_id, can_write=True))
+    try:
+        _lock_spec(pg_session_factory, ws_id, owner_id)
+        st = room.clients[member_c]
+        async with room.recon_lock:
+            await reconcile_client(pg_session_factory, str(tmp_path), room, member_c, st,
+                                   workspace_id=ws_id, artifact="spec")
+        assert room.clients[member_c].can_write is False
+    finally:
+        await MANAGER.evict(key)
+
+
+@pytest.mark.anyio
+async def test_reconcile_client_fails_closed_on_resolve_error(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # (d) On a resolve error (DB blip), the client is DOWNGRADED to read-only, NOT
+    # disconnected — no stale write access leaks, but a transient blip does not
+    # drop an innocent editor.
+    import call_manager.proposal_assist.collab.permissions as perm
+    from call_manager.proposal_assist.collab.permissions import reconcile_client
+    ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
+    key = (ws_id, "spec")
+    member_c = FakeClient()
+
+    async def _load():
+        return []
+
+    room = await MANAGER.acquire(key, load=_load, client=member_c,
+                                 state=ClientState(user_id=member_id, can_write=True))
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("db blip")
+
+    monkeypatch.setattr(perm, "_resolve", _boom)
+    try:
+        st = room.clients[member_c]
+        async with room.recon_lock:
+            await reconcile_client(pg_session_factory, str(tmp_path), room, member_c, st,
+                                   workspace_id=ws_id, artifact="spec")
+        assert st.can_write is False           # fail-closed downgrade
+        assert member_c.closed is None          # NOT disconnected
+        assert member_c in room.clients         # still registered
+    finally:
+        await MANAGER.evict(key)
+
+
+# ---------------------------------------------------------------------------
 # Task 3: signal_permission_change bridge tests
 # ---------------------------------------------------------------------------
 
