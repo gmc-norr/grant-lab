@@ -58,38 +58,52 @@ history. The proposals-list GET (`web/proposals.py:63` → `refresh_staleness` �
 `canonical_artifact_markdown` per collab-on artifact) therefore replays the full all-time log
 on every load — the unbounded-replay Important the 3a final review deferred.
 
-**Design.** Compact **on checkpoint**, **squash-in-place**, **no schema**.
+**Design.** Compact **on checkpoint**, **squash-in-place by reusing the lowest merged-range id**,
+**no schema**.
+
+> **Replay order is load-bearing (Codex High, empirically verified).** pycrdt `apply_update` is
+> NOT order-independent for a full-state merged update vs the incremental tail: **merged → tail
+> converges, but tail → merged does not** (a tail update whose dependency structs live only in the
+> merged full-state, applied first to a fresh `Doc`, does not reliably integrate once the merged
+> update arrives). Therefore compaction MUST guarantee the merged row replays **before** any tail
+> row. A naive "insert the merged update as a new (higher-id) row" breaks this: a client append
+> that commits between the snapshot and the insert can take an id **lower** than the merged row,
+> so `load_updates` (ordered by `id`) yields `[tail, merged]` → non-convergence.
 
 `checkpoint_artifact` (`collab/checkpoint.py`) already, under the commit mutex, takes an atomic
-`store.load_rows` snapshot up to a fixed `max_id`, derives the merged doc + authors, writes the
-git commit, and advances `last_checkpoint_update_id` to `max_id`. Extend it so that in the
-**same transaction** it also:
+`store.load_rows` snapshot (returning `(id, actor_id, bytes)` up to a fixed `max_id`), derives the
+merged doc + authors, writes the git commit, and advances `last_checkpoint_update_id` to `max_id`.
+Extend it so that in the **same transaction** it also compacts, guaranteeing merged-first order by
+**id reuse** (never a new high id):
 
-1. writes the merged `doc.get_update()` as ONE new `yjs_updates` row (system-authored,
-   `actor_id = NULL`), and
-2. `DELETE`s all `yjs_updates` rows for this `(workspace_id, artifact)` with `id <= max_id`
-   (the rows just merged).
+1. `min_id` = the lowest id in the snapshot. **Overwrite** the `update` bytes of the `min_id` row
+   with the merged `doc.get_update()` (full state) — this row keeps its id, which is `<=` every
+   snapshotted id and strictly `<` every tail row (tail rows have `id > max_id >= min_id`), so the
+   merged full-state always sorts first.
+2. `DELETE` the OTHER snapshotted rows — scoped to the **snapshotted id set** (`id IN (snapshot ids)
+   AND id != min_id`), NOT a blanket `id <= max_id`. A row that commits with an id `<= max_id`
+   after the snapshot but was not merged must survive (it replays after `min_id`, on top of the
+   merged state its deps are already in — convergent).
 
-Add a `store.compact_through(session, *, workspace_id, artifact, max_id, merged_update) -> None`
-helper (append merged row + delete `<= max_id`), called by `checkpoint_artifact` inside its
-existing txn/mutex. No separate commit.
+Add a `store.compact_snapshot(session, *, workspace_id, artifact, min_id, merged_update, delete_ids)
+-> None` helper (overwrite `min_id`'s bytes + delete `delete_ids`), called by `checkpoint_artifact`
+inside its existing txn/mutex. No separate commit. `load_updates` and `build_doc` are unchanged (id
+order now provably yields merged-first).
 
 **Correctness invariants** (the load-bearing claims — Component-1 is the top Codex-review target):
 
-- **Replay convergence.** Yjs updates are a CRDT: applying the full set of updates to a fresh
-  `Doc` converges regardless of order, and a merged update encodes the same operations as the
-  rows it merged. So after compaction `build_doc(load_updates())` — which applies
-  `[merged, …tail]` (or `[…tail, merged]` by id order) — is state-equivalent to the pre-compaction
-  `build_doc` over `[1..max_id, …tail]`. The merged row taking a *new* (higher) id than the tail
-  is therefore safe (order-independence). A test asserts pre/post-compaction doc equality
-  explicitly rather than trusting this.
-- **No append race.** The snapshot fixes `max_id` under the commit mutex; concurrent client
-  appends land with `id > max_id` and are neither merged nor deleted. Delete is scoped
-  `id <= max_id`.
+- **Merged-first replay (the fix).** The merged row reuses `min_id`, so `load_updates` (ORDER BY id)
+  returns `[merged(min_id), …surviving rows > min_id]` — always merged → tail. A test asserts
+  pre/post-compaction doc equality **and** explicitly exercises the concurrent-append shape (a tail
+  row committed during the checkpoint window keeps `id > max_id > min_id`, replays after merged,
+  converges).
+- **No clobber of an unmerged row.** Delete is scoped to the snapshotted id set (minus `min_id`),
+  never blanket `<= max_id`, so a late sub-`max_id` commit is not lost.
 - **Watermark alignment.** The compaction floor is exactly `last_checkpoint_update_id` (== the
-  snapshot `max_id`). No new column.
-- **No-op guard.** If the snapshot is `<= 1` row (nothing to collapse), skip the merge+delete
-  (do not rewrite a single row into another single row, and never persist a `b""`).
+  snapshot `max_id`). No new column. (`min_id`'s row survives as the merged row; the watermark stays
+  an integer high-water mark, not an FK.)
+- **No-op guard.** If the snapshot is `<= 1` row (nothing to collapse), skip (do not rewrite a
+  single row, never persist a `b""`).
 
 **Trigger.** Checkpoint-only (last-leave + explicit save) — the decision this slice makes.
 An active session that never checkpoints keeps a growing tail; bounding that is **deferred to
@@ -97,7 +111,7 @@ An active session that never checkpoints keeps a growing tail; bounding that is 
 accepts — one update each). Idle rooms compact to ~1 row via the last-leave checkpoint.
 
 **Files.** `collab/checkpoint.py` (call the compaction inside the existing txn), `collab/store.py`
-(new `compact_through` + delete helper). No change to `load_updates`/`build_doc`/`canonical.py`
+(new `compact_snapshot` overwrite+delete helper). No change to `load_updates`/`build_doc`/`canonical.py`
 (they benefit transparently).
 
 ---
@@ -137,62 +151,82 @@ when `evict()` runs, the op keeps mutating the now-detached room while a fresh c
 respect the H1 `ops` refcount; only `evict` does not, because its job is immediate poison
 burn-down.)
 
-**Design.** **Tombstone + recheck** (chosen over making `evict` defer-while-ops, which conflicts
-with evict's immediate-burn-down purpose):
+**Design.** **Tombstone + recheck at every concrete site** (chosen over making `evict`
+defer-while-ops, which conflicts with evict's immediate-burn-down purpose):
 
 - Add `Room.evicted: bool = False`.
 - `evict()` pops `_rooms[key]` (as now, so new connects build fresh) AND sets `room.evicted = True`,
   then closes client sockets.
-- Every server op that mutates/persists (the kernel accept path via `operate`, and `Room.handle`
-  for client updates), **after acquiring `room.lock`**, checks `room.evicted` (equivalently
-  `MANAGER.get(key) is not room`) and aborts its persist/broadcast if the room was evicted out from
-  under it. A detached room accepts no further writes.
+- The recheck must appear at **each** concrete persist/broadcast site (Codex Medium — a single
+  "after `room.lock`" check is not enough because the two broadcasts happen *after* the lock is
+  released):
+  1. **`Room.handle`** (`room.py`) — check `room.evicted` under `room.lock`, immediately before
+     `self.doc.apply_update` / `persist(...)`; if evicted, drop (no apply, no persist, no broadcast).
+  2. **kernel accept `_body`** — check before `store.append_update` (under `room.lock`, in the
+     threadpool op); if evicted, abort the accept (raise a clean, non-evicting error so the pc stays
+     pending — the room is being rebuilt from the log anyway).
+  3. **Both post-lock broadcasts** — `room.py:155` (`self._broadcast`) and `kernel_accept.py:93`
+     (`room.broadcast`) run *after* `room.lock` is released; each must skip the broadcast when
+     `room.evicted` (the sockets are already closed by `evict`; the durable update, if any, is
+     safely committed and a fresh connect rebuilds from the log).
 
-**Lock/ordering note.** The recheck happens under `room.lock` (already held for the mutation), so
-it observes a consistent tombstone. `evicted` is set under `manager._lock` in `evict`; the op reads
-it under `room.lock` — a plain bool flip/read, no new lock cycle. This is the concurrency-sensitive
-component; the plan must enumerate every persist site and the plan review (Codex) should scrutinize
-it specifically.
+**Lock/ordering note.** `evicted` is a plain bool set under `manager._lock` in `evict` and read at
+the sites above. The backend is a single-instance asyncio event loop, so there are no torn reads;
+the requirement is that each recheck is the **last** thing before its persist/broadcast (no `await`
+between the recheck and the action for the under-lock sites). This is the concurrency-sensitive
+component; the plan MUST enumerate every persist/broadcast site (the three above are the known set —
+the plan re-greps to confirm none are missed) and the plan review (Codex) should scrutinize it.
 
-**Files.** `collab/room.py` (`Room.evicted`, `evict`, the recheck in the op/persist sites),
-`collab/kernel.py` and/or `proposals/kernel_accept.py` (recheck after `room.lock` before persist).
+**Files.** `collab/room.py` (`Room.evicted`, `evict`, rechecks in `handle` + its broadcast),
+`proposals/kernel_accept.py` and/or `collab/kernel.py` (recheck before `append_update` + before the
+post-lock broadcast).
 
 ---
 
-## Component 4 — write-path cross-runtime validation (committed gated Node harness)
+## Component 4 — write-path cross-runtime validation (extend the existing harness)
 
-**Problem.** The Python write path (`pm_json_to_ydoc`, `apply_pm_section_to_fragment`) has only
-been validated **structurally** via pycrdt round-trip (Slice 0/2a) — never against a **real**
-browser-grade `y-prosemirror` client. The section-scoped replaces, block-count grow/shrink, and
-especially the `blocks=[]` **delete-all-blocks** clear could in principle produce an update a real
-`y-prosemirror` client mishandles. The flag flip makes real clients depend on this invariant.
+**Problem.** A real Node/`y-prosemirror` verifier for Python-produced docs **already exists**
+(`frontend/scripts/verify_python_writepath.mjs` + `tests/proposal_assist/collab/test_collab_writepath.py`,
+REGEN-gated via `REGEN_WRITEPATH=1`, golden `tests/proposal_assist/collab/goldens/python_writepath.json`).
+But it only validates **full-state** docs from `pm_json_to_ydoc(...).get_update()`. It does NOT
+cover the **incremental** updates from `apply_pm_section_to_fragment` — the section-scoped replaces,
+block-count grow/shrink, and especially the `blocks=[]` **delete-all-blocks** clear, which the flag
+flip will make real clients depend on. (Codex Low/Med: don't build a parallel harness — extend this one.)
 
-**Design.** A committed, **env-gated** Node harness (matches the existing REGEN-gated goldens
-pattern; Node is not in the pytest CI):
+**Design.** Extend the existing pair (same REGEN-gated golden pattern; Node stays out of the pytest CI):
 
-- Python side (a test/script under `tests/proposal_assist/collab/` or `frontend/scripts/`) emits
-  a fixture bundle: for each case (section replace, grow, shrink, `blocks=[]` clear, preamble clear)
-  the base doc + the Python-generated Yjs update (base64) + the expected ProseMirror JSON.
-- `frontend/scripts/validate-writepath.mjs` (Node): builds a real `yjs` `Doc`, binds it via
-  `y-prosemirror` (using the shared `collab-schema.mjs` twin), applies each Python-generated update,
-  and asserts the resulting PM doc equals the expected JSON.
-- Gated behind `VALIDATE_WRITEPATH=1` (or an npm script), **not** wired into pytest CI.
-- Run once as this slice's validation gate; commit the harness + a findings note
+- **Python producer** (`test_collab_writepath.py`): add an incremental corpus. For each case
+  (section replace, block-count grow, block-count shrink, `blocks=[]` clear, preamble clear), emit a
+  fixture with `{base_update (full-state of the pre-edit doc), incremental_update
+  (apply_pm_section_to_fragment output, base64), expected_pm_json}` into the golden artifact
+  (extend `python_writepath.json` or a sibling `python_writepath_incremental.json`), regenerated only
+  under `REGEN_WRITEPATH=1`. Keep the existing full-state corpus unchanged.
+- **Node verifier** (`verify_python_writepath.mjs`): for each incremental fixture, apply
+  `base_update` then `incremental_update` into a fresh `Y.Doc`, read back with
+  `yDocToProsemirrorJSON(doc, "prosemirror")`, and `deepStrictEqual` to `expected_pm_json` (reusing
+  the file's existing normalize + exported per-fixture comparator).
+- Run as this slice's validation gate; commit the extended harness + a findings note
   (`docs/superpowers/notes/2026-07-03-collab-slice3b1-writepath-findings.md`). If it surfaces a real
-  interop bug, fix it in the Python write path before the slice closes.
+  interop bug (e.g. `blocks=[]` producing an update a real client mishandles), fix it in the Python
+  write path before the slice closes.
 
-**Files.** `frontend/scripts/validate-writepath.mjs` (+ any small fixture-emitter on the Python
-side), findings note. Reuses `frontend/scripts/collab-schema.mjs`; `yjs`/`y-prosemirror` already in
+**Files.** `tests/proposal_assist/collab/test_collab_writepath.py` (incremental producer),
+`frontend/scripts/verify_python_writepath.mjs` (incremental verify), the golden artifact, findings
+note. Reuses the existing `collab-schema.mjs`/normalize; `yjs`/`y-prosemirror` already in
 `frontend/package.json`.
 
 ---
 
 ## Testing
 
-- **Compaction:** append N updates → checkpoint → assert the log collapsed to `[1 merged + tail]`,
-  and `build_doc(load_updates())` / `canonical_artifact_markdown` yields a doc **identical** pre/post
-  compaction; concurrent-append-during-explicit-save (a row with `id > max_id`) survives; idempotent
-  no-op when the log is already `<= 1` row; the git checkpoint content is unchanged by compaction.
+- **Compaction:** append N updates → checkpoint → assert the log collapsed to `[merged(min_id) +
+  surviving tail]`, the merged row reuses `min_id` (sorts first), and `build_doc(load_updates())` /
+  `canonical_artifact_markdown` yields a doc **identical** pre/post compaction. **Ordering
+  regression:** explicitly assert convergence in the concurrent-append shape — a tail row committed
+  during the checkpoint window (id `> max_id`) replays after the merged row and converges (this is
+  the exact `[tail, merged]` non-convergence Codex found; the id-reuse design must make it
+  `[merged, tail]`). Also: a late sub-`max_id` unmerged row is NOT deleted; idempotent no-op when the
+  log is already `<= 1` row; the git checkpoint content is unchanged by compaction.
 - **Line-attribution:** a **compensating double-divergence** fixture (one phantom block-boundary +
   one hidden real line-boundary → equal counts, misaligned positions) now raises
   `SectionMapDivergenceError`; the 3a `hard_break + "## …"` phantom case still raises; every
@@ -202,22 +236,27 @@ side), findings note. Reuses `frontend/scripts/collab-schema.mjs`; `yjs`/`y-pros
   op does NOT persist to the detached room (tombstone recheck aborts) and a fresh connect gets a
   clean room rebuilt from the log; existing evict/operate/release semantics unchanged for the
   no-race path.
-- **Write-path:** the gated Node harness passes for all fixtures (incl. `blocks=[]` clear); findings
-  note records the result.
+- **Write-path:** the extended `test_collab_writepath.py` producer + `verify_python_writepath.mjs`
+  verifier pass for the new **incremental** fixtures (section replace, grow, shrink, `blocks=[]`
+  clear, preamble clear) alongside the unchanged full-state corpus; findings note records the result.
 - **Parity:** the flag-off suites stay green unchanged; grouped-dir sweep + `ruff check .` clean; no
   migration touched.
 
 ## Open risks / for plan + Codex review
 
-1. **Compaction convergence + ordering** (Component 1) — the merged row taking a higher id than the
-   tail relies on Yjs order-independence; the plan must include an explicit pre/post doc-equality
-   test, and Codex should confirm no path assumes strict chronological replay.
+1. **Compaction delete-set + isolation** (Component 1) — the ordering bug is resolved by id reuse
+   (merged row keeps `min_id`, always sorts first; verified against Codex's tail-before-merged
+   non-convergence). The residual to pin in the plan: the delete must be scoped to the snapshotted id
+   set (minus `min_id`), NOT blanket `<= max_id`, and the snapshot→overwrite→delete must be one
+   consistent transaction so a concurrent append is never half-seen. Include the explicit
+   concurrent-append convergence test.
 2. **Compaction vs a straddling reader** — a `canonical_artifact_markdown` replay that races the
    checkpoint txn: MVCC means the reader sees either the pre- or post-compaction row set atomically;
-   confirm the delete+insert is one txn and the reader uses one snapshot.
-3. **Zombie-window persist-site enumeration** (Component 3) — the plan must list every site that
-   persists/broadcasts after `room.lock` and add the `evicted` recheck to each; a missed site
-   reopens the window.
+   confirm the overwrite+delete is one txn and the reader uses one snapshot.
+3. **Zombie-window persist-site enumeration** (Component 3) — the three known sites are `Room.handle`
+   (before apply/persist), the kernel `_body` (before `append_update`), and both post-lock broadcasts
+   (`room.py:155`, `kernel_accept.py:93`). The plan must re-grep to confirm that set is complete; a
+   missed site reopens the window.
 4. **Line-attribution text-equality brittleness** (Component 2) — trailing-newline / normalization
    differences between a block-range serialization and `split_sections[k].text`; the plan should pin
    the exact comparison (raw text vs re-`split_sections` of each side).
