@@ -36,6 +36,11 @@ const ARTIFACT = path.resolve(
   'tests/proposal_assist/collab/goldens/python_writepath.json',
 );
 
+const INCREMENTAL = path.resolve(
+  repoRoot,
+  'tests/proposal_assist/collab/goldens/python_writepath_incremental.json',
+);
+
 const normalise = (o) => JSON.parse(JSON.stringify(o));
 
 /** Load the committed Python-produced write-path artifact. */
@@ -51,6 +56,31 @@ export function reconstruct(entry) {
   const d = new Y.Doc();
   Y.applyUpdate(d, Buffer.from(entry.update_b64, 'base64'));
   return normalise(yDocToProsemirrorJSON(d, 'prosemirror'));
+}
+
+/** Load the committed Python-produced incremental write-path artifact. */
+export function loadIncremental() {
+  return JSON.parse(readFileSync(INCREMENTAL, 'utf8'));
+}
+
+/** Apply base THEN incremental Python-produced bytes; read back the PM JSON. */
+export function reconstructIncremental(entry) {
+  const d = new Y.Doc();
+  Y.applyUpdate(d, Buffer.from(entry.base_b64, 'base64'));
+  Y.applyUpdate(d, Buffer.from(entry.incr_b64, 'base64'));
+  return normalise(yDocToProsemirrorJSON(d, 'prosemirror'));
+}
+
+export function compareAllIncremental(entries = loadIncremental()) {
+  const mismatches = [];
+  for (const entry of entries) {
+    try {
+      deepStrictEqual(reconstructIncremental(entry), normalise(entry.pm_json));
+    } catch {
+      mismatches.push({ name: entry.name });
+    }
+  }
+  return mismatches;
 }
 
 /**
@@ -106,6 +136,31 @@ if (invokedDirectly) {
   console.log(
     `\nGO: ${entries.length}/${entries.length} fixtures read back identical ` +
       `(Node y-prosemirror == Python pm_json_to_ydoc).`,
+  );
+
+  // --- Incremental fixtures ---
+  const incrEntries = loadIncremental();
+  const incrMismatches = compareAllIncremental(incrEntries);
+  const incrBad = new Set(incrMismatches.map((m) => m.name));
+
+  console.log('\n=== verify_python_writepath incremental (base + apply_pm_section_to_fragment) ===');
+  for (const entry of incrEntries) {
+    console.log(`  ${incrBad.has(entry.name) ? '✗' : '✓'} ${entry.name}`);
+  }
+
+  if (incrMismatches.length) {
+    console.error(
+      `\nNO-GO: ${incrMismatches.length}/${incrEntries.length} incremental fixture(s) mismatched:`,
+    );
+    for (const m of incrMismatches) {
+      console.error(`\n[MISMATCH] ${m.name}`);
+    }
+    process.exit(1);
+  }
+
+  console.log(
+    `\nGO: ${incrEntries.length}/${incrEntries.length} incremental fixtures read back identical ` +
+      `(Node y-prosemirror == Python apply_pm_section_to_fragment).`,
   );
   process.exit(0);
 }

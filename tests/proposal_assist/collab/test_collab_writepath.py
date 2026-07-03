@@ -110,3 +110,52 @@ def test_writepath_committed_bytes_reconstruct_pm():
     for entry in committed:
         doc = build_doc([base64.b64decode(entry["update_b64"])])
         assert ydoc_to_pm_json(doc) == entry["pm_json"], entry["name"]
+
+
+# ---------------------------------------------------------------------------
+# Incremental fixtures: base full-state + apply_pm_section_to_fragment update
+# ---------------------------------------------------------------------------
+
+INCREMENTAL = GOLDENS / "python_writepath_incremental.json"
+
+_INCR_CASES = [
+    ("replace_middle", "Pre.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n", 1, "## A\n\nA EDITED.\n"),
+    ("grow_blocks", "Pre.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n", 1, "## A\n\nP1.\n\nP2.\n"),
+    ("shrink_blocks", "Pre.\n\n## A\n\nP1.\n\nP2.\n\n## B\n\nBody b.\n", 1, "## A\n\nOnly.\n"),
+    ("clear_blocks_empty", "Pre.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n", 1, ""),
+    ("clear_preamble", "Pre.\n\n## A\n\nBody a.\n", 0, ""),
+]
+
+
+def _build_incremental_entries():
+    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
+
+    entries = []
+    for name, base_md, idx, new_md in _INCR_CASES:
+        doc = pm_json_to_ydoc(markdown_to_pm(base_md), client_id=_CLIENT_ID)
+        base = doc.get_update()
+        blocks = (markdown_to_pm(new_md).get("content") or []) if new_md.strip() else []
+        incr = apply_pm_section_to_fragment(doc, section_index=idx, blocks=blocks)
+        entries.append({
+            "name": name,
+            "pm_json": ydoc_to_pm_json(doc),
+            "base_b64": base64.b64encode(base).decode("ascii"),
+            "incr_b64": base64.b64encode(incr).decode("ascii"),
+        })
+    return entries
+
+
+def _maybe_regenerate_incremental():
+    if not os.environ.get("REGEN_WRITEPATH"):
+        return
+    INCREMENTAL.write_text(json.dumps(_build_incremental_entries(), indent=2) + "\n")
+
+
+def test_incremental_committed_bytes_reconstruct_pm():
+    """Committed base+incremental bytes reconstruct the expected post-edit PM."""
+    _maybe_regenerate_incremental()
+    assert INCREMENTAL.exists(), "python_writepath_incremental.json missing; REGEN_WRITEPATH=1"
+    for entry in json.loads(INCREMENTAL.read_text()):
+        doc = build_doc([base64.b64decode(entry["base_b64"]), base64.b64decode(entry["incr_b64"])])
+        assert ydoc_to_pm_json(doc) == entry["pm_json"], entry["name"]
