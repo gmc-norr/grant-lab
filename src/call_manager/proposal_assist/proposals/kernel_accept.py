@@ -24,6 +24,12 @@ from call_manager.proposal_assist.proposals.accepting import (
     UnsupportedKernelKind,
 )
 
+
+class RoomEvicted(Exception):
+    """The room was evicted (poison recovery) while this accept was in flight.
+    Pre-commit abort: the pc stays pending; a fresh connect rebuilds from the log."""
+
+
 # These are all raised BEFORE any fragment mutation (validation guards, plus the
 # commit-mutex acquire that precedes the spec-lock guard — Codex H3), so the room
 # doc is untouched and there is nothing to evict. Every OTHER exception may have
@@ -31,6 +37,9 @@ from call_manager.proposal_assist.proposals.accepting import (
 # ProposedChangeNotFound is raised by _load_scoped as the very first thing it does
 # (a TOCTOU between _route's s.get and the kernel's FOR UPDATE load), so the room
 # doc is always untouched when it propagates.
+# RoomEvicted is raised immediately before s.commit() (mutation already applied to
+# room.doc but the txn is rolled back on raise): the room is detached and clients
+# are already being closed, so no evict is triggered here — it IS the evict signal.
 _CLEAN_ACCEPT_ERRORS = (
     SpecLockedError,
     SectionStructureError,
@@ -39,6 +48,7 @@ _CLEAN_ACCEPT_ERRORS = (
     ProposedChangeNotPending,
     CommitMutexTimeout,
     IndexError,
+    RoomEvicted,
 )
 
 
@@ -79,6 +89,8 @@ async def accept_via_kernel(
                             # citation_remove / citation_update / unknown — no kernel path.
                             # Raised BEFORE any room mutation → non-evicting (Codex Low).
                             raise UnsupportedKernelKind(kind)
+                        if room.evicted:
+                            raise RoomEvicted(str(key))  # tombstoned mid-accept — abort, pc pending
                         # Commit the ONE transaction, then detach the pc for return.
                         # expire_on_commit=False keeps the pc's columns populated
                         # after commit and _serialize reads only columns, so no
@@ -94,7 +106,7 @@ async def accept_via_kernel(
             # already committed and CRDT tolerates reordering, so releasing the lock
             # before the sequential per-client sends avoids head-of-line stalling
             # every concurrent read/write on this room behind one backpressured client.
-            if result.update is not None:
+            if result.update is not None and not room.evicted:
                 await room.broadcast(P.create_update_message(result.update))
             return result.pc
         except _CLEAN_ACCEPT_ERRORS:
