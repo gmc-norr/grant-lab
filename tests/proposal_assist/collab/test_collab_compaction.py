@@ -1,8 +1,12 @@
 
-from call_manager.proposal_assist.collab import store
+from pathlib import Path
+
+from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.canonical import build_doc
+from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+from tests.proposal_assist.collab.test_collab_checkpoint import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -90,3 +94,47 @@ def test_compact_snapshot_does_not_clobber_unlisted_rows(pg_session_factory):
     with pg_session_factory() as s:
         after = [r[0] for r in store.load_rows(s, workspace_id=wid, artifact="draft")]
     assert after == [rows[0][0], rows[2][0]]   # min_id (reused) + the untouched third
+
+
+def _enable(pg_session_factory, wid):
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+
+
+def test_checkpoint_compacts_log_to_single_row(pg_session_factory, tmp_path):
+    wid = _mk_ws(pg_session_factory, "cp-compact@ki.se")
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, "## A\n\nseed.\n")
+    _enable(pg_session_factory, wid)
+    # Two AUTHORED edits (actor_id set → checkpoint commits + compacts).
+    _append(pg_session_factory, wid, "## A\n\nedit one.\n", actor_id=1)
+    _append(pg_session_factory, wid, "## A\n\nedit one.\n\n## B\n\nedit two.\n", actor_id=1)
+    with pg_session_factory() as s:
+        before = ydoc_to_pm_json(
+            build_doc(store.load_updates(s, workspace_id=wid, artifact="draft"))
+        )
+    with pg_session_factory() as s:
+        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        s.commit()
+    with pg_session_factory() as s:
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+        after = ydoc_to_pm_json(
+            build_doc(store.load_updates(s, workspace_id=wid, artifact="draft"))
+        )
+    assert len(rows) == 1                # collapsed to the single merged row
+    assert after == before               # doc unchanged by compaction
+
+
+def test_checkpoint_single_row_no_compaction_noop(pg_session_factory, tmp_path):
+    wid = _mk_ws(pg_session_factory, "cp-single@ki.se")
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, "## A\n\nseed.\n")
+    _enable(pg_session_factory, wid)
+    _append(pg_session_factory, wid, "## A\n\none edit.\n", actor_id=1)
+    with pg_session_factory() as s:
+        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        s.commit()
+    with pg_session_factory() as s:
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+    assert len(rows) == 1   # a single-row log is left as-is (no pointless rewrite)
