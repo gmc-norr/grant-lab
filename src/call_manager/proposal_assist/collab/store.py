@@ -83,6 +83,7 @@ def compact_snapshot(
     artifact: str,
     min_id: int,
     merged_update: bytes,
+    merged_actor_id: int | None,
     delete_ids: list[int],
 ) -> None:
     """Squash a checkpointed prefix of the log into ONE full-state row WITHOUT
@@ -92,7 +93,11 @@ def compact_snapshot(
     always replays merged-before-tail. pycrdt does NOT converge tail-before-merged,
     so this ordering is load-bearing (Slice 3b-1). The other merged rows are
     deleted by EXPLICIT id (never a blanket ``id <= max_id``), so a row that
-    commits after the snapshot is never clobbered. Stages on the caller's txn."""
+    commits after the snapshot is never clobbered. Stages on the caller's txn.
+    The merged row also inherits ``merged_actor_id`` (the most-recent author in
+    the snapshot) so ``load_rows`` still reflects the last author after compaction;
+    because the merged row sits at/below the checkpoint watermark, this attribution
+    is observable metadata only and never re-triggers checkpoint authorship."""
     session.execute(
         sa_update(YjsUpdate)
         .where(
@@ -100,7 +105,7 @@ def compact_snapshot(
             YjsUpdate.artifact == artifact,
             YjsUpdate.id == min_id,
         )
-        .values(update_bytes=merged_update)
+        .values(update_bytes=merged_update, actor_id=merged_actor_id)
     )
     if delete_ids:
         session.execute(

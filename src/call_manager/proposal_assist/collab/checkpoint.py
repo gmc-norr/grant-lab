@@ -142,12 +142,17 @@ def checkpoint_artifact(
     # (a single-row log has nothing to collapse and must not be pointlessly
     # rewritten). `doc` is the merged doc already built above.
     if len(rows) >= 2:
+        # Preserve the most-recent author on the merged row so load_rows still
+        # reflects the last author after compaction (transparency); the merged
+        # row is <= the watermark, so this attribution never re-triggers authorship.
+        merged_actor_id = next((a for (_, a, _) in reversed(rows) if a is not None), None)
         store.compact_snapshot(
             session,
             workspace_id=workspace_id,
             artifact=artifact,
             min_id=rows[0][0],
             merged_update=doc.get_update(),
+            merged_actor_id=merged_actor_id,
             delete_ids=[rid for (rid, _, _) in rows[1:]],
         )
     return CheckpointResult(committed=changed, commit_sha=commit_sha, authors=authors)

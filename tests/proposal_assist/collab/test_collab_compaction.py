@@ -37,7 +37,7 @@ def test_compact_snapshot_reuses_min_id_and_preserves_doc(pg_session_factory):
     with pg_session_factory() as s:
         store.compact_snapshot(
             s, workspace_id=wid, artifact="draft", min_id=min_id,
-            merged_update=merged, delete_ids=[rows[1][0]],
+            merged_update=merged, merged_actor_id=None, delete_ids=[rows[1][0]],
         )
         s.commit()
     with pg_session_factory() as s:
@@ -64,7 +64,7 @@ def test_compact_snapshot_merged_replays_before_a_lower_tail(pg_session_factory)
     with pg_session_factory() as s:
         store.compact_snapshot(
             s, workspace_id=wid, artifact="draft", min_id=min_id,
-            merged_update=merged, delete_ids=[max_id],
+            merged_update=merged, merged_actor_id=None, delete_ids=[max_id],
         )
         s.commit()
     with pg_session_factory() as s:
@@ -88,7 +88,7 @@ def test_compact_snapshot_does_not_clobber_unlisted_rows(pg_session_factory):
     with pg_session_factory() as s:
         store.compact_snapshot(
             s, workspace_id=wid, artifact="draft", min_id=rows[0][0],
-            merged_update=merged, delete_ids=[rows[1][0]],
+            merged_update=merged, merged_actor_id=None, delete_ids=[rows[1][0]],
         )
         s.commit()
     with pg_session_factory() as s:
@@ -138,3 +138,42 @@ def test_checkpoint_single_row_no_compaction_noop(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         rows = store.load_rows(s, workspace_id=wid, artifact="draft")
     assert len(rows) == 1   # a single-row log is left as-is (no pointless rewrite)
+
+
+def test_compact_snapshot_preserves_merged_actor_id(pg_session_factory):
+    wid = _mk_ws(pg_session_factory, "compact-actor@ki.se")
+    _append(pg_session_factory, wid, "## A\n\nseed.\n")                  # unauthored seed
+    _append(pg_session_factory, wid, "## A\n\nauthored.\n", actor_id=1)  # authored tail
+    with pg_session_factory() as s:
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+    merged = build_doc([b for (_, _, b) in rows]).get_update()
+    with pg_session_factory() as s:
+        store.compact_snapshot(
+            s, workspace_id=wid, artifact="draft", min_id=rows[0][0],
+            merged_update=merged, merged_actor_id=1, delete_ids=[rows[1][0]],
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        after = store.load_rows(s, workspace_id=wid, artifact="draft")
+    assert [r[0] for r in after] == [rows[0][0]]  # collapsed to the reused min_id row
+    # merged row carries the last author, not the seed's None
+    assert after[0][1] == 1
+
+
+def test_checkpoint_compaction_preserves_last_author(pg_session_factory, tmp_path):
+    wid = _mk_ws(pg_session_factory, "cp-actor@ki.se")
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, "## A\n\nseed.\n")
+    _enable(pg_session_factory, wid)
+    # unauthored seed → becomes min_id row
+    _append(pg_session_factory, wid, "## A\n\nseed.\n")
+    # authored tail
+    _append(pg_session_factory, wid, "## A\n\nauthored edit.\n", actor_id=1)
+    with pg_session_factory() as s:
+        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        s.commit()
+    with pg_session_factory() as s:
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+    assert len(rows) == 1
+    # last author preserved through compaction even though min_id row was an unauthored seed
+    assert rows[-1][1] == 1
