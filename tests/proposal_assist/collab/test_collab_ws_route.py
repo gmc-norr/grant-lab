@@ -191,6 +191,37 @@ def test_invalid_artifact_is_rejected(_app, pg_session_factory):
         client.__exit__(None, None, None)
 
 
+def test_member_connecting_to_locked_spec_is_read_only(_app, pg_session_factory):
+    from datetime import UTC, datetime
+
+    from fastapi.testclient import TestClient
+
+    from call_manager.db.models import WorkspaceViewer, YjsUpdate
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ls-owner@ki.se")
+        member = make_user(s, email="ls-member@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        ws.spec_locked_at = datetime.now(UTC)          # locked → members read-only on spec
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="spec")
+        s.commit()
+        wid, mid = ws.id, member.id
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, mid))
+    try:
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/spec") as wsconn:
+            assert P.is_sync_step1(wsconn.receive_bytes())   # connect + read OK
+            wsconn.send_bytes(_update_frame("should be dropped"))
+    finally:
+        client.__exit__(None, None, None)
+    with pg_session_factory() as s:
+        rows = s.execute(select(YjsUpdate).where(YjsUpdate.workspace_id == wid)).scalars().all()
+        assert rows == []   # read-only member's write was dropped
+
+
 def _recv_until_write(wsconn, tries: int = 10) -> bytes:
     """Read frames until a SYNC write (STEP2/UPDATE) arrives; the server may
     send a STEP1 first."""

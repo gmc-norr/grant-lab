@@ -67,6 +67,8 @@ from call_manager.proposal_assist.citations.quotes import (
     find_quote_offsets,
     normalize_for_quote_match,
 )
+from call_manager.proposal_assist.collab import canonical
+from call_manager.proposal_assist.collab.state import is_collab_enabled
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -481,11 +483,19 @@ async def propose_citation_impl(
         if chunk is None:
             return {"error": "chunk not found"}
 
-        # 3. Read the live proposal (no ledger needed at propose-time).
-        proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
-        if not proposal_path.exists():
-            return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
-        proposal_text = proposal_path.read_text()
+        # 3. Read the live proposal for the anchor-uniqueness probe. Collab-on:
+        # read the ROOM-CANONICAL text (Slice 3a C1) so an anchor present in the
+        # durable log but not yet checkpointed to disk is not false-rejected.
+        # Flag-off: raw disk proposal.md, byte-for-byte as before (parity).
+        if is_collab_enabled(session, workspace_id=ctx.workspace_id, artifact="draft"):
+            proposal_text = canonical.canonical_artifact_markdown(
+                session, workspace_id=ctx.workspace_id, artifact="draft", repo_dir=ctx.repo_dir
+            )
+        else:
+            proposal_path = ctx.repo_dir / PROPOSAL_FILENAME
+            if not proposal_path.exists():
+                return {"error": f"{PROPOSAL_FILENAME} does not exist in this workspace"}
+            proposal_text = proposal_path.read_text()
 
         # 4. Quote-verify against the raw chunk text.
         try:

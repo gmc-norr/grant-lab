@@ -11,6 +11,7 @@ import asyncio
 import uuid
 
 from call_manager.proposal_assist.collab.room import ClientState, RoomManager
+from tests.proposal_assist.collab.test_collab_room import FakeClient
 
 
 async def _load() -> list[bytes]:
@@ -142,3 +143,29 @@ async def test_operate_else_branch_bumps_ops_atomically():
     assert room1.ops == 1 and mgr.has_room(key)
     await cm2.__aexit__(None, None, None)
     assert room1.ops == 0 and not mgr.has_room(key)
+
+
+async def test_last_client_release_during_op_checkpoints_on_op_exit():
+    # A room with ONE client and an in-flight server op (ops=1). The last client
+    # is released with an on_evict checkpoint; because ops>0 the room is NOT
+    # evicted yet and on_evict must NOT run. When the op exits (ops->0, no
+    # clients), the room is evicted AND the stashed on_evict fires exactly once.
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    fired = {"n": 0}
+
+    async def _on_evict(_room):
+        fired["n"] += 1
+
+    async def _load():
+        return []
+
+    client = FakeClient()
+    async with mgr.operate(key, load=_load) as room:   # ops=1
+        room.clients[client] = ClientState(user_id=1, can_write=True)
+        await mgr.release(key, client=client, on_evict=_on_evict)
+        assert mgr.get(key) is room     # not evicted (ops>0)
+        assert fired["n"] == 0          # on_evict deferred
+    # operate() exited: ops->0, no clients → evict + fire stashed on_evict
+    assert mgr.get(key) is None
+    assert fired["n"] == 1

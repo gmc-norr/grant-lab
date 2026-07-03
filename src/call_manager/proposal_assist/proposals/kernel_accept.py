@@ -98,7 +98,14 @@ async def accept_via_kernel(
                 await room.broadcast(P.create_update_message(result.update))
             return result.pc
         except _CLEAN_ACCEPT_ERRORS:
-            raise  # validation error before any mutation — room doc untouched
+            raise  # validation error BEFORE any mutation — room doc untouched, no evict
         except Exception:
+            # POST-mutation failure only: the fragment was already mutated but the
+            # txn rolled back, so room.doc is ahead of the durable log. Evict to
+            # force every client to reconnect and rebuild cleanly from the log.
+            # Blast radius = all clients on this room; acceptable because (a) accept
+            # failures here are rare, (b) reconnect-from-log is lossless (Slice 3a e;
+            # re-hydrate-in-place is deferred to a later slice). Pre-mutation trips
+            # are enumerated in _CLEAN_ACCEPT_ERRORS above and never reach here.
             await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log
             raise

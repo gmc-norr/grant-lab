@@ -52,6 +52,10 @@ from typing import Any
 
 import pycrdt
 
+from call_manager.proposal_assist.editing.save import SectionStructureError
+from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
+
+from .markdown_bridge import pm_to_markdown
 from .schema import SCHEMA
 
 _FRAGMENT_KEY = "prosemirror"
@@ -59,6 +63,14 @@ _FRAGMENT_KEY = "prosemirror"
 # Mark types in a fixed, deterministic order (schema declaration order). Used to
 # order the marks emitted for a text chunk that carries more than one mark.
 _MARK_ORDER: dict[str, int] = {name: i for i, name in enumerate(SCHEMA.marks)}
+
+
+class SectionMapDivergenceError(SectionStructureError):
+    """The doc's split_sections line-boundaries cannot be expressed at
+    top-level-block granularity (e.g. a ``## …`` line INSIDE a multi-line block
+    via hard_break, or a fence-state flip from a literal ``` in inline text).
+    Raised BEFORE any mutation — the accept fails clean (no evict, pc stays
+    pending) instead of splicing the wrong section (silent data loss)."""
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +195,24 @@ def _append_node(
     return elem
 
 
+def _insert_node(
+    parent: pycrdt.XmlFragment | pycrdt.XmlElement, index: int, node: dict[str, Any]
+) -> pycrdt.XmlElement:
+    """Insert PM ``node`` as a child of ``parent`` at ``index`` (positional sibling
+    of ``_append_node``). ``children.insert`` integrates the element, so its own
+    children can then be populated identically to the append path."""
+    node_type = node["type"]
+    attrs = _node_attrs_for_yjs(node_type, node.get("attrs") or {})
+    elem = parent.children.insert(index, pycrdt.XmlElement(node_type, dict(attrs)))
+    content = node.get("content") or []
+    if content and _block_holds_inline(node_type, content):
+        _append_inline_content(elem, content)
+    else:
+        for child in content:
+            _append_node(elem, child)
+    return elem
+
+
 def _block_holds_inline(node_type: str, content: list[dict[str, Any]]) -> bool:
     """True when this block's content is inline (text / inline atoms)."""
     spec = SCHEMA.nodes.get(node_type)
@@ -246,6 +276,67 @@ def apply_pm_json_to_fragment(doc: pycrdt.Doc, pm_json: dict) -> bytes:
     finally:
         doc.unobserve(sub)
     # One transaction => one observer callback with the coalesced incremental update.
+    return captured[-1] if captured else b""
+
+
+def _block_starts_section(block_json: dict[str, Any]) -> bool:
+    """True if this top-level block begins a section, using the SAME rule as
+    split_sections: is_h2_heading_line on the block's serialized first line.
+    A node-type (heading level-2) check would diverge on `##NoSpace` paragraphs."""
+    first_line = pm_to_markdown({"type": "doc", "content": [block_json]}).split("\n", 1)[0]
+    return is_h2_heading_line(first_line)
+
+
+def apply_pm_section_to_fragment(
+    doc: pycrdt.Doc, *, section_index: int, blocks: list[dict[str, Any]]
+) -> bytes:
+    """Replace ONLY ``section_index``'s top-level block range in the ``prosemirror``
+    XmlFragment with ``blocks`` (the new section's PM blocks), preserving every
+    other section's Yjs identity + any concurrent client edits. Returns the
+    incremental Yjs update (captured via observer), or ``b""`` if nothing changed.
+    Safe because the kernel's staleness gate proved the target section unchanged
+    since the proposer read it.
+    """
+    captured: list[bytes] = []
+    sub = doc.observe(lambda event: captured.append(event.update))
+    try:
+        fragment = doc.get(_FRAGMENT_KEY, type=pycrdt.XmlFragment)
+        pm_json = ydoc_to_pm_json(doc)
+        blocks_json = pm_json.get("content") or []
+        # Section boundaries via the SAME rule as split_sections. The preamble
+        # (section 0) is ALWAYS present — split_sections emits Section 0 even when
+        # empty — so section k spans [starts[k], starts[k+1]). NO dedupe: a
+        # no-preamble doc yields starts=[0, 0, ...] so section 0 is the empty range
+        # [0, 0) and every index aligns with the split-numbered pc.section_index the
+        # kernel passes (dropping the leading 0 shifts every section — silent
+        # wrong-section corruption).
+        starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
+        # Cross-check the block-granularity map against the line-scan truth the
+        # kernel validated section_index against. A mismatch means some boundary
+        # falls INSIDE a block (hard_break + "## …", or a fence flip) — replacing
+        # a block range would splice the wrong section. Refuse pre-mutation.
+        # (A compensating double-divergence — one phantom boundary AND one hidden
+        # real one — would slip a count check; line-attribution is 3b hardening.)
+        n_line_sections = len(split_sections(pm_to_markdown(pm_json)))
+        if len(starts) != n_line_sections:
+            raise SectionMapDivergenceError(
+                f"section map divergence: {n_line_sections} line-scan sections vs "
+                f"{len(starts)} block-boundary sections — a section boundary falls "
+                "inside a multi-line block; re-edit the offending paragraph"
+            )
+        if not 0 <= section_index < len(starts):
+            raise IndexError(
+                f"section_index {section_index} out of range ({len(starts)} sections)"
+            )
+        start = starts[section_index]
+        end = starts[section_index + 1] if section_index + 1 < len(starts) else len(blocks_json)
+        with doc.transaction():
+            for i in range(end - 1, start - 1, -1):   # delete range back-to-front
+                del fragment.children[i]
+            for offset, block in enumerate(blocks):    # insert new blocks at `start`
+                _insert_node(fragment, start + offset, block)
+    finally:
+        doc.unobserve(sub)
     return captured[-1] if captured else b""
 
 

@@ -19,7 +19,7 @@ from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.checkpoint import _head_or_empty, checkpoint_artifact
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import (
-    apply_pm_json_to_fragment,
+    apply_pm_section_to_fragment,
     ydoc_to_pm_json,
 )
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
@@ -121,10 +121,28 @@ def kernel_accept_prose(
         session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
 
-    # Apply: reassemble the whole doc with the section replaced, mutate the live
-    # room fragment (capturing the incremental update), stage it, checkpoint.
-    new_doc_md = "".join(new_text if s.index == pc.section_index else s.text for s in sections)
-    update = apply_pm_json_to_fragment(room_doc, markdown_to_pm(new_doc_md))
+    # Apply ONLY the target section's blocks to the live room fragment (Slice 3a
+    # C2): the staleness gate above proved this section unchanged since the
+    # proposer read it, so a section-scoped replace clobbers nothing on the target
+    # and preserves concurrent edits in every OTHER section. An empty new_text is a
+    # legal preamble clear (see the structure guard above) — raw markdown_to_pm
+    # raises on blank input, so map it to NO blocks.
+    section_blocks = markdown_to_pm(new_text).get("content") or [] if new_text.strip() else []
+    update = apply_pm_section_to_fragment(
+        room_doc, section_index=pc.section_index, blocks=section_blocks
+    )
+    if not update:
+        # No net change to the fragment (e.g. a blank edit of an already-empty
+        # range). Persisting b"" would poison the durable log — pycrdt
+        # apply_update(b"") raises on the next hydration. Accept as a no-op at the
+        # current checkpoint (mirrors the new_text == live.text short-circuit above).
+        repo = workspace_repo_dir(workspaces_dir, workspace_id)
+        pc.status = "accepted"
+        pc.resolved_by = approver.id
+        pc.resolved_at = datetime.now(UTC)
+        pc.resulting_commit_sha = _head_or_empty(repo)
+        session.flush()
+        return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
     # From here on room_doc is mutated: any failure must evict the room.
     store.append_update(
         session, workspace_id=workspace_id, artifact=artifact,
@@ -230,10 +248,19 @@ def kernel_accept_citation(
         session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
 
-    # Apply the marker-bearing whole-doc markdown to the live room fragment,
-    # capturing the incremental update, stage it, and checkpoint proposal.md +
-    # citations.json in ONE commit (extra_files).
-    update = apply_pm_json_to_fragment(room_doc, markdown_to_pm(result["new_proposal_text"]))
+    # Section-scoped apply (Slice 3a C2): the marker insertion is confined to the
+    # anchor's section; splice just that section's new blocks so concurrent edits
+    # elsewhere survive. Extract the changed section's markdown from the whole-doc
+    # result and convert to PM blocks.
+    new_section_md = split_sections(result["new_proposal_text"])[pc.section_index].text
+    section_blocks = markdown_to_pm(new_section_md).get("content") or []
+    update = apply_pm_section_to_fragment(
+        room_doc, section_index=pc.section_index, blocks=section_blocks
+    )
+    # No `if not update:` guard here (unlike the prose path above). A citation
+    # insert always adds at least one marker-bearing block to a non-empty section
+    # (the idempotent early-return above already handled the no-op case), so
+    # apply_pm_section_to_fragment always yields a non-empty update here.
     # From here on room_doc is mutated: any failure must evict the room.
     store.append_update(
         session, workspace_id=workspace_id, artifact=artifact,

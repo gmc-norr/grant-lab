@@ -18,7 +18,10 @@ from starlette.websockets import WebSocketDisconnect
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.permissions import make_checkpoint_on_evict
+from call_manager.proposal_assist.collab.permissions import (
+    make_checkpoint_on_evict,
+    reconcile_client,
+)
 from call_manager.proposal_assist.collab.room import MANAGER, ClientState, PersistError
 from call_manager.proposal_assist.collab.ws_auth import (
     WSAuthError,
@@ -113,6 +116,19 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
     state = ClientState(user_id=user.id, can_write=can_write)
     room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
     try:
+        # Close the connect-straddle TOCTOU (Slice 3a b): a permission mutation that
+        # committed while we were mid-acquire may have fired its refresh BEFORE this
+        # client was registered. Re-resolve THIS client now, under the recon lock so
+        # ordering vs a concurrent refresh is well-defined (either the refresh saw
+        # us, or we see the committed mutation here). Inside the try so `finally`
+        # still releases the client if this raises.
+        async with room.recon_lock:
+            await reconcile_client(
+                session_factory, workspaces_dir, room, websocket, state,
+                workspace_id=workspace_id, artifact=artifact,
+            )
+        if websocket not in room.clients:
+            return  # reconcile revoked + deregistered this client (already closed 1008)
         async with room.lock:
             initial = room.initial_message()
         await websocket.send_bytes(initial)
