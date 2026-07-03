@@ -53,6 +53,11 @@ def test_attribution_catches_compensating_divergence():
     # constructed against this serializer, the attribution is defense-in-depth and
     # the count check already suffices for reachable inputs — record that as a
     # finding in the commit message rather than asserting a vacuous pass.
+    # OBSERVED (Slice 3b-1): against this serializer the ELSE branch is the live
+    # one — hard_break renders as a backslash-continuation so split_sections reads
+    # the hidden "## X" as a real boundary (here starts=[0,1] vs n_line=3, counts
+    # DIFFER). The count check already refuses; positional attribution is
+    # defense-in-depth for future serializer changes that could net equal counts.
     from call_manager.proposal_assist.collab.yjs_bridge import _block_starts_section
     blocks = [
         # section 0 preamble holds a hidden real boundary (hard_break + "## X"):
