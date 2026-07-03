@@ -799,10 +799,27 @@ export function compareAllIncremental(entries = loadIncremental()) {
 
 In the `if (invokedDirectly)` block, after the full-state comparison, also run `compareAllIncremental()`, print per-fixture ✓/✗, and `process.exit(1)` if any incremental fixture mismatches (a real NO-GO — a Python-generated incremental update that a real `y-prosemirror` client cannot apply).
 
+Also extend the vitest wrapper `frontend/src/writepath.test.ts` (which already asserts `compareAll` for the full-state corpus) to add a second assertion that `compareAllIncremental()` returns no mismatches — so the incremental coverage runs in the frontend vitest suite exactly like the full-state corpus:
+
+```typescript
+import { compareAll, compareAllIncremental, loadWritepath } from "../scripts/verify_python_writepath.mjs";
+// ...existing full-state test...
+test("incremental Python-produced updates read back identical in y-prosemirror", () => {
+  const mismatches = compareAllIncremental();
+  expect(mismatches, JSON.stringify(mismatches)).toHaveLength(0);
+});
+```
+
+**Environment note (already handled for this run):** `y-prosemirror`/`yjs` must be installed (`cd frontend && pnpm install --frozen-lockfile` — lockfile installs bypass the pnpm cooldown). The detached run's worktree symlinks `frontend/node_modules` to the main tree, which has already been `pnpm install`ed, so this is pre-satisfied; do NOT `pnpm add` anything.
+
 - [ ] **Step 4: Run the Node harness (the validation gate)**
 
-Run: `cd frontend && node scripts/verify_python_writepath.mjs`
-Expected: GO — all full-state AND incremental fixtures read back identical. If any incremental fixture (especially `clear_blocks_empty` / `clear_preamble`) mismatches, that is a REAL write-path interop bug: STOP, record it in the findings note, and fix `apply_pm_section_to_fragment` / the serializer before proceeding (do not weaken the assertion).
+Run (both the direct CLI and the vitest wrapper):
+```bash
+cd frontend && node scripts/verify_python_writepath.mjs
+pnpm exec vitest run src/writepath.test.ts
+```
+Expected: GO — all full-state AND incremental fixtures read back identical, vitest green. If any incremental fixture (especially `clear_blocks_empty` / `clear_preamble`) mismatches, that is a REAL write-path interop bug: STOP, record it in the findings note, and fix `apply_pm_section_to_fragment` / the serializer before proceeding (do not weaken the assertion).
 
 - [ ] **Step 5: Write the findings note + commit**
 
@@ -812,7 +829,7 @@ Run: `uv run ruff check tests/proposal_assist/collab/test_collab_writepath.py`
 Expected: `All checks passed!`
 
 ```bash
-git add tests/proposal_assist/collab/test_collab_writepath.py frontend/scripts/verify_python_writepath.mjs tests/proposal_assist/collab/goldens/python_writepath_incremental.json docs/superpowers/notes/2026-07-03-collab-slice3b1-writepath-findings.md
+git add tests/proposal_assist/collab/test_collab_writepath.py frontend/scripts/verify_python_writepath.mjs frontend/src/writepath.test.ts tests/proposal_assist/collab/goldens/python_writepath_incremental.json docs/superpowers/notes/2026-07-03-collab-slice3b1-writepath-findings.md
 git commit -m "test(collab): extend write-path harness with incremental apply fixtures (real y-prosemirror)"
 ```
 
