@@ -13,7 +13,7 @@
 - A **custom thin Yjs provider** over the existing WS route `/api/ws/workspaces/{id}/{artifact}` (no `y-websocket`).
 - Conditional mount by a new additive `collab_enabled` read-model field; flag-off path (CM6) preserved byte-for-byte.
 - Read-only rendering of citations (inline-atom NodeView pill).
-- "Save a version" wired to the existing checkpoint endpoint, gated so it can't race an in-flight update.
+- "Save a version" wired to the existing checkpoint endpoint, gated (socket settled) to *shrink* the window against an in-flight update — not a race-free guarantee (see §7.2; a true fence is a follow-up).
 - A first-task **handshake de-risk** (Slice-0 style GO/NO-GO), a schema-equality test, a provider unit test, and one Playwright round-trip e2e.
 
 **Explicitly NOT in scope (deferred):**
@@ -63,17 +63,20 @@ Code-split so non-collab users don't pull Tiptap/yjs (mirror the existing `lazy(
 
 `collabProvider.ts` opens a raw `WebSocket` to `wss?://<host>/api/ws/workspaces/{workspaceId}/{artifact}` and speaks exactly the three sync frames the server implements (`protocol.py`): `SYNC_STEP1`, `SYNC_STEP2`, `SYNC_UPDATE`. Message framing uses `y-protocols/sync` (`writeSyncStep1/2`, `writeUpdate`, `readSyncMessage`) + `lib0/encoding|decoding` so bytes are wire-identical to what pycrdt's `_sync` codec expects. AWARENESS (message type 1) is never sent (3b-4).
 
-The provider MUST explicitly implement all four of the following (these are the amendments that were called out as required before implementation):
+The provider MUST explicitly implement all of the following (these are the amendments called out as required before implementation):
 
-1. **Bidirectional initial sync (server-first STEP1 + client STEP1 on open).**
+1. **Outer message-type framing.**
+   The backend classifies frames as `[YMessageType.SYNC (0)] [YSyncMessageType subtype] [varuint len] [payload]` (`protocol.py`). `y-protocols/sync`'s `writeSyncStep1/2` / `writeUpdate` emit only the **inner** sync sub-message (`[subtype][len][payload]`). So every outbound frame MUST prepend the outer `writeVarUint(encoder, YMessageType.SYNC = 0)` byte before the sync sub-message; and every inbound frame MUST read the leading varuint message-type, confirm it is SYNC (0) — parking/ignoring AWARENESS (1), which the server never sends but a defensive reader tolerates — and only then `readSyncMessage` on the remainder. This mirrors the server's `create_sync_message`/`create_update_message` (which include the outer SYNC byte) and `handle_sync_message(message[1:])` / `extract_update` (which strip it).
+
+2. **Bidirectional initial sync (server-first STEP1 + client STEP1 on open).**
    The server sends its own `SYNC_STEP1` right after `accept()` (`collab_ws.py` → `room.initial_message()`). The provider must:
    - On socket open, **send its own `SYNC_STEP1`** (client state vector) so the server replies with a `SYNC_STEP2` carrying the whole server document — without this the client uploads its empty state but never downloads the doc (blank editor).
-   - On receiving the server's `SYNC_STEP1`, reply with `SYNC_STEP2` (client diff). For a fresh/read-only client this is near-empty; a read-only client's STEP2 is a write frame and is dropped server-side by design (reading still works because the client's *own* STEP1 → server STEP2 answer is on the ungated read path).
+   - On receiving the server's `SYNC_STEP1`, a **writer** replies with `SYNC_STEP2` (its diff — near-empty for a fresh client). A **read-only client (`canWrite=false`) suppresses the STEP2 reply entirely** (it has nothing the server will accept) and never sends `SYNC_UPDATE` — so a non-writer emits **no** write frames at all. Reading still works because the client's *own* STEP1 → server's STEP2 answer is on the ungated read path. The provider therefore takes a `canWrite` flag (from the read model's `can_write`, §6) and gates all outbound write frames (STEP2 reply + updates) on it.
 
-2. **Origin tagging (no echo loop).**
+3. **Origin tagging (no echo loop).**
    Apply every inbound update with the provider object as the transaction origin: `Y.applyUpdate(doc, update, provider)`. The local update handler `doc.on('update', (u, origin) => …)` MUST forward to the socket **only when `origin !== provider`** — otherwise remote updates get re-broadcast to the server as if local, producing an echo loop.
 
-3. **Close-code-aware reconnect.**
+4. **Close-code-aware reconnect.**
    | Close code | Meaning (server) | Reconnect? |
    |---|---|---|
    | 1008 policy violation | bad origin / auth fail / non-member / **collab-not-enabled** / mid-session permission revoke | **NO** — permanent policy rejection; reconnecting loops forever. Surface a terminal "disconnected" status. |
@@ -81,9 +84,9 @@ The provider MUST explicitly implement all four of the following (these are the 
    | 1011 server error | poison/evict recovery | **YES** — reconnect (with backoff) rebuilds cleanly from the durable log; the CRDT client re-offers its update. |
    | 1006 / network / unclean | transport drop | **YES** — reconnect with exponential backoff (cap ~30s), re-run the STEP1 handshake on reopen (resync). |
 
-4. **Vite WS proxy.** Dev proxy currently has `ws:false` (`frontend/vite.config.ts`). Add a WebSocket-enabled proxy for `/api/ws` → `ws://localhost:8000` (a dedicated `"/api/ws"` entry with `ws:true`, or flip `ws:true` on the catch-all — the dedicated entry is lower-risk since it won't disturb Vite's own HMR socket).
+5. **Vite WS proxy.** Dev proxy currently has `ws:false` (`frontend/vite.config.ts`). Add a WebSocket-enabled proxy for `/api/ws` → `ws://localhost:8000` (a dedicated `"/api/ws"` entry with `ws:true`, or flip `ws:true` on the catch-all — the dedicated entry is lower-risk since it won't disturb Vite's own HMR socket).
 
-Provider surface (indicative): `new CollabProvider({ url, doc })` → `.status` ("connecting"|"connected"|"offline"|"disconnected-policy"), `.on('status', cb)`, `.bufferedAmount`/`.isSettled()` (for the Save-a-version gate, §7), `.destroy()`.
+Provider surface (indicative): `new CollabProvider({ url, doc, canWrite, WebSocketImpl? })` → `.status` ("connecting"|"connected"|"offline"|"closed-policy"), `.on('status', cb)`, `.bufferedAmount`/`.isSettled()` (for the Save-a-version gate, §7), `.destroy()`. `WebSocketImpl` defaults to the global `WebSocket` and is **injectable** — the Node handshake probe (§8, Task 1) and the provider unit test pass in Node's `WebSocket` (Node ≥20) / the `ws` package / a fake socket, so both exercise the real provider.
 
 ## 5. Editor & schema
 
@@ -127,20 +130,20 @@ The checkpoint endpoint checkpoints the **durable log**, not the live browser bu
 
 ### 7.3 editorStore / StatusBar
 `editorStore` is repurposed on the collab path:
-- `setSave` carries a **connection/sync status** display derived from the provider `.status` (§4) and `can_write` — e.g. "connecting"/"connected"/"offline"/"read-only" — instead of dirty/saved. (The provider emits transport statuses; the editor maps them, plus `can_write`, onto the displayed string.)
+- `setSave` carries a **connection/sync status** on this path. The current `SaveState` union is `idle|saving|saved|dirty|error` (`editorStore.ts`) with no connection states, and `StatusBar` (`StatusBar.tsx`) has no labels for connection status — so this path requires **additively widening `SaveState`** with collab states (e.g. `collab-connecting | collab-synced | collab-offline | collab-readonly`), mapped from the provider `.status` (§4) + `can_write`, plus matching labels in `StatusBar`. The widening is additive: the CM6 flag-off path still emits only the original five, so its StatusBar rendering is byte-for-byte unchanged (parity).
 - `setCursor` from the Tiptap selection (Ln/Col in the StatusBar).
 - `setDirty` is inert (a CRDT has no per-section dirty state); the Outline's dirty markers simply don't show on this path.
 - `resetEditorStore` on unmount as today.
-The StatusBar and Outline components are untouched; only what the collab editor publishes changes.
+The Outline component is untouched; `StatusBar` gains labels for the new collab states (additive — CM6 rendering unchanged). Only what the collab editor publishes changes.
 
 ### 7.4 Outline staleness (accepted for this slice)
 The sidebar Outline reads headings from the React Query `useDraft` cache (`CockpitSidebar.tsx`), which is stale vs the live Y.Doc. Minimal boundary: **refetch the draft/spec query on checkpoint / version-save** so the Outline updates at version boundaries. Live-as-you-type Outline is a follow-up (a tiny Tiptap-derived outline store feeding the sidebar).
 
 ## 8. Testing & de-risk
 
-1. **Task 1 — handshake de-risk (GO/NO-GO gate, before building the editor).** Prove a JS Yjs provider completes a live bidirectional sync handshake against the hand-rolled pycrdt server: a focused Playwright (or Node-ws) round-trip against a real uvicorn with the flag enabled on a seeded workspace — connect, receive server STEP1, exchange STEP2, send an update, confirm it persists and a second connection converges. If NO-GO, stop and fix transport; do not paper over it. (This mirrors the Slice-0 spike discipline.)
+1. **Task 1 — handshake de-risk (GO/NO-GO gate, before building the editor).** A **Node-ws probe against a real uvicorn**, importing the **real provider** with an injectable `WebSocket` implementation (Node ≥20 global `WebSocket` or the `ws` package) — so the probe exercises the actual provider code, not a throwaway client. A Python seed helper/fixture (pytest fixture or a small script) creates an active workspace, commits a draft, enables collab for `draft`, and prints the `workspace_id` + a valid session cookie. The Node probe connects with that `Cookie` header + a matching `Origin`, then verifies: (i) the bidirectional handshake completes; (ii) a sent update **persists** (survives a fresh connection replaying the durable log); (iii) a **second concurrent client converges**. If NO-GO, stop and fix transport — do not paper over it. (Mirrors the Slice-0 spike discipline.) Playwright is reserved for the later browser/UI/proxy e2e (item 4).
 2. **Schema-equality vitest** (§5.2) — the drift guard.
-3. **Provider unit test** (fake socket): sends own STEP1 on open; replies STEP2 to server STEP1; local edit → one `SYNC_UPDATE` frame; inbound update applied with provider origin and **not** re-sent; non-writer path sends no write frames; 1008 → no reconnect; 1006/1011 → reconnect scheduled.
+3. **Provider unit test** (injectable fake socket): outbound frames carry the outer SYNC byte; sends its own STEP1 on open; a **writer** replies STEP2 to the server's STEP1 and a local edit → one `SYNC_UPDATE` frame; inbound update applied with the provider origin and **not** re-sent; a **read-only provider (`canWrite=false`)** sends its own STEP1 but **no STEP2 reply and no `SYNC_UPDATE`**; `1008`/`1009` → no reconnect; `1006`/`1011` → reconnect scheduled.
 4. **One Playwright e2e:** two browser contexts on a flag-on workspace → type in A, assert B converges, reload preserves content, "Save a version" returns a commit and the Outline refetches.
 5. **Parity:** CM6 flag-off tests (`test_accepting.py`, `test_api_spec_lock.py`, member/rubric/soft-delete) stay green unchanged; `get_draft`/`get_spec` existing tests still pass with the two additive fields.
 
@@ -166,4 +169,4 @@ The sidebar Outline reads headings from the React Query `useDraft` cache (`Cockp
 - **Handshake compatibility** is the top unknown — mitigated by making it Task 1's explicit GO/NO-GO gate.
 - **Schema drift** — mitigated by the equality test.
 - **Duplicate yjs** — mitigated by pinning + dedupe verification.
-- **CSP:** the SPA's CSP must allow the WS connection (`connect-src` including `ws:`/`wss:` self); relaxed in `SPA_MODE=dev`, but the prod CSP will need to permit the WS origin when 3b-5 flips the flag — noted for 3b-5, but verify the dev CSP doesn't block the e2e here.
+- **CSP (decision: prod CSP stays out of this slice).** Dev CSP already allows `ws:` in `SPA_MODE=dev`, so the dev/e2e WS connection works here. Prod CSP is deliberately **not** touched — prod currently has tests asserting **no** `ws:` in the CSP, and the flag is OFF so no prod WS occurs. When 3b-5 flips the flag it will add a **narrow same-origin WS allowance** (not a broad `ws:`/`wss:` scheme wildcard). Action for this slice: only verify the dev CSP doesn't block the Task-1 probe / e2e.
