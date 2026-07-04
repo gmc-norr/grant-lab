@@ -104,3 +104,27 @@ async def test_malformed_awareness_dropped_without_raising():
 async def test_room_awareness_has_no_server_local_state():
     room = Room((uuid.uuid4(), "draft"))
     assert room.awareness.states == {}                # set_local_state(None) at init
+
+
+@pytest.mark.anyio
+async def test_awareness_snapshot_primes_a_new_joiner():
+    room = Room((uuid.uuid4(), "draft"))
+    a = FakeClient()
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[a] = st
+    frame, cid = _awareness_frame({"user": {"name": "Present"}})
+    await room.handle(sender=a, state=st, message=frame, persist=_noop_persist)
+
+    snapshot = await room.awareness_snapshot()
+    assert snapshot is not None and P.is_awareness(snapshot)
+    # a fresh awareness applying the snapshot sees the present user
+    joiner = Awareness(Doc())
+    joiner.set_local_state(None)
+    joiner.apply_awareness_update(P.extract_awareness_update(snapshot), "srv")
+    assert cid in joiner.states
+
+
+@pytest.mark.anyio
+async def test_awareness_snapshot_is_none_when_empty():
+    room = Room((uuid.uuid4(), "draft"))
+    assert await room.awareness_snapshot() is None

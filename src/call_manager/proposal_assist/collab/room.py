@@ -93,6 +93,16 @@ class Room:
         """The SYNC_STEP1 the server sends a client on connect."""
         return P.create_sync_message(self.doc)
 
+    async def awareness_snapshot(self) -> bytes | None:
+        """The current presence as an AWARENESS wire frame, to prime a joining
+        client. None if no presence yet. Excludes the server's own id (cleared
+        at init)."""
+        async with self._lock:
+            ids = list(self.awareness.states)
+            if not ids:
+                return None
+            return P.create_awareness_message(self.awareness.encode_awareness_update(ids))
+
     async def handle(
         self,
         *,
