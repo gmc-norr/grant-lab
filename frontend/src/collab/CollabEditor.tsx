@@ -1,7 +1,8 @@
 import Collaboration from "@tiptap/extension-collaboration";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { useEffect } from "react";
 import type * as Y from "yjs";
-import type { components } from "../api/schema.gen";
+import { resetEditorStore } from "../cockpit/editorStore";
 import { collabEditorExtensions } from "./CitationNode";
 import type { CollabProvider, ProviderStatus } from "./collabProvider";
 import { SaveVersionButton } from "./SaveVersionButton";
@@ -11,12 +12,14 @@ type CollabEditorProps = {
   workspaceId: string;
   artifact: "draft" | "spec";
   canWrite: boolean;
-  /** Citation map used by the Pill tooltip (Task 5). Optional — spec panel omits it. */
-  citations?: Record<string, components["schemas"]["CitationOut"]>;
 };
 
 export function CollabEditor(props: CollabEditorProps) {
   const { doc, provider, status } = useCollabDoc(props);
+  // Clear the shared editor store on unmount so a stale collab save-status
+  // (e.g. "Synced"/"Read-only") does not leak into the StatusBar of the next
+  // cockpit tab/view — mirrors the CM6 ArtifactSectionEditor's reset.
+  useEffect(() => () => resetEditorStore(), []);
   // doc/provider are null on the first render (built in the effect); render a
   // placeholder so the inner editor's useEditor always gets a live Y.Doc.
   if (!doc || !provider) {

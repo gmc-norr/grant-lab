@@ -68,7 +68,6 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
           workspaceId={id}
           artifact="draft"
           canWrite={draft.data.can_write}
-          citations={draft.data.citations}
         />
       ) : (
         <ArtifactSectionEditor

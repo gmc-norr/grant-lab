@@ -35,11 +35,11 @@ function frameType(b: Uint8Array): { msg: number; sub: number } {
   return { msg, sub };
 }
 
-function makeProvider(canWrite: boolean) {
+function makeProvider(canWrite: boolean, extra: { maxReconnectAttempts?: number } = {}) {
   const sockets: FakeSocket[] = [];
   const WS = class extends FakeSocket { constructor(u: string) { super(u); sockets.push(this); } } as unknown as typeof WebSocket;
   const doc = new Y.Doc();
-  const p = new CollabProvider({ url: "ws://x/api/ws/workspaces/w/draft", doc, canWrite, WebSocketImpl: WS, reconnectBaseMs: 10, reconnectMaxMs: 20 });
+  const p = new CollabProvider({ url: "ws://x/api/ws/workspaces/w/draft", doc, canWrite, WebSocketImpl: WS, reconnectBaseMs: 10, reconnectMaxMs: 20, ...extra });
   return { p, doc, sockets: sockets as unknown as FakeSocket[] };
 }
 
@@ -126,6 +126,20 @@ describe("CollabProvider", () => {
     sockets1006[0].open(); sockets1006[0].drop(1006);
     vi.advanceTimersByTime(50);
     expect(sockets1006.length).toBeGreaterThanOrEqual(2);
+    vi.useRealTimers();
+  });
+
+  it("gives up after maxReconnectAttempts consecutive failures (no infinite loop)", () => {
+    vi.useFakeTimers();
+    // Never open() → every connect fails; drop the newest socket to drive the next.
+    const { sockets } = makeProvider(true, { maxReconnectAttempts: 2 });
+    for (let i = 0; i < 6; i++) {
+      sockets[sockets.length - 1].drop(1006);
+      vi.advanceTimersByTime(50);
+    }
+    // initial + exactly 2 reconnects, then it stops — this is what bounds the
+    // pre-accept-1008-surfaced-as-1006 permanent-rejection loop.
+    expect(sockets).toHaveLength(3);
     vi.useRealTimers();
   });
 });

@@ -75,3 +75,32 @@ def test_spec_exposes_collab_enabled_and_can_write(
 
     r2 = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/spec")
     assert r2.json()["collab_enabled"] is True
+
+
+def test_spec_locked_makes_member_can_write_false(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """A LOCKED spec → a member gets can_write False (owner-only), while the owner
+    keeps can_write True. Proves can_write is wired through resolve_access's
+    lock branch, not hard-coded True."""
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import Workspace
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "draft preamble\n"
+    )
+    _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.spec_locked_at = datetime.now(UTC)
+        ws.spec_locked_by = owner_id
+        s.commit()
+
+    rm = _client(app, member_id).get(f"/api/workspaces/{ws_id}/spec")
+    assert rm.status_code == 200
+    assert rm.json()["can_write"] is False  # locked spec → member cannot write
+
+    ro = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/spec")
+    assert ro.json()["can_write"] is True  # owner still can_write on a locked spec

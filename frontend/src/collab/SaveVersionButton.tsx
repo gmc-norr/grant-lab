@@ -1,4 +1,4 @@
-import { Button } from "@mantine/core";
+import { Button, Group, Text } from "@mantine/core";
 import { useEffect, useState } from "react";
 import { setSave } from "../cockpit/editorStore";
 import type { CollabProvider, ProviderStatus } from "./collabProvider";
@@ -24,8 +24,18 @@ export function SaveVersionButton(props: {
   }, [props.status, props.canWrite]);
   const disabled = !props.canWrite || !settled || save.isPending;
   return (
-    <Button size="xs" variant="default" disabled={disabled} onClick={() => void save.mutateAsync()}>
-      {save.isPending ? "Saving…" : "Save a version"}
-    </Button>
+    <Group gap="xs">
+      {/* mutate() (not mutateAsync) so a rejected checkpoint is captured in
+          save.isError instead of an unhandled promise rejection — a failed
+          checkpoint must be SURFACED, not silently swallowed. */}
+      <Button size="xs" variant="default" disabled={disabled} onClick={() => save.mutate()}>
+        {save.isPending ? "Saving…" : "Save a version"}
+      </Button>
+      {save.isError && (
+        <Text size="xs" c="red" role="alert">
+          Save failed — retry
+        </Text>
+      )}
+    </Group>
   );
 }
