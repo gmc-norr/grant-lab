@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { useDraft, useSaveSection } from "../api/editor";
 import { downloadExport, type ExportKind } from "../api/export";
+import { CollabEditor } from "../collab/CollabEditor";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
 
 export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: string; n: number } | null }) {
@@ -61,18 +62,28 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
           </Text>
         )}
       </Group>
-      <ArtifactSectionEditor
-        key={`draft:${id}`}
-        workspaceId={id}
-        queryKey={["draft", id]}
-        head={head}
-        canEdit={can_edit}
-        sections={sections}
-        save={save}
-        refetch={draft.refetch}
-        citations
-        openPeek={openPeek}
-      />
+      {draft.data.collab_enabled ? (
+        <CollabEditor
+          key={`collab-draft:${id}`}
+          workspaceId={id}
+          artifact="draft"
+          canWrite={draft.data.can_write}
+          citations={draft.data.citations}
+        />
+      ) : (
+        <ArtifactSectionEditor
+          key={`draft:${id}`}
+          workspaceId={id}
+          queryKey={["draft", id]}
+          head={head}
+          canEdit={can_edit}
+          sections={sections}
+          save={save}
+          refetch={draft.refetch}
+          citations
+          openPeek={openPeek}
+        />
+      )}
     </Stack>
   );
 }

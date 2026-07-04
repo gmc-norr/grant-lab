@@ -72,6 +72,7 @@ export default defineConfig({
     // catch-all would also swallow /@vite, /@id, /@fs, /src, /node_modules and
     // the HMR requests, breaking dev.
     proxy: {
+      "/api/ws": { target: BACKEND.replace(/^http/, "ws"), ws: true, changeOrigin: true },
       "^/": {
         target: BACKEND,
         changeOrigin: true,

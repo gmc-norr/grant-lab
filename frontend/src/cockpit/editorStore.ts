@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from "react";
 
-export type SaveState = "idle" | "saving" | "saved" | "dirty" | "error";
+export type SaveState =
+  | "idle" | "saving" | "saved" | "dirty" | "error"
+  | "collab-connecting" | "collab-synced" | "collab-offline" | "collab-readonly";
 export type Cursor = { line: number; col: number };
 export type EditorSnapshot = { dirty: number[]; cursor: Cursor | null; save: SaveState };
 

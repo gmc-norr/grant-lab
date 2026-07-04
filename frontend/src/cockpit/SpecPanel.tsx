@@ -4,6 +4,7 @@ import { useEffect } from "react";
 
 import { useLatestCoherence, useStartCoherence } from "../api/coherence";
 import { useInitSpec, useLockSpec, useSaveSpecSection, useSpec, useUnlockSpec } from "../api/editor";
+import { CollabEditor } from "../collab/CollabEditor";
 import { ArtifactSectionEditor } from "../editor/ArtifactSectionEditor";
 
 export function SpecPanel({ id }: { id: string }) {
@@ -97,20 +98,29 @@ export function SpecPanel({ id }: { id: string }) {
           </Text>
         )}
       </Group>
-      <ArtifactSectionEditor
-        // Remount on workspace change so index-keyed buffers / peek / selection never
-        // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
-        key={`spec:${id}`}
-        workspaceId={id}
-        queryKey={["spec", id]}
-        head={head}
-        canEdit={can_edit}
-        sections={sections}
-        save={save}
-        refetch={spec.refetch}
-        citations={false}
-        fullViewLabel="Full spec"
-      />
+      {spec.data.collab_enabled ? (
+        <CollabEditor
+          key={`collab-spec:${id}`}
+          workspaceId={id}
+          artifact="spec"
+          canWrite={spec.data.can_write}
+        />
+      ) : (
+        <ArtifactSectionEditor
+          // Remount on workspace change so index-keyed buffers / peek / selection never
+          // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
+          key={`spec:${id}`}
+          workspaceId={id}
+          queryKey={["spec", id]}
+          head={head}
+          canEdit={can_edit}
+          sections={sections}
+          save={save}
+          refetch={spec.refetch}
+          citations={false}
+          fullViewLabel="Full spec"
+        />
+      )}
     </Stack>
   );
 }

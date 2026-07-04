@@ -2,6 +2,7 @@ import Collaboration from "@tiptap/extension-collaboration";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { components } from "../api/schema.gen";
 import { collabEditorExtensions } from "./CitationNode";
+import { SaveVersionButton } from "./SaveVersionButton";
 import { useCollabDoc } from "./useCollabDoc";
 
 export function CollabEditor(props: {
@@ -11,7 +12,7 @@ export function CollabEditor(props: {
   /** Citation map used by the Pill tooltip (Task 5). Optional — spec panel omits it. */
   citations?: Record<string, components["schemas"]["CitationOut"]>;
 }) {
-  const { doc, status } = useCollabDoc(props);
+  const { doc, provider, status } = useCollabDoc(props);
   const editor = useEditor(
     {
       editable: props.canWrite,
@@ -24,6 +25,13 @@ export function CollabEditor(props: {
   );
   return (
     <div data-collab-status={status}>
+      <SaveVersionButton
+        id={props.workspaceId}
+        artifact={props.artifact}
+        provider={provider}
+        canWrite={props.canWrite}
+        status={status}
+      />
       <EditorContent editor={editor} data-testid="collab-editor" />
     </div>
   );
