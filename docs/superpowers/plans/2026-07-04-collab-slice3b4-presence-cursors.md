@@ -617,15 +617,17 @@ it("awareness converges: A sets presence, B sees it", async () => {
 
 - [ ] **Step 2: Run the live probe**
 
+The driver seeds Postgres + uvicorn + a collab-enabled draft and runs the probe itself
+(`subprocess … cwd="frontend"`). It resolves `alembic.ini` relative to cwd, so **run it
+from the repo root** (NOT from `frontend/`):
+
 ```bash
-cd frontend
-# Terminal-in-one: the driver seeds + starts uvicorn, prints env, then runs vitest.
-# (Follows the 3b-3 recipe; the driver enables collab for the seeded workspace.)
-EMBEDDING_MODEL=bge-m3 uv run python ../scripts/collab_handshake_probe.py --run-vitest
-# or, if the driver only prints env: export PROBE_WS_URL/PROBE_COOKIE/PROBE_ORIGIN then:
-#   pnpm vitest run --config vitest.probe.config.ts src/collab/handshake.probe.test.ts
+# from /home/parlar_ai/dev/call-monitor (repo root)
+EMBEDDING_MODEL=bge-m3 uv run python scripts/collab_handshake_probe.py
 ```
-Expected: the new test PASSES (plus the existing convergence/persistence probe).
+Expected: the driver prints `HANDSHAKE_PROBE: GO` and exits 0; the new awareness-convergence
+test PASSES alongside the existing convergence/persistence probe (all in `handshake.probe.test.ts`,
+run via `vitest.probe.config.ts` on port 8199).
 
 - [ ] **Step 3: GO/NO-GO decision**
 
@@ -724,11 +726,11 @@ git commit -m "feat(collab): prime new joiners with an awareness snapshot"
 ### Task 6: Disconnect removal on the room-manager teardown paths
 
 **Files:**
-- Modify: `src/call_manager/proposal_assist/collab/room.py`
+- Modify: `src/call_manager/proposal_assist/collab/room.py` (adds `remove_client_presence`, teardown hooks, AND scrubs presence in `_broadcast`'s dead-client cleanup)
 - Test: `tests/proposal_assist/collab/test_collab_awareness.py`
 
 **Interfaces:**
-- Produces: `async Room.remove_client_presence(state)`; `RoomManager.release` / `RoomManager.drop_client` broadcast a removal when a client leaves and the room survives.
+- Produces: `async Room.remove_client_presence(state)`; `RoomManager.release` / `RoomManager.drop_client` broadcast a removal when a client leaves and the room survives; `Room._broadcast` scrubs a hard-failed client's awareness from `room.awareness`.
 
 - [ ] **Step 1: Write the failing tests** (append to `test_collab_awareness.py`)
 
@@ -796,12 +798,40 @@ async def test_release_last_client_no_presence_broadcast_no_crash():
     await room.handle(sender=a, state=sta, message=frame, persist=_noop_persist)
     await mgr.release(key, client=a)                   # last client → room evicted, no survivor
     assert not mgr.has_room(key)
+
+
+@pytest.mark.anyio
+async def test_broadcast_drop_of_failing_client_scrubs_its_presence():
+    # A client whose send raises is popped by _broadcast DIRECTLY. Its ClientState
+    # is then unrecoverable by a later release()/drop_client(), so _broadcast must
+    # scrub its awareness from room.awareness — else the stale id leaks into every
+    # future new-joiner snapshot.
+    room = Room((uuid.uuid4(), "draft"))
+
+    class BoomClient(FakeClient):
+        async def send_bytes(self, data):
+            raise RuntimeError("socket closed")
+
+    good, boom = FakeClient(), BoomClient()
+    st_good = ClientState(user_id=1, can_write=True)
+    st_boom = ClientState(user_id=2, can_write=True)
+    room.clients[good] = st_good
+    room.clients[boom] = st_boom
+    frame, cid = _awareness_frame({"user": {"name": "Boom"}})
+    await room.handle(sender=boom, state=st_boom, message=frame, persist=_noop_persist)
+    assert cid in room.awareness.states
+
+    # Any broadcast that targets boom drops it (send raises) and scrubs its presence.
+    await room.broadcast(P.create_awareness_message(frame))
+    assert boom not in room.clients
+    assert cid not in room.awareness.states
+    assert await room.awareness_snapshot() is None      # no leak into snapshots
 ```
 
 - [ ] **Step 2: Run to verify fail**
 
 Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/collab/test_collab_awareness.py -p no:cacheprovider -q`
-Expected: FAIL — `Room` has no `remove_client_presence`; `b.sent` empty after release.
+Expected: FAIL — `Room` has no `remove_client_presence`; `b.sent` empty after release; the boom-client's `cid` still lingers in `room.awareness.states`.
 
 - [ ] **Step 3: Implement in `room.py`**
 
@@ -869,16 +899,48 @@ Modify `RoomManager.drop_client`:
             await survivor.remove_client_presence(removed_state)
 ```
 
+Scrub presence in `Room._broadcast`'s dead-client cleanup. The dead-client loop runs
+between awaits (the sends are already done), so the awareness mutation is atomic wrt
+other coroutines — no lock needed. This closes the leak where a hard socket failure
+pops the client before `release`/`drop_client` can recover its `ClientState`:
+
+```python
+    async def _broadcast(self, frame: bytes, *, exclude) -> None:
+        """Send to every client except `exclude`, isolating per-client failures: a
+        broken/closed socket is dropped and the rest still receive the frame. A
+        dropped client's presence is ALSO scrubbed from the room awareness so a hard
+        socket failure cannot leak its cursor into new-joiner snapshots (the later
+        release()/drop_client() can no longer recover its ClientState)."""
+        dead = []
+        for client in list(self.clients):
+            if client is exclude:
+                continue
+            try:
+                await client.send_bytes(frame)
+            except Exception:
+                dead.append(client)
+        for client in dead:
+            state = self.clients.pop(client, None)
+            if state is not None and state.awareness_ids:
+                # Synchronous (no await) → atomic; no room lock needed here.
+                self.awareness.remove_awareness_states(list(state.awareness_ids), origin="server")
+```
+
+> Survivors' live carets for a hard-failed peer clear on the ~30s y-awareness timeout
+> (this rare path does not re-broadcast a removal — doing so from inside `_broadcast`
+> would be re-entrant). The correctness fix is the snapshot scrub above; the timeout is
+> the same bound already accepted elsewhere.
+
 - [ ] **Step 4: Run to verify pass**
 
 Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/collab/ -p no:cacheprovider -q`
-Expected: PASS (awareness + room + ws-route + operate + evict-tombstone suites green — release/drop_client behavior preserved).
+Expected: PASS (awareness + room + ws-route + operate + evict-tombstone suites green — release/drop_client behavior preserved; existing `test_broadcast_isolates_a_failing_client` still green since it uses no awareness).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/call_manager/proposal_assist/collab/room.py tests/proposal_assist/collab/test_collab_awareness.py
-git commit -m "feat(collab): broadcast presence removal on release/drop_client teardown"
+git commit -m "feat(collab): presence removal on teardown + scrub on hard broadcast failure"
 ```
 
 ---
@@ -909,9 +971,13 @@ it("awareness removal: A disconnects, B stops seeing A", async () => {
 
 - [ ] **Step 2: Run the live probe**
 
-Run (same driver as Task 4):
-`cd frontend && EMBEDDING_MODEL=bge-m3 uv run python ../scripts/collab_handshake_probe.py --run-vitest`
-Expected: both awareness probes PASS. **GO** completes the full interop gate (convergence + removal).
+Run the same driver from the **repo root** (it runs the whole `handshake.probe.test.ts` file,
+now including the removal probe):
+```bash
+# from /home/parlar_ai/dev/call-monitor (repo root)
+EMBEDDING_MODEL=bge-m3 uv run python scripts/collab_handshake_probe.py
+```
+Expected: `HANDSHAKE_PROBE: GO`; both awareness probes PASS. **GO** completes the full interop gate (convergence + removal).
 
 - [ ] **Step 3: Commit**
 
@@ -1165,57 +1231,68 @@ Expected: `@tiptap/extension-collaboration-caret 3.27.1`; `@tiptap/y-tiptap` pre
 
 - [ ] **Step 2: Write the failing test** (`CollabEditor.identity.test.tsx`)
 
-This asserts the R2-1 late-identity fix: a `useSession()` result arriving after mount is pushed into `provider.awareness` (via `editor.commands.updateUser`, which writes the `user` field to awareness local state) — the editor is not rebuilt.
+This asserts the R2-1 late-identity fix concretely: a `useSession()` result arriving after mount is pushed into `provider.awareness` (via `editor.commands.updateUser`, which writes the `user` field to awareness local state) — the editor is not rebuilt. The mock **stashes the created provider** so the test can assert on its awareness. If the `updateUser` effect is missing, the local user stays `"Anonymous"` (the pre-resolve fallback) and the assertion fails — which is the point.
 
 ```tsx
-import { render, waitFor } from "@testing-library/react";
+import { waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { CollabProvider } from "./collabProvider";
+import { renderWithProviders } from "../test-utils"; // the repo's real helper (src/test-utils.tsx)
 
-// Mock useSession so we control when identity resolves.
+// Control when identity resolves.
 const sessionData: { value: any } = { value: undefined };
 vi.mock("../api/session", () => ({ useSession: () => ({ data: sessionData.value }) }));
 
-// Use a FakeSocket so no real network is needed (mirror collabProvider.test.ts).
-vi.mock("./useCollabDoc", async () => {
-  const Y = await import("yjs");
-  const { CollabProvider } = await import("./collabProvider");
-  return {
-    useCollabDoc: (opts: any) => {
+// A stable fake-socket provider, stashed for assertions. useCollabDoc builds the
+// provider once in an effect (stable across rerenders); the mock mirrors that by
+// creating exactly one provider and reusing it.
+let stashed: CollabProvider | null = null;
+class FakeSocket {
+  static OPEN = 1; readyState = 1; bufferedAmount = 0; binaryType = "arraybuffer";
+  onopen: any; onmessage: any; onclose: any; onerror: any;
+  constructor(public url: string) { queueMicrotask(() => this.onopen?.()); }
+  send() {} close() { this.onclose?.({ code: 1000 }); }
+}
+vi.mock("./useCollabDoc", () => ({
+  useCollabDoc: (opts: any) => {
+    if (!stashed) {
       const doc = new Y.Doc();
-      // minimal fake socket provider
-      class FakeSocket { static OPEN=1; readyState=1; bufferedAmount=0; binaryType="arraybuffer";
-        onopen:any; onmessage:any; onclose:any; onerror:any; constructor(public url:string){ queueMicrotask(()=>this.onopen?.()); }
-        send(){} close(){ this.onclose?.({code:1000}); } }
-      const provider = new CollabProvider({ url:"ws://x/api/ws/workspaces/w/draft", doc, canWrite:opts.canWrite, WebSocketImpl: FakeSocket as any });
-      return { doc, provider, status: "connected" };
-    },
-  };
-});
+      stashed = new CollabProvider({
+        url: "ws://x/api/ws/workspaces/w/draft", doc, canWrite: opts.canWrite,
+        WebSocketImpl: FakeSocket as unknown as typeof WebSocket,
+      });
+    }
+    return { doc: stashed.doc, provider: stashed, status: "connected" };
+  },
+}));
 
 import { CollabEditor } from "./CollabEditor";
-import { renderWithProviders } from "../test/renderWithProviders"; // use the repo's helper
 
-describe("CollabEditor identity", () => {
-  it("updates the caret user when useSession resolves after mount (R2-1)", async () => {
-    sessionData.value = undefined;                 // unresolved at mount
-    const utils = renderWithProviders(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
-    // resolve identity late
+describe("CollabEditor identity (R2-1)", () => {
+  it("pushes late-resolved identity into provider.awareness via updateUser", async () => {
+    stashed = null;
+    sessionData.value = undefined;                              // unresolved at mount
+    const { rerender } = renderWithProviders(
+      <CollabEditor workspaceId="w" artifact="draft" canWrite />,
+    );
+    await waitFor(() => expect(stashed).not.toBeNull());
+    // pre-resolve: caret user is the fallback
+    expect((stashed!.awareness.getLocalState() as any)?.user?.name).toBe("Anonymous");
+
     sessionData.value = { user: { id: 7, name: "Late Name", email: "late@ki.se" } };
-    utils.rerender(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
+    rerender(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
     await waitFor(() => {
-      // the awareness local state's user reflects the resolved identity
-      const anyUser = document.querySelector('[data-testid="collab-editor"]');
-      expect(anyUser).toBeTruthy();
+      expect((stashed!.awareness.getLocalState() as any)?.user?.name).toBe("Late Name");
     });
-    // NOTE: assert on provider.awareness.getLocalState().user via a test hook if the
-    // harness exposes the provider; otherwise this render-smoke + the e2e (Task 12)
-    // cover the visual. Keep this test lightweight — the pure identity mapping is
-    // unit-tested in Task 10.
   });
 });
 ```
 
-> Testing a live Tiptap editor + caret plugin in jsdom is fragile (see 3b-3's StrictMode/mock experience). Keep this test to a render-smoke that proves the wiring compiles and mounts with the late-resolve rerender; the **authoritative** identity proof is the pure util test (Task 10) + the e2e (Task 12). If the harness exposes the provider, strengthen the assertion to `provider.awareness.getLocalState()?.user.name === "Late Name"`.
+> If the caret plugin cannot mount in jsdom (see 3b-3's editor-in-jsdom fragility), fall
+> back to spying on `editor.commands.updateUser` via a thin test seam — but the awareness
+> assertion above is the target: it fails if the effect is missing. The pure identity
+> mapping is separately unit-tested in Task 10; the visual proof is the Task 12 e2e.
 
 - [ ] **Step 3: Run to verify fail**
 
@@ -1370,7 +1447,7 @@ git commit -m "test(collab): author presence e2e (deferred-run) + slice verifica
 
 **Spec coverage** (each spec section → task):
 - §4 wire protocol (frame, MESSAGE_AWARENESS, ungated, not persisted, origin-gated) → Tasks 1–3.
-- §5.1 protocol helpers → Task 1. §5.2 relay + attribution (incl R2-2) → Task 2. §5.3 snapshot → Task 5. §5.4 removal on teardown (Amdt 3) → Task 6.
+- §5.1 protocol helpers → Task 1. §5.2 relay + attribution (incl R2-2) → Task 2. §5.3 snapshot → Task 5. §5.4 removal on teardown (Amdt 3) + `_broadcast` hard-failure presence scrub (R2-4) → Task 6.
 - §6 provider (send/receive/flush Amdt 5, destroy removal, clear-on-close R2-3) → Tasks 3, 8.
 - §7 CollaborationCaret + updateUser effect (R2-1) → Task 11.
 - §8 identity (UserOut.name Amdt b, displayName, colorForUserId) → Tasks 9, 10.
@@ -1378,7 +1455,7 @@ git commit -m "test(collab): author presence e2e (deferred-run) + slice verifica
 - §11 Task-1 de-risk (interop GO/NO-GO) → Tasks 4 (convergence) + 7 (removal).
 - Amendment 1 (server phantom) → Task 2 `set_local_state(None)` + `test_room_awareness_has_no_server_local_state`.
 
-**Placeholder scan:** every code step shows real code; every test shows real assertions; commands include the exact `EMBEDDING_MODEL=bge-m3 … -p no:cacheprovider` form. The only softened items are (a) the `test_api_me.py` fixture names (flagged: mirror the file's idiom) and (b) the jsdom caret component test (flagged: render-smoke + Task-10 unit + Task-12 e2e are the authoritative proof) — both intentional, with the concrete fallback named.
+**Placeholder scan:** every code step shows real code; every test shows real assertions; commands include the exact `EMBEDDING_MODEL=bge-m3 … -p no:cacheprovider` form. The one softened item is the `test_api_me.py` fixture names (flagged: mirror the file's idiom). The jsdom caret component test now asserts R2-1 concretely (`provider.awareness.getLocalState().user.name === "Late Name"` after a late resolve, with a `"Anonymous"` pre-condition so a missing effect fails it), with a `updateUser`-spy fallback named. The live gates run the real driver from the repo root (`scripts/collab_handshake_probe.py`).
 
 **Type/name consistency:** `awareness_ids` (snake) server-side; `awareness` field + `sendAwareness`/`onAwarenessUpdate` client-side; `MESSAGE_AWARENESS = 1` both sides; `colorForUserId`/`displayName` defined in Task 10 and consumed in Task 11; `awareness_snapshot()`/`remove_client_presence()` defined in Tasks 5/6 and used in Task 5's `collab_ws` + Task 6's `RoomManager`. `updateUser` is the Tiptap v3 CollaborationCaret command.
 

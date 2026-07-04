@@ -1,7 +1,7 @@
 # Collab Slice 3b-4 — Awareness / Presence / Remote Cursors (Design)
 
 **Date:** 2026-07-04
-**Status:** design approved (5 round-1 amendments + 3 round-2 spec-review amendments folded). Round-2: **R2-1** late-identity `updateUser` effect (no editor rebuild) — §7; **R2-2** robust id attribution via `read_awareness_client_ids` payload parse ∪ states-diff (same-clientID reconnect) — §5.1/§5.2; **R2-3** provider clears remote presence on socket close (poison-evict is not client-true) — §5.4/§6. All grounded against real pycrdt 0.14.0 + the Tiptap v3 registry.
+**Status:** design approved (5 round-1 amendments + 4 round-2 review amendments folded). Round-2: **R2-1** late-identity `updateUser` effect (no editor rebuild) — §7; **R2-2** robust id attribution via `read_awareness_client_ids` payload parse ∪ states-diff (same-clientID reconnect) — §5.1/§5.2; **R2-3** provider clears remote presence on socket close (poison-evict is not client-true) — §5.4/§6; **R2-4** `_broadcast` scrubs a hard-failed client's presence (else it leaks into new-joiner snapshots) — §5.4. All grounded against real pycrdt 0.14.0 + the Tiptap v3 registry.
 **Builds on:** Slice 3b-3 (Tiptap frontend + custom thin Yjs provider), merged `16e4bca` + remediation `46f5959`. Continues the collab-editing foundation ([[project_collab_editing_foundation]]).
 
 ---
@@ -134,6 +134,8 @@ A leaver's caret must vanish for peers **immediately**, not after the 30 s aware
 - Room **evicted** (last client left) → no surviving peers → skip removal (the room object is gone anyway).
 - Client-empty-but-ops>0 (deferred-checkpoint case) → no peers → skip.
 - `evict()` (poison) closes every socket → the next connection rebuilds from the durable log; the in-memory `Awareness` dies with the room. No **server-side** removal is possible or needed (no surviving peers on that room object). **But this is not client-true (Amendment R2-3):** each surviving *browser* provider gets a 1011 close and reconnects, and would retain the other peers' stale carets until the 30 s awareness timeout. The provider therefore clears remote presence locally on any socket close (§6); peers repopulate from the reconnect snapshot + on-open flush.
+
+**One more removal seam (Amendment R2-4):** `Room._broadcast` already drops a client whose `send_bytes` raises (a hard socket failure), popping it directly from `room.clients`. Because that pop happens *before* the WS route's `finally`→`release` runs, `release`/`drop_client` would find `removed_state=None` and never remove the dead client's awareness — so its id would linger in `room.awareness` and **leak into every future `awareness_snapshot()`**. `_broadcast`'s dead-client cleanup therefore also scrubs the dropped client's `awareness_ids` from `room.awareness` (synchronous, between awaits → atomic; no lock needed). This rare path does not re-broadcast a removal to survivors (that would be re-entrant inside `_broadcast`); their stale carets clear on the ~30 s y-awareness timeout, while the snapshot is corrected immediately.
 
 This keeps presence-removal on the **room-manager teardown paths**, not merely on a normal WS close — so a revoke (path 2) and a normal disconnect (path 1) both drop the caret. It also composes with Slice-2c: a revoked member is closed 1008 by `reconcile_client`, and the subsequent `drop_client`/`release` removes its presence.
 
