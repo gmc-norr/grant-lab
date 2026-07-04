@@ -4,20 +4,29 @@ import { describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "../test-utils";
 
-vi.mock("./collabProvider", () => ({
-  CollabProvider: class {
-    on() {
-      return () => {};
-    }
-    destroy() {}
-    isSettled() {
-      return false;
-    }
-    get status() {
-      return "connected";
-    }
-  },
-}));
+// Async factory + dynamic imports so the mock exposes a REAL y-protocols
+// Awareness (CollaborationCaret reads provider.awareness.setLocalStateField on
+// mount — a bare stub would crash). Dynamic import avoids the vi.mock hoisting
+// init-order problem with top-level imports.
+vi.mock("./collabProvider", async () => {
+  const Y = await import("yjs");
+  const awarenessProtocol = await import("y-protocols/awareness");
+  return {
+    CollabProvider: class {
+      awareness = new awarenessProtocol.Awareness(new Y.Doc());
+      on() {
+        return () => {};
+      }
+      destroy() {}
+      isSettled() {
+        return false;
+      }
+      get status() {
+        return "connected";
+      }
+    },
+  };
+});
 
 vi.mock("./useSaveVersion", () => ({
   useSaveVersion: () => ({ mutateAsync: vi.fn(), isPending: false }),
