@@ -19,7 +19,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pycrdt import Doc
 
@@ -52,15 +52,23 @@ class PersistError(Exception):
 class ClientState:
     """Per-connection state the room tracks for a client socket. `can_write` is
     MUTABLE: mid-session permission reconciliation (Slice 2c) flips it in place,
-    and the WS route reads it per message."""
+    and the WS route reads it per message. `awareness_ids` tracks the awareness
+    client ids this socket has declared, so its presence can be removed on
+    disconnect."""
     user_id: int
     can_write: bool
+    awareness_ids: set[int] = field(default_factory=set)
 
 
 class Room:
     def __init__(self, key: RoomKey) -> None:
         self.key = key
         self.doc = Doc()
+        # Per-room presence. set_local_state(None) clears the server doc's own
+        # awareness entry (a fresh Awareness seeds states[doc.client_id] = {}),
+        # so the server never broadcasts a phantom cursor.
+        self.awareness = P.Awareness(self.doc)
+        self.awareness.set_local_state(None)
         self.clients: dict = {}
         self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
@@ -161,7 +169,36 @@ class Room:
             await self._broadcast(P.create_update_message(update), exclude=sender)
             return
 
-        # AWARENESS and anything else: ignored in Slice 1 (presence is Slice 3).
+        if P.is_awareness(message):
+            # Presence relay: ungated (not a doc mutation) and NEVER persisted.
+            try:
+                payload = P.extract_awareness_update(message)
+                declared = set(P.read_awareness_client_ids(payload))
+            except Exception:
+                logger.warning(
+                    "collab.malformed_awareness",
+                    extra={"event": "collab_malformed_awareness", "room": str(self.key)},
+                )
+                return
+            async with self._lock:
+                before = set(self.awareness.states)
+                try:
+                    self.awareness.apply_awareness_update(payload, origin="client")
+                except Exception:
+                    logger.warning(
+                        "collab.malformed_awareness_update",
+                        extra={"event": "collab_malformed_awareness_update",
+                               "room": str(self.key)},
+                    )
+                    return
+                # Attribute ids to THIS socket: payload-declared ids (robust to a
+                # same-clientID reconnect where the diff is empty) ∪ states-diff.
+                state.awareness_ids |= declared | (set(self.awareness.states) - before)
+            # Relay the raw payload as-is to peers (standard y-awareness relay).
+            await self._broadcast(P.create_awareness_message(payload), exclude=sender)
+            return
+
+        # Anything else: ignored.
         return
 
     # --- public accessors for the kernel (Step 1c) ---
