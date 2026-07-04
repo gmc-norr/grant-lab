@@ -91,4 +91,85 @@ test.describe("collab editor round-trip", () => {
     await ctxA.close();
     await ctxB.close();
   });
+
+  // Presence / remote-caret e2e (Slice 3b-4, Task 12 Step 1 + Step 6).
+  //
+  // DEFERRED LIVE RUN: same environment requirements as the round-trip test
+  // above (harness contention on :5173 means we do not run the Playwright
+  // browser suite in CI without the seed step).  The presence transport itself
+  // (awareness broadcast through the Yjs WS kernel) is already proven by the
+  // Task 4 / Task 7 live interop gates on the backend.
+  //
+  // Caret class names confirmed from:
+  //   frontend/node_modules/@tiptap/extension-collaboration-caret/src/collaboration-caret.ts
+  //   version 3.27.1 — defaultRender emits:
+  //     span.collaboration-carets__caret  (the caret widget)
+  //       div.collaboration-carets__label (the name label text node inside it)
+  // If the package is later upgraded and the class names change, this test
+  // will fail on first live run — update the selectors to match the new names.
+  test("client B sees a remote caret widget with the owner's name after client A focuses and types", async ({
+    browser,
+    baseURL,
+  }) => {
+    // Both contexts use the same owner cookie: two tabs, one owner.
+    // CollaborationCaret will broadcast awareness for each context; each
+    // remote peer's caret appears in the other's editor DOM.  With a single
+    // owner the label text will be the owner's display name (name or email
+    // prefix per collabColor.ts#displayName).
+    const cookieObj = [
+      {
+        name: "session",
+        value: SESSION_COOKIE!,
+        url: baseURL!,
+      },
+    ];
+
+    const ctxA = await browser.newContext();
+    await ctxA.addCookies(cookieObj);
+
+    const ctxB = await browser.newContext();
+    await ctxB.addCookies(cookieObj);
+
+    const a = await ctxA.newPage();
+    const b = await ctxB.newPage();
+
+    const url = `/cockpit/${COLLAB_WS_ID}`;
+    await a.goto(url);
+    await b.goto(url);
+
+    // Wait for both editors to mount and the Yjs WS handshake to complete.
+    const edA = a.getByTestId("collab-editor");
+    const edB = b.getByTestId("collab-editor");
+    await expect(edA).toBeVisible({ timeout: 10_000 });
+    await expect(edB).toBeVisible({ timeout: 10_000 });
+
+    // Client A focuses the editor and types — this moves A's cursor into the
+    // document, which triggers an awareness update that propagates to B.
+    await edA.click();
+    await a.keyboard.type("presence-probe");
+
+    // Client B should receive A's awareness state and render a remote caret
+    // widget within 5 s (Yjs awareness is broadcast on every local state
+    // change, independent of document sync).
+    //
+    // Selector rationale:
+    //   .collaboration-carets__caret  — the outer <span> decoration widget
+    //   .collaboration-carets__label  — the name <div> nested inside it
+    // Both class names are emitted by the default render function in
+    // @tiptap/extension-collaboration-caret 3.27.1 (verified from source).
+    const remoteCaret = edB.locator(".collaboration-carets__caret");
+    await expect(remoteCaret).toBeVisible({ timeout: 5_000 });
+
+    const remoteLabel = remoteCaret.locator(".collaboration-carets__label");
+    await expect(remoteLabel).toBeVisible({ timeout: 2_000 });
+
+    // The label text should be the owner's display name (non-empty string).
+    // We don't assert the exact name because the seed may use any fixture
+    // user — just confirm it is not empty, i.e. the widget carries a name.
+    const labelText = await remoteLabel.textContent();
+    expect(labelText?.trim().length).toBeGreaterThan(0);
+
+    await ctxA.close();
+    await ctxB.close();
+  });
 });
