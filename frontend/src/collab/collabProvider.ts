@@ -1,9 +1,11 @@
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
 import * as syncProtocol from "y-protocols/sync";
+import * as awarenessProtocol from "y-protocols/awareness";
 import type * as Y from "yjs";
 
 const MESSAGE_SYNC = 0;
+const MESSAGE_AWARENESS = 1;
 const WS_OPEN = 1;
 
 export type ProviderStatus = "connecting" | "connected" | "offline" | "closed-policy";
@@ -23,6 +25,7 @@ export interface CollabProviderOptions {
 
 export class CollabProvider {
   readonly doc: Y.Doc;
+  readonly awareness: awarenessProtocol.Awareness;
   private readonly url: string;
   private readonly canWrite: boolean;
   private readonly WS: typeof WebSocket;
@@ -37,9 +40,14 @@ export class CollabProvider {
   private destroyed = false;
   private lastLocalEditMs = 0;
   private readonly onUpdate: (update: Uint8Array, origin: unknown) => void;
+  private readonly onAwarenessUpdate: (
+    changes: { added: number[]; updated: number[]; removed: number[] },
+    origin: unknown,
+  ) => void;
 
   constructor(opts: CollabProviderOptions) {
     this.doc = opts.doc;
+    this.awareness = new awarenessProtocol.Awareness(this.doc);
     this.url = opts.url;
     this.canWrite = opts.canWrite;
     this.WS = opts.WebSocketImpl ?? (globalThis.WebSocket as typeof WebSocket);
@@ -58,6 +66,13 @@ export class CollabProvider {
       this.send(encoding.toUint8Array(enc));
     };
     this.doc.on("update", this.onUpdate);
+    this.onAwarenessUpdate = (changes, origin) => {
+      // Origin-tag guard: never echo an update we applied FROM the socket.
+      // Awareness send is UNGATED by canWrite — viewers also broadcast their caret.
+      if (origin === this) return;
+      this.sendAwareness([...changes.added, ...changes.updated, ...changes.removed]);
+    };
+    this.awareness.on("update", this.onAwarenessUpdate);
     this.connect();
   }
 
@@ -81,6 +96,12 @@ export class CollabProvider {
   destroy(): void {
     this.destroyed = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    // Remove the listener FIRST so the manual removal isn't double-sent by the handler.
+    this.awareness.off("update", this.onAwarenessUpdate);
+    // Announce our departure so peers drop our caret immediately (before close).
+    awarenessProtocol.removeAwarenessStates(this.awareness, [this.doc.clientID], "destroy");
+    this.sendAwareness([this.doc.clientID]);
+    this.awareness.destroy();
     this.doc.off("update", this.onUpdate);
     if (this.ws) { try { this.ws.close(); } catch { /* already closed */ } this.ws = null; }
     this.listeners.clear();
@@ -94,6 +115,14 @@ export class CollabProvider {
 
   private send(bytes: Uint8Array): void {
     if (this.ws && this.ws.readyState === WS_OPEN) this.ws.send(bytes);
+  }
+
+  private sendAwareness(ids: number[]): void {
+    if (!ids.length) return;
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, MESSAGE_AWARENESS);
+    encoding.writeVarUint8Array(enc, awarenessProtocol.encodeAwarenessUpdate(this.awareness, ids));
+    this.send(encoding.toUint8Array(enc));
   }
 
   private connect(): void {
@@ -111,6 +140,13 @@ export class CollabProvider {
       encoding.writeVarUint(enc, MESSAGE_SYNC);
       syncProtocol.writeSyncStep1(enc, this.doc);
       this.send(encoding.toUint8Array(enc));
+      // Flush our local awareness so peers/server learn it even if the caret set
+      // the local user state before the socket opened (Amendment 5).
+      // Only flush if the local state is non-empty (Awareness initialises to {}).
+      const localState = this.awareness.getLocalState();
+      if (localState !== null && Object.keys(localState).length > 0) {
+        this.sendAwareness([this.doc.clientID]);
+      }
     };
 
     ws.onmessage = (ev: MessageEvent) => {
@@ -124,7 +160,12 @@ export class CollabProvider {
         if (!(ev.data instanceof ArrayBuffer)) return;
         const dec = decoding.createDecoder(new Uint8Array(ev.data));
         const messageType = decoding.readVarUint(dec);
-        if (messageType !== MESSAGE_SYNC) return; // AWARENESS (1) etc: ignored in 3b-3
+        if (messageType === MESSAGE_AWARENESS) {
+          // Ungated read: viewers see peers' carets. origin `this` → no echo.
+          awarenessProtocol.applyAwarenessUpdate(this.awareness, decoding.readVarUint8Array(dec), this);
+          return;
+        }
+        if (messageType !== MESSAGE_SYNC) return;
         const enc = encoding.createEncoder();
         encoding.writeVarUint(enc, MESSAGE_SYNC);
         // readSyncMessage applies inbound STEP2/UPDATE to the doc with `this` as the
