@@ -49,6 +49,7 @@ from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.permissions import signal_from_request
+from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -112,6 +113,8 @@ class DraftOut(BaseModel):
     sections: list[SectionOut]
     # ev_id -> citation display fields, computed over the WHOLE proposal.
     citations: dict[str, CitationOut]
+    collab_enabled: bool
+    can_write: bool
 
 
 class SpecOut(BaseModel):
@@ -125,6 +128,8 @@ class SpecOut(BaseModel):
     locked_at: datetime | None
     locked_by: str | None
     can_manage_lock: bool
+    collab_enabled: bool
+    can_write: bool
 
 
 class SpecLockOut(BaseModel):
@@ -263,7 +268,20 @@ def get_draft(
         raw = proposal.read_text()
         sections = _sections_out(raw)
         citations = _citation_map(session, settings, workspace_id, raw)
-    return DraftOut(head=head, can_edit=can_edit, sections=sections, citations=citations)
+        _, can_write = resolve_access(
+            session, user=user, workspace_id=workspace_id, artifact="draft"
+        )
+        collab_enabled = collab_state.is_collab_enabled(
+            session, workspace_id=workspace_id, artifact="draft"
+        )
+    return DraftOut(
+        head=head,
+        can_edit=can_edit,
+        sections=sections,
+        citations=citations,
+        collab_enabled=collab_enabled,
+        can_write=can_write,
+    )
 
 
 @router.get("/workspaces/{workspace_id}/spec", response_model=SpecOut)
@@ -293,6 +311,12 @@ def get_spec(
         # queries it, so this must run before the `with` block closes.
         locked_by = _locker_email(session, ws.spec_locked_by)
         locked_at = ws.spec_locked_at
+        _, can_write = resolve_access(
+            session, user=user, workspace_id=workspace_id, artifact="spec"
+        )
+        collab_enabled = collab_state.is_collab_enabled(
+            session, workspace_id=workspace_id, artifact="spec"
+        )
     return SpecOut(
         head=head,
         can_edit=can_edit,
@@ -301,6 +325,8 @@ def get_spec(
         locked_at=locked_at,
         locked_by=locked_by,
         can_manage_lock=is_owner,
+        collab_enabled=collab_enabled,
+        can_write=can_write,
     )
 
 

@@ -59,6 +59,7 @@ export default defineConfig({
     // browser fixtures and would crash under vitest. Playwright runs them via
     // its own config (playwright.config.ts).
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    exclude: ["**/node_modules/**", "src/**/*.probe.test.ts"],
   },
   server: {
     port: 5173,
@@ -71,6 +72,7 @@ export default defineConfig({
     // catch-all would also swallow /@vite, /@id, /@fs, /src, /node_modules and
     // the HMR requests, breaking dev.
     proxy: {
+      "/api/ws": { target: BACKEND.replace(/^http/, "ws"), ws: true, changeOrigin: true },
       "^/": {
         target: BACKEND,
         changeOrigin: true,

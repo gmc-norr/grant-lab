@@ -13,6 +13,10 @@ const SAVE_LABEL: Record<SaveState, string> = {
   saved: "Saved",
   dirty: "Unsaved",
   error: "Save failed",
+  "collab-connecting": "Connecting…",
+  "collab-synced": "Synced",
+  "collab-offline": "Offline — reconnecting…",
+  "collab-readonly": "Read-only",
 };
 const BAND_LABEL: Record<string, string> = {
   strong: "Strong",
