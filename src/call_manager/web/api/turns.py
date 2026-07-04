@@ -18,7 +18,10 @@ from sqlalchemy import select
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ChatTurn, TurnJob, User, WorkspaceEvent
+from call_manager.proposal_assist.collab import state as collab_state
+from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
+from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded, TokenCapExceeded
 from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
@@ -143,6 +146,14 @@ def submit_turn(
         selection_block = None
         if sc is not None:
             repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+            sections = None
+            if sc.target_artifact == "draft" and collab_state.is_collab_enabled(
+                session, workspace_id=workspace_id, artifact="draft"
+            ):
+                raw = canonical_artifact_markdown(
+                    session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+                )
+                sections = split_sections(raw)
             try:
                 selection_block = build_selection_block(
                     repo_dir=repo_dir,
@@ -155,6 +166,7 @@ def submit_turn(
                         from_offset=sc.from_offset,
                         to_offset=sc.to_offset,
                     ),
+                    sections=sections,
                 )
             except SelectionConflictError as e:
                 raise HTTPException(status_code=409, detail=str(e)) from e

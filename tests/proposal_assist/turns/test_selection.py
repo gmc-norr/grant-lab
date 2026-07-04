@@ -115,3 +115,21 @@ def test_codepoint_offsets_index_non_bmp(tmp_path):
         repo_dir=repo, sel=_sel(repo, doc, 1, frm, frm + 2, "ZZ"),
     )
     assert block["verified"] is True and block["anchor"] == "ZZ"
+
+
+def test_collab_sections_override_verifies_modify(tmp_path):
+    # git doc has "original."; the collab room override has "LIVE." A modify against
+    # the LIVE section verifies (not 409) when we pass sections explicitly.
+    git_doc = "p\n\n## Approach\noriginal.\n"
+    live_doc = "p\n\n## Approach\nDo it carefully now.\n"
+    repo = _repo(tmp_path, git_doc)
+    live_secs = split_sections(live_doc)
+    frm = live_secs[1].text.index("carefully")
+    to = frm + len("carefully")
+    block = build_selection_block(
+        repo_dir=repo,
+        sel=_sel(repo, live_doc, 1, frm, to, "carefully", rt="modify", base_sha=live_secs[1].sha),
+        sections=live_secs,
+    )
+    assert block["verified"] is True
+    assert block["request_type"] == "modify" and block["anchor"] == "carefully"
