@@ -5,17 +5,24 @@ broadcast-outside-lock / post-mutation-evict contract."""
 from __future__ import annotations
 
 import uuid
+
 from starlette.concurrency import run_in_threadpool
 
+from call_manager.proposal_assist.citations.human_cite import (
+    CiteInvalid,
+    CiteRefNotFound,
+    CiteStale,
+)
 from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.kernel import apply_citation_to_room
 from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.citations.human_cite import CiteStale, CiteInvalid, CiteRefNotFound
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 
-_CLEAN_CITE_ERRORS = (CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout, IndexError, RoomEvicted)
+_CLEAN_CITE_ERRORS = (
+    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout, IndexError, RoomEvicted
+)
 
 
 async def direct_cite_via_kernel(

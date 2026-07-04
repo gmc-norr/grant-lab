@@ -616,7 +616,10 @@ def compute_citation_insert(
     # 1a. A tombstoned reference (soft-deleted) cannot be newly cited — reject
     # BEFORE any write so the working tree stays clean.
     if ref.tombstoned_at is not None:
-        return {"error": "reference is tombstoned and cannot be cited", "error_code": "ref_not_found"}
+        return {
+            "error": "reference is tombstoned and cannot be cited",
+            "error_code": "ref_not_found",
+        }
 
     # 2. Load the ReferenceChunk (reference + index), workspace-scoped.
     chunk = (
@@ -637,7 +640,10 @@ def compute_citation_insert(
         # mirroring human_cite.insert_citation_for_user (slice-equality alone accepts
         # quote_end > len via Python suffix slicing).
         if not (0 <= quote_start < quote_end <= len(chunk.text)):
-            return {"error": "evidence quote offsets out of range", "error_code": "quote_out_of_range"}
+            return {
+                "error": "evidence quote offsets out of range",
+                "error_code": "quote_out_of_range",
+            }
         start, end = quote_start, quote_end
         sliced = chunk.text[start:end]
         if sliced != evidence_quote:

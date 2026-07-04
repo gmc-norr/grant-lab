@@ -14,7 +14,13 @@ from pycrdt import Doc
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange, User, Workspace
+from call_manager.proposal_assist.citations.human_cite import (
+    CiteInvalid,
+    CiteRefNotFound,
+    CiteStale,
+)
 from call_manager.proposal_assist.citations.ledger import dump_ledger, load_ledger
+from call_manager.proposal_assist.citations.markers import anchor_occurrences
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.checkpoint import _head_or_empty, checkpoint_artifact
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
@@ -26,8 +32,6 @@ from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.citations.human_cite import CiteInvalid, CiteRefNotFound, CiteStale
-from call_manager.proposal_assist.citations.markers import anchor_occurrences
 from call_manager.proposal_assist.proposals.accepting import _load_scoped
 from call_manager.proposal_assist.tools.citations import (
     CITATIONS_FILENAME,
@@ -128,7 +132,9 @@ def apply_citation_to_room(
 
     new_section_md = split_sections(result["new_proposal_text"])[section_index].text
     section_blocks = markdown_to_pm(new_section_md).get("content") or []
-    update = apply_pm_section_to_fragment(room_doc, section_index=section_index, blocks=section_blocks)
+    update = apply_pm_section_to_fragment(
+        room_doc, section_index=section_index, blocks=section_blocks
+    )
     store.append_update(session, workspace_id=workspace_id, artifact="draft",
                         actor_id=actor_id, update=update, commit=False)
     cp = checkpoint_artifact(
@@ -294,9 +300,15 @@ def kernel_accept_citation(
     except (CiteStale, CiteInvalid, CiteRefNotFound):
         return _stale()  # git-first parity: every verify failure is terminal-stale
     if res.idempotent:
-        pc.status = "accepted"; pc.resolved_by = approver.id; pc.resolved_at = datetime.now(UTC)
-        pc.resulting_commit_sha = res.commit_sha; session.flush()
+        pc.status = "accepted"
+        pc.resolved_by = approver.id
+        pc.resolved_at = datetime.now(UTC)
+        pc.resulting_commit_sha = res.commit_sha
+        session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
-    pc.status = "accepted"; pc.resolved_by = approver.id; pc.resolved_at = datetime.now(UTC)
-    pc.resulting_commit_sha = res.commit_sha; session.flush()
+    pc.status = "accepted"
+    pc.resolved_by = approver.id
+    pc.resolved_at = datetime.now(UTC)
+    pc.resulting_commit_sha = res.commit_sha
+    session.flush()
     return KernelAcceptResult(pc=pc, update=res.update, committed=res.committed, evict=True)

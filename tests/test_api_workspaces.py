@@ -1055,7 +1055,8 @@ def _room_base_sha(app, pg_session_factory, tmp_path, ws_id, section_index=1):
 def _enable_collab(pg_session_factory, ws_id):
     from call_manager.proposal_assist.collab import state
     with pg_session_factory() as s:
-        state.enable_collab(s, workspace_id=ws_id, artifact="draft"); s.commit()
+        state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        s.commit()
 
 
 def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -1079,7 +1080,9 @@ def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session
                                            "preamble\n\n## Methods\noriginal.\n")
     rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
     bc, bs = _capture(tmp_path, ws_id, 1)
-    r = _client(app, member_id).post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    r = _client(app, member_id).post(
+        f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid)
+    )
     assert r.status_code == 403
 
 

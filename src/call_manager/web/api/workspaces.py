@@ -14,9 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
+from starlette.concurrency import run_in_threadpool
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
@@ -34,6 +34,7 @@ from call_manager.db.models import (
 )
 from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
+from call_manager.proposal_assist.citations.collab_cite import direct_cite_via_kernel
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     current_head,
@@ -45,14 +46,12 @@ from call_manager.proposal_assist.citations.human_cite import (
     CiteStale,
     insert_citation_for_user,
 )
-from call_manager.proposal_assist.citations.collab_cite import direct_cite_via_kernel
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
-from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -69,6 +68,7 @@ from call_manager.proposal_assist.editing.save import (
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 from call_manager.workspaces import create_workspace, soft_delete_workspace
@@ -871,7 +871,9 @@ async def post_citation(
     # workspace/row is a harmless bool; each branch below does its own full auth.
     def _route() -> bool:
         with sf() as session:
-            return collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="draft")
+            return collab_state.is_collab_enabled(
+                session, workspace_id=workspace_id, artifact="draft"
+            )
 
     enabled = await run_in_threadpool(_route)
 
@@ -893,11 +895,20 @@ async def post_citation(
         await run_in_threadpool(_gate)
         try:
             out = await direct_cite_via_kernel(
-                session_factory=sf, workspaces_dir=settings.workspaces_dir, workspace_id=workspace_id,
-                actor_id=user.id, section_index=body.section_index, base_section_sha=body.base_section_sha,
-                anchor=body.anchor, reference_id=body.reference_id, chunk_index=body.chunk_index,
-                evidence_quote=body.evidence_quote, quote_start=body.quote_start,
-                quote_end=body.quote_end, stance=body.stance)
+                session_factory=sf,
+                workspaces_dir=settings.workspaces_dir,
+                workspace_id=workspace_id,
+                actor_id=user.id,
+                section_index=body.section_index,
+                base_section_sha=body.base_section_sha,
+                anchor=body.anchor,
+                reference_id=body.reference_id,
+                chunk_index=body.chunk_index,
+                evidence_quote=body.evidence_quote,
+                quote_start=body.quote_start,
+                quote_end=body.quote_end,
+                stance=body.stance,
+            )
         except CiteStale as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         except CiteRefNotFound as e:
@@ -907,10 +918,14 @@ async def post_citation(
         except RoomEvicted as e:
             raise HTTPException(status_code=409, detail="workspace busy; retry the citation") from e
         except CommitMutexTimeout as e:
-            raise HTTPException(status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}) from e
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         except GitCommitError as e:
             logger.exception("collab citation insert failed for workspace %s", workspace_id)
-            raise HTTPException(status_code=500, detail="citation failed — nothing was written") from e
+            raise HTTPException(
+                status_code=500, detail="citation failed — nothing was written"
+            ) from e
         return AddCitationOut(**out)
 
     # Flag-off: the CURRENT handler body, byte-for-byte (owner FIRST, then the

@@ -1,17 +1,21 @@
 import pytest
-from call_manager.proposal_assist.tools.citations import compute_citation_insert
+
 from call_manager.proposal_assist.citations.ledger import empty_ledger
-from tests.proposal_assist.conftest import make_user, make_workspace
+from call_manager.proposal_assist.tools.citations import compute_citation_insert
+
 # Reuse the REAL reference fixture — Reference has required NOT-NULL columns
 # (kind/source_type/filename/storage_path/mime_type/metadata_status); a hand-rolled
 # minimal insert fails at flush. _seed_reference(session, wid, *, chunk_text) → ref_id.
 from tests.proposal_assist.collab.test_collab_kernel_citation import _seed_reference
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def test_exact_offsets_disambiguate_repeated_quote(pg_session_factory):
     # "sky" occurs twice → offset-less path is ambiguous; exact offsets pick one.
     with pg_session_factory() as s:
-        o = make_user(s, email="cci@ki.se"); ws = make_workspace(s, owner=o); s.commit()
+        o = make_user(s, email="cci@ki.se")
+        ws = make_workspace(s, owner=o)
+        s.commit()
         wid = ws.id
         rid = _seed_reference(s, wid, chunk_text="blue sky and grey sky").id
         prop = "preamble\n\n## Methods\nThe claim here.\n"
@@ -38,7 +42,9 @@ def test_exact_offsets_disambiguate_repeated_quote(pg_session_factory):
 ])
 def test_exact_offsets_bounds_rejected(pg_session_factory, qs, qe, frag):
     with pg_session_factory() as s:
-        o = make_user(s, email="cci2@ki.se"); ws = make_workspace(s, owner=o); s.commit()
+        o = make_user(s, email="cci2@ki.se")
+        ws = make_workspace(s, owner=o)
+        s.commit()
         wid = ws.id
         rid = _seed_reference(s, wid, chunk_text="blue sky").id
         res = compute_citation_insert(
@@ -51,7 +57,9 @@ def test_exact_offsets_bounds_rejected(pg_session_factory, qs, qe, frag):
 
 def test_error_returns_carry_codes(pg_session_factory):
     with pg_session_factory() as s:
-        o = make_user(s, email="cci3@ki.se"); ws = make_workspace(s, owner=o); s.commit()
+        o = make_user(s, email="cci3@ki.se")
+        ws = make_workspace(s, owner=o)
+        s.commit()
         wid = ws.id
         rid = _seed_reference(s, wid, chunk_text="blue sky").id
         # anchor absent from the doc → anchor_not_found (maps to 409-stale on the direct path)
