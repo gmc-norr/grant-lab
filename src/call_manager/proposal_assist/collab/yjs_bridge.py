@@ -311,19 +311,32 @@ def apply_pm_section_to_fragment(
         # kernel passes (dropping the leading 0 shifts every section — silent
         # wrong-section corruption).
         starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
-        # Cross-check the block-granularity map against the line-scan truth the
-        # kernel validated section_index against. A mismatch means some boundary
-        # falls INSIDE a block (hard_break + "## …", or a fence flip) — replacing
-        # a block range would splice the wrong section. Refuse pre-mutation.
-        # (A compensating double-divergence — one phantom boundary AND one hidden
-        # real one — would slip a count check; line-attribution is 3b hardening.)
-        n_line_sections = len(split_sections(pm_to_markdown(pm_json)))
-        if len(starts) != n_line_sections:
+        # Positional attribution (Slice 3b-1): a matching COUNT is necessary but
+        # NOT sufficient — a compensating pair (one phantom block-boundary + one
+        # hidden real line-boundary) nets to the same count yet misaligns the
+        # partitions, splicing the wrong section. Verify the two partitions
+        # COINCIDE: each block range must serialize to the SAME markdown as the
+        # correspondingly-indexed split_sections section. Trailing newlines are
+        # normalized away because split_sections attaches the inter-section blank
+        # line to the PRECEDING section, which the per-range serialization drops.
+        line_sections = split_sections(pm_to_markdown(pm_json))
+        ends = starts[1:] + [len(blocks_json)]
+        if len(starts) != len(line_sections):
             raise SectionMapDivergenceError(
-                f"section map divergence: {n_line_sections} line-scan sections vs "
-                f"{len(starts)} block-boundary sections — a section boundary falls "
-                "inside a multi-line block; re-edit the offending paragraph"
+                f"section map divergence: {len(line_sections)} line-scan sections "
+                f"vs {len(starts)} block-boundary sections"
             )
+        for k, (s_i, e_i) in enumerate(zip(starts, ends, strict=True)):
+            range_md = (
+                pm_to_markdown({"type": "doc", "content": blocks_json[s_i:e_i]})
+                if e_i > s_i
+                else ""
+            )
+            if range_md.rstrip("\n") != line_sections[k].text.rstrip("\n"):
+                raise SectionMapDivergenceError(
+                    f"section {k} block-range does not match its line-scan section — "
+                    "a boundary falls inside a multi-line block; re-edit the paragraph"
+                )
         if not 0 <= section_index < len(starts):
             raise IndexError(
                 f"section_index {section_index} out of range ({len(starts)} sections)"

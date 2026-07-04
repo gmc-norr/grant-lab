@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import YjsUpdate
@@ -72,3 +74,45 @@ def load_rows(
         .order_by(YjsUpdate.id)
     ).all()
     return [(int(r[0]), (int(r[1]) if r[1] is not None else None), r[2]) for r in rows]
+
+
+def compact_snapshot(
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    artifact: str,
+    min_id: int,
+    merged_update: bytes,
+    merged_actor_id: int | None,
+    delete_ids: list[int],
+) -> None:
+    """Squash a checkpointed prefix of the log into ONE full-state row WITHOUT
+    changing replay order. The merged full-state update OVERWRITES the row with
+    the LOWEST id in the snapshot (``min_id``), so it keeps an id below every tail
+    row (tail ids are all > max_id >= min_id) and ``load_updates`` (ORDER BY id)
+    always replays merged-before-tail. pycrdt does NOT converge tail-before-merged,
+    so this ordering is load-bearing (Slice 3b-1). The other merged rows are
+    deleted by EXPLICIT id (never a blanket ``id <= max_id``), so a row that
+    commits after the snapshot is never clobbered. Stages on the caller's txn.
+    The merged row also inherits ``merged_actor_id`` (the most-recent author in
+    the snapshot) so ``load_rows`` still reflects the last author after compaction;
+    because the merged row sits at/below the checkpoint watermark, this attribution
+    is observable metadata only and never re-triggers checkpoint authorship."""
+    session.execute(
+        sa_update(YjsUpdate)
+        .where(
+            YjsUpdate.workspace_id == workspace_id,
+            YjsUpdate.artifact == artifact,
+            YjsUpdate.id == min_id,
+        )
+        .values(update_bytes=merged_update, actor_id=merged_actor_id)
+    )
+    if delete_ids:
+        session.execute(
+            sa_delete(YjsUpdate).where(
+                YjsUpdate.workspace_id == workspace_id,
+                YjsUpdate.artifact == artifact,
+                YjsUpdate.id.in_(delete_ids),
+            )
+        )
+    session.flush()

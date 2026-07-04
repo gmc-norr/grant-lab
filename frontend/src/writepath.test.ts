@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore -- untyped .mjs verifier; resolved by esbuild at test time.
-import { compareAll, loadWritepath } from "../scripts/verify_python_writepath.mjs";
+import { compareAll, compareAllIncremental, loadWritepath } from "../scripts/verify_python_writepath.mjs";
 
 describe("cross-runtime write path (Node reads Python-produced ydocs)", () => {
   it("reads back every Python-produced fixture identical to pm_json", () => {
@@ -24,5 +24,10 @@ describe("cross-runtime write path (Node reads Python-produced ydocs)", () => {
     // Report offending fixture names first so a failure is legible.
     expect(mismatches.map((m: { name: string }) => m.name)).toEqual([]);
     expect(mismatches).toEqual([]);
+  });
+
+  it("incremental Python-produced updates read back identical in y-prosemirror", () => {
+    const mismatches = compareAllIncremental();
+    expect(mismatches, JSON.stringify(mismatches)).toHaveLength(0);
   });
 });

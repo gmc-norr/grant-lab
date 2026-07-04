@@ -25,6 +25,7 @@ from call_manager.proposal_assist.proposals.accepting import (
     reject_proposed_change,
 )
 from call_manager.proposal_assist.proposals.kernel_accept import (
+    RoomEvicted,
     accept_via_kernel,
 )
 from call_manager.proposal_assist.proposals.staleness import refresh_staleness
@@ -186,6 +187,10 @@ async def accept(
                 status_code=429,
                 detail="workspace busy; retry",
                 headers={"Retry-After": "2"},
+            ) from exc
+        except RoomEvicted as exc:
+            raise HTTPException(
+                status_code=409, detail="workspace busy; retry the accept"
             ) from exc
         except GitCommitError as exc:
             raise HTTPException(

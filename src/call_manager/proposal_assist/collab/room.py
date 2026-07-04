@@ -64,6 +64,7 @@ class Room:
         self.clients: dict = {}
         self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
+        self.evicted = False   # tombstone: in-flight ops recheck & abort (Slice 3b-1)
         self._lock = asyncio.Lock()
         self._pending_on_evict = None   # deferred last-leave checkpoint (Slice 3a c)
         # Serialize permission reconciliation per-room (Slice 3a cluster a/b).
@@ -133,6 +134,8 @@ class Room:
                 # so check→apply is atomic. (Codex High #1)
                 if not state.can_write:
                     return
+                if self.evicted:
+                    return  # room tombstoned mid-flight — drop (no apply/persist/broadcast)
                 # Apply FIRST so we never persist an update that won't replay
                 # (keeps the durable log clean by construction). apply_update is
                 # atomic: a malformed update raises without mutating the doc.
@@ -153,6 +156,8 @@ class Room:
                     raise PersistError(str(self.key)) from e
             # Broadcast outside the lock (CRDT tolerates reordering; a slow
             # client must not block other writers).
+            if self.evicted:
+                return  # evicted after persist — skip broadcast (sockets already closed)
             await self._broadcast(P.create_update_message(update), exclude=sender)
             return
 
@@ -328,6 +333,7 @@ class RoomManager:
             room = self._rooms.pop(key, None)
         if room is None:
             return
+        room.evicted = True   # tombstone: block any in-flight op's persist/broadcast (Slice 3b-1)
         for client in list(room.clients):
             with suppress(Exception):
                 await client.close(code=_WS_INTERNAL_ERROR)

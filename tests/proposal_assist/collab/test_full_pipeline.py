@@ -24,11 +24,12 @@ from .fixtures import CORPUS
 
 _GOLDENS = pathlib.Path(__file__).parent / "goldens"
 
-# Not a per-fixture markdown golden: the cross-runtime write-path artifact
-# (a JSON array of {name, pm_json, update_b64}). Its corpus parity is asserted
-# separately in test_collab_writepath.py; exclude it from the per-file globs
-# here so this test keeps checking only the JS/Python markdown goldens.
-_NON_GOLDEN = {"python_writepath"}
+# Not per-fixture markdown goldens: the cross-runtime write-path artifacts
+# (JSON arrays of {name, pm_json, update_b64} full-state, and {name, pm_json,
+# base_b64, incr_b64} incremental). Their corpus parity is asserted separately
+# in test_collab_writepath.py; exclude them from the per-file globs here so this
+# test keeps checking only the JS/Python markdown goldens.
+_NON_GOLDEN = {"python_writepath", "python_writepath_incremental"}
 
 
 def test_js_and_python_corpora_match():
