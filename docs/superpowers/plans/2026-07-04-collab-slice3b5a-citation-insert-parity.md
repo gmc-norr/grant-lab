@@ -40,22 +40,14 @@ Pure, isolated change: let the citation core accept an exact evidence-quote span
 
 ```python
 # tests/proposal_assist/test_compute_citation_insert_offsets.py
-import uuid
 import pytest
 from call_manager.proposal_assist.tools.citations import compute_citation_insert
 from call_manager.proposal_assist.citations.ledger import empty_ledger
 from tests.proposal_assist.conftest import make_user, make_workspace
-
-
-def _seed_ref(session, wid, chunk_text: str) -> uuid.UUID:
-    """Minimal Reference + ReferenceChunk(index 0) in this workspace."""
-    from call_manager.db.models import Reference, ReferenceChunk
-    ref = Reference(workspace_id=wid, title="R", kind="url", source_url="http://x")
-    session.add(ref)
-    session.flush()
-    session.add(ReferenceChunk(reference_id=ref.id, workspace_id=wid, chunk_index=0, text=chunk_text))
-    session.flush()
-    return ref.id
+# Reuse the REAL reference fixture — Reference has required NOT-NULL columns
+# (kind/source_type/filename/storage_path/mime_type/metadata_status); a hand-rolled
+# minimal insert fails at flush. _seed_reference(session, wid, *, chunk_text) → ref_id.
+from tests.proposal_assist.collab.test_collab_kernel_citation import _seed_reference
 
 
 def test_exact_offsets_disambiguate_repeated_quote(pg_session_factory):
@@ -63,7 +55,7 @@ def test_exact_offsets_disambiguate_repeated_quote(pg_session_factory):
     with pg_session_factory() as s:
         o = make_user(s, email="cci@ki.se"); ws = make_workspace(s, owner=o); s.commit()
         wid = ws.id
-        rid = _seed_ref(s, wid, "blue sky and grey sky")
+        rid = _seed_reference(s, wid, chunk_text="blue sky and grey sky")
         prop = "preamble\n\n## Methods\nThe claim here.\n"
         # offset-less → ambiguous error
         amb = compute_citation_insert(
@@ -90,7 +82,7 @@ def test_exact_offsets_bounds_rejected(pg_session_factory, qs, qe, frag):
     with pg_session_factory() as s:
         o = make_user(s, email="cci2@ki.se"); ws = make_workspace(s, owner=o); s.commit()
         wid = ws.id
-        rid = _seed_ref(s, wid, "blue sky")
+        rid = _seed_reference(s, wid, chunk_text="blue sky")
         res = compute_citation_insert(
             s, workspace_id=wid, proposal_text="p\n\n## H\nThe claim here.\n",
             ledger=empty_ledger(), ref_uuid=rid, anchor="The claim here.",
@@ -131,23 +123,48 @@ def compute_citation_insert(
         # mirroring human_cite.insert_citation_for_user (slice-equality alone accepts
         # quote_end > len via Python suffix slicing).
         if not (0 <= quote_start < quote_end <= len(chunk.text)):
-            return {"error": "evidence quote offsets out of range"}
+            return {"error": "evidence quote offsets out of range", "error_code": "quote_out_of_range"}
         start, end = quote_start, quote_end
         sliced = chunk.text[start:end]
         if sliced != evidence_quote:
-            return {"error": "evidence quote not found in chunk"}
+            return {"error": "evidence quote not found in chunk", "error_code": "quote_not_found"}
         if not sliced.strip():
-            return {"error": "evidence quote is empty"}
+            return {"error": "evidence quote is empty", "error_code": "quote_empty"}
     else:
         try:
             start, end = find_quote_offsets(chunk.text, evidence_quote)
         except QuoteNotFound:
-            return {"error": "evidence quote not found in chunk"}
+            return {"error": "evidence quote not found in chunk", "error_code": "quote_not_found"}
         except QuoteAmbiguous:
-            return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk"}
+            return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk",
+                    "error_code": "quote_ambiguous"}
 ```
 
-(Leave the rest of the function unchanged — `start`/`end` flow downstream as before.)
+**Also stamp `error_code` on every OTHER error return** in `compute_citation_insert` so the direct-cite caller (Task 2) can map by code instead of sniffing messages. Add the key to each existing `return {"error": ...}`:
+
+| existing `error` message (line) | add `"error_code"` |
+|---|---|
+| `"reference not found"` (:612) | `"ref_not_found"` |
+| `"reference is tombstoned and cannot be cited"` (:617) | `"ref_not_found"` |
+| `"chunk not found"` (:630) | `"chunk_not_found"` |
+| `"anchor is ambiguous"` (:672) | `"anchor_ambiguous"` |
+| `"anchor not found"` (:673) | `"anchor_not_found"` |
+
+This is additive: existing callers (`_insert_citation_locked` agent tool, `kernel_accept_citation` PC path) test only `"error" in result` and are unaffected. `start`/`end` flow downstream unchanged. Add a Task-1 test asserting the codes:
+
+```python
+def test_error_returns_carry_codes(pg_session_factory):
+    with pg_session_factory() as s:
+        o = make_user(s, email="cci3@ki.se"); ws = make_workspace(s, owner=o); s.commit()
+        wid = ws.id
+        rid = _seed_reference(s, wid, chunk_text="blue sky")
+        # anchor absent from the doc → anchor_not_found (maps to 409-stale on the direct path)
+        r = compute_citation_insert(
+            s, workspace_id=wid, proposal_text="p\n\n## H\nbody.\n", ledger=empty_ledger(),
+            ref_uuid=rid, anchor="NOPE", chunk_index=0, evidence_quote="blue",
+            quote_start=0, quote_end=4, stance="supports", confidence=None)
+        assert r["error_code"] == "anchor_not_found"
+```
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -287,6 +304,31 @@ def test_apply_citation_anchor_absent_from_section_raises(pg_session_factory, tm
                 base_section_sha=base_sha, anchor="NOT PRESENT ANYWHERE", reference_id=rid,
                 chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
                 actor_id=oid, workspaces_dir=str(tmp_path), require_anchor_in_section=True)
+
+
+def test_apply_citation_anchor_unique_in_other_section_rejected(pg_session_factory, tmp_path):
+    # The distinguishing case (Codex): the anchor is absent from the SELECTED section
+    # but occurs exactly ONCE in another section → whole-doc insert_marker would
+    # SUCCEED and mis-cite that other section. Only the section pre-check catches it;
+    # a broken `== 0` guard lets this through and the test fails (no CiteStale raised).
+    md0 = "preamble\n\n## Methods\nAlpha body here.\n\n## Results\nUNIQUE PHRASE lives here.\n"
+    with pg_session_factory() as s:
+        o = make_user(s, email="acr4@ki.se"); ws = make_workspace(s, owner=o, current_phase="active"); s.commit()
+        wid, oid = ws.id, o.id
+    repo = Path(tmp_path) / str(wid) / "repo"; _init_repo(repo, md0)
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft"); s.commit()
+        rid = _seed_reference(s, wid, chunk_text="azure sky")
+    with pg_session_factory() as s:
+        room_doc = _live_room(s, wid, str(tmp_path))
+    sec1_sha = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))[1].sha
+    with pg_session_factory() as s:
+        with pytest.raises(CiteStale):   # "UNIQUE PHRASE" is in section 2, not section 1
+            apply_citation_to_room(
+                s, room_doc=room_doc, workspace_id=wid, section_index=1,
+                base_section_sha=sec1_sha, anchor="UNIQUE PHRASE", reference_id=rid,
+                chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
+                actor_id=oid, workspaces_dir=str(tmp_path), require_anchor_in_section=True)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -330,9 +372,12 @@ def apply_citation_to_room(
     live = sections[section_index]
     if live.sha != base_section_sha:
         raise CiteStale("this section changed — reopen and re-cite")
-    if require_anchor_in_section and anchor_occurrences(live.text, anchor) == 0:
-        # Direct-user protection: the anchor must exist in the section the user
-        # selected, before the whole-doc insert_marker inside compute_citation_insert.
+    if require_anchor_in_section and not anchor_occurrences(live.text, anchor):
+        # Direct-user protection (human_cite parity): the anchor must occur in the
+        # section the user selected BEFORE the whole-doc insert_marker — else a
+        # whole-doc-unique anchor living in ANOTHER section would be silently
+        # mis-cited. NOTE: anchor_occurrences returns list[int]; `not []` is the
+        # empty-check (`== 0` would compare a list to an int and never fire).
         raise CiteStale("this section changed — reopen and re-cite")
 
     acquire_commit_mutex(session, workspace_id)
@@ -350,12 +395,17 @@ def apply_citation_to_room(
         evidence_quote=evidence_quote, stance=stance, confidence=confidence,
         quote_start=quote_start, quote_end=quote_end)
     if "error" in result:
-        err = result["error"]
-        if "reference not found" in err or "tombstoned" in err:
-            raise CiteRefNotFound(err)
-        if "ambiguous" in err:
-            raise CiteInvalid(err)
-        raise CiteStale(err)  # not-found / anchor-not-found / offsets → terminal stale
+        code = result.get("error_code")
+        msg = result["error"]
+        # Map by TYPED CODE (not message substrings) to mirror human_cite's HTTP
+        # semantics: ref→404, anchor-moved→409, everything else (chunk/quote/
+        # ambiguous-anchor)→422. The PC path (kernel_accept_citation) still catches
+        # all three and collapses them to _stale(), so its parity is unchanged.
+        if code == "ref_not_found":
+            raise CiteRefNotFound(msg)   # 404
+        if code == "anchor_not_found":
+            raise CiteStale(msg)         # 409 — section moved / anchor gone
+        raise CiteInvalid(msg)           # 422 — chunk / quote / anchor_ambiguous
     if result.get("idempotent"):
         return CitationApplyResult(
             update=None, ev_id=result["ev_id"], citekey=result.get("citekey"),
@@ -705,15 +755,12 @@ async def post_citation(
     sf = request.app.state.session_factory
     repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
 
+    # _route decides ONLY the branch — no auth, no prechecks — so the flag-off path
+    # keeps its exact owner-first ordering (Codex: a non-owner member must still see
+    # 403 before any proposal-404, not the reverse). is_collab_enabled on a missing
+    # workspace/row is a harmless bool; each branch below does its own full auth.
     def _route() -> bool:
         with sf() as session:
-            require_member(workspace_id=workspace_id, user=user, session=session)  # 404 if not a member
-            if not (repo_dir / PROPOSAL_FILENAME).exists():
-                raise HTTPException(status_code=404, detail="no proposal.md yet")
-            try:
-                current_head(repo_dir)
-            except GitCommitError as e:
-                raise HTTPException(status_code=404, detail="no proposal.md yet") from e
             return collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="draft")
 
     enabled = await run_in_threadpool(_route)
@@ -721,9 +768,18 @@ async def post_citation(
     if enabled:
         def _gate() -> None:
             with sf() as session:
-                _, can_write = resolve_access(session, user=user, workspace_id=workspace_id, artifact="draft")
+                is_member, can_write = resolve_access(
+                    session, user=user, workspace_id=workspace_id, artifact="draft")
+                if not is_member:
+                    raise HTTPException(status_code=404, detail="workspace not found")
                 if not can_write:
                     raise HTTPException(status_code=403, detail="not permitted to write this draft")
+            if not (repo_dir / PROPOSAL_FILENAME).exists():
+                raise HTTPException(status_code=404, detail="no proposal.md yet")
+            try:
+                current_head(repo_dir)
+            except GitCommitError as e:
+                raise HTTPException(status_code=404, detail="no proposal.md yet") from e
         await run_in_threadpool(_gate)
         try:
             out = await direct_cite_via_kernel(
@@ -747,10 +803,19 @@ async def post_citation(
             raise HTTPException(status_code=500, detail="citation failed — nothing was written") from e
         return AddCitationOut(**out)
 
-    # Flag-off: the existing owner-only git path, byte-for-byte (threadpooled).
+    # Flag-off: the CURRENT handler body, byte-for-byte (owner FIRST, then the
+    # proposal/head prechecks, then insert). Threadpooled. This ordering is the
+    # parity guarantee asserted by test_post_citation_flag_off_still_owner_only.
     def _git() -> AddCitationOut:
         with sf() as session:
             ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            if not (repo_dir / PROPOSAL_FILENAME).exists():
+                raise HTTPException(status_code=404, detail="no proposal.md yet")
+            try:
+                current_head(repo_dir)
+            except GitCommitError as e:
+                logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
+                raise HTTPException(status_code=404, detail="no proposal.md yet") from e
             try:
                 result = insert_citation_for_user(
                     session=session, workspace=ws, user_id=user.id, section_index=body.section_index,
@@ -1108,8 +1173,8 @@ A floating Ask/Edit/Cite toolbar for the collab editor: three distinct gates, tr
 - Test: `frontend/src/collab/TiptapSelectionToolbar.test.tsx` (new)
 
 **Interfaces:**
-- Consumes: `deriveClaimAnchor` (Task 7); `useSubmitTurn` (`../api/turns`); `CitationComposer` (`../cockpit/CitationComposer`); provider `status`/`isSettled()` (Task-3 spec §4.E); `DraftOut` `head`/`can_edit`/`can_write` + `sections[i].sha`.
-- Props: `{ editor: Editor; provider: CollabProvider; workspaceId: string; head: string; sections: { sha: string }[]; canEdit: boolean; canWrite: boolean }`.
+- Consumes: `deriveClaimAnchor` (Task 7); `toCodePointOffset` (`../cockpit/selection`); `useSubmitTurn` (`../api/turns`); `CitationComposer` (`../cockpit/CitationComposer` — props `{workspaceId, claim: ClaimContext, onDone, onCancel}`); provider `status`/`isSettled()`; `DraftOut` `head`/`can_edit`/`can_write` + `sections[i]` `{sha, text}` (text is room-canonical via Task 5, so client-computed offsets match the backend's).
+- Props: `{ editor: Editor; provider: CollabProvider; workspaceId: string; head: string; sections: { sha: string; text: string }[]; canEdit: boolean; canWrite: boolean }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1131,7 +1196,12 @@ function renderTB(over: Record<string, unknown> = {}) {
   const provider = { status: "connected", isSettled: () => true } as never;
   const props = {
     editor, provider, workspaceId: "w1", head: "a".repeat(40),
-    sections: [{ sha: "0".repeat(64) }, { sha: "1".repeat(64) }],
+    // section[1].text must contain the mocked anchor ("Alpha claim.", sectionIndex 1)
+    // so `anchorable` is true and the offsets are computable.
+    sections: [
+      { sha: "0".repeat(64), text: "preamble" },
+      { sha: "1".repeat(64), text: "## A\nAlpha claim." },
+    ],
     canEdit: true, canWrite: true, ...over,
   };
   return render(
@@ -1185,11 +1255,12 @@ import type { Editor } from "@tiptap/core";
 import { useSubmitTurn } from "../api/turns";
 import { CitationComposer } from "../cockpit/CitationComposer";
 import { deriveClaimAnchor, type ClaimAnchor } from "./selectionAnchor";
+import { toCodePointOffset } from "../cockpit/selection";
 import type { CollabProvider } from "./collabProvider";
 
 interface Props {
   editor: Editor; provider: CollabProvider; workspaceId: string;
-  head: string; sections: { sha: string }[]; canEdit: boolean; canWrite: boolean;
+  head: string; sections: { sha: string; text: string }[]; canEdit: boolean; canWrite: boolean;
 }
 
 export function TiptapSelectionToolbar(props: Props) {
@@ -1206,8 +1277,21 @@ export function TiptapSelectionToolbar(props: Props) {
 
   if (!claim) return null;
   const settled = provider.status === "connected" && provider.isSettled();
-  const sectionSha = props.sections[claim.sectionIndex]?.sha ?? "";
-  const writeReady = settled && claim.singleSection && !claim.headingOnly && !!sectionSha;
+  const section = props.sections[claim.sectionIndex];
+  const sectionSha = section?.sha ?? "";
+  // Section-local CODE-POINT offsets of the anchor, computed against the SAME
+  // room-canonical section text the backend verifies against (get_draft + build_
+  // selection_block are both room-canonical under collab — Tasks 5/6). indexOf is
+  // UTF-16 → convert to code points (Python str slicing). -1 ⇒ the anchor isn't
+  // matchable in the section markdown (selection straddles inline markup / a
+  // citation marker) → not anchorable; disable ALL actions rather than send 0,0
+  // (which the backend rejects as "nothing selected") or risk a wrong-instance edit.
+  const utf16Idx = section ? section.text.indexOf(claim.anchor) : -1;
+  const anchorable = claim.singleSection && !!sectionSha && utf16Idx >= 0;
+  const fromOffset = anchorable ? toCodePointOffset(section!.text, utf16Idx) : 0;
+  const toOffset = anchorable ? toCodePointOffset(section!.text, utf16Idx + claim.anchor.length) : 0;
+  const askReady = anchorable;                              // offsets computable
+  const writeReady = settled && anchorable && !claim.headingOnly;  // Edit/Cite
 
   const runTurn = (requestType: "ask" | "modify", instruction: string) =>
     submit.mutate({
@@ -1215,16 +1299,16 @@ export function TiptapSelectionToolbar(props: Props) {
       selection_context: {
         request_type: requestType, target_artifact: "draft", section_index: claim.sectionIndex,
         base_commit_sha: props.head, base_section_sha: sectionSha, anchor: claim.anchor,
-        from_offset: 0, to_offset: claim.anchor.length,  // best-effort; anchor text is authoritative
+        from_offset: fromOffset, to_offset: toOffset,
       },
     });
 
   return (
     <Paper role="toolbar" shadow="sm" p={4} withBorder>
       <Group gap={4}>
-        {/* Ask — any member */}
+        {/* Ask — any member; needs computable offsets (askReady), not settledness */}
         <Menu>
-          <Menu.Target><Button size="xs" variant="subtle">Ask</Button></Menu.Target>
+          <Menu.Target><Button size="xs" variant="subtle" disabled={!askReady}>Ask</Button></Menu.Target>
           <Menu.Dropdown>
             <Menu.Item onClick={() => runTurn("ask", `Explain: ${claim.anchor}`)}>Explain</Menu.Item>
           </Menu.Dropdown>
@@ -1248,7 +1332,7 @@ export function TiptapSelectionToolbar(props: Props) {
           workspaceId={props.workspaceId}
           claim={{ section_index: claim.sectionIndex, base_commit_sha: props.head,
                    base_section_sha: sectionSha, anchor: claim.anchor }}
-          onClose={() => setCiteOpen(false)}
+          onCancel={() => setCiteOpen(false)}
           onDone={() => setCiteOpen(false)}
         />
       )}
@@ -1319,4 +1403,15 @@ Write `/home/parlar_ai/dev/call-monitor/.worktrees/collab-slice3b5a/SDD_REPORT_3
 - **Spec coverage:** §4.A→Task 5; §4.B→Task 6; §4.C→Tasks 2+3+4; §4.D→Task 1; §4.E→Tasks 7+8; §4.F→Task 4; §5 evict contract→Task 3; §6 parity→Tasks 4/5/9; §7 tests distributed. All covered.
 - **Type consistency:** `apply_citation_to_room` (Task 2) is consumed by Task 3 with matching kwargs; `direct_cite_via_kernel` (Task 3) consumed by Task 4 with matching kwargs; `deriveClaimAnchor` (Task 7) shape consumed by Task 8. `compute_citation_insert` optional offsets (Task 1) used in Tasks 2/3.
 - **Placeholders:** none — every code step shows real code. Two explicit "verify the real signature and adapt" notes (CitationComposer props, useSubmitTurn variable shape, SelectionContext.target_artifact field) point at concrete files to check; the implementer must confirm names against the code, not invent them.
-- **Known risk to watch in review:** Task 2's error remapping (compute error strings → CiteStale/CiteInvalid/CiteRefNotFound) must preserve `kernel_accept_citation`'s "all verify failures → _stale()" behavior — the existing kernel-citation suite is the guard (run in Task 2 Step 4). Task 3's post-mutation-evict is the highest-risk new behavior — its injected-failure test is mandatory.
+- **Known risk to watch in review:** Task 2's error remapping (compute error CODES → CiteStale/CiteInvalid/CiteRefNotFound) must preserve `kernel_accept_citation`'s "all verify failures → _stale()" behavior — the existing kernel-citation suite is the guard (run in Task 2 Step 4). Task 3's post-mutation-evict is the highest-risk new behavior — its injected-failure test is mandatory.
+
+## Codex Review (round 1 — folded in, each verified against code)
+
+- **[High] Task 2 section-anchor guard was a no-op** — `anchor_occurrences` returns `list[int]` (markers.py:58), so `== 0` never fires. Fixed to `not anchor_occurrences(...)`; added `test_apply_citation_anchor_unique_in_other_section_rejected` (the case that actually exercises the guard — anchor unique in a DIFFERENT section, which a broken guard lets through as a mis-cite).
+- **[High] Task 2 string-based error remap would turn quote/chunk/offset errors into 409-stale** — regressing direct-cite semantics (those are 422 today). Fixed: Task 1 stamps a typed `error_code` on every `compute_citation_insert` error return; Task 2 maps by code (`ref_not_found`→404, `anchor_not_found`→409, else→422). Additive; PC path still collapses all to `_stale()`.
+- **[Med-high] Task 4 changed flag-off auth ordering** — moving `require_member`+prechecks into `_route` would surface a proposal-404 before the owner-403 (workspaces.py:862 is owner-first). Fixed: `_route` now returns only `is_collab_enabled`; the flag-off `_git` branch is the current owner-first body byte-for-byte (asserted by `test_post_citation_flag_off_still_owner_only`).
+- **[Med] Task 8 `from_offset: 0` would 409 most Edits** — a verified modify checks `text[from:to] == anchor` (selection.py:57). Fixed: the toolbar computes real section-local code-point offsets via `toCodePointOffset` + `indexOf` on the room-canonical section text, and disables actions (`anchorable`) when the anchor isn't matchable in the section markdown.
+- **[Med] Task 1 fixture omitted required Reference columns** (`kind/source_type/filename/storage_path/mime_type/metadata_status`) and used a non-column `source_url`. Fixed: reuse the real `_seed_reference` helper.
+- **[Low] Task 8 CitationComposer prop** — real component takes `onCancel` (CitationComposer.tsx:21), not `onClose`. Fixed.
+
+Codex's read on the pointed spots: Task 3's evict contract is broadly right (mirror `accept_via_kernel`, evict only after room mutation); the main risk was upstream error classification from Task 2 — now typed, so `_CLEAN_CITE_ERRORS` is auditable.
