@@ -24,12 +24,12 @@ export function useCollabDoc(opts: {
     ref.current = { doc, provider };
   }
   useEffect(() => {
-    const { provider } = ref.current!;
+    const { provider, doc } = ref.current!;
     const off = provider.on("status", setStatus);
     return () => {
       off();
       provider.destroy();
-      ref.current!.doc.destroy();
+      doc.destroy();
       ref.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
