@@ -1,7 +1,7 @@
 # Collab Slice 3b-4 — Awareness / Presence / Remote Cursors (Design)
 
 **Date:** 2026-07-04
-**Status:** design approved (with 5 amendments, all grounded against real pycrdt 0.14.0 + the Tiptap v3 registry); pending written-spec review.
+**Status:** design approved (5 round-1 amendments + 3 round-2 spec-review amendments folded). Round-2: **R2-1** late-identity `updateUser` effect (no editor rebuild) — §7; **R2-2** robust id attribution via `read_awareness_client_ids` payload parse ∪ states-diff (same-clientID reconnect) — §5.1/§5.2; **R2-3** provider clears remote presence on socket close (poison-evict is not client-true) — §5.4/§6. All grounded against real pycrdt 0.14.0 + the Tiptap v3 registry.
 **Builds on:** Slice 3b-3 (Tiptap frontend + custom thin Yjs provider), merged `16e4bca` + remediation `46f5959`. Continues the collab-editing foundation ([[project_collab_editing_foundation]]).
 
 ---
@@ -63,20 +63,32 @@ def extract_awareness_update(message: bytes) -> bytes:
     header, read the varuint-prefixed payload. Caller checks is_awareness() first.
     Mirror of extract_update() (which strips the 2-byte SYNC header)."""
     return read_message(message[1:])
+
+def read_awareness_client_ids(payload: bytes) -> list[int]:
+    """Parse the client ids declared in a y-protocols awareness update, without
+    mutating any Awareness. Update format (encodeAwarenessUpdate): a varuint
+    count, then per client [clientID varuint][clock varuint][state varString].
+    Read each clientID; skip clock + the varuint-length-prefixed state bytes.
+    Used to attribute ids to a socket ROBUSTLY (see §5.2, Amendment R2-2)."""
 ```
 
-`is_awareness()` already exists ([protocol.py:34](../../../src/call_manager/proposal_assist/collab/protocol.py)).
+`is_awareness()` already exists ([protocol.py:34](../../../src/call_manager/proposal_assist/collab/protocol.py)). `read_awareness_client_ids` is TDD'd against `Awareness.encode_awareness_update()` output (round-trip) and exercised end-to-end (against real JS `encodeAwarenessUpdate` bytes) by the Task-1 probe.
 
 ### 5.2 `room.py` — per-room `Awareness` + per-client id tracking
 
 - **`Room.__init__`** creates `self.awareness = Awareness(self.doc)` and **immediately calls `self.awareness.set_local_state(None)`** (**Amendment 1**). Verified: a fresh `Awareness(doc)` seeds `states` with the server doc's own `client_id` (an empty `{}`), which would broadcast as a phantom cursor; `set_local_state(None)` clears it, and the server never re-adds a local state. (Defense-in-depth: snapshot encoding in §5.3 also only encodes ids currently in `states`, which by construction excludes the server's own once cleared.)
-- **`ClientState` gains `awareness_ids: set[int]` (Amendment 2)**, `field(default_factory=set)`, **MUTABLE** (like `can_write`). `apply_awareness_update()` does not return affected ids, so we attribute ids to a socket by **diffing `set(self.awareness.states)` before/after the apply** (verified: a client's first real state shows up as `after - before`). A socket owns exactly one stable awareness client id (its Y.Doc's `clientID`), so first-frame attribution is sufficient; a later state *update* re-uses that id (no diff, already recorded), and a self-removal (`state=null`) is a no-op for attribution.
+- **`ClientState` gains `awareness_ids: set[int]` (Amendment 2)**, `field(default_factory=set)`, **MUTABLE** (like `can_write`). `apply_awareness_update()` does not return affected ids, so we attribute ids to a socket by **combining two signals (Amendment R2-2)**: the **declared ids parsed from the payload** (`P.read_awareness_client_ids(payload)`) **unioned with** the states-diff (`set(self.awareness.states) - before`). Parse-from-payload is the primary signal and is robust to the **same-clientID reconnect** hazard: if a socket reconnects while its old awareness state still lingers in `self.awareness.states`, the diff yields nothing (the id already present), so a diff-only attribution would leave the new socket owning no ids and its caret un-removable at teardown. Parsing the payload attributes the id regardless. The diff remains as defense-in-depth. A socket owns exactly one stable awareness client id (its Y.Doc's `clientID`); a self-removal frame (`state=null`) still declares that id, so it too attributes correctly.
 - **`Room.handle` — new `is_awareness` branch** (before the final catch-all `return`):
 
 ```python
 if P.is_awareness(message):
     try:
         payload = P.extract_awareness_update(message)
+    except Exception:
+        logger.warning("collab.malformed_awareness", extra={...})
+        return
+    try:
+        declared = set(P.read_awareness_client_ids(payload))   # robust to same-id reconnect
     except Exception:
         logger.warning("collab.malformed_awareness", extra={...})
         return
@@ -87,7 +99,7 @@ if P.is_awareness(message):
         except Exception:
             logger.warning("collab.malformed_awareness_update", extra={...})
             return
-        state.awareness_ids |= set(self.awareness.states) - before
+        state.awareness_ids |= declared | (set(self.awareness.states) - before)
     # Ungated (presence, not a mutation); NOT persisted. Relay the raw payload as-is.
     await self._broadcast(P.create_awareness_message(payload), exclude=sender)
     return
@@ -121,7 +133,7 @@ A leaver's caret must vanish for peers **immediately**, not after the 30 s aware
 
 - Room **evicted** (last client left) → no surviving peers → skip removal (the room object is gone anyway).
 - Client-empty-but-ops>0 (deferred-checkpoint case) → no peers → skip.
-- `evict()` (poison) closes every socket → the next connection rebuilds from the durable log; the in-memory `Awareness` dies with the room. No explicit removal needed (no surviving peers on that room object).
+- `evict()` (poison) closes every socket → the next connection rebuilds from the durable log; the in-memory `Awareness` dies with the room. No **server-side** removal is possible or needed (no surviving peers on that room object). **But this is not client-true (Amendment R2-3):** each surviving *browser* provider gets a 1011 close and reconnects, and would retain the other peers' stale carets until the 30 s awareness timeout. The provider therefore clears remote presence locally on any socket close (§6); peers repopulate from the reconnect snapshot + on-open flush.
 
 This keeps presence-removal on the **room-manager teardown paths**, not merely on a normal WS close — so a revoke (path 2) and a normal disconnect (path 1) both drop the caret. It also composes with Slice-2c: a revoked member is closed 1008 by `reconcile_client`, and the subsequent `drop_client`/`release` removes its presence.
 
@@ -146,6 +158,7 @@ Add a `y-protocols/awareness` `Awareness` bound to the **same** `Y.Doc`, exposed
   Note: awareness send is **ungated by `canWrite`** — unlike document updates, a read-only client broadcasts its presence.
 - **Inbound apply** (replaces the current `if (messageType !== MESSAGE_SYNC) return;` blanket ignore at [collabProvider.ts:127](../../../frontend/src/collab/collabProvider.ts)): on `MESSAGE_AWARENESS`, `awarenessProtocol.applyAwarenessUpdate(this.awareness, decoding.readVarUint8Array(dec), this)` — origin `this` so the resulting `update` event is not re-broadcast. Ungated read.
 - **On-open flush (Amendment 5, client half):** in `ws.onopen`, after the client STEP1, if `this.awareness.getLocalState()` is non-null, send `encodeAwarenessUpdate(this.awareness, [this.doc.clientID])`. `CollaborationCaret` may set the local user state before the socket opens (the effect that builds the provider vs the caret extension mounting), and `send()` is a no-op while `readyState !== OPEN`; without this flush the first caret would not appear until the user next moves the selection.
+- **On socket close / offline (Amendment R2-3):** in `ws.onclose` (any code — 1006/1011/1008/1009), locally clear **remote** presence: `removeAwarenessStates(this.awareness, [...this.awareness.getStates().keys()].filter(id => id !== this.doc.clientID), this)` with origin `this` (so `onAwarenessUpdate` skips it — no send attempt on a dead socket, no echo). While offline the remote carets are stale (we receive no updates), so dropping them is honest; on reconnect the server's snapshot (§5.3) + peers' on-open flushes (§6) repopulate the live set. The **local** state is retained (it is re-sent by the on-open flush).
 - **On destroy:** `awarenessProtocol.removeAwarenessStates(this.awareness, [this.doc.clientID], "provider-destroy")` and send the resulting removal frame (so peers drop our caret on unmount/navigate), then remove the listener and `this.awareness.destroy()`. Ordered before `this.ws.close()` so the frame is flushed.
 - **Post-destroy guard** already exists on `onmessage` ([collabProvider.ts:119](../../../frontend/src/collab/collabProvider.ts)); the awareness branch lives inside the same guarded/`try` block.
 
@@ -163,16 +176,26 @@ In `CollabEditorInner`, read the current user from `useSession()` and add the ex
 import { CollaborationCaret } from "@tiptap/extension-collaboration-caret";
 // ...
 const { data: me } = useSession();
-const label = displayName(me?.user);                 // §8
-const color = colorForUserId(me?.user.id ?? 0);      // §8
+const label = displayName(me?.user);                 // §8 (falls back until me resolves)
+const color = colorForUserId(me?.user?.id ?? 0);     // §8
 const editor = useEditor({
   editable: props.canWrite,
   extensions: [
     ...collabEditorExtensions,
     Collaboration.configure({ document: props.doc, field: "prosemirror" }),
+    // seed with whatever identity we have now; corrected by the effect below
     CollaborationCaret.configure({ provider: props.provider, user: { name: label, color } }),
   ],
-}, [props.doc]);
+}, [props.doc]);   // editor identity keyed ONLY on the doc — NOT rebuilt on identity change
+
+// Identity-freeze fix (Amendment R2-1): useEditor's dep list is [props.doc], so a
+// useSession() result that arrives AFTER mount would otherwise freeze the fallback
+// name/color for the whole mount. Push identity through the sanctioned v3 command
+// whenever it resolves/changes, instead of rebuilding the editor (which would
+// destroy the caret plugin state).
+useEffect(() => {
+  if (editor && me?.user) editor.commands.updateUser({ name: label, color });
+}, [editor, label, color, me?.user]);
 ```
 
 `CollaborationCaret` reads `provider.awareness` (confirmed from the v3 docs — it accepts a Yjs network provider), which our thin provider now exposes. **Peer dep note:** the caret extension declares a peer on `@tiptap/y-tiptap`; verify at install that it resolves compatibly with the pinned `y-prosemirror@1.3.7`/`yjs@13.6.31` (it is expected to already be present transitively via `@tiptap/extension-collaboration@3.27.1`). This is one of the Task-1 install-time checks.
@@ -203,6 +226,7 @@ No other backend model changes. `SpecOut`/`DraftOut` are untouched this slice.
 **Server unit** (`tests/proposal_assist/collab/…` — cockpit/collab tests live under `tests/proposal_assist/`):
 - **Relay:** an `AWARENESS` frame from client A is broadcast to B, sender excluded; **no `yjs_updates` row is written** (assert the store is untouched); relayed even when the sender's `ClientState.can_write is False` (ungated).
 - **Id attribution + disconnect removal:** after A sends awareness, `A.state.awareness_ids` is non-empty; after `release`/`drop_client` removes A while B remains, B receives a removal frame and `room.awareness.states` no longer contains A's id.
+- **Same-clientID reconnect attribution (Amendment R2-2):** a socket presents an awareness update whose clientID is already in `room.awareness.states` (simulating a reconnect before the old state expired); assert the new socket's `state.awareness_ids` still contains that id (parse-from-payload wins where the diff yields nothing), so its later teardown removes it. Plus a direct `read_awareness_client_ids` round-trip test vs `encode_awareness_update`.
 - **New-joiner snapshot:** with A present (state set), a freshly-registered B receives `awareness_snapshot()` bytes after the initial sync.
 - **Server-own-id suppression (Amendment 1):** a fresh `Room`'s `awareness.states` is empty; `awareness_snapshot()` of a presence-free room is `None`.
 - **Revoke path (Amendment 3):** `reconcile_client` losing membership closes A 1008 and its presence is removed for B (drives `drop_client`/`release`).
@@ -212,6 +236,8 @@ No other backend model changes. `SpecOut`/`DraftOut` are untouched this slice.
 - Local awareness change → an `AWARENESS` frame is sent; an inbound frame applied via origin `this` does **not** echo.
 - Inbound `AWARENESS` mutates `provider.awareness.states`.
 - On-open flush sends the local state once the socket opens.
+- **Clear-remote-on-close (Amendment R2-3):** with a remote id present in `provider.awareness`, a socket `close` event drops all non-local ids locally (origin `this`, no send), while the local state is retained.
+- **Late-identity update (Amendment R2-1):** a `useSession()` result arriving after mount drives `editor.commands.updateUser` (component test asserting the caret user reflects the resolved name/color, not the fallback) — the editor is not rebuilt.
 - `destroy()` sends a removal frame then tears down.
 - A `canWrite:false` provider **still** sends and receives awareness (ungated), while still suppressing document writes (regression guard vs the 3b-3 write-suppression).
 
@@ -238,7 +264,7 @@ No other backend model changes. `SpecOut`/`DraftOut` are untouched this slice.
 ## 12. File-by-file change list
 
 **Server (additive, no schema, no migration):**
-- `proposal_assist/collab/protocol.py` — re-export `Awareness`, `create_awareness_message`; add `extract_awareness_update`.
+- `proposal_assist/collab/protocol.py` — re-export `Awareness`, `create_awareness_message`; add `extract_awareness_update` + `read_awareness_client_ids`.
 - `proposal_assist/collab/room.py` — `Room.awareness` (+`set_local_state(None)`), `ClientState.awareness_ids`, `handle()` awareness branch, `awareness_snapshot()`, `remove_client_presence()`; `RoomManager.release`/`drop_client` presence-removal hook.
 - `proposal_assist/web/collab_ws.py` — send `awareness_snapshot()` after the initial sync.
 - `web/api/me.py` — `UserOut.name`.
