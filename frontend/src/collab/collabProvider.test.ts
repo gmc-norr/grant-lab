@@ -203,4 +203,15 @@ describe("CollabProvider", () => {
     p.destroy();
     expect(s.sent.some((b) => firstMsgType(b) === MESSAGE_AWARENESS)).toBe(true);
   });
+
+  it("clears REMOTE awareness (keeps local) when the socket closes", () => {
+    const { p, doc, sockets } = makeProvider(true);
+    const s = sockets[0]; s.open();
+    p.awareness.setLocalStateField("user", { name: "Me" });     // local state
+    s.deliver(awarenessFrameFor({ name: "Peer" }));             // a remote peer
+    expect([...p.awareness.getStates().keys()].length).toBeGreaterThanOrEqual(2);
+    s.drop(1011);                                                // server error → reconnecting
+    const ids = [...p.awareness.getStates().keys()];
+    expect(ids).toEqual([doc.clientID]);                         // only local remains
+  });
 });

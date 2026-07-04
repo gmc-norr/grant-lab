@@ -182,7 +182,12 @@ export class CollabProvider {
 
     ws.onclose = (ev: CloseEvent) => {
       this.ws = null;
-      if (this.destroyed) return;
+      if (this.destroyed) return;   // destroy() already tore down awareness
+      // While disconnected we receive no awareness updates, so remote carets are
+      // stale. Drop all NON-local ids locally (origin `this`: no send, no echo).
+      // On reconnect the server snapshot + peers' on-open flush repopulate. (R2-3)
+      const remote = [...this.awareness.getStates().keys()].filter((id) => id !== this.doc.clientID);
+      if (remote.length) awarenessProtocol.removeAwarenessStates(this.awareness, remote, this);
       if (ev.code === 1008 || ev.code === 1009) { this.setStatus("closed-policy"); return; }
       this.setStatus("offline");
       this.scheduleReconnect();
