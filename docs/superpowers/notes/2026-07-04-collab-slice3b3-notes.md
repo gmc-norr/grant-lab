@@ -81,3 +81,99 @@ All six test cases pass:
 - `frontend/src/collab/handshake.probe.test.ts` — NEW: live convergence + persistence probe.
 - `scripts/collab_handshake_probe.py` — NEW: testcontainers + uvicorn driver.
 - `docs/superpowers/notes/2026-07-04-collab-slice3b3-notes.md` — this file.
+
+---
+
+# Collab Slice 3b-3 — Task 6 findings (2026-07-04)
+
+## Dev CSP permits WebSocket — CONFIRMED
+
+`src/call_manager/web/middleware.py` `build_csp(dev=True)` emits:
+
+```
+connect-src 'self' ws: http://localhost:5173
+```
+
+This is only emitted when `SPA_MODE=dev`; `prod` and `disabled` keep strict
+`connect-src 'self'` (no `ws:` token). The `ws:` scheme wildcard covers
+`ws://localhost:8000/api/ws/workspaces/<id>/draft` (the Yjs WS URL) as proxied
+by the Vite dev server from `:5173` to uvicorn on `:8000`. No change was made to
+`build_csp` — this was a read-only confirmation.
+
+## Authored artifacts
+
+### `frontend/e2e/collab.spec.ts` (NEW)
+
+Real executable Playwright spec. The test is gated by
+`test.skip(!process.env.E2E_COLLAB_WS_ID, ...)` so the Playwright suite stays
+GREEN in an unseeded env (confirmed: `pnpm exec playwright test
+e2e/collab.spec.ts` reports `1 skipped`). When `E2E_COLLAB_WS_ID` is set it
+runs for real: two authed browser contexts open `/cockpit/<id>`, client A types
+`hello-collab`, client B asserts convergence within 5 s, client A clicks "Save a
+version" and asserts the button re-enables, client A reloads and asserts
+persistence. Auth is via a session cookie added to each browser context (NOT a
+password form — the old Jinja login route was deleted in the full-React auth
+migration).
+
+### `scripts/collab_e2e_seed.py` (NEW)
+
+Mirrors `scripts/collab_handshake_probe.py` — boots testcontainers Postgres,
+runs Alembic to head, seeds a `current_phase=active` workspace with collab
+enabled on the `draft` artifact, starts uvicorn in `SPA_MODE=dev`
+(`APP_BASE_URL` configurable to match the Vite port), mints a signed session
+cookie, and prints `E2E_COLLAB_WS_ID` + `E2E_SESSION_COOKIE` for the caller to
+export before running Playwright. The script blocks until Ctrl-C (keeps the
+testcontainers Postgres alive for the Playwright run).
+
+## Live run outcome: DEFERRED
+
+A genuine attempt was made. The seed machinery was verified to work: testcontainers
+Postgres boot + 60 Alembic migrations + seed user/workspace/collab-state + uvicorn
+start + session cookie mint all succeeded. The API endpoint
+`GET /api/workspaces/<id>/draft` returned `{"collab_enabled": true, "can_write": true}`.
+
+The live Playwright run could not complete because:
+
+1. **Port 5173 is occupied by another Vite instance** (the main-branch dev server,
+   PID 1138593). Our worktree's Vite therefore started on `:5174`. The
+   `playwright.config.ts` `use.baseURL` is hardcoded to `http://localhost:5173`
+   (dev mode), so the browser navigated to the wrong Vite instance which served
+   the **pre-collab DraftPanel** (no `CollabEditor` branch).
+2. Serving via `APP_BASE_URL=http://localhost:5174` (our Vite) would work
+   for CSRF, but the playwright baseURL would also need updating to `:5174`.
+   That change is a config-file commit on the main repo (not appropriate for this
+   worktree slice) and requires the other 5173 process to be stopped.
+
+This is the standard "dev front-door requires manual coordination" constraint
+noted in the existing deferred e2e suites (`dashboard.spec.ts` header). It does
+NOT indicate a defect in the spec or the transport. The transport is already
+proven end-to-end by Task 1's GO probe (two-client convergence + persistence
+asserted by Node/ws against real uvicorn + testcontainers).
+
+**To run the live e2e:**
+
+```bash
+# 1. Kill any existing :5173 Vite or start this one first
+source .venv/bin/activate
+EMBEDDING_MODEL=bge-m3 python scripts/collab_e2e_seed.py   # prints E2E_COLLAB_WS_ID + E2E_SESSION_COOKIE
+
+# In a second terminal:
+cd frontend && pnpm dev  # starts on :5173 if free
+
+# In a third terminal, export the vars from the seed output, then:
+cd frontend
+E2E_COLLAB_WS_ID=<ws_id> E2E_SESSION_COOKIE=<cookie> pnpm exec playwright test e2e/collab.spec.ts
+```
+
+## Suite health
+
+- `pnpm test` (vitest): **96 files, 496 tests — all passed**. `e2e/*.spec.ts`
+  are NOT collected by vitest (vitest `include` is `src/**`).
+- `pnpm exec tsc --noEmit`: **clean** (0 errors).
+- `pnpm exec playwright test e2e/collab.spec.ts` (unseeded): **1 skipped** (not failed).
+
+## Files changed
+
+- `frontend/e2e/collab.spec.ts` — NEW: Playwright e2e round-trip spec.
+- `scripts/collab_e2e_seed.py` — NEW: testcontainers + uvicorn seed helper.
+- `docs/superpowers/notes/2026-07-04-collab-slice3b3-notes.md` — this section.
