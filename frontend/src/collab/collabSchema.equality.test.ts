@@ -6,6 +6,15 @@ import { collabExtensions } from "./schema";
 
 const tiptap = getSchema(collabExtensions);
 
+// attrs are compared by their effective default via `v.default ?? null`. This
+// intentionally does NOT distinguish a REQUIRED attr (no default) from a
+// nullable one (default: null), because Tiptap cannot express a required attr —
+// getSchema always injects `default: null`. So citation.citekey/ev_id,
+// image.src and link.href (required in collab-schema.mjs) read as nullable here.
+// See the note in schema.ts. What this guard DOES enforce: identical node/mark
+// name sets, content expressions, group, inline/atom flags, and attr key sets +
+// their non-null defaults — which is what keeps the y-prosemirror ↔ pycrdt
+// bridge in sync with the server's markdown serializer.
 function nodeShape(s: any, name: string) {
   const n = s.nodes[name].spec;
   return {

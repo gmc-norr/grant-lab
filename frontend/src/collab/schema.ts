@@ -1,5 +1,17 @@
 import { Node, Mark, mergeAttributes, type Extensions } from "@tiptap/core";
 
+// NOTE on required-vs-nullable attrs (intrinsic Tiptap limitation):
+// collab-schema.mjs declares citation.citekey/ev_id, image.src and link.href as
+// REQUIRED (no default). Tiptap CANNOT express a required attribute — getSchema
+// always injects `default: null`, so these attrs are nullable here. This is a
+// forced, unavoidable deviation, not an oversight; the schema-equality test
+// (collabSchema.equality.test.ts) therefore does not distinguish required from
+// nullable. It is inert for 3b-3: the server always materializes these attrs
+// from markdown (non-null), citations are read-only, and there is no client
+// authoring UI, so the null default is never exercised. When the future
+// client-authored-citation slice lands, the checkpoint/markdown serializer must
+// guard a null citekey (a citation created without one) before it can serialize.
+
 const Doc = Node.create({ name: "doc", topNode: true, content: "block+" });
 const Text = Node.create({ name: "text", group: "inline" });
 const Paragraph = Node.create({
