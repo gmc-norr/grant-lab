@@ -207,6 +207,13 @@ class Room:
                     return
                 # Attribute ids to THIS socket: payload-declared ids (robust to a
                 # same-clientID reconnect where the diff is empty) ∪ states-diff.
+                # KNOWN LIMITATION: folding in `declared` means a MALICIOUS member
+                # could hand-craft a frame declaring a *peer's* client id, so that
+                # this socket's disconnect removes the peer's caret for everyone.
+                # It is transient (the victim's ~15s awareness heartbeat re-adds it)
+                # and presence is display-only/spoofable by design (a member can
+                # already forge their own name/cursor), so we accept it rather than
+                # give up the reconnect-robustness the `declared` union buys.
                 state.awareness_ids |= declared | (set(self.awareness.states) - before)
             # Relay the raw payload as-is to peers (standard y-awareness relay).
             await self._broadcast(P.create_awareness_message(payload), exclude=sender)

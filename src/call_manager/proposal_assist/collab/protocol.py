@@ -82,26 +82,45 @@ def read_awareness_client_ids(payload: bytes) -> list[int]:
     """Parse the client ids declared in a y-protocols awareness update WITHOUT
     mutating any Awareness. Update format (encodeAwarenessUpdate): a varuint
     count, then per client [clientID varuint][clock varuint][state varString].
-    Read each clientID; skip clock + the varuint-length-prefixed state bytes."""
+    Read each clientID; skip clock + the varuint-length-prefixed state bytes.
+
+    HARDENED against adversarial frames: every varuint is capped at 10 bytes
+    (a 64-bit value is at most 10 base-128 groups) and every read is
+    bounds-checked against the payload, so a malformed/oversized frame — e.g. a
+    long run of 0x80+ continuation bytes — raises PROMPTLY (O(payload)) instead of
+    shifting a multi-megabit Python int. Without this cap a ~1 MB all-continuation
+    payload (under the WS frame cap) is an O(n^2) CPU stall that blocks the entire
+    single-instance asyncio event loop — a whole-process DoS, since the awareness
+    path is ungated by can_write. The sole caller (room.handle) wraps this in
+    try/except and drops the frame on any exception."""
+    n = len(payload)
     pos = 0
 
     def _rvu() -> int:
         nonlocal pos
         num = 0
         shift = 0
-        while True:
+        for _ in range(10):  # a 64-bit varuint is at most 10 base-128 bytes
+            if pos >= n:
+                raise ValueError("awareness varuint: truncated")
             b = payload[pos]
             pos += 1
             num |= (b & 0x7F) << shift
             if b < 0x80:
                 return num
             shift += 7
+        raise ValueError("awareness varuint: overlong")
 
     count = _rvu()
     ids: list[int] = []
+    # A conforming frame declares >= 3 bytes per client (id+clock+len), so `count`
+    # cannot exceed `n`; a lying count simply raises "truncated" once the body is
+    # exhausted (each iteration advances pos by >= 3), keeping this O(n).
     for _ in range(count):
-        ids.append(_rvu())   # clientID
-        _rvu()               # clock (skip)
-        state_len = _rvu()   # varString byte length
-        pos += state_len     # skip state bytes
+        ids.append(_rvu())            # clientID
+        _rvu()                        # clock (skip)
+        state_len = _rvu()            # varString byte length
+        if state_len > n - pos:       # never skip past the payload
+            raise ValueError("awareness varString: out of range")
+        pos += state_len              # skip state bytes
     return ids
