@@ -15,6 +15,7 @@ router = APIRouter()
 class UserOut(BaseModel):
     id: int
     email: str
+    name: str | None
     status: str
     default_profile_id: int | None
 
@@ -30,6 +31,7 @@ def get_me(user: User = Depends(get_current_user)):  # noqa: B008
         user=UserOut(
             id=user.id,
             email=user.email,
+            name=user.name,
             status=user.status,
             default_profile_id=user.default_profile_id,
         ),

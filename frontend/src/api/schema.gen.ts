@@ -3502,6 +3502,8 @@ export interface components {
             email: string;
             /** Id */
             id: number;
+            /** Name */
+            name: string | null;
             /** Status */
             status: string;
         };
