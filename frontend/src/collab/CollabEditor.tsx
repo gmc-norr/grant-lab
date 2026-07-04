@@ -9,12 +9,17 @@ import { collabEditorExtensions } from "./CitationNode";
 import { colorForUserId, displayName } from "./collabColor";
 import type { CollabProvider, ProviderStatus } from "./collabProvider";
 import { SaveVersionButton } from "./SaveVersionButton";
+import { TiptapSelectionToolbar } from "./TiptapSelectionToolbar";
 import { useCollabDoc } from "./useCollabDoc";
 
 type CollabEditorProps = {
   workspaceId: string;
   artifact: "draft" | "spec";
   canWrite: boolean;
+  /** Optional props for the draft selection toolbar (draft-only) */
+  head?: string;
+  sections?: { sha: string; text: string }[];
+  canEdit?: boolean;
 };
 
 export function CollabEditor(props: CollabEditorProps) {
@@ -74,6 +79,17 @@ function CollabEditorInner(
         status={props.status}
       />
       <EditorContent editor={editor} data-testid="collab-editor" />
+      {props.artifact === "draft" && props.sections != null && props.head != null && editor && (
+        <TiptapSelectionToolbar
+          editor={editor}
+          provider={props.provider}
+          workspaceId={props.workspaceId}
+          head={props.head}
+          sections={props.sections}
+          canEdit={props.canEdit ?? false}
+          canWrite={props.canWrite}
+        />
+      )}
     </div>
   );
 }
