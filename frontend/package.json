@@ -22,6 +22,8 @@
     "@mantine/core": "9.4.0",
     "@mantine/hooks": "9.4.0",
     "@tanstack/react-query": "5.101.0",
+    "@tiptap/core": "3.27.1",
+    "@tiptap/pm": "3.27.1",
     "@uiw/codemirror-theme-vscode": "4.25.10",
     "@vscode/codicons": "0.0.45",
     "lib0": "0.2.117",
