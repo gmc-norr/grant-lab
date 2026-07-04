@@ -50,4 +50,19 @@ describe("collab handshake (live uvicorn)", () => {
     expect(names).toContain("Alice");           // GO: JS↔Python awareness interop works
     a.destroy(); b.destroy();
   }, 15000);
+
+  it("awareness removal: A disconnects, B stops seeing A", async () => {
+    const docA = new Y.Doc();
+    const a = new CollabProvider({ url: URL, doc: docA, canWrite: true, WebSocketImpl: WSWithAuth });
+    const docB = new Y.Doc();
+    const b = new CollabProvider({ url: URL, doc: docB, canWrite: true, WebSocketImpl: WSWithAuth });
+    await settle();
+    a.awareness.setLocalStateField("user", { name: "Alice", color: "#f00" });
+    await settle();
+    expect([...b.awareness.getStates().values()].some((s: any) => s?.user?.name === "Alice")).toBe(true);
+    a.destroy();                 // sends removal + server release broadcasts removal
+    await settle();
+    expect([...b.awareness.getStates().values()].some((s: any) => s?.user?.name === "Alice")).toBe(false);
+    b.destroy();
+  }, 15000);
 });
