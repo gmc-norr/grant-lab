@@ -128,3 +128,100 @@ async def test_awareness_snapshot_primes_a_new_joiner():
 async def test_awareness_snapshot_is_none_when_empty():
     room = Room((uuid.uuid4(), "draft"))
     assert await room.awareness_snapshot() is None
+
+
+# ---------------------------------------------------------------------------
+# Task 6: presence removal on teardown paths
+# ---------------------------------------------------------------------------
+
+from call_manager.proposal_assist.collab.room import RoomManager  # noqa: E402
+
+
+@pytest.mark.anyio
+async def test_release_removes_departed_presence_for_survivors():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    a, b = FakeClient(), FakeClient()
+
+    async def _load():
+        return []
+
+    sta = ClientState(user_id=1, can_write=True)
+    await mgr.acquire(key, load=_load, client=a, state=sta)
+    await mgr.acquire(key, load=_load, client=b, state=ClientState(user_id=2, can_write=True))
+    room = mgr.get(key)
+    frame, cid = _awareness_frame({"user": {"name": "Alice"}})
+    await room.handle(sender=a, state=sta, message=frame, persist=_noop_persist)
+    b.sent.clear()
+
+    await mgr.release(key, client=a)                 # A leaves, B remains
+    assert b.sent and P.is_awareness(b.sent[-1])     # B told to drop A's caret
+    assert cid not in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_drop_client_removes_departed_presence_for_survivors():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    a, b = FakeClient(), FakeClient()
+
+    async def _load():
+        return []
+
+    sta = ClientState(user_id=1, can_write=True)
+    await mgr.acquire(key, load=_load, client=a, state=sta)
+    await mgr.acquire(key, load=_load, client=b, state=ClientState(user_id=2, can_write=True))
+    room = mgr.get(key)
+    frame, cid = _awareness_frame({"user": {"name": "Bob"}})
+    await room.handle(sender=a, state=sta, message=frame, persist=_noop_persist)
+    b.sent.clear()
+
+    await mgr.drop_client(key, a)                     # revoke path
+    assert b.sent and P.is_awareness(b.sent[-1])
+    assert cid not in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_release_last_client_no_presence_broadcast_no_crash():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    a = FakeClient()
+
+    async def _load():
+        return []
+
+    sta = ClientState(user_id=1, can_write=True)
+    await mgr.acquire(key, load=_load, client=a, state=sta)
+    room = mgr.get(key)
+    frame, _ = _awareness_frame({"user": {"name": "Solo"}})
+    await room.handle(sender=a, state=sta, message=frame, persist=_noop_persist)
+    await mgr.release(key, client=a)                   # last client → room evicted, no survivor
+    assert not mgr.has_room(key)
+
+
+@pytest.mark.anyio
+async def test_broadcast_drop_of_failing_client_scrubs_its_presence():
+    # A client whose send raises is popped by _broadcast DIRECTLY. Its ClientState
+    # is then unrecoverable by a later release()/drop_client(), so _broadcast must
+    # scrub its awareness from room.awareness — else the stale id leaks into every
+    # future new-joiner snapshot.
+    room = Room((uuid.uuid4(), "draft"))
+
+    class BoomClient(FakeClient):
+        async def send_bytes(self, data):
+            raise RuntimeError("socket closed")
+
+    good, boom = FakeClient(), BoomClient()
+    st_good = ClientState(user_id=1, can_write=True)
+    st_boom = ClientState(user_id=2, can_write=True)
+    room.clients[good] = st_good
+    room.clients[boom] = st_boom
+    frame, cid = _awareness_frame({"user": {"name": "Boom"}})
+    await room.handle(sender=boom, state=st_boom, message=frame, persist=_noop_persist)
+    assert cid in room.awareness.states
+
+    # Any broadcast that targets boom drops it (send raises) and scrubs its presence.
+    await room.broadcast(P.create_awareness_message(frame))
+    assert boom not in room.clients
+    assert cid not in room.awareness.states
+    assert await room.awareness_snapshot() is None      # no leak into snapshots

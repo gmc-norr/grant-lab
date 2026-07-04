@@ -221,12 +221,28 @@ class Room:
     def recon_lock(self) -> asyncio.Lock:
         return self._recon_lock
 
+    async def remove_client_presence(self, state: ClientState) -> None:
+        """Remove a departed client's awareness ids and broadcast the removal to
+        remaining clients so their carets drop immediately (not after the ~30s
+        timeout). No-op if the client owned no presence. Callers invoke this only
+        when the room still has peers (see RoomManager.release/drop_client)."""
+        ids = list(state.awareness_ids)
+        if not ids:
+            return
+        async with self._lock:
+            self.awareness.remove_awareness_states(ids, origin="server")
+            frame = P.create_awareness_message(self.awareness.encode_awareness_update(ids))
+        await self._broadcast(frame, exclude=None)
+
     async def broadcast(self, frame: bytes) -> None:
         await self._broadcast(frame, exclude=None)
 
     async def _broadcast(self, frame: bytes, *, exclude) -> None:
         """Send to every client except `exclude`, isolating per-client failures:
-        a broken/closed socket is dropped and the rest still receive the frame."""
+        a broken/closed socket is dropped and the rest still receive the frame.
+        A dropped client's presence is ALSO scrubbed from the room awareness so a
+        hard socket failure cannot leak its cursor into new-joiner snapshots (the
+        later release()/drop_client() can no longer recover its ClientState)."""
         dead = []
         for client in list(self.clients):
             if client is exclude:
@@ -236,7 +252,10 @@ class Room:
             except Exception:
                 dead.append(client)
         for client in dead:
-            self.clients.pop(client, None)
+            state = self.clients.pop(client, None)
+            if state is not None and state.awareness_ids:
+                # Synchronous (no await) → atomic; no room lock needed here.
+                self.awareness.remove_awareness_states(list(state.awareness_ids), origin="server")
 
 
 class RoomManager:
@@ -342,19 +361,27 @@ class RoomManager:
         If the room is client-empty but a server op is still in flight (ops>0),
         the eviction (and checkpoint) are deferred: `on_evict` is stashed on the
         room and run by `operate()`-exit when it evicts (Slice 3a c)."""
+        removed_state = None
+        survivor = None
         async with self._lock:
             room = self._rooms.get(key)
             if room is None:
                 return
+            removed_state = room.clients.get(client)
             room.clients.pop(client, None)
             if not room.clients and room.ops == 0:
                 evicted = self._rooms.pop(key)
             else:
                 evicted = None
-                if not room.clients and on_evict is not None:
+                if room.clients:
+                    survivor = room     # peers remain → drop the leaver's caret
+                elif on_evict is not None:
                     # Client-empty but an op is in flight: defer the checkpoint to
                     # operate()-exit so a straddling op cannot swallow it (Slice 3a c).
                     room._pending_on_evict = on_evict
+        # Presence removal + checkpoint both run OUTSIDE the manager lock.
+        if survivor is not None and removed_state is not None:
+            await survivor.remove_client_presence(removed_state)
         if evicted is not None and on_evict is not None:
             await on_evict(evicted)
 
@@ -363,13 +390,20 @@ class RoomManager:
         becomes empty. Used by permission revocation and teardown where a
         last-leave checkpoint is wrong (the workspace may be soft-deleted / the
         member just lost access). release() is the checkpointing counterpart."""
+        removed_state = None
+        survivor = None
         async with self._lock:
             room = self._rooms.get(key)
             if room is None:
                 return
+            removed_state = room.clients.get(client)
             room.clients.pop(client, None)
             if not room.clients and room.ops == 0 and self._rooms.get(key) is room:
                 self._rooms.pop(key, None)
+            elif room.clients:
+                survivor = room
+        if survivor is not None and removed_state is not None:
+            await survivor.remove_client_presence(removed_state)
 
     async def evict(self, key: RoomKey) -> None:
         """Force-remove a room regardless of connected clients (poison recovery),
