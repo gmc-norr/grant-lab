@@ -59,6 +59,7 @@ export default defineConfig({
     // browser fixtures and would crash under vitest. Playwright runs them via
     // its own config (playwright.config.ts).
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    exclude: ["**/node_modules/**", "src/**/*.probe.test.ts"],
   },
   server: {
     port: 5173,
