@@ -31,7 +31,7 @@ const COLLAB_WS_ID = process.env.E2E_COLLAB_WS_ID;
 const SESSION_COOKIE = process.env.E2E_SESSION_COOKIE;
 
 test.describe("collab editor round-trip", () => {
-  test.skip(!COLLAB_WS_ID, "requires a seeded collab workspace — set E2E_COLLAB_WS_ID + E2E_SESSION_COOKIE");
+  test.skip(!COLLAB_WS_ID || !SESSION_COOKIE, "requires a seeded collab workspace — set E2E_COLLAB_WS_ID + E2E_SESSION_COOKIE");
 
   test("two clients converge; edit persists; Save a version checkpoints", async ({
     browser,

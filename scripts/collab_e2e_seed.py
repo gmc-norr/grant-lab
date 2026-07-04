@@ -30,7 +30,6 @@ Then run the e2e suite:
 from __future__ import annotations
 
 import os
-import signal
 import sys
 import tempfile
 import threading
@@ -58,9 +57,8 @@ def main() -> int:
     # browser talks to the Vite proxy on :5173, not uvicorn on :8000.
     os.environ["APP_BASE_URL"] = "http://localhost:5173"
 
-    from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
     import uvicorn
-    from sqlalchemy import create_engine  # noqa: F401 (imported for clarity)
+    from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 
     with PostgresContainer("pgvector/pgvector:pg16", driver="psycopg") as pg:
         db_url = pg.get_connection_url()  # postgresql+psycopg://...
@@ -69,8 +67,9 @@ def main() -> int:
         os.environ["WORKSPACES_DIR"] = str(workspaces)
 
         # --- migrate ---
-        from alembic import command
         from alembic.config import Config
+
+        from alembic import command
 
         cfg = Config("alembic.ini")
         cfg.set_main_option("sqlalchemy.url", db_url)
@@ -135,10 +134,11 @@ def main() -> int:
         print("Press Ctrl-C to stop uvicorn (testcontainers Postgres also stops).")
         print()
 
-        # Block until interrupted.
+        # Block until interrupted (portable — signal.pause() is Linux-only).
         try:
-            signal.pause()  # Linux only; blocks until any signal
-        except (AttributeError, KeyboardInterrupt):
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
             pass
 
         server.should_exit = True
