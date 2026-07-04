@@ -77,12 +77,16 @@ class Room:
         self._pending_on_evict = None   # deferred last-leave checkpoint (Slice 3a c)
         # Serialize permission reconciliation per-room (Slice 3a cluster a/b).
         # Lock-acquisition ORDER (deadlock-freedom):
-        #   recon_lock → (manager._lock via MANAGER.release/drop_client)
-        # No path acquires recon_lock while holding manager._lock or room._lock.
-        # No path acquires room._lock while holding recon_lock — the WS route
-        # takes recon_lock for the self-reconcile, releases it, THEN takes room._lock
-        # for the initial message; refresh_permissions holds only recon_lock across
-        # its pass. Therefore there is no lock cycle → deadlock-free.
+        #   recon_lock → manager._lock (via MANAGER.release/drop_client) → room._lock
+        #   (via remove_client_presence, run AFTER manager._lock is released).
+        # No path acquires recon_lock while holding manager._lock or room._lock, and
+        # no path acquires recon_lock while holding room._lock — so the chain above is
+        # acyclic → deadlock-free. Note (Slice 3b-4): refresh_permissions may now
+        # TRANSITIVELY take room._lock, because release/drop_client call
+        # remove_client_presence (presence removal for surviving peers) — but always
+        # AFTER manager._lock has been released, so no room._lock-under-manager._lock
+        # edge exists. The WS route still takes recon_lock for the self-reconcile,
+        # releases it, THEN takes room._lock for the initial message.
         # Note: reconcile_client may run checkpoint on_evict (a threadpool git commit
         # + advisory commit-mutex wait) while holding recon_lock, briefly serializing
         # connects to the same room — acceptable (revokes are rare; connects to OTHER
