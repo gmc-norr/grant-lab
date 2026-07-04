@@ -12,8 +12,10 @@ Wire format (pycrdt._sync):
 from __future__ import annotations
 
 from pycrdt import (
+    Awareness,
     YMessageType,
     YSyncMessageType,
+    create_awareness_message,
     create_sync_message,
     create_update_message,
     handle_sync_message,
@@ -24,10 +26,14 @@ __all__ = [
     "create_sync_message",
     "handle_sync_message",
     "create_update_message",
+    "create_awareness_message",
+    "Awareness",
     "is_sync_step1",
     "is_sync_write",
     "is_awareness",
     "extract_update",
+    "extract_awareness_update",
+    "read_awareness_client_ids",
 ]
 
 
@@ -63,3 +69,39 @@ def extract_update(message: bytes) -> bytes:
     payload. Caller is responsible for checking is_sync_write() first.
     """
     return read_message(message[2:])
+
+
+def extract_awareness_update(message: bytes) -> bytes:
+    """Raw awareness payload from an AWARENESS frame: strip the 1-byte type header,
+    read the varuint-prefixed payload. Caller checks is_awareness() first.
+    Mirror of extract_update() (which strips the 2-byte SYNC header)."""
+    return read_message(message[1:])
+
+
+def read_awareness_client_ids(payload: bytes) -> list[int]:
+    """Parse the client ids declared in a y-protocols awareness update WITHOUT
+    mutating any Awareness. Update format (encodeAwarenessUpdate): a varuint
+    count, then per client [clientID varuint][clock varuint][state varString].
+    Read each clientID; skip clock + the varuint-length-prefixed state bytes."""
+    pos = 0
+
+    def _rvu() -> int:
+        nonlocal pos
+        num = 0
+        shift = 0
+        while True:
+            b = payload[pos]
+            pos += 1
+            num |= (b & 0x7F) << shift
+            if b < 0x80:
+                return num
+            shift += 7
+
+    count = _rvu()
+    ids: list[int] = []
+    for _ in range(count):
+        ids.append(_rvu())   # clientID
+        _rvu()               # clock (skip)
+        state_len = _rvu()   # varString byte length
+        pos += state_len     # skip state bytes
+    return ids

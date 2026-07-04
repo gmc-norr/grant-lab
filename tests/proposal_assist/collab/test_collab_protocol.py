@@ -54,3 +54,42 @@ def test_step1_drives_convergence_via_handle_sync_message():
 def test_empty_message_is_not_a_write():
     assert P.is_sync_write(b"") is False
     assert P.is_sync_step1(b"") is False
+
+
+from pycrdt import Doc as _Doc  # noqa: E402
+
+
+def _awareness_payload(user):
+    d = _Doc()
+    a = P.Awareness(d)
+    a.set_local_state(user)
+    return a.encode_awareness_update([a.client_id]), a.client_id
+
+
+def test_extract_awareness_update_roundtrips_create_awareness_message():
+    payload, _ = _awareness_payload({"user": {"name": "Alice"}})
+    frame = P.create_awareness_message(payload)
+    assert P.is_awareness(frame)
+    assert P.extract_awareness_update(frame) == payload
+
+
+def test_read_awareness_client_ids_single():
+    payload, cid = _awareness_payload({"user": {"name": "Alice", "color": "#f00"}})
+    assert P.read_awareness_client_ids(payload) == [cid]
+
+
+def test_read_awareness_client_ids_multi_and_removal():
+    # Merge two clients into one server awareness, encode a multi-client snapshot.
+    d = _Doc()
+    srv = P.Awareness(d)
+    srv.set_local_state(None)
+    p1, c1 = _awareness_payload({"user": {"name": "A"}})
+    p2, c2 = _awareness_payload({"user": {"name": "B"}})
+    srv.apply_awareness_update(p1, "x")
+    srv.apply_awareness_update(p2, "x")
+    snap = srv.encode_awareness_update(list(srv.states))
+    assert sorted(P.read_awareness_client_ids(snap)) == sorted([c1, c2])
+    # A removal frame (state=null) STILL declares the id.
+    srv.remove_awareness_states([c1], "srv")
+    rem = srv.encode_awareness_update([c1])
+    assert P.read_awareness_client_ids(rem) == [c1]
