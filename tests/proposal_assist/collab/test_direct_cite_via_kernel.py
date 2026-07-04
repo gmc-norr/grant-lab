@@ -53,7 +53,7 @@ async def test_direct_cite_applies_and_returns(pg_session_factory, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_direct_cite_stale_does_not_evict(pg_session_factory, tmp_path):
+async def test_direct_cite_stale_does_not_evict(pg_session_factory, tmp_path, monkeypatch):
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
         o = make_user(s, email="dck2@ki.se"); ws = make_workspace(s, owner=o, current_phase="active"); s.commit()
@@ -62,12 +62,19 @@ async def test_direct_cite_stale_does_not_evict(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft"); s.commit()
         rid = _seed_reference(s, wid, chunk_text="azure sky").id; s.commit()
+    evict_calls: list = []
+    _orig_evict = MANAGER.evict
+    async def _spy_evict(key):
+        evict_calls.append(key)
+        return await _orig_evict(key)
+    monkeypatch.setattr(MANAGER, "evict", _spy_evict)
     with pytest.raises(CiteStale):
         await direct_cite_via_kernel(
             session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
             actor_id=oid, section_index=1, base_section_sha="dead" * 16, anchor="The claim here.",
             reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
             stance="supports")
+    assert evict_calls == []  # clean error → evict must NOT have been called
     assert MANAGER.get((wid, "draft")) is None  # clean abort → no lingering room
 
 
@@ -87,10 +94,18 @@ async def test_direct_cite_post_mutation_failure_evicts(pg_session_factory, tmp_
     import call_manager.proposal_assist.collab.kernel as kmod
     def _boom(*a, **k): raise RuntimeError("disk full")
     monkeypatch.setattr(kmod, "checkpoint_artifact", _boom)
+    evict_calls: list = []
+    _orig_evict = MANAGER.evict
+    async def _spy_evict(key):
+        evict_calls.append(key)
+        return await _orig_evict(key)
+    monkeypatch.setattr(MANAGER, "evict", _spy_evict)
     with pytest.raises(RuntimeError):
         await direct_cite_via_kernel(
             session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
             actor_id=oid, section_index=1, base_section_sha=bsha, anchor="The claim here.",
             reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
             stance="supports")
+    assert (wid, "draft") in evict_calls  # post-mutation error → evict must have been called
+    assert len(evict_calls) == 1
     assert MANAGER.get((wid, "draft")) is None  # evicted (poison recovery)
