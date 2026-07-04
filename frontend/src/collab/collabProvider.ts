@@ -17,6 +17,8 @@ export interface CollabProviderOptions {
   WebSocketImpl?: typeof WebSocket;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
+  /** Give up after this many CONSECUTIVE failed connects (reset on open). */
+  maxReconnectAttempts?: number;
 }
 
 export class CollabProvider {
@@ -26,6 +28,7 @@ export class CollabProvider {
   private readonly WS: typeof WebSocket;
   private readonly baseMs: number;
   private readonly maxMs: number;
+  private readonly maxAttempts: number;
   private ws: WebSocket | null = null;
   private _status: ProviderStatus = "connecting";
   private readonly listeners = new Set<StatusListener>();
@@ -42,6 +45,7 @@ export class CollabProvider {
     this.WS = opts.WebSocketImpl ?? (globalThis.WebSocket as typeof WebSocket);
     this.baseMs = opts.reconnectBaseMs ?? 1000;
     this.maxMs = opts.reconnectMaxMs ?? 30000;
+    this.maxAttempts = opts.maxReconnectAttempts ?? 12;
     this.onUpdate = (update, origin) => {
       // Origin-tag guard: an update we applied FROM the socket carries `this` as
       // its transaction origin — never echo it back (infinite loop otherwise).
@@ -110,18 +114,28 @@ export class CollabProvider {
     };
 
     ws.onmessage = (ev: MessageEvent) => {
-      const data = new Uint8Array(ev.data as ArrayBuffer);
-      const dec = decoding.createDecoder(data);
-      const messageType = decoding.readVarUint(dec);
-      if (messageType !== MESSAGE_SYNC) return; // AWARENESS (1) etc: ignored in 3b-3
-      const enc = encoding.createEncoder();
-      encoding.writeVarUint(enc, MESSAGE_SYNC);
-      // readSyncMessage applies inbound STEP2/UPDATE to the doc with `this` as the
-      // txn origin (origin-tag), and writes a STEP2 reply into `enc` iff it read a STEP1.
-      syncProtocol.readSyncMessage(dec, enc, this.doc, this);
-      if (encoding.length(enc) > 1 && this.canWrite) {
-        // A STEP2 reply is a WRITE frame — read-only clients suppress it.
-        this.send(encoding.toUint8Array(enc));
+      // Post-destroy guard: a message task queued before unmount can still fire
+      // AFTER destroy()/doc.destroy() — never apply an update to a torn-down doc.
+      if (this.destroyed) return;
+      // Malformed/unexpected frames are DROPPED, not thrown (mirrors the server's
+      // decode guard in room.py): a stray text/truncated frame must not crash the
+      // handler. binaryType is "arraybuffer", so a non-ArrayBuffer is unexpected.
+      try {
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        const dec = decoding.createDecoder(new Uint8Array(ev.data));
+        const messageType = decoding.readVarUint(dec);
+        if (messageType !== MESSAGE_SYNC) return; // AWARENESS (1) etc: ignored in 3b-3
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, MESSAGE_SYNC);
+        // readSyncMessage applies inbound STEP2/UPDATE to the doc with `this` as the
+        // txn origin (origin-tag), and writes a STEP2 reply into `enc` iff it read a STEP1.
+        syncProtocol.readSyncMessage(dec, enc, this.doc, this);
+        if (encoding.length(enc) > 1 && this.canWrite) {
+          // A STEP2 reply is a WRITE frame — read-only clients suppress it.
+          this.send(encoding.toUint8Array(enc));
+        }
+      } catch {
+        // drop malformed frame
       }
     };
 
@@ -137,6 +151,15 @@ export class CollabProvider {
 
   private scheduleReconnect(): void {
     if (this.destroyed || this.timer) return;
+    if (this.attempts >= this.maxAttempts) {
+      // Give up after this many CONSECUTIVE failures with no successful open
+      // (attempts resets to 0 on open). Bounds the retry loop for a PERMANENT
+      // rejection: a pre-accept server close(1008) (expired cookie / non-member /
+      // collab disabled) reaches the browser as a 1006 handshake failure — NOT
+      // catchable by the 1008 guard — so without this cap it would retry forever.
+      // Stays "offline"; a remount (page reload / re-navigation) retries.
+      return;
+    }
     const delay = Math.min(this.baseMs * 2 ** this.attempts, this.maxMs);
     this.attempts += 1;
     this.timer = setTimeout(() => { this.timer = null; this.connect(); }, delay);

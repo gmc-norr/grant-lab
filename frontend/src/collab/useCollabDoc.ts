@@ -39,6 +39,12 @@ export function useCollabDoc(opts: {
       doc.destroy();
       setState(null);
     };
-  }, [workspaceId, artifact, canWrite]);
+    // canWrite is intentionally NOT a dependency: it is the CONNECT-TIME write
+    // gate (the server also enforces it and reconciles permission mid-session —
+    // Slice 2c). Rebuilding the doc/provider on a permission flip would destroy
+    // the Y.Doc out from under the bound editor; full client-side mid-session
+    // editability is a 3b-4 concern.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, artifact]);
   return { doc: state?.doc ?? null, provider: state?.provider ?? null, status };
 }

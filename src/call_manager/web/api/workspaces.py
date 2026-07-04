@@ -465,6 +465,12 @@ def post_init_spec(
                 # rolled-back write, or a head/section snapshot from two moments.
                 head, sections = current_head(repo_dir), _sections_out(raw)
             session.commit()  # releases the mutex; persists rows iff we seeded
+            # Read collab_enabled WHILE the session is open (the return is outside
+            # the `with` block). can_write is unconditionally True here: require_owner
+            # above + a successful init only runs on an UNLOCKED spec.
+            collab_enabled = collab_state.is_collab_enabled(
+                session, workspace_id=workspace_id, artifact="spec"
+            )
         except SpecLockedError as e:
             session.rollback()
             raise HTTPException(
@@ -493,6 +499,8 @@ def post_init_spec(
         locked_at=None,
         locked_by=None,
         can_manage_lock=True,
+        collab_enabled=collab_enabled,
+        can_write=True,
     )
 
 
