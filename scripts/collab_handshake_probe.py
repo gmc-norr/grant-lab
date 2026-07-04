@@ -6,7 +6,14 @@ probe against the real server, exits with the probe's code. Run:
     EMBEDDING_MODEL=bge-m3 python scripts/collab_handshake_probe.py
 """
 from __future__ import annotations
-import os, subprocess, sys, tempfile, threading, time, uuid
+
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
 from pathlib import Path
 
 # Add the repo root so `tests.*` modules are importable outside pytest.
@@ -23,10 +30,8 @@ def main() -> int:
     os.environ["SPA_MODE"] = "disabled"
     os.environ["APP_BASE_URL"] = "http://127.0.0.1:8199"
 
-    from testcontainers.postgres import PostgresContainer
     import uvicorn
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+    from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("pgvector/pgvector:pg16", driver="psycopg") as pg:
         db_url = pg.get_connection_url()  # postgresql+psycopg://...
@@ -35,8 +40,9 @@ def main() -> int:
         os.environ["WORKSPACES_DIR"] = str(workspaces)
 
         # --- migrate ---
-        from alembic import command
         from alembic.config import Config
+
+        from alembic import command
         cfg = Config("alembic.ini")
         cfg.set_main_option("sqlalchemy.url", db_url)
         command.upgrade(cfg, "head")
@@ -66,7 +72,9 @@ def main() -> int:
         cookie = "session=" + app.state.session_signer.make(user_id=oid)
 
         # --- uvicorn in a thread ---
-        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=8199, log_level="warning"))
+        server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=8199, log_level="warning")
+        )
         t = threading.Thread(target=server.run, daemon=True)
         t.start()
         for _ in range(100):
