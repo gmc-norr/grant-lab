@@ -1,0 +1,169 @@
+# Collab Slice 3b-3 — Tiptap WYSIWYG editor + Yjs WebSocket provider (frontend)
+
+**Date:** 2026-07-04
+**Status:** Design (approved with amendments; pre-plan)
+**Depends on:** Slice 3b-1 server hardening (MERGED `e4d5442`) and the whole collab foundation (Slices 0–2c, 3a). See `[[project_collab_editing_foundation]]`.
+
+## 1. What this slice is (and is not)
+
+3b-3 is the **first frontend runtime** for the collaborative editor: a schema-locked Tiptap WYSIWYG surface in the cockpit that, when the collab flag is enabled for an artifact, binds a Yjs `Y.Doc` to the hand-rolled backend WebSocket sync server and gives live, multi-client editing. Flag-off keeps the existing CodeMirror-6 section editor unchanged.
+
+**In scope:**
+- A Tiptap React editor whose ProseMirror schema matches `frontend/scripts/collab-schema.mjs` exactly, guarded by a schema-equality test.
+- A **custom thin Yjs provider** over the existing WS route `/api/ws/workspaces/{id}/{artifact}` (no `y-websocket`).
+- Conditional mount by a new additive `collab_enabled` read-model field; flag-off path (CM6) preserved byte-for-byte.
+- Read-only rendering of citations (inline-atom NodeView pill).
+- "Save a version" wired to the existing checkpoint endpoint, gated so it can't race an in-flight update.
+- A first-task **handshake de-risk** (Slice-0 style GO/NO-GO), a schema-equality test, a provider unit test, and one Playwright round-trip e2e.
+
+**Explicitly NOT in scope (deferred):**
+- **Presence / cursors / awareness → Slice 3b-4.** The provider sends no awareness frames; the server already ignores them.
+- **Flipping the flag ON in prod → Slice 3b-5.** At the end of 3b-3 the flag remains OFF by default; the editor is exercised only via dev/e2e enabling the per-artifact flag on a seeded workspace.
+- Rich editing UX: formatting toolbar, bubble menu, slash commands, interactive citation **insert** in the WYSIWYG surface (citation insert stays on the existing CM6/REST flow).
+- Live-as-you-type Outline (see §7); a true persist-ack fence for Save-a-version (see §7); active-session update-tail bounding (foundation roadmap, lands around the flip).
+
+## 2. Constraints & invariants (hard gates)
+
+1. **Flag stays OFF in prod.** Every new runtime behavior is reachable only when `is_collab_enabled(workspace, artifact)` is true, which prod never sets. Flag-off parity is a HARD gate.
+2. **CM6 flag-off path is byte-for-byte unchanged.** `ArtifactSectionEditor` / `CodeMirrorEditor` / `useDraft` / `useSaveSection` / the REST section-save flow are untouched on the flag-off path. `can_edit` keeps its current owner-oriented semantics (do not repurpose it — the CM6 path reads it).
+3. **Backend changes are additive & read-only.** The only backend edit is adding `collab_enabled` + `can_write` fields to the `DraftOut` / `SpecOut` response models (derived from `resolve_access` / `is_collab_enabled`). NO migration, NO new write endpoint, NO schema change. The checkpoint and WS routes already exist.
+4. **Single-instance Yjs.** Exactly one `yjs` and one `y-prosemirror` instance in the bundle (dedupe/pin), matching the versions the write-path harness already validated (`yjs 13.6.31`, `y-prosemirror 1.3.7`). A duplicated yjs silently breaks CRDT identity.
+5. **Schema identity is load-bearing.** The Tiptap-generated schema MUST equal `collab-schema.mjs` node-for-node / mark-for-mark / attr-for-attr, or the y-prosemirror ↔ pycrdt bridge desyncs from the server's markdown serializer. A CI vitest enforces this.
+6. Tests: backend runs with `EMBEDDING_MODEL=bge-m3`, grouped-dir (never whole-suite). CI runs `ruff check .` (not format). Frontend gate is `tsc` (no TS linter) + `vitest` + Playwright.
+
+## 3. Architecture overview
+
+### 3.1 Conditional mount
+`DraftPanel` / `SpecPanel` read the new `collab_enabled` field from the draft/spec query:
+- `collab_enabled === true` → render `<CollabEditor artifact="draft"|"spec" workspaceId can_write=… citations=…/>`.
+- `collab_enabled === false` (prod default) → the current `ArtifactSectionEditor` path, unchanged.
+
+The choice is made at the panel level so the two editors never coexist for one artifact and the CM6 path is completely dormant when collab is on (and vice versa).
+
+### 3.2 New frontend modules (`frontend/src/collab/`)
+| File | Responsibility |
+|---|---|
+| `CollabEditor.tsx` | Tiptap React editor component; owns the `useEditor` instance, wires the Collaboration extension to the Y.Doc, sets `editable` from `can_write`, publishes cursor/status to `editorStore`, renders the "Save a version" control. |
+| `collabProvider.ts` | The thin Yjs↔WebSocket provider (see §4). Framing via `y-protocols/sync` + `lib0`. Emits `status` events; owns reconnect. |
+| `useCollabDoc.ts` | React hook: constructs the `Y.Doc` + provider for a `(workspaceId, artifact)`, tears them down on unmount / artifact switch, exposes `{ doc, provider, status }`. |
+| `schema.ts` | Tiptap `Node`/`Mark` extensions (snake_case names) matching `collab-schema.mjs`; the `citation` inline-atom extension. |
+| `CitationNode.tsx` | Read-only React NodeView for the citation pill. |
+| `collabSchema.equality.test.ts` | Vitest asserting the Tiptap schema ≡ `collab-schema.mjs`. |
+| `collabProvider.test.ts` | Vitest for the provider against a fake socket. |
+
+Code-split so non-collab users don't pull Tiptap/yjs (mirror the existing `lazy()` on `Cockpit`).
+
+### 3.3 Dependencies
+- **Add (runtime):** `@tiptap/react`, `@tiptap/core`, `@tiptap/pm`, `@tiptap/extension-collaboration`, `y-protocols`, `lib0`.
+- **Promote dev→runtime + pin:** `yjs`, `y-prosemirror` (already present as devDeps for the golden/write-path tooling; the runtime editor must use the **same** pinned versions).
+- **Do NOT add** `y-websocket` (custom provider) or `@tiptap/extension-collaboration-cursor` (that's 3b-4).
+- pnpm `add` for the fresh `@tiptap/*` packages will hit the 7-day `minimumReleaseAge` cooldown → use the ephemeral `--config.minimumReleaseAge=0` for the add; the committed lockfile install is unaffected. Verify integrity against the registry.
+
+## 4. Transport — custom thin provider
+
+`collabProvider.ts` opens a raw `WebSocket` to `wss?://<host>/api/ws/workspaces/{workspaceId}/{artifact}` and speaks exactly the three sync frames the server implements (`protocol.py`): `SYNC_STEP1`, `SYNC_STEP2`, `SYNC_UPDATE`. Message framing uses `y-protocols/sync` (`writeSyncStep1/2`, `writeUpdate`, `readSyncMessage`) + `lib0/encoding|decoding` so bytes are wire-identical to what pycrdt's `_sync` codec expects. AWARENESS (message type 1) is never sent (3b-4).
+
+The provider MUST explicitly implement all four of the following (these are the amendments that were called out as required before implementation):
+
+1. **Bidirectional initial sync (server-first STEP1 + client STEP1 on open).**
+   The server sends its own `SYNC_STEP1` right after `accept()` (`collab_ws.py` → `room.initial_message()`). The provider must:
+   - On socket open, **send its own `SYNC_STEP1`** (client state vector) so the server replies with a `SYNC_STEP2` carrying the whole server document — without this the client uploads its empty state but never downloads the doc (blank editor).
+   - On receiving the server's `SYNC_STEP1`, reply with `SYNC_STEP2` (client diff). For a fresh/read-only client this is near-empty; a read-only client's STEP2 is a write frame and is dropped server-side by design (reading still works because the client's *own* STEP1 → server STEP2 answer is on the ungated read path).
+
+2. **Origin tagging (no echo loop).**
+   Apply every inbound update with the provider object as the transaction origin: `Y.applyUpdate(doc, update, provider)`. The local update handler `doc.on('update', (u, origin) => …)` MUST forward to the socket **only when `origin !== provider`** — otherwise remote updates get re-broadcast to the server as if local, producing an echo loop.
+
+3. **Close-code-aware reconnect.**
+   | Close code | Meaning (server) | Reconnect? |
+   |---|---|---|
+   | 1008 policy violation | bad origin / auth fail / non-member / **collab-not-enabled** / mid-session permission revoke | **NO** — permanent policy rejection; reconnecting loops forever. Surface a terminal "disconnected" status. |
+   | 1009 message too big | frame exceeded 1 MB | **NO** — resending the same frame repeats the failure. |
+   | 1011 server error | poison/evict recovery | **YES** — reconnect (with backoff) rebuilds cleanly from the durable log; the CRDT client re-offers its update. |
+   | 1006 / network / unclean | transport drop | **YES** — reconnect with exponential backoff (cap ~30s), re-run the STEP1 handshake on reopen (resync). |
+
+4. **Vite WS proxy.** Dev proxy currently has `ws:false` (`frontend/vite.config.ts`). Add a WebSocket-enabled proxy for `/api/ws` → `ws://localhost:8000` (a dedicated `"/api/ws"` entry with `ws:true`, or flip `ws:true` on the catch-all — the dedicated entry is lower-risk since it won't disturb Vite's own HMR socket).
+
+Provider surface (indicative): `new CollabProvider({ url, doc })` → `.status` ("connecting"|"connected"|"offline"|"disconnected-policy"), `.on('status', cb)`, `.bufferedAmount`/`.isSettled()` (for the Save-a-version gate, §7), `.destroy()`.
+
+## 5. Editor & schema
+
+### 5.1 Schema (the correctness core)
+`collab/schema.ts` defines Tiptap `Node`/`Mark` extensions whose **`name`** fields are pinned to the snake_case names in `collab-schema.mjs`:
+- Nodes: `doc`, `paragraph`, `heading` (levels 1–6), `bullet_list`, `ordered_list`, `list_item` (content `paragraph block*`), `blockquote`, `code_block`, `horizontal_rule`, `image` (`src`/`alt`/`title`), `hard_break`, `text`, and the custom `citation` inline-atom (`citekey`, `ev_id`).
+- Marks: `strong`, `em`, `strikethrough`, `code`, `link` (`href`/`title`).
+- Attrs, content expressions (`doc: block+`, `list_item: paragraph block*`, etc.), `group`, `inline`/`atom` flags must all match.
+
+We do **not** rely on StarterKit's default names (`bold`/`italic`/`strike`/`bulletList`…). Either configure/rename StarterKit nodes or define individual extensions; the equality test is the backstop.
+
+**`@tiptap/extension-collaboration`** binds the editor to `{ document: ydoc, field: 'prosemirror' }` (the XmlFragment name the server uses). Tiptap's native history is disabled; y-undo (bundled by the Collaboration extension) provides undo/redo.
+
+### 5.2 Schema-equality test (drift guard)
+`collabSchema.equality.test.ts` builds the ProseMirror `Schema` that Tiptap generates from the extensions and asserts structural equality against the `schema` exported by `collab-schema.mjs`: identical node-name set, mark-name set, per-node `content`/`group`/`inline`/`atom`, per-node/mark attr names + defaults. Any drift fails CI. This is what makes the "third schema twin" safe. The comparison is over **structural fields** (string names, content expressions, attr keys/defaults), not object identity — so it is robust even though the Tiptap side is built via `@tiptap/pm`'s `prosemirror-model` while `collab-schema.mjs` uses the standalone `prosemirror-model` devDep. At runtime the editor only ever uses `@tiptap/pm`'s copy (`collab-schema.mjs` is test-only tooling), so runtime schema construction is single-instance.
+
+### 5.3 Citations (read-only)
+`CitationNode.tsx` is a read-only React NodeView rendering the existing citation-pill visual (reuse current pill styling). It does not open the citation composer or support insert in this slice — interactive citation insert remains on the CM6/REST path (deferred).
+
+### 5.4 Editability
+`CollabEditor` sets `editable` from the new **`can_write`** field (from `resolve_access`), NOT `can_edit`. A non-writer gets a read-only editor (no local-only edits the server would silently drop). If a mid-session revoke closes the socket 1008, the provider surfaces a terminal disconnected status and the editor drops to read-only.
+
+## 6. Backend read-model additions (additive)
+
+Add two fields to `DraftOut` and `SpecOut`:
+- `collab_enabled: bool` — from `collab_state.is_collab_enabled(session, workspace_id, artifact)`.
+- `can_write: bool` — from `resolve_access(session, user, workspace_id, artifact)` (the resolver the WS + checkpoint endpoint already use — single source of truth for write permission).
+
+`get_draft` / `get_spec` already open a session and `require_member`; they additionally call `resolve_access` (returns `(is_member, can_write)`) and `is_collab_enabled`, and populate the two new fields. `can_edit` is left exactly as-is (owner-oriented) so the CM6 path is unaffected. Regenerate `frontend/src/api/schema.gen.ts` (with `EMBEDDING_MODEL=bge-m3` to avoid the mxbai warning that breaks openapi-typescript).
+
+Rationale for `can_write` (the amendment): the current read models are owner-oriented (`can_edit = owner` for draft; `owner && !locked` for spec), but `resolve_access` grants write to any **active member** on an active draft / unlocked spec. Keying the collab editor's editability off `can_edit` would wrongly make active members read-only. `can_write` from the same resolver keeps the HTTP read model and the WS write gate consistent.
+
+## 7. Save / version UX, status, Outline
+
+### 7.1 "Save a version" = checkpoint
+On the collab path there is no per-section REST save — edits persist continuously through the WS, and checkpoints are server-side (last-client-leaving is already wired). The Draft/Spec panel's save affordance becomes **"Save a version"** → `POST /api/workspaces/{id}/collab/{artifact}/checkpoint` (exists, currently uncalled). Response `{committed, commit_sha, authors}`; `503` (busy/commit-failed) is retriable, `403` read-only, `409` collab-off.
+
+### 7.2 The save-version race and the settled-gate (amendment)
+The checkpoint endpoint checkpoints the **durable log**, not the live browser buffer, so a click immediately after a keystroke can checkpoint one update behind. Minimal-slice mitigation: **disable the "Save a version" control unless the provider is settled** — socket `readyState===OPEN` **and** `bufferedAmount===0` **and** a short idle-debounce (≈300–400 ms) since the last local update. This reduces (does not eliminate) the window; a residual sub-RTT gap remains because the server persists asynchronously after the frame leaves the client.
+**Follow-up (documented, not in this slice):** a true fence — a lightweight server ack of the last-persisted update id so the client can wait for `acked >= last-sent` before checkpointing. Pairs naturally with the 3b-4 awareness channel.
+
+### 7.3 editorStore / StatusBar
+`editorStore` is repurposed on the collab path:
+- `setSave` carries a **connection/sync status** display derived from the provider `.status` (§4) and `can_write` — e.g. "connecting"/"connected"/"offline"/"read-only" — instead of dirty/saved. (The provider emits transport statuses; the editor maps them, plus `can_write`, onto the displayed string.)
+- `setCursor` from the Tiptap selection (Ln/Col in the StatusBar).
+- `setDirty` is inert (a CRDT has no per-section dirty state); the Outline's dirty markers simply don't show on this path.
+- `resetEditorStore` on unmount as today.
+The StatusBar and Outline components are untouched; only what the collab editor publishes changes.
+
+### 7.4 Outline staleness (accepted for this slice)
+The sidebar Outline reads headings from the React Query `useDraft` cache (`CockpitSidebar.tsx`), which is stale vs the live Y.Doc. Minimal boundary: **refetch the draft/spec query on checkpoint / version-save** so the Outline updates at version boundaries. Live-as-you-type Outline is a follow-up (a tiny Tiptap-derived outline store feeding the sidebar).
+
+## 8. Testing & de-risk
+
+1. **Task 1 — handshake de-risk (GO/NO-GO gate, before building the editor).** Prove a JS Yjs provider completes a live bidirectional sync handshake against the hand-rolled pycrdt server: a focused Playwright (or Node-ws) round-trip against a real uvicorn with the flag enabled on a seeded workspace — connect, receive server STEP1, exchange STEP2, send an update, confirm it persists and a second connection converges. If NO-GO, stop and fix transport; do not paper over it. (This mirrors the Slice-0 spike discipline.)
+2. **Schema-equality vitest** (§5.2) — the drift guard.
+3. **Provider unit test** (fake socket): sends own STEP1 on open; replies STEP2 to server STEP1; local edit → one `SYNC_UPDATE` frame; inbound update applied with provider origin and **not** re-sent; non-writer path sends no write frames; 1008 → no reconnect; 1006/1011 → reconnect scheduled.
+4. **One Playwright e2e:** two browser contexts on a flag-on workspace → type in A, assert B converges, reload preserves content, "Save a version" returns a commit and the Outline refetches.
+5. **Parity:** CM6 flag-off tests (`test_accepting.py`, `test_api_spec_lock.py`, member/rubric/soft-delete) stay green unchanged; `get_draft`/`get_spec` existing tests still pass with the two additive fields.
+
+## 9. Process
+
+- Worktree isolation (`.worktrees/collab-slice3b3`), detached subagent-driven-development, **stop-before-merge** (human verifies + merges).
+- Explicit-path `git add` only; never touch master/main from the worktree.
+- Backend tests: `EMBEDDING_MODEL=bge-m3`, grouped-dir, `-p no:cacheprovider`.
+- Frontend: `pnpm install --frozen-lockfile` for the harness; `tsc` + `vitest run` + Playwright are the gates; `--config.minimumReleaseAge=0` only for the fresh `@tiptap/*` adds.
+- No `/code-review` / `/ultrareview` slash reviews in the detached run (user-billed); use a dispatched code-reviewer subagent for the final review.
+
+## 10. Deferred / follow-ups
+
+- Presence / cursors / awareness — **Slice 3b-4** (extends both server and this provider).
+- Flip the flag ON in prod — **Slice 3b-5** (CM6→Tiptap cutover; `save_section` git-canonical switchover + Tier-1/2 post-checkpoint re-fire land around here).
+- Rich UX: toolbar, bubble menu, slash commands, interactive citation insert in WYSIWYG.
+- Live-as-you-type Outline (Tiptap-derived outline store).
+- True persist-ack fence for Save-a-version (§7.2).
+- Active-session update-tail bounding (high-volume Tiptap updates).
+
+## 11. Open risks
+
+- **Handshake compatibility** is the top unknown — mitigated by making it Task 1's explicit GO/NO-GO gate.
+- **Schema drift** — mitigated by the equality test.
+- **Duplicate yjs** — mitigated by pinning + dedupe verification.
+- **CSP:** the SPA's CSP must allow the WS connection (`connect-src` including `ws:`/`wss:` self); relaxed in `SPA_MODE=dev`, but the prod CSP will need to permit the WS origin when 3b-5 flips the flag — noted for 3b-5, but verify the dev CSP doesn't block the e2e here.
