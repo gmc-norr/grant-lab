@@ -1040,6 +1040,49 @@ def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factor
     assert r.json()["error"]["code"] == "not_found"
 
 
+# --- Collab cite: flag-on routes to live room (any writer); flag-off = owner-only --
+
+def _room_base_sha(app, pg_session_factory, tmp_path, ws_id, section_index=1):
+    from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
+    from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from call_manager.proposal_assist.paths import workspace_repo_dir
+    with pg_session_factory() as s:
+        raw = canonical_artifact_markdown(s, workspace_id=ws_id, artifact="draft",
+                                          repo_dir=workspace_repo_dir(tmp_path, ws_id))
+    return split_sections(raw)[section_index].sha
+
+
+def _enable_collab(pg_session_factory, ws_id):
+    from call_manager.proposal_assist.collab import state
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=ws_id, artifact="draft"); s.commit()
+
+
+def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _stranger_id, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n")
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    _enable_collab(pg_session_factory, ws_id)
+    bc, _ = _capture(tmp_path, ws_id, 1)          # git head (base_commit_sha, not the gate)
+    bs = _room_base_sha(app, pg_session_factory, tmp_path, ws_id)
+    c = _client(app, member_id)                   # a NON-owner writer
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 200, r.text
+    assert set(r.json()) == {"ev_id", "citekey", "commit_sha"}
+
+
+def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Parity: with collab OFF, a member is still 403 (unchanged git path).
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _s, ws_id = _seed(app, pg_session_factory, tmp_path,
+                                           "preamble\n\n## Methods\noriginal.\n")
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    r = _client(app, member_id).post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 403
+
+
 def test_references_list_member_gated_excludes_tombstoned(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):

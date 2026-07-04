@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 
@@ -44,12 +45,14 @@ from call_manager.proposal_assist.citations.human_cite import (
     CiteStale,
     insert_citation_for_user,
 )
+from call_manager.proposal_assist.citations.collab_cite import direct_cite_via_kernel
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
+from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -847,67 +850,123 @@ def post_save_section(
 
 
 @router.post("/workspaces/{workspace_id}/citations", response_model=AddCitationOut)
-def post_citation(
+async def post_citation(
     workspace_id: uuid.UUID,
     body: AddCitationIn,
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> AddCitationOut:
-    """Human select-to-cite: a direct citation commit (owner-gated). Sync handler
-    (FastAPI threadpools it) calling the sync insert_citation_for_user core; this
-    handler owns the transaction (single commit/rollback, mutex released on it)."""
+    """Human select-to-cite: collab-aware citation commit.
+
+    Flag-on:  any writer, routes to the live Yjs room via direct_cite_via_kernel.
+    Flag-off: owner-only, sync git path (threadpooled), byte-for-byte parity.
+    """
     settings = request.app.state.settings
     sf = request.app.state.session_factory
-    with sf() as session:
-        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        # 404 precheck (mirror the save route): proposal.md + git HEAD must exist.
-        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        if not (repo_dir / PROPOSAL_FILENAME).exists():
-            raise HTTPException(status_code=404, detail="no proposal.md yet")
+    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+
+    # _route decides ONLY the branch — no auth, no prechecks — so the flag-off path
+    # keeps its exact owner-first ordering (Codex: a non-owner member must still see
+    # 403 before any proposal-404, not the reverse). is_collab_enabled on a missing
+    # workspace/row is a harmless bool; each branch below does its own full auth.
+    def _route() -> bool:
+        with sf() as session:
+            return collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="draft")
+
+    enabled = await run_in_threadpool(_route)
+
+    if enabled:
+        def _gate() -> None:
+            with sf() as session:
+                is_member, can_write = resolve_access(
+                    session, user=user, workspace_id=workspace_id, artifact="draft")
+                if not is_member:
+                    raise HTTPException(status_code=404, detail="workspace not found")
+                if not can_write:
+                    raise HTTPException(status_code=403, detail="not permitted to write this draft")
+            if not (repo_dir / PROPOSAL_FILENAME).exists():
+                raise HTTPException(status_code=404, detail="no proposal.md yet")
+            try:
+                current_head(repo_dir)
+            except GitCommitError as e:
+                raise HTTPException(status_code=404, detail="no proposal.md yet") from e
+        await run_in_threadpool(_gate)
         try:
-            current_head(repo_dir)
-        except GitCommitError as e:
-            logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
-            raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        try:
-            result = insert_citation_for_user(
-                session=session,
-                workspace=ws,
-                user_id=user.id,
-                section_index=body.section_index,
-                base_commit_sha=body.base_commit_sha,
-                base_section_sha=body.base_section_sha,
-                anchor=body.anchor,
-                reference_id=body.reference_id,
-                chunk_index=body.chunk_index,
-                evidence_quote=body.evidence_quote,
-                quote_start=body.quote_start,
-                quote_end=body.quote_end,
-                stance=body.stance,
-                workspaces_dir=settings.workspaces_dir,
-            )
-            session.commit()
+            out = await direct_cite_via_kernel(
+                session_factory=sf, workspaces_dir=settings.workspaces_dir, workspace_id=workspace_id,
+                actor_id=user.id, section_index=body.section_index, base_section_sha=body.base_section_sha,
+                anchor=body.anchor, reference_id=body.reference_id, chunk_index=body.chunk_index,
+                evidence_quote=body.evidence_quote, quote_start=body.quote_start,
+                quote_end=body.quote_end, stance=body.stance)
         except CiteStale as e:
-            session.rollback()
             raise HTTPException(status_code=409, detail=str(e)) from e
         except CiteRefNotFound as e:
-            session.rollback()
             raise HTTPException(status_code=404, detail=str(e)) from e
         except CiteInvalid as e:
-            session.rollback()
             raise HTTPException(status_code=422, detail=str(e)) from e
+        except RoomEvicted as e:
+            raise HTTPException(status_code=409, detail="workspace busy; retry the citation") from e
         except CommitMutexTimeout as e:
-            session.rollback()
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
+            raise HTTPException(status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}) from e
         except GitCommitError as e:
-            session.rollback()
-            logger.exception("user citation insert failed for workspace %s", workspace_id)
-            raise HTTPException(
-                status_code=500, detail="citation failed — nothing was written"
-            ) from e
-    return AddCitationOut(**result)
+            logger.exception("collab citation insert failed for workspace %s", workspace_id)
+            raise HTTPException(status_code=500, detail="citation failed — nothing was written") from e
+        return AddCitationOut(**out)
+
+    # Flag-off: the CURRENT handler body, byte-for-byte (owner FIRST, then the
+    # proposal/head prechecks, then insert). Threadpooled. This ordering is the
+    # parity guarantee asserted by test_post_citation_flag_off_still_owner_only.
+    def _git() -> AddCitationOut:
+        with sf() as session:
+            ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            if not (repo_dir / PROPOSAL_FILENAME).exists():
+                raise HTTPException(status_code=404, detail="no proposal.md yet")
+            try:
+                current_head(repo_dir)
+            except GitCommitError as e:
+                logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
+                raise HTTPException(status_code=404, detail="no proposal.md yet") from e
+            try:
+                result = insert_citation_for_user(
+                    session=session,
+                    workspace=ws,
+                    user_id=user.id,
+                    section_index=body.section_index,
+                    base_commit_sha=body.base_commit_sha,
+                    base_section_sha=body.base_section_sha,
+                    anchor=body.anchor,
+                    reference_id=body.reference_id,
+                    chunk_index=body.chunk_index,
+                    evidence_quote=body.evidence_quote,
+                    quote_start=body.quote_start,
+                    quote_end=body.quote_end,
+                    stance=body.stance,
+                    workspaces_dir=settings.workspaces_dir,
+                )
+                session.commit()
+            except CiteStale as e:
+                session.rollback()
+                raise HTTPException(status_code=409, detail=str(e)) from e
+            except CiteRefNotFound as e:
+                session.rollback()
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            except CiteInvalid as e:
+                session.rollback()
+                raise HTTPException(status_code=422, detail=str(e)) from e
+            except CommitMutexTimeout as e:
+                session.rollback()
+                raise HTTPException(
+                    status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+                ) from e
+            except GitCommitError as e:
+                session.rollback()
+                logger.exception("user citation insert failed for workspace %s", workspace_id)
+                raise HTTPException(
+                    status_code=500, detail="citation failed — nothing was written"
+                ) from e
+        return AddCitationOut(**result)
+
+    return await run_in_threadpool(_git)
 
 
 class CockpitMetaOut(BaseModel):
