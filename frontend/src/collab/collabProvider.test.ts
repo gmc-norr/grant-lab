@@ -1,4 +1,6 @@
 import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
+import * as sync from "y-protocols/sync";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { CollabProvider } from "./collabProvider";
@@ -55,11 +57,9 @@ describe("CollabProvider", () => {
     const { p, sockets } = makeProvider(true);
     const s = sockets[0]; s.open(); s.sent.length = 0;
     // server STEP1 = create_sync_message equivalent: build one from a fresh doc
-    const enc = require("lib0/encoding");
     const srv = new Y.Doc();
-    const sync = require("y-protocols/sync");
-    const e = enc.createEncoder(); enc.writeVarUint(e, MESSAGE_SYNC); sync.writeSyncStep1(e, srv);
-    s.deliver(enc.toUint8Array(e));
+    const e = encoding.createEncoder(); encoding.writeVarUint(e, MESSAGE_SYNC); sync.writeSyncStep1(e, srv);
+    s.deliver(encoding.toUint8Array(e));
     expect(s.sent).toHaveLength(1);
     expect(frameType(s.sent[0]).sub).toBe(SYNC_STEP2);
     void p;
@@ -80,9 +80,8 @@ describe("CollabProvider", () => {
     const other = new Y.Doc();
     other.getXmlFragment("prosemirror").push([new Y.XmlElement("paragraph")]);
     const update = Y.encodeStateAsUpdate(other);
-    const enc = require("lib0/encoding"); const sync = require("y-protocols/sync");
-    const e = enc.createEncoder(); enc.writeVarUint(e, MESSAGE_SYNC); sync.writeUpdate(e, update);
-    s.deliver(enc.toUint8Array(e));
+    const e = encoding.createEncoder(); encoding.writeVarUint(e, MESSAGE_SYNC); sync.writeUpdate(e, update);
+    s.deliver(encoding.toUint8Array(e));
     expect(doc.getXmlFragment("prosemirror").length).toBe(1); // applied
     expect(s.sent).toHaveLength(0);                            // not echoed back
   });
@@ -93,9 +92,8 @@ describe("CollabProvider", () => {
     expect(s.sent).toHaveLength(1); // its own STEP1 (read request, ungated)
     s.sent.length = 0;
     // server STEP1 -> writer would reply STEP2; read-only suppresses it
-    const enc = require("lib0/encoding"); const sync = require("y-protocols/sync");
-    const srv = new Y.Doc(); const e = enc.createEncoder(); enc.writeVarUint(e, MESSAGE_SYNC); sync.writeSyncStep1(e, srv);
-    s.deliver(enc.toUint8Array(e));
+    const srv = new Y.Doc(); const e = encoding.createEncoder(); encoding.writeVarUint(e, MESSAGE_SYNC); sync.writeSyncStep1(e, srv);
+    s.deliver(encoding.toUint8Array(e));
     // local edit also suppressed
     doc.getXmlFragment("prosemirror").push([new Y.XmlElement("paragraph")]);
     expect(s.sent).toHaveLength(0);
@@ -103,19 +101,31 @@ describe("CollabProvider", () => {
 
   it("does NOT reconnect on 1008 (policy) or 1009 (too big)", () => {
     vi.useFakeTimers();
-    const { sockets } = makeProvider(true);
-    sockets[0].open(); sockets[0].drop(1008);
+    // 1008: policy violation
+    const { sockets: sockets1008 } = makeProvider(true);
+    sockets1008[0].open(); sockets1008[0].drop(1008);
     vi.advanceTimersByTime(1000);
-    expect(sockets).toHaveLength(1); // no new socket
+    expect(sockets1008).toHaveLength(1); // no new socket
+    // 1009: message too big
+    const { sockets: sockets1009 } = makeProvider(true);
+    sockets1009[0].open(); sockets1009[0].drop(1009);
+    vi.advanceTimersByTime(1000);
+    expect(sockets1009).toHaveLength(1); // no new socket
     vi.useRealTimers();
   });
 
   it("reconnects on 1006/1011 with backoff", () => {
     vi.useFakeTimers();
-    const { sockets } = makeProvider(true);
-    sockets[0].open(); sockets[0].drop(1011);
+    // 1011: server error
+    const { sockets: sockets1011 } = makeProvider(true);
+    sockets1011[0].open(); sockets1011[0].drop(1011);
     vi.advanceTimersByTime(50);
-    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    expect(sockets1011.length).toBeGreaterThanOrEqual(2);
+    // 1006: abnormal closure
+    const { sockets: sockets1006 } = makeProvider(true);
+    sockets1006[0].open(); sockets1006[0].drop(1006);
+    vi.advanceTimersByTime(50);
+    expect(sockets1006.length).toBeGreaterThanOrEqual(2);
     vi.useRealTimers();
   });
 });
