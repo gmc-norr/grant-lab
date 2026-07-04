@@ -49,6 +49,7 @@ from call_manager.proposal_assist.citations.human_cite import (
 from call_manager.proposal_assist.citations.ledger import find_by_id, load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
+from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
@@ -268,14 +269,19 @@ def get_draft(
             head = current_head(repo_dir)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        raw = proposal.read_text()
+        collab_enabled = collab_state.is_collab_enabled(
+            session, workspace_id=workspace_id, artifact="draft"
+        )
+        if collab_enabled:
+            raw = canonical_artifact_markdown(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            )
+        else:
+            raw = proposal.read_text()
         sections = _sections_out(raw)
         citations = _citation_map(session, settings, workspace_id, raw)
         _, can_write = resolve_access(
             session, user=user, workspace_id=workspace_id, artifact="draft"
-        )
-        collab_enabled = collab_state.is_collab_enabled(
-            session, workspace_id=workspace_id, artifact="draft"
         )
     return DraftOut(
         head=head,

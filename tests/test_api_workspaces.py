@@ -288,6 +288,40 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
     assert cites[ev_id]["title"] is None
 
 
+def test_draft_collab_returns_room_canonical_sections(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    from call_manager.proposal_assist.collab import state, store
+    from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _m, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        s.commit()
+    # Hydrate then apply a LIVE, uncheckpointed edit to the room (git stays "original.").
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
+        )
+        s.commit()
+        room = build_doc(updates)
+        upd = apply_pm_json_to_fragment(
+            room, markdown_to_pm("preamble\n\n## Methods\nLIVE EDITED.\n")
+        )
+        store.append_update(
+            s, workspace_id=ws_id, artifact="draft", actor_id=owner_id, update=upd, commit=True
+        )
+    body = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/draft").json()
+    joined = "".join(sec["text"] for sec in body["sections"])
+    assert "LIVE EDITED." in joined  # room-canonical, NOT git "original."
+    assert "original." not in joined
+
+
 from call_manager.proposal_assist.proposals.proposing import capture_base  # noqa: E402
 
 
