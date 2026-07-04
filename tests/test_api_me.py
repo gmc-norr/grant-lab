@@ -57,3 +57,31 @@ def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory):
     r = c.get("/api/me")
     assert r.status_code == 200
     assert r.json()["capabilities"] == {"admin": True}
+
+
+def test_me_exposes_user_name(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(status="active", email="named@ki.se", name="Dr. Named")
+        s.add(u)
+        s.commit()
+        uid = u.id
+    c = TestClient(app)
+    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+    r = c.get("/api/me")
+    assert r.status_code == 200
+    assert r.json()["user"]["name"] == "Dr. Named"
+
+
+def test_me_name_is_null_when_unset(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        u = User(status="active", email="anon@ki.se")
+        s.add(u)
+        s.commit()
+        uid = u.id
+    c = TestClient(app)
+    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
+    r = c.get("/api/me")
+    assert r.status_code == 200
+    assert r.json()["user"]["name"] is None

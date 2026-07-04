@@ -3,10 +3,25 @@ import * as encoding from "lib0/encoding";
 import * as sync from "y-protocols/sync";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import * as awarenessProtocol from "y-protocols/awareness";
 import { CollabProvider } from "./collabProvider";
 
 const MESSAGE_SYNC = 0;
+const MESSAGE_AWARENESS = 1;
 const SYNC_STEP1 = 0, SYNC_STEP2 = 1, SYNC_UPDATE = 2;
+
+function firstMsgType(b: Uint8Array): number {
+  return decoding.readVarUint(decoding.createDecoder(b));
+}
+function awarenessFrameFor(user: Record<string, unknown>): Uint8Array {
+  const d = new Y.Doc();
+  const aw = new awarenessProtocol.Awareness(d);
+  aw.setLocalStateField("user", user);
+  const e = encoding.createEncoder();
+  encoding.writeVarUint(e, MESSAGE_AWARENESS);
+  encoding.writeVarUint8Array(e, awarenessProtocol.encodeAwarenessUpdate(aw, [d.clientID]));
+  return encoding.toUint8Array(e);
+}
 
 /** A synchronous fake WebSocket capturing sent frames and exposing hooks. */
 class FakeSocket {
@@ -141,5 +156,62 @@ describe("CollabProvider", () => {
     // pre-accept-1008-surfaced-as-1006 permanent-rejection loop.
     expect(sockets).toHaveLength(3);
     vi.useRealTimers();
+  });
+
+  it("sends an AWARENESS frame when the local awareness changes", () => {
+    const { p, sockets } = makeProvider(true);
+    const s = sockets[0]; s.open(); s.sent.length = 0;
+    p.awareness.setLocalStateField("user", { name: "Alice", color: "#f00" });
+    expect(s.sent).toHaveLength(1);
+    expect(firstMsgType(s.sent[0])).toBe(MESSAGE_AWARENESS);
+  });
+
+  it("applies inbound AWARENESS to provider.awareness and does NOT echo", () => {
+    const { p, sockets } = makeProvider(true);
+    const s = sockets[0]; s.open(); s.sent.length = 0;
+    s.deliver(awarenessFrameFor({ name: "Bob" }));
+    const users = [...p.awareness.getStates().values()].map((st) => (st as any).user?.name);
+    expect(users).toContain("Bob");
+    expect(s.sent).toHaveLength(0);        // applied with origin `this` → not echoed
+  });
+
+  it("flushes local awareness on open (state set before the socket opened)", () => {
+    const { p, sockets } = makeProvider(true);
+    p.awareness.setLocalStateField("user", { name: "Early" });  // before open: send is a no-op
+    const s = sockets[0];
+    s.open();
+    // open sends STEP1 + the awareness flush
+    const types = s.sent.map(firstMsgType);
+    expect(types).toContain(MESSAGE_AWARENESS);
+  });
+
+  it("read-only client still sends and receives awareness (ungated)", () => {
+    const { p, sockets } = makeProvider(false);
+    const s = sockets[0]; s.open(); s.sent.length = 0;
+    p.awareness.setLocalStateField("user", { name: "Viewer" });
+    expect(s.sent.some((b) => firstMsgType(b) === MESSAGE_AWARENESS)).toBe(true);  // sends
+    s.deliver(awarenessFrameFor({ name: "Peer" }));
+    const users = [...p.awareness.getStates().values()].map((st) => (st as any).user?.name);
+    expect(users).toContain("Peer");                                              // receives
+  });
+
+  it("sends an awareness removal frame on destroy", () => {
+    const { p, sockets } = makeProvider(true);
+    const s = sockets[0]; s.open();
+    p.awareness.setLocalStateField("user", { name: "Leaver" });
+    s.sent.length = 0;
+    p.destroy();
+    expect(s.sent.some((b) => firstMsgType(b) === MESSAGE_AWARENESS)).toBe(true);
+  });
+
+  it("clears REMOTE awareness (keeps local) when the socket closes", () => {
+    const { p, doc, sockets } = makeProvider(true);
+    const s = sockets[0]; s.open();
+    p.awareness.setLocalStateField("user", { name: "Me" });     // local state
+    s.deliver(awarenessFrameFor({ name: "Peer" }));             // a remote peer
+    expect([...p.awareness.getStates().keys()].length).toBeGreaterThanOrEqual(2);
+    s.drop(1011);                                                // server error → reconnecting
+    const ids = [...p.awareness.getStates().keys()];
+    expect(ids).toEqual([doc.clientID]);                         // only local remains
   });
 });
