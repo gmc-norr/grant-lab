@@ -37,4 +37,17 @@ describe("collab handshake (live uvicorn)", () => {
     expect(docC.getXmlFragment("prosemirror").toJSON()).toContain("hello-from-A");
     c.destroy();
   }, 15000);
+
+  it("awareness converges: A sets presence, B sees it", async () => {
+    const docA = new Y.Doc();
+    const a = new CollabProvider({ url: URL, doc: docA, canWrite: true, WebSocketImpl: WSWithAuth });
+    const docB = new Y.Doc();
+    const b = new CollabProvider({ url: URL, doc: docB, canWrite: true, WebSocketImpl: WSWithAuth });
+    await settle();
+    a.awareness.setLocalStateField("user", { name: "Alice", color: "#ff0000" });
+    await settle();
+    const names = [...b.awareness.getStates().values()].map((s: any) => s?.user?.name);
+    expect(names).toContain("Alice");           // GO: JS↔Python awareness interop works
+    a.destroy(); b.destroy();
+  }, 15000);
 });
