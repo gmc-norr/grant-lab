@@ -47,3 +47,6 @@ src/call_manager/web/spa/
 frontend/test-results/
 frontend/playwright-report/
 frontend/.playwright/
+
+# collab e2e runner transient log
+.e2e-vite.log
