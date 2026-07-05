@@ -31,16 +31,45 @@ cleanup() {
   # SIGINT the seed's process GROUP so the seed's KeyboardInterrupt handler runs
   # (it sets server.should_exit and lets the `with PostgresContainer` context stop
   # the docker container). Plain SIGTERM would skip that handler and orphan the PG
-  # container (Ryuk reaps it eventually, but slowly). Give it a moment, then hard-kill.
+  # container (Ryuk reaps it eventually, but slowly).
   if [ -n "$SEED_PGID" ]; then
     kill -INT -"$SEED_PGID" 2>/dev/null || true
-    sleep 2
+    # PostgresContainer.__exit__ (stop + remove the docker container) can take a
+    # while — wait up to ~20s for the group to exit BEFORE hard-killing, so a fixed
+    # timeout doesn't SIGKILL mid-cleanup and leak the container.
+    for _ in $(seq 1 40); do
+      kill -0 -"$SEED_PGID" 2>/dev/null || break
+      sleep 0.5
+    done
     kill -KILL -"$SEED_PGID" 2>/dev/null || true
   fi
-  # Vite spawns esbuild/node children; kill the whole group (its leader is VITE_PGID).
-  [ -n "$VITE_PGID" ] && kill -TERM -"$VITE_PGID" 2>/dev/null || true
+  # Vite spawns esbuild/node children; TERM the whole group, wait briefly, then KILL.
+  if [ -n "$VITE_PGID" ]; then
+    kill -TERM -"$VITE_PGID" 2>/dev/null || true
+    for _ in $(seq 1 10); do kill -0 -"$VITE_PGID" 2>/dev/null || break; sleep 0.3; done
+    kill -KILL -"$VITE_PGID" 2>/dev/null || true
+  fi
+  # Backstop: the Vite node can escape the group-kill (esbuild service detaches),
+  # leaving :5173 held. Free the ports by whoever still listens so the NEXT run's
+  # preflight isn't tripped by our own leak.
+  for port in 5173 8000; do
+    local pid
+    pid="$(ss -ltnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1 || true)"
+    [ -n "${pid:-}" ] && kill -KILL "$pid" 2>/dev/null || true
+  done
 }
 trap cleanup EXIT
+
+# Preflight: refuse to run if :8000 or :5173 is already in use. Otherwise the
+# readiness probe could validate a STALE server/DB from a previous (orphaned) run
+# while our fresh workspace is unreachable (Codex High).
+for port in 8000 5173; do
+  if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+    echo "[run] port $port already in use — aborting to avoid validating a stale server."
+    ss -ltnp "sport = :$port" 2>/dev/null || true
+    exit 1
+  fi
+done
 
 echo "[run] starting seed (testcontainers PG + uvicorn:8000)…"
 # `uv run python -u` → unbuffered stdout so the printed E2E_* vars reach $SEED_LOG
@@ -66,7 +95,10 @@ export E2E_MEMBER_LABEL; E2E_MEMBER_LABEL="$(get E2E_MEMBER_LABEL)"
 echo "[run] workspace=$E2E_COLLAB_WS_ID owner=$E2E_OWNER_LABEL member=$E2E_MEMBER_LABEL"
 
 echo "[run] starting Vite dev (:5173)…"
-( cd frontend && exec pnpm dev ) >"$VITE_LOG" 2>&1 &
+# --strictPort: fail fast rather than silently moving to :5174 (which the readiness
+# probe below would miss, validating a stale :5173). Preflight already frees the port;
+# this guards the launch race without changing the committed vite.config.ts default.
+( cd frontend && exec pnpm exec vite --strictPort ) >"$VITE_LOG" 2>&1 &
 VITE_PGID=$!
 
 echo "[run] waiting for uvicorn:8000 + vite:5173…"

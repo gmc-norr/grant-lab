@@ -168,6 +168,18 @@ def main() -> int:
             if server.started:
                 break
             time.sleep(0.1)
+        if not server.started:
+            # uvicorn never bound (e.g. :8000 already in use by an orphaned run).
+            # Fail LOUD and refuse to print env vars — otherwise a runner's readiness
+            # probe would validate the STALE server/DB while our fresh workspace is
+            # unreachable. The `with PostgresContainer` context stops the PG on return.
+            print(
+                "ERROR: uvicorn did not start within 10s (is port 8000 already in "
+                "use?). Refusing to print stale env vars.",
+                file=sys.stderr,
+            )
+            sys.stderr.flush()
+            return 1
 
         print()
         print("=== collab e2e seed ready (2 users) ===")

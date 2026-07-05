@@ -1,4 +1,4 @@
-import { expect, test, type Browser } from "@playwright/test";
+import { expect, test, type Browser, type Page } from "@playwright/test";
 
 // Collab two-browser e2e — Slice 3b-5d.D0 de-risk (extends the 3b-3/3b-4 harness).
 //
@@ -31,6 +31,20 @@ async function openAs(browser: Browser, cookie: string, baseURL: string, path: s
   const page = await ctx.newPage();
   await page.goto(path);
   return { ctx, page };
+}
+
+/** Click "Save a version" and wait for the checkpoint POST to actually settle —
+ * not just for the button to re-enable, which can pass before React Query flips
+ * `isPending` (Codex Low). Endpoint: POST .../collab/{artifact}/checkpoint. */
+async function saveVersion(page: Page) {
+  const btn = page.getByRole("button", { name: /save a version/i });
+  await expect(btn).toBeEnabled({ timeout: 8_000 });
+  await Promise.all([
+    page.waitForResponse(
+      (r) => r.request().method() === "POST" && /\/collab\/[^/]+\/checkpoint\b/.test(r.url()),
+    ),
+    btn.click(),
+  ]);
 }
 
 test.describe("collab two-browser (distinct users)", () => {
@@ -78,11 +92,7 @@ test.describe("collab two-browser (distinct users)", () => {
     if (MEMBER_LABEL) expect(nameOnA).toContain(MEMBER_LABEL);
 
     // Checkpoint (Save a version) on the owner, then reload and confirm persistence.
-    const saveBtn = A.page.getByRole("button", { name: /save a version/i });
-    await expect(saveBtn).toBeEnabled({ timeout: 8_000 });
-    await saveBtn.click();
-    await expect(saveBtn).toBeEnabled({ timeout: 8_000 });
-
+    await saveVersion(A.page);
     await A.page.reload();
     await expect(A.page.getByTestId("collab-editor")).toContainText("hello-collab", {
       timeout: 15_000,
@@ -128,73 +138,46 @@ test.describe("collab two-browser (distinct users)", () => {
     await B.ctx.close();
   });
 
-  // (c) Cite-via-room on a fresh section; the citation node appears on BOTH sides.
-  //     [strong signal, NOT a GO gate] — the 409-after-co-edit variant (3b-5a C#3)
-  //     is a KNOWN D1 deferral and is exercised as a documented observation in D0's
-  //     run notes, not asserted here (it must not turn into a flaky hard failure).
+  // (c) Select-to-cite in the live editor. [strong signal, NOT a GO gate]
+  //     D0 FINDING → D1: the Cite/Edit write-actions latch DISABLED. TiptapSelectionToolbar
+  //     computes `settled = status==="connected" && provider.isSettled()` ONLY inside its
+  //     selectionUpdate-triggered render, but that same selection fires a CollaborationCaret
+  //     awareness broadcast → ws.send() → provider.bufferedAmount>0 at that instant →
+  //     isSettled() false → writeReady false, with NO re-render when the buffer drains a
+  //     tick later (SaveVersionButton avoids this by polling isSettled() every 200ms).
+  //     The vitest toolbar tests mock isSettled()=true, so this is browser-only.
   //
-  //     STALE-STATE GUARD (Codex Medium): all scenarios share ONE server-side room,
-  //     and the earlier scenarios leave UNCHECKPOINTED live Yjs edits. The Cite
-  //     toolbar derives base_section_sha from the git-backed useDraft sections
-  //     (TiptapSelectionToolbar.tsx:81), but the citation kernel validates it against
-  //     the LIVE room section SHA (kernel.py:88-92, direct_cite_via_kernel). So a
-  //     drifted git-vs-live section would 409 from ACCUMULATED state, not the intended
-  //     fresh path — masking a real result. Serial execution alone does not fix this.
-  //     Remedy: checkpoint (Save a version) THEN reload both, so git == live before we
-  //     cite, giving this test a clean, self-consistent base regardless of test order.
-  test("owner cites a claim; the pill converges to the member", async ({ browser, baseURL }) => {
-    // KNOWN GAP → D1 (D0 finding, not a GO gate). Edit/Cite latch DISABLED in the
-    // live editor: TiptapSelectionToolbar computes `settled = status==="connected" &&
-    // provider.isSettled()` only inside its selectionUpdate-triggered render, but the
-    // SAME selection change fires a CollaborationCaret awareness broadcast → ws.send()
-    // → provider.bufferedAmount>0 at that instant → isSettled() false → writeReady
-    // false. The buffer drains microseconds later but nothing re-renders the toolbar,
-    // so the write actions stay disabled. Verified live: status=connected,
-    // anchorable=true (Ask enabled), PM selection a clean body word, isSettled() true
-    // when sampled a tick later — yet Cite never enables. The vitest toolbar tests
-    // mock isSettled()=true so never caught it. Marked expected-fail; will flip to an
-    // unexpected PASS the moment D1 fixes the settle re-render race.
-    test.fail(true, "D1: toolbar `settled` samples isSettled() at render vs the awareness-send that dirties bufferedAmount");
+  //     We assert the SPECIFIC current symptom — Ask ENABLED (anchoring works: Ask is
+  //     gated only on `anchorable`) but Cite DISABLED (the settle latch) — rather than
+  //     blanket-`test.fail`-ing the whole scenario, so a regression in convergence,
+  //     selection, or the toolbar rendering still fails loudly (Codex Medium).
+  //     WHEN D1 FIXES the settle re-render race, the `toBeDisabled` below flips → restore
+  //     the full flow here: checkpoint (saveVersion) + reload BOTH to a git==live base
+  //     (else the kernel 409s a stale base_section_sha — direct_cite_via_kernel validates
+  //     vs the LIVE room, kernel.py:88-92), then click Cite → CitationComposer → pick the
+  //     seeded reference → triple-click the chunk <pre> → Add citation → assert the
+  //     citation-pill converges to BOTH A and B (the seed provisions a citeable ref).
+  test("select-to-cite: write-actions latch disabled in the live editor (D1 gap)", async ({
+    browser,
+    baseURL,
+  }) => {
     const draft = `/cockpit/${WS}`;
     const A = await openAs(browser, COOKIE_OWNER!, baseURL!, draft);
+    // Second client so the awareness broadcast (the latch trigger) is realistic.
     const B = await openAs(browser, COOKIE_MEMBER!, baseURL!, draft);
 
     const edA = A.page.getByTestId("collab-editor");
-    const edB = B.page.getByTestId("collab-editor");
     await expect(edA).toBeVisible({ timeout: 15_000 });
-    await expect(edB).toBeVisible({ timeout: 15_000 });
+    await expect(B.page.getByTestId("collab-editor")).toBeVisible({ timeout: 15_000 });
 
-    // Reset to a consistent base: fold any prior scenario's uncheckpointed edits into
-    // git, then reload so the toolbar's git sections match the live room (see guard above).
-    const saveBtn = A.page.getByRole("button", { name: /save a version/i });
-    await expect(saveBtn).toBeEnabled({ timeout: 8_000 });
-    await saveBtn.click();
-    await expect(saveBtn).toBeEnabled({ timeout: 8_000 });
-    await A.page.reload();
-    await B.page.reload();
-    await expect(edA).toBeVisible({ timeout: 15_000 });
-    await expect(edB).toBeVisible({ timeout: 15_000 });
-
-    // Select a unique word in the seeded section body to anchor the claim.
+    // Select a unique body word to anchor the claim.
     await edA.getByText("diagnostic", { exact: false }).first().dblclick();
-    const citeBtn = A.page.getByRole("button", { name: "Cite" });
-    await expect(citeBtn).toBeEnabled({ timeout: 8_000 });
-    await citeBtn.click();
 
-    const composer = A.page.getByRole("complementary", { name: /add a citation/i });
-    await expect(composer).toBeVisible({ timeout: 5_000 });
-    // Pick the seeded (indexed) reference.
-    await composer.getByRole("button", { name: /Seed Reference on Precision Medicine/i }).click();
-    // Select a supporting passage: triple-click the chunk <pre> (selects the line
-    // and fires the mouseup captureSelection listens for).
-    const chunk = composer.locator("pre").first();
-    await expect(chunk).toBeVisible({ timeout: 5_000 });
-    await chunk.click({ clickCount: 3 });
-    await composer.getByRole("button", { name: /add citation/i }).click();
-
-    // The pill appears for the owner and converges to the member.
-    await expect(edA.getByTestId("citation-pill").first()).toBeVisible({ timeout: 10_000 });
-    await expect(edB.getByTestId("citation-pill").first()).toBeVisible({ timeout: 10_000 });
+    // Anchoring works → Ask (gated only on `anchorable`) enables.
+    await expect(A.page.getByRole("button", { name: "Ask" })).toBeEnabled({ timeout: 8_000 });
+    // The D1 symptom → Cite (also gated on `settled`) is stuck disabled by the
+    // render-vs-awareness-send race. Flips to enabled once D1 lands (see header).
+    await expect(A.page.getByRole("button", { name: "Cite" })).toBeDisabled();
 
     await A.ctx.close();
     await B.ctx.close();
