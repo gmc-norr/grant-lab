@@ -154,9 +154,9 @@ Replace the current block (the `# --- seed ---` import line through the `cookie_
 
 Note: this removes the old single-owner `wid, oid = ...` / `_init_repo(...)` / `cookie_value = ...` lines. `owner_cookie` replaces `cookie_value` in the print block (Step 4).
 
-- [ ] **Step 4: Replace the print block**
+- [ ] **Step 4: Replace the print block (with an explicit flush)**
 
-Replace the `print("=== collab e2e seed ready ===")` block (from that line through the final `print()` before the `try:` loop) with:
+Replace the `print("=== collab e2e seed ready ===")` block (from that line through the final `print()` before the `try:` loop) with the version below. The **`sys.stdout.flush()`** is load-bearing (Codex High): the runner redirects the seed's stdout to a file, and Python **fully block-buffers** a non-tty stdout — the seed then blocks forever in its `while True: sleep(1)` loop, so without an explicit flush the `E2E_*` lines never leave the buffer and the runner's grep times out. (The runner also launches it with `python -u`; the flush makes the seed correct regardless of how it is invoked.)
 
 ```python
         print()
@@ -177,6 +177,8 @@ Replace the `print("=== collab e2e seed ready ===")` block (from that line throu
         print()
         print("Press Ctrl-C to stop uvicorn (testcontainers Postgres also stops).")
         print()
+        sys.stdout.flush()  # Codex High: flush before the blocking sleep loop so the
+        #                     runner (which reads a redirected stdout file) sees the vars.
 ```
 
 - [ ] **Step 5: Lint the seed**
@@ -234,10 +236,11 @@ EOF
 # parses the printed E2E_* vars, starts Vite dev (:5173), waits for both ports,
 # then runs frontend/e2e/collab.spec.ts. Tears everything down on exit.
 #
-# Requirements: an active .venv (uv), frontend deps installed (pnpm i), and a
-# Chromium usable by Playwright. On a fresh machine the browser OS libs may be
-# missing: `cd frontend && pnpm exec playwright install --with-deps chromium`
-# (needs sudo). Chromium itself is cached at ~/.cache/ms-playwright/chromium-1223.
+# Requirements: `uv` (the seed runs via `uv run`, no pre-activated venv needed),
+# frontend deps installed (pnpm i), and a Chromium usable by Playwright. On a fresh
+# machine the browser OS libs may be missing:
+#   cd frontend && pnpm exec playwright install --with-deps chromium   (needs sudo)
+# Chromium itself is cached at ~/.cache/ms-playwright/chromium-1223.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -245,28 +248,40 @@ cd "$ROOT"
 
 SEED_LOG="$(mktemp)"
 VITE_LOG="$ROOT/.e2e-vite.log"
-SEED_PID=""
-VITE_PID=""
+SEED_PGID=""
+VITE_PGID=""
 
 cleanup() {
-  [ -n "$SEED_PID" ] && kill "$SEED_PID" 2>/dev/null || true
-  [ -n "$VITE_PID" ] && kill "$VITE_PID" 2>/dev/null || true
-  # Vite spawns a child esbuild/node; best-effort sweep of THIS repo's dev server.
-  pkill -f "vite.*$ROOT/frontend" 2>/dev/null || true
+  # SIGINT the seed's process GROUP so the seed's KeyboardInterrupt handler runs
+  # (it sets server.should_exit and lets the `with PostgresContainer` context stop
+  # the docker container). Plain SIGTERM would skip that handler and orphan the PG
+  # container (Ryuk reaps it eventually, but slowly). Give it a moment, then hard-kill.
+  if [ -n "$SEED_PGID" ]; then
+    kill -INT -"$SEED_PGID" 2>/dev/null || true
+    sleep 2
+    kill -KILL -"$SEED_PGID" 2>/dev/null || true
+  fi
+  # Vite spawns esbuild/node children; kill the whole group (setsid made VITE_PGID
+  # the group leader), not just the wrapper PID.
+  [ -n "$VITE_PGID" ] && kill -TERM -"$VITE_PGID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "[run] starting seed (testcontainers PG + uvicorn:8000)…"
-EMBEDDING_MODEL=bge-m3 python scripts/collab_e2e_seed.py >"$SEED_LOG" 2>&1 &
-SEED_PID=$!
+# setsid → own process group (clean group-kill in cleanup). `uv run python -u` →
+# unbuffered stdout so the printed E2E_* vars reach $SEED_LOG immediately, and no
+# pre-activated venv required.
+setsid env EMBEDDING_MODEL=bge-m3 uv run python -u scripts/collab_e2e_seed.py \
+  >"$SEED_LOG" 2>&1 &
+SEED_PGID=$!
 
 # Wait up to ~150s for the seed to print the workspace id (PG image pull + migrate).
 for _ in $(seq 1 300); do
   grep -q '^E2E_COLLAB_WS_ID=' "$SEED_LOG" && break
-  kill -0 "$SEED_PID" 2>/dev/null || { echo "[run] seed exited early:"; cat "$SEED_LOG"; exit 1; }
+  kill -0 "$SEED_PGID" 2>/dev/null || { echo "[run] seed exited early:"; cat "$SEED_LOG"; exit 1; }
   sleep 0.5
 done
-grep -q '^E2E_COLLAB_WS_ID=' "$SEED_LOG" || { echo "[run] seed never printed vars:"; cat "$SEED_LOG"; exit 1; }
+grep -q '^E2E_COLLAB_WS_ID=' "$SEED_LOG" || { echo "[run] seed never printed vars:"; tail -40 "$SEED_LOG"; exit 1; }
 
 get() { grep "^$1=" "$SEED_LOG" | head -1 | cut -d= -f2-; }
 export E2E_COLLAB_WS_ID; E2E_COLLAB_WS_ID="$(get E2E_COLLAB_WS_ID)"
@@ -278,17 +293,27 @@ export E2E_MEMBER_LABEL; E2E_MEMBER_LABEL="$(get E2E_MEMBER_LABEL)"
 echo "[run] workspace=$E2E_COLLAB_WS_ID owner=$E2E_OWNER_LABEL member=$E2E_MEMBER_LABEL"
 
 echo "[run] starting Vite dev (:5173)…"
-( cd frontend && pnpm dev >"$VITE_LOG" 2>&1 ) &
-VITE_PID=$!
+setsid bash -c 'cd frontend && exec pnpm dev' >"$VITE_LOG" 2>&1 &
+VITE_PGID=$!
 
 echo "[run] waiting for uvicorn:8000 + vite:5173…"
+# curl WITHOUT -f on purpose: a 401 from /api/me (unauthenticated) still proves the
+# port is up and serving. -f would treat that 401 as failure and never go ready.
+ready=0
 for _ in $(seq 1 120); do
   if curl -s -o /dev/null "http://127.0.0.1:8000/api/me" \
      && curl -s -o /dev/null "http://localhost:5173/"; then
+    ready=1
     break
   fi
   sleep 0.5
 done
+if [ "$ready" -ne 1 ]; then
+  echo "[run] servers not ready after ~60s — aborting."
+  echo "--- seed log (tail) ---"; tail -30 "$SEED_LOG"
+  echo "--- vite log (tail) ---"; tail -30 "$VITE_LOG"
+  exit 1
+fi
 
 echo "[run] running collab e2e…"
 cd frontend
@@ -465,6 +490,16 @@ test.describe("collab two-browser (distinct users)", () => {
   //     [strong signal, NOT a GO gate] — the 409-after-co-edit variant (3b-5a C#3)
   //     is a KNOWN D1 deferral and is exercised as a documented observation in D0's
   //     run notes, not asserted here (it must not turn into a flaky hard failure).
+  //
+  //     STALE-STATE GUARD (Codex Medium): all scenarios share ONE server-side room,
+  //     and the earlier scenarios leave UNCHECKPOINTED live Yjs edits. The Cite
+  //     toolbar derives base_section_sha from the git-backed useDraft sections
+  //     (TiptapSelectionToolbar.tsx:81), but the citation kernel validates it against
+  //     the LIVE room section SHA (kernel.py:88-92, direct_cite_via_kernel). So a
+  //     drifted git-vs-live section would 409 from ACCUMULATED state, not the intended
+  //     fresh path — masking a real result. Serial execution alone does not fix this.
+  //     Remedy: checkpoint (Save a version) THEN reload both, so git == live before we
+  //     cite, giving this test a clean, self-consistent base regardless of test order.
   test("owner cites a claim; the pill converges to the member", async ({ browser, baseURL }) => {
     const draft = `/cockpit/${WS}`;
     const A = await openAs(browser, COOKIE_OWNER!, baseURL!, draft);
@@ -472,6 +507,17 @@ test.describe("collab two-browser (distinct users)", () => {
 
     const edA = A.page.getByTestId("collab-editor");
     const edB = B.page.getByTestId("collab-editor");
+    await expect(edA).toBeVisible({ timeout: 15_000 });
+    await expect(edB).toBeVisible({ timeout: 15_000 });
+
+    // Reset to a consistent base: fold any prior scenario's uncheckpointed edits into
+    // git, then reload so the toolbar's git sections match the live room (see guard above).
+    const saveBtn = A.page.getByRole("button", { name: /save a version/i });
+    await expect(saveBtn).toBeEnabled({ timeout: 8_000 });
+    await saveBtn.click();
+    await expect(saveBtn).toBeEnabled({ timeout: 8_000 });
+    await A.page.reload();
+    await B.page.reload();
     await expect(edA).toBeVisible({ timeout: 15_000 });
     await expect(edB).toBeVisible({ timeout: 15_000 });
 
@@ -650,3 +696,8 @@ EOF
 **Type/name consistency:** seed prints `E2E_COOKIE_OWNER/MEMBER`, `E2E_OWNER_LABEL/MEMBER_LABEL`, `E2E_SESSION_COOKIE` (=owner) → runner `get()` exports the same names → spec reads the same names (with `E2E_SESSION_COOKIE` fallback for `COOKIE_OWNER`). Selectors verified against source: `[data-testid="collab-editor"]`, `.collaboration-carets__caret`/`__label`, `button[aria-label="Cite"]`, `aside[aria-label="Add a citation"]` (`getByRole("complementary")`), `[data-testid="citation-pill"]`, `.ProseMirror[contenteditable]`, `?tab=spec`.
 
 **Known fragilities (acknowledged, not blockers):** the Cite passage-selection (triple-click → `onMouseUp`) and the anchor-uniqueness of the double-clicked word are the least-robust interactions; per §3.3c/§5 a Cite failure that is not the known 409 is a weigh-it punch-list item, not a GO trip — if it proves flaky in the run, record it as a gap in the findings rather than forcing green.
+
+**Codex plan-review findings folded (all three verified against source):**
+- **High — seed stdout never flushes to the runner.** Python fully block-buffers a non-tty stdout; the seed then blocks in `while True: sleep(1)`, so the redirected `E2E_*` lines never reach the runner's `grep` → 150 s timeout. Fixed: `sys.stdout.flush()` after the seed's print block (Task 1 Step 4) **and** the runner launches it with `uv run python -u` (Task 2 Step 1).
+- **Medium — shared-workspace stale state contaminates the fresh Cite.** Verified `direct_cite_via_kernel` validates `base_section_sha` against the **live room** section SHA ([kernel.py:88-92](../../../src/call_manager/proposal_assist/collab/kernel.py#L88)), while the toolbar derives it from git-backed `useDraft` sections — so uncheckpointed edits from scenarios (a)/(b) would 409 the "fresh" Cite from accumulated state, not the intended gap (serial mode alone would not fix it). Fixed: scenario (c) checkpoints + reloads both pages to a consistent git==live base before selecting (Task 3).
+- **Medium — soft runner readiness/cleanup.** Fixed: hard readiness failure with seed+Vite log tails (no fall-through into Playwright); `setsid` process groups with a group-kill for Vite's esbuild/node children and a **SIGINT** to the seed group so its `KeyboardInterrupt` handler stops the testcontainers PG (SIGTERM would orphan it). The `curl` probes intentionally omit `-f` (a 401 from `/api/me` still proves the port is serving) — annotated in-script so it is not "fixed" back.
