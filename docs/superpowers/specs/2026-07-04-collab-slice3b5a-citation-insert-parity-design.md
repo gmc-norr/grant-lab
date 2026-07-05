@@ -382,3 +382,28 @@ report (do not silently skip). Full flag-on e2e is 3b-5d's de-risk; here we prov
 - Ask/Edit `from_offset`/`to_offset` precision under collab is best-effort (anchor text is the
   primary signal). If the agent preamble ever depends on exact offsets, revisit.
 - The 3 documented 3b-4 presence follow-ups remain **3b-5b** (not this slice).
+
+### Adversarial-review deferrals — REQUIRED before the 3b-5d flag flip
+
+These are flag-ON-only gaps found in the 3b-5a merge review (3-lens adversarial pass). All are
+inert while the flag is OFF (the collab toolbar/path does not render or route in prod). The 4
+cheap correctness/parity gaps were fixed in `4e2bf5c`; the rest are deferred to 3b-5d because
+they are live-editing-integration work that overlaps the flip's own de-risk:
+
+- **C#3 — stale-snapshot 409 (highest priority for the flip).** The toolbar reads
+  `base_section_sha`/`sections` from the cached `DraftOut` (`useDraft`), which is NOT invalidated
+  on Yjs room updates. After ANY live co-edit the sha goes stale → Edit/Cite return 409 "save and
+  reselect" (nonsensical under collab) and stay a dead-end for the session. Fix at flip: derive the
+  sha/offsets from the live doc, or invalidate `["draft", id]` on provider-settle + room updates;
+  and reword the collab conflict message (no "save"). This likely means the toolbar should NOT trust
+  a point-in-time `DraftOut` for the base — a design note for 3b-5d.
+- **C#2 — silent Ask/Edit failure + dropped disclosure-ack.** `runTurn` has no `onError`; a member
+  who hasn't acked the hosted-model disclosure clicks Ask → 403 → nothing happens. Port the CM6
+  `needsAck` ack+retry (SelectionToolbar.tsx) and a generic error surface.
+- **Idempotent `AddCitationOut.citekey=None` → 500** (theoretical): a re-cite of a citekey-less
+  (hand-edited/corrupt) ledger row. Make `citekey` optional or coerce at the flip.
+- **C#4/#5/#6 (minor):** heading-line section-index off-by-one vs `split_sections` (contained,
+  safe); `CitationComposer` unmounts if the selection empties mid-compose (lift it out of the
+  toolbar); inline-not-floating render + no "why disabled" hint for the not-anchorable case.
+- **Invalid-stance** (now fixed `4e2bf5c`) and the `error_code` leak into the agent-tool error dict
+  (harmless/additive, no action) are noted for completeness.
