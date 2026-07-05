@@ -214,4 +214,33 @@ describe("CollabProvider", () => {
     const ids = [...p.awareness.getStates().keys()];
     expect(ids).toEqual([doc.clientID]);                         // only local remains
   });
+
+  function malformedAwarenessFrame(): Uint8Array {
+    // A structurally-valid AWARENESS frame whose inner payload carries an
+    // invalid-JSON state string → applyAwarenessUpdate's JSON.parse throws
+    // (deterministic + version-independent), exercising the provider's drop guard.
+    const inner = encoding.createEncoder();
+    encoding.writeVarUint(inner, 1); // one updated client
+    encoding.writeVarUint(inner, 999); // clientID
+    encoding.writeVarUint(inner, 0); // clock
+    encoding.writeVarString(inner, "{not valid json"); // state → JSON.parse throws
+    const e = encoding.createEncoder();
+    encoding.writeVarUint(e, MESSAGE_AWARENESS);
+    encoding.writeVarUint8Array(e, encoding.toUint8Array(inner));
+    return encoding.toUint8Array(e);
+  }
+
+  it("drops a malformed AWARENESS frame without crashing or corrupting awareness", () => {
+    const { p, sockets } = makeProvider(true);
+    const s = sockets[0];
+    s.open();
+    s.sent.length = 0;
+    expect(() => s.deliver(malformedAwarenessFrame())).not.toThrow(); // handler survives
+    expect(p.status).toBe("connected"); // no teardown
+    expect([...p.awareness.getStates().values()].some((st) => (st as any).user)).toBe(false); // no bogus peer
+    // provider still works afterwards: a subsequent VALID awareness frame applies
+    s.deliver(awarenessFrameFor({ name: "Bob" }));
+    const users = [...p.awareness.getStates().values()].map((st) => (st as any).user?.name);
+    expect(users).toContain("Bob");
+  });
 });
