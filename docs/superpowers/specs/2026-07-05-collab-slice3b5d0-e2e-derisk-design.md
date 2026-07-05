@@ -23,12 +23,14 @@ The collaborative-editing stack (server-authoritative Yjs log + Tiptap + custom 
 
 ## 3. Harness (reuse + extend)
 
-### 3.1 Seed — three users, one workspace (`scripts/collab_e2e_seed.py`)
+### 3.1 Seed — two users, two artifacts (`scripts/collab_e2e_seed.py`)
 
-Extend the existing seed from one owner to **three users on one collab-enabled workspace**:
-- **owner** (writer), **member** (writer — added via the existing collaborator/membership model), **viewer** (read-only — `WorkspaceViewer`).
-- Print a signed session cookie per user plus the workspace id, e.g. `E2E_COLLAB_WS_ID`, `E2E_COOKIE_OWNER`, `E2E_COOKIE_MEMBER`, `E2E_COOKIE_VIEWER`. Keep the existing single-owner env names (`E2E_SESSION_COOKIE` = owner) for back-compat with the un-extended tests.
-- For the Cite scenario (§3.3c) the seed also creates **one reference with a citeable chunk** in the workspace library, so a select→Cite flow has a source to cite. (Highest-setup-cost item — if reference seeding proves heavy, Cite degrades to "record the gap" per §4.)
+`WorkspaceViewer` is **membership, not a read-only role** ([models.py:753](../../../src/call_manager/db/models.py#L753)), and `resolve_access` returns `(True, True)` for any member on an **active draft** — every member writes; a non-owner is read-only **only** in `current_phase == "setup"` or a **locked spec** ([ws_auth.py:118-126](../../../src/call_manager/proposal_assist/collab/ws_auth.py#L118)). So D0 uses **two users** and gets the read-only context from a **locked spec artifact**, not a third "viewer" user:
+- **owner** (writer everywhere), **member** (a `WorkspaceViewer` membership row — a *writer* on the active draft, *read-only* on the locked spec).
+- **Active draft** (`current_phase="active"`, collab enabled on `draft`) → owner + member are **both writers** (convergence/presence/reconnect/Cite).
+- **Locked spec** (collab enabled on `spec`, `spec_locked_at` set, minimal spec content seeded) → owner **writer**, member **read-only** (the read-only scenario, §3.3d).
+- Print a signed cookie per user + the workspace id: `E2E_COLLAB_WS_ID`, `E2E_COOKIE_OWNER`, `E2E_COOKIE_MEMBER`. Keep `E2E_SESSION_COOKIE` = owner for back-compat with the un-extended tests.
+- For the Cite scenario (§3.3c) the seed also creates **one `Reference` + one `ReferenceChunk` (`text_status="done"`)** directly (cheap), so a select→Cite flow has a citeable source. (If it proves heavy, Cite degrades to "record the gap" per §4.)
 - Everything else (testcontainers PG, Alembic upgrade, `_init_repo`, uvicorn:8000, dev CSP) is unchanged.
 
 ### 3.2 Runner — one command (`scripts/collab_e2e_run.sh`)
@@ -46,7 +48,7 @@ Switch the two existing tests to **distinct-user cookies** (owner vs member — 
 - **(a) Convergence + presence, two distinct writers:** A (owner) types → B (member) converges within the timeout; each sees the *other's distinct name* on the remote caret (not one shared owner name). Retains the existing checkpoint (Save-a-version) + reload-persist assertions.
 - **(b) Reconnect / re-sync:** drop B's socket (Playwright `context.setOffline(true)` then `false`, or a provider close), assert B reconnects, re-syncs the latest doc, and its caret reappears for A (presence self-heal, ≤ ~15s per 3b-4/3b-5b).
 - **(c) Cite-via-room (fresh section):** on a freshly-loaded section (no prior co-edit), A selects a claim → the selection toolbar's **Cite** → CitationComposer → pick the seeded reference/quote → the `citation` node appears in **both** A and B. Then, as a *documented* check, cite again *after* a co-edit changed that section and observe the **stale-snapshot 409** ("save and reselect") — recording the known 3b-5a C#3 blocker for D1 (expected, not a failure).
-- **(d) Read-only viewer:** V (viewer) loads the same draft — its `collab-editor` is present and shows A's live edits + A/B carets, but the editor is **non-editable** (`contenteditable=false`; typing changes nothing). Confirms the ungated read path + the `editable: canWrite` gate.
+- **(d) Read-only member (on the locked spec):** the member opens the **spec** artifact (collab-enabled + locked → member is read-only there); its `collab-editor` is present and shows the owner's live spec edits + the owner's caret, but the editor is **non-editable** (`contenteditable=false`; typing changes nothing). Confirms the ungated read path + the `editable: canWrite` gate. (The plan verifies the locked collab spec renders a read-only `CollabEditor` rather than a lock-banner-only view; if it does not, that itself is a recorded finding, not a blocker.)
 
 ## 4. The Run + Findings
 
@@ -57,9 +59,9 @@ Attempt the live run in this environment via the runner. Capture, per scenario, 
 
 ## 5. GO/NO-GO Criteria
 
-- **GO** — the core transport all passes: two-distinct-user convergence, distinct-name presence, checkpoint + reload-persistence, reconnect/re-sync, and the read-only viewer. The only gaps are the *expected* deferrals (Cite-after-co-edit 409 → D1; relay-spoof → D2). ⇒ proceed to D1.
-- **NO-GO** — any **core-transport** break (text doesn't sync, presence absent/wrong-identity, checkpoint loses content, reconnect fails to re-sync, or the read-only gate leaks write access). ⇒ stop and reshape before D1; the punch-list defines the fix.
-- **Cite fresh-section** is a strong signal but not a GO gate (its 409-after-co-edit variant is a known D1 item); a fresh-section Cite failure that is *not* the 409 is a punch-list defect.
+- **GO** — the core transport all passes: two-distinct-user convergence, distinct-name presence, checkpoint + reload-persistence, and reconnect/re-sync. The only gaps are the *expected* deferrals (Cite-after-co-edit 409 → D1; relay-spoof → D2). ⇒ proceed to D1.
+- **NO-GO** — any **core-transport** break (text doesn't sync, presence absent/wrong-identity, checkpoint loses content, or reconnect fails to re-sync). ⇒ stop and reshape before D1; the punch-list defines the fix.
+- **Read-only member** and **Cite fresh-section** are strong signals but **not GO gates**: the read-only fixture (locked collab spec) has rendering nuance D0 is partly meant to surface, and Cite's 409-after-co-edit variant is a known D1 item. A read-only *write leak* (member actually mutates the locked spec) or a fresh-section Cite failure that is *not* the 409 is a punch-list defect worth weighing, but neither is a mechanical GO/NO-GO trip.
 
 ## 6. Execution Model
 
@@ -80,7 +82,7 @@ No prod flip, no `enable_collab` caller, no prod CSP change, no D1–D3 fixes (t
 
 | Item | Kind | Files |
 |------|------|-------|
-| 3-user + reference seed | script | `scripts/collab_e2e_seed.py` |
+| 2-user + active-draft/locked-spec + reference seed | script | `scripts/collab_e2e_seed.py` |
 | One-command runner | script | `scripts/collab_e2e_run.sh` |
 | Distinct-user + core-scenario e2e | test | `frontend/e2e/collab.spec.ts` |
 | GO/NO-GO + punch-list | doc | `docs/superpowers/notes/2026-07-05-collab-e2e-derisk-findings.md` |
