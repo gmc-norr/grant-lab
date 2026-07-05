@@ -101,15 +101,19 @@ with:
                 # Attribute ids to THIS socket: payload-declared ids (robust to a
                 # same-clientID reconnect where the states-diff is empty) ∪ states-diff,
                 # MINUS any id owned by another live socket of a DIFFERENT user. That
-                # closes the griefing vector — a member declaring a *peer's* client id
-                # so its own disconnect scrubs the peer's caret — while leaving same-user
-                # re-attribution untouched: a same-clientID reconnect that transiently
-                # overlaps its old socket (same user_id) still re-claims its id (R2-2).
-                # Griefing vs reconnect is indistinguishable from the frame alone, but a
-                # griefer is a different member and a reconnect is the same user. The
-                # residual (accepted) exposure is a transient position-spoof: the raw
-                # payload is still relayed below, but presence is display-only/spoofable
-                # by design and self-heals via the victim's ~15s awareness re-announce.
+                # closes the DISCONNECT-removal vector — a member declaring a *peer's*
+                # client id so its own disconnect scrubs the peer's caret — while leaving
+                # same-user re-attribution untouched: a same-clientID reconnect that
+                # transiently overlaps its old socket (same user_id) still re-claims its
+                # id (R2-2). Griefing vs reconnect is indistinguishable from the frame
+                # alone, but a griefer is a different member and a reconnect the same user.
+                # NOTE: this does NOT stop an ACTIVE relay-spoof — the raw payload is still
+                # relayed below, so a co-member can send a peer's id at a high awareness
+                # clock to hide/fake that caret until a page/room reset (y-awareness is
+                # clock-gated: lower-clock victim re-announces are ignored → NO self-heal).
+                # Presence is display-only and the flag is OFF, so this is cosmetic and
+                # prod-inert; the complete fix (filter relayed payloads to sender-owned
+                # ids) is tracked for 3b-5d.
                 owned_by_other_users: set[int] = set()
                 for client, st in self.clients.items():
                     if client is not sender and st.user_id != state.user_id:
@@ -403,7 +407,7 @@ git commit -m "test(collab): lock malformed-awareness-frame drop guard (3b-5b #4
 
 - [ ] **Frontend full suite (NOT just the collab files):**
   Run (cwd `frontend`): `pnpm exec vitest run`
-  Expected: all files pass. Running the whole suite catches any other test that renders the real `CollabEditor` without a resolved session (grep first: `grep -rn "CollabEditor" frontend/src --include=*.tsx --include=*.ts -l` — expect only `CollabEditor.tsx`, `CollabEditor.test.tsx`, `CollabEditor.identity.test.tsx`, and `DraftPanel*` which stubs it).
+  Expected: all files pass. Running the whole suite catches any other test that renders the real `CollabEditor` without a resolved session. The full reference set is `grep -rln "CollabEditor" frontend/src`: component `CollabEditor.tsx`; helpers `CitationNode.tsx` + `useCollabDoc.ts` (not renders); production hosts `cockpit/DraftPanel.tsx` + `cockpit/SpecPanel.tsx` (both mount it only when `collab_enabled` is truthy); tests `collab/CollabEditor.test.tsx` + `collab/CollabEditor.identity.test.tsx` (the only two rendering the REAL gated editor — both fixed in Task 2) + `cockpit/DraftPanel.collab.test.tsx` (stubs it). Verified: the ONLY test setting `collab_enabled: true` is `DraftPanel.collab.test.tsx`, which stubs `CollabEditor`; `SpecPanel.test.tsx` never sets it, so it renders the CM6 path — neither hits the gate.
 
 - [ ] **Frontend type-check:** (cwd `frontend`) `pnpm exec tsc --noEmit` — clean.
 
