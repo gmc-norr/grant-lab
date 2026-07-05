@@ -204,6 +204,52 @@ def _files_in_head(repo: Path) -> list[str]:
     return [line for line in result.stdout.strip().split("\n") if line]
 
 
+def test_checkpoint_record_version_false_is_quiet_and_compacts(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        o = make_user(s, email="cp-quiet@ki.se")
+        ws = make_workspace(s, owner=o)
+        s.commit()
+        wid, oid = ws.id, o.id
+    _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\noriginal.\n")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    # TWO authored edits (>= 2 rows) so the quiet path must STILL compact — proving
+    # record_version=False did not accidentally skip the compaction block (the point
+    # of 3b-5c is tail-bounding). Mirrors test_collab_compaction.py's 2-edit pattern.
+    _seed_room_with_edit(pg_session_factory, wid, oid, "## Background\n\nedit one.\n")
+    _seed_room_with_edit(
+        pg_session_factory, wid, oid, "## Background\n\nedit one.\n\n## Aims\n\nedit two.\n"
+    )
+    with pg_session_factory() as s:
+        # pre-checkpoint tail max
+        max_id = store.load_rows(s, workspace_id=wid, artifact="draft")[-1][0]
+
+    with pg_session_factory() as s:
+        res = checkpoint_artifact(
+            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path),
+            record_version=False,
+        )
+        s.commit()
+
+    assert res.committed is True                                   # git commit STILL made
+    with pg_session_factory() as s:
+        av = (
+            s.execute(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid))
+            .scalars()
+            .all()
+        )
+        ev = s.execute(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == wid, WorkspaceEvent.kind == "collab_checkpoint"
+            )
+        ).scalars().all()
+        assert av == [] and ev == []                               # QUIET: no version / event
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+        assert len(rows) == 1                                      # COMPACTED 2 -> 1 (quiet path)
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == max_id
+
+
 def test_checkpoint_co_commits_extra_files(pg_session_factory, tmp_path):
     # Task 2: checkpoint with extra_files={} co-commits multiple files atomically.
     # Seed a room with an authored edit, then checkpoint with citations.json.

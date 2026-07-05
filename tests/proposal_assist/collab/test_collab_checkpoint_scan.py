@@ -1,0 +1,121 @@
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+from sqlalchemy import select
+
+from call_manager.db.models import ArtifactVersion, Workspace, WorkspaceEvent
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.collab import checkpoint as cp
+from call_manager.proposal_assist.collab import state, store
+from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from tests.proposal_assist.conftest import make_user, make_workspace
+
+
+def _init_repo(repo: Path, content: str) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(args, cwd=repo, check=True)
+    (repo / PROPOSAL_FILENAME).write_text(content)
+    subprocess.run(["git", "add", PROPOSAL_FILENAME], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+
+def _seed_edit(pg_session_factory, wid, actor_id, md) -> None:
+    doc = pm_json_to_ydoc(markdown_to_pm(md))
+    with pg_session_factory() as s:
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=actor_id, update=doc.get_update()
+        )
+        s.commit()
+
+
+def _mk(pg_session_factory, tmp_path, email, md, *, soft_deleted=False):
+    with pg_session_factory() as s:
+        o = make_user(s, email=email)
+        ws = make_workspace(s, owner=o)
+        s.commit()
+        wid, oid = ws.id, o.id
+    _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\noriginal.\n")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        if soft_deleted:
+            s.get(Workspace, wid).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+    _seed_edit(pg_session_factory, wid, oid, md)
+    return wid
+
+
+def test_checkpoint_active_tails_quietly_checkpoints_candidate(pg_session_factory, tmp_path):
+    wid = _mk(pg_session_factory, tmp_path, "cat-a@ki.se", "## Background\n\nedited by A.\n")
+
+    n = cp.checkpoint_active_tails(pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1)
+
+    assert n == 1
+    disk = (Path(tmp_path) / str(wid) / "repo" / PROPOSAL_FILENAME).read_text()
+    assert "edited by A." in disk                       # committed to git
+    with pg_session_factory() as s:
+        assert (
+            s.execute(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid))
+            .scalars()
+            .all()
+            == []
+        )
+        assert (
+            s.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == wid,
+                    WorkspaceEvent.kind == "collab_checkpoint",
+                )
+            )
+            .scalars()
+            .all()
+            == []
+        )                                                # QUIET
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == 1
+
+
+def test_checkpoint_active_tails_rechecks_soft_delete(pg_session_factory, tmp_path, monkeypatch):
+    # A candidate that is soft-deleted between scan and checkpoint must be skipped by
+    # the per-candidate recheck (mirrors make_checkpoint_on_evict). Force the finder to
+    # return a soft-deleted workspace to exercise the recheck directly.
+    wid = _mk(pg_session_factory, tmp_path, "cat-sd@ki.se", "## X\n\nedited.\n", soft_deleted=True)
+    monkeypatch.setattr(
+        store, "find_checkpoint_candidates", lambda s, *, min_tail: [(wid, "draft")]
+    )
+
+    n = cp.checkpoint_active_tails(pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1)
+
+    assert n == 0
+    disk = (Path(tmp_path) / str(wid) / "repo" / PROPOSAL_FILENAME).read_text()
+    assert disk == "## Background\noriginal.\n"          # NOT committed
+    with pg_session_factory() as s:
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == 0
+
+
+def test_checkpoint_active_tails_isolates_a_failing_artifact(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    wid_bad = _mk(pg_session_factory, tmp_path, "cat-bad@ki.se", "## X\n\nbad.\n")
+    wid_ok = _mk(pg_session_factory, tmp_path, "cat-ok@ki.se", "## Y\n\nok.\n")
+    real = cp.checkpoint_artifact
+
+    def _flaky(session, *, workspace_id, **kw):
+        if workspace_id == wid_bad:
+            raise RuntimeError("boom")
+        return real(session, workspace_id=workspace_id, **kw)
+
+    monkeypatch.setattr(cp, "checkpoint_artifact", _flaky)
+
+    n = cp.checkpoint_active_tails(pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1)
+
+    assert n == 1                                        # the healthy one still ran
+    ok_disk = (Path(tmp_path) / str(wid_ok) / "repo" / PROPOSAL_FILENAME).read_text()
+    assert "ok." in ok_disk
+    bad_disk = (Path(tmp_path) / str(wid_bad) / "repo" / PROPOSAL_FILENAME).read_text()
+    assert bad_disk == "## Background\noriginal.\n"      # failed one rolled back, uncommitted

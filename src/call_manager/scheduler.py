@@ -326,6 +326,27 @@ def build_scheduler(
         coalesce=True,
     )
 
+    if settings.collab_checkpoint_scan_seconds > 0:
+
+        def _collab_checkpoint_job() -> None:
+            from call_manager.proposal_assist.collab.checkpoint import checkpoint_active_tails
+
+            checkpoint_active_tails(
+                session_factory,
+                workspaces_dir=settings.workspaces_dir,
+                min_tail=settings.collab_checkpoint_min_tail,
+            )
+
+        sched.add_job(
+            _collab_checkpoint_job,
+            trigger=IntervalTrigger(seconds=settings.collab_checkpoint_scan_seconds),
+            id="collab:checkpoint_tails",
+            name="Collab active-session tail-bounding checkpoint",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
     def _golden_tick() -> None:
         # Lazy import: keeps scheduler module-load cheap and dodges any
         # potential cycle via ranking → db → web. The import only fires

@@ -223,6 +223,19 @@ class Settings(BaseSettings):
             "tighter teardown latency but more polling."
         ),
     )
+    collab_checkpoint_scan_seconds: int = Field(
+        default=60,
+        alias="COLLAB_CHECKPOINT_SCAN_SECONDS",
+        description=(
+            "Interval for the collab tail-bounding scan (Slice 3b-5c). 0 disables the "
+            "periodic job entirely."
+        ),
+    )
+    collab_checkpoint_min_tail: int = Field(
+        default=200,
+        alias="COLLAB_CHECKPOINT_MIN_TAIL",
+        description="Min uncheckpointed Yjs-log rows before a collab room is auto-checkpointed.",
+    )
     daily_token_cap_input: int = Field(
         default=500_000,
         alias="DAILY_TOKEN_CAP_INPUT",
