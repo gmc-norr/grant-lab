@@ -314,3 +314,82 @@ def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
         assert job is not None, jid
         assert job.misfire_grace_time is not None and job.misfire_grace_time >= 6 * 3600, jid
     sched.shutdown(wait=False)
+
+
+def test_build_scheduler_wires_collab_checkpoint_job(_settings_env, monkeypatch):
+    from unittest.mock import MagicMock
+
+    import call_manager.proposal_assist.collab.checkpoint as cp
+    from call_manager.config import Settings
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+
+    settings = Settings()
+
+    def session_factory():
+        return None
+
+    workspace_controller = build_workspace_controller(
+        settings=settings, session_factory=session_factory
+    )
+    sched = build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=workspace_controller,
+        start=False,
+    )
+    job = sched.get_job("collab:checkpoint_tails")
+    assert job is not None
+    # wired with the CONFIGURED interval...
+    assert job.trigger.interval.total_seconds() == settings.collab_checkpoint_scan_seconds
+    # ...and the job fn passes the configured session_factory / workspaces_dir / min_tail.
+    captured = {}
+    monkeypatch.setattr(
+        cp, "checkpoint_active_tails",
+        lambda sf, *, workspaces_dir, min_tail: captured.update(
+            sf=sf, workspaces_dir=workspaces_dir, min_tail=min_tail
+        ),
+    )
+    job.func()   # the closure lazy-imports checkpoint_active_tails → picks up the patch
+    assert captured == {
+        "sf": session_factory,
+        "workspaces_dir": settings.workspaces_dir,
+        "min_tail": settings.collab_checkpoint_min_tail,
+    }
+
+
+def test_build_scheduler_omits_collab_checkpoint_when_disabled(_settings_env, monkeypatch):
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("COLLAB_CHECKPOINT_SCAN_SECONDS", "0")
+    from call_manager.config import Settings
+    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+
+    settings = Settings()
+
+    def session_factory():
+        return None
+
+    workspace_controller = build_workspace_controller(
+        settings=settings, session_factory=session_factory
+    )
+    sched = build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=workspace_controller,
+        start=False,
+    )
+    assert sched.get_job("collab:checkpoint_tails") is None
