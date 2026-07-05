@@ -24,50 +24,58 @@ type CollabEditorProps = {
 
 export function CollabEditor(props: CollabEditorProps) {
   const { doc, provider, status } = useCollabDoc(props);
+  const { data: me } = useSession();
   // Clear the shared editor store on unmount so a stale collab save-status
   // (e.g. "Synced"/"Read-only") does not leak into the StatusBar of the next
   // cockpit tab/view — mirrors the CM6 ArtifactSectionEditor's reset.
   useEffect(() => () => resetEditorStore(), []);
-  // doc/provider are null on the first render (built in the effect); render a
-  // placeholder so the inner editor's useEditor always gets a live Y.Doc.
-  if (!doc || !provider) {
+  // Gate the editor mount on a RESOLVED identity as well as the live doc/provider.
+  // Mounting CollaborationCaret before useSession() resolves would seed and
+  // broadcast an "Anonymous" fallback caret for one render (Slice 3b-5b #1). The
+  // doc/provider are still built + connected above, so sync is not delayed; only the
+  // editable surface waits for identity — normally instant (me is app-shell cached),
+  // and the cockpit's auth gate guarantees me resolves for anyone who reaches it.
+  if (!doc || !provider || !me?.user) {
     return (
       <div data-collab-status={status} data-testid="collab-connecting">
         Connecting…
       </div>
     );
   }
-  return <CollabEditorInner {...props} doc={doc} provider={provider} status={status} />;
+  return (
+    <CollabEditorInner {...props} doc={doc} provider={provider} status={status} me={me} />
+  );
 }
 
 function CollabEditorInner(
-  props: CollabEditorProps & { doc: Y.Doc; provider: CollabProvider; status: ProviderStatus },
+  props: CollabEditorProps & {
+    doc: Y.Doc;
+    provider: CollabProvider;
+    status: ProviderStatus;
+    me: NonNullable<ReturnType<typeof useSession>["data"]>;
+  },
 ) {
-  const { data: me } = useSession();
-  const label = displayName(me?.user);
-  const color = colorForUserId(me?.user?.id ?? 0);
+  const label = displayName(props.me.user);
+  const color = colorForUserId(props.me.user?.id ?? 0);
   const editor = useEditor(
     {
       editable: props.canWrite,
       extensions: [
         ...collabEditorExtensions,
         Collaboration.configure({ document: props.doc, field: "prosemirror" }),
-        // Seed with whatever identity we have now; the effect below corrects it
-        // if useSession() resolves after mount (R2-1). Added for writers AND
-        // read-only viewers (they see peers' carets and broadcast their own).
+        // Identity is resolved before this component mounts (gated in CollabEditor),
+        // so the caret seeds with the real name/color — never a fallback "Anonymous".
         CollaborationCaret.configure({ provider: props.provider, user: { name: label, color } }),
       ],
     },
     [props.doc], // editor keyed ONLY on the doc — NOT rebuilt on identity change
   );
 
-  // R2-1: useEditor's dep list is [props.doc], so a late useSession() result would
-  // freeze the fallback name/color. Push identity through the sanctioned v3 command
-  // whenever it resolves/changes, instead of rebuilding the editor (which would
-  // destroy the caret plugin state).
+  // Keep identity fresh if the user renames themselves mid-session (a cheap no-op
+  // otherwise). The mount gate — not this effect — is now the primary mechanism.
   useEffect(() => {
-    if (editor && me?.user) editor.commands.updateUser({ name: label, color });
-  }, [editor, label, color, me?.user]);
+    if (editor) editor.commands.updateUser({ name: label, color });
+  }, [editor, label, color]);
 
   return (
     <div data-collab-status={props.status}>

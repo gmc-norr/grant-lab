@@ -32,6 +32,10 @@ vi.mock("./useSaveVersion", () => ({
   useSaveVersion: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
+vi.mock("../api/session", () => ({
+  useSession: () => ({ data: { user: { id: 1, name: "Tester", email: "t@ki.se" } } }),
+}));
+
 import { CollabEditor } from "./CollabEditor";
 
 describe("CollabEditor", () => {

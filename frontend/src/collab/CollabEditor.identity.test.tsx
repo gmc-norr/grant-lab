@@ -33,21 +33,24 @@ vi.mock("./useCollabDoc", () => ({
 
 import { CollabEditor } from "./CollabEditor";
 
-describe("CollabEditor identity (R2-1)", () => {
-  it("pushes late-resolved identity into provider.awareness via updateUser", async () => {
+describe("CollabEditor identity (Slice 3b-5b #1: no Anonymous flash)", () => {
+  it("does not broadcast any identity until the session resolves, then mounts with the real name", async () => {
     stashed = null;
-    sessionData.value = undefined;                              // unresolved at mount
+    sessionData.value = undefined; // unresolved at mount
     const { rerender } = renderWithProviders(
       <CollabEditor workspaceId="w" artifact="draft" canWrite />,
     );
     await waitFor(() => expect(stashed).not.toBeNull());
-    // pre-resolve: caret user is the fallback
-    expect((stashed!.awareness.getLocalState() as any)?.user?.name).toBe("Anonymous");
+    // pre-resolve: the editor/caret is NOT mounted, so no local awareness user is
+    // ever set — nothing "Anonymous" is broadcast.
+    expect((stashed!.awareness.getLocalState() as any)?.user).toBeUndefined();
 
     sessionData.value = { user: { id: 7, name: "Late Name", email: "late@ki.se" } };
     rerender(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
     await waitFor(() => {
       expect((stashed!.awareness.getLocalState() as any)?.user?.name).toBe("Late Name");
     });
+    // and it was NEVER the "Anonymous" fallback
+    expect((stashed!.awareness.getLocalState() as any)?.user?.name).not.toBe("Anonymous");
   });
 });
