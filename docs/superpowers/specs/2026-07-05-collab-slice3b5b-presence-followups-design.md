@@ -110,7 +110,7 @@ state.awareness_ids |= new_ids
 ### Files
 
 - Modify: `src/call_manager/proposal_assist/collab/room.py` — the attribution line + comment in `Room.handle`'s awareness branch.
-- Test: `tests/proposal_assist/collab/test_room_presence.py` (extend the existing presence tests; create if absent — mirror the existing room-presence test module).
+- Test: `tests/proposal_assist/collab/test_collab_awareness.py` (extend the existing presence scaffold — the module that already drives `Room.handle` with fake client sockets; do NOT create a parallel presence-test module).
 
 ### Tests
 
@@ -162,9 +162,9 @@ it("drops a malformed AWARENESS frame without crashing or corrupting awareness",
 
 ## 6. Item #3 — reconnect clock-collision (documented, accepted)
 
-**What it is.** When a socket drops, the server's `remove_client_presence` calls y-awareness `remove_awareness_states`, which **bumps the awareness clock** for the removed ids (so the removal propagates to peers). If the *same* client reconnects with the *same* `doc.clientID`, its local awareness clock resumes below the removal clock, so its first re-announce is treated as stale and ignored by peers — the reconnected client's caret is briefly invisible to others.
+**What it is.** When a socket drops, the server's `remove_client_presence` calls y-awareness `remove_awareness_states`. For a *remote* id (the departed peer — not the server's own client id) this deletes the state and encodes the removal as `state: null` at the **same** clock; the clock is incremented only when a client removes its *own* id (the `clientID === awareness.clientID` branch in y-protocols `awareness.js`). Peers therefore hold that id at that clock with no state. If the *same* client reconnects with the *same* `doc.clientID`, its on-open flush re-announces at that **same** clock with a non-null state, which `applyAwarenessUpdate` does **not** apply — a non-null state cannot override an equal-clock entry (only a `null` state overrides at an equal clock). So the reconnected client's caret stays invisible to peers until its awareness renews at a **higher** clock.
 
-**Why we accept it.** This is inherent to y-awareness's clock semantics combined with any server-side presence removal; standard `y-websocket` deployments exhibit the same dynamic. It **self-heals**: the y-protocols `Awareness` object created at [collabProvider.ts:50](../../../frontend/src/collab/collabProvider.ts#L50) runs a built-in re-announce interval (`outdatedTime/2`, ~15 s) that bumps the local clock, and any cursor/selection activity bumps it immediately. So an *active* reconnected editor's caret reappears at once; only an *idle* reconnected client's caret may lag by one to two re-announce cycles (~15–30 s). Impact is cosmetic and transient.
+**Why we accept it.** This is inherent to y-awareness's clock semantics combined with any server-side presence removal; standard `y-websocket` deployments exhibit the same dynamic. It **self-heals** on the client's next awareness renewal (which sets local state at a higher clock): any cursor/selection change bumps the clock immediately via `setLocalState`, and the y-protocols `Awareness` object created at [collabProvider.ts:50](../../../frontend/src/collab/collabProvider.ts#L50) runs a built-in renew interval that re-announces the local state once it is older than `outdatedTimeout / 2` (~15 s). So an *active* reconnected editor's caret reappears at once; only an *idle* reconnected client's caret lags until the next renew (≤ ~15 s). Impact is cosmetic and transient.
 
 **Why we do not fix it.** The two candidate fixes are both worse than the symptom: (a) resetting the client's `clientID` on reconnect would orphan its in-flight doc edits and defeat CRDT convergence; (b) forcing an eager local re-announce (or shortening the interval) adds constant background awareness traffic for a rare edge. If field data after the flip shows idle-reconnect caret gaps are a real annoyance, an eager on-reconnect re-announce can be revisited in a later slice. This item is recorded as an accepted limitation in the design and mirrored as a short code comment near `remove_client_presence` in `room.py`.
 
@@ -185,6 +185,6 @@ it("drops a malformed AWARENESS frame without crashing or corrupting awareness",
 | Item | Kind | Files |
 |------|------|-------|
 | #1 Anonymous flash | frontend fix + test | `CollabEditor.tsx`, `CollabEditor.identity.test.tsx` |
-| #2 Griefing guard | backend fix + tests | `room.py`, `tests/proposal_assist/collab/test_room_presence.py` |
+| #2 Griefing guard | backend fix + tests | `room.py`, `tests/proposal_assist/collab/test_collab_awareness.py` |
 | #3 Clock-collision | documentation | this spec + `room.py` comment |
 | #4 Malformed frame | frontend test-only | `collabProvider.test.ts` |
