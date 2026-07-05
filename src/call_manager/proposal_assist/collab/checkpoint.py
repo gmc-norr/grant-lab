@@ -55,6 +55,7 @@ def checkpoint_artifact(
     artifact: str,
     workspaces_dir,
     extra_files: dict[str, str] | None = None,
+    record_version: bool = True,
 ) -> CheckpointResult:
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
 
@@ -112,7 +113,7 @@ def checkpoint_artifact(
         repo, files, f"collab checkpoint: {artifact} (authors:{author_tag})"
     )
     changed = commit_sha != head
-    if changed:
+    if changed and record_version:
         session.add(
             ArtifactVersion(
                 workspace_id=workspace_id,
