@@ -242,6 +242,11 @@ EOF
 #   cd frontend && pnpm exec playwright install --with-deps chromium   (needs sudo)
 # Chromium itself is cached at ~/.cache/ms-playwright/chromium-1223.
 set -euo pipefail
+# Job control ON: each `&` job gets its OWN process group whose leader PID == $!,
+# so `kill -SIG -"$PGID"` signals the whole subtree (uv->python, pnpm->esbuild/node).
+# NB: do NOT use `setsid` here — it forks, so $! would be a short-lived parent, not
+# the detached child, and cleanup would miss the real process (orphaning port 8000).
+set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -261,18 +266,15 @@ cleanup() {
     sleep 2
     kill -KILL -"$SEED_PGID" 2>/dev/null || true
   fi
-  # Vite spawns esbuild/node children; kill the whole group (setsid made VITE_PGID
-  # the group leader), not just the wrapper PID.
+  # Vite spawns esbuild/node children; kill the whole group (its leader is VITE_PGID).
   [ -n "$VITE_PGID" ] && kill -TERM -"$VITE_PGID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "[run] starting seed (testcontainers PG + uvicorn:8000)…"
-# setsid → own process group (clean group-kill in cleanup). `uv run python -u` →
-# unbuffered stdout so the printed E2E_* vars reach $SEED_LOG immediately, and no
-# pre-activated venv required.
-setsid env EMBEDDING_MODEL=bge-m3 uv run python -u scripts/collab_e2e_seed.py \
-  >"$SEED_LOG" 2>&1 &
+# `uv run python -u` → unbuffered stdout so the printed E2E_* vars reach $SEED_LOG
+# immediately, and no pre-activated venv required.
+env EMBEDDING_MODEL=bge-m3 uv run python -u scripts/collab_e2e_seed.py >"$SEED_LOG" 2>&1 &
 SEED_PGID=$!
 
 # Wait up to ~150s for the seed to print the workspace id (PG image pull + migrate).
@@ -293,7 +295,7 @@ export E2E_MEMBER_LABEL; E2E_MEMBER_LABEL="$(get E2E_MEMBER_LABEL)"
 echo "[run] workspace=$E2E_COLLAB_WS_ID owner=$E2E_OWNER_LABEL member=$E2E_MEMBER_LABEL"
 
 echo "[run] starting Vite dev (:5173)…"
-setsid bash -c 'cd frontend && exec pnpm dev' >"$VITE_LOG" 2>&1 &
+( cd frontend && exec pnpm dev ) >"$VITE_LOG" 2>&1 &
 VITE_PGID=$!
 
 echo "[run] waiting for uvicorn:8000 + vite:5173…"

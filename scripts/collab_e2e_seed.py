@@ -30,11 +30,13 @@ Then run the e2e suite:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Add the repo root so `tests.*` and `call_manager.*` are importable.
@@ -87,23 +89,74 @@ def main() -> int:
         Session = make_session_factory(engine)
         app.state.session_factory = Session
 
-        # --- seed ---
+        # --- seed: two users, two collab artifacts ---
+        from call_manager.db.models import Reference, ReferenceChunk, WorkspaceViewer
+        from call_manager.proposal_assist.citations.gitio import _git_env
         from call_manager.proposal_assist.collab import state as collab_state
         from tests.proposal_assist.conftest import make_user, make_workspace
         from tests.test_editing_save import _init_repo
 
+        suffix = uuid.uuid4().hex[:8]
         with Session() as s:
-            owner = make_user(s, email=f"e2e-collab-{uuid.uuid4().hex[:8]}@ki.se")
+            owner = make_user(s, email=f"e2e-owner-{suffix}@ki.se")
+            member = make_user(s, email=f"e2e-member-{suffix}@ki.se")
             ws = make_workspace(s, owner=owner, current_phase="active")
+            # Membership row: a WorkspaceViewer is a *writer* on the active draft
+            # and *read-only* on the locked spec (resolve_access, ws_auth.py:118-126).
+            s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
+            # Collab enabled on BOTH artifacts; spec locked so the member is read-only there.
             collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+            collab_state.enable_collab(s, workspace_id=ws.id, artifact="spec")
+            ws.spec_locked_at = datetime.now(UTC)
+            # One citeable reference (indexed) so the select->Cite flow has a source.
+            ref = Reference(
+                workspace_id=ws.id,
+                kind="paper",
+                source_type="uploaded",
+                filename="seed-ref.pdf",
+                storage_path=f"seed/{suffix}/seed-ref.pdf",
+                mime_type="application/pdf",
+                title="Seed Reference on Precision Medicine",
+                citekey=f"seed{suffix}",
+                text_status="done",
+                metadata_status="approved",
+            )
+            s.add(ref)
+            s.flush()
+            s.add(
+                ReferenceChunk(
+                    reference_id=ref.id,
+                    workspace_id=ws.id,
+                    chunk_index=0,
+                    text=(
+                        "Precision medicine improves diagnostic yield in "
+                        "oncology cohorts and shortens time to targeted therapy."
+                    ),
+                    embedding=[0.0] * 1024,
+                    embedding_model="bge-m3",
+                )
+            )
             s.commit()
-            wid, oid = ws.id, owner.id
+            wid = ws.id
+            owner_label = owner.email.split("@")[0]
+            member_label = member.email.split("@")[0]
+            owner_cookie = app.state.session_signer.make(user_id=owner.id)
+            member_cookie = app.state.session_signer.make(user_id=member.id)
 
-        _init_repo(workspaces, wid, doc="Preamble.\n\n## A\n\nBody a.\n")
-
-        # Mint a signed session cookie (no "session=" prefix — that's added by
-        # the browser/Playwright context).
-        cookie_value = app.state.session_signer.make(user_id=oid)
+        # Repo: draft (proposal.md) + a NON-EMPTY spec (proposal-spec.md), both committed.
+        # Empty spec sections would trigger SpecPanel's "Start spec from skeleton" CTA
+        # instead of the read-only CollabEditor the read-only scenario needs.
+        draft_doc = (
+            "Preamble.\n\n## Aims\n\n"
+            "Precision medicine improves diagnostic outcomes for patients.\n"
+        )
+        repo = _init_repo(workspaces, wid, doc=draft_doc)
+        (repo / "proposal-spec.md").write_text(
+            "# Spec\n\n## Aim\n\nThe aim of this proposal is precision oncology.\n"
+        )
+        env = _git_env()
+        subprocess.run(["git", "add", "proposal-spec.md"], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "seed spec"], cwd=repo, check=True, env=env)
 
         # --- start uvicorn on :8000 (the Vite proxy target) ---
         server = uvicorn.Server(
@@ -115,24 +168,39 @@ def main() -> int:
             if server.started:
                 break
             time.sleep(0.1)
+        if not server.started:
+            # uvicorn never bound (e.g. :8000 already in use by an orphaned run).
+            # Fail LOUD and refuse to print env vars — otherwise a runner's readiness
+            # probe would validate the STALE server/DB while our fresh workspace is
+            # unreachable. The `with PostgresContainer` context stops the PG on return.
+            print(
+                "ERROR: uvicorn did not start within 10s (is port 8000 already in "
+                "use?). Refusing to print stale env vars.",
+                file=sys.stderr,
+            )
+            sys.stderr.flush()
+            return 1
 
         print()
-        print("=== collab e2e seed ready ===")
+        print("=== collab e2e seed ready (2 users) ===")
         print()
         print(f"E2E_COLLAB_WS_ID={wid}")
-        print(f"E2E_SESSION_COOKIE={cookie_value}")
+        print(f"E2E_COOKIE_OWNER={owner_cookie}")
+        print(f"E2E_COOKIE_MEMBER={member_cookie}")
+        print(f"E2E_SESSION_COOKIE={owner_cookie}")  # back-compat with the pre-D0 tests
+        print(f"E2E_OWNER_LABEL={owner_label}")
+        print(f"E2E_MEMBER_LABEL={member_label}")
         print()
-        print("Now start Vite in another terminal:")
-        print("  cd frontend && pnpm dev")
+        print("Owner is a writer on draft + spec; member is a writer on the")
+        print("active draft and READ-ONLY on the locked spec (?tab=spec).")
         print()
-        print("Then run the e2e suite:")
-        print(
-            f"  cd frontend && E2E_COLLAB_WS_ID={wid} E2E_SESSION_COOKIE={cookie_value} "
-            "pnpm exec playwright test e2e/collab.spec.ts"
-        )
+        print("Now start Vite in another terminal:  cd frontend && pnpm dev")
+        print("Or use the one-command runner:        scripts/collab_e2e_run.sh")
         print()
         print("Press Ctrl-C to stop uvicorn (testcontainers Postgres also stops).")
         print()
+        sys.stdout.flush()  # Codex High: flush before the blocking sleep loop so the
+        #                     runner (which reads a redirected stdout file) sees the vars.
 
         # Block until interrupted (portable — signal.pause() is Linux-only).
         try:
