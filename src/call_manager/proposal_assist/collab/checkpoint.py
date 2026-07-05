@@ -4,13 +4,14 @@ per-update actor log since the last checkpoint watermark."""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 
 from pycrdt import Doc
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import ArtifactVersion, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import Artifact, filename_for
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
@@ -23,6 +24,8 @@ from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.paths import workspace_repo_dir
+
+logger = logging.getLogger(__name__)
 
 _ARTIFACT = {"draft": Artifact.DRAFT, "spec": Artifact.SPEC}
 
@@ -157,3 +160,43 @@ def checkpoint_artifact(
             delete_ids=[rid for (rid, _, _) in rows[1:]],
         )
     return CheckpointResult(committed=changed, commit_sha=commit_sha, authors=authors)
+
+
+def checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail: int) -> int:
+    """Periodic tail-bound (Slice 3b-5c): scan for growing collab logs and quietly
+    checkpoint each. Runs on a BackgroundScheduler thread — pure DB+git, never
+    touches the asyncio room MANAGER. Each candidate is checkpointed in its OWN
+    transaction so one artifact's failure never aborts the others; errors are logged
+    and swallowed (best-effort maintenance)."""
+    with session_factory() as s:
+        candidates = store.find_checkpoint_candidates(s, min_tail=min_tail)
+    done = 0
+    for workspace_id, artifact in candidates:
+        with session_factory() as s:
+            # Re-check liveness (mirrors permissions.make_checkpoint_on_evict): a
+            # workspace soft-deleted between scan and now must not be checkpointed.
+            ws = s.get(Workspace, workspace_id)
+            if ws is None or ws.soft_deleted_at is not None:
+                continue
+            try:
+                checkpoint_artifact(
+                    s,
+                    workspace_id=workspace_id,
+                    artifact=artifact,
+                    workspaces_dir=workspaces_dir,
+                    record_version=False,
+                )
+                s.commit()
+                done += 1
+            except Exception:  # noqa: BLE001 — best-effort; isolate per artifact
+                s.rollback()
+                logger.warning(
+                    "collab.checkpoint_tail_failed",
+                    extra={
+                        "event": "collab_checkpoint_tail_failed",
+                        "workspace_id": str(workspace_id),
+                        "artifact": artifact,
+                    },
+                    exc_info=True,
+                )
+    return done
