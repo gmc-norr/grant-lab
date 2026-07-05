@@ -1,5 +1,7 @@
-from call_manager.db.models import YjsUpdate
-from call_manager.proposal_assist.collab import store
+from datetime import UTC, datetime
+
+from call_manager.db.models import Workspace, YjsUpdate
+from call_manager.proposal_assist.collab import state, store
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -57,3 +59,41 @@ def test_load_updates_empty_room_returns_empty_list(pg_session_factory):
         ws = make_workspace(s, owner=owner)
         s.commit()
         assert store.load_updates(s, workspace_id=ws.id, artifact="draft") == []
+
+
+def test_find_checkpoint_candidates_counts_rows_excludes_softdeleted(pg_session_factory):
+    with pg_session_factory() as s:
+        o = make_user(s, email="fcc-o@ki.se")
+        ws1 = make_workspace(s, owner=o)   # lightly edited (1 uncheckpointed row)
+        ws2 = make_workspace(s, owner=o)   # over threshold (3 uncheckpointed rows)
+        ws3 = make_workspace(s, owner=o)   # over threshold BUT soft-deleted
+        s.commit()
+        w1, w2, w3 = ws1.id, ws2.id, ws3.id
+
+    with pg_session_factory() as s:
+        # ws1: one row, then checkpoint watermark advanced past it
+        store.append_update(s, workspace_id=w1, artifact="draft", actor_id=None, update=b"\x01")
+        s.commit()
+        first_id = store.load_rows(s, workspace_id=w1, artifact="draft")[-1][0]
+        state.advance_checkpoint(
+            s, workspace_id=w1, artifact="draft", up_to_update_id=first_id, commit_sha="x"
+        )
+        s.commit()
+        # ws2: 3 uncheckpointed rows (interleaves global ids, inflating ws1's id-gap)
+        for b in (b"\x02", b"\x03", b"\x04"):
+            store.append_update(s, workspace_id=w2, artifact="draft", actor_id=None, update=b)
+        s.commit()
+        # ws1: ONE more row — now its max_id - watermark gap is large (ws2 bumped the
+        # global sequence) but its uncheckpointed COUNT is only 1.
+        store.append_update(s, workspace_id=w1, artifact="draft", actor_id=None, update=b"\x05")
+        s.commit()
+        # ws3: 3 uncheckpointed rows, but soft-delete the workspace
+        for b in (b"\x06", b"\x07", b"\x08"):
+            store.append_update(s, workspace_id=w3, artifact="draft", actor_id=None, update=b)
+        s.get(Workspace, w3).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pg_session_factory() as s:
+        got = set(store.find_checkpoint_candidates(s, min_tail=3))
+
+    assert got == {(w2, "draft")}   # ws1 excluded (count=1, NOT gap); ws3 excluded (soft-deleted)

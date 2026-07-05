@@ -9,11 +9,11 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import YjsUpdate
+from call_manager.db.models import CollabArtifactState, Workspace, YjsUpdate
 
 
 def append_update(
@@ -74,6 +74,35 @@ def load_rows(
         .order_by(YjsUpdate.id)
     ).all()
     return [(int(r[0]), (int(r[1]) if r[1] is not None else None), r[2]) for r in rows]
+
+
+def find_checkpoint_candidates(
+    session: Session, *, min_tail: int
+) -> list[tuple[uuid.UUID, str]]:
+    """`(workspace_id, artifact)` pairs of LIVE (non-soft-deleted) workspaces whose
+    log has at least `min_tail` rows above their checkpoint watermark.
+
+    `YjsUpdate.id` is a GLOBAL autoincrement, so `max_id - watermark` would count
+    other rooms' interleaved ids — the candidate predicate must COUNT rows whose id
+    exceeds each room's own watermark (`HAVING count >= min_tail`). Soft-deleted
+    workspaces are excluded (their tail must not be checkpointed — mirrors the
+    eviction guard in permissions.make_checkpoint_on_evict)."""
+    rows = session.execute(
+        select(YjsUpdate.workspace_id, YjsUpdate.artifact)
+        .join(Workspace, Workspace.id == YjsUpdate.workspace_id)
+        .outerjoin(
+            CollabArtifactState,
+            (CollabArtifactState.workspace_id == YjsUpdate.workspace_id)
+            & (CollabArtifactState.artifact == YjsUpdate.artifact),
+        )
+        .where(
+            Workspace.soft_deleted_at.is_(None),
+            YjsUpdate.id > func.coalesce(CollabArtifactState.last_checkpoint_update_id, 0),
+        )
+        .group_by(YjsUpdate.workspace_id, YjsUpdate.artifact)
+        .having(func.count() >= min_tail)
+    ).all()
+    return [(r[0], r[1]) for r in rows]
 
 
 def compact_snapshot(
