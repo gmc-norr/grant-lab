@@ -288,6 +288,40 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
     assert cites[ev_id]["title"] is None
 
 
+def test_draft_collab_returns_room_canonical_sections(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    from call_manager.proposal_assist.collab import state, store
+    from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _m, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        s.commit()
+    # Hydrate then apply a LIVE, uncheckpointed edit to the room (git stays "original.").
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
+        )
+        s.commit()
+        room = build_doc(updates)
+        upd = apply_pm_json_to_fragment(
+            room, markdown_to_pm("preamble\n\n## Methods\nLIVE EDITED.\n")
+        )
+        store.append_update(
+            s, workspace_id=ws_id, artifact="draft", actor_id=owner_id, update=upd, commit=True
+        )
+    body = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/draft").json()
+    joined = "".join(sec["text"] for sec in body["sections"])
+    assert "LIVE EDITED." in joined  # room-canonical, NOT git "original."
+    assert "original." not in joined
+
+
 from call_manager.proposal_assist.proposals.proposing import capture_base  # noqa: E402
 
 
@@ -1038,6 +1072,91 @@ def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factor
     r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+# --- Collab cite: flag-on routes to live room (any writer); flag-off = owner-only --
+
+def _room_base_sha(app, pg_session_factory, tmp_path, ws_id, section_index=1):
+    from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
+    from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from call_manager.proposal_assist.paths import workspace_repo_dir
+    with pg_session_factory() as s:
+        raw = canonical_artifact_markdown(s, workspace_id=ws_id, artifact="draft",
+                                          repo_dir=workspace_repo_dir(tmp_path, ws_id))
+    return split_sections(raw)[section_index].sha
+
+
+def _enable_collab(pg_session_factory, ws_id):
+    from call_manager.proposal_assist.collab import state
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        s.commit()
+
+
+def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _stranger_id, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n")
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    _enable_collab(pg_session_factory, ws_id)
+    bc, _ = _capture(tmp_path, ws_id, 1)          # git head (base_commit_sha, not the gate)
+    bs = _room_base_sha(app, pg_session_factory, tmp_path, ws_id)
+    c = _client(app, member_id)                   # a NON-owner writer
+    r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
+    assert r.status_code == 200, r.text
+    assert set(r.json()) == {"ev_id", "citekey", "commit_sha"}
+
+
+def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    # Parity: with collab OFF, a member is still 403 (unchanged git path).
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, member_id, _s, ws_id = _seed(app, pg_session_factory, tmp_path,
+                                           "preamble\n\n## Methods\noriginal.\n")
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    bc, bs = _capture(tmp_path, ws_id, 1)
+    r = _client(app, member_id).post(
+        f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid)
+    )
+    assert r.status_code == 403
+
+
+def test_post_citation_collab_out_of_range_section_is_409(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    # Review A/B: an out-of-range section_index (a peer deleted the section mid-cite)
+    # must return 409 on the flag-on path — parity with the flag-off CiteStale, NOT a 500.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _m, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    _enable_collab(pg_session_factory, ws_id)
+    bc, _ = _capture(tmp_path, ws_id, 1)
+    r = _client(app, owner_id).post(
+        f"/api/workspaces/{ws_id}/citations",
+        json=_cite_body(bc, "0" * 64, rid, section_index=99),
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_post_citation_collab_invalid_stance_is_422(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    # Parity: flag-off human_cite rejects a bad stance with 422; the flag-on direct
+    # path must too (compute_citation_insert does not validate stance).
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _m, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    _enable_collab(pg_session_factory, ws_id)
+    bc, _ = _capture(tmp_path, ws_id, 1)
+    bs = _room_base_sha(app, pg_session_factory, tmp_path, ws_id)
+    r = _client(app, owner_id).post(
+        f"/api/workspaces/{ws_id}/citations",
+        json=_cite_body(bc, bs, rid, stance="not-a-real-stance"),
+    )
+    assert r.status_code == 422, r.text
 
 
 def test_references_list_member_gated_excludes_tombstoned(

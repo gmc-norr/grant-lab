@@ -14,7 +14,13 @@ from pycrdt import Doc
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange, User, Workspace
+from call_manager.proposal_assist.citations.human_cite import (
+    CiteInvalid,
+    CiteRefNotFound,
+    CiteStale,
+)
 from call_manager.proposal_assist.citations.ledger import dump_ledger, load_ledger
+from call_manager.proposal_assist.citations.markers import anchor_occurrences
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.checkpoint import _head_or_empty, checkpoint_artifact
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
@@ -42,8 +48,102 @@ class KernelAcceptResult:
     evict: bool
 
 
+@dataclass
+class CitationApplyResult:
+    update: bytes | None   # None on idempotent hit
+    ev_id: str
+    citekey: str | None
+    commit_sha: str
+    committed: bool
+    idempotent: bool
+
+
 def _live_sections(room_doc: Doc):
     return split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))
+
+
+def apply_citation_to_room(
+    session,
+    *,
+    room_doc,
+    workspace_id,
+    section_index,
+    base_section_sha,
+    anchor,
+    reference_id,
+    chunk_index,
+    evidence_quote,
+    quote_start=None,
+    quote_end=None,
+    stance="supports",
+    confidence=None,
+    actor_id,
+    workspaces_dir,
+    require_anchor_in_section=False,
+) -> CitationApplyResult:
+    """Apply a citation marker to the LIVE room + co-commit the ledger. Shared by
+    kernel_accept_citation (pc path) and direct_cite_via_kernel (direct path).
+    Staleness is vs the LIVE section SHA (never git). Raises CiteStale/CiteInvalid/
+    CiteRefNotFound; the caller decides the HTTP/pc mapping. Caller owns the txn."""
+    sections = _live_sections(room_doc)
+    if not 0 <= section_index < len(sections):
+        raise IndexError(f"section_index {section_index} out of range")
+    live = sections[section_index]
+    if live.sha != base_section_sha:
+        raise CiteStale("this section changed — reopen and re-cite")
+    if require_anchor_in_section and not anchor_occurrences(live.text, anchor):
+        # Direct-user protection (human_cite parity): the anchor must occur in the
+        # section the user selected BEFORE the whole-doc insert_marker — else a
+        # whole-doc-unique anchor living in ANOTHER section would be silently
+        # mis-cited. NOTE: anchor_occurrences returns list[int]; `not []` is the
+        # empty-check (`== 0` would compare a list to an int and never fire).
+        raise CiteStale("this section changed — reopen and re-cite")
+
+    acquire_commit_mutex(session, workspace_id)
+    repo = workspace_repo_dir(workspaces_dir, workspace_id)
+    _cpath = repo / CITATIONS_FILENAME
+    try:
+        ledger = load_ledger(_cpath.read_text() if _cpath.exists() else None)
+    except ValueError as exc:
+        raise CiteInvalid("citations.json is invalid") from exc
+
+    room_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
+    result = compute_citation_insert(
+        session, workspace_id=workspace_id, proposal_text=room_md, ledger=ledger,
+        ref_uuid=uuid.UUID(str(reference_id)), anchor=anchor, chunk_index=chunk_index,
+        evidence_quote=evidence_quote, stance=stance, confidence=confidence,
+        quote_start=quote_start, quote_end=quote_end)
+    if "error" in result:
+        code = result.get("error_code")
+        msg = result["error"]
+        # Map by TYPED CODE (not message substrings) to mirror human_cite's HTTP
+        # semantics: ref→404, anchor-moved→409, everything else (chunk/quote/
+        # ambiguous-anchor)→422. The PC path (kernel_accept_citation) still catches
+        # all three and collapses them to _stale(), so its parity is unchanged.
+        if code == "ref_not_found":
+            raise CiteRefNotFound(msg)   # 404
+        if code == "anchor_not_found":
+            raise CiteStale(msg)         # 409 — section moved / anchor gone
+        raise CiteInvalid(msg)           # 422 — chunk / quote / anchor_ambiguous
+    if result.get("idempotent"):
+        return CitationApplyResult(
+            update=None, ev_id=result["ev_id"], citekey=result.get("citekey"),
+            commit_sha=_head_or_empty(repo), committed=False, idempotent=True)
+
+    new_section_md = split_sections(result["new_proposal_text"])[section_index].text
+    section_blocks = markdown_to_pm(new_section_md).get("content") or []
+    update = apply_pm_section_to_fragment(
+        room_doc, section_index=section_index, blocks=section_blocks
+    )
+    store.append_update(session, workspace_id=workspace_id, artifact="draft",
+                        actor_id=actor_id, update=update, commit=False)
+    cp = checkpoint_artifact(
+        session, workspace_id=workspace_id, artifact="draft", workspaces_dir=workspaces_dir,
+        extra_files={CITATIONS_FILENAME: dump_ledger(result["new_ledger"])})
+    _write_citekey_cache(session, result["ref"], result["citekey"], owns_txn=False)
+    return CitationApplyResult(
+        update=update, ev_id=result["ev_id"], citekey=result["citekey"],
+        commit_sha=cp.commit_sha, committed=cp.committed, idempotent=False)
 
 
 def kernel_accept_prose(
@@ -170,25 +270,15 @@ def kernel_accept_citation(
 ) -> KernelAcceptResult:
     """Accept a citation_insert against the LIVE Yjs room and co-commit the ledger.
 
-    Sibling to ``kernel_accept_prose``. Applies the marker-bearing whole-doc
-    markdown to the live room fragment as an authenticated incremental Yjs update,
-    then checkpoints proposal.md + citations.json in ONE ``write_and_commit_files``
-    (via ``extra_files``) so a git failure rolls back BOTH the room marker and the
-    ledger row. Staleness is checked against the LIVE section SHA (never git). The
-    caller owns the transaction (the route's ``_body`` commits once); this function
-    only ``flush()``es. All verify failures map to terminal stale (git-first parity).
+    Sibling to ``kernel_accept_prose``. Delegates the mutex→ledger→compute→apply→
+    checkpoint pipeline to ``apply_citation_to_room``; all verify failures map to
+    terminal stale (git-first parity). Caller owns the transaction.
     """
     pc = _load_scoped(session, proposed_change_id, workspace_id)  # FOR UPDATE
     if pc.status != "pending":
         from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotPending
 
         raise ProposedChangeNotPending(pc.status)
-
-    artifact = pc.target_artifact
-    sections = _live_sections(room_doc)
-    if not 0 <= pc.section_index < len(sections):
-        raise IndexError(f"section_index {pc.section_index} out of range")
-    live = sections[pc.section_index]
 
     def _stale() -> KernelAcceptResult:
         pc.status = "stale"
@@ -197,87 +287,28 @@ def kernel_accept_citation(
         session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
 
-    # Staleness vs the LIVE section SHA (never git) — identical to prose.
-    if live.sha != pc.base_section_sha:
-        return _stale()
-
-    # Freeze the writer BEFORE minting/reading the ledger (Codex H3). Re-entered by
-    # checkpoint_artifact as an in-txn no-op (Postgres advisory xact locks are
-    # re-entrant within a transaction). Raised BEFORE any doc mutation.
-    acquire_commit_mutex(session, workspace_id)
-
-    # The ledger is disk-canonical (NOT in the room); read it under the mutex via
-    # the canonical loader (load_ledger(None) -> empty_ledger()).
-    repo = workspace_repo_dir(workspaces_dir, workspace_id)
-    _cpath = repo / CITATIONS_FILENAME
-    try:
-        ledger = load_ledger(_cpath.read_text() if _cpath.exists() else None)
-    except ValueError:
-        # Corrupt citations.json. The git-first path (_read_proposal_and_ledger,
-        # citations.py) turns this into {"error": ...} which maps to terminal stale
-        # — mirror that here (parity) rather than letting the ValueError escape to
-        # the generic post-mutation evict arm (room eviction + 500). Codex Medium.
-        return _stale()
-
-    room_md = pm_to_markdown(ydoc_to_pm_json(room_doc))  # whole-doc, room-canonical
     p = pc.payload
-    result = compute_citation_insert(
-        session,
-        workspace_id=workspace_id,
-        proposal_text=room_md,
-        ledger=ledger,
-        ref_uuid=uuid.UUID(str(p["reference_id"])),
-        anchor=p["anchor"],
-        chunk_index=p["chunk_index"],
-        evidence_quote=p["evidence_quote"],
-        # Match the git-first accept EXACTLY (accepting.py: `payload.get("stance",
-        # "supports")`) — a key-absent default, NOT `or`. A present-but-None stance
-        # (the propose-time validator permits None) must map identically on both
-        # paths, else flag-on and flag-off diverge (parity is the point of 2b-2).
-        stance=p.get("stance", "supports"),
-        confidence=p.get("confidence"),
-    )
-    if "error" in result:
-        # All verify failures are terminal-stale (git-first parity).
-        return _stale()
-    if result.get("idempotent"):
+    try:
+        res = apply_citation_to_room(
+            session, room_doc=room_doc, workspace_id=workspace_id,
+            section_index=pc.section_index, base_section_sha=pc.base_section_sha,
+            anchor=p["anchor"], reference_id=p["reference_id"], chunk_index=p["chunk_index"],
+            evidence_quote=p["evidence_quote"], quote_start=None, quote_end=None,
+            stance=p.get("stance", "supports"), confidence=p.get("confidence"),
+            actor_id=approver.id, workspaces_dir=workspaces_dir,
+            require_anchor_in_section=False)  # pc was section-validated at propose time
+    except (CiteStale, CiteInvalid, CiteRefNotFound):
+        return _stale()  # git-first parity: every verify failure is terminal-stale
+    if res.idempotent:
         pc.status = "accepted"
         pc.resolved_by = approver.id
         pc.resolved_at = datetime.now(UTC)
-        pc.resulting_commit_sha = _head_or_empty(repo)
+        pc.resulting_commit_sha = res.commit_sha
         session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
-
-    # Section-scoped apply (Slice 3a C2): the marker insertion is confined to the
-    # anchor's section; splice just that section's new blocks so concurrent edits
-    # elsewhere survive. Extract the changed section's markdown from the whole-doc
-    # result and convert to PM blocks.
-    new_section_md = split_sections(result["new_proposal_text"])[pc.section_index].text
-    section_blocks = markdown_to_pm(new_section_md).get("content") or []
-    update = apply_pm_section_to_fragment(
-        room_doc, section_index=pc.section_index, blocks=section_blocks
-    )
-    # No `if not update:` guard here (unlike the prose path above). A citation
-    # insert always adds at least one marker-bearing block to a non-empty section
-    # (the idempotent early-return above already handled the no-op case), so
-    # apply_pm_section_to_fragment always yields a non-empty update here.
-    # From here on room_doc is mutated: any failure must evict the room.
-    store.append_update(
-        session, workspace_id=workspace_id, artifact=artifact,
-        actor_id=approver.id, update=update, commit=False,
-    )
-    cp = checkpoint_artifact(
-        session, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir,
-        extra_files={CITATIONS_FILENAME: dump_ledger(result["new_ledger"])},
-    )
-    # Post-commit citekey cache (Codex High) — owns_txn=False: begin_nested()+flush
-    # so the FOR UPDATE pc-row lock + advisory mutex stay held; the route's single
-    # session.commit persists the checkpoint + status flip + this cache write in ONE
-    # transaction. Same helper + semantics as the git-first accept-replay.
-    _write_citekey_cache(session, result["ref"], result["citekey"], owns_txn=False)
     pc.status = "accepted"
     pc.resolved_by = approver.id
     pc.resolved_at = datetime.now(UTC)
-    pc.resulting_commit_sha = cp.commit_sha
+    pc.resulting_commit_sha = res.commit_sha
     session.flush()
-    return KernelAcceptResult(pc=pc, update=update, committed=cp.committed, evict=True)
+    return KernelAcceptResult(pc=pc, update=res.update, committed=res.committed, evict=True)

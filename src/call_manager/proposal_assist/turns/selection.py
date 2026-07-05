@@ -38,9 +38,10 @@ class SelectionInput:
     to_offset: int
 
 
-def build_selection_block(*, repo_dir: Path, sel: SelectionInput) -> dict:
-    proposal = repo_dir / PROPOSAL_FILENAME
-    sections = split_sections(proposal.read_text()) if proposal.exists() else []
+def build_selection_block(*, repo_dir: Path, sel: SelectionInput, sections=None) -> dict:
+    if sections is None:
+        proposal = repo_dir / PROPOSAL_FILENAME
+        sections = split_sections(proposal.read_text()) if proposal.exists() else []
     live = sections[sel.section_index] if 0 <= sel.section_index < len(sections) else None
 
     verified = live is not None and live.sha == sel.base_section_sha

@@ -585,6 +585,8 @@ def compute_citation_insert(
     evidence_quote: str,
     stance: str,
     confidence: str | None,
+    quote_start: int | None = None,
+    quote_end: int | None = None,
 ) -> dict[str, Any]:
     """Pure DB-and-compute core of a citation insert (steps 1–12).
 
@@ -609,12 +611,15 @@ def compute_citation_insert(
     # 1. Load + workspace-scope the Reference.
     ref = session.get(Reference, ref_uuid)
     if ref is None or ref.workspace_id != workspace_id:
-        return {"error": "reference not found"}
+        return {"error": "reference not found", "error_code": "ref_not_found"}
 
     # 1a. A tombstoned reference (soft-deleted) cannot be newly cited — reject
     # BEFORE any write so the working tree stays clean.
     if ref.tombstoned_at is not None:
-        return {"error": "reference is tombstoned and cannot be cited"}
+        return {
+            "error": "reference is tombstoned and cannot be cited",
+            "error_code": "ref_not_found",
+        }
 
     # 2. Load the ReferenceChunk (reference + index), workspace-scoped.
     chunk = (
@@ -627,15 +632,32 @@ def compute_citation_insert(
         .one_or_none()
     )
     if chunk is None:
-        return {"error": "chunk not found"}
+        return {"error": "chunk not found", "error_code": "chunk_not_found"}
 
     # 4. Quote-verify against the raw chunk text.
-    try:
-        start, end = find_quote_offsets(chunk.text, evidence_quote)
-    except QuoteNotFound:
-        return {"error": "evidence quote not found in chunk"}
-    except QuoteAmbiguous:
-        return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk"}
+    if quote_start is not None and quote_end is not None:
+        # Exact-offset path (direct human cite): full bounds + equality + non-empty,
+        # mirroring human_cite.insert_citation_for_user (slice-equality alone accepts
+        # quote_end > len via Python suffix slicing).
+        if not (0 <= quote_start < quote_end <= len(chunk.text)):
+            return {
+                "error": "evidence quote offsets out of range",
+                "error_code": "quote_out_of_range",
+            }
+        start, end = quote_start, quote_end
+        sliced = chunk.text[start:end]
+        if sliced != evidence_quote:
+            return {"error": "evidence quote not found in chunk", "error_code": "quote_not_found"}
+        if not sliced.strip():
+            return {"error": "evidence quote is empty", "error_code": "quote_empty"}
+    else:
+        try:
+            start, end = find_quote_offsets(chunk.text, evidence_quote)
+        except QuoteNotFound:
+            return {"error": "evidence quote not found in chunk", "error_code": "quote_not_found"}
+        except QuoteAmbiguous:
+            return {"error": "evidence quote is ambiguous (occurs multiple times) in chunk",
+                    "error_code": "quote_ambiguous"}
 
     # 5. Idempotency — identical (ref, chunk, quote) with a live marker → no-op.
     # The idempotency key is (reference_id, chunk_index, evidence_quote) BY
@@ -669,8 +691,8 @@ def compute_citation_insert(
         new_proposal_text = insert_marker(proposal_text, anchor, citekey, ev_id)
     except AnchorError as exc:
         if "ambiguous" in str(exc):
-            return {"error": "anchor is ambiguous"}
-        return {"error": "anchor not found"}
+            return {"error": "anchor is ambiguous", "error_code": "anchor_ambiguous"}
+        return {"error": "anchor not found", "error_code": "anchor_not_found"}
 
     # 8. Hashes — BARE 64-hex, matching references.original_sha256's column format.
     chunk_content_hash = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
