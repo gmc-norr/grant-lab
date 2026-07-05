@@ -86,24 +86,24 @@ In `Room.handle`, awareness ids are attributed to the sending socket as `declare
 
 ### Mechanism — never attribute an id a live peer already owns
 
-Before folding new ids into the sender's `awareness_ids`, subtract the set of ids currently owned by **other live sockets**:
+Before folding new ids into the sender's `awareness_ids`, subtract the set of ids currently owned by another live socket belonging to a **different user**:
 
 ```python
 # Attribute ids to THIS socket: declared ids (robust to a same-clientID reconnect
-# where the states-diff is empty) ∪ states-diff, MINUS any id another live socket
-# already owns. Excluding peer-owned ids closes the griefing vector where a member
-# declares a live peer's client id so its own disconnect scrubs the peer's caret.
-# A genuine same-clientID reconnect is unaffected: the prior socket's ids were
-# removed from its ClientState on disconnect, so no LIVE client owns them.
-owned_by_others: set[int] = set()
+# where the states-diff is empty) ∪ states-diff, MINUS any id owned by another live
+# socket of a DIFFERENT user. That closes the griefing vector — a member declaring
+# a *peer's* client id so its own disconnect scrubs the peer's caret — while leaving
+# same-user re-attribution untouched, so a same-clientID reconnect that transiently
+# overlaps its old socket (same user_id) still re-claims its id (R2-2 robustness).
+owned_by_other_users: set[int] = set()
 for client, st in self.clients.items():
-    if client is not sender:
-        owned_by_others |= st.awareness_ids
-new_ids = (declared | (set(self.awareness.states) - before)) - owned_by_others
+    if client is not sender and st.user_id != state.user_id:
+        owned_by_other_users |= st.awareness_ids
+new_ids = (declared | (set(self.awareness.states) - before)) - owned_by_other_users
 state.awareness_ids |= new_ids
 ```
 
-`sender` is already a keyword arg of `handle`, and `self.clients` maps socket → `ClientState` ([room.py:110-116,72](../../../src/call_manager/proposal_assist/collab/room.py#L110)). Subtracting `owned_by_others` from the **whole** attribution (not just `declared`) is strictly safer and preserves reconnect-robustness because a departed socket is popped from `self.clients` before its successor connects.
+`sender` is already a keyword arg of `handle`, and `self.clients` maps socket → `ClientState` ([room.py:110-116,72](../../../src/call_manager/proposal_assist/collab/room.py#L110)). Restricting the exclusion to *different-user* owners is the key: griefing and a same-clientID reconnect are indistinguishable from the frame alone, but a griefer is a different member and a reconnect is the same user. Subtracting from the **whole** attribution (not just `declared`) is defensive — the states-diff never contains a live peer's id anyway (it is already in `before`). Same-user "self-griefing" (a member scrubbing their own other-tab caret) is harmless and therefore intentionally allowed.
 
 **Scope of the fix (be precise):** this closes the harmful part — an attacker's *disconnect* removing a victim's caret. It does **not** stop the attacker from *relaying* a spoofed state for the peer's id (the raw payload is still broadcast at [room.py:219](../../../src/call_manager/proposal_assist/collab/room.py#L219)); presence is display-only and already spoofable (a member can forge their own name/cursor), and a transient position-spoof self-heals via the victim's own awareness re-announce. Filtering/rewriting relayed payloads per-id would be invasive and is out of scope. Update the existing KNOWN-LIMITATION comment block ([room.py:210-216](../../../src/call_manager/proposal_assist/collab/room.py#L210)) to reflect that the disconnect-removal vector is now closed and only the (accepted, self-healing) position-spoof remains.
 
@@ -114,11 +114,11 @@ state.awareness_ids |= new_ids
 
 ### Tests
 
-Drive `Room.handle` directly with two fake client sockets (`sender` A and peer B), reusing the existing presence-test scaffolding:
+Drive `Room.handle` directly with fake client sockets, reusing the existing presence-test scaffolding (`FakeClient`, `_awareness_frame`, `_noop_persist`, `ClientState`):
 
-1. **Griefing blocked:** B declares id `X` (B's own). A then sends an awareness frame *declaring* `X`. Assert `X ∉ clientA_state.awareness_ids` (A did not capture B's id), and that after A's `remove_client_presence`, `X` is still present in `room.awareness.states` (B's caret survives A's disconnect).
-2. **Legitimate self-attribution intact:** a fresh socket C declaring its own id `Z` (owned by no live peer) → `Z ∈ clientC_state.awareness_ids`.
-3. **Same-clientID reconnect intact:** socket D owns `W`; D disconnects (popped from `self.clients`, presence removed); a new socket D2 declares `W` → `W ∈ clientD2_state.awareness_ids` (no live owner remained, so the guard does not block re-claim).
+1. **Cross-user griefing blocked (new test):** victim V (`user_id=1`) announces its presence via `_awareness_frame` → id `X` attributed to V. Attacker A (`user_id=2`) *replays V's frame* (declaring V's live id `X`). Assert `X ∉ stateA.awareness_ids` (A does not capture a different user's id), and that after `room.remove_client_presence(stateA)`, `X` is still in `room.awareness.states` (V's caret survives A's disconnect).
+2. **Fresh self-attribution intact (existing coverage):** the existing `test_awareness_relayed_to_not_persisted_not_to_sender` already asserts a sender captures its own id with a peer present — with the guard, `owned_by_other_users` is empty (the peer owns nothing), so it still passes. No new test needed; the plan runs it to confirm no regression.
+3. **Same-user reconnect overlap intact (existing coverage, must stay green):** the existing `test_same_clientid_reconnect_is_attributed_via_payload_parse` keeps the old socket in `room.clients` (same `user_id=1`) when the reconnecting socket claims the same id. Because the guard only excludes *different-user* owners, the same-user reconnect still re-claims its id → this test passes **unchanged**. The plan explicitly re-runs it as the regression guard for the guard's scope.
 
 ## 5. Fix #4 — malformed-awareness JS-side test (frontend, test-only)
 
@@ -177,7 +177,7 @@ it("drops a malformed AWARENESS frame without crashing or corrupting awareness",
 ## 8. Risks & Rejected Alternatives
 
 - **#1 delays content in the rare pending-session window.** Accepted: negligible because `me` is app-shell-cached before the cockpit renders; the auth gate guarantees `me` resolves. Rejected alternative: provider `identityReady` flag (more surface, still sets an anonymous local state).
-- **#2 could over-restrict attribution.** Guarded against: subtracting only *other live* sockets' ids; a departed socket's ids are already gone from `self.clients`, so same-clientID reconnect still re-claims. Rejected alternative: rewriting/filtering relayed awareness payloads per-id (invasive; the residual position-spoof self-heals).
+- **#2 could over-restrict attribution.** Guarded against by scoping the exclusion to *different-user* live owners: a same-clientID reconnect is the same `user_id`, so it is never blocked — even during a transient old/new socket overlap — preserving R2-2. The threat model is a member scrubbing *another* member's caret; same-user "self-griefing" is harmless and allowed. Rejected alternatives: excluding *all* other live owners (breaks the same-user reconnect-overlap the `declared` union exists for — caught while grounding the plan against the existing reconnect test); rewriting/filtering relayed awareness payloads per-id (invasive; the residual position-spoof self-heals).
 - **#4 is test-only.** No behaviour change; the risk is a flaky or non-deterministic assertion — mitigated by using an invalid-JSON state (deterministic `JSON.parse` throw) rather than a truncated buffer (version-dependent).
 
 ## 9. Deliverables Summary
