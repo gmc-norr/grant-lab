@@ -126,3 +126,50 @@ async def test_direct_cite_post_mutation_failure_evicts(pg_session_factory, tmp_
     assert (wid, "draft") in evict_calls  # post-mutation error → evict must have been called
     assert len(evict_calls) == 1
     assert MANAGER.get((wid, "draft")) is None  # evicted (poison recovery)
+
+
+@pytest.mark.anyio
+async def test_direct_cite_section_structure_error_does_not_evict(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # Review A: a pre-mutation SectionStructureError (e.g. a section-map divergence in
+    # the apply) must be re-raised WITHOUT evicting a clean room — it belongs in
+    # _CLEAN_CITE_ERRORS, mirroring _CLEAN_ACCEPT_ERRORS.
+    import call_manager.proposal_assist.citations.collab_cite as ccmod
+    from call_manager.proposal_assist.editing.save import SectionStructureError
+
+    md0 = "preamble\n\n## Methods\nThe claim here.\n"
+    with pg_session_factory() as s:
+        o = make_user(s, email="dck5@ki.se")
+        ws = make_workspace(s, owner=o, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, o.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+        rid = _seed_reference(s, wid, chunk_text="azure sky").id
+        s.commit()
+    with pg_session_factory() as s:
+        bsha = _base_sha(s, wid, str(tmp_path))
+
+    def _raise_struct(*a, **k):
+        raise SectionStructureError("section-map divergence")
+
+    monkeypatch.setattr(ccmod, "apply_citation_to_room", _raise_struct)
+    evict_calls: list = []
+    _orig_evict = MANAGER.evict
+
+    async def _spy_evict(key):
+        evict_calls.append(key)
+        return await _orig_evict(key)
+
+    monkeypatch.setattr(MANAGER, "evict", _spy_evict)
+    with pytest.raises(SectionStructureError):
+        await direct_cite_via_kernel(
+            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
+            actor_id=oid, section_index=1, base_section_sha=bsha, anchor="The claim here.",
+            reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
+            stance="supports")
+    assert evict_calls == []  # pre-mutation clean error → no evict

@@ -921,6 +921,13 @@ async def post_citation(
             raise HTTPException(status_code=404, detail=str(e)) from e
         except CiteInvalid as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
+        except IndexError as e:
+            # Out-of-range section_index (e.g. a peer deleted the section mid-cite).
+            # Parity with the flag-off path (insert_citation_for_user → CiteStale 409)
+            # — a reachable concurrent-edit race must be a 4xx, not a 500.
+            raise HTTPException(
+                status_code=409, detail="this section changed — reopen and re-cite"
+            ) from e
         except RoomEvicted as e:
             raise HTTPException(status_code=409, detail="workspace busy; retry the citation") from e
         except CommitMutexTimeout as e:

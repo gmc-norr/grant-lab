@@ -49,9 +49,13 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   const section = sections[claim.sectionIndex];
   const sectionSha = section?.sha ?? "";
 
-  // Compute section-local code-point offsets against the canonical section text
+  // Compute section-local code-point offsets against the canonical section text.
+  // Reject a NON-UNIQUE anchor: indexOf returns the FIRST occurrence, which would
+  // silently target the wrong duplicate (the backend text[from:to]==anchor check
+  // still passes). Refuse rather than mis-target (review C#1).
   const utf16Idx = section ? section.text.indexOf(claim.anchor) : -1;
-  const anchorable = claim.singleSection && !!sectionSha && utf16Idx >= 0;
+  const anchorUnique = utf16Idx >= 0 && utf16Idx === section!.text.lastIndexOf(claim.anchor);
+  const anchorable = claim.singleSection && !!sectionSha && anchorUnique;
   const fromOffset = anchorable ? toCodePointOffset(section!.text, utf16Idx) : 0;
   const toOffset = anchorable ? toCodePointOffset(section!.text, utf16Idx + claim.anchor.length) : 0;
 

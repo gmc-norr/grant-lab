@@ -68,12 +68,14 @@ function renderToolbar(overrides: {
   canWrite?: boolean;
   connected?: boolean;
   settled?: boolean;
+  sections?: { sha: string; text: string }[];
 } = {}) {
   const {
     canEdit = true,
     canWrite = true,
     connected = true,
     settled = true,
+    sections = SECTIONS,
   } = overrides;
   const qc = new QueryClient();
   render(
@@ -84,7 +86,7 @@ function renderToolbar(overrides: {
           provider={fakeProvider(connected, settled)}
           workspaceId="ws-1"
           head={HEAD}
-          sections={SECTIONS}
+          sections={sections}
           canEdit={canEdit}
           canWrite={canWrite}
         />
@@ -125,6 +127,15 @@ describe("TiptapSelectionToolbar gates", () => {
   it("unsettled provider → Cite and Edit disabled (Ask still enabled)", () => {
     renderToolbar({ canEdit: true, canWrite: true, connected: true, settled: false });
     expect(screen.getByRole("button", { name: /ask/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /edit/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /cite/i })).toBeDisabled();
+  });
+
+  it("non-unique anchor in section → all actions disabled (avoids wrong-target)", () => {
+    // "Test claim." appears TWICE → indexOf would silently target the first
+    // occurrence, not the one the user selected. Refuse rather than mis-target (C#1).
+    renderToolbar({ sections: [{ sha: "s1sha", text: "Test claim. Test claim." }] });
+    expect(screen.getByRole("button", { name: /ask/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /edit/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /cite/i })).toBeDisabled();
   });

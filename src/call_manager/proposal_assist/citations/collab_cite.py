@@ -9,6 +9,7 @@ import uuid
 from starlette.concurrency import run_in_threadpool
 
 from call_manager.proposal_assist.citations.human_cite import (
+    _ALLOWED_STANCES,
     CiteInvalid,
     CiteRefNotFound,
     CiteStale,
@@ -18,10 +19,16 @@ from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.kernel import apply_citation_to_room
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.editing.save import SectionStructureError
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 
+# Pre-mutation validation errors — re-raised WITHOUT evicting the room (it is
+# untouched). Mirrors _CLEAN_ACCEPT_ERRORS in kernel_accept: SectionStructureError
+# (incl. its SectionMapDivergenceError subclass) can be raised by the section apply
+# BEFORE the fragment mutation, so it must not needlessly evict a clean room.
 _CLEAN_CITE_ERRORS = (
-    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout, IndexError, RoomEvicted
+    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout,
+    IndexError, RoomEvicted, SectionStructureError,
 )
 
 
@@ -30,6 +37,11 @@ async def direct_cite_via_kernel(
     section_index, base_section_sha, anchor, reference_id, chunk_index,
     evidence_quote, quote_start, quote_end, stance="supports",
 ) -> dict:
+    # Stance validation — parity with the flag-off human_cite path
+    # (insert_citation_for_user raises CiteInvalid on a bad stance). compute_citation_insert
+    # does NOT validate stance, so guard here before touching the room. Raised pre-op → 422.
+    if stance not in _ALLOWED_STANCES:
+        raise CiteInvalid(f"invalid stance {stance!r}")
     key = (workspace_id, "draft")
 
     async def _load() -> list[bytes]:

@@ -1120,6 +1120,45 @@ def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session
     assert r.status_code == 403
 
 
+def test_post_citation_collab_out_of_range_section_is_409(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    # Review A/B: an out-of-range section_index (a peer deleted the section mid-cite)
+    # must return 409 on the flag-on path — parity with the flag-off CiteStale, NOT a 500.
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _m, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    _enable_collab(pg_session_factory, ws_id)
+    bc, _ = _capture(tmp_path, ws_id, 1)
+    r = _client(app, owner_id).post(
+        f"/api/workspaces/{ws_id}/citations",
+        json=_cite_body(bc, "0" * 64, rid, section_index=99),
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_post_citation_collab_invalid_stance_is_422(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    # Parity: flag-off human_cite rejects a bad stance with 422; the flag-on direct
+    # path must too (compute_citation_insert does not validate stance).
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _m, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
+    rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
+    _enable_collab(pg_session_factory, ws_id)
+    bc, _ = _capture(tmp_path, ws_id, 1)
+    bs = _room_base_sha(app, pg_session_factory, tmp_path, ws_id)
+    r = _client(app, owner_id).post(
+        f"/api/workspaces/{ws_id}/citations",
+        json=_cite_body(bc, bs, rid, stance="not-a-real-stance"),
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_references_list_member_gated_excludes_tombstoned(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
