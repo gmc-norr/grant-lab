@@ -166,7 +166,7 @@ git commit -m "feat(collab): count-based checkpoint-candidate scan excluding sof
 Add to `tests/proposal_assist/collab/test_collab_checkpoint.py` (reuses the module's `_init_repo` + `_seed_room_with_edit`):
 
 ```python
-def test_checkpoint_record_version_false_is_quiet(pg_session_factory, tmp_path):
+def test_checkpoint_record_version_false_is_quiet_and_compacts(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         o = make_user(s, email="cp-quiet@ki.se")
         ws = make_workspace(s, owner=o)
@@ -176,8 +176,15 @@ def test_checkpoint_record_version_false_is_quiet(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
         s.commit()
-    doc = _seed_room_with_edit(pg_session_factory, wid, oid, "## Background\n\nquiet edit.\n")
-    expected_md = serialize_doc_to_markdown(doc)
+    # TWO authored edits (>= 2 rows) so the quiet path must STILL compact — proving
+    # record_version=False did not accidentally skip the compaction block (the point
+    # of 3b-5c is tail-bounding). Mirrors test_collab_compaction.py's 2-edit pattern.
+    _seed_room_with_edit(pg_session_factory, wid, oid, "## Background\n\nedit one.\n")
+    _seed_room_with_edit(
+        pg_session_factory, wid, oid, "## Background\n\nedit one.\n\n## Aims\n\nedit two.\n"
+    )
+    with pg_session_factory() as s:
+        max_id = store.load_rows(s, workspace_id=wid, artifact="draft")[-1][0]  # pre-checkpoint tail max
 
     with pg_session_factory() as s:
         res = checkpoint_artifact(
@@ -187,8 +194,6 @@ def test_checkpoint_record_version_false_is_quiet(pg_session_factory, tmp_path):
         s.commit()
 
     assert res.committed is True                                   # git commit STILL made
-    disk = (Path(tmp_path) / str(wid) / "repo" / PROPOSAL_FILENAME).read_text()
-    assert disk == expected_md                                     # content in git
     with pg_session_factory() as s:
         av = s.execute(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid)).scalars().all()
         ev = s.execute(
@@ -197,13 +202,14 @@ def test_checkpoint_record_version_false_is_quiet(pg_session_factory, tmp_path):
             )
         ).scalars().all()
         assert av == [] and ev == []                               # QUIET: no version / event
-        # watermark still advanced past the edit
-        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == 1
+        rows = store.load_rows(s, workspace_id=wid, artifact="draft")
+        assert len(rows) == 1                                      # COMPACTED 2 -> 1 on the quiet path
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == max_id
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest -p no:cacheprovider tests/proposal_assist/collab/test_collab_checkpoint.py::test_checkpoint_record_version_false_is_quiet -q`
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest -p no:cacheprovider tests/proposal_assist/collab/test_collab_checkpoint.py::test_checkpoint_record_version_false_is_quiet_and_compacts -q`
 Expected: FAIL — `checkpoint_artifact() got an unexpected keyword argument 'record_version'`.
 
 - [ ] **Step 3: Implement the `record_version` gate**
@@ -473,9 +479,10 @@ git commit -m "feat(collab): checkpoint_active_tails periodic job body (scan+rec
 Add to `tests/test_scheduler.py` (mirrors `test_build_scheduler_includes_rank_drain_job`):
 
 ```python
-def test_build_scheduler_includes_collab_checkpoint_job(_settings_env):
+def test_build_scheduler_wires_collab_checkpoint_job(_settings_env, monkeypatch):
     from unittest.mock import MagicMock
 
+    import call_manager.proposal_assist.collab.checkpoint as cp
     from call_manager.config import Settings
     from call_manager.proposal_assist.drafting.factory import build_workspace_controller
 
@@ -498,7 +505,24 @@ def test_build_scheduler_includes_collab_checkpoint_job(_settings_env):
         workspace_controller=workspace_controller,
         start=False,
     )
-    assert sched.get_job("collab:checkpoint_tails") is not None
+    job = sched.get_job("collab:checkpoint_tails")
+    assert job is not None
+    # wired with the CONFIGURED interval...
+    assert job.trigger.interval.total_seconds() == settings.collab_checkpoint_scan_seconds
+    # ...and the job fn passes the configured session_factory / workspaces_dir / min_tail.
+    captured = {}
+    monkeypatch.setattr(
+        cp, "checkpoint_active_tails",
+        lambda sf, *, workspaces_dir, min_tail: captured.update(
+            sf=sf, workspaces_dir=workspaces_dir, min_tail=min_tail
+        ),
+    )
+    job.func()   # the closure lazy-imports checkpoint_active_tails → picks up the patch
+    assert captured == {
+        "sf": session_factory,
+        "workspaces_dir": settings.workspaces_dir,
+        "min_tail": settings.collab_checkpoint_min_tail,
+    }
 
 
 def test_build_scheduler_omits_collab_checkpoint_when_disabled(_settings_env, monkeypatch):
@@ -532,7 +556,7 @@ def test_build_scheduler_omits_collab_checkpoint_when_disabled(_settings_env, mo
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `EMBEDDING_MODEL=bge-m3 uv run pytest -p no:cacheprovider tests/test_scheduler.py::test_build_scheduler_includes_collab_checkpoint_job -q`
+Run: `EMBEDDING_MODEL=bge-m3 uv run pytest -p no:cacheprovider tests/test_scheduler.py::test_build_scheduler_wires_collab_checkpoint_job -q`
 Expected: FAIL — `get_job("collab:checkpoint_tails")` is `None` (job not registered yet).
 
 - [ ] **Step 3: Add the settings**
@@ -612,7 +636,7 @@ git commit -m "feat(collab): register periodic tail-bounding scheduler job + set
 
 ## Self-Review
 
-- **Spec coverage:** scan query → Task 1; `record_version` quiet → Task 2; job body (scan+recheck+isolation) → Task 3; scheduler registration + settings → Task 4. §3.2 quiet-version gap proven by Task 2's `av == [] and ev == []`. Medium#1 (count not gap) proven by Task 1's ws1-excluded assertion. Medium#2 (soft-delete) proven by Task 1 (scan filter) + Task 3 (recheck).
+- **Spec coverage:** scan query → Task 1; `record_version` quiet → Task 2; job body (scan+recheck+isolation) → Task 3; scheduler registration + settings → Task 4. §3.2 quiet-version gap proven by Task 2's `av == [] and ev == []`, and tail-bounding proven by Task 2's `len(rows) == 1` (compaction still runs on the quiet path). Medium#1 (count not gap) proven by Task 1's ws1-excluded assertion. Medium#2 (soft-delete) proven by Task 1 (scan filter) + Task 3 (recheck). Task 4 proves the job is not just registered but wired with the configured interval + `session_factory`/`workspaces_dir`/`min_tail` (invokes `job.func()` against a monkeypatched `checkpoint_active_tails`).
 - **Placeholders:** none — every step has complete code + exact commands.
 - **Type/name consistency:** `find_checkpoint_candidates(session, *, min_tail)`, `checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail)`, `record_version: bool = True`, `collab_checkpoint_scan_seconds`/`collab_checkpoint_min_tail`, id `collab:checkpoint_tails` — identical across tasks, tests, and the scheduler call.
 - **Regression guards:** Task 2 Step 4 re-runs the existing checkpoint tests (default path unchanged); Task 4 Step 5 re-runs the full `test_scheduler.py`; Final Verification runs the whole collab dir + `test_api_spec.py`.
