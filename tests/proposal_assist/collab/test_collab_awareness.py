@@ -89,6 +89,31 @@ async def test_same_clientid_reconnect_is_attributed_via_payload_parse():
 
 
 @pytest.mark.anyio
+async def test_declaring_a_different_users_live_id_does_not_capture_it():
+    # Griefing guard (Slice 3b-5b #2): a member must not capture an awareness id a
+    # LIVE peer of a DIFFERENT user already owns — otherwise the attacker's
+    # disconnect would scrub the victim's caret for everyone.
+    room = Room((uuid.uuid4(), "draft"))
+    victim, attacker = FakeClient(), FakeClient()
+    st_victim = ClientState(user_id=1, can_write=True)
+    st_attacker = ClientState(user_id=2, can_write=True)   # DIFFERENT user
+    room.clients[victim] = st_victim
+    room.clients[attacker] = st_attacker
+    frame, cid = _awareness_frame({"user": {"name": "Victim"}})
+
+    await room.handle(sender=victim, state=st_victim, message=frame, persist=_noop_persist)
+    assert cid in st_victim.awareness_ids                  # victim owns its id
+
+    # attacker (different user) REPLAYS the victim's frame, declaring the victim's id
+    await room.handle(sender=attacker, state=st_attacker, message=frame, persist=_noop_persist)
+    assert cid not in st_attacker.awareness_ids            # guard: not captured
+
+    # the victim's caret survives the attacker's disconnect
+    await room.remove_client_presence(st_attacker)
+    assert cid in room.awareness.states
+
+
+@pytest.mark.anyio
 async def test_malformed_awareness_dropped_without_raising():
     room = Room((uuid.uuid4(), "draft"))
     sender, other = FakeClient(), FakeClient()

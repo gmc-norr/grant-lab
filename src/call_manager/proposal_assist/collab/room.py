@@ -206,15 +206,27 @@ class Room:
                     )
                     return
                 # Attribute ids to THIS socket: payload-declared ids (robust to a
-                # same-clientID reconnect where the diff is empty) ∪ states-diff.
-                # KNOWN LIMITATION: folding in `declared` means a MALICIOUS member
-                # could hand-craft a frame declaring a *peer's* client id, so that
-                # this socket's disconnect removes the peer's caret for everyone.
-                # It is transient (the victim's ~15s awareness heartbeat re-adds it)
-                # and presence is display-only/spoofable by design (a member can
-                # already forge their own name/cursor), so we accept it rather than
-                # give up the reconnect-robustness the `declared` union buys.
-                state.awareness_ids |= declared | (set(self.awareness.states) - before)
+                # same-clientID reconnect where the states-diff is empty) ∪ states-diff,
+                # MINUS any id owned by another live socket of a DIFFERENT user. That
+                # closes the DISCONNECT-removal vector — a member declaring a *peer's*
+                # client id so its own disconnect scrubs the peer's caret — while leaving
+                # same-user re-attribution untouched: a same-clientID reconnect that
+                # transiently overlaps its old socket (same user_id) still re-claims its
+                # id (R2-2). Griefing vs reconnect is indistinguishable from the frame
+                # alone, but a griefer is a different member and a reconnect the same user.
+                # NOTE: this does NOT stop an ACTIVE relay-spoof — the raw payload is still
+                # relayed below, so a co-member can send a peer's id at a high awareness
+                # clock to hide/fake that caret until a page/room reset (y-awareness is
+                # clock-gated: lower-clock victim re-announces are ignored → NO self-heal).
+                # Presence is display-only and the flag is OFF, so this is cosmetic and
+                # prod-inert; the complete fix (filter relayed payloads to sender-owned
+                # ids) is tracked for 3b-5d.
+                owned_by_other_users: set[int] = set()
+                for client, st in self.clients.items():
+                    if client is not sender and st.user_id != state.user_id:
+                        owned_by_other_users |= st.awareness_ids
+                new_ids = (declared | (set(self.awareness.states) - before)) - owned_by_other_users
+                state.awareness_ids |= new_ids
             # Relay the raw payload as-is to peers (standard y-awareness relay).
             await self._broadcast(P.create_awareness_message(payload), exclude=sender)
             return
@@ -237,6 +249,16 @@ class Room:
         remaining clients so their carets drop immediately (not after the ~30s
         timeout). No-op if the client owned no presence. Callers invoke this only
         when the room still has peers (see RoomManager.release/drop_client)."""
+        # ACCEPTED LIMITATION (reconnect clock-collision, Slice 3b-5b #3): removing a
+        # REMOTE id here encodes the removal as state=null at the id's CURRENT clock
+        # (y-awareness bumps the clock only when a client removes its OWN id). If the
+        # same client reconnects with the same doc.clientID, its on-open flush
+        # re-announces at that same clock and applyAwarenessUpdate ignores it (a
+        # non-null state cannot override an equal-clock entry), so the reconnected
+        # caret is briefly invisible to peers. It self-heals at the next awareness
+        # renewal: immediately on cursor activity, or <= ~15s via the y-protocols
+        # renew interval (outdatedTimeout/2). Inherent to y-awareness + server-side
+        # removal; standard y-websocket shares it. Documented, not fixed.
         ids = list(state.awareness_ids)
         if not ids:
             return
