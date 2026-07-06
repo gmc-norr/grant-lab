@@ -12,7 +12,7 @@
 
 - Feature flag STAYS OFF in prod. No `enable_collab` source caller. **Client-only.**
 - **No backend, no endpoint, no DB migration, no schema change.** Source edits confined to `frontend/src/collab/*` + `frontend/e2e/collab.spec.ts`.
-- **Do not regress `SaveVersionButton`** — identical poll behaviour (200ms, `isSettled()`, initial synchronous sample) after the refactor.
+- **`SaveVersionButton` stays behaviourally equivalent** — same 200ms `isSettled()` poll via the hook. One intended, harmless difference: the hook samples `isSettled()` **synchronously on mount**, so the button reflects a settled connection immediately instead of staying disabled for the first ~200ms tick (the old inline poll first sampled only after the interval). This removes a spurious initial disable; no test or flow depends on that delay. (Codex Medium: the earlier "byte-for-behaviour" wording was inaccurate — this is the honest statement.)
 - Frontend gate: `pnpm exec tsc --noEmit` (there is NO TS linter — tsc is the gate) + `pnpm exec vitest run <file>`. The e2e stays opt-in / skip-gated on the D0 seed vars.
 - `git add` explicit paths only. Work on branch `collab-slice3b5d1a` cut from `master` (`fbd1f39`); merge `--no-ff`, **local only**, is **user-gated** (STOP before merge).
 - `provider.isSettled()` ([collabProvider.ts:82](../../../frontend/src/collab/collabProvider.ts#L82)) already includes the `status === "connected"` term, so the whole settle predicate is just `isSettled()`.
@@ -164,7 +164,7 @@ Run:
 cd frontend
 pnpm exec tsc --noEmit
 ```
-Expected: tsc clean (behaviour unchanged — same 200ms `isSettled()` poll, now via the hook).
+Expected: tsc clean (behaviourally equivalent — same 200ms `isSettled()` poll via the hook; initial sample now synchronous, see Global Constraints).
 
 - [ ] **Step 7: Commit**
 
@@ -175,8 +175,10 @@ git commit -m "$(cat <<'EOF'
 feat(collab): reactive useSettled poll hook + adopt in SaveVersionButton (3b-5d.D1a)
 
 Extract SaveVersionButton's 200ms isSettled() poll into a shared useSettled hook so
-the value is reactive (re-renders when the WS buffer drains). SaveVersionButton is
-byte-for-behaviour unchanged; the hook is the fix vehicle for the toolbar settled-latch.
+the value is reactive (re-renders when the WS buffer drains). SaveVersionButton stays
+behaviourally equivalent (same 200ms poll); the only change is the initial sample is now
+synchronous on mount, removing a spurious first-tick disable. The hook is the fix vehicle
+for the toolbar settled-latch.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 EOF
@@ -310,9 +312,16 @@ vi.mock("../api/turns", () => ({
 }));
 ```
 
-`ApiError` is a real class from `../api/client`; do NOT mock it — import it in the test so `instanceof` matches:
+`ApiError` is a real class from `../api/client`; do NOT mock it — import it in the test so `instanceof` matches. Also import the mocked `deriveClaimAnchor` (to drive selection changes) + `act`/`fireEvent`:
 ```tsx
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { ApiError } from "../api/client";
+import { deriveClaimAnchor } from "./selectionAnchor"; // vi-mocked at the top of the file
+```
+
+Enhance the module-level `fakeEditor` helper to expose a `fire(event)` so a test can trigger `selectionUpdate` (also reused by the Task 6 C#5 test). Add to its returned object:
+```tsx
+    fire: (event: string) => listeners.get(event)?.forEach((fn) => fn()),
 ```
 
 Add tests (after the gates `describe`). `ApiError`'s constructor shape: confirm it is `new ApiError(code, message, ...)` or similar by reading `../api/client`; the test builds one whose `.message` contains "disclosure":
@@ -324,6 +333,7 @@ describe("TiptapSelectionToolbar Ask errors", () => {
   beforeEach(() => {
     submitMock.mockReset();
     ackMock.mockReset();
+    vi.mocked(deriveClaimAnchor).mockReturnValue(fixedClaim); // restore default claim
   });
 
   it("disclosure 403 → inline ack banner → ack + retry re-submits", () => {
@@ -355,6 +365,51 @@ describe("TiptapSelectionToolbar Ask errors", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/couldn.t do that/i);
     expect(screen.queryByText(/hosted model/i)).toBeNull();
   });
+
+  it("ack-retry re-submits the FROZEN payload even if the selection changed (Codex High)", () => {
+    const editor = fakeEditor(); // exposes .fire (added above) so we can move the selection
+    submitMock.mockImplementationOnce((_vars, opts) =>
+      opts.onError(
+        new ApiError("disclosure_required", "hosted-model disclosure not acknowledged"),
+      ),
+    );
+    const qc = new QueryClient();
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <TiptapSelectionToolbar
+            editor={editor}
+            provider={fakeProvider(true, true)}
+            workspaceId="ws-1"
+            head={HEAD}
+            sections={SECTIONS}
+            canEdit
+            canWrite
+          />
+        </QueryClientProvider>
+      </MantineProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /ask/i }));
+    fireEvent.click(screen.getByText(/explain this/i));
+    expect(submitMock.mock.calls[0][0].selection_context.anchor).toBe("Test claim.");
+    expect(screen.getByRole("alert")).toHaveTextContent(/hosted model/i);
+
+    // User moves the selection to a DIFFERENT claim before acking.
+    vi.mocked(deriveClaimAnchor).mockReturnValue({
+      sectionIndex: 0,
+      anchor: "Other claim.",
+      singleSection: true,
+      headingOnly: false,
+    });
+    act(() => editor.fire("selectionUpdate"));
+
+    // Ack → the retry MUST re-send the ORIGINAL "Test claim." context, not "Other claim.".
+    ackMock.mockImplementationOnce((_v, opts) => opts.onSuccess());
+    submitMock.mockImplementationOnce((_vars, opts) => opts.onSuccess?.());
+    fireEvent.click(screen.getByRole("button", { name: /i understand/i }));
+    expect(submitMock).toHaveBeenCalledTimes(2);
+    expect(submitMock.mock.calls[1][0].selection_context.anchor).toBe("Test claim.");
+  });
 });
 ```
 
@@ -376,14 +431,38 @@ import { Button, Group, Menu, Paper, Text } from "@mantine/core";
 import { useSubmitTurn, useAckDisclosure } from "../api/turns";
 import { ApiError } from "../api/client";
 ```
-2. Add hooks + state with the others (above the early return):
+2. At module scope (after the imports) declare the frozen-payload type:
+```tsx
+type TurnPayload = { content: string; selection_context: SelectionContext };
+```
+3. Add hooks + state with the others (above the early return):
 ```tsx
   const ack = useAckDisclosure(workspaceId);
-  const [needsAck, setNeedsAck] = useState<{ rt: "ask" | "modify"; text: string } | null>(null);
+  const [needsAck, setNeedsAck] = useState<TurnPayload | null>(null);
   const [turnError, setTurnError] = useState<string | null>(null);
 ```
-3. Replace `runTurn` body's `submit.mutate(...)` call:
+4. Replace `runTurn` so it builds the payload from the live claim once, then hands a **frozen** payload to `submitTurn`; the ack-retry re-submits that exact payload (Codex High — never rebuild `selection_context` from a possibly-changed live claim):
 ```tsx
+  // submitTurn owns mutate + error handling. On a disclosure 403 it freezes the WHOLE
+  // payload (content + the selection_context captured at submit time) into needsAck, so
+  // ackAndRetry re-submits the ORIGINAL selection — immune to the user changing/clearing
+  // the selection between the 403 and the ack (Codex High).
+  function submitTurn(payload: TurnPayload) {
+    submit.mutate(payload, {
+      onSuccess: () => {
+        setNeedsAck(null);
+        setTurnError(null);
+      },
+      onError: (e) => {
+        if (e instanceof ApiError && /disclosure/i.test(e.message)) {
+          setNeedsAck(payload);
+        } else {
+          setTurnError("Couldn't do that — please try again.");
+        }
+      },
+    });
+  }
+
   function runTurn(requestType: "ask" | "modify", instruction: string) {
     if (!instruction.trim() || submit.isPending) return;
     const selection_context: SelectionContext = {
@@ -396,22 +475,7 @@ import { ApiError } from "../api/client";
       from_offset: fromOffset,
       to_offset: toOffset,
     };
-    submit.mutate(
-      { content: instruction, selection_context },
-      {
-        onSuccess: () => {
-          setNeedsAck(null);
-          setTurnError(null);
-        },
-        onError: (e) => {
-          if (e instanceof ApiError && /disclosure/i.test(e.message)) {
-            setNeedsAck({ rt: requestType, text: instruction });
-          } else {
-            setTurnError("Couldn't do that — please try again.");
-          }
-        },
-      },
-    );
+    submitTurn({ content: instruction, selection_context });
   }
 
   function ackAndRetry() {
@@ -419,12 +483,13 @@ import { ApiError } from "../api/client";
     ack.mutate(undefined, {
       onSuccess: () => {
         setNeedsAck(null);
-        if (pending) runTurn(pending.rt, pending.text);
+        if (pending) submitTurn(pending); // re-submit the FROZEN payload, not the live claim
       },
     });
   }
 ```
-4. In the returned JSX, inside the `<Paper …>` after the `</Group>` of the button row, add the banners:
+(Note: when `claim` becomes null the toolbar returns null and the ack banner disappears — the frozen payload guarantees no wrong-target submit and no crash; the user simply re-selects and re-clicks. This graceful degradation is acceptable for D1a; surviving `claim → null` for the banner is not required.)
+5. In the returned JSX, inside the `<Paper …>` after the `</Group>` of the button row, add the banners:
 ```tsx
         {needsAck && (
           <Group gap="xs" mt={4} wrap="nowrap" role="alert">
@@ -586,17 +651,37 @@ Expected: **4 passed**, including the restored scenario (c) — the pill converg
 
 - [ ] **Step 1: Write the failing snapshot test**
 
-Add to `TiptapSelectionToolbar.test.tsx`: open Cite, then drive a `selectionUpdate` that makes `deriveClaimAnchor` return `null`, and assert the composer is still present.
+Add to `TiptapSelectionToolbar.test.tsx`: open Cite, then drive a `selectionUpdate` that makes `deriveClaimAnchor` return `null`, and assert the composer is still present. This reuses the top-level `deriveClaimAnchor` import and the `fakeEditor().fire` helper added in Task 3 (no `await import` — that would need an async test):
 
 ```tsx
-  it("C#5: open composer survives the selection emptying (frozen claim snapshot)", () => {
-    const derive = vi.mocked((await import("./selectionAnchor")).deriveClaimAnchor);
-    // Render with a claim, open Cite, then flip deriveClaimAnchor to null + fire selectionUpdate.
-    // (Use the fakeEditor's captured "selectionUpdate" listener to trigger a re-derive.)
-    // ... assert screen.getByTestId("citation-composer") is still in the document.
+  it("C#5: an open composer survives the selection emptying (frozen claim snapshot)", () => {
+    const editor = fakeEditor(); // exposes .fire
+    const qc = new QueryClient();
+    render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <TiptapSelectionToolbar
+            editor={editor}
+            provider={fakeProvider(true, true)}
+            workspaceId="ws-1"
+            head={HEAD}
+            sections={SECTIONS}
+            canEdit
+            canWrite
+          />
+        </QueryClientProvider>
+      </MantineProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /cite/i })); // open composer (frozen snapshot)
+    expect(screen.getByTestId("citation-composer")).toBeInTheDocument();
+    // Selection empties → claim becomes null.
+    vi.mocked(deriveClaimAnchor).mockReturnValue(null);
+    act(() => editor.fire("selectionUpdate"));
+    // The open composer, rendered from the frozen snapshot, must survive.
+    expect(screen.getByTestId("citation-composer")).toBeInTheDocument();
   });
 ```
-> The implementer wires the `selectionUpdate` listener capture (the `fakeEditor` already records listeners) to invoke it after `derive.mockReturnValue(null)`, then asserts the mocked `citation-composer` testid persists.
+> `deriveClaimAnchor` is module-mocked at the top of the file; `vi.mocked(deriveClaimAnchor).mockReturnValue(null)` + `editor.fire("selectionUpdate")` re-derives to null. Remember to restore it (`beforeEach` → `fixedClaim`) as in the Ask-errors block.
 
 - [ ] **Step 2: Run it red** — `pnpm exec vitest run src/collab/TiptapSelectionToolbar.test.tsx -t "survives the selection emptying"` → FAIL (composer gone).
 
@@ -684,3 +769,8 @@ EOF
 **Type/name consistency:** `useSettled(provider): boolean` created in Task 1, consumed in Task 2 (toolbar) + Task 1 Step 5 (SaveVersionButton). `ClaimContext` (from `../cockpit/CitationComposer`) reused for the Task 6 snapshot. `needsAck`/`turnError`/`citeClaim` state names consistent across Tasks 3/6. The `saveVersion` helper (from D0) is reused unchanged in Task 4. Selectors match D0-verified ones (`collab-editor`, `citation-pill`, `complementary`/"add a citation", "Cite", "Seed Reference on Precision Medicine").
 
 **Ordering:** Task 6 is explicitly conditional on Task 5 Step 3 — the reactive C#5 call the spec requires. The git==live base-reset in Task 4 keeps D1b's 409 out of scope.
+
+**Codex plan-review findings folded (all verified against source):**
+- **High — ack-retry wrong-target.** `needsAck` now stores the **frozen `TurnPayload`** (content + the `selection_context` captured at submit time); `submitTurn` re-sends it verbatim, so an ack-retry can never rebuild against a changed/cleared live claim. New regression test drives a selection change between the 403 and the ack and asserts the retry keeps the original anchor.
+- **Medium — `SaveVersionButton` behaviour.** Constraint reworded from "byte-for-behaviour" to "behaviourally equivalent": the hook's synchronous initial sample removes a spurious first-tick disable (harmless; no test/flow depends on it) — the honest statement, not preserving the worse old initial-false.
+- **Low — Task 6 sketch.** Rewritten as a parseable (non-async) test reusing the top-level `deriveClaimAnchor` mock + `fakeEditor().fire` helper (added in Task 3), instead of `await import()` in a non-async arrow.
