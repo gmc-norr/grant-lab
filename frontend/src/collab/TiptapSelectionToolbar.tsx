@@ -8,6 +8,7 @@ import { CitationComposer, type ClaimContext } from "../cockpit/CitationComposer
 import { toCodePointOffset, type SelectionContext } from "../cockpit/selection";
 import type { CollabProvider } from "./collabProvider";
 import { deriveClaimAnchor } from "./selectionAnchor";
+import { useSettled } from "./useSettled";
 
 const ASK_PRESETS = [
   { label: "Explain this", text: "Explain the selected text." },
@@ -33,6 +34,9 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   const submit = useSubmitTurn(workspaceId);
   const [claim, setClaim] = useState(() => deriveClaimAnchor(editor.state));
   const [citeOpen, setCiteOpen] = useState(false);
+  // Reactive settle state (polled) so Edit/Cite re-enable when the WS buffer drains —
+  // the render-time sample latched disabled after a selection's awareness send (D0).
+  const settled = useSettled(provider);
 
   useEffect(() => {
     const update = () => setClaim(deriveClaimAnchor(editor.state));
@@ -41,9 +45,6 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   }, [editor]);
 
   if (!claim) return null;
-
-  // Transport-settled guard: Edit and Cite require a settled connection
-  const settled = provider.status === "connected" && provider.isSettled();
 
   // Locate the section in the sections array
   const section = sections[claim.sectionIndex];

@@ -1,7 +1,7 @@
 // frontend/src/collab/TiptapSelectionToolbar.test.tsx
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { theme } from "../theme/theme";
@@ -138,5 +138,45 @@ describe("TiptapSelectionToolbar gates", () => {
     expect(screen.getByRole("button", { name: /ask/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /edit/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /cite/i })).toBeDisabled();
+  });
+
+  it("reactive settle: Cite/Edit enable on the poll tick after the buffer drains", () => {
+    vi.useFakeTimers();
+    try {
+      const ref = { val: false };
+      const provider = {
+        get status() {
+          return "connected";
+        },
+        isSettled: () => ref.val, // controllable — false until we drain
+      } as never;
+      const qc = new QueryClient();
+      render(
+        <MantineProvider theme={theme} defaultColorScheme="dark">
+          <QueryClientProvider client={qc}>
+            <TiptapSelectionToolbar
+              editor={fakeEditor()}
+              provider={provider}
+              workspaceId="ws-1"
+              head={HEAD}
+              sections={SECTIONS}
+              canEdit={true}
+              canWrite={true}
+            />
+          </QueryClientProvider>
+        </MantineProvider>,
+      );
+      // Unsettled → Ask enabled (anchorable) but Cite/Edit disabled (the latch symptom).
+      expect(screen.getByRole("button", { name: /ask/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /cite/i })).toBeDisabled();
+      expect(screen.getByRole("button", { name: /edit/i })).toBeDisabled();
+      // Buffer drains → the poll re-enables the write-actions (no reselect needed).
+      ref.val = true;
+      act(() => vi.advanceTimersByTime(200));
+      expect(screen.getByRole("button", { name: /cite/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /edit/i })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
