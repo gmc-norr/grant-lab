@@ -105,6 +105,34 @@ def find_checkpoint_candidates(
     return [(r[0], r[1]) for r in rows]
 
 
+def find_artifacts_with_updates(session: Session) -> list[tuple[uuid.UUID, str]]:
+    """DISTINCT (workspace_id, artifact) owning ANY log rows, live workspaces
+    only. The kill-switch handover needs every artifact with a log — including
+    fully-checkpointed ones (a stale log would still clobber kill-window
+    git-first writes on replay after the switch lifts), which is why this is
+    NOT find_checkpoint_candidates(min_tail=0) (that only sees rows above the
+    watermark)."""
+    rows = session.execute(
+        select(YjsUpdate.workspace_id, YjsUpdate.artifact)
+        .join(Workspace, Workspace.id == YjsUpdate.workspace_id)
+        .where(Workspace.soft_deleted_at.is_(None))
+        .distinct()
+    ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+def truncate_log(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
+    """Delete ALL log rows for one artifact. Kill-switch handover ONLY — the
+    caller must have checkpointed the full log to git IN THE SAME transaction.
+    Returns the number of rows deleted."""
+    res = session.execute(
+        sa_delete(YjsUpdate).where(
+            YjsUpdate.workspace_id == workspace_id, YjsUpdate.artifact == artifact
+        )
+    )
+    return int(res.rowcount or 0)
+
+
 def compact_snapshot(
     session: Session,
     *,

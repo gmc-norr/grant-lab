@@ -67,6 +67,25 @@ STATIC_DIR = Path(__file__).parent / "web" / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 3b-5d.D4: kill-switch handover BEFORE serving — drain every collab log to
+    # git and truncate it, so the git-first world is coherent from request #1.
+    if app.state.settings.collab_kill_switch:
+        import logging
+
+        from starlette.concurrency import run_in_threadpool
+
+        from call_manager.proposal_assist.collab.handover import run_kill_switch_handover
+
+        _n = await run_in_threadpool(
+            lambda: run_kill_switch_handover(
+                app.state.session_factory,
+                workspaces_dir=app.state.settings.workspaces_dir,
+            )
+        )
+        logging.getLogger(__name__).warning(
+            "collab kill-switch engaged — handover drained %d artifact(s)", _n
+        )
+
     # Deferred import: keeps `admin_bootstrap` off the import graph until
     # lifespan runs, so test-side `create_app()` calls that never enter
     # lifespan don't pay the import cost or trigger its side-effects.

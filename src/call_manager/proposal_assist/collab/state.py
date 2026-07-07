@@ -69,3 +69,14 @@ def advance_checkpoint(
         session.add(row)
     row.last_checkpoint_update_id = up_to_update_id
     row.last_checkpoint_commit_sha = commit_sha
+
+
+def reset_checkpoint(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> None:
+    """Kill-switch handover ONLY: return the artifact to the 'never opened'
+    state (the log is truncated separately, same transaction) so a
+    post-kill-switch reconnect hydrates fresh from git HEAD. enabled_at is
+    deliberately untouched (sticky-forward)."""
+    row = _get(session, workspace_id, artifact)
+    if row is not None:
+        row.last_checkpoint_update_id = None
+        row.last_checkpoint_commit_sha = None
