@@ -37,6 +37,7 @@ __all__ = [
     "extract_awareness_update",
     "read_awareness_client_ids",
     "read_awareness_entries",
+    "filter_awareness_update",
     "AwarenessEntry",
 ]
 
@@ -150,3 +151,31 @@ def read_awareness_client_ids(payload: bytes) -> list[int]:
     """The client ids declared in an awareness update — thin wrapper over
     read_awareness_entries (one parser, no drift)."""
     return [e.client_id for e in read_awareness_entries(payload)]
+
+
+def _write_varuint(num: int) -> bytes:
+    """Base-128 varuint writer — mirror of the reader in read_awareness_entries."""
+    out = bytearray()
+    while num > 0x7F:
+        out.append(0x80 | (num & 0x7F))
+        num >>= 7
+    out.append(num)
+    return bytes(out)
+
+
+def filter_awareness_update(
+    payload: bytes, entries: list[AwarenessEntry], allowed_ids: set[int]
+) -> bytes | None:
+    """Drop the entries whose client_id is not in allowed_ids.
+
+    All allowed -> the payload UNCHANGED, byte-identical (fast path — the
+    overwhelmingly common case; zero re-encode in normal operation). None
+    allowed -> None (nothing to relay). Mixed -> rebuilt as varuint(kept count)
+    + the kept entries' ORIGINAL byte spans — entries are never re-encoded,
+    only re-counted."""
+    kept = [e for e in entries if e.client_id in allowed_ids]
+    if len(kept) == len(entries):
+        return payload
+    if not kept:
+        return None
+    return _write_varuint(len(kept)) + b"".join(payload[e.start : e.end] for e in kept)

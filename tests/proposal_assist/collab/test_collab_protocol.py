@@ -197,3 +197,49 @@ def test_read_awareness_client_ids_is_a_wrapper_over_entries():
     assert P.read_awareness_client_ids(payload) == [e.client_id for e in entries]
     assert [e.client_id for e in entries] == [7, 2**40 + 3]
     assert [e.is_null for e in entries] == [False, True]
+
+
+# ---------------------------------------------------------------------------
+# 3b-5d.D2: filter_awareness_update
+# ---------------------------------------------------------------------------
+
+
+def test_filter_awareness_update_all_allowed_is_byte_identical_fast_path():
+    payload = _vu(2) + _entry(7, 1, b'{"a":1}') + _entry(9, 1, b'{"b":2}')
+    entries = P.read_awareness_entries(payload)
+    # `is`: the fast path must not copy — zero re-encode in normal operation.
+    assert P.filter_awareness_update(payload, entries, {7, 9}) is payload
+
+
+def test_filter_awareness_update_none_allowed_returns_none():
+    payload = _vu(1) + _entry(7, 1, b'{"a":1}')
+    entries = P.read_awareness_entries(payload)
+    assert P.filter_awareness_update(payload, entries, {8}) is None
+
+
+def test_filter_awareness_update_mixed_rebuilds_kept_spans():
+    # A real two-client snapshot filtered to one id must parse to exactly the
+    # kept id AND apply cleanly to a fresh pycrdt Awareness.
+    d = _Doc()
+    srv = P.Awareness(d)
+    srv.set_local_state(None)
+    p1, c1 = _awareness_payload({"user": {"name": "Keep"}})
+    p2, _c2 = _awareness_payload({"user": {"name": "Drop"}})
+    srv.apply_awareness_update(p1, "x")
+    srv.apply_awareness_update(p2, "x")
+    snap = srv.encode_awareness_update(list(srv.states))
+    entries = P.read_awareness_entries(snap)
+    out = P.filter_awareness_update(snap, entries, {c1})
+    assert out is not None and out != snap
+    assert P.read_awareness_client_ids(out) == [c1]
+    fresh = P.Awareness(_Doc())
+    fresh.set_local_state(None)
+    fresh.apply_awareness_update(out, "x")
+    assert set(fresh.states) == {c1}
+    assert fresh.states[c1]["user"]["name"] == "Keep"
+
+
+def test_filter_awareness_update_empty_frame_is_all_allowed():
+    # count=0: vacuously all-allowed → same object back (relay-unchanged).
+    payload = _vu(0)
+    assert P.filter_awareness_update(payload, [], set()) is payload
