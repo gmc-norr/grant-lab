@@ -395,6 +395,7 @@ def test_failed_is_not_covered(pg_session_factory):
     """DELIBERATE SEMANTIC: FAILED is absent from _COVERED_STATUSES — a
     dead-lettered job's content gets a fresh row with a fresh attempt budget."""
     alpha_sha = split_sections(UNCOVERED_DOC)[1].sha
+    beta_sha = split_sections(UNCOVERED_DOC)[2].sha
     with pg_session_factory() as s:
         ws = _ws(s)
         s.add(
@@ -412,6 +413,8 @@ def test_failed_is_not_covered(pg_session_factory):
             s, workspace_id=ws.id, doc=UNCOVERED_DOC, commit_sha="c2"
         )
         assert n == 2  # Alpha re-enqueued despite the failed row, plus Beta
+        new = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws.id, commit_sha="c2").all()
+        assert {j.section_sha for j in new} == {alpha_sha, beta_sha}
 
 
 def test_second_identical_call_is_idempotent(pg_session_factory):

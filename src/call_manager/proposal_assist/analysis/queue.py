@@ -81,7 +81,7 @@ def enqueue_uncovered_sections(
 ) -> int:
     """Enqueue a claim-analysis job for every non-empty section of *doc* whose
     content sha has no queued/running/done job. Content-keyed idempotent; dedups
-    duplicate-content sections; reads nothing (caller supplies the markdown) and
+    duplicate-content sections; performs no file/git IO (caller supplies the markdown) and
     does NOT commit (caller owns the transaction). Returns the number inserted.
 
     Callers: the collab checkpoint hook (3b-5d.D3 immediacy) and the reconcile
