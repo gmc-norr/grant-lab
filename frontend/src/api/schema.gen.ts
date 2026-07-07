@@ -714,9 +714,16 @@ export interface paths {
         put?: never;
         /**
          * Insert Annotation
-         * @description Insert the citation an uncited_supported annotation suggests, via the
-         *     canonical write path (insert_from_annotation). Owner-only. On a genuine
-         *     (non-idempotent) insert, re-enqueue analysis for the now-changed section.
+         * @description Insert the citation an uncited_supported annotation suggests. Owner-only.
+         *
+         *     Flag-on:  routes through the live Yjs room via insert_annotation_via_kernel
+         *               (the bespoke, occurrence-aware core — see apply_annotation_insert_
+         *               to_room's docstring for why it does not reuse the generic citation
+         *               kernel's compute).
+         *     Flag-off: the canonical git write path (insert_from_annotation), byte-for-
+         *               byte, threadpooled.
+         *     On a genuine (non-idempotent) insert, either branch re-enqueues analysis
+         *     for the now-changed section (Tier-2 immediacy parity).
          */
         post: operations["insert_annotation_api_workspaces__workspace_id__annotations__annotation_id__insert_post"];
         delete?: never;
@@ -770,9 +777,10 @@ export interface paths {
         put?: never;
         /**
          * Post Citation
-         * @description Human select-to-cite: a direct citation commit (owner-gated). Sync handler
-         *     (FastAPI threadpools it) calling the sync insert_citation_for_user core; this
-         *     handler owns the transaction (single commit/rollback, mutex released on it).
+         * @description Human select-to-cite: collab-aware citation commit.
+         *
+         *     Flag-on:  any writer, routes to the live Yjs room via direct_cite_via_kernel.
+         *     Flag-off: owner-only, sync git path (threadpooled), byte-for-byte parity.
          */
         post: operations["post_citation_api_workspaces__workspace_id__citations_post"];
         delete?: never;
@@ -1498,9 +1506,12 @@ export interface paths {
         put?: never;
         /**
          * Post Init Spec
-         * @description Idempotent Spec initialization (owner-gated). If proposal-spec.md is
-         *     whitespace-only, seed SPEC_SKELETON as ONE whole-doc commit (sidestepping the
-         *     preamble structure guard); otherwise no-op. Returns the SpecOut either way.
+         * @description Idempotent Spec initialization (owner-gated). Flag-on: the skeleton seeds
+         *     through the live room (kernel) — provenance comes from the collab checkpoint
+         *     (ArtifactVersion "collab checkpoint: spec" / WorkspaceEvent kind=
+         *     "collab_checkpoint"), NOT a user_edit row (3b-5d.D4 §3.3 deliberate deviation
+         *     — do not duplicate provenance rows on the kernel path). Flag-off: the legacy
+         *     whole-doc git commit, byte-for-byte.
          */
         post: operations["post_init_spec_api_workspaces__workspace_id__spec_post"];
         delete?: never;
@@ -1849,7 +1860,7 @@ export interface components {
         /** AddCitationOut */
         AddCitationOut: {
             /** Citekey */
-            citekey: string;
+            citekey: string | null;
             /** Commit Sha */
             commit_sha: string;
             /** Ev Id */

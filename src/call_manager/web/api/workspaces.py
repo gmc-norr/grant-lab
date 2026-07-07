@@ -187,7 +187,9 @@ class AddCitationIn(BaseModel):
 
 class AddCitationOut(BaseModel):
     ev_id: str
-    citekey: str
+    # None on an idempotent re-cite of a citekey-less/corrupt ledger row —
+    # kernel.py carries str | None end-to-end (3b-5a deferral, fixed at the flip).
+    citekey: str | None
     commit_sha: str
 
 
