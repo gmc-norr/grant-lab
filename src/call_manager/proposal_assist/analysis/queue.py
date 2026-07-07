@@ -12,7 +12,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -66,6 +66,53 @@ def enqueue_section_job(
     )
     result = session.execute(stmt)
     return result.inserted_primary_key is not None
+
+
+# A section is "covered" when a job for its exact content is queued, running,
+# or done. FAILED is deliberately absent: a dead-lettered job's content gets
+# another chance via the coverage loop (fresh row, fresh attempt budget).
+# SUPERSEDED is likewise absent, but a superseded sha only reappears at HEAD
+# via a content revert, which deserves a re-run anyway.
+_COVERED_STATUSES = ("queued", "running", "done")
+
+
+def enqueue_uncovered_sections(
+    session: Session, *, workspace_id: uuid.UUID, doc: str, commit_sha: str
+) -> int:
+    """Enqueue a claim-analysis job for every non-empty section of *doc* whose
+    content sha has no queued/running/done job. Content-keyed idempotent; dedups
+    duplicate-content sections; performs no file/git IO (caller supplies the markdown) and
+    does NOT commit (caller owns the transaction). Returns the number inserted.
+
+    Callers: the collab checkpoint hook (3b-5d.D3 immediacy) and the reconcile
+    tick (the always-on safety net) — one source of truth for the coverage
+    predicate."""
+    covered = set(
+        session.execute(
+            select(ClaimAnalysisJob.section_sha).where(
+                ClaimAnalysisJob.workspace_id == workspace_id,
+                ClaimAnalysisJob.status.in_(_COVERED_STATUSES),
+            )
+        ).scalars()
+    )
+    inserted = 0
+    for sec in split_sections(doc):
+        if not sec.text.strip():
+            continue  # empty preamble/section — nothing to analyze
+        if sec.sha in covered:
+            continue
+        if enqueue_section_job(
+            session,
+            workspace_id=workspace_id,
+            section_index=sec.index,
+            section_heading=sec.heading,
+            section_sha=sec.sha,
+            commit_sha=commit_sha,
+        ):
+            inserted += 1
+        # Duplicate sections share content (and a sha) — enqueue once.
+        covered.add(sec.sha)
+    return inserted
 
 
 def enqueue_containing_section(

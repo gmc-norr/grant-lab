@@ -9,20 +9,12 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from call_manager.db.models import ClaimAnalysisJob, Workspace
-from call_manager.proposal_assist.analysis.queue import enqueue_section_job
+from call_manager.db.models import Workspace
+from call_manager.proposal_assist.analysis.queue import enqueue_uncovered_sections
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
-from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
-
-# A section is "covered" when a job for its exact content is queued, running,
-# or done. FAILED is deliberately absent: a dead-lettered job's content gets
-# another chance via this tick (fresh row, fresh attempt budget). SUPERSEDED is
-# likewise absent, but a superseded sha only reappears at HEAD via a content
-# revert, which deserves a re-run anyway.
-_COVERED_STATUSES = ("queued", "running", "done")
 
 
 def reconcile_analysis_coverage(*, session_factory, workspaces_dir) -> int:
@@ -31,7 +23,9 @@ def reconcile_analysis_coverage(*, session_factory, workspaces_dir) -> int:
 
     One session, one commit at the end. Workspaces that are soft-deleted,
     have no proposal.md, or have an unreadable HEAD are skipped without
-    raising — the next tick retries.
+    raising — the next tick retries. The covered/uncovered predicate lives
+    in queue.enqueue_uncovered_sections (shared with the collab checkpoint
+    hook, 3b-5d.D3).
     """
     inserted = 0
     with session_factory() as session:
@@ -56,30 +50,8 @@ def reconcile_analysis_coverage(*, session_factory, workspaces_dir) -> int:
                     exc_info=True,
                 )
                 continue
-
-            covered = set(
-                session.execute(
-                    select(ClaimAnalysisJob.section_sha).where(
-                        ClaimAnalysisJob.workspace_id == ws_id,
-                        ClaimAnalysisJob.status.in_(_COVERED_STATUSES),
-                    )
-                ).scalars()
+            inserted += enqueue_uncovered_sections(
+                session, workspace_id=ws_id, doc=doc, commit_sha=head
             )
-            for sec in split_sections(doc):
-                if not sec.text.strip():
-                    continue  # empty preamble/section — nothing to analyze
-                if sec.sha in covered:
-                    continue
-                if enqueue_section_job(
-                    session,
-                    workspace_id=ws_id,
-                    section_index=sec.index,
-                    section_heading=sec.heading,
-                    section_sha=sec.sha,
-                    commit_sha=head,
-                ):
-                    inserted += 1
-                # Duplicate sections share content (and a sha) — enqueue once.
-                covered.add(sec.sha)
         session.commit()
     return inserted
