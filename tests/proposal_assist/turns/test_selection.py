@@ -133,3 +133,72 @@ def test_collab_sections_override_verifies_modify(tmp_path):
     )
     assert block["verified"] is True
     assert block["request_type"] == "modify" and block["anchor"] == "carefully"
+
+
+def test_collab_relocation_modify_verifies_short_unique_span(tmp_path):
+    # git has an OLD Aims; the live room is AHEAD → the client's git sha is stale.
+    # A unique SHORT span ("diagnostic") relocates and verifies (no 409). THE regression.
+    # Bogus client offsets (999,1002) prove the block recomputes them from the anchor.
+    live_doc = "p\n\n## Aims\nPrecision medicine improves diagnostic outcomes.\n"
+    repo = _repo(tmp_path, "p\n\n## Aims\nold aims text.\n")
+    live_secs = split_sections(live_doc)
+    frm = live_secs[1].text.index("diagnostic")
+    block = build_selection_block(
+        repo_dir=repo,
+        sel=_sel(repo, live_doc, 1, 999, 1002, "diagnostic", rt="modify", base_sha="0" * 40),
+        sections=live_secs, allow_anchor_relocation=True,
+    )
+    assert block == {
+        "type": "selection", "request_type": "modify", "section_index": 1,
+        "anchor": "diagnostic", "from_offset": frm, "to_offset": frm + len("diagnostic"),
+        "verified": True, "heading": "Aims",
+    }
+
+
+def test_collab_relocation_modify_anchor_gone_raises(tmp_path):
+    live_doc = "p\n\n## Aims\nPrecision medicine outcomes.\n"  # no "diagnostic"
+    repo = _repo(tmp_path, "p\n\n## Aims\nx.\n")
+    live_secs = split_sections(live_doc)
+    with pytest.raises(SelectionConflictError, match="no longer in this section"):
+        build_selection_block(
+            repo_dir=repo,
+            sel=_sel(repo, live_doc, 1, 0, 10, "diagnostic", rt="modify", base_sha="0" * 40),
+            sections=live_secs, allow_anchor_relocation=True,
+        )
+
+
+def test_collab_relocation_modify_ambiguous_raises(tmp_path):
+    live_doc = "p\n\n## Aims\nrisk here and risk there.\n"  # "risk" appears twice
+    repo = _repo(tmp_path, "p\n\n## Aims\nx.\n")
+    live_secs = split_sections(live_doc)
+    with pytest.raises(SelectionConflictError, match="appears more than once"):
+        build_selection_block(
+            repo_dir=repo,
+            sel=_sel(repo, live_doc, 1, 0, 4, "risk", rt="modify", base_sha="0" * 40),
+            sections=live_secs, allow_anchor_relocation=True,
+        )
+
+
+def test_collab_relocation_ask_anchor_gone_is_unverified(tmp_path):
+    live_doc = "p\n\n## Aims\nPrecision medicine outcomes.\n"
+    repo = _repo(tmp_path, "p\n\n## Aims\nx.\n")
+    live_secs = split_sections(live_doc)
+    block = build_selection_block(
+        repo_dir=repo,
+        sel=_sel(repo, live_doc, 1, 0, 10, "diagnostic", rt="ask", base_sha="0" * 40),
+        sections=live_secs, allow_anchor_relocation=True,
+    )
+    assert block["verified"] is False and block["anchor"] == "diagnostic"
+
+
+def test_flag_off_modify_stale_sha_still_409(tmp_path):
+    # Default allow_anchor_relocation=False → unchanged flag-off behavior (parity).
+    live_doc = "p\n\n## Aims\nPrecision medicine improves diagnostic outcomes.\n"
+    repo = _repo(tmp_path, live_doc)
+    live_secs = split_sections(live_doc)
+    with pytest.raises(SelectionConflictError):
+        build_selection_block(
+            repo_dir=repo,
+            sel=_sel(repo, live_doc, 1, 0, 10, "diagnostic", rt="modify", base_sha="stale" * 8),
+            sections=live_secs,  # NO allow_anchor_relocation → default False
+        )

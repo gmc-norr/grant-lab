@@ -80,6 +80,7 @@ def apply_citation_to_room(
     actor_id,
     workspaces_dir,
     require_anchor_in_section=False,
+    enforce_section_sha=True,
 ) -> CitationApplyResult:
     """Apply a citation marker to the LIVE room + co-commit the ledger. Shared by
     kernel_accept_citation (pc path) and direct_cite_via_kernel (direct path).
@@ -89,7 +90,7 @@ def apply_citation_to_room(
     if not 0 <= section_index < len(sections):
         raise IndexError(f"section_index {section_index} out of range")
     live = sections[section_index]
-    if live.sha != base_section_sha:
+    if enforce_section_sha and live.sha != base_section_sha:
         raise CiteStale("this section changed — reopen and re-cite")
     if require_anchor_in_section and not anchor_occurrences(live.text, anchor):
         # Direct-user protection (human_cite parity): the anchor must occur in the

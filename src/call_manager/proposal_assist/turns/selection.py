@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.citations.markers import anchor_occurrences
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 
 MAX_SELECTION_CODEPOINTS = 4000
@@ -38,11 +39,61 @@ class SelectionInput:
     to_offset: int
 
 
-def build_selection_block(*, repo_dir: Path, sel: SelectionInput, sections=None) -> dict:
+def _relocated_selection_block(sel: SelectionInput, live) -> dict:
+    """Collab path: the client's base_section_sha and offsets are git-derived and the
+    live room is ahead of git, so re-locate the anchor in the LIVE section text and
+    ignore the stale sha. Verified iff the anchor occurs exactly once (marker-aware).
+    A modify that can't be uniquely located is a real conflict (409); an ask stays
+    leniently unverified."""
+    occ = anchor_occurrences(live.text, sel.anchor)
+    if len(occ) == 1:
+        frm = occ[0]
+        to = frm + len(sel.anchor)
+        if to - frm > MAX_SELECTION_CODEPOINTS:
+            raise SelectionConflictError("selection is too long — select a smaller span")
+        return {
+            "type": "selection",
+            "request_type": sel.request_type,
+            "section_index": sel.section_index,
+            "anchor": sel.anchor,
+            "from_offset": frm,
+            "to_offset": to,
+            "verified": True,
+            "heading": live.heading,
+        }
+    if sel.request_type == "modify":
+        if not occ:
+            raise SelectionConflictError(
+                "the text you selected is no longer in this section — reselect"
+            )
+        raise SelectionConflictError(
+            "your selection appears more than once — select a more specific range"
+        )
+    # ask: leniently unverified (unchanged spirit of the git-path unverified branch).
+    if len(sel.anchor) > MAX_SELECTION_CODEPOINTS:
+        raise SelectionConflictError("selection is too long — select a smaller span")
+    return {
+        "type": "selection",
+        "request_type": sel.request_type,
+        "section_index": sel.section_index,
+        "anchor": sel.anchor,
+        "from_offset": sel.from_offset,
+        "to_offset": sel.to_offset,
+        "verified": False,
+        "heading": live.heading,
+    }
+
+
+def build_selection_block(
+    *, repo_dir: Path, sel: SelectionInput, sections=None, allow_anchor_relocation=False
+) -> dict:
     if sections is None:
         proposal = repo_dir / PROPOSAL_FILENAME
         sections = split_sections(proposal.read_text()) if proposal.exists() else []
     live = sections[sel.section_index] if 0 <= sel.section_index < len(sections) else None
+
+    if allow_anchor_relocation and live is not None:
+        return _relocated_selection_block(sel, live)
 
     verified = live is not None and live.sha == sel.base_section_sha
 

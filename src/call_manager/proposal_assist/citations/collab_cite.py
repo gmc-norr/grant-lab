@@ -64,7 +64,8 @@ async def direct_cite_via_kernel(
                             anchor=anchor, reference_id=reference_id, chunk_index=chunk_index,
                             evidence_quote=evidence_quote, quote_start=quote_start,
                             quote_end=quote_end, stance=stance, actor_id=actor_id,
-                            workspaces_dir=workspaces_dir, require_anchor_in_section=True)
+                            workspaces_dir=workspaces_dir, require_anchor_in_section=True,
+                            enforce_section_sha=False)
                         if room.evicted:
                             raise RoomEvicted(str(key))  # tombstoned mid-cite — abort before commit
                         s.commit()
