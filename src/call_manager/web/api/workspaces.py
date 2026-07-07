@@ -379,6 +379,15 @@ def post_save_spec_section(
         except GitCommitError as e:
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+        # 3b-5d.D4 severance: a collab-enabled artifact is Tiptap-only. A stale
+        # CM6 tab (or direct API call) must not git-first-write around the live
+        # room. 409 tells the client to reload (it will mount the collab editor).
+        # Under the kill-switch the flag reads False -> git-first saves resume.
+        if collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="spec"):
+            raise HTTPException(
+                status_code=409,
+                detail="this workspace now uses the live editor — reload the page",
+            )
         try:
             result = save_section(
                 session=session,
@@ -819,6 +828,15 @@ def post_save_section(
         except GitCommitError as e:
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
+        # 3b-5d.D4 severance: a collab-enabled artifact is Tiptap-only. A stale
+        # CM6 tab (or direct API call) must not git-first-write around the live
+        # room. 409 tells the client to reload (it will mount the collab editor).
+        # Under the kill-switch the flag reads False -> git-first saves resume.
+        if collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="draft"):
+            raise HTTPException(
+                status_code=409,
+                detail="this workspace now uses the live editor — reload the page",
+            )
         try:
             result = save_section(
                 session=session,
