@@ -8,12 +8,27 @@ Caller owns the transaction: provenance rows are added but NOT committed
 here, and the commit mutex is released by the caller's COMMIT/ROLLBACK
 (mirrors editing/save.py). A DB failure AFTER the git commit is recovered
 by reconciliation (same atomicity model as save_section).
+
+3b-5d.D4: the core (derive_annotation_cite + compute_annotation_insert) is
+extracted so the collab kernel path (apply_annotation_insert_to_room,
+collab/kernel.py) can drive the SAME occurrence-aware compute against the
+live room instead of git — WHY a bespoke core rather than reusing the generic
+compute_citation_insert: this insert is occurrence-aware (the same
+(reference_id, chunk_index, evidence_quote) live ELSEWHERE in the document
+does NOT satisfy an insert targeted at THIS annotation's occurrence — see
+compute_annotation_insert's docstring), so the generic
+compute_citation_insert's ledger-wide _find_idempotent_row scan would falsely
+short-circuit it, and its evidence row lacks the claim_context_text/hash this
+core stamps on every row. Extracting a bespoke derive/compute pair keeps that
+narrower repair semantics intact on both the git AND the kernel path.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -84,43 +99,45 @@ class InsertConflict(RuntimeError):
     The message is user-facing — web routes map this to 409 detail=str(exc)."""
 
 
-def insert_from_annotation(
-    *,
-    session: Session,
-    workspace: Workspace,
-    user_id: int,
-    annotation: UserClaimAnnotation,
-    workspaces_dir: Path | str,
-) -> dict:
-    """Insert the citation an ``uncited_supported`` annotation suggests.
+@dataclass(frozen=True)
+class DerivedCite:
+    section_index: int
+    anchor: str
+    reference_id: uuid.UUID
+    chunk_index: int
+    evidence_quote: str
+    quote_start: int
+    quote_end: int
 
-    Returns ``{"ev_id", "citekey", "commit_sha"}`` on success, or
-    ``{"idempotent": True}`` when THIS annotation was already inserted.
-    Raises :class:`InsertConflict` for every expected user-facing failure,
-    ``CommitMutexTimeout`` (web maps to 503) and ``GitCommitError`` (500).
-    """
-    # 1. Serialize against every other git mutation of this workspace.
-    # CommitMutexTimeout propagates — the web layer maps it to 503.
-    acquire_commit_mutex(session, workspace.id)
 
-    # Expire annotation immediately after acquiring the mutex: SQLAlchemy's
-    # identity map still holds the pre-block snapshot. A concurrent insert
-    # that committed while we were blocked would have flipped annotation.status
-    # to "inserted", but the ORM would not see it without re-SELECTing. Under
-    # READ COMMITTED the next attribute access re-issues a SELECT, so the
-    # idempotency check below is authoritative inside the mutex.
-    session.expire(annotation)
+@dataclass(frozen=True)
+class AnnotationInsertOutcome:
+    """Either a claim-context repair hit (``repair`` set — the annotation's
+    status/resolved fields are ALREADY mutated by the time this is returned,
+    and NOTHING new was written), or a fresh insert (``new_doc``/``new_ledger``/
+    ``ev_id``/``citekey`` set — nothing committed yet, that is the caller's job)."""
 
-    # 2. Turn-lock: an agent turn in flight owns the repo.
-    if _turn_in_flight(session, workspace.id):
-        raise InsertConflict(TURN_IN_FLIGHT_MESSAGE)
+    repair: tuple[str, str | None] | None = None
+    new_doc: str | None = None
+    new_ledger: dict | None = None
+    ev_id: str | None = None
+    citekey: str | None = None
 
+
+def derive_annotation_cite(
+    session: Session, *, workspace: Workspace, annotation: UserClaimAnnotation, doc: str
+) -> DerivedCite | None:
+    """Steps 3-6 of insert_from_annotation, extracted VERBATIM with the document
+    text parameterized (git path passes the disk read; the kernel path passes
+    the live-room serialization). Returns None when THIS annotation is already
+    inserted (the idempotent signal); raises InsertConflict exactly as before.
+    Contains NO mutex/expire/turn-lock — callers own those."""
     # 3. Occurrence-aware idempotency (spec rev-3 finding 4): only THIS
     # annotation being inserted is a no-op. The same (ref, chunk, quote)
     # being live elsewhere in the document does NOT satisfy this occurrence,
     # so there is deliberately NO _find_idempotent_row-style ledger scan here.
     if annotation.status == "inserted":
-        return {"idempotent": True}
+        return None
     if annotation.status != "open" or annotation.kind != "uncited_supported":
         raise InsertConflict("annotation is no longer actionable")
 
@@ -154,11 +171,6 @@ def insert_from_annotation(
     # 5. Live document — the annotation addresses a section SNAPSHOT
     # (section_sha) plus a duplicate-section ordinal (section_occurrence).
     # If that exact content no longer exists at HEAD the finding is stale.
-    repo = workspace_repo_dir(workspaces_dir, workspace.id)
-    proposal_path = repo / PROPOSAL_FILENAME
-    if not proposal_path.exists():
-        raise InsertConflict("the text changed — re-analysis is pending")
-    doc = proposal_path.read_text()
     sections = split_sections(doc)
     matches = [s for s in sections if s.sha == annotation.section_sha]
     if annotation.section_occurrence >= len(matches):
@@ -193,13 +205,52 @@ def insert_from_annotation(
     if doc.count(anchor) != 1:
         raise InsertConflict("repeated text — cite it via chat or edit the sentence to be unique")
 
-    # 7. Ledger + citekey (same resolution as the agent path) + marker.
-    citations_path = repo / CITATIONS_FILENAME
-    try:
-        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
-    except ValueError as exc:
-        logger.error("corrupt citations.json in workspace %s: %s", workspace.id, exc)
-        raise InsertConflict(f"citations.json is invalid: {exc}") from exc
+    return DerivedCite(
+        section_index=target.index,
+        anchor=anchor,
+        reference_id=ref.id,
+        chunk_index=annotation.chunk_index,
+        evidence_quote=annotation.evidence_quote,
+        quote_start=q_start,
+        quote_end=q_end,
+    )
+
+
+def compute_annotation_insert(
+    session: Session,
+    *,
+    workspace: Workspace,
+    annotation: UserClaimAnnotation,
+    user_id: int,
+    doc: str,
+    ledger: dict,
+    derived: DerivedCite,
+) -> AnnotationInsertOutcome:
+    """Steps 6.5-8 of insert_from_annotation, extracted VERBATIM (parameterized
+    on doc/ledger/derived — the caller already ran derive_annotation_cite and
+    passes its result through so this does not re-walk the anchor search).
+    Writes NO git; the caller (git path or kernel path) owns the commit.
+
+    Occurrence-aware by construction: the claim-context-hash-keyed repair scan
+    below is the ONLY idempotency check here — it repairs a partial prior
+    write (git commit landed, DB commit rolled back) for THIS exact
+    (reference, chunk, quote, claim-context) tuple. It deliberately does NOT
+    do a generic _find_idempotent_row-style scan (tools/citations.py) — the
+    same (reference_id, chunk_index, evidence_quote) already cited at ANOTHER
+    sentence must NOT satisfy this occurrence (spec rev-3 finding 4)."""
+    ref = session.get(Reference, derived.reference_id)
+    chunk = (
+        session.query(ReferenceChunk)
+        .filter(
+            ReferenceChunk.reference_id == derived.reference_id,
+            ReferenceChunk.chunk_index == derived.chunk_index,
+            ReferenceChunk.workspace_id == workspace.id,
+        )
+        .one_or_none()
+    )
+    anchor = derived.anchor
+    q_start, q_end = derived.quote_start, derived.quote_end
+
     # Idempotency repair for a partial prior write: the git commit (step 9)
     # lands BEFORE annotation.status='inserted' is set on the session and
     # committed by the CALLER. If that caller commit fails (e.g. a citekey
@@ -230,7 +281,7 @@ def insert_from_annotation(
             annotation.status = "inserted"
             annotation.resolved_by_user_id = user_id
             annotation.resolved_at = datetime.now(UTC)
-            return {"idempotent": True, "ev_id": rid, "citekey": r.get("citekey")}
+            return AnnotationInsertOutcome(repair=(rid, r.get("citekey")))
 
     ev_id = new_ev_id()
     citekey = _resolve_citekey_for_ref(session, ledger=ledger, ref=ref, workspace_id=workspace.id)
@@ -246,7 +297,7 @@ def insert_from_annotation(
             "repeated text — cite it via chat or edit the sentence to be unique"
         ) from exc
 
-    # 8. Evidence row via the single authoritative constructor — identical
+    # Evidence row via the single authoritative constructor — identical
     # schema shape to the agent insert (_insert_citation_locked step 12).
     now_iso = datetime.now(UTC).isoformat()
     claim_text = annotation.claim_text
@@ -272,15 +323,82 @@ def insert_from_annotation(
     )
     new_ledger = append_evidence(ledger, row)
 
+    return AnnotationInsertOutcome(
+        new_doc=new_doc, new_ledger=new_ledger, ev_id=ev_id, citekey=citekey
+    )
+
+
+def insert_from_annotation(
+    *,
+    session: Session,
+    workspace: Workspace,
+    user_id: int,
+    annotation: UserClaimAnnotation,
+    workspaces_dir: Path | str,
+) -> dict:
+    """Insert the citation an ``uncited_supported`` annotation suggests.
+
+    Returns ``{"ev_id", "citekey", "commit_sha"}`` on success, or
+    ``{"idempotent": True}`` when THIS annotation was already inserted.
+    Raises :class:`InsertConflict` for every expected user-facing failure,
+    ``CommitMutexTimeout`` (web maps to 503) and ``GitCommitError`` (500).
+    """
+    # 1. Serialize against every other git mutation of this workspace.
+    # CommitMutexTimeout propagates — the web layer maps it to 503.
+    acquire_commit_mutex(session, workspace.id)
+
+    # Expire annotation immediately after acquiring the mutex: SQLAlchemy's
+    # identity map still holds the pre-block snapshot. A concurrent insert
+    # that committed while we were blocked would have flipped annotation.status
+    # to "inserted", but the ORM would not see it without re-SELECTing. Under
+    # READ COMMITTED the next attribute access re-issues a SELECT, so the
+    # idempotency check below is authoritative inside the mutex.
+    session.expire(annotation)
+
+    # 2. Turn-lock: an agent turn in flight owns the repo.
+    if _turn_in_flight(session, workspace.id):
+        raise InsertConflict(TURN_IN_FLIGHT_MESSAGE)
+
+    repo = workspace_repo_dir(workspaces_dir, workspace.id)
+    proposal_path = repo / PROPOSAL_FILENAME
+    if not proposal_path.exists():
+        raise InsertConflict("the text changed — re-analysis is pending")
+    doc = proposal_path.read_text()
+
+    derived = derive_annotation_cite(session, workspace=workspace, annotation=annotation, doc=doc)
+    if derived is None:
+        return {"idempotent": True}
+
+    # 7. Ledger + citekey (same resolution as the agent path) + marker.
+    citations_path = repo / CITATIONS_FILENAME
+    try:
+        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
+    except ValueError as exc:
+        logger.error("corrupt citations.json in workspace %s: %s", workspace.id, exc)
+        raise InsertConflict(f"citations.json is invalid: {exc}") from exc
+
+    outcome = compute_annotation_insert(
+        session,
+        workspace=workspace,
+        annotation=annotation,
+        user_id=user_id,
+        doc=doc,
+        ledger=ledger,
+        derived=derived,
+    )
+    if outcome.repair is not None:
+        ev_id, citekey = outcome.repair
+        return {"idempotent": True, "ev_id": ev_id, "citekey": citekey}
+
     # 9. Atomic commit — proposal.md + citations.json in ONE commit (git
     # first). GitCommitError propagates (web maps it to 500).
     commit_sha = write_and_commit_files(
         repo,
         {
-            PROPOSAL_FILENAME: new_doc,
-            CITATIONS_FILENAME: dump_ledger(new_ledger),
+            PROPOSAL_FILENAME: outcome.new_doc,
+            CITATIONS_FILENAME: dump_ledger(outcome.new_ledger),
         },
-        f"user insert citation: {citekey} (user:{user_id})",
+        f"user insert citation: {outcome.citekey} (user:{user_id})",
     )
 
     # 10. Provenance + resolution rows (committed by the caller, atomically
@@ -291,7 +409,7 @@ def insert_from_annotation(
             workspace_id=workspace.id,
             commit_sha=commit_sha,
             created_by="user",
-            message=f"user insert citation: {citekey}",
+            message=f"user insert citation: {outcome.citekey}",
         )
     )
     session.add(
@@ -299,7 +417,11 @@ def insert_from_annotation(
             workspace_id=workspace.id,
             kind="user_citation_insert",
             actor_id=user_id,
-            payload={"annotation_id": annotation.id, "ev_id": ev_id, "citekey": citekey},
+            payload={
+                "annotation_id": annotation.id,
+                "ev_id": outcome.ev_id,
+                "citekey": outcome.citekey,
+            },
         )
     )
     annotation.status = "inserted"
@@ -311,7 +433,8 @@ def insert_from_annotation(
     # Unlike the agent path (own session) this rides the CALLER's commit —
     # best-effort in the same sense: if that commit fails, the git ledger is
     # canonical and reconciliation backfills the cache.
-    if ref.citekey != citekey:
-        ref.citekey = citekey
+    ref = session.get(Reference, derived.reference_id)
+    if ref.citekey != outcome.citekey:
+        ref.citekey = outcome.citekey
 
-    return {"ev_id": ev_id, "citekey": citekey, "commit_sha": commit_sha}
+    return {"ev_id": outcome.ev_id, "citekey": outcome.citekey, "commit_sha": commit_sha}
