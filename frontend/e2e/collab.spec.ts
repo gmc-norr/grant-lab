@@ -223,4 +223,88 @@ test.describe("collab two-browser (distinct users)", () => {
     await owner.ctx.close();
     await member.ctx.close();
   });
+
+  // (e) Cite after a co-edit with NO save-first — the D1b acceptance gate. Both users
+  //     edit the draft so the live room is ahead of git HEAD; the toolbar's git
+  //     base_section_sha is now stale, but the cite still lands because the backend
+  //     relocates by anchor (3b-5d.D1b). Inverse of (c), which checkpoints to a
+  //     git==live base first to AVOID this path.
+  test("owner cites after both users edit without saving; the pill converges", async ({
+    browser,
+    baseURL,
+  }) => {
+    const draft = `/cockpit/${WS}`;
+    const A = await openAs(browser, COOKIE_OWNER!, baseURL!, draft);
+    const B = await openAs(browser, COOKIE_MEMBER!, baseURL!, draft);
+
+    const edA = A.page.getByTestId("collab-editor");
+    const edB = B.page.getByTestId("collab-editor");
+    await expect(edA).toBeVisible({ timeout: 15_000 });
+    await expect(edB).toBeVisible({ timeout: 15_000 });
+
+    // Both append at the document end (the Aims section, which holds the citeable
+    // words) so that section's live sha diverges from git — with NO "Save a version".
+    await edA.click();
+    await A.page.keyboard.press("Control+End");
+    await A.page.keyboard.type(" Owner note.");
+    await expect(edB).toContainText("Owner note", { timeout: 8_000 });
+    await edB.click();
+    await B.page.keyboard.press("Control+End");
+    await B.page.keyboard.type(" Member note.");
+    await expect(edA).toContainText("Member note", { timeout: 8_000 });
+
+    // Reload ONLY the owner. The member stays connected, so the room never empties →
+    // NO last-leave checkpoint → git HEAD stays BEHIND the live room. This gives the
+    // owner a clean selection surface (a live, actively-co-edited editor does not
+    // register a dblclick selection reliably) while preserving the stale-git-base
+    // condition D1b must tolerate. The co-edits re-sync from the persisted room.
+    await A.page.reload();
+    await expect(edA).toBeVisible({ timeout: 15_000 });
+    await expect(edA).toContainText("Member note", { timeout: 15_000 });
+
+    // Select exactly the word "medicine" WITHOUT a save-first — a clean, still-uncited
+    // token before the existing citation pill (scenario (c) cited "diagnostic" here).
+    // A center-dblclick on the long co-edited paragraph can land on the pill/whitespace
+    // and yield no claim, so drive a precise DOM Range → mouseup, which ProseMirror maps
+    // to a selection the toolbar reacts to. Pre-D1b this 409s (git base != live section).
+    await edA.click();
+    await A.page.evaluate(() => {
+      const pm = document.querySelector('[data-testid="collab-editor"] .ProseMirror');
+      if (!pm) throw new Error("editor not found");
+      const walk = document.createTreeWalker(pm, NodeFilter.SHOW_TEXT);
+      for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+        const i = (n.textContent ?? "").indexOf("medicine");
+        if (i >= 0) {
+          const r = document.createRange();
+          r.setStart(n, i);
+          r.setEnd(n, i + "medicine".length);
+          const sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(r);
+          pm.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+          return;
+        }
+      }
+      throw new Error("'medicine' not found in editor");
+    });
+    const citeBtn = A.page.getByRole("button", { name: "Cite" });
+    await expect(citeBtn).toBeEnabled({ timeout: 8_000 });
+    await citeBtn.click();
+
+    const composer = A.page.getByRole("complementary", { name: /add a citation/i });
+    await expect(composer).toBeVisible({ timeout: 5_000 });
+    await composer.getByRole("button", { name: /Seed Reference on Precision Medicine/i }).click();
+    const chunk = composer.locator("pre").first();
+    await expect(chunk).toBeVisible({ timeout: 5_000 });
+    await chunk.selectText();
+    await chunk.dispatchEvent("mouseup");
+    await composer.getByRole("button", { name: /add citation/i }).click();
+
+    // The pill lands for the owner and converges to the member — no save was needed.
+    await expect(edA.getByTestId("citation-pill").first()).toBeVisible({ timeout: 10_000 });
+    await expect(edB.getByTestId("citation-pill").first()).toBeVisible({ timeout: 10_000 });
+
+    await A.ctx.close();
+    await B.ctx.close();
+  });
 });
