@@ -35,6 +35,15 @@ _EMPTY_UPDATE = b"\x00\x00"
 # RFC 6455 close code: server error (used for poison-room eviction)
 _WS_INTERNAL_ERROR = 1011
 
+# Per-USER cap on awareness client-id bindings per room (Slice 3b-5d.D2). Legit
+# usage is ~1 binding per page-load, so 64 is generous. Per-user, NOT per-room:
+# a room-wide cap would be an abuse amplifier — one member could exhaust it and
+# every future joiner's first-announce would be whole-dropped (presence-silent
+# for the room's life: attack #1's effect achieved THROUGH the mitigation). A
+# per-user quota confines a spammer to exhausting only its own presence; total
+# map growth is bounded by members × quota.
+_MAX_AWARENESS_BINDINGS_PER_USER = 64
+
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +250,30 @@ class Room:
                     return  # pure-foreign frame (routine stale-scrub): drop
                 kept_ids = {e.client_id for e in kept}
                 new_ids = kept_ids - self._awareness_bindings.keys()
+                if new_ids:
+                    # Per-user binding quota — see _MAX_AWARENESS_BINDINGS_PER_USER.
+                    # Over-cap: drop ONLY the would-be-new-binding entries. Bound
+                    # renewals (heartbeats/caret moves) always pass, and foreign
+                    # entries were already logged above — a mixed quota+spoof
+                    # frame still fires the spoof signal (Codex Medium).
+                    bound = sum(
+                        1 for uid in self._awareness_bindings.values()
+                        if uid == state.user_id
+                    )
+                    if bound + len(new_ids) > _MAX_AWARENESS_BINDINGS_PER_USER:
+                        logger.warning(
+                            "collab.awareness_bindings_capped",
+                            extra={"event": "collab_awareness_bindings_capped",
+                                   "room": str(self.key), "user_id": state.user_id,
+                                   "bound": bound, "new": len(new_ids)},
+                        )
+                        kept = [
+                            e for e in kept if e.client_id in self._awareness_bindings
+                        ]
+                        kept_ids = {e.client_id for e in kept}
+                        new_ids = set()
+                        if not kept:
+                            return
                 relay = P.filter_awareness_update(payload, entries, kept_ids)
                 if relay is None:  # unreachable (kept is non-empty) — defensive
                     return

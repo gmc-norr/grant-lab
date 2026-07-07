@@ -545,3 +545,113 @@ async def test_unbound_null_preclaim_is_not_attributed_to_sender():
     # …and B's departure cannot scrub it.
     await room.remove_client_presence(st_b)
     assert x in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_binding_quota_is_per_user_not_per_room(caplog):
+    # Finding 2: the quota must confine a binding-spammer to exhausting only
+    # its OWN presence — another user's first-announce still binds and relays.
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    b, c, peer = FakeClient(), FakeClient(), FakeClient()
+    st_b = ClientState(user_id=2, can_write=True)
+    st_c = ClientState(user_id=3, can_write=True)
+    room.clients[b] = st_b
+    room.clients[c] = st_c
+    room.clients[peer] = ClientState(user_id=1, can_write=True)
+
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    assert len(st_b.awareness_ids) == _MAX_AWARENESS_BINDINGS_PER_USER
+    peer.sent.clear()
+
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        one_more = _crafted_frame(_entry(9999, 1, b'{"user":{"name":"B"}}'))
+        await room.handle(sender=b, state=st_b, message=one_more, persist=_noop_persist)
+    assert peer.sent == []  # nothing left after dropping the new id → not relayed
+    assert 9999 not in room._awareness_bindings
+    capped = [
+        r for r in caplog.records if r.getMessage() == "collab.awareness_bindings_capped"
+    ]
+    assert capped and capped[0].levelno == logging.WARNING
+
+    # User C is unaffected: a fresh first-announce still binds and relays.
+    frame_c, cid_c = _awareness_frame({"user": {"name": "C"}})
+    await room.handle(sender=c, state=st_c, message=frame_c, persist=_noop_persist)
+    assert peer.sent and cid_c in st_c.awareness_ids
+    assert room._awareness_bindings[cid_c] == 3
+
+
+@pytest.mark.anyio
+async def test_renewal_of_bound_ids_is_not_quota_checked():
+    # A user AT the cap can still renew already-bound ids: only NEW bindings
+    # count against the quota (heartbeats/caret moves must never be dropped).
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    b, peer = FakeClient(), FakeClient()
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=1, can_write=True)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    peer.sent.clear()
+    renew = _crafted_frame(_entry(1000, 2, b'{"user":{"name":"B2"}}'))
+    await room.handle(sender=b, state=st_b, message=renew, persist=_noop_persist)
+    assert peer.sent  # renewal relayed
+    assert room.awareness.states[1000]["user"]["name"] == "B2"
+
+
+@pytest.mark.anyio
+async def test_quota_drop_preserves_renewals_and_foreign_logging(caplog):
+    # Codex Medium: at the cap, a mixed frame [bound renewal + over-cap new id +
+    # foreign spoof] must NOT be whole-dropped — the renewal still relays, only
+    # the new id is dropped, and the foreign entry STILL fires the WARNING
+    # spoof signature (foreign logging precedes the quota).
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    victim, b, peer = FakeClient(), FakeClient(), FakeClient()
+    st_v = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[victim] = st_v
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=3, can_write=True)
+    v_frame, cid_v = _awareness_frame({"user": {"name": "Victim"}})
+    await room.handle(sender=victim, state=st_v, message=v_frame, persist=_noop_persist)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    peer.sent.clear()
+
+    mixed = _crafted_frame(
+        _entry(1000, 2, b'{"user":{"name":"B2"}}'),  # bound renewal
+        _entry(9999, 1, b'{"user":{"name":"B"}}'),  # over-cap new id
+        _entry(cid_v, 10**9, b'{"user":{"name":"Fake"}}'),  # foreign spoof
+    )
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        await room.handle(sender=b, state=st_b, message=mixed, persist=_noop_persist)
+
+    relayed = P.extract_awareness_update(peer.sent[-1])
+    assert P.read_awareness_client_ids(relayed) == [1000]  # renewal survives
+    assert room.awareness.states[1000]["user"]["name"] == "B2"
+    assert 9999 not in room._awareness_bindings
+    assert room.awareness.states[cid_v]["user"]["name"] == "Victim"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "collab.awareness_bindings_capped" in warnings
+    assert "collab.awareness_foreign_filtered" in warnings  # not suppressed
