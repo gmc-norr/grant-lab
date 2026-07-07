@@ -12,6 +12,7 @@ from pycrdt import Doc
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ArtifactVersion, Workspace, WorkspaceEvent
+from call_manager.proposal_assist.analysis.queue import enqueue_uncovered_sections
 from call_manager.proposal_assist.artifacts import Artifact, filename_for
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
@@ -132,6 +133,14 @@ def checkpoint_artifact(
                 actor_id=authors[0] if len(authors) == 1 else None,
                 payload={"artifact": artifact, "commit_sha": commit_sha, "authors": authors},
             )
+        )
+    if changed and artifact == "draft":
+        # Prompt Tier-2 coverage for the just-committed draft (3b-5d.D3): mirror
+        # save_section step 10, funnelled. `md` is the committed HEAD content;
+        # idempotent, so covered sections are free no-ops. Gated on `changed`
+        # (not record_version) so the silent tail-scan checkpoints are covered too.
+        enqueue_uncovered_sections(
+            session, workspace_id=workspace_id, doc=md, commit_sha=commit_sha
         )
     state.advance_checkpoint(
         session,
