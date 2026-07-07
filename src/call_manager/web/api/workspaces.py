@@ -51,6 +51,7 @@ from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+from call_manager.proposal_assist.collab.flip import maybe_auto_enable
 from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import (
@@ -269,15 +270,19 @@ def get_draft(
             head = current_head(repo_dir)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        collab_enabled = collab_state.is_collab_enabled(
-            session, workspace_id=workspace_id, artifact="draft"
+        raw_disk = proposal.read_text()
+        # 3b-5d.D4 enable-on-touch: the first read of a table-free artifact
+        # flips collab on (sticky, per-artifact, kill-switch-suppressed) and
+        # THIS response already reports collab_enabled=true.
+        collab_enabled = maybe_auto_enable(
+            session, workspace_id=workspace_id, artifact="draft", head_md=raw_disk
         )
         if collab_enabled:
             raw = canonical_artifact_markdown(
                 session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
             )
         else:
-            raw = proposal.read_text()
+            raw = raw_disk
         sections = _sections_out(raw)
         citations = _citation_map(session, settings, workspace_id, raw)
         _, can_write = resolve_access(
@@ -315,16 +320,24 @@ def get_spec(
             head = current_head(repo_dir)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
-        sections = _sections_out(spec.read_text())
+        raw_disk = spec.read_text()
+        collab_enabled = maybe_auto_enable(
+            session, workspace_id=workspace_id, artifact="spec", head_md=raw_disk
+        )
+        raw = (
+            canonical_artifact_markdown(
+                session, workspace_id=workspace_id, artifact="spec", repo_dir=repo_dir
+            )
+            if collab_enabled
+            else raw_disk
+        )
+        sections = _sections_out(raw)
         # Resolve the lock display fields WHILE the session is open: _locker_email
         # queries it, so this must run before the `with` block closes.
         locked_by = _locker_email(session, ws.spec_locked_by)
         locked_at = ws.spec_locked_at
         _, can_write = resolve_access(
             session, user=user, workspace_id=workspace_id, artifact="spec"
-        )
-        collab_enabled = collab_state.is_collab_enabled(
-            session, workspace_id=workspace_id, artifact="spec"
         )
     return SpecOut(
         head=head,
