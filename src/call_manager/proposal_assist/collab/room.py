@@ -15,6 +15,7 @@ for the live doc and Postgres is the durable replay log.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -287,6 +288,24 @@ class Room:
                         new_ids = set()
                         if not kept:
                             return
+                if len(kept) > 1:
+                    # pycrdt applies entry-by-entry (json.loads inline), so a
+                    # bad tail after a good head would leave the head applied —
+                    # in the snapshot, unbound and unattributed, unscrubable
+                    # (review #1). Pre-validate every state so apply stays
+                    # all-or-nothing. Single-entry frames (the ~universal legit
+                    # shape) skip this: a lone failing entry mutates nothing.
+                    for e in kept:
+                        if not e.is_null:
+                            try:
+                                json.loads(payload[e.state_start : e.end])
+                            except ValueError:
+                                logger.warning(
+                                    "collab.malformed_awareness_update",
+                                    extra={"event": "collab_malformed_awareness_update",
+                                           "room": str(self.key)},
+                                )
+                                return
                 relay = P.filter_awareness_update(payload, entries, kept)
                 if relay is None:  # unreachable (kept is non-empty) — defensive
                     return

@@ -582,6 +582,32 @@ async def test_null_flood_cannot_grow_meta(caplog):
 
 
 @pytest.mark.anyio
+async def test_partial_apply_cannot_poison_snapshot():
+    # Review #1: pycrdt applies entry-by-entry (json.loads inline), so a frame
+    # [valid entry][bad-JSON tail] raises AFTER the head already mutated states.
+    # Without pre-validation the head id lands in the server snapshot — unbound
+    # and unattributed, so no disconnect scrub can ever remove the phantom
+    # caret. The whole frame must be dropped BEFORE anything is applied.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    y, z = 616161, 616162
+    poison = _crafted_frame(
+        _entry(y, 9, b'{"user":{"name":"Phantom"}}'),
+        _entry(z, 9, b"{not json"),
+    )
+    await room.handle(sender=b, state=st_b, message=poison, persist=_noop_persist)
+    assert y not in room.awareness.states and z not in room.awareness.states
+    assert room._awareness_bindings == {}
+    assert st_b.awareness_ids == set()
+    assert a.sent == []
+    assert await room.awareness_snapshot() is None  # no phantom for new joiners
+
+
+@pytest.mark.anyio
 async def test_binding_quota_is_per_user_not_per_room(caplog):
     # Finding 2: the quota must confine a binding-spammer to exhausting only
     # its OWN presence — another user's first-announce still binds and relays.
