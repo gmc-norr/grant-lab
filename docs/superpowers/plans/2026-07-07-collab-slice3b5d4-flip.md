@@ -1695,8 +1695,14 @@ EOF
 - Test: `tests/proposal_assist/collab/test_collab_annotation_insert_kernel.py` (new); existing `tests/proposal_assist/test_api_annotations_insert.py` + `tests/test_analysis_insert*.py` (if present, locate via `grep -rl insert_from_annotation tests/`) pass **UNCHANGED** — that is the extraction gate, same discipline as D3's reconcile refactor.
 
 **Interfaces:**
-- Consumes: `apply_citation_to_room` (kernel.py:65 — the citation primitive `direct_cite_via_kernel` already uses, with `require_anchor_in_section=True, enforce_section_sha=False`); the `direct_cite_via_kernel` wrapper template; Task 7's canonical read (the tab and this insert now see the same doc).
-- Produces: `derive_annotation_cite(session, *, workspace, annotation, doc: str) -> DerivedCite | None` (`None` = this annotation already inserted, the idempotent signal; `DerivedCite` is a frozen dataclass: `section_index: int, anchor: str, reference_id, chunk_index: int, evidence_quote: str, quote_start: int, quote_end: int`) raising `InsertConflict` exactly where the current inline steps 3-6 do; async `insert_annotation_via_kernel(*, session_factory, workspaces_dir, workspace_id, actor_id, annotation_id) -> dict` returning `{"ev_id","citekey","commit_sha"}` or `{"idempotent": True}`.
+- Consumes: the `direct_cite_via_kernel` wrapper template and `apply_citation_to_room`'s MECHANICS (kernel.py:65-149 — read it; the new helper mirrors its fragment-apply/append/checkpoint/citekey-cache sequence) but NOT its compute core; Task 7's canonical read (the tab and this insert now see the same doc).
+- Produces:
+  - `derive_annotation_cite(session, *, workspace, annotation, doc: str) -> DerivedCite | None` (`None` = this annotation already inserted; `DerivedCite` frozen dataclass: `section_index: int, anchor: str, reference_id, chunk_index: int, evidence_quote: str, quote_start: int, quote_end: int`) raising `InsertConflict` exactly where the current inline steps 3-6 do.
+  - `compute_annotation_insert(session, *, workspace, annotation, user_id, doc: str, ledger: dict) -> AnnotationInsertOutcome` — steps 6.5-8 of `insert_from_annotation` extracted VERBATIM (the claim-context-keyed repair scan at insert.py:206-233 — which MUTATES the annotation's status/resolved fields on a repair hit, keep that inside — then ev_id/citekey mint, `insert_marker`, `build_evidence_row` WITH `claim_context_text/hash`, `append_evidence`). `AnnotationInsertOutcome` frozen dataclass: either `repair=(ev_id, citekey)` set, or `new_doc: str, new_ledger: dict, ev_id: str, citekey: str` set.
+  - `apply_annotation_insert_to_room(session, *, room_doc, workspace_id, workspaces_dir, annotation_id, actor_id) -> AnnotationRoomResult` in kernel.py (`update: bytes | None, ev_id, citekey, commit_sha, idempotent: bool`).
+  - async `insert_annotation_via_kernel(*, session_factory, workspaces_dir, workspace_id, actor_id, annotation_id) -> dict` returning `{"ev_id","citekey","commit_sha"}` or `{"idempotent": True}`.
+
+**WHY a bespoke core (Codex High, plan-review):** the generic `compute_citation_insert` short-circuits on ANY live `(reference_id, chunk_index, evidence_quote)` ledger row (`tools/citations.py:664-681`, `_find_idempotent_row`), but annotation insert is deliberately OCCURRENCE-AWARE — "the same (ref, chunk, quote) being live elsewhere in the document does NOT satisfy this occurrence" (insert.py:118-121), with its own narrower claim-context-keyed repair idempotency (insert.py:206-233), and its evidence row carries `claim_context_text/hash` which the generic row does not. Routing through `apply_citation_to_room` would falsely mark annotations inserted and degrade the ledger row shape. Hence: extract the annotation compute core and give it its own kernel applier that reuses only the room MECHANICS.
 
 - [ ] **Step 1: Extraction first (behavior-preserving, gated by existing tests)**
 
@@ -1724,7 +1730,9 @@ def derive_annotation_cite(
     Contains NO mutex/expire/turn-lock — callers own those."""
 ```
 
-Body: the current lines from the `if annotation.status == "inserted": return ...` check through the anchor-uniqueness `raise` — with `return {"idempotent": True}` becoming `return None`, `doc = proposal_path.read_text()` deleted (the `doc` param replaces it; the `proposal_path.exists()` guard STAYS in the git caller), and the final line `return DerivedCite(section_index=target.index, anchor=anchor, reference_id=ref.id, chunk_index=annotation.chunk_index, evidence_quote=annotation.evidence_quote, quote_start=q_start, quote_end=q_end)`. Then `insert_from_annotation` keeps its steps 1-2 (mutex, expire, turn-lock) and the disk read + exists-guard, calls `derived = derive_annotation_cite(...)`, maps `None → {"idempotent": True}`, and continues its steps 7+ (ledger/citekey/marker/commit/annotation-status) using `derived.anchor` etc. — READ insert.py:206-317 and keep those steps byte-identical, only swapping variable sources.
+Body: the current lines from the `if annotation.status == "inserted": return ...` check through the anchor-uniqueness `raise` — with `return {"idempotent": True}` becoming `return None`, `doc = proposal_path.read_text()` deleted (the `doc` param replaces it; the `proposal_path.exists()` guard STAYS in the git caller), and the final line `return DerivedCite(section_index=target.index, anchor=anchor, reference_id=ref.id, chunk_index=annotation.chunk_index, evidence_quote=annotation.evidence_quote, quote_start=q_start, quote_end=q_end)`.
+
+**Second extraction, same commit:** `compute_annotation_insert(session, *, workspace, annotation, user_id, doc, ledger) -> AnnotationInsertOutcome` — move insert.py's claim-context repair scan (:206-233, INCLUDING its annotation status/resolved-field mutations on a repair hit → outcome with `repair=(rid, citekey)`) plus steps 7-8 (`new_ev_id`/`_resolve_citekey_for_ref`/`insert_marker` with its `AnchorError → InsertConflict` mapping/`build_evidence_row` with claim_context/`append_evidence`) VERBATIM, parameterized on `(doc, ledger)`; the compute does NOT write git. Then `insert_from_annotation` = steps 1-2 (mutex, expire, turn-lock) + disk reads (doc + ledger, with the existing corrupt-ledger `InsertConflict`) + `derive_annotation_cite` + `compute_annotation_insert` + step 9 (`write_and_commit_files` of `new_doc`+`new_ledger`) + steps 10+ (ArtifactVersion, `WorkspaceEvent(kind="user_citation_insert")`, annotation resolved fields, citekey cache — READ insert.py:289-317 and keep byte-identical, only swapping variable sources).
 
 Gate: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_api_annotations_insert.py $(grep -rl insert_from_annotation tests/ | tr '\n' ' ') -p no:cacheprovider -q` → all pass with ZERO test edits (`git status --porcelain -- tests/` clean). Commit the extraction alone:
 
@@ -1732,9 +1740,10 @@ Gate: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_api_annot
 uv run ruff check src/call_manager/proposal_assist/analysis/insert.py
 git add src/call_manager/proposal_assist/analysis/insert.py
 git commit -m "$(cat <<'EOF'
-refactor(analysis): extract derive_annotation_cite from insert_from_annotation (3b-5d.D4)
+refactor(analysis): extract derive_annotation_cite + compute_annotation_insert (3b-5d.D4)
 
-Behavior-preserving; existing annotation-insert tests pass unchanged.
+Behavior-preserving dual extraction; existing annotation-insert tests pass
+unchanged (occurrence-aware idempotency + claim-context repair semantics intact).
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 EOF
@@ -1752,11 +1761,10 @@ the marker lands in the LIVE room + ledger + checkpoint; annotation flips to
 
 import pytest
 
-from call_manager.db.models import UserClaimAnnotation
+from call_manager.db.models import UserClaimAnnotation, WorkspaceEvent
 from call_manager.proposal_assist.collab import state
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from tests.proposal_assist.conftest import make_user
 from tests.proposal_assist.test_api_annotations_insert import _seed_supported
 
 
@@ -1785,10 +1793,86 @@ def test_enabled_insert_lands_in_room_and_flips_annotation(
             repo_dir=workspace_repo_dir(str(tmp_path), wid),
         )
         assert f"ev:{body['ev_id']}" in canon  # marker is IN THE ROOM projection
-        assert s.get(UserClaimAnnotation, ann_id).status == "inserted"
+        ann = s.get(UserClaimAnnotation, ann_id)
+        assert ann.status == "inserted"
+        # provenance parity with the git path (Codex Medium): resolved fields +
+        # the user_citation_insert feed event survive the kernel routing
+        assert ann.resolved_by_user_id == current_user.id
+        assert ann.resolved_at is not None
+        ev_kinds = [
+            e.kind
+            for e in s.query(WorkspaceEvent).filter_by(workspace_id=wid).all()
+        ]
+        assert "user_citation_insert" in ev_kinds
+        # ledger row carries the annotation's claim context (bespoke core, not
+        # the generic citation row shape)
+        import json
+        ledger = json.loads(
+            (workspace_repo_dir(str(tmp_path), wid) / "citations.json").read_text()
+        )
+        row = next(r for r in ledger["evidence"] if r["id"] == body["ev_id"])
+        assert (row.get("claim_context") or {}).get("hash")
     # idempotent repeat
     r2 = client_authed_owner.post(f"/api/workspaces/{wid}/annotations/{ann_id}/insert")
     assert r2.status_code == 200 and r2.json()["idempotent"] is True
+
+
+def test_same_evidence_elsewhere_still_inserts_here(
+    client_authed_owner, current_user, pg_session_factory, tmp_path, _app
+):
+    """THE occurrence-aware regression (Codex High): the same (ref, chunk,
+    quote) already cited in ANOTHER location must NOT satisfy this annotation —
+    the kernel path inserts a SECOND marker + ledger row, never a false
+    idempotent. Build the pre-existing citation by running the git-path insert
+    for a FIRST annotation, then enable collab and insert a SECOND annotation
+    for the same evidence at a different sentence."""
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws, ann1_id, repo = _seed_supported(s, tmp_path, current_user)
+        s.commit()
+        wid = ws.id
+    # first insert via the git path (flag off) — evidence now live in the doc
+    r1 = client_authed_owner.post(f"/api/workspaces/{wid}/annotations/{ann1_id}/insert")
+    assert r1.status_code == 200
+    ev1 = r1.json()["ev_id"]
+    # second OPEN annotation, same reference/chunk/quote, different sentence:
+    # clone ann1's row against another claim sentence appended to the section
+    with pg_session_factory() as s:
+        from call_manager.proposal_assist.editing.sectionizer import split_sections
+
+        a1 = s.get(UserClaimAnnotation, ann1_id)
+        doc = (repo / "proposal.md").read_text()
+        new_doc = doc + "Another factual claim.\n"
+        import subprocess
+        (repo / "proposal.md").write_text(new_doc)
+        subprocess.run(["git", "add", "proposal.md"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "second claim"], cwd=repo, check=True)
+        sec = split_sections(new_doc)[1]
+        a2 = UserClaimAnnotation(
+            workspace_id=wid, section_sha=sec.sha, section_occurrence=0,
+            section_heading=sec.heading, sentence_ordinal=1,
+            char_offset=sec.text.index("Another factual claim"),
+            claim_sha="1" * 64, claim_text="Another factual claim",
+            kind="uncited_supported", evidence_id="",
+            reference_id=a1.reference_id, chunk_index=a1.chunk_index,
+            evidence_quote=a1.evidence_quote, status="open",
+        )
+        s.add(a2)
+        from call_manager.proposal_assist.collab import state as collab_state_mod
+        collab_state_mod.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+        ann2_id = a2.id
+    r2 = client_authed_owner.post(f"/api/workspaces/{wid}/annotations/{ann2_id}/insert")
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert body2.get("idempotent") is not True  # NOT falsely satisfied
+    assert body2["ev_id"] != ev1                # a genuinely NEW citation
+    with pg_session_factory() as s:
+        canon = canonical_artifact_markdown(
+            s, workspace_id=wid, artifact="draft",
+            repo_dir=workspace_repo_dir(str(tmp_path), wid),
+        )
+    assert f"ev:{ev1}" in canon and f"ev:{body2['ev_id']}" in canon  # BOTH markers live
 
 
 def test_disabled_insert_takes_git_path(  # regression pin for the fork
@@ -1809,89 +1893,81 @@ def test_disabled_insert_takes_git_path(  # regression pin for the fork
 Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/collab/test_collab_annotation_insert_kernel.py -p no:cacheprovider -q`
 Expected: enabled-case FAIL (`ev:` marker lands on DISK, not in the room projection — the canonical read shows the pre-insert seed or falls back); disabled-case PASS.
 
-- [ ] **Step 4: Implement `insert_annotation_via_kernel` (collab_cite.py)**
+- [ ] **Step 4: Implement `apply_annotation_insert_to_room` (kernel.py) + `insert_annotation_via_kernel` (collab_cite.py)**
+
+(a) `apply_annotation_insert_to_room` in kernel.py — READ `apply_citation_to_room` (kernel.py:65-149) first and mirror its room MECHANICS exactly (mutex acquisition, disk-ledger read with the corrupt-ledger error mapping, room-fragment apply of the new doc, `store.append_update(commit=False)`, `checkpoint_artifact(extra_files={CITATIONS_FILENAME: dump_ledger(new_ledger)})`, `_write_citekey_cache(owns_txn=False)`), swapping ONLY the compute core:
 
 ```python
-async def insert_annotation_via_kernel(
-    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, actor_id: int,
-    annotation_id: int,
-) -> dict:
-    """Claims-tab insert against the live room: derive the cite from the
-    annotation vs the ROOM-serialized doc, then apply via the same kernel
-    citation primitive as direct_cite_via_kernel; flip the annotation to
-    'inserted' in the SAME transaction as the room append + checkpoint."""
-    from call_manager.db.models import UserClaimAnnotation, Workspace
-    from call_manager.proposal_assist.analysis.insert import (
-        InsertConflict,
-        _turn_in_flight,
-        derive_annotation_cite,
+def apply_annotation_insert_to_room(
+    session, *, room_doc, workspace_id, workspaces_dir, annotation_id: int, actor_id: int
+) -> AnnotationRoomResult:
+    """Claims-tab insert against the live room (3b-5d.D4 §3.3). Sequence:
+    load ws+annotation -> turn-lock guard -> derive vs the ROOM-serialized doc
+    -> compute_annotation_insert (occurrence-aware; claim-ctx repair) ->
+    [repair: return idempotent, NO room mutation] -> apply new_doc to the
+    fragment -> append_update(commit=False) -> checkpoint(extra_files=ledger)
+    -> user_citation_insert WorkspaceEvent + annotation resolved fields +
+    citekey cache. Caller commits. Raises InsertConflict/CommitMutexTimeout
+    exactly like the git path."""
+```
+
+Body skeleton (adapt names to kernel.py's existing imports; the derive/compute/provenance pieces are the Step-1 extractions and insert.py's own step-10 block moved here verbatim):
+
+```python
+    ws = session.get(Workspace, workspace_id)
+    ann = session.get(UserClaimAnnotation, annotation_id)
+    if ann is None or ann.workspace_id != workspace_id:
+        raise InsertConflict("annotation is no longer actionable")
+    acquire_commit_mutex(session, workspace_id)
+    session.expire(ann)  # parity: re-read status inside the mutex (insert.py step 1)
+    if _turn_in_flight(session, workspace_id):
+        raise InsertConflict(TURN_IN_FLIGHT_MESSAGE)
+    live_md = serialize_doc_to_markdown(room_doc)
+    derived = derive_annotation_cite(session, workspace=ws, annotation=ann, doc=live_md)
+    if derived is None:
+        return AnnotationRoomResult(update=None, ev_id=None, citekey=None,
+                                    commit_sha=None, idempotent=True)
+    ledger = ...  # disk read + ValueError -> InsertConflict, EXACTLY as insert.py does
+    outcome = compute_annotation_insert(
+        session, workspace=ws, annotation=ann, user_id=actor_id, doc=live_md, ledger=ledger
     )
-    from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+    if outcome.repair is not None:  # claim-ctx repair hit: annotation fields already flipped
+        rid, ck = outcome.repair
+        return AnnotationRoomResult(update=None, ev_id=rid, citekey=ck,
+                                    commit_sha=None, idempotent=True)
+    update = apply_pm_json_to_fragment(room_doc, markdown_to_pm(outcome.new_doc))
+    store.append_update(session, workspace_id=workspace_id, artifact="draft",
+                        actor_id=actor_id, update=update, commit=False)
+    cp = checkpoint_artifact(session, workspace_id=workspace_id, artifact="draft",
+                             workspaces_dir=workspaces_dir,
+                             extra_files={CITATIONS_FILENAME: dump_ledger(outcome.new_ledger)})
+    # steps 10+ from insert.py, verbatim: user_citation_insert WorkspaceEvent
+    # (same payload shape), annotation status/resolved_by_user_id/resolved_at,
+    # citekey cache. Do NOT add the git path's ArtifactVersion — checkpoint_artifact
+    # already recorded one for this commit (message deviation flagged like Task 6).
+    ...
+    return AnnotationRoomResult(update=update, ev_id=outcome.ev_id,
+                                citekey=outcome.citekey, commit_sha=cp.commit_sha,
+                                idempotent=False)
+```
 
-    key = (workspace_id, "draft")
+CAREFUL — whole-doc vs section-scoped apply: `apply_citation_to_room` applies the citation via a SECTION-scoped fragment replace (3a C2). If its mechanics expose that (an `apply_pm_section_to_fragment` call keyed on the section), mirror THAT with `derived.section_index` instead of the whole-doc `apply_pm_json_to_fragment` sketched above — the invariant is: use the SAME fragment-mutation primitive `apply_citation_to_room` uses, so concurrent-edit clobber behavior is identical. State which primitive you used and why in your report.
 
-    async def _load() -> list[bytes]:
-        def _read():
-            with session_factory() as s:
-                updates = load_or_hydrate(s, workspace_id=workspace_id, artifact="draft",
-                                          workspaces_dir=workspaces_dir)
-                s.commit()
-                return updates
-        return await run_in_threadpool(_read)
+(b) `insert_annotation_via_kernel` in collab_cite.py — the thin async wrapper, same shape as `direct_cite_via_kernel` (operate/lock/threadpooled `_body`/broadcast-outside-lock/evict taxonomy): `_body` calls `apply_annotation_insert_to_room`, checks `room.evicted` before commit, returns `(update, out_dict)`; `InsertConflict` joins the CLEAN (no-evict) tuple — it is raised pre-mutation or by compute before any fragment change; broadcast only when `update is not None`.
 
-    async with MANAGER.operate(key, load=_load) as room:
-        try:
-            async with room.lock:
-                def _body() -> tuple[bytes | None, dict]:
-                    with session_factory() as s:
-                        ws = s.get(Workspace, workspace_id)
-                        ann = s.get(UserClaimAnnotation, annotation_id)
-                        if ann is None or ann.workspace_id != workspace_id:
-                            raise InsertConflict("annotation is no longer actionable")
-                        if _turn_in_flight(s, workspace_id):
-                            raise InsertConflict(TURN_IN_FLIGHT_MESSAGE)
-                        live_md = serialize_doc_to_markdown(room.doc)
-                        derived = derive_annotation_cite(
-                            s, workspace=ws, annotation=ann, doc=live_md
-                        )
-                        if derived is None:
-                            return None, {"idempotent": True}
-                        res = apply_citation_to_room(
-                            s, room_doc=room.doc, workspace_id=workspace_id,
-                            section_index=derived.section_index,
-                            base_section_sha="", anchor=derived.anchor,
-                            reference_id=derived.reference_id,
-                            chunk_index=derived.chunk_index,
-                            evidence_quote=derived.evidence_quote,
-                            quote_start=derived.quote_start, quote_end=derived.quote_end,
-                            stance="supports", actor_id=actor_id,
-                            workspaces_dir=workspaces_dir,
-                            require_anchor_in_section=True, enforce_section_sha=False,
-                        )
-                        if room.evicted:
-                            raise RoomEvicted(str(key))
-                        ann.status = "inserted"  # mirror the git path's flip — verify
-                        # against insert.py steps 8-9 whether more fields are set
-                        # (e.g. inserted ev linkage) and mirror them EXACTLY.
-                        s.commit()
-                        return res.update, {"ev_id": res.ev_id, "citekey": res.citekey,
-                                            "commit_sha": res.commit_sha}
-                update, out = await run_in_threadpool(_body)
-            if update is not None and not room.evicted:
-                await room.broadcast(P.create_update_message(update))
-            return out
+```python
         except (*_CLEAN_CITE_ERRORS, InsertConflict):
-            raise  # pre-mutation / tombstoned — no evict
+            raise  # pre-mutation / tombstoned — room doc untouched, no evict
         except Exception:
-            await MANAGER.evict(key)
+            await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log
             raise
 ```
 
-`TURN_IN_FLIGHT_MESSAGE` imports from `analysis.insert` (verify its name there; if module-private, import the module and reference it). BEFORE committing this step, READ `insert.py`'s post-insert annotation mutation block (steps 8-9, ~lines 206-317) and mirror every annotation-row field it sets — the invariant: after either path, the `UserClaimAnnotation` row is in the identical state. If the git path sets fields beyond `status` (e.g. a link to the created evidence id or timestamps), replicate them; state what you found in your report.
+`TURN_IN_FLIGHT_MESSAGE` / `_turn_in_flight` import from `analysis.insert` (if module-private, import the module and reference through it).
 
 - [ ] **Step 5: Rewrite `insert_annotation` with the `_route()` fork**
 
-Async conversion mirroring `post_citation`: `_route()` reads the draft flag; enabled → owner gate (`require_owner` + annotation 404 in a threadpooled `_gate`), then `insert_annotation_via_kernel(...)`, mapping `InsertConflict → 409(str(e))`, `CiteStale/CiteInvalid/CiteRefNotFound → 409(str(e))` (the annotation world reports every expected failure as a 409 conflict — parity), `CommitMutexTimeout → 429 + Retry-After`, `RoomEvicted → 409("the live session was reset — retry")`, `GitCommitError → 500("insert failed — nothing was written")`; build `InsertResultOut` from the dict (idempotent flag included). On the NON-idempotent kernel success, ALSO call `enqueue_containing_section(...)` exactly as the git branch does (same args, `commit_sha` from the result) — Tier-2 immediacy parity. Disabled → the ENTIRE former body verbatim in a threadpooled `def _git() -> InsertResultOut:` closure.
+Async conversion mirroring `post_citation`: `_route()` reads the draft flag; enabled → owner gate (`require_owner` + annotation 404 in a threadpooled `_gate`), then `insert_annotation_via_kernel(...)`, mapping `InsertConflict → 409(str(e))` (the bespoke core reports every expected user-facing failure as InsertConflict — exact parity with the git branch's mapping), `CommitMutexTimeout → 429 + Retry-After`, `RoomEvicted → 409("the live session was reset — retry")`, `GitCommitError → 500("insert failed — nothing was written")`; build `InsertResultOut` from the dict (idempotent flag included). On the NON-idempotent kernel success, ALSO call `enqueue_containing_section(...)` exactly as the git branch does (same args, `commit_sha` from the result) — Tier-2 immediacy parity. Disabled → the ENTIRE former body verbatim in a threadpooled `def _git() -> InsertResultOut:` closure.
 
 - [ ] **Step 6: Run all gates for this task**
 
@@ -1901,8 +1977,8 @@ Expected: all pass; `git status --porcelain -- tests/proposal_assist/test_api_an
 - [ ] **Step 7: Lint and commit**
 
 ```bash
-uv run ruff check src/call_manager/proposal_assist/citations/collab_cite.py src/call_manager/web/api/annotations.py tests/proposal_assist/collab/test_collab_annotation_insert_kernel.py
-git add src/call_manager/proposal_assist/citations/collab_cite.py src/call_manager/web/api/annotations.py tests/proposal_assist/collab/test_collab_annotation_insert_kernel.py
+uv run ruff check src/call_manager/proposal_assist/collab/kernel.py src/call_manager/proposal_assist/citations/collab_cite.py src/call_manager/web/api/annotations.py tests/proposal_assist/collab/test_collab_annotation_insert_kernel.py
+git add src/call_manager/proposal_assist/collab/kernel.py src/call_manager/proposal_assist/citations/collab_cite.py src/call_manager/web/api/annotations.py tests/proposal_assist/collab/test_collab_annotation_insert_kernel.py
 git commit -m "$(cat <<'EOF'
 feat(collab): Claims-tab insert routes through the kernel when draft collab is on (3b-5d.D4)
 
@@ -2332,4 +2408,5 @@ Report gate results and stop. Merge (local `--no-ff` into `master`) happens only
 - Spec §3.7 Component G (formatting floor, no schema-shape change) → Task 11.
 - Spec §6 gates incl. prod-mode e2e + Word-paste manual DoD → Tasks 12, 13.
 - Spec §8 waivers → no tasks, by design (do NOT add code for waived items).
-- Deviation to carry into review prompts: provenance rows on the kernel init-spec path come from the checkpoint, not `user_edit` (Task 6, spec'd §3.3).
+- Deviations to carry into review prompts: (1) provenance rows on the kernel init-spec path come from the checkpoint, not `user_edit` (Task 6, spec'd §3.3); (2) the kernel annotation-insert path emits the git path's `user_citation_insert` WorkspaceEvent + resolved fields but relies on the checkpoint's ArtifactVersion (message text differs from the git path's `"user insert citation: …"` — same class of deviation as Task 6).
+- Codex plan-review amendments (2026-07-07): Task 8 rebuilt around a bespoke annotation compute core — the generic `compute_citation_insert` idempotency scan (`tools/citations.py:664-681`) would falsely satisfy occurrence-aware annotations (insert.py:118-121) and drop the claim-context row fields; occurrence regression + provenance-parity assertions added.
