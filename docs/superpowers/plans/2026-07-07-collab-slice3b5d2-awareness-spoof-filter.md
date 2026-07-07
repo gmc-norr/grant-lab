@@ -415,7 +415,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `P.read_awareness_entries`, `P.AwarenessEntry`, `P.filter_awareness_update` (Tasks 1–2).
-- Produces: `Room._awareness_bindings: dict[int, int]` (client_id → user_id; room-lifetime, private). Log events: `collab.awareness_bind` (INFO), `collab.awareness_stale_scrub_filtered` (INFO), `collab.awareness_foreign_filtered` (WARNING). Task 4 inserts the quota check between the `new_ids` computation and the bind loop — keep those two statements separate exactly as written.
+- Produces: `Room._awareness_bindings: dict[int, int]` (client_id → user_id; room-lifetime, private). Log events: `collab.awareness_bind` (INFO), `collab.awareness_stale_scrub_filtered` (INFO), `collab.awareness_foreign_filtered` (WARNING). Task 4 inserts the quota block between the `new_ids = ...` assignment and the `relay = ...` line — keep those statements separate exactly as written. Binding happens AFTER a successful apply and only for ids accepted into `awareness.states` (Codex High: a parse-valid but unapplied entry must never stealth-reserve a binding).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -636,6 +636,84 @@ async def test_own_null_removal_still_relays_and_clears():
     await room.handle(sender=a, state=st, message=bye, persist=_noop_persist)
     assert b.sent and P.is_awareness(b.sent[-1])  # removal relayed
     assert cid not in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_failed_apply_does_not_reserve_bindings():
+    # Codex High (a): a span-valid frame whose apply FAILS (invalid JSON state)
+    # must not bind — else an attacker could stealth-pre-claim an id (no visible
+    # caret, since nothing applied) and the real user's later announce would be
+    # filtered as foreign for the room's life.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    x = 424242
+    junk = _crafted_frame(_entry(x, 10**9, b"{not json"))  # span-valid, apply fails
+    await room.handle(sender=b, state=st_b, message=junk, persist=_noop_persist)
+    assert x not in room._awareness_bindings
+    assert a.sent == []  # dropped, not relayed
+    # The real user announces X afterwards: bound to THEM, relayed.
+    announce = _crafted_frame(_entry(x, 1, b'{"user":{"name":"RealA"}}'))
+    await room.handle(sender=a, state=st_a, message=announce, persist=_noop_persist)
+    assert room._awareness_bindings[x] == 1
+    assert b.sent and P.is_awareness(b.sent[-1])
+
+
+@pytest.mark.anyio
+async def test_clock_ignored_entry_does_not_reserve_binding():
+    # Codex High (b): a valid entry pycrdt IGNORES on apply (clock 0 is never
+    # accepted: 0 < 0 is false) must not bind either — bind-after-accept, not
+    # bind-on-parse.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    x = 424243
+    stale = _crafted_frame(_entry(x, 0, b'{"user":{"name":"Ghost"}}'))
+    await room.handle(sender=b, state=st_b, message=stale, persist=_noop_persist)
+    assert x not in room._awareness_bindings  # ignored → not bound
+    assert x not in room.awareness.states
+    # The real user's announce still binds to them.
+    announce = _crafted_frame(_entry(x, 1, b'{"user":{"name":"RealA"}}'))
+    await room.handle(sender=a, state=st_a, message=announce, persist=_noop_persist)
+    assert room._awareness_bindings[x] == 1
+    assert x in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_unbound_null_preclaim_is_not_attributed_to_sender():
+    # A null entry for an UNBOUND id is allowed through (harmless removal, never
+    # enters states) but neither binds nor attributes — else the sender's later
+    # disconnect would scrub the id's REAL owner (who binds it afterwards) for
+    # everyone: the 3b-5b griefing vector resurrected through the new code.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    x = 424244
+    await room.handle(
+        sender=b, state=st_b,
+        message=_crafted_frame(_entry(x, 5, b"null")), persist=_noop_persist,
+    )
+    assert x not in st_b.awareness_ids and x not in room._awareness_bindings
+    # Real owner announces afterwards (clock above the stale null's meta clock)…
+    await room.handle(
+        sender=a, state=st_a,
+        message=_crafted_frame(_entry(x, 6, b'{"user":{"name":"RealA"}}')),
+        persist=_noop_persist,
+    )
+    assert room._awareness_bindings[x] == 1
+    assert x in room.awareness.states
+    # …and B's departure cannot scrub it.
+    await room.remove_client_presence(st_b)
+    assert x in room.awareness.states
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -645,7 +723,7 @@ cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
   tests/proposal_assist/collab/test_collab_awareness.py -p no:cacheprovider -q
 ```
 
-Expected: the 8 new tests FAIL (`AttributeError: 'Room' object has no attribute '_awareness_bindings'`, spoof frames relayed, etc.); all 13 pre-existing tests PASS.
+Expected: the 11 new tests FAIL (`AttributeError: 'Room' object has no attribute '_awareness_bindings'`, spoof frames relayed, etc.); all 13 pre-existing tests PASS.
 
 - [ ] **Step 3: Implement**
 
@@ -690,14 +768,6 @@ In `src/call_manager/proposal_assist/collab/room.py`:
                 for e in entries:
                     owner = self._awareness_bindings.get(e.client_id)
                     (kept if owner in (None, state.user_id) else foreign).append(e)
-                new_ids = {e.client_id for e in kept} - self._awareness_bindings.keys()
-                for cid in new_ids:
-                    self._awareness_bindings[cid] = state.user_id
-                    logger.info(
-                        "collab.awareness_bind",
-                        extra={"event": "collab_awareness_bind", "room": str(self.key),
-                               "client_id": cid, "user_id": state.user_id},
-                    )
                 if foreign:
                     # Foreign NULL-state entries are ROUTINE: y-protocols' 3s
                     # local timeout-scrub of a backgrounded tab ships with
@@ -724,6 +794,7 @@ In `src/call_manager/proposal_assist/collab/room.py`:
                 if entries and not kept:
                     return  # pure-foreign frame (routine stale-scrub): drop
                 kept_ids = {e.client_id for e in kept}
+                new_ids = kept_ids - self._awareness_bindings.keys()
                 relay = P.filter_awareness_update(payload, entries, kept_ids)
                 if relay is None:  # unreachable (kept is non-empty) — defensive
                     return
@@ -737,20 +808,40 @@ In `src/call_manager/proposal_assist/collab/room.py`:
                         extra={"event": "collab_malformed_awareness_update",
                                "room": str(self.key)},
                     )
-                    return
-                # Attribute kept ids to THIS socket (disconnect removal). The
-                # 3b-5b owned_by_other_users guard is subsumed: a foreign-bound
-                # id is filtered above, so it can never be attributed here; and
-                # attribution from kept_ids (not a states-diff) keeps the R2-2
-                # same-clientID-reconnect re-attribution working.
-                state.awareness_ids |= kept_ids
+                    return  # nothing bound, nothing relayed (bind-after-accept)
+                # Bind AFTER a successful apply, and only the new ids pycrdt
+                # actually ACCEPTED into states (Codex High): a parse-valid
+                # entry that fails or is clock-ignored on apply must not reserve
+                # a binding, or a stealth pre-claim (malformed JSON state /
+                # stale clock — no visible caret either way) would filter the
+                # id's real owner for the room's life.
+                for cid in new_ids:
+                    if cid in self.awareness.states:
+                        self._awareness_bindings[cid] = state.user_id
+                        logger.info(
+                            "collab.awareness_bind",
+                            extra={"event": "collab_awareness_bind",
+                                   "room": str(self.key),
+                                   "client_id": cid, "user_id": state.user_id},
+                        )
+                # Attribute to THIS socket only ids bound to THIS user (drives
+                # disconnect removal). The 3b-5b owned_by_other_users guard is
+                # subsumed: a foreign-bound id is filtered above, and an
+                # unbound-never-accepted id (e.g. a null pre-claim) is never
+                # attributed — so this socket's disconnect can never scrub an
+                # id someone else binds later. Attribution from kept ids (not a
+                # states-diff) keeps R2-2 same-clientID reconnects working.
+                state.awareness_ids |= {
+                    cid for cid in kept_ids
+                    if self._awareness_bindings.get(cid) == state.user_id
+                }
             # Relay the FILTERED payload outside the lock (standard y-awareness
             # relay; a slow client must not block the room).
             await self._broadcast(P.create_awareness_message(relay), exclude=sender)
             return
 ```
 
-Keep the `new_ids = ...` assignment and the `for cid in new_ids:` loop as two separate adjacent statements — Task 4 inserts the quota check between them.
+Keep the `new_ids = ...` assignment and the `relay = ...` line as separate adjacent statements — Task 4 inserts the quota block between them.
 
 - [ ] **Step 4: Run the tests to verify they pass (new + ALL pre-existing)**
 
@@ -781,6 +872,11 @@ same-user reconnect re-claims freely). Applies + relays the FILTERED payload
 (fixes snapshot poisoning), drops pure-foreign frames (the routine y-protocols
 timeout-scrub) at INFO, flags foreign non-null spoofs at WARNING, and removes
 the 3b-5b owned_by_other_users guard (subsumed by bindings).
+
+Binds AFTER a successful apply, and only ids pycrdt accepted into states
+(Codex High): a parse-valid but unapplied entry (malformed JSON state /
+clock-ignored) can never stealth-reserve a binding. Attribution is limited
+to own-bound ids, so a disconnect can never scrub an id bound later.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 EOF
@@ -831,7 +927,7 @@ async def test_binding_quota_is_per_user_not_per_room(caplog):
     with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
         one_more = _crafted_frame(_entry(9999, 1, b'{"user":{"name":"B"}}'))
         await room.handle(sender=b, state=st_b, message=one_more, persist=_noop_persist)
-    assert peer.sent == []  # whole frame dropped at the cap
+    assert peer.sent == []  # nothing left after dropping the new id → not relayed
     assert 9999 not in room._awareness_bindings
     capped = [
         r for r in caplog.records if r.getMessage() == "collab.awareness_bindings_capped"
@@ -868,6 +964,50 @@ async def test_renewal_of_bound_ids_is_not_quota_checked():
     await room.handle(sender=b, state=st_b, message=renew, persist=_noop_persist)
     assert peer.sent  # renewal relayed
     assert room.awareness.states[1000]["user"]["name"] == "B2"
+
+
+@pytest.mark.anyio
+async def test_quota_drop_preserves_renewals_and_foreign_logging(caplog):
+    # Codex Medium: at the cap, a mixed frame [bound renewal + over-cap new id +
+    # foreign spoof] must NOT be whole-dropped — the renewal still relays, only
+    # the new id is dropped, and the foreign entry STILL fires the WARNING
+    # spoof signature (foreign logging precedes the quota).
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    victim, b, peer = FakeClient(), FakeClient(), FakeClient()
+    st_v = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[victim] = st_v
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=3, can_write=True)
+    v_frame, cid_v = _awareness_frame({"user": {"name": "Victim"}})
+    await room.handle(sender=victim, state=st_v, message=v_frame, persist=_noop_persist)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    peer.sent.clear()
+
+    mixed = _crafted_frame(
+        _entry(1000, 2, b'{"user":{"name":"B2"}}'),  # bound renewal
+        _entry(9999, 1, b'{"user":{"name":"B"}}'),  # over-cap new id
+        _entry(cid_v, 10**9, b'{"user":{"name":"Fake"}}'),  # foreign spoof
+    )
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        await room.handle(sender=b, state=st_b, message=mixed, persist=_noop_persist)
+
+    relayed = P.extract_awareness_update(peer.sent[-1])
+    assert P.read_awareness_client_ids(relayed) == [1000]  # renewal survives
+    assert room.awareness.states[1000]["user"]["name"] == "B2"
+    assert 9999 not in room._awareness_bindings
+    assert room.awareness.states[cid_v]["user"]["name"] == "Victim"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "collab.awareness_bindings_capped" in warnings
+    assert "collab.awareness_foreign_filtered" in warnings  # not suppressed
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -877,7 +1017,7 @@ cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
   tests/proposal_assist/collab/test_collab_awareness.py -p no:cacheprovider -q
 ```
 
-Expected: both new tests FAIL (`ImportError: cannot import name '_MAX_AWARENESS_BINDINGS_PER_USER'`); everything else PASS.
+Expected: the 3 new tests FAIL (`ImportError: cannot import name '_MAX_AWARENESS_BINDINGS_PER_USER'`); everything else PASS.
 
 - [ ] **Step 3: Implement**
 
@@ -896,11 +1036,15 @@ In `src/call_manager/proposal_assist/collab/room.py`:
 _MAX_AWARENESS_BINDINGS_PER_USER = 64
 ```
 
-**(b)** In the awareness branch, INSERT between the `new_ids = ...` assignment and the `for cid in new_ids:` bind loop:
+**(b)** In the awareness branch, INSERT between the `new_ids = ...` assignment and the `relay = ...` line:
 
 ```python
                 if new_ids:
                     # Per-user binding quota — see _MAX_AWARENESS_BINDINGS_PER_USER.
+                    # Over-cap: drop ONLY the would-be-new-binding entries. Bound
+                    # renewals (heartbeats/caret moves) always pass, and foreign
+                    # entries were already logged above — a mixed quota+spoof
+                    # frame still fires the spoof signal (Codex Medium).
                     bound = sum(
                         1 for uid in self._awareness_bindings.values()
                         if uid == state.user_id
@@ -912,7 +1056,13 @@ _MAX_AWARENESS_BINDINGS_PER_USER = 64
                                    "room": str(self.key), "user_id": state.user_id,
                                    "bound": bound, "new": len(new_ids)},
                         )
-                        return
+                        kept = [
+                            e for e in kept if e.client_id in self._awareness_bindings
+                        ]
+                        kept_ids = {e.client_id for e in kept}
+                        new_ids = set()
+                        if not kept:
+                            return
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -937,8 +1087,10 @@ feat(collab): per-user awareness binding quota (3b-5d.D2)
 
 Caps NEW bindings at 64 per user per room. Per-user, not per-room, so a
 binding-spammer exhausts only its own presence — a room-wide cap would let
-one member silence every future joiner's first-announce. Renewals of
-already-bound ids are never quota-checked.
+one member silence every future joiner's first-announce. Over-cap frames
+are not whole-dropped: only the would-be-new-binding entries are stripped,
+bound renewals always relay, and foreign-entry logging precedes the quota
+so a mixed quota+spoof frame still fires the spoof WARNING (Codex Medium).
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 EOF
@@ -958,7 +1110,7 @@ cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
   tests/proposal_assist tests/test_api_spec.py -p no:cacheprovider -q
 ```
 
-Expected: all pass (D1b baseline was 1632 passed / 1 skipped; this slice adds 18 tests). A `connection refused` on testcontainers PG = infra flake → re-run the flagged file in isolation before treating as real.
+Expected: all pass (D1b baseline was 1632 passed / 1 skipped; this slice adds 22 tests). A `connection refused` on testcontainers PG = infra flake → re-run the flagged file in isolation before treating as real.
 
 - [ ] **Step 2: Lint (whole repo, as CI runs it)**
 
@@ -998,6 +1150,7 @@ Expected: exactly 4 files (2 src, 2 tests) + docs, nothing else.
 
 ## Self-Review (completed at plan-writing time)
 
-- **Spec coverage:** §5.1–.2 → Task 1; §5.3 → Task 2; §6 filter/binding/log-split/snapshot-fix/attribution → Task 3; §6 quota → Task 4; §7 log table → Tasks 3–4 (INFO chosen where spec said INFO/DEBUG); §9 test list → all present (spans, hardening, wrapper, filter unit, empty-frame ×2, spoof-hide, null-scrub log split, mixed, inversion, first-announce, fast-path, quota-isolation, renewal-not-quota-checked, self-removal, 3b-5b regression via full-file runs); §9 gates → Task 5. §8 residuals are documentation-only (no tasks — correct).
+- **Spec coverage:** §5.1–.2 → Task 1; §5.3 → Task 2; §6 filter/binding/log-split/snapshot-fix/bind-after-accept/attribution → Task 3; §6 quota → Task 4; §7 log table → Tasks 3–4; §9 test list → all present (spans, hardening, wrapper, filter unit, empty-frame ×2, spoof-hide, null-scrub log split, mixed, inversion, first-announce, fast-path, failed-apply-no-binding, clock-ignored-no-binding, unbound-null-preclaim-not-attributed, quota-isolation, renewal-not-quota-checked, quota-mixed-preserves-renewals+foreign-log, self-removal, 3b-5b regression via full-file runs); §9 gates → Task 5. §8 residuals are documentation-only (no tasks — correct).
 - **Type consistency:** `AwarenessEntry` fields (`client_id`, `start`, `end`, `is_null`) used identically in Tasks 1–3; `filter_awareness_update(payload, entries, allowed_ids)` signature identical in Tasks 2–3; Task 4's insertion point (`new_ids` / bind loop) matches Task 3's code verbatim.
 - **Known nuance encoded in tests:** the inversion test asserts relay + attribution and uses a crafted clock-10 renewal (a same-clock re-announce would hit the documented 3b-5b #3 clock-collision, which is out of scope).
+- **Codex plan-review folded (2 findings, both verified):** High — binding moved AFTER a successful apply and restricted to ids accepted into `awareness.states` (a parse-valid-but-unapplied entry — malformed JSON state or clock-ignored — must never stealth-reserve a binding), plus attribution restricted to own-bound ids (closes the unbound-null-preclaim → disconnect-scrub resurrection of the 3b-5b griefing vector found while verifying); 3 regression tests added to Task 3. Medium — foreign-entry logging moved BEFORE the quota, and over-cap drops only the would-be-new-binding entries (bound renewals always relay); mixed quota+spoof regression test added to Task 4.
