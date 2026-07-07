@@ -1,15 +1,19 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from call_manager.db.models import ClaimAnalysisJob, User, Workspace
 from call_manager.proposal_assist.analysis.queue import (
     claim_queued_jobs,
     enqueue_section_job,
+    enqueue_uncovered_sections,
     mark_done,
     mark_failed,
     mark_superseded,
     requeue_stuck_running,
     touch_running_job,
 )
+from call_manager.proposal_assist.editing.sectionizer import split_sections
 
 
 def _ws(session):
@@ -324,3 +328,120 @@ def test_touch_running_job_refreshes_updated_at(pg_session_factory):
         s.commit()
         assert requeue_stuck_running(s, older_than_minutes=15) == 0
         assert s.get(ClaimAnalysisJob, job.id).status == "running"
+
+
+# --- enqueue_uncovered_sections (3b-5d.D3) --------------------------------- #
+# Shared coverage loop: one job per uncovered non-empty section of a supplied
+# markdown doc. Callers: the collab checkpoint hook (immediacy) and the
+# reconcile tick (safety net).
+
+# Empty preamble (section 0 is "") + Alpha + Beta + a byte-identical duplicate
+# of Alpha (same text → same sha → must dedup to ONE job).
+UNCOVERED_DOC = (
+    "## Alpha\nAlpha makes a factual claim.\n"
+    "## Beta\nBeta makes another claim.\n"
+    "## Alpha\nAlpha makes a factual claim.\n"
+)
+
+
+def _live_unique_shas(doc):
+    return {s.sha for s in split_sections(doc) if s.text.strip()}
+
+
+def test_uncovered_sections_enqueued_once_each(pg_session_factory):
+    """One job per unique non-empty section: the empty preamble is skipped,
+    the duplicated Alpha section gets ONE row, the insert count is returned,
+    and every row is queued pinned to the supplied commit_sha."""
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        n = enqueue_uncovered_sections(
+            s, workspace_id=ws.id, doc=UNCOVERED_DOC, commit_sha="c1"
+        )
+        s.commit()
+        assert n == 2  # Alpha, Beta — dup Alpha deduped, preamble skipped
+        jobs = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws.id).all()
+        assert {j.section_sha for j in jobs} == _live_unique_shas(UNCOVERED_DOC)
+        assert all(j.status == "queued" and j.commit_sha == "c1" for j in jobs)
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "done"])
+def test_covered_section_is_skipped(pg_session_factory, status):
+    """covered = queued/running/done (_COVERED_STATUSES): a pre-existing job in
+    any of those states keeps its section out; only Beta is enqueued."""
+    alpha_sha = split_sections(UNCOVERED_DOC)[1].sha
+    beta_sha = split_sections(UNCOVERED_DOC)[2].sha
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        s.add(
+            ClaimAnalysisJob(
+                workspace_id=ws.id,
+                section_index=1,
+                section_heading="Alpha",
+                section_sha=alpha_sha,
+                commit_sha="seed",
+                status=status,
+            )
+        )
+        s.flush()
+        n = enqueue_uncovered_sections(
+            s, workspace_id=ws.id, doc=UNCOVERED_DOC, commit_sha="c2"
+        )
+        assert n == 1
+        new = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws.id, commit_sha="c2").all()
+        assert [j.section_sha for j in new] == [beta_sha]
+
+
+def test_failed_is_not_covered(pg_session_factory):
+    """DELIBERATE SEMANTIC: FAILED is absent from _COVERED_STATUSES — a
+    dead-lettered job's content gets a fresh row with a fresh attempt budget."""
+    alpha_sha = split_sections(UNCOVERED_DOC)[1].sha
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        s.add(
+            ClaimAnalysisJob(
+                workspace_id=ws.id,
+                section_index=1,
+                section_heading="Alpha",
+                section_sha=alpha_sha,
+                commit_sha="seed",
+                status="failed",
+            )
+        )
+        s.flush()
+        n = enqueue_uncovered_sections(
+            s, workspace_id=ws.id, doc=UNCOVERED_DOC, commit_sha="c2"
+        )
+        assert n == 2  # Alpha re-enqueued despite the failed row, plus Beta
+
+
+def test_second_identical_call_is_idempotent(pg_session_factory):
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        assert (
+            enqueue_uncovered_sections(
+                s, workspace_id=ws.id, doc=UNCOVERED_DOC, commit_sha="c1"
+            )
+            == 2
+        )
+        assert (
+            enqueue_uncovered_sections(
+                s, workspace_id=ws.id, doc=UNCOVERED_DOC, commit_sha="c1"
+            )
+            == 0
+        )
+
+
+def test_does_not_commit(pg_session_factory):
+    """The helper stages inserts on the caller's transaction and never commits:
+    rows are visible in-transaction and GONE after rollback."""
+    with pg_session_factory() as s:
+        ws = _ws(s)
+        s.commit()  # persist the workspace so the enqueue is the only pending work
+        ws_id = ws.id
+        n = enqueue_uncovered_sections(
+            s, workspace_id=ws_id, doc=UNCOVERED_DOC, commit_sha="c1"
+        )
+        assert n == 2
+        assert s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).count() == 2
+        s.rollback()
+        assert s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).count() == 0
