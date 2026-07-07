@@ -121,3 +121,79 @@ def test_read_awareness_client_ids_rejects_state_len_overshoot():
     # count=1, clientID=1, clock=0, state_len=200 but no state bytes → out of range.
     with pytest.raises(ValueError):
         P.read_awareness_client_ids(bytes([1, 1, 0, 200]))
+
+
+# ---------------------------------------------------------------------------
+# 3b-5d.D2: entry-span parser (read_awareness_entries)
+# ---------------------------------------------------------------------------
+
+
+def _vu(n: int) -> bytes:
+    """Base-128 varuint (y-protocols encoding) — test-local writer."""
+    out = bytearray()
+    while n > 0x7F:
+        out.append(0x80 | (n & 0x7F))
+        n >>= 7
+    out.append(n)
+    return bytes(out)
+
+
+def _entry(cid: int, clock: int, state_json: bytes) -> bytes:
+    """One awareness entry: [clientID varuint][clock varuint][varString state]."""
+    return _vu(cid) + _vu(clock) + _vu(len(state_json)) + state_json
+
+
+def test_read_awareness_entries_spans_reconstruct_payload():
+    # Re-concatenating each entry's [start:end) span behind a fresh count varuint
+    # must reproduce a real multi-client snapshot byte-for-byte.
+    d = _Doc()
+    srv = P.Awareness(d)
+    srv.set_local_state(None)
+    p1, c1 = _awareness_payload({"user": {"name": "A"}})
+    p2, c2 = _awareness_payload({"user": {"name": "B"}})
+    srv.apply_awareness_update(p1, "x")
+    srv.apply_awareness_update(p2, "x")
+    snap = srv.encode_awareness_update(list(srv.states))
+    entries = P.read_awareness_entries(snap)
+    assert sorted(e.client_id for e in entries) == sorted([c1, c2])
+    rebuilt = _vu(len(entries)) + b"".join(snap[e.start : e.end] for e in entries)
+    assert rebuilt == snap
+
+
+def test_read_awareness_entries_is_null_flags_removals_only():
+    payload, cid = _awareness_payload({"user": {"name": "Alice"}})
+    (announce,) = P.read_awareness_entries(payload)
+    assert announce.client_id == cid and announce.is_null is False
+    # A removal frame (state = JSON null) declares the id with is_null=True.
+    d = _Doc()
+    srv = P.Awareness(d)
+    srv.set_local_state(None)
+    srv.apply_awareness_update(payload, "x")
+    srv.remove_awareness_states([cid], "srv")
+    rem = srv.encode_awareness_update([cid])
+    (removal,) = P.read_awareness_entries(rem)
+    assert removal.client_id == cid and removal.is_null is True
+
+
+def test_read_awareness_entries_preserves_dos_hardening():
+    # The f535f6c adversarial cases, now against the refactored parser: the
+    # refactor must not lose the bounds (capped varuints, prompt ValueError).
+    import time
+
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError):
+        P.read_awareness_entries(b"\xff" * 900_000)  # all-continuation varuint run
+    assert time.perf_counter() - t0 < 2.0  # bounded — nowhere near the ~66s stall
+    with pytest.raises(ValueError):
+        P.read_awareness_entries(b"\x03")  # lying count / truncated body
+    with pytest.raises(ValueError):
+        P.read_awareness_entries(bytes([1, 1, 0, 200]))  # state_len overshoot
+
+
+def test_read_awareness_client_ids_is_a_wrapper_over_entries():
+    # Hand-crafted two-entry payload; the big id spans multiple varuint groups.
+    payload = _vu(2) + _entry(7, 1, b'{"x":1}') + _entry(2**40 + 3, 5, b"null")
+    entries = P.read_awareness_entries(payload)
+    assert P.read_awareness_client_ids(payload) == [e.client_id for e in entries]
+    assert [e.client_id for e in entries] == [7, 2**40 + 3]
+    assert [e.is_null for e in entries] == [False, True]
