@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 import pytest
@@ -250,3 +251,512 @@ async def test_broadcast_drop_of_failing_client_scrubs_its_presence():
     assert boom not in room.clients
     assert cid not in room.awareness.states
     assert await room.awareness_snapshot() is None      # no leak into snapshots
+
+
+# ---------------------------------------------------------------------------
+# 3b-5d.D2: awareness relay-spoof ownership filter
+# ---------------------------------------------------------------------------
+
+ROOM_LOGGER = "call_manager.proposal_assist.collab.room"
+
+
+def _vu(n: int) -> bytes:
+    """Base-128 varuint (y-protocols encoding) — test-local writer."""
+    out = bytearray()
+    while n > 0x7F:
+        out.append(0x80 | (n & 0x7F))
+        n >>= 7
+    out.append(n)
+    return bytes(out)
+
+
+def _entry(cid: int, clock: int, state_json: bytes) -> bytes:
+    """One awareness entry: [clientID varuint][clock varuint][varString state]."""
+    return _vu(cid) + _vu(clock) + _vu(len(state_json)) + state_json
+
+
+def _crafted_frame(*entries: bytes) -> bytes:
+    """A full AWARENESS wire frame from hand-crafted entries (attacker's view)."""
+    payload = _vu(len(entries)) + b"".join(entries)
+    return P.create_awareness_message(payload)
+
+
+@pytest.mark.anyio
+async def test_spoof_hide_blocked_and_flagged(caplog):
+    # THE regression (3b-5b REQUIRED deferral): user B sends a high-clock
+    # non-null override of A's id — must be filtered before ANYONE (the victim
+    # included) receives it, must not poison the server snapshot, and must fire
+    # the WARNING spoof signature.
+    room = Room((uuid.uuid4(), "draft"))
+    victim, attacker, observer = FakeClient(), FakeClient(), FakeClient()
+    st_v = ClientState(user_id=1, can_write=True)
+    st_a = ClientState(user_id=2, can_write=True)
+    room.clients[victim] = st_v
+    room.clients[attacker] = st_a
+    room.clients[observer] = ClientState(user_id=3, can_write=True)
+    frame, cid = _awareness_frame({"user": {"name": "Victim"}})
+    await room.handle(sender=victim, state=st_v, message=frame, persist=_noop_persist)
+    observer.sent.clear()
+
+    spoof = _crafted_frame(_entry(cid, 10**9, b'{"user":{"name":"Fake"}}'))
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        await room.handle(sender=attacker, state=st_a, message=spoof, persist=_noop_persist)
+
+    assert observer.sent == []  # not relayed to anyone
+    assert room.awareness.states[cid]["user"]["name"] == "Victim"  # state intact
+    assert cid not in st_a.awareness_ids  # not attributed to the attacker
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "collab.awareness_foreign_filtered" in warnings
+    # A new joiner's snapshot is spoof-free.
+    snapshot = await room.awareness_snapshot()
+    joiner = Awareness(Doc())
+    joiner.set_local_state(None)
+    joiner.apply_awareness_update(P.extract_awareness_update(snapshot), "srv")
+    assert joiner.states[cid]["user"]["name"] == "Victim"
+
+
+@pytest.mark.anyio
+async def test_foreign_null_scrub_filtered_benignly_at_info(caplog):
+    # Legit clients DO send foreign null-state frames all day: y-protocols' 3s
+    # local timeout-scrub of a backgrounded tab ships with origin 'timeout',
+    # which the provider's origin guard does not suppress. Filtered (each peer
+    # scrubs locally — the relay is redundant) but logged INFO, NOT the WARNING
+    # spoof signature. Guards the log-level split.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    frame, cid = _awareness_frame({"user": {"name": "Backgrounded"}})
+    await room.handle(sender=a, state=st_a, message=frame, persist=_noop_persist)
+    a.sent.clear()
+
+    scrub = _crafted_frame(_entry(cid, 1, b"null"))
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        await room.handle(sender=b, state=st_b, message=scrub, persist=_noop_persist)
+
+    assert a.sent == []  # not relayed
+    assert cid in room.awareness.states  # A's presence intact
+    stale = [
+        r for r in caplog.records if r.getMessage() == "collab.awareness_stale_scrub_filtered"
+    ]
+    assert stale and all(r.levelno == logging.INFO for r in stale)
+    assert not [
+        r for r in caplog.records if r.getMessage() == "collab.awareness_foreign_filtered"
+    ]
+
+
+@pytest.mark.anyio
+async def test_mixed_frame_stripped_to_own_entries():
+    room = Room((uuid.uuid4(), "draft"))
+    a, b, peer = FakeClient(), FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=3, can_write=True)
+    frame, cid_a = _awareness_frame({"user": {"name": "A"}})
+    await room.handle(sender=a, state=st_a, message=frame, persist=_noop_persist)
+    peer.sent.clear()
+
+    own_id = 555
+    mixed = _crafted_frame(
+        _entry(own_id, 1, b'{"user":{"name":"B"}}'),
+        _entry(cid_a, 10**9, b'{"user":{"name":"Fake"}}'),
+    )
+    await room.handle(sender=b, state=st_b, message=mixed, persist=_noop_persist)
+
+    assert peer.sent  # something WAS relayed
+    relayed = P.extract_awareness_update(peer.sent[-1])
+    assert P.read_awareness_client_ids(relayed) == [own_id]  # foreign entry stripped
+    assert room.awareness.states[cid_a]["user"]["name"] == "A"
+    assert room.awareness.states[own_id]["user"]["name"] == "B"
+    assert st_b.awareness_ids == {own_id}
+
+
+@pytest.mark.anyio
+async def test_binding_outlives_socket_blocks_inversion_allows_same_user_reclaim():
+    # Attack #2: B cannot claim a blipped peer's id (room-lifetime USER
+    # binding); the victim's same-user reconnect re-claims it freely (R2-2).
+    room = Room((uuid.uuid4(), "draft"))
+    a1, b, peer = FakeClient(), FakeClient(), FakeClient()
+    st_a1 = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a1] = st_a1
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=3, can_write=True)
+    frame, cid = _awareness_frame({"user": {"name": "A"}})
+    await room.handle(sender=a1, state=st_a1, message=frame, persist=_noop_persist)
+
+    room.clients.pop(a1)  # A's socket blips
+    await room.remove_client_presence(st_a1)
+    peer.sent.clear()
+
+    steal = _crafted_frame(_entry(cid, 10**9, b'{"user":{"name":"NotA"}}'))
+    await room.handle(sender=b, state=st_b, message=steal, persist=_noop_persist)
+    assert peer.sent == []  # filtered: the binding outlives the socket
+    assert cid not in st_b.awareness_ids
+
+    a2 = FakeClient()  # same user reconnects (network blip → same doc.clientID)
+    st_a2 = ClientState(user_id=1, can_write=True)
+    room.clients[a2] = st_a2
+    renew = _crafted_frame(_entry(cid, 10, b'{"user":{"name":"A"}}'))
+    await room.handle(sender=a2, state=st_a2, message=renew, persist=_noop_persist)
+    assert peer.sent and P.is_awareness(peer.sent[-1])  # relayed
+    assert cid in st_a2.awareness_ids  # re-attributed to the reconnect
+    assert room.awareness.states[cid]["user"]["name"] == "A"
+
+
+@pytest.mark.anyio
+async def test_first_announce_binds_and_logs(caplog):
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st = ClientState(user_id=7, can_write=True)
+    room.clients[a] = st
+    room.clients[b] = ClientState(user_id=1, can_write=True)
+    frame, cid = _awareness_frame({"user": {"name": "New"}})
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        await room.handle(sender=a, state=st, message=frame, persist=_noop_persist)
+    assert room._awareness_bindings == {cid: 7}
+    assert b.sent  # relayed
+    assert "collab.awareness_bind" in [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.anyio
+async def test_all_own_frame_relays_byte_identical():
+    # The fast path: zero re-encode — the relayed frame IS the inbound frame.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[a] = st
+    room.clients[b] = ClientState(user_id=2, can_write=True)
+    frame, _ = _awareness_frame({"user": {"name": "Own"}})
+    await room.handle(sender=a, state=st, message=frame, persist=_noop_persist)
+    assert b.sent == [frame]
+
+
+@pytest.mark.anyio
+async def test_empty_awareness_frame_dropped():
+    # count=0: nothing to apply, nothing to show — dropped instead of
+    # pointlessly relayed (review low; pre-D2 relayed these and every
+    # receiver no-op'd). No bindings created either way.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[a] = st
+    room.clients[b] = ClientState(user_id=2, can_write=True)
+    empty = _crafted_frame()  # payload = b"\x00"
+    await room.handle(sender=a, state=st, message=empty, persist=_noop_persist)
+    assert b.sent == []
+    assert room._awareness_bindings == {}
+
+
+@pytest.mark.anyio
+async def test_own_null_removal_still_relays_and_clears():
+    # Legit self-removal (provider destroy/unload path) must keep working: an
+    # own-bound null entry is allowed, relayed, and clears the server state.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[a] = st
+    room.clients[b] = ClientState(user_id=2, can_write=True)
+    frame, cid = _awareness_frame({"user": {"name": "Leaving"}})
+    await room.handle(sender=a, state=st, message=frame, persist=_noop_persist)
+    b.sent.clear()
+    bye = _crafted_frame(_entry(cid, 5, b"null"))
+    await room.handle(sender=a, state=st, message=bye, persist=_noop_persist)
+    assert b.sent and P.is_awareness(b.sent[-1])  # removal relayed
+    assert cid not in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_failed_apply_does_not_reserve_bindings():
+    # Codex High (a): a span-valid frame whose apply FAILS (invalid JSON state)
+    # must not bind — else an attacker could stealth-pre-claim an id (no visible
+    # caret, since nothing applied) and the real user's later announce would be
+    # filtered as foreign for the room's life.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    x = 424242
+    junk = _crafted_frame(_entry(x, 10**9, b"{not json"))  # span-valid, apply fails
+    await room.handle(sender=b, state=st_b, message=junk, persist=_noop_persist)
+    assert x not in room._awareness_bindings
+    assert a.sent == []  # dropped, not relayed
+    # The real user announces X afterwards: bound to THEM, relayed.
+    announce = _crafted_frame(_entry(x, 1, b'{"user":{"name":"RealA"}}'))
+    await room.handle(sender=a, state=st_a, message=announce, persist=_noop_persist)
+    assert room._awareness_bindings[x] == 1
+    assert b.sent and P.is_awareness(b.sent[-1])
+
+
+@pytest.mark.anyio
+async def test_clock_ignored_entry_does_not_reserve_binding():
+    # Codex High (b): a valid entry pycrdt IGNORES on apply (clock 0 is never
+    # accepted: 0 < 0 is false) must not bind either — bind-after-accept, not
+    # bind-on-parse.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    x = 424243
+    stale = _crafted_frame(_entry(x, 0, b'{"user":{"name":"Ghost"}}'))
+    await room.handle(sender=b, state=st_b, message=stale, persist=_noop_persist)
+    assert x not in room._awareness_bindings  # ignored → not bound
+    assert x not in room.awareness.states
+    # The real user's announce still binds to them.
+    announce = _crafted_frame(_entry(x, 1, b'{"user":{"name":"RealA"}}'))
+    await room.handle(sender=a, state=st_a, message=announce, persist=_noop_persist)
+    assert room._awareness_bindings[x] == 1
+    assert x in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_unbound_null_preclaim_filtered_no_meta_poison():
+    # Review #2: a null for a NOT-YET-BOUND id must be filtered outright — never
+    # applied, never relayed. pycrdt (like y-protocols) records the clock of an
+    # unknown-id removal in its private _meta map WITHOUT entering states, so a
+    # relayed/applied null@1e9 would permanently clock-gate the id's real
+    # owner's low-clock announces (a silent, permanent hide — worse than the
+    # documented visible pre-claim). The high clock + owner clock 1 here are the
+    # attack's real shape; a low poison clock would mask the defect.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    x = 424244
+    meta_before = dict(room.awareness._meta)
+    await room.handle(
+        sender=b, state=st_b,
+        message=_crafted_frame(_entry(x, 10**9, b"null")), persist=_noop_persist,
+    )
+    assert a.sent == []  # not relayed — peers' meta stays clean too
+    assert x not in st_b.awareness_ids and x not in room._awareness_bindings
+    assert dict(room.awareness._meta) == meta_before  # server meta not poisoned
+    # The real owner announces at a NORMAL low clock and is fully visible…
+    await room.handle(
+        sender=a, state=st_a,
+        message=_crafted_frame(_entry(x, 1, b'{"user":{"name":"RealA"}}')),
+        persist=_noop_persist,
+    )
+    assert room._awareness_bindings[x] == 1
+    assert x in room.awareness.states
+    # …and B's departure cannot scrub it.
+    await room.remove_client_presence(st_b)
+    assert x in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_null_flood_cannot_grow_meta(caplog):
+    # Review #3: nulls never bind, so without filtering they'd evade the quota
+    # entirely while growing pycrdt's unpruned _meta map without bound (and any
+    # future clientID colliding with a poisoned entry is clock-gated out).
+    # Filtered-unbound-null (F2) closes the vector: meta must not grow at all.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    meta_size = len(room.awareness._meta)
+    for wave in range(5):
+        flood = _crafted_frame(
+            *[_entry(500_000 + wave * 64 + i, 10**9, b"null") for i in range(64)]
+        )
+        with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+            await room.handle(sender=b, state=st_b, message=flood, persist=_noop_persist)
+    assert len(room.awareness._meta) == meta_size  # no growth, ever
+    assert a.sent == []  # nothing relayed
+    assert room._awareness_bindings == {}
+    # Filtered as the benign-scrub class (INFO), not the WARNING spoof signature.
+    assert any(
+        r.getMessage() == "collab.awareness_stale_scrub_filtered" for r in caplog.records
+    )
+
+
+@pytest.mark.anyio
+async def test_partial_apply_cannot_poison_snapshot():
+    # Review #1: pycrdt applies entry-by-entry (json.loads inline), so a frame
+    # [valid entry][bad-JSON tail] raises AFTER the head already mutated states.
+    # Without pre-validation the head id lands in the server snapshot — unbound
+    # and unattributed, so no disconnect scrub can ever remove the phantom
+    # caret. The whole frame must be dropped BEFORE anything is applied.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    y, z = 616161, 616162
+    poison = _crafted_frame(
+        _entry(y, 9, b'{"user":{"name":"Phantom"}}'),
+        _entry(z, 9, b"{not json"),
+    )
+    await room.handle(sender=b, state=st_b, message=poison, persist=_noop_persist)
+    assert y not in room.awareness.states and z not in room.awareness.states
+    assert room._awareness_bindings == {}
+    assert st_b.awareness_ids == set()
+    assert a.sent == []
+    assert await room.awareness_snapshot() is None  # no phantom for new joiners
+
+
+@pytest.mark.anyio
+async def test_binding_quota_is_per_user_not_per_room(caplog):
+    # Finding 2: the quota must confine a binding-spammer to exhausting only
+    # its OWN presence — another user's first-announce still binds and relays.
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    b, c, peer = FakeClient(), FakeClient(), FakeClient()
+    st_b = ClientState(user_id=2, can_write=True)
+    st_c = ClientState(user_id=3, can_write=True)
+    room.clients[b] = st_b
+    room.clients[c] = st_c
+    room.clients[peer] = ClientState(user_id=1, can_write=True)
+
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    assert len(st_b.awareness_ids) == _MAX_AWARENESS_BINDINGS_PER_USER
+    peer.sent.clear()
+
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        one_more = _crafted_frame(_entry(9999, 1, b'{"user":{"name":"B"}}'))
+        await room.handle(sender=b, state=st_b, message=one_more, persist=_noop_persist)
+    assert peer.sent == []  # nothing left after dropping the new id → not relayed
+    assert 9999 not in room._awareness_bindings
+    capped = [
+        r for r in caplog.records if r.getMessage() == "collab.awareness_bindings_capped"
+    ]
+    assert capped and capped[0].levelno == logging.WARNING
+
+    # User C is unaffected: a fresh first-announce still binds and relays.
+    frame_c, cid_c = _awareness_frame({"user": {"name": "C"}})
+    await room.handle(sender=c, state=st_c, message=frame_c, persist=_noop_persist)
+    assert peer.sent and cid_c in st_c.awareness_ids
+    assert room._awareness_bindings[cid_c] == 3
+
+
+@pytest.mark.anyio
+async def test_renewal_of_bound_ids_is_not_quota_checked():
+    # A user AT the cap can still renew already-bound ids: only NEW bindings
+    # count against the quota (heartbeats/caret moves must never be dropped).
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    b, peer = FakeClient(), FakeClient()
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=1, can_write=True)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    peer.sent.clear()
+    renew = _crafted_frame(_entry(1000, 2, b'{"user":{"name":"B2"}}'))
+    await room.handle(sender=b, state=st_b, message=renew, persist=_noop_persist)
+    assert peer.sent  # renewal relayed
+    assert room.awareness.states[1000]["user"]["name"] == "B2"
+
+
+@pytest.mark.anyio
+async def test_reload_recycles_dead_bindings_instead_of_silencing(caplog):
+    # Review #4: bindings die only with the room, so in a long-lived shared
+    # room a legit user's 65th page-reload identity would trip the cap and go
+    # presence-silent with no recovery short of room-empty. At the cap, the
+    # user's OLDEST bindings whose ids have no live caret (not in states) are
+    # recycled first; the cap only drops when all bound ids ARE live carets —
+    # the actual abuse shape.
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    b, peer = FakeClient(), FakeClient()
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=1, can_write=True)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    # The oldest identity's caret goes away (unload/scrub) — binding remains.
+    await room.handle(
+        sender=b, state=st_b,
+        message=_crafted_frame(_entry(1000, 2, b"null")), persist=_noop_persist,
+    )
+    assert 1000 in room._awareness_bindings
+    assert 1000 not in room.awareness.states
+    peer.sent.clear()
+
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        reload_announce = _crafted_frame(_entry(9999, 1, b'{"user":{"name":"B"}}'))
+        await room.handle(
+            sender=b, state=st_b, message=reload_announce, persist=_noop_persist
+        )
+    assert peer.sent  # relayed — the user is NOT silenced
+    assert room._awareness_bindings.get(9999) == 2  # new identity bound
+    assert 1000 not in room._awareness_bindings  # oldest dead binding recycled
+    assert not [
+        r for r in caplog.records if r.getMessage() == "collab.awareness_bindings_capped"
+    ]
+
+
+@pytest.mark.anyio
+async def test_quota_drop_preserves_renewals_and_foreign_logging(caplog):
+    # Codex Medium: at the cap, a mixed frame [bound renewal + over-cap new id +
+    # foreign spoof] must NOT be whole-dropped — the renewal still relays, only
+    # the new id is dropped, and the foreign entry STILL fires the WARNING
+    # spoof signature (foreign logging precedes the quota).
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    victim, b, peer = FakeClient(), FakeClient(), FakeClient()
+    st_v = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[victim] = st_v
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=3, can_write=True)
+    v_frame, cid_v = _awareness_frame({"user": {"name": "Victim"}})
+    await room.handle(sender=victim, state=st_v, message=v_frame, persist=_noop_persist)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    peer.sent.clear()
+
+    mixed = _crafted_frame(
+        _entry(1000, 2, b'{"user":{"name":"B2"}}'),  # bound renewal
+        _entry(9999, 1, b'{"user":{"name":"B"}}'),  # over-cap new id
+        _entry(cid_v, 10**9, b'{"user":{"name":"Fake"}}'),  # foreign spoof
+    )
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        await room.handle(sender=b, state=st_b, message=mixed, persist=_noop_persist)
+
+    relayed = P.extract_awareness_update(peer.sent[-1])
+    assert P.read_awareness_client_ids(relayed) == [1000]  # renewal survives
+    assert room.awareness.states[1000]["user"]["name"] == "B2"
+    assert 9999 not in room._awareness_bindings
+    assert room.awareness.states[cid_v]["user"]["name"] == "Victim"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "collab.awareness_bindings_capped" in warnings
+    assert "collab.awareness_foreign_filtered" in warnings  # not suppressed

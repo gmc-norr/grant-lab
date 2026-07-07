@@ -11,6 +11,8 @@ Wire format (pycrdt._sync):
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from pycrdt import (
     Awareness,
     YMessageType,
@@ -20,6 +22,7 @@ from pycrdt import (
     create_update_message,
     handle_sync_message,
     read_message,
+    write_var_uint,
 )
 
 __all__ = [
@@ -34,6 +37,9 @@ __all__ = [
     "extract_update",
     "extract_awareness_update",
     "read_awareness_client_ids",
+    "read_awareness_entries",
+    "filter_awareness_update",
+    "AwarenessEntry",
 ]
 
 
@@ -78,14 +84,29 @@ def extract_awareness_update(message: bytes) -> bytes:
     return read_message(message[1:])
 
 
-def read_awareness_client_ids(payload: bytes) -> list[int]:
-    """Parse the client ids declared in a y-protocols awareness update WITHOUT
-    mutating any Awareness. Update format (encodeAwarenessUpdate): a varuint
-    count, then per client [clientID varuint][clock varuint][state varString].
-    Read each clientID; skip clock + the varuint-length-prefixed state bytes.
+class AwarenessEntry(NamedTuple):
+    """One entry of a y-protocols awareness update: the declared client id, the
+    entry's full byte span [start:end) within the payload (clientID varuint +
+    clock varuint + varString state), the start of the state bytes
+    (payload[state_start:end] is the JSON document), and whether the state is
+    the JSON literal null — a removal; JSON.stringify(null) === "null", so a
+    4-byte compare on the span already in hand, no JSON decode."""
 
-    HARDENED against adversarial frames: every varuint is capped at 10 bytes
-    (a 64-bit value is at most 10 base-128 groups) and every read is
+    client_id: int
+    start: int
+    end: int
+    state_start: int
+    is_null: bool
+
+
+def read_awareness_entries(payload: bytes) -> list[AwarenessEntry]:
+    """Parse the entries of a y-protocols awareness update WITHOUT mutating any
+    Awareness. Update format (encodeAwarenessUpdate): a varuint count, then per
+    client [clientID varuint][clock varuint][state varString]. Records each
+    entry's byte span so a filter can rebuild a payload from original bytes.
+
+    HARDENED against adversarial frames (f535f6c): every varuint is capped at 10
+    bytes (a 64-bit value is at most 10 base-128 groups) and every read is
     bounds-checked against the payload, so a malformed/oversized frame — e.g. a
     long run of 0x80+ continuation bytes — raises PROMPTLY (O(payload)) instead of
     shifting a multi-megabit Python int. Without this cap a ~1 MB all-continuation
@@ -112,15 +133,45 @@ def read_awareness_client_ids(payload: bytes) -> list[int]:
         raise ValueError("awareness varuint: overlong")
 
     count = _rvu()
-    ids: list[int] = []
+    entries: list[AwarenessEntry] = []
     # A conforming frame declares >= 3 bytes per client (id+clock+len), so `count`
     # cannot exceed `n`; a lying count simply raises "truncated" once the body is
     # exhausted (each iteration advances pos by >= 3), keeping this O(n).
     for _ in range(count):
-        ids.append(_rvu())            # clientID
+        start = pos
+        client_id = _rvu()
         _rvu()                        # clock (skip)
         state_len = _rvu()            # varString byte length
         if state_len > n - pos:       # never skip past the payload
             raise ValueError("awareness varString: out of range")
+        is_null = state_len == 4 and payload[pos : pos + 4] == b"null"
+        state_start = pos
         pos += state_len              # skip state bytes
-    return ids
+        entries.append(AwarenessEntry(client_id, start, pos, state_start, is_null))
+    return entries
+
+
+def read_awareness_client_ids(payload: bytes) -> list[int]:
+    """The client ids declared in an awareness update — thin wrapper over
+    read_awareness_entries (one parser, no drift)."""
+    return [e.client_id for e in read_awareness_entries(payload)]
+
+
+def filter_awareness_update(
+    payload: bytes, entries: list[AwarenessEntry], kept: list[AwarenessEntry]
+) -> bytes | None:
+    """Rebuild the payload keeping only the `kept` subset of `entries` (the
+    caller's already-partitioned allow-list — passing the entries themselves,
+    not a derived id-set, keeps one source of truth).
+
+    All kept -> the payload UNCHANGED, byte-identical (fast path — the
+    overwhelmingly common case; zero re-encode in normal operation). None
+    kept -> None (nothing to relay). Mixed -> rebuilt as varuint(kept count)
+    + the kept entries' ORIGINAL byte spans — entries are never re-encoded,
+    only re-counted. (write_var_uint is pycrdt's writer — byte-identical
+    mirror of the reader in read_awareness_entries.)"""
+    if len(kept) == len(entries):
+        return payload
+    if not kept:
+        return None
+    return write_var_uint(len(kept)) + b"".join(payload[e.start : e.end] for e in kept)
