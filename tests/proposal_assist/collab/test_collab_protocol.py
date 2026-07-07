@@ -197,6 +197,9 @@ def test_read_awareness_client_ids_is_a_wrapper_over_entries():
     assert P.read_awareness_client_ids(payload) == [e.client_id for e in entries]
     assert [e.client_id for e in entries] == [7, 2**40 + 3]
     assert [e.is_null for e in entries] == [False, True]
+    # state_start:end is exactly the state bytes (the room pre-validates these).
+    assert payload[entries[0].state_start : entries[0].end] == b'{"x":1}'
+    assert payload[entries[1].state_start : entries[1].end] == b"null"
 
 
 # ---------------------------------------------------------------------------
@@ -208,13 +211,13 @@ def test_filter_awareness_update_all_allowed_is_byte_identical_fast_path():
     payload = _vu(2) + _entry(7, 1, b'{"a":1}') + _entry(9, 1, b'{"b":2}')
     entries = P.read_awareness_entries(payload)
     # `is`: the fast path must not copy — zero re-encode in normal operation.
-    assert P.filter_awareness_update(payload, entries, {7, 9}) is payload
+    assert P.filter_awareness_update(payload, entries, entries) is payload
 
 
 def test_filter_awareness_update_none_allowed_returns_none():
     payload = _vu(1) + _entry(7, 1, b'{"a":1}')
     entries = P.read_awareness_entries(payload)
-    assert P.filter_awareness_update(payload, entries, {8}) is None
+    assert P.filter_awareness_update(payload, entries, []) is None
 
 
 def test_filter_awareness_update_mixed_rebuilds_kept_spans():
@@ -229,7 +232,8 @@ def test_filter_awareness_update_mixed_rebuilds_kept_spans():
     srv.apply_awareness_update(p2, "x")
     snap = srv.encode_awareness_update(list(srv.states))
     entries = P.read_awareness_entries(snap)
-    out = P.filter_awareness_update(snap, entries, {c1})
+    kept = [e for e in entries if e.client_id == c1]
+    out = P.filter_awareness_update(snap, entries, kept)
     assert out is not None and out != snap
     assert P.read_awareness_client_ids(out) == [c1]
     fresh = P.Awareness(_Doc())
@@ -240,6 +244,7 @@ def test_filter_awareness_update_mixed_rebuilds_kept_spans():
 
 
 def test_filter_awareness_update_empty_frame_is_all_allowed():
-    # count=0: vacuously all-allowed → same object back (relay-unchanged).
+    # count=0: vacuously all-kept → same object back (the caller decides whether
+    # an empty frame is worth relaying at all).
     payload = _vu(0)
-    assert P.filter_awareness_update(payload, [], set()) is payload
+    assert P.filter_awareness_update(payload, [], []) is payload

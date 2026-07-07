@@ -22,6 +22,7 @@ from pycrdt import (
     create_update_message,
     handle_sync_message,
     read_message,
+    write_var_uint,
 )
 
 __all__ = [
@@ -86,13 +87,15 @@ def extract_awareness_update(message: bytes) -> bytes:
 class AwarenessEntry(NamedTuple):
     """One entry of a y-protocols awareness update: the declared client id, the
     entry's full byte span [start:end) within the payload (clientID varuint +
-    clock varuint + varString state), and whether the state is the JSON literal
-    null — a removal; JSON.stringify(null) === "null", so a 4-byte compare on
-    the span already in hand, no JSON decode."""
+    clock varuint + varString state), the start of the state bytes
+    (payload[state_start:end] is the JSON document), and whether the state is
+    the JSON literal null — a removal; JSON.stringify(null) === "null", so a
+    4-byte compare on the span already in hand, no JSON decode."""
 
     client_id: int
     start: int
     end: int
+    state_start: int
     is_null: bool
 
 
@@ -142,8 +145,9 @@ def read_awareness_entries(payload: bytes) -> list[AwarenessEntry]:
         if state_len > n - pos:       # never skip past the payload
             raise ValueError("awareness varString: out of range")
         is_null = state_len == 4 and payload[pos : pos + 4] == b"null"
+        state_start = pos
         pos += state_len              # skip state bytes
-        entries.append(AwarenessEntry(client_id, start, pos, is_null))
+        entries.append(AwarenessEntry(client_id, start, pos, state_start, is_null))
     return entries
 
 
@@ -153,29 +157,21 @@ def read_awareness_client_ids(payload: bytes) -> list[int]:
     return [e.client_id for e in read_awareness_entries(payload)]
 
 
-def _write_varuint(num: int) -> bytes:
-    """Base-128 varuint writer — mirror of the reader in read_awareness_entries."""
-    out = bytearray()
-    while num > 0x7F:
-        out.append(0x80 | (num & 0x7F))
-        num >>= 7
-    out.append(num)
-    return bytes(out)
-
-
 def filter_awareness_update(
-    payload: bytes, entries: list[AwarenessEntry], allowed_ids: set[int]
+    payload: bytes, entries: list[AwarenessEntry], kept: list[AwarenessEntry]
 ) -> bytes | None:
-    """Drop the entries whose client_id is not in allowed_ids.
+    """Rebuild the payload keeping only the `kept` subset of `entries` (the
+    caller's already-partitioned allow-list — passing the entries themselves,
+    not a derived id-set, keeps one source of truth).
 
-    All allowed -> the payload UNCHANGED, byte-identical (fast path — the
+    All kept -> the payload UNCHANGED, byte-identical (fast path — the
     overwhelmingly common case; zero re-encode in normal operation). None
-    allowed -> None (nothing to relay). Mixed -> rebuilt as varuint(kept count)
+    kept -> None (nothing to relay). Mixed -> rebuilt as varuint(kept count)
     + the kept entries' ORIGINAL byte spans — entries are never re-encoded,
-    only re-counted."""
-    kept = [e for e in entries if e.client_id in allowed_ids]
+    only re-counted. (write_var_uint is pycrdt's writer — byte-identical
+    mirror of the reader in read_awareness_entries.)"""
     if len(kept) == len(entries):
         return payload
     if not kept:
         return None
-    return _write_varuint(len(kept)) + b"".join(payload[e.start : e.end] for e in kept)
+    return write_var_uint(len(kept)) + b"".join(payload[e.start : e.end] for e in kept)

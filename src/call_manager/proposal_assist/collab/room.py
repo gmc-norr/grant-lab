@@ -274,7 +274,7 @@ class Room:
                         new_ids = set()
                         if not kept:
                             return
-                relay = P.filter_awareness_update(payload, entries, kept_ids)
+                relay = P.filter_awareness_update(payload, entries, kept)
                 if relay is None:  # unreachable (kept is non-empty) — defensive
                     return
                 try:
