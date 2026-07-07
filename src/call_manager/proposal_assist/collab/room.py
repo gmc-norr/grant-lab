@@ -266,24 +266,37 @@ class Room:
                 new_ids = kept_ids - self._awareness_bindings.keys()
                 if new_ids:
                     # Per-user binding quota — see _MAX_AWARENESS_BINDINGS_PER_USER.
-                    # Over-cap: drop ONLY the would-be-new-binding entries. Bound
-                    # renewals (heartbeats/caret moves) always pass, and foreign
-                    # entries were already logged above — a mixed quota+spoof
-                    # frame still fires the spoof signal (Codex Medium).
-                    bound = sum(
-                        1 for uid in self._awareness_bindings.values()
+                    mine = [
+                        cid for cid, uid in self._awareness_bindings.items()
                         if uid == state.user_id
-                    )
-                    if bound + len(new_ids) > _MAX_AWARENESS_BINDINGS_PER_USER:
+                    ]
+                    overflow = len(mine) + len(new_ids) - _MAX_AWARENESS_BINDINGS_PER_USER
+                    if overflow > 0:
+                        # Recycle the user's OLDEST dead bindings first (id no
+                        # longer in states — a stale reload identity, not a live
+                        # caret): a long-lived room + many reloads must not
+                        # silence a legit user (review #4). Live-caret bindings
+                        # are never recycled; dict order = oldest first. A
+                        # recycled id becomes claimable again — same class as
+                        # the documented binding-reset-race residual, and any
+                        # reclaim is bind-logged.
+                        dead = [c for c in mine if c not in self.awareness.states]
+                        for cid in dead[:overflow]:
+                            del self._awareness_bindings[cid]
+                        overflow -= len(dead[:overflow])
+                    if overflow > 0:
+                        # All bound ids are live carets (the abuse shape): drop
+                        # ONLY the would-be-new-binding entries. Bound renewals
+                        # (heartbeats/caret moves) always pass, and filtered
+                        # entries were already logged above — a mixed
+                        # quota+spoof frame still fires the spoof signal.
                         logger.warning(
                             "collab.awareness_bindings_capped",
                             extra={"event": "collab_awareness_bindings_capped",
                                    "room": str(self.key), "user_id": state.user_id,
-                                   "bound": bound, "new": len(new_ids)},
+                                   "bound": len(mine), "new": len(new_ids)},
                         )
-                        kept = [
-                            e for e in kept if e.client_id in self._awareness_bindings
-                        ]
+                        kept = [e for e in kept if e.client_id not in new_ids]
                         kept_ids = {e.client_id for e in kept}
                         new_ids = set()
                         if not kept:

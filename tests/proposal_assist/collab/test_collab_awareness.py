@@ -674,6 +674,50 @@ async def test_renewal_of_bound_ids_is_not_quota_checked():
 
 
 @pytest.mark.anyio
+async def test_reload_recycles_dead_bindings_instead_of_silencing(caplog):
+    # Review #4: bindings die only with the room, so in a long-lived shared
+    # room a legit user's 65th page-reload identity would trip the cap and go
+    # presence-silent with no recovery short of room-empty. At the cap, the
+    # user's OLDEST bindings whose ids have no live caret (not in states) are
+    # recycled first; the cap only drops when all bound ids ARE live carets —
+    # the actual abuse shape.
+    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+
+    room = Room((uuid.uuid4(), "draft"))
+    b, peer = FakeClient(), FakeClient()
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[b] = st_b
+    room.clients[peer] = ClientState(user_id=1, can_write=True)
+    fill = _crafted_frame(
+        *[
+            _entry(1000 + i, 1, b'{"user":{"name":"B"}}')
+            for i in range(_MAX_AWARENESS_BINDINGS_PER_USER)
+        ]
+    )
+    await room.handle(sender=b, state=st_b, message=fill, persist=_noop_persist)
+    # The oldest identity's caret goes away (unload/scrub) — binding remains.
+    await room.handle(
+        sender=b, state=st_b,
+        message=_crafted_frame(_entry(1000, 2, b"null")), persist=_noop_persist,
+    )
+    assert 1000 in room._awareness_bindings
+    assert 1000 not in room.awareness.states
+    peer.sent.clear()
+
+    with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+        reload_announce = _crafted_frame(_entry(9999, 1, b'{"user":{"name":"B"}}'))
+        await room.handle(
+            sender=b, state=st_b, message=reload_announce, persist=_noop_persist
+        )
+    assert peer.sent  # relayed — the user is NOT silenced
+    assert room._awareness_bindings.get(9999) == 2  # new identity bound
+    assert 1000 not in room._awareness_bindings  # oldest dead binding recycled
+    assert not [
+        r for r in caplog.records if r.getMessage() == "collab.awareness_bindings_capped"
+    ]
+
+
+@pytest.mark.anyio
 async def test_quota_drop_preserves_renewals_and_foreign_logging(caplog):
     # Codex Medium: at the cap, a mixed frame [bound renewal + over-cap new id +
     # foreign spoof] must NOT be whole-dropped — the renewal still relays, only
