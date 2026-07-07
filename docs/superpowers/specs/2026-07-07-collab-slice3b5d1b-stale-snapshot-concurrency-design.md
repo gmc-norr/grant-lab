@@ -129,10 +129,16 @@ API/schema change**.
 `pc.base_section_sha` = live-at-read → accept-time `kernel_accept_prose` remains a genuine
 live-vs-live conflict gate. D1b changes only the *submit* gate.
 
-**Uniqueness note.** The toolbar's `anchor` is the derived *claim* (a full sentence:
-`deriveClaimAnchor` + `anchor == section.text[from:to]` by construction), so exact-substring
-relocation is unique in the common case. A short/duplicated anchor degrades to the "appears more
-than once" `409`, which is a clearer message than today's opaque "save and reselect".
+**Anchor shape & uniqueness.** The toolbar's `anchor` is the **literal selected text** —
+`deriveClaimAnchor` returns `doc.textBetween(from, to)` (`selectionAnchor.ts:27`), so
+`anchor == section.text[from:to]` by construction *but it may be as short as a single word* (the
+D1a e2e selects `diagnostic`). Relocation is therefore exact-substring: unique when the selection
+is distinctive, but a short/repeated selection can match multiple times and degrades to the
+"appears more than once" `409`. That is strictly better than today (which `409`s **always** once
+the room is ahead of git) and a clearer message than the old opaque "save and reselect" — but it
+is weaker than exact-offset disambiguation. Precise disambiguation (offset-proximity, or the
+frontend sending live offsets) is the deferred **Approach-3** polish, not D1b. Tests must cover a
+**unique short span** (not only a long sentence) plus the ambiguous-short-span `409`.
 
 ## 7. Parity — what stays unchanged
 
@@ -166,12 +172,20 @@ HTTP mappings are **unchanged**; only the spurious-trigger frequency drops.
 ## 10. Testing
 
 **Unit (pure-Python, no DB) — `build_selection_block`:**
-- collab `modify`, live ahead of git (sha mismatch) but anchor unique → **verified block with
-  recomputed live offsets** (the regression test).
+- collab `modify`, live ahead of git (sha mismatch), anchor is a **unique short span (single
+  word)** → **verified block with recomputed live offsets** (the regression test; a short span,
+  not only a long sentence — the real toolbar anchor can be one word).
 - collab `modify`, anchor gone → `409` "no longer in this section".
-- collab `modify`, anchor appears twice → `409` "appears more than once".
+- collab `modify`, anchor appears twice in the live section → `409` "appears more than once".
 - collab `ask`, anchor gone → unverified block, **no** `409`.
 - flag-off `modify` with a stale git sha → still `409` (parity, `allow_anchor_relocation=False`).
+
+**Route/integration (Edit call-site wiring; Codex Medium) — `POST /workspaces/{id}/turns`:**
+Collab-enabled draft, live room ahead of git, submit a `modify` selection carrying a **stale git
+`base_section_sha`** → `200` and the stored selection block is `verified` with **recomputed live
+offsets**. A unit test on `build_selection_block` alone cannot catch a plan that implements
+`allow_anchor_relocation` but forgets to pass it from the collab branch at `turns.py:150`; this
+test pins that wire.
 
 **Integration (testcontainers PG + live room) — Cite kernel / `direct_cite_via_kernel`:**
 - flag-on, section co-edited in the room so git-sha ≠ live-sha, anchor still present-and-unique →
