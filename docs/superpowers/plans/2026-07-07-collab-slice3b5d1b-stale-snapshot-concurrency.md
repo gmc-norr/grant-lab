@@ -48,8 +48,8 @@
 
 - [ ] **Step 1: Confirm you are on master with the D1b spec commits and a clean tree**
 
-Run: `git -C /home/parlar_ai/dev/call-monitor branch --show-current && git -C /home/parlar_ai/dev/call-monitor log --oneline -2 && git -C /home/parlar_ai/dev/call-monitor status --porcelain`
-Expected: branch `master`; top commits `92f4013` (fold-in) over `d70846d` (spec); only the two unrelated untracked `docs/superpowers/...` files, nothing staged.
+Run: `git -C /home/parlar_ai/dev/call-monitor branch --show-current && git -C /home/parlar_ai/dev/call-monitor log --oneline -3 && git -C /home/parlar_ai/dev/call-monitor status --porcelain`
+Expected: branch `master`; top three commits `f65e4b0` (plan) over `92f4013` (spec fold-in) over `d70846d` (spec); only the two unrelated untracked `docs/superpowers/...` files, nothing staged.
 
 - [ ] **Step 2: Cut the feature branch**
 
@@ -409,29 +409,40 @@ EOF
 
 - [ ] **Step 1: Write the failing route/integration test**
 
-Create `tests/proposal_assist/test_submit_turn_collab_relocation.py`:
+Create `tests/proposal_assist/test_submit_turn_collab_relocation.py`. This makes the
+live Yjs room **genuinely ahead of git** (git HEAD has no "diagnostic"; the live log
+adds it) so a git/disk-baselined relocate would 409 (anchor gone) — proving the route
+baselines on the LIVE room, not just that the wire is present (Codex-Medium). No unused
+imports/vars (Task 3 lints this file, so it must pass ruff):
 
 ```python
-"""POST /api/workspaces/{id}/turns — collab Edit submit relocates by anchor (3b-5d.D1b).
+"""POST /api/workspaces/{id}/turns — collab Edit submit relocates against the LIVE
+room (3b-5d.D1b).
 
 A unit test on build_selection_block cannot catch a plan that adds
 allow_anchor_relocation but forgets to pass it from the collab-draft branch of
-turns.py (Codex-Medium). This drives the real route: a collab-enabled draft
-(so turns.py builds `sections` from the canonical live read) + a deliberately
-stale git base_section_sha + a present anchor → 200 with a verified block whose
-offsets were recomputed, NOT the client's.
+turns.py (Codex-Medium); and a same-content stub cannot prove the baseline is the
+LIVE room rather than git. This drives the real route with the live Yjs room
+genuinely AHEAD of git HEAD: git has NO "diagnostic", the live log DOES. A
+git-baselined relocate would 409 (anchor gone); the live baseline returns 200 with
+the offset recomputed from the live section.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from call_manager.db.models import WorkspaceEvent
-from call_manager.proposal_assist.collab import state
+from call_manager.proposal_assist.collab import state, store
+from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
+from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
+from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.test_api_workspaces import _app, _client, _seed
 
-# Preamble (0) + one H2 section (1) with a UNIQUE anchor word "diagnostic".
-_DOC = "# Title\npreamble\n## Aims\nPrecision medicine improves diagnostic outcomes.\n"
+# git: preamble (0) + Aims (1) WITHOUT "diagnostic". The live room adds it.
+_DOC_GIT = "# Title\npreamble\n## Aims\nPrecision medicine outcomes.\n"
+_LIVE_AIMS = "## Aims\nPrecision medicine improves diagnostic outcomes.\n"
 
 
 def _ack(pg_session_factory, ws_id, user_id):
@@ -440,17 +451,35 @@ def _ack(pg_session_factory, ws_id, user_id):
         s.commit()
 
 
-def test_collab_modify_stale_git_sha_relocates_and_submits(
+def test_collab_modify_relocates_against_live_room(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
-    owner_id, member_id, stranger_id, ws_id = _seed(app, pg_session_factory, tmp_path, _DOC)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, _DOC_GIT)
+    # Enable collab, hydrate the room from git (log = _DOC_GIT), then apply a live edit
+    # to section 1 that introduces "diagnostic" → the room is now AHEAD of git HEAD.
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        updates = load_or_hydrate(
+            s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
+        )
+        room_doc = build_doc(updates)
+        blocks = markdown_to_pm(_LIVE_AIMS).get("content") or []
+        update = apply_pm_section_to_fragment(room_doc, section_index=1, blocks=blocks)
+        store.append_update(
+            s, workspace_id=ws_id, artifact="draft", actor_id=owner_id, update=update, commit=False
+        )
         s.commit()
     _ack(pg_session_factory, ws_id, owner_id)
-    client = _client(app, owner_id)
 
+    # The offset the backend will compute — canonical LIVE read → split → index.
+    with pg_session_factory() as s:
+        live_md = canonical_artifact_markdown(
+            s, workspace_id=ws_id, artifact="draft", repo_dir=workspace_repo_dir(tmp_path, ws_id)
+        )
+    expected_off = split_sections(live_md)[1].text.index("diagnostic")
+
+    client = _client(app, owner_id)
     r = client.post(
         f"/api/workspaces/{ws_id}/turns",
         json={
@@ -460,25 +489,26 @@ def test_collab_modify_stale_git_sha_relocates_and_submits(
                 "section_index": 1,
                 "base_commit_sha": "0" * 40,
                 "base_section_sha": "stale" * 8,  # git sha the room is ahead of
-                "anchor": "diagnostic",           # still present + unique in the live section
+                "anchor": "diagnostic",           # present in LIVE, absent from git HEAD
                 "from_offset": 999,               # bogus client offsets — must be recomputed
                 "to_offset": 1009,
             },
         },
     )
-    assert r.status_code == 200  # was 409 before the collab-branch wire
+    assert r.status_code == 200  # a git-baselined relocate would 409 (not in git HEAD)
     turn = r.json()["user_turn"]
-    blocks = turn["content"] if isinstance(turn["content"], list) else [turn["content"]]
-    sel = [b for b in blocks if b.get("type") == "selection"][0]
+    blocks_out = turn["content"] if isinstance(turn["content"], list) else [turn["content"]]
+    sel = [b for b in blocks_out if b.get("type") == "selection"][0]
     assert sel["verified"] is True and sel["request_type"] == "modify"
     assert sel["anchor"] == "diagnostic"
-    assert (sel["from_offset"], sel["to_offset"]) != (999, 1009)  # recomputed live offsets
+    assert sel["from_offset"] == expected_off  # the LIVE section offset, not git, not 999
+    assert sel["to_offset"] == expected_off + len("diagnostic")
 ```
 
 - [ ] **Step 2: Run — verify it FAILS (wire not yet added)**
 
 Run: `EMBEDDING_MODEL=bge-m3 uv run pytest tests/proposal_assist/test_submit_turn_collab_relocation.py -p no:cacheprovider -q`
-Expected: FAIL with `assert 409 == 200` — the collab branch does not yet pass `allow_anchor_relocation`, so the stale sha triggers the modify 409.
+Expected: FAIL at `assert r.status_code == 200` (gets 409) — the collab branch builds `sections` from the live room (which HAS "diagnostic") but does not yet pass `allow_anchor_relocation`, so the stale sha makes the modify unverified → 409.
 
 - [ ] **Step 3: Wire the collab-draft branch**
 
@@ -534,8 +564,10 @@ feat(collab): wire allow_anchor_relocation from the collab turns branch (3b-5d.D
 
 A single collab_draft bool now drives both the canonical-live sections read and
 allow_anchor_relocation, so a collab Edit modify with a stale git sha but a
-present anchor submits (200) instead of 409ing. Route test pins the wire that a
-build_selection_block unit test can't.
+present anchor submits (200) instead of 409ing. Route test drives a live room
+genuinely ahead of git (anchor absent from git HEAD, present in the live log) so
+it pins both the wire AND the live baseline — neither of which a
+build_selection_block unit test can catch.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 EOF
@@ -610,10 +642,12 @@ Insert before the closing `});` of the `test.describe("collab two-browser (disti
   });
 ```
 
-- [ ] **Step 2: Typecheck the e2e spec**
+- [ ] **Step 2: Sanity-check the spec (note: `tsc` does NOT cover e2e)**
 
-Run: `cd /home/parlar_ai/dev/call-monitor/frontend && pnpm exec tsc --noEmit`
-Expected: exit 0 (no type errors introduced).
+`frontend/tsconfig.json` has `"include": ["src"]`, so `pnpm exec tsc --noEmit` does **not** type-check `frontend/e2e/`. The new scenario reuses the exact selectors/APIs of scenarios (a)–(d), so it is type-consistent by construction; its real validation is the Playwright run in Step 3 (Playwright's loader fails on a broken spec). Confirm no accidental `src` changes and that the file still parses:
+
+Run: `cd /home/parlar_ai/dev/call-monitor/frontend && pnpm exec tsc --noEmit && node --check e2e/collab.spec.ts 2>/dev/null || echo "(node --check skips TS syntax — rely on Step 3)"`
+Expected: `tsc` exit 0 (src unchanged). The e2e spec is exercised in Step 3.
 
 - [ ] **Step 3: Run the full two-browser e2e suite (the D1b acceptance run)**
 
