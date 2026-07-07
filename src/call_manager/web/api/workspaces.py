@@ -34,7 +34,10 @@ from call_manager.db.models import (
 )
 from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
-from call_manager.proposal_assist.citations.collab_cite import direct_cite_via_kernel
+from call_manager.proposal_assist.citations.collab_cite import (
+    direct_cite_via_kernel,
+    init_spec_via_kernel,
+)
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     current_head,
@@ -440,99 +443,157 @@ def post_save_spec_section(
 
 
 @router.post("/workspaces/{workspace_id}/spec", response_model=SpecOut)
-def post_init_spec(
+async def post_init_spec(
     workspace_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> SpecOut:
-    """Idempotent Spec initialization (owner-gated). If proposal-spec.md is
-    whitespace-only, seed SPEC_SKELETON as ONE whole-doc commit (sidestepping the
-    preamble structure guard); otherwise no-op. Returns the SpecOut either way."""
+    """Idempotent Spec initialization (owner-gated). Flag-on: the skeleton seeds
+    through the live room (kernel) — provenance comes from the collab checkpoint
+    (ArtifactVersion "collab checkpoint: spec" / WorkspaceEvent kind=
+    "collab_checkpoint"), NOT a user_edit row (3b-5d.D4 §3.3 deliberate deviation
+    — do not duplicate provenance rows on the kernel path). Flag-off: the legacy
+    whole-doc git commit, byte-for-byte."""
     settings = request.app.state.settings
     sf = request.app.state.session_factory
-    with sf() as session:
-        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        spec = repo_dir / SPEC_FILENAME
-        if not spec.exists():
-            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        try:
-            acquire_commit_mutex(session, ws.id)
-            # post_init_spec bypasses save_section, so it needs its OWN lock
-            # guard. Check under the mutex (like the lock/unlock routes) BEFORE
-            # the whitespace/no-op branch, so a locked spec is 409 regardless of
-            # file content.
-            session.refresh(ws, ["spec_locked_at"])
-            if ws.spec_locked_at is not None:
-                raise SpecLockedError(str(ws.id))
-            raw = spec.read_text()  # read UNDER the mutex so a concurrent init serializes
-            if raw.strip() == "":
-                commit_sha = write_and_commit_files(
-                    repo_dir, {SPEC_FILENAME: SPEC_SKELETON}, "user spec init"
-                )
-                session.add(
-                    ArtifactVersion(
-                        workspace_id=ws.id,
-                        commit_sha=commit_sha,
-                        created_by="user",
-                        message="user spec init",
-                    )
-                )
-                session.add(
-                    WorkspaceEvent(
-                        workspace_id=ws.id,
-                        kind="user_edit",
-                        actor_id=user.id,
-                        payload={"artifact": "spec", "commit_sha": commit_sha},
-                    )
-                )
-                # Snapshot the response WHILE STILL HOLDING the mutex: we just
-                # committed exactly SPEC_SKELETON at commit_sha.
-                head, sections = commit_sha, _sections_out(SPEC_SKELETON)
-            else:
-                # No-op: capture head + sections UNDER the lock too. Reading them
-                # after releasing the mutex (Codex Medium) would let a writer that
-                # grabs the lock the instant we release expose an uncommitted /
-                # rolled-back write, or a head/section snapshot from two moments.
-                head, sections = current_head(repo_dir), _sections_out(raw)
-            session.commit()  # releases the mutex; persists rows iff we seeded
-            # Read collab_enabled WHILE the session is open (the return is outside
-            # the `with` block). can_write is unconditionally True here: require_owner
-            # above + a successful init only runs on an UNLOCKED spec.
-            collab_enabled = collab_state.is_collab_enabled(
+
+    def _route() -> bool:
+        with sf() as session:
+            return collab_state.is_collab_enabled(
                 session, workspace_id=workspace_id, artifact="spec"
             )
+
+    enabled = await run_in_threadpool(_route)
+
+    if enabled:
+        def _gate() -> None:
+            with sf() as session:
+                require_owner(workspace_id=workspace_id, user=user, session=session)
+            if not (
+                workspace_repo_dir(settings.workspaces_dir, workspace_id) / SPEC_FILENAME
+            ).exists():
+                raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        await run_in_threadpool(_gate)
+        try:
+            head, md = await init_spec_via_kernel(
+                session_factory=sf, workspaces_dir=settings.workspaces_dir,
+                workspace_id=workspace_id, actor_id=user.id,
+            )
         except SpecLockedError as e:
-            session.rollback()
             raise HTTPException(
-                status_code=409,
-                detail="spec is locked — unlock to edit",
+                status_code=409, detail="spec is locked — unlock to edit"
             ) from e
         except CommitMutexTimeout as e:
-            session.rollback()
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
+        except RoomEvicted as e:
+            raise HTTPException(
+                status_code=409, detail="the live session was reset — retry"
+            ) from e
         except GitCommitError as e:
-            session.rollback()
-            logger.exception("spec init failed for workspace %s", workspace_id)
+            logger.exception("collab spec init failed for workspace %s", workspace_id)
             raise HTTPException(
                 status_code=500, detail="spec init failed — nothing was written"
             ) from e
-    # A successful init only runs on an UNLOCKED spec (locked -> SpecLockedError
-    # -> 409 above), so the lock fields are always unset here. can_manage_lock=True
-    # because require_owner above guarantees the caller owns the workspace.
-    return SpecOut(
-        head=head,
-        can_edit=True,
-        sections=sections,
-        locked=False,
-        locked_at=None,
-        locked_by=None,
-        can_manage_lock=True,
-        collab_enabled=collab_enabled,
-        can_write=True,
-    )
+        return SpecOut(
+            head=head,
+            can_edit=True,
+            sections=_sections_out(md),
+            locked=False,
+            locked_at=None,
+            locked_by=None,
+            can_manage_lock=True,
+            collab_enabled=True,
+            can_write=True,
+        )
+
+    def _git() -> SpecOut:
+        with sf() as session:
+            ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+            spec = repo_dir / SPEC_FILENAME
+            if not spec.exists():
+                raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+            try:
+                acquire_commit_mutex(session, ws.id)
+                # post_init_spec bypasses save_section, so it needs its OWN lock
+                # guard. Check under the mutex (like the lock/unlock routes) BEFORE
+                # the whitespace/no-op branch, so a locked spec is 409 regardless of
+                # file content.
+                session.refresh(ws, ["spec_locked_at"])
+                if ws.spec_locked_at is not None:
+                    raise SpecLockedError(str(ws.id))
+                raw = spec.read_text()  # read UNDER the mutex so a concurrent init serializes
+                if raw.strip() == "":
+                    commit_sha = write_and_commit_files(
+                        repo_dir, {SPEC_FILENAME: SPEC_SKELETON}, "user spec init"
+                    )
+                    session.add(
+                        ArtifactVersion(
+                            workspace_id=ws.id,
+                            commit_sha=commit_sha,
+                            created_by="user",
+                            message="user spec init",
+                        )
+                    )
+                    session.add(
+                        WorkspaceEvent(
+                            workspace_id=ws.id,
+                            kind="user_edit",
+                            actor_id=user.id,
+                            payload={"artifact": "spec", "commit_sha": commit_sha},
+                        )
+                    )
+                    # Snapshot the response WHILE STILL HOLDING the mutex: we just
+                    # committed exactly SPEC_SKELETON at commit_sha.
+                    head, sections = commit_sha, _sections_out(SPEC_SKELETON)
+                else:
+                    # No-op: capture head + sections UNDER the lock too. Reading them
+                    # after releasing the mutex (Codex Medium) would let a writer that
+                    # grabs the lock the instant we release expose an uncommitted /
+                    # rolled-back write, or a head/section snapshot from two moments.
+                    head, sections = current_head(repo_dir), _sections_out(raw)
+                session.commit()  # releases the mutex; persists rows iff we seeded
+                # Read collab_enabled WHILE the session is open (the return is outside
+                # the `with` block). can_write is unconditionally True here: require_owner
+                # above + a successful init only runs on an UNLOCKED spec.
+                collab_enabled = collab_state.is_collab_enabled(
+                    session, workspace_id=workspace_id, artifact="spec"
+                )
+            except SpecLockedError as e:
+                session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="spec is locked — unlock to edit",
+                ) from e
+            except CommitMutexTimeout as e:
+                session.rollback()
+                raise HTTPException(
+                    status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+                ) from e
+            except GitCommitError as e:
+                session.rollback()
+                logger.exception("spec init failed for workspace %s", workspace_id)
+                raise HTTPException(
+                    status_code=500, detail="spec init failed — nothing was written"
+                ) from e
+        # A successful init only runs on an UNLOCKED spec (locked -> SpecLockedError
+        # -> 409 above), so the lock fields are always unset here. can_manage_lock=True
+        # because require_owner above guarantees the caller owns the workspace.
+        return SpecOut(
+            head=head,
+            can_edit=True,
+            sections=sections,
+            locked=False,
+            locked_at=None,
+            locked_by=None,
+            can_manage_lock=True,
+            collab_enabled=collab_enabled,
+            can_write=True,
+        )
+
+    return await run_in_threadpool(_git)
 
 
 @router.post("/workspaces/{workspace_id}/spec/lock", response_model=SpecLockOut)

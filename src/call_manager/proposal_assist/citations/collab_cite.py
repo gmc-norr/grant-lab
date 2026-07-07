@@ -16,10 +16,10 @@ from call_manager.proposal_assist.citations.human_cite import (
 )
 from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import apply_citation_to_room
+from call_manager.proposal_assist.collab.kernel import apply_citation_to_room, kernel_init_spec
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
-from call_manager.proposal_assist.editing.save import SectionStructureError
+from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 
 # Pre-mutation validation errors — re-raised WITHOUT evicting the room (it is
@@ -77,6 +77,56 @@ async def direct_cite_via_kernel(
             return out
         except _CLEAN_CITE_ERRORS:
             raise  # pre-mutation — room doc untouched, no evict
+        except Exception:
+            await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log
+            raise
+
+
+async def init_spec_via_kernel(
+    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, actor_id: int
+) -> tuple[str, str]:
+    """'Start spec from skeleton' against the live spec room. Same
+    operate/lock/threadpool/broadcast-outside-lock/evict contract as
+    direct_cite_via_kernel. Returns (head_sha, room_markdown).
+
+    CAREFUL: kernel_init_spec mutates room.doc BEFORE its checkpoint; a failure
+    AFTER the mutation must evict (dirty room) — that is exactly what the bare
+    `except Exception` below does. SpecLockedError/CommitMutexTimeout are raised
+    BEFORE the mutation so they are clean (no evict). Do not reorder
+    kernel_init_spec so that stops being true.
+    """
+    key = (workspace_id, "spec")
+
+    async def _load() -> list[bytes]:
+        def _read():
+            with session_factory() as s:
+                updates = load_or_hydrate(
+                    s, workspace_id=workspace_id, artifact="spec",
+                    workspaces_dir=workspaces_dir,
+                )
+                s.commit()
+                return updates
+        return await run_in_threadpool(_read)
+
+    async with MANAGER.operate(key, load=_load) as room:
+        try:
+            async with room.lock:
+                def _body() -> tuple[bytes | None, str, str]:
+                    with session_factory() as s:
+                        head, md, update = kernel_init_spec(
+                            s, room_doc=room.doc, workspace_id=workspace_id,
+                            workspaces_dir=workspaces_dir, actor_id=actor_id,
+                        )
+                        if room.evicted:
+                            raise RoomEvicted(str(key))
+                        s.commit()
+                        return update, head, md
+                update, head, md = await run_in_threadpool(_body)
+            if update is not None and not room.evicted:
+                await room.broadcast(P.create_update_message(update))
+            return head, md
+        except (SpecLockedError, CommitMutexTimeout, RoomEvicted):
+            raise  # pre/clean — room doc untouched or tombstoned; no evict
         except Exception:
             await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log
             raise

@@ -14,6 +14,7 @@ from pycrdt import Doc
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange, User, Workspace
+from call_manager.proposal_assist.artifacts import SPEC_SKELETON
 from call_manager.proposal_assist.citations.human_cite import (
     CiteInvalid,
     CiteRefNotFound,
@@ -22,9 +23,14 @@ from call_manager.proposal_assist.citations.human_cite import (
 from call_manager.proposal_assist.citations.ledger import dump_ledger, load_ledger
 from call_manager.proposal_assist.citations.markers import anchor_occurrences
 from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.collab.checkpoint import _head_or_empty, checkpoint_artifact
+from call_manager.proposal_assist.collab.checkpoint import (
+    _head_or_empty,
+    checkpoint_artifact,
+    serialize_doc_to_markdown,
+)
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import (
+    apply_pm_json_to_fragment,
     apply_pm_section_to_fragment,
     ydoc_to_pm_json,
 )
@@ -258,6 +264,50 @@ def kernel_accept_prose(
     pc.resulting_commit_sha = result.commit_sha
     session.flush()
     return KernelAcceptResult(pc=pc, update=update, committed=result.committed, evict=True)
+
+
+def kernel_init_spec(
+    session: Session,
+    *,
+    room_doc: Doc,
+    workspace_id: uuid.UUID,
+    workspaces_dir,
+    actor_id: int,
+) -> tuple[str, str, bytes | None]:
+    """Seed SPEC_SKELETON into an empty live spec room (3b-5d.D4 §3.3).
+
+    Returns (head_sha, room_markdown, broadcast_update). broadcast_update is
+    None on the idempotent no-op path (room already has content). Raises
+    SpecLockedError under the mutex (mirrors post_init_spec's git path) and
+    CommitMutexTimeout. Caller commits.
+
+    Deliberate provenance deviation (spec §3.3): the commit provenance here
+    comes from checkpoint_artifact (ArtifactVersion message "collab checkpoint:
+    spec", WorkspaceEvent kind="collab_checkpoint") rather than the git path's
+    "user spec init" / kind="user_edit" rows — do NOT duplicate provenance rows.
+    """
+    acquire_commit_mutex(session, workspace_id)
+    ws = session.get(Workspace, workspace_id)
+    session.refresh(ws, ["spec_locked_at"])
+    if ws.spec_locked_at is not None:
+        raise SpecLockedError(str(workspace_id))
+
+    live_md = serialize_doc_to_markdown(room_doc)
+    if live_md.strip() != "":
+        # Idempotent no-op: the room already has content. Head = current git
+        # HEAD (the response's git anchor, same as the git path's no-op branch).
+        head = _head_or_empty(workspace_repo_dir(workspaces_dir, workspace_id))
+        return head, live_md, None
+
+    update = apply_pm_json_to_fragment(room_doc, markdown_to_pm(SPEC_SKELETON))
+    store.append_update(
+        session, workspace_id=workspace_id, artifact="spec",
+        actor_id=actor_id, update=update, commit=False,
+    )
+    cp = checkpoint_artifact(
+        session, workspace_id=workspace_id, artifact="spec", workspaces_dir=workspaces_dir,
+    )
+    return cp.commit_sha, serialize_doc_to_markdown(room_doc), update
 
 
 def kernel_accept_citation(
