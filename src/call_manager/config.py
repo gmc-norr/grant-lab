@@ -236,6 +236,18 @@ class Settings(BaseSettings):
         alias="COLLAB_CHECKPOINT_MIN_TAIL",
         description="Min uncheckpointed Yjs-log rows before a collab room is auto-checkpointed.",
     )
+    collab_kill_switch: bool = Field(
+        default=False,
+        alias="COLLAB_KILL_SWITCH",
+        description=(
+            "Emergency brake (3b-5d.D4): when true, is_collab_enabled reports "
+            "False everywhere (WS refuses, writers take git-first branches, "
+            "reads fall back to git, auto-enable pauses) and startup runs the "
+            "drain-then-truncate handover pass, making git the sole canonical "
+            "store. Engage by setting the env and RESTARTING — the restart is "
+            "the socket drain. enabled_at rows are never cleared."
+        ),
+    )
     daily_token_cap_input: int = Field(
         default=500_000,
         alias="DAILY_TOKEN_CAP_INPUT",

@@ -9,12 +9,30 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import CollabArtifactState
 
+# 3b-5d.D4 kill-switch: a process-wide override consulted by is_collab_enabled.
+# Armed once at app creation from Settings.collab_kill_switch (create_app), and
+# by tests via set_kill_switch. Module-level ON PURPOSE (not threaded through
+# call sites): every gate in the tree already consults is_collab_enabled, and
+# the switch is an emergency, restart-scoped toggle — not per-request state.
+_KILL_SWITCH = False
+
+
+def set_kill_switch(value: bool) -> None:
+    global _KILL_SWITCH
+    _KILL_SWITCH = bool(value)
+
+
+def kill_switch_engaged() -> bool:
+    return _KILL_SWITCH
+
 
 def _get(session: Session, workspace_id: uuid.UUID, artifact: str) -> CollabArtifactState | None:
     return session.get(CollabArtifactState, (workspace_id, artifact))
 
 
 def is_collab_enabled(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> bool:
+    if _KILL_SWITCH:
+        return False
     row = _get(session, workspace_id, artifact)
     return bool(row and row.enabled_at is not None)
 

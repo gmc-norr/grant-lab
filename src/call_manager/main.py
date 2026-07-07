@@ -25,6 +25,7 @@ from call_manager.db.session import make_engine, make_session_factory
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
+from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
 from call_manager.proposal_assist.web.activity import (
@@ -270,6 +271,10 @@ EMBEDDING_COLUMN_DIM = 1024
 def create_app() -> FastAPI:
     configure_logging()
     settings = Settings()
+
+    # 3b-5d.D4: arm the collab kill-switch BEFORE any request can consult the
+    # flag. Module-level on purpose — see collab/state.py.
+    collab_state.set_kill_switch(settings.collab_kill_switch)
 
     if settings.embedding_dim != EMBEDDING_COLUMN_DIM:
         raise RuntimeError(
