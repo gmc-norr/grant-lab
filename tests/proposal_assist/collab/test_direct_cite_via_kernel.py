@@ -60,7 +60,12 @@ async def test_direct_cite_applies_and_returns(pg_session_factory, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_direct_cite_stale_does_not_evict(pg_session_factory, tmp_path, monkeypatch):
+async def test_direct_cite_anchor_gone_is_clean_stale_no_evict(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # D1b: the direct path no longer enforces base_section_sha, so "stale" is now
+    # surfaced by a GONE anchor (require_anchor_in_section), not a bad sha. It must
+    # still be a CLEAN pre-mutation error → no eviction, no lingering room.
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
         o = make_user(s, email="dck2@ki.se")
@@ -74,6 +79,8 @@ async def test_direct_cite_stale_does_not_evict(pg_session_factory, tmp_path, mo
         s.commit()
         rid = _seed_reference(s, wid, chunk_text="azure sky").id
         s.commit()
+    with pg_session_factory() as s:
+        bsha = _base_sha(s, wid, str(tmp_path))
     evict_calls: list = []
     _orig_evict = MANAGER.evict
     async def _spy_evict(key):
@@ -83,9 +90,9 @@ async def test_direct_cite_stale_does_not_evict(pg_session_factory, tmp_path, mo
     with pytest.raises(CiteStale):
         await direct_cite_via_kernel(
             session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
-            actor_id=oid, section_index=1, base_section_sha="dead" * 16, anchor="The claim here.",
-            reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
-            stance="supports")
+            actor_id=oid, section_index=1, base_section_sha=bsha,
+            anchor="NOT PRESENT IN THIS SECTION", reference_id=rid, chunk_index=0,
+            evidence_quote="azure", quote_start=0, quote_end=5, stance="supports")
     assert evict_calls == []  # clean error → evict must NOT have been called
     assert MANAGER.get((wid, "draft")) is None  # clean abort → no lingering room
 
@@ -173,3 +180,31 @@ async def test_direct_cite_section_structure_error_does_not_evict(
             reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
             stance="supports")
     assert evict_calls == []  # pre-mutation clean error → no evict
+
+
+@pytest.mark.anyio
+async def test_direct_cite_stale_sha_allowed_when_anchor_present(pg_session_factory, tmp_path):
+    # D1b THE regression: a mismatched/stale base_section_sha (the toolbar's git sha,
+    # while the live room is ahead) with a still-present anchor SUCCEEDS — direct_cite
+    # passes enforce_section_sha=False and relies on anchor-relocation.
+    md0 = "preamble\n\n## Methods\nThe claim here.\n"
+    with pg_session_factory() as s:
+        o = make_user(s, email="dck6@ki.se")
+        ws = make_workspace(s, owner=o, current_phase="active")
+        s.commit()
+        wid, oid = ws.id, o.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+        rid = _seed_reference(s, wid, chunk_text="azure sky").id
+        s.commit()
+    out = await direct_cite_via_kernel(
+        session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
+        actor_id=oid, section_index=1, base_section_sha="dead" * 16,  # STALE — now ignored
+        anchor="The claim here.", reference_id=rid, chunk_index=0,
+        evidence_quote="azure", quote_start=0, quote_end=5, stance="supports")
+    assert set(out) == {"ev_id", "citekey", "commit_sha"}
+    disk = (repo / PROPOSAL_FILENAME).read_text()
+    assert f"[@{out['citekey']}]<!-- ev:{out['ev_id']} -->" in disk
