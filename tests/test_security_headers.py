@@ -96,6 +96,35 @@ def test_413_early_reject_carries_csp_and_hsts_over_https(migrated_engine, pg_ur
     assert "max-age=" in r.headers["strict-transport-security"]
 
 
+def test_build_csp_prod_has_same_origin_ws_token():
+    from call_manager.web.middleware import build_csp
+
+    csp = build_csp(dev=False, ws_origin="wss://grants.example.org")
+    assert "connect-src 'self' wss://grants.example.org" in csp
+    assert "ws:" not in csp.replace("wss://grants.example.org", "")  # narrow, no bare scheme
+    assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("style-src")[0]
+
+
+def test_build_csp_http_base_gets_ws_token():
+    from call_manager.web.middleware import build_csp
+
+    assert "connect-src 'self' ws://lanhost:8000" in build_csp(ws_origin="ws://lanhost:8000")
+
+
+def test_build_csp_dev_output_unchanged():
+    from call_manager.web.middleware import build_csp
+
+    assert "connect-src 'self' ws: http://localhost:5173" in build_csp(dev=True)
+    # dev ignores ws_origin (its broad ws: token already covers the Yjs socket)
+    assert build_csp(dev=True) == build_csp(dev=True, ws_origin="wss://x")
+
+
+def test_build_csp_no_origin_stays_strict():
+    from call_manager.web.middleware import build_csp
+
+    assert "connect-src 'self';" in build_csp() + ";"
+
+
 def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):
     # Probe the body-size cap via POST /api/auth/login. A normal-sized JSON body
     # reaches the handler (unknown email → generic 400); the point is it was NOT

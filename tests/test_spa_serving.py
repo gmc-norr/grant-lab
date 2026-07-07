@@ -107,7 +107,13 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     # gate); a regression flipping it would relax script-src/connect-src here.
     prod_csp = c.get("/").headers["content-security-policy"]
     assert "'unsafe-inline'" not in prod_csp.split("script-src")[1].split(";")[0]
-    assert "ws:" not in prod_csp
+    # 3b-5d.D4: prod's connect-src now carries a narrow same-origin WS token
+    # (derived from APP_BASE_URL, here "http://testserver" -> "ws://testserver")
+    # for the Yjs socket — but must NOT carry dev's broad, bare `ws:` scheme
+    # (which would allow a WebSocket to ANY origin).
+    connect_src = prod_csp.split("connect-src")[1].split(";")[0]
+    assert connect_src.strip() == "'self' ws://testserver"
+    assert "ws:" not in connect_src.replace("ws://testserver", "")
 
 
 def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):

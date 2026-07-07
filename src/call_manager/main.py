@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -362,7 +363,15 @@ def create_app() -> FastAPI:
 
     # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
     # referrer-policy). HSTS only when the deployment is https (cookie_secure).
-    _csp = build_csp(dev=settings.spa_mode == "dev")
+    #
+    # 3b-5d.D4: the Yjs WS needs an explicit same-origin token in the non-dev
+    # CSP. Derived from APP_BASE_URL — which also drives check_origin, cookie
+    # security and HSTS, so scheme misalignment fails loudly here at startup.
+    _base = urlsplit(settings.app_base_url)
+    if not _base.scheme or not _base.netloc:
+        raise RuntimeError(f"APP_BASE_URL is not a valid URL: {settings.app_base_url!r}")
+    _ws_origin = f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
+    _csp = build_csp(dev=settings.spa_mode == "dev", ws_origin=_ws_origin)
     _hsts = settings.cookie_secure
     app.add_middleware(
         SecurityHeadersMiddleware,
