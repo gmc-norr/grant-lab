@@ -16,15 +16,26 @@ Three choices are genuinely right and worth defending:
 2. **Propose-only agent + human accept** — the trust architecture. In this domain it is a feature, not a limitation.
 3. **Continuous background review** instead of end-stage review — the *machinery* of quality is built.
 
-## 2. The core tension: an engineer's IDE for people who write documents
+## 2. The core tension: an engineer's IDE for people who write documents — and iteration is the core motion
 
 Surfaces today: 4 artifact tabs (Draft/Spec/Scorecard/Panel review) + 6 bottom tabs (Inbox/Problems/Activity/Library/Citations/Claims) + chat + outline + versions + members. Individually justified; together they present as a flat cockpit that assumes the user already knows the workflow. A clinician co-writing an EU application at 21:00 does not.
 
-The fix is **not more features — it's re-presenting existing ones as a journey**:
+**Correction (2026-07-07, from review discussion):** the first fix instinct — "guide users through phases" — is wrong in an important way. **Real proposals are developed by iteration, not progression.** You start with a concept; drafting reveals its weaknesses; a co-author extends it; the concept pivots in week 6; internal feedback reshapes it in week 9. Development is a spiral, not a pipeline; any linear journey (Understand → Specify → Draft → Harden → Submit) misdescribes it and will fight the user precisely when the tool should help most. Phase models are dropped from this review's recommendations.
 
-- A **narrative spine**: the workspace always answers *"where are we, and what's next?"* — "Methods has 3 uncited claims · 2 proposals await review · evaluator is stale since your last big edit · 41 days to deadline." Every signal exists; none is composed into guidance.
-- `current_phase {setup, active}` is too coarse. Even a soft, non-enforced phase model (**Understand → Specify → Draft → Harden → Submit**) that changes which panels are *prominent* would transform legibility without touching write paths.
-- The paused **Spec→Plan→Draft→Review brainstorm** (stopped mid-Q7) was circling exactly this; resume it after the flip as the umbrella for this work.
+What survives is the underlying need: the workspace should always answer *"what's most valuable to do next?"* — but **derived from state, never from a declared stage**.
+
+**Iteration-first design principles:**
+
+1. **Guidance derives from state, not stages.** The narrative spine is a priority queue over live signals — deadline distance, spec↔draft drift, uncited claims, pending proposals, stale evaluator. Pivot the concept in week 6 and the spine simply reflects the new state. No stage to be "in," nothing to go "back" to.
+2. **Drift is a conversation, not a defect.** The coherence keeper currently treats SPEC↔DRAFT divergence as a draft problem. In real iteration, divergence is often the draft *discovering something better*. Coherence findings must offer **two-way resolution**: (a) revise draft toward spec, or (b) **revise spec toward draft** — both as normal proposals. This single change converts the waterfall into a loop.
+3. **The spec is a living document.** Co-editable by default (the collab foundation already provides this); lock is the *endgame exception* (final-weeks freeze), not the resting posture. If evolving the concept carries unlock ceremony, the spec rots, and a stale spec makes every coherence signal noise.
+4. **Signals calibrate to maturity.** Section status (sketch → drafting → evidence-complete → polished) tells analyzers what standard to hold each section to — no uncited-claims nagging on an outline. This gives section status a second job beyond ownership (§3).
+5. **Lower the cost of changing your mind — without losing accumulated work.** The test for iteration features: restructuring, re-aiming, and trying alternatives must be cheap *and provenance-preserving*. This re-justifies roadmap **#2 citations-as-node** (evidence that survives heavy restructuring) and **#3 structure ops** as *iteration infrastructure*, not power-user extras (see §8).
+6. **Record the evolution.** A **direction log**: when the spec materially changes, the agent drafts a one-liner "pivoted from X to Y because Z" for approval. Teams get memory of their own evolution ("why did we drop the biomarker aim?"), which pays again at resubmission. Rides on existing spec versioning.
+
+Note the template tension is resolvable: the funder's *final* structure is fixed, but the path there is iterative — so templates (§4) act as a **convergence target** (compliance signals show distance from the required shape) and never as a straitjacket that blocks restructuring mid-flight.
+
+The paused **Spec→Plan→Draft→Review brainstorm** (stopped mid-Q7) should be resumed after the flip **with iteration-first as its frame** — explicitly *not* as a phase model.
 
 ## 3. Suggestions live in a list; writers think in margins
 
@@ -82,6 +93,8 @@ Current roadmap after the flip: #2 citations-as-node → #3 structure ops → #4
 | **2 — The funder's reality** | Unpark ProposalTemplate (scaffold+validate+limits) · rubric-from-call · compliance signal · DOCX export | Directly protects outcomes |
 | **3 — Quality loop** | Problem/Scorecard/Panel → one-click fix proposals · section-draft-from-spec · RAG revamp | Turns dashboards into a coach |
 | **4 — Power** | Structure ops (#3, needed by templates anyway) · citations-as-node (#2) · cross-workspace reuse · per-section alternatives + compare | Compounding, after 1–3 |
+
+**Iteration-lens amendment (§2):** the Tier-4 placement of #2/#3 is partially reversed. Citations-as-node and structure ops are **"make iteration cheap" infrastructure** — evidence that survives restructuring, and cheap reorganizing/extending — not power-user extras. They may justifiably pull forward alongside Tier 2 (templates need structure ops anyway), and per-section alternatives belongs to the same family. Likewise, the coherence keeper's **two-way drift resolution** (spec-follows-draft, §2 principle 2) is a Tier-1-adjacent change: small, and it corrects a waterfall bias baked into the current analyzer.
 
 **Deliberately keep parked:**
 - **Autonomous agent writes (#4).** Propose-only is the trust story in a hospital. Revisit only for narrow mechanical classes (formatting, reference hygiene) — never narrative content.
