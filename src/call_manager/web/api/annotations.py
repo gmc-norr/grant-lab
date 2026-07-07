@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
@@ -28,6 +29,7 @@ from call_manager.proposal_assist.analysis.queue import (
     enqueue_containing_section,
     enqueue_section_job,
 )
+from call_manager.proposal_assist.citations.collab_cite import insert_annotation_via_kernel
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
@@ -35,6 +37,7 @@ from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, Co
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.tools.citations import _citation_snapshot
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
@@ -203,58 +206,125 @@ class InsertResultOut(BaseModel):
     "/workspaces/{workspace_id}/annotations/{annotation_id}/insert",
     response_model=InsertResultOut,
 )
-def insert_annotation(
+async def insert_annotation(
     workspace_id: uuid.UUID,
     annotation_id: int,
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> InsertResultOut:
-    """Insert the citation an uncited_supported annotation suggests, via the
-    canonical write path (insert_from_annotation). Owner-only. On a genuine
-    (non-idempotent) insert, re-enqueue analysis for the now-changed section."""
+    """Insert the citation an uncited_supported annotation suggests. Owner-only.
+
+    Flag-on:  routes through the live Yjs room via insert_annotation_via_kernel
+              (the bespoke, occurrence-aware core — see apply_annotation_insert_
+              to_room's docstring for why it does not reuse the generic citation
+              kernel's compute).
+    Flag-off: the canonical git write path (insert_from_annotation), byte-for-
+              byte, threadpooled.
+    On a genuine (non-idempotent) insert, either branch re-enqueues analysis
+    for the now-changed section (Tier-2 immediacy parity).
+    """
     settings = request.app.state.settings
     sf = request.app.state.session_factory
-    with sf() as session:
-        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        ann = _annotation_or_404(session, ws, annotation_id)
-        try:
-            result = insert_from_annotation(
-                session=session,
-                workspace=ws,
-                user_id=user.id,
-                annotation=ann,
-                workspaces_dir=settings.workspaces_dir,
+
+    def _route() -> bool:
+        with sf() as session:
+            return collab_state.is_collab_enabled(
+                session, workspace_id=workspace_id, artifact="draft"
             )
-            session.commit()
+
+    enabled = await run_in_threadpool(_route)
+
+    if enabled:
+        def _gate() -> None:
+            with sf() as session:
+                ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+                _annotation_or_404(session, ws, annotation_id)
+        await run_in_threadpool(_gate)
+        try:
+            out = await insert_annotation_via_kernel(
+                session_factory=sf,
+                workspaces_dir=settings.workspaces_dir,
+                workspace_id=workspace_id,
+                actor_id=user.id,
+                annotation_id=annotation_id,
+            )
         except InsertConflict as e:
-            session.rollback()
             raise HTTPException(status_code=409, detail=str(e)) from e
         except CommitMutexTimeout as e:
-            session.rollback()
-            # /api sanitizes >=500 -> remap the 503 busy signal to a retriable 429.
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
+        except RoomEvicted as e:
+            raise HTTPException(
+                status_code=409, detail="the live session was reset — retry"
+            ) from e
         except GitCommitError as e:
-            session.rollback()
             raise HTTPException(
                 status_code=500, detail="insert failed — nothing was written"
             ) from e
 
-        if "idempotent" not in result:
-            enqueue_containing_section(
-                session,
-                workspace_id=workspace_id,
-                workspaces_dir=settings.workspaces_dir,
-                commit_sha=result["commit_sha"],
-                ev_id=result["ev_id"],
-            )
-            return InsertResultOut(
-                ev_id=result["ev_id"],
-                citekey=result["citekey"],
-                commit_sha=result["commit_sha"],
-            )
-    return InsertResultOut(idempotent=True)
+        if out.get("idempotent"):
+            return InsertResultOut(idempotent=True)
+
+        def _enqueue() -> None:
+            with sf() as session:
+                enqueue_containing_section(
+                    session,
+                    workspace_id=workspace_id,
+                    workspaces_dir=settings.workspaces_dir,
+                    commit_sha=out["commit_sha"],
+                    ev_id=out["ev_id"],
+                )
+        await run_in_threadpool(_enqueue)
+        return InsertResultOut(
+            ev_id=out["ev_id"], citekey=out["citekey"], commit_sha=out["commit_sha"]
+        )
+
+    # Flag-off: the CURRENT handler body, byte-for-byte, threadpooled.
+    def _git() -> InsertResultOut:
+        with sf() as session:
+            ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            ann = _annotation_or_404(session, ws, annotation_id)
+            try:
+                result = insert_from_annotation(
+                    session=session,
+                    workspace=ws,
+                    user_id=user.id,
+                    annotation=ann,
+                    workspaces_dir=settings.workspaces_dir,
+                )
+                session.commit()
+            except InsertConflict as e:
+                session.rollback()
+                raise HTTPException(status_code=409, detail=str(e)) from e
+            except CommitMutexTimeout as e:
+                session.rollback()
+                # /api sanitizes >=500 -> remap the 503 busy signal to a retriable 429.
+                raise HTTPException(
+                    status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+                ) from e
+            except GitCommitError as e:
+                session.rollback()
+                raise HTTPException(
+                    status_code=500, detail="insert failed — nothing was written"
+                ) from e
+
+            if "idempotent" not in result:
+                enqueue_containing_section(
+                    session,
+                    workspace_id=workspace_id,
+                    workspaces_dir=settings.workspaces_dir,
+                    commit_sha=result["commit_sha"],
+                    ev_id=result["ev_id"],
+                )
+                return InsertResultOut(
+                    ev_id=result["ev_id"],
+                    citekey=result["citekey"],
+                    commit_sha=result["commit_sha"],
+                )
+        return InsertResultOut(idempotent=True)
+
+    return await run_in_threadpool(_git)
 
 
 class DismissReasonIn(BaseModel):

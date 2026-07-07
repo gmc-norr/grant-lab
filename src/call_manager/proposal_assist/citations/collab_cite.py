@@ -8,6 +8,7 @@ import uuid
 
 from starlette.concurrency import run_in_threadpool
 
+from call_manager.proposal_assist.analysis.insert import InsertConflict
 from call_manager.proposal_assist.citations.human_cite import (
     _ALLOWED_STANCES,
     CiteInvalid,
@@ -16,7 +17,11 @@ from call_manager.proposal_assist.citations.human_cite import (
 )
 from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import apply_citation_to_room, kernel_init_spec
+from call_manager.proposal_assist.collab.kernel import (
+    apply_annotation_insert_to_room,
+    apply_citation_to_room,
+    kernel_init_spec,
+)
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
@@ -127,6 +132,63 @@ async def init_spec_via_kernel(
             return head, md
         except (SpecLockedError, CommitMutexTimeout, RoomEvicted):
             raise  # pre/clean — room doc untouched or tombstoned; no evict
+        except Exception:
+            await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log
+            raise
+
+
+async def insert_annotation_via_kernel(
+    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, actor_id: int,
+    annotation_id: int,
+) -> dict:
+    """Claims-tab annotation insert against the live draft room. Same
+    operate/lock/threadpool/broadcast-outside-lock/evict contract as
+    direct_cite_via_kernel — delegates the mutex/derive/compute/apply/
+    checkpoint pipeline to apply_annotation_insert_to_room (the bespoke,
+    occurrence-aware core; see that function's docstring for why it does NOT
+    reuse apply_citation_to_room's compute).
+
+    Returns {"ev_id", "citekey", "commit_sha"} on a genuine insert, or
+    {"idempotent": True} when THIS annotation was already inserted (or a
+    claim-context repair hit resolved it with no new room mutation).
+    """
+    key = (workspace_id, "draft")
+
+    async def _load() -> list[bytes]:
+        def _read():
+            with session_factory() as s:
+                updates = load_or_hydrate(s, workspace_id=workspace_id, artifact="draft",
+                                          workspaces_dir=workspaces_dir)
+                s.commit()
+                return updates
+        return await run_in_threadpool(_read)
+
+    async with MANAGER.operate(key, load=_load) as room:
+        try:
+            async with room.lock:
+                def _body() -> tuple[bytes | None, dict]:
+                    with session_factory() as s:
+                        res = apply_annotation_insert_to_room(
+                            s, room_doc=room.doc, workspace_id=workspace_id,
+                            workspaces_dir=workspaces_dir, annotation_id=annotation_id,
+                            actor_id=actor_id,
+                        )
+                        if room.evicted:
+                            # tombstoned mid-insert — abort before commit
+                            raise RoomEvicted(str(key))
+                        s.commit()
+                        if res.idempotent:
+                            return None, {"idempotent": True}
+                        return res.update, {
+                            "ev_id": res.ev_id, "citekey": res.citekey,
+                            "commit_sha": res.commit_sha,
+                        }
+                update, out = await run_in_threadpool(_body)
+            if update is not None and not room.evicted:
+                await room.broadcast(P.create_update_message(update))
+            return out
+        except (*_CLEAN_CITE_ERRORS, InsertConflict):
+            raise  # pre-mutation / tombstoned — room doc untouched, no evict
         except Exception:
             await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log
             raise
