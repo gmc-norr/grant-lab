@@ -147,9 +147,10 @@ def submit_turn(
         if sc is not None:
             repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
             sections = None
-            if sc.target_artifact == "draft" and collab_state.is_collab_enabled(
+            collab_draft = sc.target_artifact == "draft" and collab_state.is_collab_enabled(
                 session, workspace_id=workspace_id, artifact="draft"
-            ):
+            )
+            if collab_draft:
                 raw = canonical_artifact_markdown(
                     session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
                 )
@@ -167,6 +168,7 @@ def submit_turn(
                         to_offset=sc.to_offset,
                     ),
                     sections=sections,
+                    allow_anchor_relocation=collab_draft,
                 )
             except SelectionConflictError as e:
                 raise HTTPException(status_code=409, detail=str(e)) from e
