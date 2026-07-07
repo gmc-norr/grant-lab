@@ -219,19 +219,32 @@ class Room:
                 # caret is clock-gated on receivers and does NOT self-heal)
                 # before anyone — the victim included — receives it.
                 kept: list[P.AwarenessEntry] = []
-                foreign: list[P.AwarenessEntry] = []
+                filtered: list[P.AwarenessEntry] = []
                 for e in entries:
                     owner = self._awareness_bindings.get(e.client_id)
-                    (kept if owner in (None, state.user_id) else foreign).append(e)
-                if foreign:
-                    # Foreign NULL-state entries are ROUTINE: y-protocols' 3s
-                    # local timeout-scrub of a backgrounded tab ships with
-                    # origin 'timeout', which the provider's origin guard does
-                    # not suppress → INFO. Foreign NON-null entries are the true
+                    # Own-bound: anything goes (announce, renewal, self-removal).
+                    # Unbound: only NON-null may pass (a first announce, which
+                    # bind-after-accept will bind). An unbound NULL is filtered:
+                    # pycrdt records an unknown-id removal's clock in its private
+                    # _meta map without entering states, so applying/relaying a
+                    # null@huge-clock for a not-yet-bound id would permanently
+                    # clock-gate the id's real owner (a silent hide) and grow
+                    # _meta without bound — nulls never bind, so the binding
+                    # quota can't see them (review #2/#3).
+                    if owner == state.user_id or (owner is None and not e.is_null):
+                        kept.append(e)
+                    else:
+                        filtered.append(e)
+                if filtered:
+                    # NULL-state entries are ROUTINE: y-protocols' 3s local
+                    # timeout-scrub of a backgrounded tab ships with origin
+                    # 'timeout', which the provider's origin guard does not
+                    # suppress → INFO (each peer scrubs locally; the relay is
+                    # redundant). Foreign-bound NON-null entries are the true
                     # spoof signature → WARNING. The level split is load-bearing:
                     # without it the daily scrub noise drowns the spoof signal.
-                    stale = [e.client_id for e in foreign if e.is_null]
-                    spoof = [e.client_id for e in foreign if not e.is_null]
+                    stale = [e.client_id for e in filtered if e.is_null]
+                    spoof = [e.client_id for e in filtered if not e.is_null]
                     if stale:
                         logger.info(
                             "collab.awareness_stale_scrub_filtered",

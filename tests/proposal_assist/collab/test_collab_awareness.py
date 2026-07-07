@@ -517,11 +517,14 @@ async def test_clock_ignored_entry_does_not_reserve_binding():
 
 
 @pytest.mark.anyio
-async def test_unbound_null_preclaim_is_not_attributed_to_sender():
-    # A null entry for an UNBOUND id is allowed through (harmless removal, never
-    # enters states) but neither binds nor attributes — else the sender's later
-    # disconnect would scrub the id's REAL owner (who binds it afterwards) for
-    # everyone: the 3b-5b griefing vector resurrected through the new code.
+async def test_unbound_null_preclaim_filtered_no_meta_poison():
+    # Review #2: a null for a NOT-YET-BOUND id must be filtered outright — never
+    # applied, never relayed. pycrdt (like y-protocols) records the clock of an
+    # unknown-id removal in its private _meta map WITHOUT entering states, so a
+    # relayed/applied null@1e9 would permanently clock-gate the id's real
+    # owner's low-clock announces (a silent, permanent hide — worse than the
+    # documented visible pre-claim). The high clock + owner clock 1 here are the
+    # attack's real shape; a low poison clock would mask the defect.
     room = Room((uuid.uuid4(), "draft"))
     a, b = FakeClient(), FakeClient()
     st_a = ClientState(user_id=1, can_write=True)
@@ -529,15 +532,18 @@ async def test_unbound_null_preclaim_is_not_attributed_to_sender():
     room.clients[a] = st_a
     room.clients[b] = st_b
     x = 424244
+    meta_before = dict(room.awareness._meta)
     await room.handle(
         sender=b, state=st_b,
-        message=_crafted_frame(_entry(x, 5, b"null")), persist=_noop_persist,
+        message=_crafted_frame(_entry(x, 10**9, b"null")), persist=_noop_persist,
     )
+    assert a.sent == []  # not relayed — peers' meta stays clean too
     assert x not in st_b.awareness_ids and x not in room._awareness_bindings
-    # Real owner announces afterwards (clock above the stale null's meta clock)…
+    assert dict(room.awareness._meta) == meta_before  # server meta not poisoned
+    # The real owner announces at a NORMAL low clock and is fully visible…
     await room.handle(
         sender=a, state=st_a,
-        message=_crafted_frame(_entry(x, 6, b'{"user":{"name":"RealA"}}')),
+        message=_crafted_frame(_entry(x, 1, b'{"user":{"name":"RealA"}}')),
         persist=_noop_persist,
     )
     assert room._awareness_bindings[x] == 1
@@ -545,6 +551,34 @@ async def test_unbound_null_preclaim_is_not_attributed_to_sender():
     # …and B's departure cannot scrub it.
     await room.remove_client_presence(st_b)
     assert x in room.awareness.states
+
+
+@pytest.mark.anyio
+async def test_null_flood_cannot_grow_meta(caplog):
+    # Review #3: nulls never bind, so without filtering they'd evade the quota
+    # entirely while growing pycrdt's unpruned _meta map without bound (and any
+    # future clientID colliding with a poisoned entry is clock-gated out).
+    # Filtered-unbound-null (F2) closes the vector: meta must not grow at all.
+    room = Room((uuid.uuid4(), "draft"))
+    a, b = FakeClient(), FakeClient()
+    st_a = ClientState(user_id=1, can_write=True)
+    st_b = ClientState(user_id=2, can_write=True)
+    room.clients[a] = st_a
+    room.clients[b] = st_b
+    meta_size = len(room.awareness._meta)
+    for wave in range(5):
+        flood = _crafted_frame(
+            *[_entry(500_000 + wave * 64 + i, 10**9, b"null") for i in range(64)]
+        )
+        with caplog.at_level(logging.INFO, logger=ROOM_LOGGER):
+            await room.handle(sender=b, state=st_b, message=flood, persist=_noop_persist)
+    assert len(room.awareness._meta) == meta_size  # no growth, ever
+    assert a.sent == []  # nothing relayed
+    assert room._awareness_bindings == {}
+    # Filtered as the benign-scrub class (INFO), not the WARNING spoof signature.
+    assert any(
+        r.getMessage() == "collab.awareness_stale_scrub_filtered" for r in caplog.records
+    )
 
 
 @pytest.mark.anyio
