@@ -437,9 +437,10 @@ async def test_all_own_frame_relays_byte_identical():
 
 
 @pytest.mark.anyio
-async def test_empty_awareness_frame_passthrough():
-    # count=0: trivially all-allowed → relayed unchanged (behavior-preserving
-    # vs pre-D2), no bindings created.
+async def test_empty_awareness_frame_dropped():
+    # count=0: nothing to apply, nothing to show — dropped instead of
+    # pointlessly relayed (review low; pre-D2 relayed these and every
+    # receiver no-op'd). No bindings created either way.
     room = Room((uuid.uuid4(), "draft"))
     a, b = FakeClient(), FakeClient()
     st = ClientState(user_id=1, can_write=True)
@@ -447,7 +448,7 @@ async def test_empty_awareness_frame_passthrough():
     room.clients[b] = ClientState(user_id=2, can_write=True)
     empty = _crafted_frame()  # payload = b"\x00"
     await room.handle(sender=a, state=st, message=empty, persist=_noop_persist)
-    assert b.sent == [empty]
+    assert b.sent == []
     assert room._awareness_bindings == {}
 
 
