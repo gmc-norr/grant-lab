@@ -54,9 +54,13 @@ def maybe_auto_enable(session: Session, *, workspace_id: uuid.UUID, artifact: st
 
 Called from exactly two places — the draft and spec read models in `web/api/workspaces.py`, where `collab_enabled` is already computed and HEAD markdown is already read. When it enables, the SAME response returns `collab_enabled: true` → Tiptap mounts on that load; the room hydrates from HEAD at first WS connect. Per-artifact; setup-phase workspaces enable too (WS access is already owner-only in setup via `resolve_access`). Soft-deleted workspaces never reach the hook (read models 404 first).
 
-### 3.2 Component B — kill-switch (`COLLAB_KILL_SWITCH`)
+### 3.2 Component B — kill-switch (`COLLAB_KILL_SWITCH`) with drain-then-truncate handover
 
-New settings flag (env `COLLAB_KILL_SWITCH`, default off), honored **inside `is_collab_enabled`** — the single choke point every gate already consults (WS connect, accept/cite routing, canonical reads, checkpoint endpoint, spec-lock freeze, the new guards of §3.3, and `maybe_auto_enable`). Must not require threading settings through call sites (module-level accessor; exact mechanism = plan detail). Engaging it is an env change → restart: in-memory rooms die (persisted Yjs log stays canonical — no data loss), new connects refuse 1008, every writer takes its git-first branch, reads fall back to git HEAD. The 3b-5c tail-scan selects candidates by uncheckpointed tail size, NOT by flag — **the plan must verify `find_checkpoint_candidates` is flag-independent and add a regression test that the scan drains tails under kill-switch** — so within one scan interval (60s) git is current and the git-first world is coherent. Un-set + restart to resume; rooms replay from the preserved log. `enabled_at` rows are never cleared.
+New settings flag (env `COLLAB_KILL_SWITCH`, default off), honored **inside `is_collab_enabled`** — the single choke point every gate already consults (WS connect, accept/cite routing, canonical reads, checkpoint endpoint, spec-lock freeze, the new guards of §3.3, and `maybe_auto_enable`). Must not require threading settings through call sites (module-level accessor; exact mechanism = plan detail).
+
+**The handover problem (Codex High, verified):** `checkpoint_artifact` serializes the artifact from the Yjs LOG and commits it over whatever git HEAD holds (`checkpoint.py:109-118`), and the 3b-5c scan only selects tails `>= min_tail` (`store.py:79-103`, `HAVING count >= min_tail`, default 200 via `COLLAB_CHECKPOINT_MIN_TAIL`, `scheduler.py:337`). So a naive "flag off, fall back to git" kill-switch loses writes in BOTH directions: (enter) a git-first save that lands while an uncheckpointed tail exists is later overwritten when that tail checkpoints; (exit) a re-opened room replays the preserved log — which lacks every git-first edit made during the kill window (`load_or_hydrate` only seeds an EMPTY store) — and the next checkpoint commits that stale state over them.
+
+**Resolution — make git the SOLE canonical store while killed, via a startup handover pass.** Engaging the switch is an env change → restart, so the lifespan runs, per enabled artifact with a non-empty log, BEFORE serving requests: (1) `checkpoint_artifact` with no tail floor (drain everything, `record_version=False`; the D3 coverage hook firing on these drain commits is idempotent and harmless), then (2) on success, truncate that artifact's `yjs_updates` rows and reset the checkpoint watermark/last-SHA — the "never opened" state. After the pass: nothing can clobber git-first writes (no log left to checkpoint from), and exiting (unset env + restart) finds empty stores that re-hydrate from CURRENT git HEAD via the existing empty-store path — both clobber directions closed with no new invariants. A failed artifact keeps its log (no truncate), is logged loudly, and the periodic scan — while the switch is on — repeats the same drain-then-truncate pass (tail floor 0) until it succeeds; the runbook says to check for those log lines before trusting git-first coherence for that artifact. `enabled_at` rows are never cleared; new connects refuse 1008; every writer takes its git-first branch; reads fall back to git HEAD (log unused while killed — truncation is safe).
 
 ### 3.3 Component C — writer severance
 
@@ -64,9 +68,10 @@ New settings flag (env `COLLAB_KILL_SWITCH`, default off), honored **inside `is_
 - **Claims-tab insert**: `insert_annotation` gains the `post_citation` `_route()` shape — flag-on routes through a room-aware path built on the existing kernel citation machinery (`apply_citation_to_room` / the `direct_cite_via_kernel` composition); flag-off calls `insert_from_annotation` byte-for-byte unchanged. **Fallback (second choice, only if the plan phase shows the annotation offset logic resists room routing): 409 + disabled Claims-tab button with hint.** Feature-preserving routing is the goal.
 - **Spec skeleton**: `post_init_spec` flag-on routes the skeleton through the kernel as a room write + checkpoint (an open empty room does NOT re-hydrate from a git-side write — the store already holds the empty seed — so a git write here can diverge); flag-off unchanged.
 
-### 3.4 Component D — `get_spec` room-canonical
+### 3.4 Component D — room-canonical reads: `get_spec` AND `get_annotations`
 
-Mirror `get_draft`'s branch: when enabled, sections derive from `canonical_artifact_markdown` (Spec Outline SHAs track the live room). Flag-off read unchanged.
+- `get_spec`: mirror `get_draft`'s branch — when enabled, sections derive from `canonical_artifact_markdown` (Spec Outline SHAs track the live room). Flag-off read unchanged.
+- `get_annotations` (Claims-tab read model; Codex Medium, verified): today it sectionizes `proposal.read_text()` straight off disk (`annotations.py:89-97`) — post-flip the tab would show findings against stale git sections, then the room-aware insert of §3.3 would anchor against different content. When draft collab is enabled, sections derive from `canonical_artifact_markdown` instead; the pre-draft degrade (200 + empty sections) and all claim-row semantics are unchanged (rows are sha-keyed — a live-edited section's new sha simply has no findings until the next checkpoint's analysis lands, the same staleness model the rest of the cockpit already has).
 
 ### 3.5 Component E — `AddCitationOut.citekey` Optional
 
@@ -94,16 +99,20 @@ deploy D4
        held-back artifacts (tables) → stay CM6 until cleaned + re-read; audit script lists them
 rollback (incident)
   └─ set COLLAB_KILL_SWITCH=1 + restart (env implies restart; restart = socket drain)
-       → is_collab_enabled False everywhere: CM6 renders, saves work git-first, WS refuses
-       → tail-scan drains any uncheckpointed log tail to git within ~60s (flag-independent)
-       → fix forward; unset + restart; rooms replay from preserved log
+       → lifespan handover pass BEFORE serving: per artifact, drain log→checkpoint (no tail
+         floor) then truncate log + reset watermark; failures keep their log, log loudly,
+         and the periodic scan retries the same pass until clean
+       → is_collab_enabled False everywhere: CM6 renders, saves work git-first, WS refuses;
+         git is the SOLE canonical store — nothing can overwrite git-first writes
+       → fix forward; unset + restart; empty stores re-hydrate from CURRENT git HEAD
+         (kill-window edits preserved; sessions resume fresh)
 ```
 
 ## 5. Error handling & threading
 
 - `maybe_auto_enable` runs on the request's sync session in the read models (Starlette threadpool) — pure DB DML + a string scan; no git, no room `MANAGER`. The concurrent-first-read insert race resolves via conflict-tolerant insert (treat conflict as enabled).
 - The 409 save-guards and routing branches read the flag OUTSIDE any lock (cheap, same as `accept()`'s `_route()`); the kernel paths they route to carry their own established locking (room lock → FOR UPDATE → commit mutex).
-- Kill-switch reads must be race-free trivially (a bool env read); no live-socket teardown code — the restart IS the teardown, and checkpoint-on-evict/last-leave/tail-scan bound git lag.
+- Kill-switch reads must be race-free trivially (a bool env read); no live-socket teardown code — the restart IS the teardown. The handover pass runs synchronously in the lifespan before the app serves (sync DB+git only, never the asyncio room `MANAGER` — no rooms exist yet at startup), with per-artifact error isolation mirroring `checkpoint_active_tails`; drain-then-truncate is two steps in ONE transaction per artifact (a truncate without its checkpoint must be impossible).
 - CSP derivation happens once at app startup (build_csp already does); a malformed `APP_BASE_URL` fails at startup, not per-request.
 
 ## 6. Testing
@@ -112,7 +121,8 @@ rollback (incident)
 - **Read-model integration**: first `get_draft`/`get_spec` flips `collab_enabled` false→true in ONE request; setup-phase workspace enables; repo-less/mid-Phase-0 workspace read → no 500, no premature row (whatever the read model does today pre-repo stays); held-back artifact stays false and CM6 path remains usable (save route NOT 409'd).
 - **Severance**: CM6 save routes → 409 when enabled, byte-for-byte behavior when disabled (parity tests unchanged); annotation-insert routes room-aware when enabled (room content + ledger + checkpoint commit) and git-first unchanged when disabled; `post_init_spec` seeds via room when enabled (open-empty-room case gets the skeleton live) and git-first when disabled.
 - **get_spec canonical**: enabled spec read reflects un-checkpointed room content (mirror the existing get_draft tests).
-- **Kill-switch**: with env set — WS connect 1008 even for an enabled artifact; save routes revert to git-first (no 409); auto-enable suppressed; tail-scan still checkpoints (the §3.2 verification test).
+- **get_annotations canonical**: with draft collab enabled and un-checkpointed room edits, the Claims-tab sections reflect the live room (sha of an edited section changes; its findings list is empty until re-analysis); flag-off read + pre-draft degrade unchanged.
+- **Kill-switch**: with env set — WS connect 1008 even for an enabled artifact; save routes revert to git-first (no 409); auto-enable suppressed. **Handover regressions (Codex High)**: (enter) seed an uncheckpointed tail (below the 200 scan floor) → run the handover pass → git HEAD equals the room serialization AND the log is empty; a CM6 save then lands and NOTHING can overwrite it (scan pass on the drained artifact is a no-op); (exit) after kill-window git-first edits, unset + fresh room open → hydrates from CURRENT HEAD (kill-window edits present in the room); (failure isolation) a pass failure on artifact X keeps X's log, truncates nothing for X, and still processes artifact Y; (atomicity) a truncate is never visible without its checkpoint commit.
 - **CSP**: exact prod string with `wss://` (https base) and `ws://` (http base) tokens; dev string unchanged; disabled-mode… gets the same non-dev string (assert).
 - **Frontend**: vitest for shortcuts + input rules; tsc; OpenAPI regen drift check (citekey nullable).
 - **Acceptance gates**: grouped backend sweep incl. `tests/test_api_spec.py` (`EMBEDDING_MODEL=bge-m3`, `-p no:cacheprovider`, never whole-suite) · `ruff check .` · `pnpm exec tsc --noEmit` + `pnpm exec vitest run src/collab` (+ any touched suites) · **two-browser e2e TWICE**: existing dev-mode run AND a new `SPA_MODE=prod` run against the built bundle with the new CSP (seed/runner parameterized — this is the flip's proof) · **manual DoD**: paste-from-Word sanity in Tiptap (backlog §5 note: untested against real Word HTML).
@@ -141,3 +151,12 @@ rollback (incident)
 - `frontend/src/cockpit/DraftPanel.tsx:65-88`, `SpecPanel.tsx:44-123` — editor ternary + skeleton CTA; `frontend/src/collab/schema.ts` — formatting floor site; `useCollabDoc.ts:5-8` — WS URL.
 - `scripts/collab_e2e_run.sh` + `scripts/collab_e2e_seed.py:53-57,100-110` — e2e harness to parameterize for prod mode.
 - `collab/hydrate.py:26-32`, `collab/checkpoint.py:82-89` — why late/early enabling is safe.
+- `collab/store.py:79-103` — `find_checkpoint_candidates` `HAVING count >= min_tail`; `scheduler.py:337` + `config.py:234-236` — the 200-row scan floor (why the handover pass needs its own no-floor drain).
+- `web/api/annotations.py:75-97` — the Claims-tab read model made canonical in §3.4.
+
+## 10. Post-review amendments (Codex, 2026-07-07)
+
+Two findings against the committed design, both verified vs code and folded in above:
+
+1. **High — kill-switch write-loss window (§3.2 rewritten).** The original "flag off + tail-scan drains within ~60s" story was wrong twice: the scan has a 200-row floor (`store.py:103`) so small tails never drain, and the preserved log made exiting the kill-switch clobber every kill-window git-first edit (rooms replay the stale log; `load_or_hydrate` only seeds an EMPTY store). Verification made the finding STRONGER than reported (Codex named the enter-direction; the exit-direction clobber was found while verifying). Resolution: the drain-then-truncate startup handover pass — git becomes the sole canonical store while killed; exit re-hydrates from current HEAD. Regression tests specified in §6.
+2. **Medium — Claims-tab read model git-canonical (§3.4 extended).** `get_annotations` sectionizes the disk file (`annotations.py:89-97`); made canonical when draft collab is enabled, same shape as `get_draft`/`get_spec`.
