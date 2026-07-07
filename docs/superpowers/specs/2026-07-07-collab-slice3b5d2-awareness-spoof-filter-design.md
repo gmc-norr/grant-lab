@@ -10,7 +10,14 @@
 
 ## 1. Goal
 
-Prevent a connected collab client from **hiding, overriding, or displacing another user's presence** (caret) via the awareness relay. Today the server relays awareness payloads **raw** (`room.py` awareness branch), so an authenticated workspace member can send an awareness frame carrying a *peer's* client-id at a high clock — y-awareness is clock-gated, so the victim's genuine lower-clock re-announces are discarded by all receivers and the spoof **does not self-heal** (not even via the 15 s heartbeat). 3b-5b #2 closed only the *disconnect-removal* vector; the active relay-spoof is this slice.
+Prevent a connected collab client from **hiding, overriding, or displacing another user's presence** (caret) via the awareness relay. Today the server relays awareness payloads **raw** (`room.py` awareness branch), so an authenticated workspace member can send an awareness frame carrying a *peer's* client-id at a high clock. 3b-5b #2 closed only the *disconnect-removal* vector; the active relay-spoof is this slice.
+
+**Mechanism (corrected against y-protocols@1.0.7 `awareness.js`; the earlier draft was half-right).** y-awareness is clock-gated (`applyAwarenessUpdate` applies an entry only if `currClock < clock`, or an equal-clock null removal). Two spoof variants, with *different* natural outcomes:
+
+- **High-clock REMOVAL of a peer's id (the "hide"):** `applyAwarenessUpdate` has an **own-id defense** (`awareness.js:259-262`) — a received removal of *your own* live state is not applied; instead your local clock is bumped past the spoof. So a **one-shot** removal self-heals at the victim's next renewal (≤ ~15 s). Sustained hiding needs a **spam loop** re-outbidding each renewal. Nuance: our provider suppresses the *immediate* defensive re-announce that y-websocket would relay (it arrives with `origin === this` → guarded at `collabProvider.ts:72`), so the one-shot flicker widens from ~RTT to ≤ ~15 s.
+- **High-clock non-null OVERRIDE of a peer's id (the "fake"):** there is **no own-id defense branch** for non-null state (`awareness.js:266`), so the attacker's junk state replaces the victim's own local state at the spoofed clock; the victim then re-broadcasts the *poisoned* state under its own renewals (a fake name/color persists; only the cursor position is re-set on the victim's next movement). This variant genuinely does not self-heal.
+
+D2's filter kills **both** variants before anyone — the victim included — ever receives them, so the design is unchanged by this correction; but future slices (identity-from-binding, §8) will reason from this mechanism model, so it is stated accurately here.
 
 ## 2. Threat model and scope decisions (from review discussion)
 
@@ -21,7 +28,7 @@ Presence is ephemeral, never persisted, display-only, and gates nothing. All dur
 | 1 | Clock-spoof a live peer's id | **Silences** the victim's caret; no self-heal | **Closed** (ownership filter) |
 | 2 | Claim a blipped peer's id (ownership inversion) | A live-socket-ownership filter would silence the *victim* on reconnect | **Closed** (room-lifetime **user** binding) |
 | 3 | Fake name/color on own id | Duplicate caret with a false label; silences nobody; audit trail untouched | **Documented limitation** (§8; future path sketched) |
-| 4 | Binding-spam (many fresh ids) | Ghost carets; unbounded map growth | **Closed** (binding cap) |
+| 4 | Binding-spam (many fresh ids) | Ghost carets; unbounded map growth | **Bounded + attributable** (per-user quota; own-bound junk carets below quota remain — cosmetic, audit-logged, same class as #3) |
 | 5 | Junk state JSON | Cosmetic | Already handled (frame caps, drop-on-malformed, React/CollaborationCaret render as text) |
 
 **Decisions made with the user:**
@@ -36,20 +43,25 @@ Room-lifetime user binding is what kills attack #2: a griefer cannot claim a bli
 
 Backend-only. **No migration.** Flag stays **OFF** (the awareness path is reachable only on a collab-enabled artifact → prod-inert until D4). No new locks; all new work sits inside the existing `room._lock` section of the awareness branch; broadcast stays outside the lock.
 
-## 4. Why legitimate traffic is unaffected (verified against source)
+## 4. How legitimate traffic interacts with the filter (verified against y-protocols@1.0.7)
 
-- Our provider (`frontend/src/collab/collabProvider.ts:72`) has an origin-tag guard — it **never echoes** remote-applied awareness updates; every legitimate frame contains only the sender's own client-id entries. Any foreign-id entry at the server is anomalous by construction.
-- Reconnect-cleanup (`collabProvider.ts:190`, `removeAwarenessStates(remote, this)`) uses origin `this` → the guard suppresses the send; no foreign-id frames from that path either.
-- Server-originated removals (`Room.remove_client_presence`, dead-socket scrub in `_broadcast`) do not pass through `Room.handle` — untouched.
+**Legitimate clients DO emit foreign-id frames — routinely — and that is fine; they are filtered as benign stale-scrubs, not flagged as spoofs.** Every y-protocols `Awareness` runs a 3 s `_checkInterval` (`awareness.js:59-77`) that locally removes any remote id not renewed for 30 s via `removeAwarenessStates(this, remove, 'timeout')`. Origin `'timeout'` ≠ `this`, so the provider's origin guard (`collabProvider.ts:72`) does **not** suppress it, and the provider ships a frame whose only entries are foreign ids (null state, at the victim's current clock). The common benign trigger is **browser timer throttling**: a backgrounded cockpit tab's renewal stretches past 60 s, so every *other* client scrubs its caret and emits a foreign-removal frame ~once per cycle, all day.
+
+**These frames are correctly filtered** (not relayed): a high-clock foreign removal is precisely the "hide" attack, indistinguishable by intent from a benign scrub, and each peer runs its own local 30 s scrub so the relay is redundant. (Small win: today a tab waking from sleep can relay an equal-clock scrub that flickers a live peer's caret off *for everyone*; post-D2 it cannot.) The filter therefore treats **all** foreign entries alike (drop from relay); the *logging* distinguishes them (§7): foreign **null-state** = expected stale-scrub (INFO), foreign **non-null** = the true spoof signature (WARNING).
+
+The other three legitimate paths carry **only own-id** entries (verified):
+- Reconnect-cleanup (`collabProvider.ts:190`, `removeAwarenessStates(remote, this)`) uses origin `this` → guard suppresses the send.
+- Destroy / on-open flushes are own-id-only (`collabProvider.ts:103,148`).
+- Server-originated removals (`Room.remove_client_presence`, dead-socket scrub in `_broadcast`) do not pass through `Room.handle`.
 - Yjs `Doc.clientID` is random per Doc instance: page reload → fresh id (binds fresh); network-blip reconnect → same provider/doc → same id, same user → allowed by binding.
 
 ## 5. Component A — `protocol.py`: entry-span parser + filter
 
 **File:** `src/call_manager/proposal_assist/collab/protocol.py`
 
-1. **`read_awareness_entries(payload: bytes) -> list[tuple[int, int, int]]`** — refactor of the existing hardened parser. Returns `(client_id, start, end)` per entry, where `start:end` is the entry's full byte span (clientID varuint + clock varuint + varString state). Preserves **all** the f535f6c hardening verbatim: 10-byte varuint cap, bounds-checked reads, O(payload), prompt `ValueError` on truncated/overlong/out-of-range.
-2. **`read_awareness_client_ids(payload) -> list[int]`** — becomes a thin wrapper: `[e[0] for e in read_awareness_entries(payload)]`. One parser, no drift; existing tests keep passing.
-3. **`filter_awareness_update(payload: bytes, entries: list[tuple[int, int, int]], allowed_ids: set[int]) -> bytes | None`**:
+1. **`read_awareness_entries(payload: bytes) -> list[AwarenessEntry]`** — refactor of the existing hardened parser. `AwarenessEntry` is a small `NamedTuple(client_id: int, start: int, end: int, is_null: bool)`, where `start:end` is the entry's full byte span (clientID varuint + clock varuint + varString state), and `is_null` is `payload[state_start:state_end] == b"null"` (a null-state removal — `JSON.stringify(null) === "null"`; a 4-byte compare on the span already in hand, no JSON decode). Preserves **all** the f535f6c hardening verbatim: 10-byte varuint cap, bounds-checked reads, O(payload), prompt `ValueError` on truncated/overlong/out-of-range.
+2. **`read_awareness_client_ids(payload) -> list[int]`** — becomes a thin wrapper: `[e.client_id for e in read_awareness_entries(payload)]`. One parser, no drift; existing tests keep passing.
+3. **`filter_awareness_update(payload: bytes, entries: list[AwarenessEntry], allowed_ids: set[int]) -> bytes | None`**:
    - every entry's id ∈ `allowed_ids` → return `payload` **unchanged, byte-identical** (fast path; the overwhelmingly common case — zero re-encode in normal operation);
    - no entry allowed → `None`;
    - mixed → rebuild: `_write_varuint(kept_count)` + concatenation of the kept entries' original byte spans (entries are never re-encoded, only re-counted).
@@ -59,19 +71,19 @@ Backend-only. **No migration.** Flag stays **OFF** (the awareness path is reacha
 
 **File:** `src/call_manager/proposal_assist/collab/room.py`
 
-**New Room state:** `self._awareness_bindings: dict[int, int]` (awareness client_id → user_id). Module constant `_MAX_AWARENESS_BINDINGS = 512` (per room; one binding per page-load per user — generous; bounds the map against spam, in the spirit of the f535f6c DoS bounds).
+**New Room state:** `self._awareness_bindings: dict[int, int]` (awareness client_id → user_id). Module constant **`_MAX_AWARENESS_BINDINGS_PER_USER = 64`** — a **per-user** quota (legit usage ≈ 1 binding per page-load; 64 is generous). Per-user, NOT per-room: a per-room cap is an abuse amplifier — one member could burn a 512-id room cap with a single ~5 KB frame, after which *every future joiner's* first-announce (a new binding) is whole-dropped → all newcomers presence-silent for the room's life (attack #1's effect, achieved *through* the mitigation). Per-user quota confines a spammer to exhausting only *their own* presence; total map growth is bounded by `members × 64`.
 
-**Awareness branch, new order (all under the existing `self._lock`):**
+**Awareness branch, order (parse OUTSIDE the lock, as today — nothing needs the lock until the bindings read; keeps the critical section minimal):**
 
-1. Parse: `entries = P.read_awareness_entries(payload)` (exception → drop + existing `collab.malformed_awareness` log — unchanged).
-2. Partition by `allowed(id) := self._awareness_bindings.get(id) in (None, state.user_id)` → `kept_ids` / `filtered_ids`.
-3. **Cap check:** if the number of *new* bindings (`kept_ids` not yet in the map) would push `len(self._awareness_bindings)` past `_MAX_AWARENESS_BINDINGS` → drop the whole frame + WARNING `collab.awareness_bindings_capped` (room, sender user_id). Existing presence unaffected.
-4. **Bind** new ids to `state.user_id`; INFO `collab.awareness_bind` (room, client_id, user_id) — this is the impersonation-complaint audit trail.
-5. If `kept_ids` is empty → WARNING `collab.awareness_foreign_filtered` (room, sender user_id, filtered ids) + **return** — nothing applied, nothing relayed.
-6. `relay_payload = P.filter_awareness_update(payload, entries, kept_ids)`; if `filtered_ids` non-empty → the same WARNING log (kept/filtered counts).
-7. **Apply the FILTERED payload** to `self.awareness` (`apply_awareness_update(relay_payload, origin="client")`; exception → drop + existing log). This also fixes the currently-unnoticed hole where a spoofed entry poisons `awareness_snapshot()` for every future joiner.
-8. **Attribution simplifies:** `state.awareness_ids |= kept_ids`. The 3b-5b `owned_by_other_users` computation is **removed — subsumed by bindings** (an id bound to another user is filtered before it could ever be attributed), so the disconnect-removal guard becomes structurally unable to scrub a foreign caret. (The old `declared ∪ states-diff` union collapses: after a filtered apply, the states-diff ⊆ kept_ids.)
-9. **Relay the FILTERED payload** outside the lock (as today; skip if nothing kept — step 5 already returned).
+1. Parse (OUTSIDE the lock): `entries = P.read_awareness_entries(payload)` (exception → drop + existing `collab.malformed_awareness` log — unchanged).
+2. Enter `async with self._lock:` for steps 3–8.
+3. Partition by `allowed(id) := self._awareness_bindings.get(id) in (None, state.user_id)` → `kept` / `filtered` (keep each side's entries, not just ids, so the log can split null vs non-null).
+4. **Per-user quota:** among `kept`, the ids not yet in the map are *new bindings*; if binding them would push this user's current binding count past `_MAX_AWARENESS_BINDINGS_PER_USER` → drop the whole frame + WARNING `collab.awareness_bindings_capped` (room, user_id, current count). Other users' presence and this user's already-bound ids are unaffected.
+5. **Bind** the new ids to `state.user_id`; INFO `collab.awareness_bind` (room, client_id, user_id) — the impersonation-complaint audit trail.
+6. **Log filtered entries by kind** (§7): foreign **null-state** entries → INFO/DEBUG `collab.awareness_stale_scrub_filtered` (expected — the timeout-scrub of §4); foreign **non-null** entries → WARNING `collab.awareness_foreign_filtered` (room, sender user_id, ids — the true spoof signature).
+7. If `kept` is empty → **return** (still inside/after the lock as structured; nothing applied, nothing relayed). This is the pure-stale-scrub common case.
+8. `relay_payload = P.filter_awareness_update(payload, entries, kept_ids)`; **apply the FILTERED payload** to `self.awareness` (`apply_awareness_update(relay_payload, origin="client")`; exception → drop + existing log). This also fixes the currently-unnoticed hole where a spoofed entry poisons `awareness_snapshot()` for every future joiner. **Attribution:** `state.awareness_ids |= kept_ids`. The 3b-5b `owned_by_other_users` computation is **removed — subsumed by bindings** (an id bound to another user is filtered before it could ever be attributed), so the disconnect-removal guard becomes structurally unable to scrub a foreign caret. (The old `declared ∪ states-diff` union collapses: after a filtered apply, states-diff ⊆ kept_ids.)
+9. **Relay the FILTERED payload** OUTSIDE the lock (as today; step 7 already returned when nothing is kept).
 
 **Removal entries (null state)** follow the same rule: own-bound or unbound id → allowed (legit self-removal on unload — provider destroy path); foreign-bound id → filtered (that IS the hide-attack). An unbound-id removal binds then removes — harmless, uniform.
 
@@ -84,15 +96,20 @@ Backend-only. **No migration.** Flag stays **OFF** (the awareness path is reacha
 | Event | Level | When |
 |---|---|---|
 | `collab.awareness_bind` | INFO | an unbound client_id binds to a user (audit trail) |
-| `collab.awareness_foreign_filtered` | WARNING | ≥1 entry filtered (should never fire for our provider — origin guard §4) |
-| `collab.awareness_bindings_capped` | WARNING | frame dropped at the binding cap |
+| `collab.awareness_stale_scrub_filtered` | INFO/DEBUG | foreign **null-state** entry filtered — the routine timeout-scrub of §4 (expected; frequent for backgrounded tabs) |
+| `collab.awareness_foreign_filtered` | WARNING | foreign **non-null** entry filtered — the true spoof signature (should be rare in practice) |
+| `collab.awareness_bindings_capped` | WARNING | frame dropped at the per-user binding quota |
 | existing `collab.malformed_awareness*` | WARNING | unchanged |
+
+The level split is load-bearing: without it, the routine stale-scrub (§4) fires the same WARNING all day for every backgrounded tab and drowns the exact spoof signal the WARNING is meant to carry.
 
 ## 8. Documented limitations & sanctioned future path
 
 - **#3 Name/color impersonation on own id — NOT closed.** The caret's `user.{name,color}` is client-supplied JSON; a member can present a false label *on their own id* (a visible duplicate caret — it silences nobody, and durable attribution is server-stamped). **Future fix (post-flip, optional slice): identity-from-binding** — the server sends the room's binding map (client_id → authenticated user identity) to clients via a new message type, and the caret renders identity from the server's binding instead of the client payload. Identity by authentication, not by claim; zero payload rewriting; zero display-logic drift risk. D2's binding map is deliberately its foundation. Interim mitigation: the `collab.awareness_bind` audit trail resolves any impersonation complaint.
 - **3b-5b #3 reconnect-clock brief-invisibility** (same-clock re-announce ignored until renewal ≤ ~15 s) — unchanged, still documented-not-fixed.
 - **Same-user two-socket overlap** (R2-2): both sockets may carry the same id in `awareness_ids`; the first socket's disconnect briefly scrubs the survivor's caret → self-heals via renewal. Pre-existing, unchanged.
+- **Binding-reset race** (new residual): bindings die with the Room. After a force-evict/poison-recovery (all sockets closed, everyone auto-reconnects ~1 s later) or an evict-on-empty during a victim's transient blip, the map is fresh — a malicious member who reconnects first can *pre-claim* a peer's known client-id, and the peer's same-Doc re-announce is then filtered until a reload mints a fresh id. Low likelihood (needs a prior sighting of the id + winning the reconnect race), attributable via the `collab.awareness_bind` log, and strictly better than today's no-filter. Accepted, documented.
+- **Half-open-socket ghost** (new residual): today a dead-but-undetected peer is scrubbed from server awareness by the first *relayed* client timeout-scrub; post-D2 those foreign scrubs are filtered, so a new joiner can briefly see a dead caret (≤ 30 s, until their own local timeout clears it). Accepted. **Do NOT "fix" this by applying foreign removals server-side without relaying** — pycrdt's `apply_awareness_update` is clock-gated too, so an attacker's `clock=1e9` removal would then *permanently* evict a live victim from every future joiner's snapshot. That cure is worse than the disease; the filter-and-drop chosen here is deliberate.
 
 ## 9. Testing
 
@@ -103,13 +120,15 @@ Backend-only. **No migration.** Flag stays **OFF** (the awareness path is reacha
 - `read_awareness_client_ids` wrapper equivalence on conforming frames.
 
 **Room tests** (extend `tests/proposal_assist/collab/test_collab_awareness.py`, FakeClient pattern):
-- **Spoof-hide blocked (THE regression):** user A announces id X; user B sends a high-clock/removal entry for X → frame NOT relayed to peers, server awareness still holds A's state, `awareness_snapshot()` to a new joiner is spoof-free, WARNING logged, X not in B's `awareness_ids`.
+- **Spoof-hide blocked (THE regression):** user A announces id X; user B sends a high-clock/removal entry for X → frame NOT relayed to peers, server awareness still holds A's state, `awareness_snapshot()` to a new joiner is spoof-free, **WARNING** logged (non-null override case), X not in B's `awareness_ids`.
+- **Foreign null-state scrub filtered benignly (finding 1):** B sends a *null-state* entry for A's id X **at X's current clock** (the routine timeout-scrub shape) → filtered (not relayed), A's state intact, logged at **INFO/DEBUG** (`collab.awareness_stale_scrub_filtered`), NOT WARNING. Guards the log-level split.
 - **Mixed frame stripped:** B sends [own id Y, foreign id X] → peers receive a frame whose parsed ids == [Y]; server awareness updated for Y only; Y (not X) attributed to B.
 - **Inversion blocked:** A announces X; A's socket drops (`drop_client`); B announces X → filtered (binding outlives the socket); A reconnects (same user, new socket) and announces X → allowed, relayed, attributed.
 - **First-announce binds:** unknown id → allowed, bound, relayed, INFO logged.
 - **Fast path:** an all-own frame relays a byte-identical payload.
-- **Cap:** a frame that would exceed `_MAX_AWARENESS_BINDINGS` → dropped + WARNING; previously-bound presence unaffected.
-- **Self-removal still works:** A sends a null-state entry for its own id → relayed; peers' view drops the caret.
+- **Empty-frame passthrough (count = 0):** an awareness frame declaring zero entries → trivially all-allowed → relayed byte-identical, no bindings created (behavior-preserving vs today).
+- **Quota isolation (finding 2):** user B announces `_MAX_AWARENESS_BINDINGS_PER_USER` ids (fills B's quota), then one more → B's new id dropped + WARNING; **user C's fresh first-announce still binds and relays** (C unaffected). Asserts the per-user (not per-room) property.
+- **Self-removal still works:** A sends a null-state entry for its own id → allowed, relayed; peers' view drops the caret.
 - **3b-5b legit-flow tests green unchanged** (disconnect-removal, same-user reclaim R2-2, malformed-frame drop).
 
 **Acceptance gates:** grouped backend sweep incl. `tests/test_api_spec.py` (`EMBEDDING_MODEL=bge-m3`, `-p no:cacheprovider`, never whole-suite) · `ruff check .` · frontend `pnpm exec tsc --noEmit` + `pnpm exec vitest run src/collab` (untouched — regression only) · **two-browser e2e suite (a–e)** via `scripts/collab_e2e_run.sh` as the legitimate-presence regression gate (scenarios a/b/d hammer the relay: converge + distinct carets, reconnect re-announce, read-only spec presence).
