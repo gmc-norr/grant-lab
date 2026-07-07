@@ -226,10 +226,10 @@ test.describe("collab two-browser (distinct users)", () => {
 
   // (e) Cite after a co-edit with NO save-first — the D1b acceptance gate. Both users
   //     edit the draft so the live room is ahead of git HEAD; the toolbar's git
-  //     base_section_sha is now stale, but the cite still lands because the backend
-  //     relocates by anchor (3b-5d.D1b). Inverse of (c), which checkpoints to a
-  //     git==live base first to AVOID this path.
-  test("owner cites after both users edit without saving; the pill converges", async ({
+  //     base_section_sha is now stale, but the cite still SUCCEEDS (200, not 409)
+  //     because the backend relocates by anchor (3b-5d.D1b). Inverse of (c), which
+  //     checkpoints to a git==live base first to AVOID this path.
+  test("owner cites after both users edit without saving; the cite succeeds (no 409)", async ({
     browser,
     baseURL,
   }) => {
@@ -298,11 +298,24 @@ test.describe("collab two-browser (distinct users)", () => {
     await expect(chunk).toBeVisible({ timeout: 5_000 });
     await chunk.selectText();
     await chunk.dispatchEvent("mouseup");
-    await composer.getByRole("button", { name: /add citation/i }).click();
 
-    // The pill lands for the owner and converges to the member — no save was needed.
-    await expect(edA.getByTestId("citation-pill").first()).toBeVisible({ timeout: 10_000 });
-    await expect(edB.getByTestId("citation-pill").first()).toBeVisible({ timeout: 10_000 });
+    // The D1b acceptance gate: the no-save cite must SUCCEED (200 with a real
+    // ev_id/citekey), NOT 409 on the stale git base_section_sha. Asserting the POST
+    // result directly is a STRONGER gate than a pill count — scenario (c) already left a
+    // persisted pill in this shared room, so a pill-visibility check could pass on that
+    // stale pill even if this cite 409'd (Codex). "medicine" is uncited this run, so a
+    // 200 here is necessarily a fresh citation, not an idempotent no-op. Live pill
+    // convergence is proven by scenario (c) (on a clean git==live base).
+    const [citeResp] = await Promise.all([
+      A.page.waitForResponse(
+        (r) => /\/citations\b/.test(r.url()) && r.request().method() === "POST",
+      ),
+      composer.getByRole("button", { name: /add citation/i }).click(),
+    ]);
+    expect(citeResp.status()).toBe(200);
+    const body = await citeResp.json();
+    expect(body.ev_id).toBeTruthy();
+    expect(body.citekey).toBeTruthy();
 
     await A.ctx.close();
     await B.ctx.close();
