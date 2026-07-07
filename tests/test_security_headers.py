@@ -1,8 +1,17 @@
 """Security-response headers + request-body-size cap (internet-exposure hardening)."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from call_manager.main import create_app
+
+
+def _connect_src_directive(csp: str) -> str:
+    """Extract the full `connect-src ...` directive (prefix included) from a
+    CSP header string. Used instead of a bare substring check so a match
+    can't be fooled by junk appended after the expected token (e.g. an
+    injected `; script-src * 'unsafe-inline'`)."""
+    return next(d.strip() for d in csp.split("; ") if d.startswith("connect-src"))
 
 
 def _set_http_env(monkeypatch, database_url):
@@ -100,7 +109,7 @@ def test_build_csp_prod_has_same_origin_ws_token():
     from call_manager.web.middleware import build_csp
 
     csp = build_csp(dev=False, ws_origin="wss://grants.example.org")
-    assert "connect-src 'self' wss://grants.example.org" in csp
+    assert _connect_src_directive(csp) == "connect-src 'self' wss://grants.example.org"
     assert "ws:" not in csp.replace("wss://grants.example.org", "")  # narrow, no bare scheme
     assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("style-src")[0]
 
@@ -108,7 +117,8 @@ def test_build_csp_prod_has_same_origin_ws_token():
 def test_build_csp_http_base_gets_ws_token():
     from call_manager.web.middleware import build_csp
 
-    assert "connect-src 'self' ws://lanhost:8000" in build_csp(ws_origin="ws://lanhost:8000")
+    csp = build_csp(ws_origin="ws://lanhost:8000")
+    assert _connect_src_directive(csp) == "connect-src 'self' ws://lanhost:8000"
 
 
 def test_build_csp_dev_output_unchanged():
@@ -117,12 +127,49 @@ def test_build_csp_dev_output_unchanged():
     assert "connect-src 'self' ws: http://localhost:5173" in build_csp(dev=True)
     # dev ignores ws_origin (its broad ws: token already covers the Yjs socket)
     assert build_csp(dev=True) == build_csp(dev=True, ws_origin="wss://x")
+    # Pinned golden: byte-for-byte dev CSP, captured pre-3b-5d.D4 review-#10 fix
+    # via `uv run python -c "from call_manager.web.middleware import build_csp;
+    # print(repr(build_csp(dev=True)))"`. dev=True must NEVER change shape as a
+    # side effect of the ws_origin-validation fix at the derivation site.
+    assert build_csp(dev=True) == (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "font-src 'self'; connect-src 'self' ws: http://localhost:5173; "
+        "form-action 'self'; base-uri 'self'; frame-ancestors 'none'; "
+        "object-src 'none'"
+    )
 
 
 def test_build_csp_no_origin_stays_strict():
     from call_manager.web.middleware import build_csp
 
     assert "connect-src 'self';" in build_csp() + ";"
+
+
+# ---------------------------------------------------------------------------
+# 3b-5d.D4 review #10 (Critical #1): CSP directive injection via an
+# unvalidated APP_BASE_URL netloc. `urlsplit().netloc` only stops at `/`,
+# `?` or `#` — not `;` or whitespace — and config.py's APP_BASE_URL
+# validator is a bare scheme-prefix check, so a value like
+# "https://app.ki.se; script-src * 'unsafe-inline'" used to sail through to
+# the derived ws_origin and get interpolated verbatim into the CSP header.
+# _derive_ws_origin (extracted from create_app for exactly this) must now
+# reject any netloc that isn't a plain host[:port].
+# ---------------------------------------------------------------------------
+
+
+def test_ws_origin_injection_rejected_at_startup():
+    from call_manager.main import _derive_ws_origin
+
+    with pytest.raises(RuntimeError):
+        _derive_ws_origin("https://app.ki.se; script-src * 'unsafe-inline'")
+
+
+def test_ws_origin_whitespace_netloc_rejected_at_startup():
+    from call_manager.main import _derive_ws_origin
+
+    with pytest.raises(RuntimeError):
+        _derive_ws_origin("https://   ")
 
 
 def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):

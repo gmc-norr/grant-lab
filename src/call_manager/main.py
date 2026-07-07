@@ -1,3 +1,4 @@
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -287,6 +288,33 @@ async def lifespan(app: FastAPI):
 # FAST with a clear pointer to the required column migration.
 EMBEDDING_COLUMN_DIM = 1024
 
+# Strict host[:port] shape for a CSP token derived from user-supplied config.
+# `urlsplit().netloc` only terminates at `/`, `?` or `#` — NOT `;` or
+# whitespace — so a value like "https://app.ki.se; script-src * 'unsafe-inline'"
+# parses to a netloc of "app.ki.se; script-src * 'unsafe-inline'" and, absent
+# this check, would be interpolated verbatim into the CSP header, injecting
+# arbitrary directives. config.py's APP_BASE_URL validator only checks the
+# scheme prefix, so this is the last line of defense before the value reaches
+# the header.
+_HOST_PORT_RE = re.compile(r"^[A-Za-z0-9.-]+(:\d{1,5})?$")
+
+
+def _derive_ws_origin(app_base_url: str) -> str:
+    """Derive the same-origin `ws(s)://host[:port]` CSP token from APP_BASE_URL.
+
+    Raises RuntimeError (fail loudly at startup, matching the sibling
+    scheme/netloc check) if the netloc isn't a plain host[:port] — this is
+    what stops CSP directive injection via a malicious/malformed APP_BASE_URL.
+    """
+    _base = urlsplit(app_base_url)
+    if not _base.scheme or not _base.netloc:
+        raise RuntimeError(f"APP_BASE_URL is not a valid URL: {app_base_url!r}")
+    if not _HOST_PORT_RE.match(_base.netloc):
+        raise RuntimeError(
+            f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}"
+        )
+    return f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
+
 
 def create_app() -> FastAPI:
     configure_logging()
@@ -366,11 +394,9 @@ def create_app() -> FastAPI:
     #
     # 3b-5d.D4: the Yjs WS needs an explicit same-origin token in the non-dev
     # CSP. Derived from APP_BASE_URL — which also drives check_origin, cookie
-    # security and HSTS, so scheme misalignment fails loudly here at startup.
-    _base = urlsplit(settings.app_base_url)
-    if not _base.scheme or not _base.netloc:
-        raise RuntimeError(f"APP_BASE_URL is not a valid URL: {settings.app_base_url!r}")
-    _ws_origin = f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
+    # security and HSTS, so scheme misalignment (and a malformed/malicious
+    # netloc — see _derive_ws_origin) fails loudly here at startup.
+    _ws_origin = _derive_ws_origin(settings.app_base_url)
     _csp = build_csp(dev=settings.spa_mode == "dev", ws_origin=_ws_origin)
     _hsts = settings.cookie_secure
     app.add_middleware(
