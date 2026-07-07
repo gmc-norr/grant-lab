@@ -1,13 +1,18 @@
 // frontend/src/collab/TiptapSelectionToolbar.tsx
-import { Button, Group, Menu, Paper } from "@mantine/core";
+import { Button, Group, Menu, Paper, Text } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
 import { useEffect, useState } from "react";
 
-import { useSubmitTurn } from "../api/turns";
+import { ApiError } from "../api/client";
+import { useAckDisclosure, useSubmitTurn } from "../api/turns";
 import { CitationComposer, type ClaimContext } from "../cockpit/CitationComposer";
 import { toCodePointOffset, type SelectionContext } from "../cockpit/selection";
 import type { CollabProvider } from "./collabProvider";
 import { deriveClaimAnchor } from "./selectionAnchor";
+import { useSettled } from "./useSettled";
+
+// The full turn payload frozen for an ack-retry — never rebuilt from the live claim.
+type TurnPayload = { content: string; selection_context: SelectionContext };
 
 const ASK_PRESETS = [
   { label: "Explain this", text: "Explain the selected text." },
@@ -33,6 +38,12 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   const submit = useSubmitTurn(workspaceId);
   const [claim, setClaim] = useState(() => deriveClaimAnchor(editor.state));
   const [citeOpen, setCiteOpen] = useState(false);
+  // Reactive settle state (polled) so Edit/Cite re-enable when the WS buffer drains —
+  // the render-time sample latched disabled after a selection's awareness send (D0).
+  const settled = useSettled(provider);
+  const ack = useAckDisclosure(workspaceId);
+  const [needsAck, setNeedsAck] = useState<TurnPayload | null>(null);
+  const [turnError, setTurnError] = useState<string | null>(null);
 
   useEffect(() => {
     const update = () => setClaim(deriveClaimAnchor(editor.state));
@@ -41,9 +52,6 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   }, [editor]);
 
   if (!claim) return null;
-
-  // Transport-settled guard: Edit and Cite require a settled connection
-  const settled = provider.status === "connected" && provider.isSettled();
 
   // Locate the section in the sections array
   const section = sections[claim.sectionIndex];
@@ -63,6 +71,26 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   const askReady = anchorable;
   const writeReady = settled && anchorable && !claim.headingOnly;
 
+  // submitTurn owns mutate + error handling. On a disclosure 403 it freezes the WHOLE
+  // payload (content + the selection_context captured at submit time) into needsAck, so
+  // ackAndRetry re-submits the ORIGINAL selection — immune to the user changing/clearing
+  // the selection between the 403 and the ack.
+  function submitTurn(payload: TurnPayload) {
+    submit.mutate(payload, {
+      onSuccess: () => {
+        setNeedsAck(null);
+        setTurnError(null);
+      },
+      onError: (e) => {
+        if (e instanceof ApiError && /disclosure/i.test(e.message)) {
+          setNeedsAck(payload);
+        } else {
+          setTurnError("Couldn't do that — please try again.");
+        }
+      },
+    });
+  }
+
   function runTurn(requestType: "ask" | "modify", instruction: string) {
     if (!instruction.trim() || submit.isPending) return;
     const selection_context: SelectionContext = {
@@ -75,7 +103,17 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
       from_offset: fromOffset,
       to_offset: toOffset,
     };
-    submit.mutate({ content: instruction, selection_context });
+    submitTurn({ content: instruction, selection_context });
+  }
+
+  function ackAndRetry() {
+    const pending = needsAck;
+    ack.mutate(undefined, {
+      onSuccess: () => {
+        setNeedsAck(null);
+        if (pending) submitTurn(pending); // re-submit the FROZEN payload, not the live claim
+      },
+    });
   }
 
   const claimCtx: ClaimContext = {
@@ -136,6 +174,22 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
             </Button>
           )}
         </Group>
+
+        {needsAck && (
+          <Group gap="xs" mt={4} wrap="nowrap" role="alert">
+            <Text size="xs">
+              Answers use a hosted model. Don&apos;t paste patient-identifiable data.
+            </Text>
+            <Button size="xs" onClick={ackAndRetry} disabled={ack.isPending}>
+              I understand — ask
+            </Button>
+          </Group>
+        )}
+        {turnError && (
+          <Text size="xs" c="red" mt={4} role="alert">
+            {turnError}
+          </Text>
+        )}
       </Paper>
 
       {/* Citation composer rendered when Cite is clicked */}
