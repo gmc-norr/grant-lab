@@ -69,6 +69,13 @@ class Room:
         # so the server never broadcasts a phantom cursor.
         self.awareness = P.Awareness(self.doc)
         self.awareness.set_local_state(None)
+        # client_id → user_id ownership bindings (Slice 3b-5d.D2). First-announce,
+        # per-USER, ROOM-lifetime (the map dies with the Room on eviction): a
+        # socket may relay awareness entries only for ids bound to its own
+        # authenticated user. Room-lifetime (not socket-lifetime) is what blocks
+        # ownership inversion — a griefer cannot claim a blipped peer's id, while
+        # the victim's same-user reconnect re-claims it freely (R2-2).
+        self._awareness_bindings: dict[int, int] = {}
         self.clients: dict = {}
         self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
@@ -185,9 +192,10 @@ class Room:
 
         if P.is_awareness(message):
             # Presence relay: ungated (not a doc mutation) and NEVER persisted.
+            # Parse OUTSIDE the lock (bounded, O(payload) — f535f6c hardening).
             try:
                 payload = P.extract_awareness_update(message)
-                declared = set(P.read_awareness_client_ids(payload))
+                entries = P.read_awareness_entries(payload)
             except Exception:
                 logger.warning(
                     "collab.malformed_awareness",
@@ -195,40 +203,87 @@ class Room:
                 )
                 return
             async with self._lock:
-                before = set(self.awareness.states)
+                # Ownership filter (Slice 3b-5d.D2, closes the 3b-5b deferral): a
+                # socket may introduce, update, or remove awareness entries ONLY
+                # for client-ids bound to its own authenticated user. This kills
+                # the ACTIVE relay-spoof (a high-clock hide/fake of a peer's
+                # caret is clock-gated on receivers and does NOT self-heal)
+                # before anyone — the victim included — receives it.
+                kept: list[P.AwarenessEntry] = []
+                foreign: list[P.AwarenessEntry] = []
+                for e in entries:
+                    owner = self._awareness_bindings.get(e.client_id)
+                    (kept if owner in (None, state.user_id) else foreign).append(e)
+                if foreign:
+                    # Foreign NULL-state entries are ROUTINE: y-protocols' 3s
+                    # local timeout-scrub of a backgrounded tab ships with
+                    # origin 'timeout', which the provider's origin guard does
+                    # not suppress → INFO. Foreign NON-null entries are the true
+                    # spoof signature → WARNING. The level split is load-bearing:
+                    # without it the daily scrub noise drowns the spoof signal.
+                    stale = [e.client_id for e in foreign if e.is_null]
+                    spoof = [e.client_id for e in foreign if not e.is_null]
+                    if stale:
+                        logger.info(
+                            "collab.awareness_stale_scrub_filtered",
+                            extra={"event": "collab_awareness_stale_scrub_filtered",
+                                   "room": str(self.key), "user_id": state.user_id,
+                                   "client_ids": stale},
+                        )
+                    if spoof:
+                        logger.warning(
+                            "collab.awareness_foreign_filtered",
+                            extra={"event": "collab_awareness_foreign_filtered",
+                                   "room": str(self.key), "user_id": state.user_id,
+                                   "client_ids": spoof},
+                        )
+                if entries and not kept:
+                    return  # pure-foreign frame (routine stale-scrub): drop
+                kept_ids = {e.client_id for e in kept}
+                new_ids = kept_ids - self._awareness_bindings.keys()
+                relay = P.filter_awareness_update(payload, entries, kept_ids)
+                if relay is None:  # unreachable (kept is non-empty) — defensive
+                    return
                 try:
-                    self.awareness.apply_awareness_update(payload, origin="client")
+                    # Apply the FILTERED payload, so a spoofed entry can never
+                    # poison the snapshot new joiners are primed with.
+                    self.awareness.apply_awareness_update(relay, origin="client")
                 except Exception:
                     logger.warning(
                         "collab.malformed_awareness_update",
                         extra={"event": "collab_malformed_awareness_update",
                                "room": str(self.key)},
                     )
-                    return
-                # Attribute ids to THIS socket: payload-declared ids (robust to a
-                # same-clientID reconnect where the states-diff is empty) ∪ states-diff,
-                # MINUS any id owned by another live socket of a DIFFERENT user. That
-                # closes the DISCONNECT-removal vector — a member declaring a *peer's*
-                # client id so its own disconnect scrubs the peer's caret — while leaving
-                # same-user re-attribution untouched: a same-clientID reconnect that
-                # transiently overlaps its old socket (same user_id) still re-claims its
-                # id (R2-2). Griefing vs reconnect is indistinguishable from the frame
-                # alone, but a griefer is a different member and a reconnect the same user.
-                # NOTE: this does NOT stop an ACTIVE relay-spoof — the raw payload is still
-                # relayed below, so a co-member can send a peer's id at a high awareness
-                # clock to hide/fake that caret until a page/room reset (y-awareness is
-                # clock-gated: lower-clock victim re-announces are ignored → NO self-heal).
-                # Presence is display-only and the flag is OFF, so this is cosmetic and
-                # prod-inert; the complete fix (filter relayed payloads to sender-owned
-                # ids) is tracked for 3b-5d.
-                owned_by_other_users: set[int] = set()
-                for client, st in self.clients.items():
-                    if client is not sender and st.user_id != state.user_id:
-                        owned_by_other_users |= st.awareness_ids
-                new_ids = (declared | (set(self.awareness.states) - before)) - owned_by_other_users
-                state.awareness_ids |= new_ids
-            # Relay the raw payload as-is to peers (standard y-awareness relay).
-            await self._broadcast(P.create_awareness_message(payload), exclude=sender)
+                    return  # nothing bound, nothing relayed (bind-after-accept)
+                # Bind AFTER a successful apply, and only the new ids pycrdt
+                # actually ACCEPTED into states (Codex High): a parse-valid
+                # entry that fails or is clock-ignored on apply must not reserve
+                # a binding, or a stealth pre-claim (malformed JSON state /
+                # stale clock — no visible caret either way) would filter the
+                # id's real owner for the room's life.
+                for cid in new_ids:
+                    if cid in self.awareness.states:
+                        self._awareness_bindings[cid] = state.user_id
+                        logger.info(
+                            "collab.awareness_bind",
+                            extra={"event": "collab_awareness_bind",
+                                   "room": str(self.key),
+                                   "client_id": cid, "user_id": state.user_id},
+                        )
+                # Attribute to THIS socket only ids bound to THIS user (drives
+                # disconnect removal). The 3b-5b owned_by_other_users guard is
+                # subsumed: a foreign-bound id is filtered above, and an
+                # unbound-never-accepted id (e.g. a null pre-claim) is never
+                # attributed — so this socket's disconnect can never scrub an
+                # id someone else binds later. Attribution from kept ids (not a
+                # states-diff) keeps R2-2 same-clientID reconnects working.
+                state.awareness_ids |= {
+                    cid for cid in kept_ids
+                    if self._awareness_bindings.get(cid) == state.user_id
+                }
+            # Relay the FILTERED payload outside the lock (standard y-awareness
+            # relay; a slow client must not block the room).
+            await self._broadcast(P.create_awareness_message(relay), exclude=sender)
             return
 
         # Anything else: ignored.
