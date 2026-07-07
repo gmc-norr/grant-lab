@@ -29,6 +29,8 @@ from call_manager.proposal_assist.analysis.queue import (
     enqueue_section_job,
 )
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
+from call_manager.proposal_assist.collab import state as collab_state
+from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
@@ -94,7 +96,17 @@ def get_annotations(
             current_head(repo)  # validate the repo has a commit; raises on pre-draft
         except GitCommitError:
             return AnnotationsOut(is_owner=is_owner, sections=[])
-        sections = split_sections(proposal.read_text())
+        # 3b-5d.D4 §3.4: with draft collab enabled the tab must sectionize the
+        # LIVE room (the room-aware insert of the same tab anchors against it);
+        # claim rows are sha-keyed, so a live-edited section simply shows no
+        # findings until the next checkpoint's analysis lands.
+        if collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="draft"):
+            doc_raw = canonical_artifact_markdown(
+                session, workspace_id=ws.id, artifact="draft", repo_dir=repo
+            )
+        else:
+            doc_raw = proposal.read_text()
+        sections = split_sections(doc_raw)
 
         # One query for all open annotations; group by (sha, occurrence).
         anns = list(
