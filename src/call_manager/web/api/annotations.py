@@ -32,6 +32,7 @@ from call_manager.proposal_assist.analysis.queue import (
 from call_manager.proposal_assist.citations.collab_cite import insert_annotation_via_kernel
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.collab import state as collab_state
+from call_manager.proposal_assist.collab import store as collab_store
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
@@ -99,11 +100,27 @@ def get_annotations(
             current_head(repo)  # validate the repo has a commit; raises on pre-draft
         except GitCommitError:
             return AnnotationsOut(is_owner=is_owner, sections=[])
-        # 3b-5d.D4 §3.4: with draft collab enabled the tab must sectionize the
-        # LIVE room (the room-aware insert of the same tab anchors against it);
-        # claim rows are sha-keyed, so a live-edited section simply shows no
-        # findings until the next checkpoint's analysis lands.
-        if collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="draft"):
+        # 3b-5d.D4 §3.4 (fixed in review #8): with draft collab enabled the tab
+        # must sectionize the LIVE room ONLY once the room has diverged from
+        # disk — an UNTOUCHED room (hydration seed only, no authored update
+        # yet) is just a ProseMirror round-trip of the same git HEAD text, but
+        # that round-trip canonicalizes block-boundary whitespace ("loose"),
+        # while git HEAD and every pre-flip annotation's section_sha are the
+        # raw ("tight") bytes. Serving the loose projection for an untouched
+        # room would mismatch every pre-flip finding's tight sha and render
+        # the Claims tab empty right after enable-on-touch. So: untouched ->
+        # read raw disk (tight, matches pre-flip shas byte-for-byte); once the
+        # room has a real edit -> read the room projection (claim rows keyed
+        # to a live-edited section simply show no findings until the next
+        # checkpoint's analysis lands and self-heals them). has_authored_updates
+        # is the SAME predicate the kernel write path (apply_annotation_insert_
+        # to_room) uses, so read and write can never disagree about which text
+        # a section_sha was hashed against.
+        if collab_state.is_collab_enabled(
+            session, workspace_id=ws.id, artifact="draft"
+        ) and collab_store.has_authored_updates(
+            session, workspace_id=ws.id, artifact="draft"
+        ):
             doc_raw = canonical_artifact_markdown(
                 session, workspace_id=ws.id, artifact="draft", repo_dir=repo
             )

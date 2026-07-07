@@ -452,12 +452,16 @@ def apply_annotation_insert_to_room(
     # fragment below. Once a real edit has landed, this falls back to the
     # room's own text — a stale pre-flip annotation legitimately becomes
     # unmatched until reanalysis, the same degradation the Claims-tab read
-    # model already accepts (canonical_artifact_markdown docstring).
+    # model (annotations.py get_annotations) also accepts. "Untouched" is the
+    # SAME predicate the read model gates on — store.has_authored_updates —
+    # so the two paths can never disagree about which text a section_sha was
+    # hashed against.
     live_md = serialize_doc_to_markdown(room_doc)
     doc_for_derive = live_md
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
-    rows = store.load_rows(session, workspace_id=workspace_id, artifact="draft")
-    untouched = not any(row_actor is not None for (_rid, row_actor, _blob) in rows)
+    untouched = not store.has_authored_updates(
+        session, workspace_id=workspace_id, artifact="draft"
+    )
     if untouched:
         head_text = read_head_markdown(repo, "draft")
         if head_text is not None:
