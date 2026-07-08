@@ -115,6 +115,8 @@ Add to `schema.py`, `collab-schema.mjs` (+ `.d.mts` typings), and `schema.ts` (v
 - Per-column alignment colons normalize away (loose-form loss; same class as fence info strings, which are already dropped).
 - Merged cells, column widths, multi-block cells: not representable; deterministic degrade rules at parse/paste/serialize boundaries.
 - Raw pipe-table TEXT typed/pasted into the live editor stays literal text (no input rule / paste transform in v1). It also does not later "become" a table: multi-line pastes become separate paragraphs whose blank-line-separated serialization never re-parses as GFM.
+- A list item shaped `[empty paragraph, paragraph, …]` loses the empty leading paragraph on round-trip (the §B/§C companion drops it and a re-parse does not re-synthesize one, since the next block is already a paragraph). Whitespace-only normalization, no text loss, and not reachable from the editor UI (the schema/UI never produce a leading empty paragraph before real content). Same benign class as the trailing-`hard_break`-in-cell two-pass settle.
+- `colspan` reaching the serializer via the unvalidated Yjs read path is coerced defensively and clamped to a small maximum (`_MAX_COLSPAN`): a hostile non-int or huge int degrades to a bounded cell count rather than raising or amplifying (spec §C's degrade law, applied to the injection posture below).
 - Out of scope: DOCX/PDF export fidelity (backlog §5.7), Word-paste hardening beyond what the schema gives for free (§5.8), rendered-markdown preview (§5.10), per-column alignment UI, CM6 teardown.
 
 ## 7. Testing & gates
