@@ -3,7 +3,8 @@
  *
  * Nodes: doc, paragraph, heading (H1–H6), bullet_list, ordered_list,
  *        list_item, blockquote, code_block, horizontal_rule, image,
- *        hard_break, citation (inline atom).
+ *        hard_break, citation (inline atom), table, table_row, table_cell,
+ *        table_header.
  * Marks: strong, em, strikethrough, code, link.
  *
  * This is the JS source of truth for golden generation (Task 4) and the
@@ -161,6 +162,54 @@ const listItemSpec = {
   content: "paragraph block*",
 };
 
+// --- Strict-GFM tables (2026-07-08 collab-tables spec §A) -------------------
+// Shape-identical to the Tiptap extensions in src/collab/schema.ts and the
+// Python schema.py: content strings, attrs defaults, isolating, tableRole.
+
+/** @type {import("prosemirror-model").NodeSpec} */
+const tableSpec = {
+  content: "table_row+",
+  group: "block",
+  isolating: true,
+  tableRole: "table",
+  parseDOM: [{ tag: "table" }],
+  toDOM() { return ["table", ["tbody", 0]]; },
+};
+
+/** @type {import("prosemirror-model").NodeSpec} */
+const tableRowSpec = {
+  content: "(table_cell | table_header)+",
+  tableRole: "row",
+  parseDOM: [{ tag: "tr" }],
+  toDOM() { return ["tr", 0]; },
+};
+
+const gfmCellAttrs = {
+  colspan: { default: 1 },
+  rowspan: { default: 1 },
+  colwidth: { default: null },
+};
+
+/** @type {import("prosemirror-model").NodeSpec} */
+const tableCellSpec = {
+  content: "paragraph",
+  attrs: { ...gfmCellAttrs },
+  isolating: true,
+  tableRole: "cell",
+  parseDOM: [{ tag: "td" }],
+  toDOM() { return ["td", 0]; },
+};
+
+/** @type {import("prosemirror-model").NodeSpec} */
+const tableHeaderSpec = {
+  content: "paragraph",
+  attrs: { ...gfmCellAttrs },
+  isolating: true,
+  tableRole: "header_cell",
+  parseDOM: [{ tag: "th" }],
+  toDOM() { return ["th", 0]; },
+};
+
 // ---------------------------------------------------------------------------
 // Mark specs
 // ---------------------------------------------------------------------------
@@ -249,6 +298,10 @@ export const schema = new Schema({
     ordered_list: orderedListSpec,
     bullet_list: bulletListSpec,
     list_item: listItemSpec,
+    table: tableSpec,
+    table_row: tableRowSpec,
+    table_cell: tableCellSpec,
+    table_header: tableHeaderSpec,
   },
   marks: {
     link: linkSpec,
