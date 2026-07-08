@@ -553,6 +553,11 @@ def _row_line(cells: list[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+# GFM tables are narrow; colspan reaches us via the unvalidated Yjs read path,
+# so we clamp it to a sane maximum to bound the emitted-cell count (spec §C).
+_MAX_COLSPAN = 64
+
+
 def _serialize_table(node: dict) -> str:
     """Strict-GFM table serialization — the table loose-form law (spec §C).
 
@@ -570,8 +575,16 @@ def _serialize_table(node: dict) -> str:
         cells: list[str] = []
         for cell in row.get("content", []):
             cells.append(_cell_text(cell))
-            span = cell.get("attrs", {}).get("colspan", 1) or 1
-            cells.extend([""] * (int(span) - 1))
+            # colspan arrives via the UNVALIDATED Yjs read path (spec §5): a
+            # hostile client can inject a non-int or a huge int. Coerce
+            # defensively and clamp — degrade, never raise, never amplify
+            # (spec §C). GFM tables are narrow; a small cap is ample.
+            try:
+                span = int(cell.get("attrs", {}).get("colspan", 1))
+            except (TypeError, ValueError):
+                span = 1
+            span = max(1, min(span, _MAX_COLSPAN))
+            cells.extend([""] * (span - 1))
         return cells
 
     header = expand(rows[0])

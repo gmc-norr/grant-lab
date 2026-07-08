@@ -83,7 +83,9 @@ def test_table_doc_enables_and_serves_canonical_table(
     body = r.json()
     assert body["collab_enabled"] is True
     joined = "".join(sec["text"] for sec in body["sections"])
-    assert "|" in joined  # pipe-table content served, not dropped
+    assert "| a | b |" in joined
+    # space-padded canonical delimiter — unreachable by the old flattening path
+    assert "| --- | --- |" in joined
     with pg_session_factory() as s:
         assert _flag_row(s, wid, "draft").enabled_at is not None
 

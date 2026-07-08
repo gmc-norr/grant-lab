@@ -344,6 +344,23 @@ def test_colspan_degrades_to_filler_cells():
     assert "| wide |  |" in out  # content once + one empty filler
 
 
+def test_hostile_colspan_degrades_never_raises():
+    # colspan arrives via the unvalidated Yjs read path (spec §5); a hostile
+    # value must degrade, never raise, never amplify (spec §C).
+    def _doc(cs):
+        return {"type": "doc", "content": [{"type": "table", "content": [
+            {"type": "table_row", "content": [
+                {"type": "table_header", "attrs": {"colspan": cs, "rowspan": 1},
+                 "content": [{"type": "paragraph",
+                              "content": [{"type": "text", "text": "h"}]}]},
+            ]},
+        ]}]}
+    for hostile in ["abc", {}, None, -5, 10**9, 2.9]:
+        out = pm_to_markdown(_doc(hostile))
+        assert out.splitlines()[0].startswith("| ")
+        assert len(out) < 10_000  # clamped — no amplification
+
+
 def test_body_rows_padded_and_truncated_to_header_width():
     doc = _table_doc(
         [

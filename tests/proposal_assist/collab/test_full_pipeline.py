@@ -63,3 +63,15 @@ def test_fidelity_byte_identical_raw():
         ydoc = pycrdt.Doc()
         ydoc.apply_update(base64.b64decode(g["ydoc_update_b64"]))
         assert ydoc_to_pm_json(ydoc) == g["pm_json"], name
+
+
+def test_python_parse_matches_golden_pm_json():
+    """markdown_to_pm(golden.markdown) reconstructs the SAME doc the JS golden
+    encodes — proves the Python parser (incl. GFM tables + list-item leading-
+    paragraph synthesis) agrees with JS createAndFill. Compared through the Yjs
+    normal form both runtimes converge on (the benign attrs:{}/null-attr
+    representational differences are documented in gen_collab_goldens.mjs)."""
+    for name, md in CORPUS:
+        g = json.loads((_GOLDENS / f"{name}.json").read_text())
+        parsed = ydoc_to_pm_json(pm_json_to_ydoc(markdown_to_pm(md)))
+        assert parsed == g["pm_json"], name
