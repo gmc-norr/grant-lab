@@ -1,0 +1,108 @@
+{
+  "markdown": "## T\n\nName | Value\n--- | ---\nfoo | bar\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "T"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "table_row",
+            "content": [
+              {
+                "type": "table_header",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Name"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_header",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Value"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "table_row",
+            "content": [
+              {
+                "type": "table_cell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "foo"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_cell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "bar"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AR+s3YuKDQAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcArN2Lig0ABgQArN2Lig0BAVQoAKzdi4oNAAVsZXZlbAF9Aoes3YuKDQADBXRhYmxlBwCs3YuKDQQDCXRhYmxlX3JvdwcArN2Lig0FAwx0YWJsZV9oZWFkZXIHAKzdi4oNBgMJcGFyYWdyYXBoBwCs3YuKDQcGBACs3YuKDQgETmFtZSgArN2Lig0GB2NvbHNwYW4BfQEoAKzdi4oNBgdyb3dzcGFuAX0Bh6zdi4oNBgMMdGFibGVfaGVhZGVyBwCs3YuKDQ8DCXBhcmFncmFwaAcArN2Lig0QBgQArN2Lig0RBVZhbHVlKACs3YuKDQ8HY29sc3BhbgF9ASgArN2Lig0PB3Jvd3NwYW4BfQGHrN2Lig0FAwl0YWJsZV9yb3cHAKzdi4oNGQMKdGFibGVfY2VsbAcArN2Lig0aAwlwYXJhZ3JhcGgHAKzdi4oNGwYEAKzdi4oNHANmb28oAKzdi4oNGgdjb2xzcGFuAX0BKACs3YuKDRoHcm93c3BhbgF9AYes3YuKDRoDCnRhYmxlX2NlbGwHAKzdi4oNIgMJcGFyYWdyYXBoBwCs3YuKDSMGBACs3YuKDSQDYmFyKACs3YuKDSIHY29sc3BhbgF9ASgArN2Lig0iB3Jvd3NwYW4BfQEA"
+}

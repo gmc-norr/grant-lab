@@ -1,0 +1,124 @@
+{
+  "markdown": "## T\n\n| a \\| b | `x\\|y` |\n| --- | --- |\n| *em* text | plain |\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "heading",
+        "attrs": {
+          "level": 2
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "T"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "content": [
+          {
+            "type": "table_row",
+            "content": [
+              {
+                "type": "table_header",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a | b"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_header",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "x|y",
+                        "marks": [
+                          {
+                            "type": "code",
+                            "attrs": {}
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "table_row",
+            "content": [
+              {
+                "type": "table_cell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "em",
+                        "marks": [
+                          {
+                            "type": "em",
+                            "attrs": {}
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " text"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_cell",
+                "attrs": {
+                  "colspan": 1,
+                  "rowspan": 1
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "plain"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "ASSoitSdCAAHAQtwcm9zZW1pcnJvcgMHaGVhZGluZwcAqIrUnQgABgQAqIrUnQgBAVQoAKiK1J0IAAVsZXZlbAF9AoeoitSdCAADBXRhYmxlBwCoitSdCAQDCXRhYmxlX3JvdwcAqIrUnQgFAwx0YWJsZV9oZWFkZXIHAKiK1J0IBgMJcGFyYWdyYXBoBwCoitSdCAcGBACoitSdCAgFYSB8IGIoAKiK1J0IBgdjb2xzcGFuAX0BKACoitSdCAYHcm93c3BhbgF9AYeoitSdCAYDDHRhYmxlX2hlYWRlcgcAqIrUnQgQAwlwYXJhZ3JhcGgHAKiK1J0IEQYGAKiK1J0IEgRjb2RlAnt9hKiK1J0IEwN4fHmGqIrUnQgWBGNvZGUEbnVsbCgAqIrUnQgQB2NvbHNwYW4BfQEoAKiK1J0IEAdyb3dzcGFuAX0Bh6iK1J0IBQMJdGFibGVfcm93BwCoitSdCBoDCnRhYmxlX2NlbGwHAKiK1J0IGwMJcGFyYWdyYXBoBwCoitSdCBwGBgCoitSdCB0CZW0Ce32EqIrUnQgeAmVthqiK1J0IIAJlbQRudWxshKiK1J0IIQUgdGV4dCgAqIrUnQgbB2NvbHNwYW4BfQEoAKiK1J0IGwdyb3dzcGFuAX0Bh6iK1J0IGwMKdGFibGVfY2VsbAcAqIrUnQgpAwlwYXJhZ3JhcGgHAKiK1J0IKgYEAKiK1J0IKwVwbGFpbigAqIrUnQgpB2NvbHNwYW4BfQEoAKiK1J0IKQdyb3dzcGFuAX0BAA=="
+}

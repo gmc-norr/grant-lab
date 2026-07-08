@@ -29,4 +29,21 @@ CORPUS: list[tuple[str, str]] = [
     # byte-identical to tests/test_editing_save.py's "production layout" (tight, H1 + bare marker):
     ("production_layout", "# T\nintro\n## Background\nold body [@x9]\n## Aims\naims\n"),
     ("spec_skeleton", SPEC_SKELETON),
+    # --- tables (2026-07-08 collab-tables spec §D) --- #
+    ("table_basic",
+     "## Budget\n\n| Item | Cost |\n| --- | --- |\n| Staff | 100 |\n| Lab | 50 |\n"),
+    ("table_cell_escapes",
+     "## T\n\n| a \\| b | `x\\|y` |\n| --- | --- |\n| *em* text | plain |\n"),
+    ("table_borderless_normalizes",
+     "## T\n\nName | Value\n--- | ---\nfoo | bar\n"),
+    ("table_cite_in_cell",
+     f"## Claims\n\n| Claim | Source |\n| --- | --- |\n| Sky is blue | {_CITE} |\n"),
+    ("table_header_only", "| Only | Header |\n| --- | --- |\n"),
+    ("table_in_blockquote", "> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n"),
+    ("table_in_list_item",
+     "## L\n\n- intro\n\n  | a | b |\n  | --- | --- |\n  | 1 | 2 |\n"),
+    # list-item leading-paragraph synthesis (spec §B) — must match JS createAndFill:
+    ("table_first_list_item", "- | a | b |\n  | --- | --- |\n"),
+    ("quote_first_list_item", "- > quoted\n"),
+    ("empty_list_item", "- a\n-\n- b\n"),
 ]

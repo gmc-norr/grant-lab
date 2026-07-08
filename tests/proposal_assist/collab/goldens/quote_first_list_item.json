@@ -1,0 +1,36 @@
+{
+  "markdown": "- > quoted\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "bullet_list",
+        "content": [
+          {
+            "type": "list_item",
+            "content": [
+              {
+                "type": "paragraph"
+              },
+              {
+                "type": "blockquote",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "quoted"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "AQe6paPEDQAHAQtwcm9zZW1pcnJvcgMLYnVsbGV0X2xpc3QHALqlo8QNAAMJbGlzdF9pdGVtBwC6paPEDQEDCXBhcmFncmFwaIe6paPEDQIDCmJsb2NrcXVvdGUHALqlo8QNAwMJcGFyYWdyYXBoBwC6paPEDQQGBAC6paPEDQUGcXVvdGVkAA=="
+}

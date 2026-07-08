@@ -1,0 +1,68 @@
+{
+  "markdown": "- | a | b |\n  | --- | --- |\n",
+  "pm_json": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "bullet_list",
+        "content": [
+          {
+            "type": "list_item",
+            "content": [
+              {
+                "type": "paragraph"
+              },
+              {
+                "type": "table",
+                "content": [
+                  {
+                    "type": "table_row",
+                    "content": [
+                      {
+                        "type": "table_header",
+                        "attrs": {
+                          "colspan": 1,
+                          "rowspan": 1
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "a"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "table_header",
+                        "attrs": {
+                          "colspan": 1,
+                          "rowspan": 1
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "b"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "ydoc_update_b64": "ARHi6vCQCwAHAQtwcm9zZW1pcnJvcgMLYnVsbGV0X2xpc3QHAOLq8JALAAMJbGlzdF9pdGVtBwDi6vCQCwEDCXBhcmFncmFwaIfi6vCQCwIDBXRhYmxlBwDi6vCQCwMDCXRhYmxlX3JvdwcA4urwkAsEAwx0YWJsZV9oZWFkZXIHAOLq8JALBQMJcGFyYWdyYXBoBwDi6vCQCwYGBADi6vCQCwcBYSgA4urwkAsFB2NvbHNwYW4BfQEoAOLq8JALBQdyb3dzcGFuAX0Bh+Lq8JALBQMMdGFibGVfaGVhZGVyBwDi6vCQCwsDCXBhcmFncmFwaAcA4urwkAsMBgQA4urwkAsNAWIoAOLq8JALCwdjb2xzcGFuAX0BKADi6vCQCwsHcm93c3BhbgF9AQA="
+}
