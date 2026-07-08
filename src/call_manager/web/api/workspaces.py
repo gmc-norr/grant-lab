@@ -643,9 +643,20 @@ def post_lock_spec(
         spec_path = repo_dir / SPEC_FILENAME
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        is_collab = collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="spec")
         try:
             acquire_commit_mutex(session, ws.id)
+            # Fresh flag read UNDER the mutex (Codex): a pre-mutex read can go
+            # stale while we block — enable-on-touch commits the enable while
+            # HOLDING this mutex, so an under-mutex read is authoritative. If it
+            # reads False the flip is queued behind us (no room can exist until we
+            # release: the WS gate reads the flag), so stamping git HEAD is
+            # correct; if True the checkpoint branch runs with the fresh state.
+            # This route is room-aware — the remedy is the fresh read feeding the
+            # existing branch, NOT the git-first writers' severance 409. First
+            # CollabArtifactState load in this session (no stale identity-map hit).
+            is_collab = collab_state.is_collab_enabled(
+                session, workspace_id=ws.id, artifact="spec"
+            )
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
@@ -720,9 +731,13 @@ def post_unlock_spec(
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        is_collab = collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="spec")
         try:
             acquire_commit_mutex(session, ws.id)
+            # Fresh flag read UNDER the mutex (Codex) — see post_lock_spec for the
+            # soundness argument; unlock shares the moved-read shape exactly.
+            is_collab = collab_state.is_collab_enabled(
+                session, workspace_id=ws.id, artifact="spec"
+            )
             if is_collab:
                 cp = checkpoint_artifact(
                     session,

@@ -331,6 +331,94 @@ def test_collab_unlock_no_committable_head_is_404(
 
 
 # ---------------------------------------------------------------------------
+# Test 4b (Codex follow-up): the flag is read UNDER the commit mutex, so a flip
+# that commits while lock/unlock waits on the mutex is SEEN — the collab
+# checkpoint branch runs and the SpecLockEvent stamps the fresh checkpoint SHA,
+# never a stale pre-flip git HEAD.
+# ---------------------------------------------------------------------------
+
+
+def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
+    """Monkeypatch workspaces.acquire_commit_mutex to enable spec collab (on a
+    separate committed session) as a side effect before acquiring — simulating a
+    first-touch flip that committed just before we got the mutex."""
+    import call_manager.web.api.workspaces as workspaces_mod
+
+    real_acquire = workspaces_mod.acquire_commit_mutex
+
+    def _flip_then_acquire(session, wsid, **kw):
+        with pg_session_factory() as s2:
+            collab_state.enable_collab(s2, workspace_id=ws_id, artifact="spec")
+            s2.commit()
+        return real_acquire(session, wsid, **kw)
+
+    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex", _flip_then_acquire)
+
+
+def test_lock_reads_flag_under_mutex_after_concurrent_flip(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Flag OFF when the request starts; enable-on-touch flips it just before the
+    mutex is acquired. The route must see the FRESH flag: the checkpoint branch
+    runs (disk gains the room content) and SpecLockEvent.artifact_commit_sha is
+    the NEW checkpoint SHA — not the stale pre-flip HEAD a pre-mutex read would
+    have stamped."""
+    from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    repo = _init_spec_repo(tmp_path, ws_id, spec_content="## Aims\noriginal.\n")
+    head_before = _git_head(repo)
+    # Room log rows exist (they are flag-independent) but the flag is OFF.
+    doc = _seed_spec_room_update(pg_session_factory, ws_id, owner_id, "## Aims\n\nlive edit.\n")
+
+    _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id)
+    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/spec/lock")
+    assert r.status_code == 200, r.text
+    assert r.json()["locked"] is True
+
+    evs = _spec_lock_events(pg_session_factory, ws_id)
+    assert len(evs) == 1 and evs[0].action == "lock"
+    # Collab branch ran: disk holds the room's serialization, the event stamps
+    # the checkpoint's sha (== new HEAD), NOT the stale pre-flip HEAD.
+    assert (repo / SPEC_FILENAME).read_text() == serialize_doc_to_markdown(doc)
+    new_head = _git_head(repo)
+    assert new_head != head_before
+    assert evs[0].artifact_commit_sha == new_head
+    assert evs[0].artifact_commit_sha != head_before
+
+
+def test_unlock_reads_flag_under_mutex_after_concurrent_flip(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Twin of the lock case: spec locked via the flag-off path, then the flip
+    lands while unlock waits on the mutex — the unlock event must stamp the fresh
+    checkpoint SHA of the room edit, not the stale lock-time HEAD."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
+    repo = _init_spec_repo(tmp_path, ws_id, spec_content="## Aims\noriginal.\n")
+
+    c = _client(app, owner_id)
+    r_lock = c.post(f"/api/workspaces/{ws_id}/spec/lock")  # flag-off lock
+    assert r_lock.status_code == 200, r_lock.text
+    head_after_lock = _git_head(repo)
+
+    _seed_spec_room_update(pg_session_factory, ws_id, owner_id, "## Aims\n\npost-lock edit.\n")
+    _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id)
+    r_unlock = c.post(f"/api/workspaces/{ws_id}/spec/unlock")
+    assert r_unlock.status_code == 200, r_unlock.text
+    assert r_unlock.json()["locked"] is False
+
+    unlock_ev = next(
+        e for e in _spec_lock_events(pg_session_factory, ws_id) if e.action == "unlock"
+    )
+    new_head = _git_head(repo)
+    assert new_head != head_after_lock  # the checkpoint committed the room edit
+    assert unlock_ev.artifact_commit_sha == new_head
+    assert unlock_ev.artifact_commit_sha != head_after_lock
+
+
+# ---------------------------------------------------------------------------
 # Test 5: flag-OFF parity guard (collab disabled → current behaviour unchanged)
 # ---------------------------------------------------------------------------
 
