@@ -279,6 +279,14 @@ async def insert_annotation(
             raise HTTPException(
                 status_code=500, detail="insert failed — nothing was written"
             ) from e
+        except IndexError as e:
+            # Out-of-range section_index (e.g. a peer deleted the section
+            # mid-insert). Parity with the flag-off path (insert_from_annotation
+            # -> InsertConflict 409) — a reachable concurrent-edit race must be
+            # a 4xx, not a 500.
+            raise HTTPException(
+                status_code=409, detail="this section changed — reopen and re-cite"
+            ) from e
 
         if out.get("idempotent"):
             return InsertResultOut(idempotent=True)

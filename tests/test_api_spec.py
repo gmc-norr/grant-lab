@@ -33,8 +33,9 @@ def _cm6_world(monkeypatch):
     re-arms the module global from Settings().collab_kill_switch — a bare
     set_kill_switch(True) here would be clobbered before the request ever
     lands. monkeypatch.setenv persists through that reset since Settings()
-    reads it fresh, and the module scope makes _reset_kill_switch's teardown
-    the belt to this env var's suspenders.
+    reads it fresh, and the reset fixture's function scope (it reruns after
+    EVERY test, not once per module) makes _reset_kill_switch's teardown the
+    belt to this env var's suspenders.
     """
     monkeypatch.setenv("COLLAB_KILL_SWITCH", "1")
     collab_state.set_kill_switch(True)

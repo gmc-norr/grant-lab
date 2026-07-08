@@ -14,7 +14,7 @@ def _reset_kill_switch():
     state.set_kill_switch(False)
 
 
-def test_settings_parse_env_alias(monkeypatch, _settings_env):  # noqa: F811
+def test_settings_parse_env_alias(monkeypatch, _settings_env):
     monkeypatch.setenv("COLLAB_KILL_SWITCH", "1")
     assert Settings().collab_kill_switch is True
     monkeypatch.delenv("COLLAB_KILL_SWITCH")

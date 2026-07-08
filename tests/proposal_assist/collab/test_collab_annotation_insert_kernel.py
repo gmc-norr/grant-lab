@@ -118,6 +118,34 @@ def test_same_evidence_elsewhere_still_inserts_here(
     assert f"ev:{ev1}" in canon and f"ev:{body2['ev_id']}" in canon  # BOTH markers live
 
 
+def test_indexerror_maps_to_409_and_does_not_burn_annotation(
+    client_authed_owner, current_user, pg_session_factory, tmp_path, _app, monkeypatch
+):
+    """Sibling parity (workspaces.py's post_citation kernel branch mapping
+    IndexError -> 409): a bare IndexError surfacing from
+    insert_annotation_via_kernel (e.g. a peer's concurrent edit shrank the
+    section map mid-insert) must map to a 409, not an unhandled 500 — and the
+    annotation must NOT be burned to a terminal status by a request that never
+    actually inserted anything."""
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws, ann_id, repo = _seed_supported(s, tmp_path, current_user)
+        state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid = ws.id
+
+    import call_manager.web.api.annotations as annotations_mod
+
+    async def _boom(**kwargs):
+        raise IndexError("section map shrank underneath the annotation")
+
+    monkeypatch.setattr(annotations_mod, "insert_annotation_via_kernel", _boom)
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/annotations/{ann_id}/insert")
+    assert r.status_code == 409
+    with pg_session_factory() as s:
+        assert s.get(UserClaimAnnotation, ann_id).status == "open"  # not burned
+
+
 def test_disabled_insert_takes_git_path(  # regression pin for the fork
     client_authed_owner, current_user, pg_session_factory, tmp_path, _app
 ):
