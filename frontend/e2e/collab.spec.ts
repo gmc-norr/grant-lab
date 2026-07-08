@@ -3,14 +3,22 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 // Collab two-browser e2e — Slice 3b-5d.D0 de-risk (extends the 3b-3/3b-4 harness).
 //
 // DEFERRED / OPT-IN: skip-gated so the default CI Playwright run stays GREEN.
-// Requires the seed (scripts/collab_e2e_seed.py) + Vite dev + uvicorn (SPA_MODE=dev).
-// The one-command path is scripts/collab_e2e_run.sh. Manual env:
+// Requires the seed (scripts/collab_e2e_seed.py) + a front door + uvicorn. Two
+// front-door modes, selected by scripts/collab_e2e_run.sh's E2E_SPA_MODE (this
+// spec itself is mode-agnostic — it just navigates via the `baseURL` fixture,
+// which playwright.config.ts's E2E_MODE switch — shared with the Plan-3
+// dashboard e2e — points at the right origin):
+//   dev  (default) — Vite dev (:5173) proxying uvicorn SPA_MODE=dev; the Yjs WS
+//                     (ws://localhost:8000/api/ws/workspaces/<id>/<artifact>) is
+//                     allowed by the dev CSP's broad "ws:" token.
+//   prod (E2E_SPA_MODE=prod, 3b-5d.D4 THE FLIP) — uvicorn SPA_MODE=prod serves the
+//                     built bundle directly on :8000 under the STRICT CSP, whose
+//                     only WS allowance is the same-origin token derived from
+//                     APP_BASE_URL (Task 10). No Vite/no proxy in this mode.
 //   E2E_COLLAB_WS_ID  — seeded active workspace (collab on draft + spec; spec locked)
 //   E2E_COOKIE_OWNER  — signed session cookie for the owner (writer everywhere)
 //   E2E_COOKIE_MEMBER — signed session cookie for the member (draft writer; spec read-only)
 //   E2E_OWNER_LABEL / E2E_MEMBER_LABEL — expected caret label text (email local part)
-// The Yjs WS is ws://localhost:8000/api/ws/workspaces/<id>/<artifact>, proxied by
-// Vite; the dev CSP's "ws:" token allows it. Do NOT change prod CSP here (D4).
 //
 // Caret DOM (from @tiptap/extension-collaboration-caret 3.27.1):
 //   span.collaboration-carets__caret  (widget) > div.collaboration-carets__label (name)

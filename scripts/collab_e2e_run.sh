@@ -3,9 +3,22 @@
 #
 #   scripts/collab_e2e_run.sh [extra playwright args...]
 #
-# Boots scripts/collab_e2e_seed.py (testcontainers PG + uvicorn:8000, SPA_MODE=dev),
-# parses the printed E2E_* vars, starts Vite dev (:5173), waits for both ports,
-# then runs frontend/e2e/collab.spec.ts. Tears everything down on exit.
+# Two modes, selected by E2E_SPA_MODE (default "dev" — unchanged, byte-identical
+# behavior from D0):
+#   dev  (default) — boots scripts/collab_e2e_seed.py (testcontainers PG +
+#                     uvicorn:8000, SPA_MODE=dev), starts Vite dev (:5173),
+#                     waits for both ports; browser talks to :5173 under the
+#                     dev CSP's broad ws: token.
+#   prod (E2E_SPA_MODE=prod) — builds the SPA (`pnpm build`), syncs
+#                     frontend/dist/ -> src/call_manager/web/spa/ (gitignored),
+#                     boots the seed with SPA_MODE=prod so uvicorn:8000 serves
+#                     the built bundle directly under the STRICT CSP (Task 10's
+#                     same-origin ws token derived from APP_BASE_URL) — the
+#                     3b-5d.D4 flip gate. No Vite, no :5173.
+# Either way, parses the seed's printed E2E_* vars then runs
+# frontend/e2e/collab.spec.ts (playwright.config.ts's E2E_MODE switch, reused
+# from the Plan-3 dashboard e2e, picks the matching baseURL). Tears everything
+# down on exit.
 #
 # Requirements: `uv` (the seed runs via `uv run`, no pre-activated venv needed),
 # frontend deps installed (pnpm i), and a Chromium usable by Playwright. On a fresh
@@ -21,6 +34,15 @@ set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+E2E_SPA_MODE="${E2E_SPA_MODE:-dev}"
+case "$E2E_SPA_MODE" in
+  dev|prod) ;;
+  *)
+    echo "[run] E2E_SPA_MODE must be 'dev' or 'prod' (got '$E2E_SPA_MODE')"
+    exit 1
+    ;;
+esac
 
 SEED_LOG="$(mktemp)"
 VITE_LOG="$ROOT/.e2e-vite.log"
@@ -60,10 +82,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Preflight: refuse to run if :8000 or :5173 is already in use. Otherwise the
-# readiness probe could validate a STALE server/DB from a previous (orphaned) run
-# while our fresh workspace is unreachable (Codex High).
-for port in 8000 5173; do
+# Preflight: refuse to run if a port we're about to use is already in use.
+# Otherwise the readiness probe could validate a STALE server/DB from a previous
+# (orphaned) run while our fresh workspace is unreachable (Codex High). prod mode
+# never starts Vite, so it only needs :8000 free.
+PREFLIGHT_PORTS=(8000)
+[ "$E2E_SPA_MODE" = "dev" ] && PREFLIGHT_PORTS+=(5173)
+for port in "${PREFLIGHT_PORTS[@]}"; do
   if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
     echo "[run] port $port already in use — aborting to avoid validating a stale server."
     ss -ltnp "sport = :$port" 2>/dev/null || true
@@ -71,10 +96,28 @@ for port in 8000 5173; do
   fi
 done
 
-echo "[run] starting seed (testcontainers PG + uvicorn:8000)…"
+if [ "$E2E_SPA_MODE" = "prod" ]; then
+  # Safety net BEFORE touching the tree: refuse to sync the built bundle into
+  # src/call_manager/web/spa/ unless it's gitignored (the trailing slash makes
+  # check-ignore evaluate the directory-only .gitignore pattern even before the
+  # directory exists — without it, a nonexistent path spuriously reports "not
+  # ignored"). If this ever fires, someone un-ignored the path — STOP, don't sync.
+  if ! git check-ignore -q "src/call_manager/web/spa/"; then
+    echo "[run] src/call_manager/web/spa/ is NOT gitignored — refusing to sync the" \
+         "built bundle there (would risk committing it). Aborting."
+    exit 1
+  fi
+  echo "[run] E2E_SPA_MODE=prod — building the SPA (pnpm build)…"
+  ( cd frontend && pnpm build )
+  echo "[run] syncing frontend/dist/ -> src/call_manager/web/spa/…"
+  rsync -a --delete frontend/dist/ src/call_manager/web/spa/
+fi
+
+echo "[run] starting seed (testcontainers PG + uvicorn:8000, SPA_MODE=$E2E_SPA_MODE)…"
 # `uv run python -u` → unbuffered stdout so the printed E2E_* vars reach $SEED_LOG
 # immediately, and no pre-activated venv required.
-env EMBEDDING_MODEL=bge-m3 uv run python -u scripts/collab_e2e_seed.py >"$SEED_LOG" 2>&1 &
+env EMBEDDING_MODEL=bge-m3 E2E_SPA_MODE="$E2E_SPA_MODE" \
+  uv run python -u scripts/collab_e2e_seed.py >"$SEED_LOG" 2>&1 &
 SEED_PGID=$!
 
 # Wait up to ~150s for the seed to print the workspace id (PG image pull + migrate).
@@ -94,20 +137,22 @@ export E2E_OWNER_LABEL; E2E_OWNER_LABEL="$(get E2E_OWNER_LABEL)"
 export E2E_MEMBER_LABEL; E2E_MEMBER_LABEL="$(get E2E_MEMBER_LABEL)"
 echo "[run] workspace=$E2E_COLLAB_WS_ID owner=$E2E_OWNER_LABEL member=$E2E_MEMBER_LABEL"
 
-echo "[run] starting Vite dev (:5173)…"
-# --strictPort: fail fast rather than silently moving to :5174 (which the readiness
-# probe below would miss, validating a stale :5173). Preflight already frees the port;
-# this guards the launch race without changing the committed vite.config.ts default.
-( cd frontend && exec pnpm exec vite --strictPort ) >"$VITE_LOG" 2>&1 &
-VITE_PGID=$!
+if [ "$E2E_SPA_MODE" = "dev" ]; then
+  echo "[run] starting Vite dev (:5173)…"
+  # --strictPort: fail fast rather than silently moving to :5174 (which the readiness
+  # probe below would miss, validating a stale :5173). Preflight already frees the port;
+  # this guards the launch race without changing the committed vite.config.ts default.
+  ( cd frontend && exec pnpm exec vite --strictPort ) >"$VITE_LOG" 2>&1 &
+  VITE_PGID=$!
+fi
 
-echo "[run] waiting for uvicorn:8000 + vite:5173…"
+echo "[run] waiting for uvicorn:8000$([ "$E2E_SPA_MODE" = "dev" ] && echo ' + vite:5173')…"
 # curl WITHOUT -f on purpose: a 401 from /api/me (unauthenticated) still proves the
 # port is up and serving. -f would treat that 401 as failure and never go ready.
 ready=0
 for _ in $(seq 1 120); do
   if curl -s -o /dev/null "http://127.0.0.1:8000/api/me" \
-     && curl -s -o /dev/null "http://localhost:5173/"; then
+     && { [ "$E2E_SPA_MODE" = "prod" ] || curl -s -o /dev/null "http://localhost:5173/"; }; then
     ready=1
     break
   fi
@@ -116,10 +161,12 @@ done
 if [ "$ready" -ne 1 ]; then
   echo "[run] servers not ready after ~60s — aborting."
   echo "--- seed log (tail) ---"; tail -30 "$SEED_LOG"
-  echo "--- vite log (tail) ---"; tail -30 "$VITE_LOG"
+  [ "$E2E_SPA_MODE" = "dev" ] && { echo "--- vite log (tail) ---"; tail -30 "$VITE_LOG"; }
   exit 1
 fi
 
-echo "[run] running collab e2e…"
+echo "[run] running collab e2e (E2E_SPA_MODE=$E2E_SPA_MODE)…"
 cd frontend
-pnpm exec playwright test e2e/collab.spec.ts "$@"
+# E2E_MODE drives playwright.config.ts's baseURL switch (shared with the Plan-3
+# dashboard e2e): "prod" -> http://localhost:8000 (no proxy), else :5173.
+E2E_MODE="$E2E_SPA_MODE" pnpm exec playwright test e2e/collab.spec.ts "$@"
