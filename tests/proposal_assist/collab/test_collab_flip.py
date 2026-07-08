@@ -38,6 +38,27 @@ def test_plain_prose_and_single_pipe_are_clean():
     assert has_pipe_tables("a single | pipe is not a table row\n") is False
 
 
+def test_detects_borderless_two_column_table():
+    md = "# T\n\nName | Value\n---- | -----\nfoo | bar\n"
+    assert has_pipe_tables(md) is True
+
+
+def test_detects_aligned_delimiter_row():
+    md = "col a | col b\n:--- | ---:\nx | y\n"
+    assert has_pipe_tables(md) is True
+
+
+def test_single_pipe_prose_still_clean():
+    # A lone prose pipe (no delimiter row anywhere) must NOT trigger the hold-back.
+    md = "# T\n\neither | or, as they say.\n\nMore prose.\n"
+    assert has_pipe_tables(md) is False
+
+
+def test_delimiter_row_inside_fence_still_clean():
+    md = "```\nName | Value\n---- | -----\n```\nprose\n"
+    assert has_pipe_tables(md) is False
+
+
 # --- maybe_auto_enable ----------------------------------------------------- #
 
 def _ws(s, email):
