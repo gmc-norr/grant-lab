@@ -1,3 +1,4 @@
+import { Group } from "@mantine/core";
 import Collaboration from "@tiptap/extension-collaboration";
 import { CollaborationCaret } from "@tiptap/extension-collaboration-caret";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -8,7 +9,9 @@ import { resetEditorStore } from "../cockpit/editorStore";
 import { collabEditorExtensions } from "./CitationNode";
 import { colorForUserId, displayName } from "./collabColor";
 import type { CollabProvider, ProviderStatus } from "./collabProvider";
+import styles from "./CollabEditor.module.css";
 import { SaveVersionButton } from "./SaveVersionButton";
+import { InsertTableButton, TableMenu } from "./TableControls";
 import { TiptapSelectionToolbar } from "./TiptapSelectionToolbar";
 import { useCollabDoc } from "./useCollabDoc";
 
@@ -78,14 +81,18 @@ function CollabEditorInner(
   }, [editor, label, color]);
 
   return (
-    <div data-collab-status={props.status}>
-      <SaveVersionButton
-        id={props.workspaceId}
-        artifact={props.artifact}
-        provider={props.provider}
-        canWrite={props.canWrite}
-        status={props.status}
-      />
+    <div data-collab-status={props.status} className={styles.editor}>
+      <Group gap="xs">
+        <SaveVersionButton
+          id={props.workspaceId}
+          artifact={props.artifact}
+          provider={props.provider}
+          canWrite={props.canWrite}
+          status={props.status}
+        />
+        <InsertTableButton editor={editor} canWrite={props.canWrite} />
+      </Group>
+      <TableMenu editor={editor} canWrite={props.canWrite} />
       <EditorContent editor={editor} data-testid="collab-editor" />
       {props.artifact === "draft" && props.sections != null && props.head != null && editor && (
         <TiptapSelectionToolbar
