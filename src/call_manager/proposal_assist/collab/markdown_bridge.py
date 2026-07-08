@@ -15,6 +15,8 @@ Two pure functions:
   DOM serializer), so this is a focused hand-written serializer over our small
   node/mark set. Non-final blocks emit a trailing blank line so the
   ``split_sections`` ``##``-boundary rule holds and the round-trip is idempotent.
+  ``table`` nodes serialize always-bordered with the first row as header
+  (spec §C).
 
 The serializer's output is the canonical normal form: ``markdown_to_pm`` is
 many-to-one (tight and loose source both normalise to the same doc), so applying
@@ -366,9 +368,12 @@ def _escape_text(text: str) -> str:
     return "".join(_INLINE_ESCAPE.get(ch, ch) for ch in text)
 
 
-def _serialize_inline(nodes: list[dict]) -> str:
+def _serialize_inline(nodes: list[dict], *, in_cell: bool = False) -> str:
     """Serialize an inline node list, opening/closing marks as the active set
-    changes between adjacent nodes (mirrors the parse-time mark stack)."""
+    changes between adjacent nodes (mirrors the parse-time mark stack).
+
+    ``in_cell`` degrades ``hard_break`` to a single space (a ``\\``-newline
+    would split a table row); it is otherwise unused here."""
     out: list[str] = []
     active: list[dict] = []
 
@@ -389,7 +394,7 @@ def _serialize_inline(nodes: list[dict]) -> str:
         node_marks = node.get("marks", [])
         close_to(node_marks)
         open_from(node_marks)
-        out.append(_serialize_inline_atom(node))
+        out.append(_serialize_inline_atom(node, in_cell=in_cell))
 
     close_to([])
     return "".join(out)
@@ -445,7 +450,7 @@ def _wrap_inline_code(text: str) -> str:
     return f"{fence}{body}{fence}"
 
 
-def _serialize_inline_atom(node: dict) -> str:
+def _serialize_inline_atom(node: dict, *, in_cell: bool = False) -> str:
     ntype = node["type"]
     if ntype == "text":
         # code-marked text is its own self-contained span: the ``code`` mark is
@@ -460,7 +465,9 @@ def _serialize_inline_atom(node: dict) -> str:
         attrs = node["attrs"]
         return build_marker(attrs["citekey"], attrs["ev_id"])
     if ntype == "hard_break":
-        return "\\\n"
+        # In a table cell a "\"-newline would split the row: degrade to a
+        # single space (spec §C). Outside cells, unchanged.
+        return " " if in_cell else "\\\n"
     if ntype == "image":
         attrs = node.get("attrs", {})
         alt = attrs.get("alt") or ""
@@ -492,6 +499,8 @@ def _serialize_block(node: dict) -> str:
         return "\n".join("> " + line if line else ">" for line in inner.split("\n"))
     if ntype in ("bullet_list", "ordered_list"):
         return _serialize_list(node)
+    if ntype == "table":
+        return _serialize_table(node)
     return ""
 
 
@@ -520,6 +529,64 @@ def _serialize_list(node: dict) -> str:
     return "\n".join(lines)
 
 
+def _cell_text(cell: dict) -> str:
+    """Flatten one cell to single-line, pipe-safe inline markdown.
+
+    Cells hold one paragraph by schema; anything else (hostile injection —
+    the Yjs read path is unvalidated) degrades: each block's INLINE content
+    serializes in cell mode and the pieces join with single spaces — degrade,
+    never drop, never raise (spec §C). The trailing replaces are uniform and
+    deliberate: GFM splits rows on unescaped pipes BEFORE inline parsing, so
+    EVERY literal "|" — plain text, code-span bodies, link targets — must
+    leave here as "\\|" (GFM unescapes it at row level on re-parse), and any
+    stray newline (softbreak text) must flatten to a space.
+    """
+    parts: list[str] = []
+    for block in cell.get("content", []):
+        text = _serialize_inline(block.get("content", []), in_cell=True)
+        if text:
+            parts.append(text)
+    return " ".join(parts).replace("\n", " ").replace("|", "\\|")
+
+
+def _row_line(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _serialize_table(node: dict) -> str:
+    """Strict-GFM table serialization — the table loose-form law (spec §C).
+
+    Always bordered (every line starts "| " — the sectionizer-safety
+    invariant); row 1 is the header REGARDLESS of cell types; column count is
+    the header width after colspan expansion; body rows pad/truncate to it;
+    colspan > 1 degrades to content + empty filler cells; rowspan is ignored
+    (spanned-over cells are absent in the PM shape — padding fills the gap).
+    """
+    rows = node.get("content", [])
+    if not rows:
+        return ""
+
+    def expand(row: dict) -> list[str]:
+        cells: list[str] = []
+        for cell in row.get("content", []):
+            cells.append(_cell_text(cell))
+            span = cell.get("attrs", {}).get("colspan", 1) or 1
+            cells.extend([""] * (int(span) - 1))
+        return cells
+
+    header = expand(rows[0])
+    width = max(1, len(header))
+
+    def fit(cells: list[str]) -> list[str]:
+        cells = cells[:width]
+        return cells + [""] * (width - len(cells))
+
+    lines = [_row_line(fit(header)), _row_line(["---"] * width)]
+    for row in rows[1:]:
+        lines.append(_row_line(fit(expand(row))))
+    return "\n".join(lines)
+
+
 def _serialize_item_blocks(blocks: list[dict]) -> str:
     """Serialize the blocks inside a single list item.
 
@@ -529,7 +596,21 @@ def _serialize_item_blocks(blocks: list[dict]) -> str:
     ``list_item`` content is ``paragraph block*``). The ONE exception is a
     following list: a list marker interrupts a paragraph on its own, so it stays
     tight — which also keeps single-paragraph + nested-list items byte-identical.
+    An empty leading paragraph followed by more blocks is dropped (the
+    companion to the parser's leading-paragraph synthesis, spec §B) so the
+    real first block occupies the marker line instead.
     """
+    # Companion to the parser's leading-paragraph synthesis (spec §B): an EMPTY
+    # leading paragraph followed by more blocks is dropped, so the real first
+    # block occupies the marker line ("- > q", "- | a | b |"). Emitting it
+    # would place a blank line between the list marker and the first block —
+    # CommonMark allows at most ONE blank line at an item start, so the item
+    # would terminate empty and the following block would ESCAPE the list on
+    # re-parse. Dropping it here + re-synthesizing on parse = idempotent.
+    # (An item that is ONLY an empty paragraph keeps it: "- " re-parses as an
+    # empty item.)
+    if len(blocks) > 1 and blocks[0]["type"] == "paragraph" and not blocks[0].get("content"):
+        blocks = blocks[1:]
     parts: list[str] = []
     for i, b in enumerate(blocks):
         is_list = b["type"] in ("bullet_list", "ordered_list")
