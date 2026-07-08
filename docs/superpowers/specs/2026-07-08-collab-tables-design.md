@@ -44,7 +44,7 @@ Add to `schema.py`, `collab-schema.mjs` (+ `.d.mts` typings), and `schema.ts` (v
 - `tableRole` (and any other spec field) must appear consistently across the three sources to whatever depth the equality test compares — the implementer verifies against `collabSchema.equality.test.ts`'s actual comparison, not this table.
 - Marks unchanged. No new marks.
 - Cells hold exactly one `paragraph` — inline-only in practice. Citations (inline atoms) and all existing marks work inside cells with no extra work.
-- Tables are group `block`, so they are legal inside `blockquote` and `list_item` (`paragraph block*`) — supported by construction; the per-line prefixing in the existing serializer covers them (goldens lock it, §D).
+- Tables are group `block`. Inside `blockquote` (content `block+`) they are legal in any position. Inside `list_item` the content model is `paragraph block*` — a table-FIRST list item violates it, and `node.check()` rejects it. The parser handles this via leading-paragraph synthesis (§B); the per-line prefixing in the existing serializer covers nested emission (goldens lock it, §D).
 - This deliberately breaks D4 Component G's "no new nodes/marks" freeze — that constraint was scoped to the formatting-floor slice. Bridge + goldens + twin all change here, on purpose.
 
 ### B. Bridge parse (markdown → PM)
@@ -53,6 +53,8 @@ Add to `schema.py`, `collab-schema.mjs` (+ `.d.mts` typings), and `schema.ts` (v
 - New token handlers in `_block_to_pm`'s dispatch for: `table_open/close`, `thead_open/close`, `tbody_open/close`, `tr_open/close`, `th_open/close`, `td_open/close`. Mapping: `th` → `table_header`, `td` → `table_cell`; `thead`/`tbody` are structural wrappers with no PM node (rows flatten into `table`).
 - Alignment: markdown-it exposes per-cell `style="text-align:…"` — **dropped** (locked decision 1).
 - Cell inline content parses through the normal inline pipeline (citation rule, marks, code_inline) — GFM unescapes `\|` before inline parsing, so cell text arrives clean.
+- **Canonical parse-output attrs**: `markdown_to_pm` returns its hand-built dict, NOT the validated node (markdown_bridge.py:277-278), so schema defaults are never materialized into the output JSON. The table handlers therefore emit cell/header attrs explicitly as `{"colspan": 1, "rowspan": 1}` and **omit the `colwidth` key entirely** (not `colwidth: null`). This matches the Yjs encoding exactly — `_node_attrs_for_yjs` omits nulls on write, so `ydoc_to_pm_json` reads back no `colwidth` key — making markdown→PM and ydoc→PM produce identical JSON for default tables (the exact-JSON writepath goldens depend on this).
+- **Leading-paragraph synthesis in list items**: when a list item's first block is not a `paragraph`, the parser synthesizes an empty leading paragraph so the item satisfies `paragraph block*`. This is required, not optional: fence-first/quote-first/heading-first list items ALREADY raise `ValueError` from `node.check()` today (verified empirically; `markdown_to_pm_or_empty` catches only blank input, canonical.py:31-37, so hydration of such a doc 500s) — and enabling the table rule would otherwise ADD instances, because pipe-table text inside a list item parses as safe paragraph text today but becomes a table-first item the moment the rule is on. The synthesis applies to ALL non-paragraph first blocks (fixing the pre-existing crash class), and the serializer emits an empty leading paragraph in a list item as nothing, so the round-trip is idempotent (re-parse re-synthesizes the same doc).
 - Output still passes the existing `SCHEMA.node_from_json` + `node.check()` gate — the ONLY validation direction, unchanged.
 - Non-GFM pipe text (no delimiter row) still parses as a paragraph, exactly as today — and round-trips as literal text because `|` is not in the paragraph-text escape set and a re-parse still finds no delimiter row.
 
@@ -72,8 +74,9 @@ Add to `schema.py`, `collab-schema.mjs` (+ `.d.mts` typings), and `schema.ts` (v
 
 ### D. Goldens + schema twins
 
-- Regenerate the Python-writepath goldens (`frontend/scripts/gen_collab_goldens.mjs`, `verify_python_writepath.mjs`) with table cases: basic 2×2, escaped `|` in cell text, citation-in-cell, marks-in-cell, ragged body row, header-only table, table-in-list-item, table-in-blockquote, colspan-degrade input.
+- Regenerate the Python-writepath goldens (`frontend/scripts/gen_collab_goldens.mjs`, `verify_python_writepath.mjs`) with table cases: basic 2×2, escaped `|` in cell text, citation-in-cell, marks-in-cell, ragged body row, header-only table, table-in-list-item (BOTH paragraph-then-table and bare table-first, exercising the §B synthesis), table-in-blockquote, colspan-degrade input.
 - Update `collab-schema.mjs` + `.d.mts` and `collabSchema.equality.test.ts` expectations in the same commit as `schema.ts` — the equality test is the drift guard, it must never be green across a half-updated pair.
+- **Strengthen the equality guard for table nodes**: extend `collabSchema.equality.test.ts` to also compare `tableRole` and `isolating` (not just content/attrs shape) — both matter for prosemirror-tables command behavior and are easy to drift silently.
 
 ### E. Frontend nodes + editing behavior
 
