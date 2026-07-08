@@ -311,6 +311,14 @@ async def insert_annotation(
                     workspaces_dir=settings.workspaces_dir,
                 )
                 session.commit()
+            except collab_state.CollabSeveranceConflict as e:
+                # enable-on-touch flipped draft collab on AFTER _route() read False
+                # but while insert_from_annotation held the mutex — abort writing
+                # NOTHING; same 409 as the save routes' severance guard.
+                session.rollback()
+                raise HTTPException(
+                    status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+                ) from e
             except InsertConflict as e:
                 session.rollback()
                 raise HTTPException(status_code=409, detail=str(e)) from e

@@ -85,6 +85,27 @@ def _insert(session, ws, user, ann, tmp_path):
     )
 
 
+def test_insert_severed_when_collab_flips_after_guard(pg_session_factory, tmp_path):
+    """Item 2b: draft collab is enabled by the time insert_from_annotation rechecks
+    UNDER the mutex (the route's pre-mutex guard raced enable-on-touch) -> abort
+    with CollabSeveranceConflict, writing NOTHING to git."""
+    from call_manager.proposal_assist.collab import state
+    from call_manager.proposal_assist.collab.state import CollabSeveranceConflict
+
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        ref_id = _seed_reference(s, ws.id, CHUNK_TEXT)
+        repo = _init_repo(tmp_path, ws.id, DOC)
+        ann = _seed_annotation(s, ws.id, repo, reference_id=ref_id)
+        state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        head_before = current_head(repo)
+        with pytest.raises(CollabSeveranceConflict):
+            _insert(s, ws, user, ann, tmp_path)
+        s.rollback()
+    assert current_head(repo) == head_before  # git untouched
+
+
 def test_happy_path_canonical_marker_row_and_provenance(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws, user = _ws(s)

@@ -37,6 +37,31 @@ def is_collab_enabled(session: Session, *, workspace_id: uuid.UUID, artifact: st
     return bool(row and row.enabled_at is not None)
 
 
+# 3b-5d.D4 severance recheck (Item 2b): a git-first writer's PRE-mutex severance
+# guard (in the route) can race enable-on-touch — the flip may commit while the
+# writer is blocked on the commit mutex. So every git-first writer re-checks the
+# flag UNDER the mutex via raise_if_collab_severed and aborts writing NOTHING.
+# The detail is byte-identical to the routes' pre-mutex 409 so the client behaves
+# uniformly (reload -> mount the live editor). No-op when the flag is off /
+# kill-switch armed (is_collab_enabled -> False), so flag-off paths are unchanged.
+COLLAB_SEVERED_DETAIL = "this workspace now uses the live editor — reload the page"
+
+
+class CollabSeveranceConflict(RuntimeError):
+    """Raised UNDER the commit mutex when the artifact flipped to collab after a
+    git-first writer's pre-mutex severance guard passed (enable-on-touch raced
+    the in-flight write). The writer aborts, writing NOTHING; routes map this to
+    the same 409 as the pre-mutex severance guard."""
+
+
+def raise_if_collab_severed(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> None:
+    """Abort a git-first write if the artifact is (now) collab-enabled. Called by
+    every git-first writer while it holds the commit mutex. No-op when the flag is
+    off / kill-switch armed, so flag-off paths stay byte-for-byte."""
+    if is_collab_enabled(session, workspace_id=workspace_id, artifact=artifact):
+        raise CollabSeveranceConflict(str(workspace_id))
+
+
 def enable_collab(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> None:
     row = _get(session, workspace_id, artifact)
     if row is None:

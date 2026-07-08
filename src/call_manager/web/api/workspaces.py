@@ -280,7 +280,11 @@ def get_draft(
         # flips collab on (sticky, per-artifact, kill-switch-suppressed) and
         # THIS response already reports collab_enabled=true.
         collab_enabled = maybe_auto_enable(
-            session, workspace_id=workspace_id, artifact="draft", head_md=raw_disk
+            session,
+            workspace_id=workspace_id,
+            artifact="draft",
+            head_md=raw_disk,
+            artifact_path=proposal,
         )
         if collab_enabled:
             raw = canonical_artifact_markdown(
@@ -327,7 +331,11 @@ def get_spec(
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
         raw_disk = spec.read_text()
         collab_enabled = maybe_auto_enable(
-            session, workspace_id=workspace_id, artifact="spec", head_md=raw_disk
+            session,
+            workspace_id=workspace_id,
+            artifact="spec",
+            head_md=raw_disk,
+            artifact_path=spec,
         )
         raw = (
             canonical_artifact_markdown(
@@ -391,7 +399,7 @@ def post_save_spec_section(
         if collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="spec"):
             raise HTTPException(
                 status_code=409,
-                detail="this workspace now uses the live editor — reload the page",
+                detail=collab_state.COLLAB_SEVERED_DETAIL,
             )
         try:
             result = save_section(
@@ -406,6 +414,13 @@ def post_save_spec_section(
                 artifact=Artifact.SPEC,
             )
             session.commit()
+        except collab_state.CollabSeveranceConflict as e:
+            # enable-on-touch flipped spec collab on AFTER the pre-mutex guard but
+            # while save_section held the mutex — same 409 as that guard.
+            session.rollback()
+            raise HTTPException(
+                status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+            ) from e
         except StaleSectionError as e:
             session.rollback()
             raise HTTPException(
@@ -519,6 +534,13 @@ async def post_init_spec(
                 raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
             try:
                 acquire_commit_mutex(session, ws.id)
+                # Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the _route()
+                # fork read the flag as False, but enable-on-touch may have flipped
+                # spec collab on while we blocked on the mutex. Abort writing NOTHING
+                # (init_spec bypasses save_section, so it needs its OWN recheck).
+                collab_state.raise_if_collab_severed(
+                    session, workspace_id=workspace_id, artifact="spec"
+                )
                 # post_init_spec bypasses save_section, so it needs its OWN lock
                 # guard. Check under the mutex (like the lock/unlock routes) BEFORE
                 # the whitespace/no-op branch, so a locked spec is 409 regardless of
@@ -563,6 +585,13 @@ async def post_init_spec(
                 collab_enabled = collab_state.is_collab_enabled(
                     session, workspace_id=workspace_id, artifact="spec"
                 )
+            except collab_state.CollabSeveranceConflict as e:
+                # enable-on-touch flipped spec collab on while we held the mutex —
+                # abort the git-first init, same 409 as the save routes' guard.
+                session.rollback()
+                raise HTTPException(
+                    status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+                ) from e
             except SpecLockedError as e:
                 session.rollback()
                 raise HTTPException(
@@ -898,7 +927,7 @@ def post_save_section(
         if collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="draft"):
             raise HTTPException(
                 status_code=409,
-                detail="this workspace now uses the live editor — reload the page",
+                detail=collab_state.COLLAB_SEVERED_DETAIL,
             )
         try:
             result = save_section(
@@ -912,6 +941,13 @@ def post_save_section(
                 workspaces_dir=settings.workspaces_dir,
             )
             session.commit()
+        except collab_state.CollabSeveranceConflict as e:
+            # enable-on-touch flipped draft collab on AFTER the pre-mutex guard but
+            # while save_section held the mutex — same 409 as that guard.
+            session.rollback()
+            raise HTTPException(
+                status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+            ) from e
         except StaleSectionError as e:
             session.rollback()
             raise HTTPException(

@@ -59,6 +59,7 @@ from call_manager.proposal_assist.citations.quotes import (
     find_quote_offsets,
     normalize_for_quote_match,
 )
+from call_manager.proposal_assist.collab.state import raise_if_collab_severed
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
@@ -346,6 +347,12 @@ def insert_from_annotation(
     # 1. Serialize against every other git mutation of this workspace.
     # CommitMutexTimeout propagates — the web layer maps it to 503.
     acquire_commit_mutex(session, workspace.id)
+
+    # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): enable-on-touch may
+    # have flipped draft collab on while we blocked on the mutex, after the route's
+    # pre-mutex guard passed. Abort writing NOTHING; the route maps
+    # CollabSeveranceConflict to its 409. No-op when the flag is off / kill-switch.
+    raise_if_collab_severed(session, workspace_id=workspace.id, artifact="draft")
 
     # Expire annotation immediately after acquiring the mutex: SQLAlchemy's
     # identity map still holds the pre-block snapshot. A concurrent insert

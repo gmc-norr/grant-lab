@@ -99,6 +99,14 @@ def _accept_git_first(session_factory, workspace_id, pc_id, user, workspaces_dir
                 approver=user,
                 workspaces_dir=workspaces_dir,
             )
+        except collab_state.CollabSeveranceConflict as exc:
+            # enable-on-touch flipped the artifact to collab AFTER _route() read
+            # False but while save_section held the mutex — abort the git-first
+            # accept writing NOTHING; same 409 as the save routes' severance guard.
+            session.rollback()
+            raise HTTPException(
+                status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+            ) from exc
         except ProposedChangeNotFound as exc:
             session.rollback()
             raise HTTPException(status_code=404, detail="proposed change not found") from exc

@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from call_manager.proposal_assist.citations.gitio import current_head
 from call_manager.proposal_assist.collab import state
 from tests.proposal_assist.conftest import make_workspace
 from tests.test_analysis_pipeline import _init_repo
@@ -105,3 +106,39 @@ def test_kill_switch_restores_git_first_save(
     )
     assert r.status_code == 200
     assert "rewritten." in (repo / "proposal.md").read_text()
+
+
+def test_draft_save_severs_when_flag_flips_after_guard(
+    client_authed_owner, current_user, pg_session_factory, tmp_path, _app, monkeypatch
+):
+    """Item 2b: the flag is OFF at the route's pre-mutex severance guard, but
+    enable-on-touch flips draft collab on BEFORE save_section's under-mutex
+    recheck. The save must abort with the SAME 409 and write NOTHING to git —
+    proving the recheck is a real second line of defense past the guard."""
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws, repo = _seed(s, tmp_path, current_user)  # flag OFF at seed
+        s.commit()
+        wid = ws.id
+
+    import call_manager.web.api.workspaces as workspaces_mod
+
+    real_save_section = workspaces_mod.save_section
+
+    def _flip_then_save(*args, **kwargs):
+        # Simulate enable-on-touch committing on another connection AFTER the
+        # route's pre-mutex guard read False but before save_section's recheck.
+        with _app.state.session_factory() as s2:
+            state.enable_collab(s2, workspace_id=wid, artifact="draft")
+            s2.commit()
+        return real_save_section(*args, **kwargs)
+
+    monkeypatch.setattr(workspaces_mod, "save_section", _flip_then_save)
+    head_before = current_head(repo)
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/sections/1", json=_save_payload(repo)
+    )
+    assert r.status_code == 409
+    assert "live editor" in r.json()["error"]["message"]
+    assert current_head(repo) == head_before  # git HEAD unchanged
+    assert (repo / "proposal.md").read_text() == DOC  # nothing written
