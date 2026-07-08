@@ -34,3 +34,42 @@ def test_citation_is_inline_atom():
 def test_heading_carries_a_level_attr():
     # H1-H6 must be representable (real docs use H1 titles).
     assert "level" in SCHEMA.nodes["heading"].spec.get("attrs", {})
+
+
+def test_schema_has_table_nodes():
+    for n in ["table", "table_row", "table_cell", "table_header"]:
+        assert n in SCHEMA.nodes, n
+
+
+def test_table_shapes_are_strict_gfm():
+    assert SCHEMA.nodes["table"].spec["content"] == "table_row+"
+    assert SCHEMA.nodes["table"].spec.get("group") == "block"
+    assert SCHEMA.nodes["table_row"].spec["content"] == "(table_cell | table_header)+"
+    for cell in ["table_cell", "table_header"]:
+        spec = SCHEMA.nodes[cell].spec
+        assert spec["content"] == "paragraph"
+        attrs = spec["attrs"]
+        assert attrs["colspan"]["default"] == 1
+        assert attrs["rowspan"]["default"] == 1
+        assert attrs["colwidth"]["default"] is None
+
+
+def test_table_doc_validates():
+    doc = SCHEMA.node_from_json({
+        "type": "doc",
+        "content": [{
+            "type": "table",
+            "content": [
+                {"type": "table_row", "content": [
+                    {"type": "table_header", "attrs": {"colspan": 1, "rowspan": 1},
+                     "content": [{"type": "paragraph",
+                                  "content": [{"type": "text", "text": "h"}]}]},
+                ]},
+                {"type": "table_row", "content": [
+                    {"type": "table_cell", "attrs": {"colspan": 1, "rowspan": 1},
+                     "content": [{"type": "paragraph"}]},
+                ]},
+            ],
+        }],
+    })
+    doc.check()  # content model holds
