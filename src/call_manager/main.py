@@ -1,5 +1,7 @@
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +27,7 @@ from call_manager.db.session import make_engine, make_session_factory
 from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
+from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
 from call_manager.proposal_assist.web.activity import (
@@ -66,6 +69,25 @@ STATIC_DIR = Path(__file__).parent / "web" / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 3b-5d.D4: kill-switch handover BEFORE serving — drain every collab log to
+    # git and truncate it, so the git-first world is coherent from request #1.
+    if app.state.settings.collab_kill_switch:
+        import logging
+
+        from starlette.concurrency import run_in_threadpool
+
+        from call_manager.proposal_assist.collab.handover import run_kill_switch_handover
+
+        _n = await run_in_threadpool(
+            lambda: run_kill_switch_handover(
+                app.state.session_factory,
+                workspaces_dir=app.state.settings.workspaces_dir,
+            )
+        )
+        logging.getLogger(__name__).warning(
+            "collab kill-switch engaged — handover drained %d artifact(s)", _n
+        )
+
     # Deferred import: keeps `admin_bootstrap` off the import graph until
     # lifespan runs, so test-side `create_app()` calls that never enter
     # lifespan don't pay the import cost or trigger its side-effects.
@@ -266,10 +288,41 @@ async def lifespan(app: FastAPI):
 # FAST with a clear pointer to the required column migration.
 EMBEDDING_COLUMN_DIM = 1024
 
+# Strict host[:port] shape for a CSP token derived from user-supplied config.
+# `urlsplit().netloc` only terminates at `/`, `?` or `#` — NOT `;` or
+# whitespace — so a value like "https://app.ki.se; script-src * 'unsafe-inline'"
+# parses to a netloc of "app.ki.se; script-src * 'unsafe-inline'" and, absent
+# this check, would be interpolated verbatim into the CSP header, injecting
+# arbitrary directives. config.py's APP_BASE_URL validator only checks the
+# scheme prefix, so this is the last line of defense before the value reaches
+# the header.
+_HOST_PORT_RE = re.compile(r"^[A-Za-z0-9.-]+(:\d{1,5})?$")
+
+
+def _derive_ws_origin(app_base_url: str) -> str:
+    """Derive the same-origin `ws(s)://host[:port]` CSP token from APP_BASE_URL.
+
+    Raises RuntimeError (fail loudly at startup, matching the sibling
+    scheme/netloc check) if the netloc isn't a plain host[:port] — this is
+    what stops CSP directive injection via a malicious/malformed APP_BASE_URL.
+    """
+    _base = urlsplit(app_base_url)
+    if not _base.scheme or not _base.netloc:
+        raise RuntimeError(f"APP_BASE_URL is not a valid URL: {app_base_url!r}")
+    if not _HOST_PORT_RE.match(_base.netloc):
+        raise RuntimeError(
+            f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}"
+        )
+    return f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
+
 
 def create_app() -> FastAPI:
     configure_logging()
     settings = Settings()
+
+    # 3b-5d.D4: arm the collab kill-switch BEFORE any request can consult the
+    # flag. Module-level on purpose — see collab/state.py.
+    collab_state.set_kill_switch(settings.collab_kill_switch)
 
     if settings.embedding_dim != EMBEDDING_COLUMN_DIM:
         raise RuntimeError(
@@ -338,7 +391,13 @@ def create_app() -> FastAPI:
 
     # Defense-in-depth response headers (CSP, HSTS, nosniff, frame-options,
     # referrer-policy). HSTS only when the deployment is https (cookie_secure).
-    _csp = build_csp(dev=settings.spa_mode == "dev")
+    #
+    # 3b-5d.D4: the Yjs WS needs an explicit same-origin token in the non-dev
+    # CSP. Derived from APP_BASE_URL — which also drives check_origin, cookie
+    # security and HSTS, so scheme misalignment (and a malformed/malicious
+    # netloc — see _derive_ws_origin) fails loudly here at startup.
+    _ws_origin = _derive_ws_origin(settings.app_base_url)
+    _csp = build_csp(dev=settings.spa_mode == "dev", ws_origin=_ws_origin)
     _hsts = settings.cookie_secure
     app.add_middleware(
         SecurityHeadersMiddleware,

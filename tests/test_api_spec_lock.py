@@ -3,9 +3,38 @@ _client helpers + _add_spec from tests/test_api_spec.py."""
 
 from __future__ import annotations
 
+import pytest
+
 from call_manager.db.models import SpecLockEvent
+from call_manager.proposal_assist.collab import state as collab_state
 from tests.test_api_spec import _add_spec
 from tests.test_api_workspaces import _app, _client, _seed
+
+
+@pytest.fixture(autouse=True)
+def _reset_kill_switch():
+    """The switch is a module global — a leaked True poisons every collab test."""
+    yield
+    collab_state.set_kill_switch(False)
+
+
+@pytest.fixture
+def _cm6_world(monkeypatch):
+    """Run this test in the kill-switch world, where the legacy CM6
+    whole-section save path is still the write path (3b-5d.D4 severed
+    CM6 saves on collab-enabled artifacts; the kill-switch masks
+    enablement, so enable-on-touch is suppressed and legacy saves work).
+
+    Set via the env var (not a direct set_kill_switch(True) call): the test
+    body's _app() call runs create_app() AFTER this fixture, and create_app()
+    re-arms the module global from Settings().collab_kill_switch — a bare
+    set_kill_switch(True) here would be clobbered before the request ever
+    lands. monkeypatch.setenv persists through that reset since Settings()
+    reads it fresh, and the module scope makes _reset_kill_switch's teardown
+    the belt to this env var's suspenders.
+    """
+    monkeypatch.setenv("COLLAB_KILL_SWITCH", "1")
+    collab_state.set_kill_switch(True)
 
 
 def _events(pg_session_factory, ws_id):
@@ -99,7 +128,7 @@ def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
@@ -134,7 +163,9 @@ def test_locked_spec_init_is_409(monkeypatch, pg_url, pg_session_factory, tmp_pa
     assert c.post(f"/api/workspaces/{ws_id}/spec").status_code == 409
 
 
-def test_draft_unaffected_by_spec_lock(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_draft_unaffected_by_spec_lock(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n\n## Methods\nm.\n")
     _add_spec(tmp_path, ws_id, "## Aims\nx\n")
@@ -153,7 +184,9 @@ def test_draft_unaffected_by_spec_lock(monkeypatch, pg_url, pg_session_factory, 
     assert r.status_code == 200 and r.json()["changed"] is True
 
 
-def test_unlock_reenables_spec_save(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_unlock_reenables_spec_save(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, _cm6_world
+):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")

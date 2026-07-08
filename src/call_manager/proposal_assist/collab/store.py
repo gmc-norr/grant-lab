@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
@@ -76,6 +76,28 @@ def load_rows(
     return [(int(r[0]), (int(r[1]) if r[1] is not None else None), r[2]) for r in rows]
 
 
+def has_authored_updates(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> bool:
+    """True if any live log row for (workspace_id, artifact) carries a non-None
+    actor — i.e. the room has real edits beyond the unauthored hydration seed.
+
+    The tight-vs-loose distinction (3b-5d.D4): a seed-only room serializes to
+    the ProseMirror-canonical ("loose") form, while git HEAD and pre-flip
+    annotation section_shas are the raw ("tight") bytes. Readers/writers that
+    anchor by section_sha must use raw HEAD text until the first authored edit.
+    """
+    return bool(
+        session.execute(
+            select(
+                exists().where(
+                    YjsUpdate.workspace_id == workspace_id,
+                    YjsUpdate.artifact == artifact,
+                    YjsUpdate.actor_id.is_not(None),
+                )
+            )
+        ).scalar()
+    )
+
+
 def find_checkpoint_candidates(
     session: Session, *, min_tail: int
 ) -> list[tuple[uuid.UUID, str]]:
@@ -103,6 +125,34 @@ def find_checkpoint_candidates(
         .having(func.count() >= min_tail)
     ).all()
     return [(r[0], r[1]) for r in rows]
+
+
+def find_artifacts_with_updates(session: Session) -> list[tuple[uuid.UUID, str]]:
+    """DISTINCT (workspace_id, artifact) owning ANY log rows, live workspaces
+    only. The kill-switch handover needs every artifact with a log — including
+    fully-checkpointed ones (a stale log would still clobber kill-window
+    git-first writes on replay after the switch lifts), which is why this is
+    NOT find_checkpoint_candidates(min_tail=0) (that only sees rows above the
+    watermark)."""
+    rows = session.execute(
+        select(YjsUpdate.workspace_id, YjsUpdate.artifact)
+        .join(Workspace, Workspace.id == YjsUpdate.workspace_id)
+        .where(Workspace.soft_deleted_at.is_(None))
+        .distinct()
+    ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+def truncate_log(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
+    """Delete ALL log rows for one artifact. Kill-switch handover ONLY — the
+    caller must have checkpointed the full log to git IN THE SAME transaction.
+    Returns the number of rows deleted."""
+    res = session.execute(
+        sa_delete(YjsUpdate).where(
+            YjsUpdate.workspace_id == workspace_id, YjsUpdate.artifact == artifact
+        )
+    )
+    return int(res.rowcount or 0)
 
 
 def compact_snapshot(

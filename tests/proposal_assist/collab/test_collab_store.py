@@ -61,6 +61,33 @@ def test_load_updates_empty_room_returns_empty_list(pg_session_factory):
         assert store.load_updates(s, workspace_id=ws.id, artifact="draft") == []
 
 
+def test_has_authored_updates_false_empty_false_seed_true_authored(pg_session_factory):
+    with pg_session_factory() as s:
+        owner = make_user(s, email="authored-owner@ki.se")
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        wid, uid = ws.id, owner.id
+
+    with pg_session_factory() as s:
+        assert store.has_authored_updates(s, workspace_id=wid, artifact="draft") is False
+
+    with pg_session_factory() as s:
+        # unauthored hydration seed (actor_id IS NULL) — still untouched
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None, update=b"seed")
+        s.commit()
+    with pg_session_factory() as s:
+        assert store.has_authored_updates(s, workspace_id=wid, artifact="draft") is False
+        # a different artifact/room is unaffected
+        assert store.has_authored_updates(s, workspace_id=wid, artifact="spec") is False
+
+    with pg_session_factory() as s:
+        # a real, authored edit lands
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=uid, update=b"edit")
+        s.commit()
+    with pg_session_factory() as s:
+        assert store.has_authored_updates(s, workspace_id=wid, artifact="draft") is True
+
+
 def test_find_checkpoint_candidates_counts_rows_excludes_softdeleted(pg_session_factory):
     with pg_session_factory() as s:
         o = make_user(s, email="fcc-o@ki.se")

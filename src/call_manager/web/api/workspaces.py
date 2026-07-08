@@ -34,7 +34,10 @@ from call_manager.db.models import (
 )
 from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
-from call_manager.proposal_assist.citations.collab_cite import direct_cite_via_kernel
+from call_manager.proposal_assist.citations.collab_cite import (
+    direct_cite_via_kernel,
+    init_spec_via_kernel,
+)
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     current_head,
@@ -51,6 +54,7 @@ from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+from call_manager.proposal_assist.collab.flip import maybe_auto_enable
 from call_manager.proposal_assist.collab.permissions import signal_from_request
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import (
@@ -183,7 +187,9 @@ class AddCitationIn(BaseModel):
 
 class AddCitationOut(BaseModel):
     ev_id: str
-    citekey: str
+    # None on an idempotent re-cite of a citekey-less/corrupt ledger row —
+    # kernel.py carries str | None end-to-end (3b-5a deferral, fixed at the flip).
+    citekey: str | None
     commit_sha: str
 
 
@@ -269,15 +275,23 @@ def get_draft(
             head = current_head(repo_dir)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        collab_enabled = collab_state.is_collab_enabled(
-            session, workspace_id=workspace_id, artifact="draft"
+        raw_disk = proposal.read_text()
+        # 3b-5d.D4 enable-on-touch: the first read of a table-free artifact
+        # flips collab on (sticky, per-artifact, kill-switch-suppressed) and
+        # THIS response already reports collab_enabled=true.
+        collab_enabled = maybe_auto_enable(
+            session,
+            workspace_id=workspace_id,
+            artifact="draft",
+            head_md=raw_disk,
+            artifact_path=proposal,
         )
         if collab_enabled:
             raw = canonical_artifact_markdown(
                 session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
             )
         else:
-            raw = proposal.read_text()
+            raw = raw_disk
         sections = _sections_out(raw)
         citations = _citation_map(session, settings, workspace_id, raw)
         _, can_write = resolve_access(
@@ -315,16 +329,28 @@ def get_spec(
             head = current_head(repo_dir)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
-        sections = _sections_out(spec.read_text())
+        raw_disk = spec.read_text()
+        collab_enabled = maybe_auto_enable(
+            session,
+            workspace_id=workspace_id,
+            artifact="spec",
+            head_md=raw_disk,
+            artifact_path=spec,
+        )
+        raw = (
+            canonical_artifact_markdown(
+                session, workspace_id=workspace_id, artifact="spec", repo_dir=repo_dir
+            )
+            if collab_enabled
+            else raw_disk
+        )
+        sections = _sections_out(raw)
         # Resolve the lock display fields WHILE the session is open: _locker_email
         # queries it, so this must run before the `with` block closes.
         locked_by = _locker_email(session, ws.spec_locked_by)
         locked_at = ws.spec_locked_at
         _, can_write = resolve_access(
             session, user=user, workspace_id=workspace_id, artifact="spec"
-        )
-        collab_enabled = collab_state.is_collab_enabled(
-            session, workspace_id=workspace_id, artifact="spec"
         )
     return SpecOut(
         head=head,
@@ -366,6 +392,15 @@ def post_save_spec_section(
         except GitCommitError as e:
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
+        # 3b-5d.D4 severance: a collab-enabled artifact is Tiptap-only. A stale
+        # CM6 tab (or direct API call) must not git-first-write around the live
+        # room. 409 tells the client to reload (it will mount the collab editor).
+        # Under the kill-switch the flag reads False -> git-first saves resume.
+        if collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="spec"):
+            raise HTTPException(
+                status_code=409,
+                detail=collab_state.COLLAB_SEVERED_DETAIL,
+            )
         try:
             result = save_section(
                 session=session,
@@ -379,6 +414,13 @@ def post_save_spec_section(
                 artifact=Artifact.SPEC,
             )
             session.commit()
+        except collab_state.CollabSeveranceConflict as e:
+            # enable-on-touch flipped spec collab on AFTER the pre-mutex guard but
+            # while save_section held the mutex — same 409 as that guard.
+            session.rollback()
+            raise HTTPException(
+                status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+            ) from e
         except StaleSectionError as e:
             session.rollback()
             raise HTTPException(
@@ -418,99 +460,171 @@ def post_save_spec_section(
 
 
 @router.post("/workspaces/{workspace_id}/spec", response_model=SpecOut)
-def post_init_spec(
+async def post_init_spec(
     workspace_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> SpecOut:
-    """Idempotent Spec initialization (owner-gated). If proposal-spec.md is
-    whitespace-only, seed SPEC_SKELETON as ONE whole-doc commit (sidestepping the
-    preamble structure guard); otherwise no-op. Returns the SpecOut either way."""
+    """Idempotent Spec initialization (owner-gated). Flag-on: the skeleton seeds
+    through the live room (kernel) — provenance comes from the collab checkpoint
+    (ArtifactVersion "collab checkpoint: spec" / WorkspaceEvent kind=
+    "collab_checkpoint"), NOT a user_edit row (3b-5d.D4 §3.3 deliberate deviation
+    — do not duplicate provenance rows on the kernel path). Flag-off: the legacy
+    whole-doc git commit, byte-for-byte."""
     settings = request.app.state.settings
     sf = request.app.state.session_factory
-    with sf() as session:
-        ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        spec = repo_dir / SPEC_FILENAME
-        if not spec.exists():
-            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        try:
-            acquire_commit_mutex(session, ws.id)
-            # post_init_spec bypasses save_section, so it needs its OWN lock
-            # guard. Check under the mutex (like the lock/unlock routes) BEFORE
-            # the whitespace/no-op branch, so a locked spec is 409 regardless of
-            # file content.
-            session.refresh(ws, ["spec_locked_at"])
-            if ws.spec_locked_at is not None:
-                raise SpecLockedError(str(ws.id))
-            raw = spec.read_text()  # read UNDER the mutex so a concurrent init serializes
-            if raw.strip() == "":
-                commit_sha = write_and_commit_files(
-                    repo_dir, {SPEC_FILENAME: SPEC_SKELETON}, "user spec init"
-                )
-                session.add(
-                    ArtifactVersion(
-                        workspace_id=ws.id,
-                        commit_sha=commit_sha,
-                        created_by="user",
-                        message="user spec init",
-                    )
-                )
-                session.add(
-                    WorkspaceEvent(
-                        workspace_id=ws.id,
-                        kind="user_edit",
-                        actor_id=user.id,
-                        payload={"artifact": "spec", "commit_sha": commit_sha},
-                    )
-                )
-                # Snapshot the response WHILE STILL HOLDING the mutex: we just
-                # committed exactly SPEC_SKELETON at commit_sha.
-                head, sections = commit_sha, _sections_out(SPEC_SKELETON)
-            else:
-                # No-op: capture head + sections UNDER the lock too. Reading them
-                # after releasing the mutex (Codex Medium) would let a writer that
-                # grabs the lock the instant we release expose an uncommitted /
-                # rolled-back write, or a head/section snapshot from two moments.
-                head, sections = current_head(repo_dir), _sections_out(raw)
-            session.commit()  # releases the mutex; persists rows iff we seeded
-            # Read collab_enabled WHILE the session is open (the return is outside
-            # the `with` block). can_write is unconditionally True here: require_owner
-            # above + a successful init only runs on an UNLOCKED spec.
-            collab_enabled = collab_state.is_collab_enabled(
+
+    def _route() -> bool:
+        with sf() as session:
+            return collab_state.is_collab_enabled(
                 session, workspace_id=workspace_id, artifact="spec"
             )
+
+    enabled = await run_in_threadpool(_route)
+
+    if enabled:
+        def _gate() -> None:
+            with sf() as session:
+                require_owner(workspace_id=workspace_id, user=user, session=session)
+            if not (
+                workspace_repo_dir(settings.workspaces_dir, workspace_id) / SPEC_FILENAME
+            ).exists():
+                raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+        await run_in_threadpool(_gate)
+        try:
+            head, md = await init_spec_via_kernel(
+                session_factory=sf, workspaces_dir=settings.workspaces_dir,
+                workspace_id=workspace_id, actor_id=user.id,
+            )
         except SpecLockedError as e:
-            session.rollback()
             raise HTTPException(
-                status_code=409,
-                detail="spec is locked — unlock to edit",
+                status_code=409, detail="spec is locked — unlock to edit"
             ) from e
         except CommitMutexTimeout as e:
-            session.rollback()
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
+        except RoomEvicted as e:
+            raise HTTPException(
+                status_code=409, detail="the live session was reset — retry"
+            ) from e
         except GitCommitError as e:
-            session.rollback()
-            logger.exception("spec init failed for workspace %s", workspace_id)
+            logger.exception("collab spec init failed for workspace %s", workspace_id)
             raise HTTPException(
                 status_code=500, detail="spec init failed — nothing was written"
             ) from e
-    # A successful init only runs on an UNLOCKED spec (locked -> SpecLockedError
-    # -> 409 above), so the lock fields are always unset here. can_manage_lock=True
-    # because require_owner above guarantees the caller owns the workspace.
-    return SpecOut(
-        head=head,
-        can_edit=True,
-        sections=sections,
-        locked=False,
-        locked_at=None,
-        locked_by=None,
-        can_manage_lock=True,
-        collab_enabled=collab_enabled,
-        can_write=True,
-    )
+        return SpecOut(
+            head=head,
+            can_edit=True,
+            sections=_sections_out(md),
+            locked=False,
+            locked_at=None,
+            locked_by=None,
+            can_manage_lock=True,
+            collab_enabled=True,
+            can_write=True,
+        )
+
+    def _git() -> SpecOut:
+        with sf() as session:
+            ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+            spec = repo_dir / SPEC_FILENAME
+            if not spec.exists():
+                raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
+            try:
+                acquire_commit_mutex(session, ws.id)
+                # Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the _route()
+                # fork read the flag as False, but enable-on-touch may have flipped
+                # spec collab on while we blocked on the mutex. Abort writing NOTHING
+                # (init_spec bypasses save_section, so it needs its OWN recheck).
+                collab_state.raise_if_collab_severed(
+                    session, workspace_id=workspace_id, artifact="spec"
+                )
+                # post_init_spec bypasses save_section, so it needs its OWN lock
+                # guard. Check under the mutex (like the lock/unlock routes) BEFORE
+                # the whitespace/no-op branch, so a locked spec is 409 regardless of
+                # file content.
+                session.refresh(ws, ["spec_locked_at"])
+                if ws.spec_locked_at is not None:
+                    raise SpecLockedError(str(ws.id))
+                raw = spec.read_text()  # read UNDER the mutex so a concurrent init serializes
+                if raw.strip() == "":
+                    commit_sha = write_and_commit_files(
+                        repo_dir, {SPEC_FILENAME: SPEC_SKELETON}, "user spec init"
+                    )
+                    session.add(
+                        ArtifactVersion(
+                            workspace_id=ws.id,
+                            commit_sha=commit_sha,
+                            created_by="user",
+                            message="user spec init",
+                        )
+                    )
+                    session.add(
+                        WorkspaceEvent(
+                            workspace_id=ws.id,
+                            kind="user_edit",
+                            actor_id=user.id,
+                            payload={"artifact": "spec", "commit_sha": commit_sha},
+                        )
+                    )
+                    # Snapshot the response WHILE STILL HOLDING the mutex: we just
+                    # committed exactly SPEC_SKELETON at commit_sha.
+                    head, sections = commit_sha, _sections_out(SPEC_SKELETON)
+                else:
+                    # No-op: capture head + sections UNDER the lock too. Reading them
+                    # after releasing the mutex (Codex Medium) would let a writer that
+                    # grabs the lock the instant we release expose an uncommitted /
+                    # rolled-back write, or a head/section snapshot from two moments.
+                    head, sections = current_head(repo_dir), _sections_out(raw)
+                session.commit()  # releases the mutex; persists rows iff we seeded
+                # Read collab_enabled WHILE the session is open (the return is outside
+                # the `with` block). can_write is unconditionally True here: require_owner
+                # above + a successful init only runs on an UNLOCKED spec.
+                collab_enabled = collab_state.is_collab_enabled(
+                    session, workspace_id=workspace_id, artifact="spec"
+                )
+            except collab_state.CollabSeveranceConflict as e:
+                # enable-on-touch flipped spec collab on while we held the mutex —
+                # abort the git-first init, same 409 as the save routes' guard.
+                session.rollback()
+                raise HTTPException(
+                    status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+                ) from e
+            except SpecLockedError as e:
+                session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="spec is locked — unlock to edit",
+                ) from e
+            except CommitMutexTimeout as e:
+                session.rollback()
+                raise HTTPException(
+                    status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+                ) from e
+            except GitCommitError as e:
+                session.rollback()
+                logger.exception("spec init failed for workspace %s", workspace_id)
+                raise HTTPException(
+                    status_code=500, detail="spec init failed — nothing was written"
+                ) from e
+        # A successful init only runs on an UNLOCKED spec (locked -> SpecLockedError
+        # -> 409 above), so the lock fields are always unset here. can_manage_lock=True
+        # because require_owner above guarantees the caller owns the workspace.
+        return SpecOut(
+            head=head,
+            can_edit=True,
+            sections=sections,
+            locked=False,
+            locked_at=None,
+            locked_by=None,
+            can_manage_lock=True,
+            collab_enabled=collab_enabled,
+            can_write=True,
+        )
+
+    return await run_in_threadpool(_git)
 
 
 @router.post("/workspaces/{workspace_id}/spec/lock", response_model=SpecLockOut)
@@ -529,9 +643,20 @@ def post_lock_spec(
         spec_path = repo_dir / SPEC_FILENAME
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        is_collab = collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="spec")
         try:
             acquire_commit_mutex(session, ws.id)
+            # Fresh flag read UNDER the mutex (Codex): a pre-mutex read can go
+            # stale while we block — enable-on-touch commits the enable while
+            # HOLDING this mutex, so an under-mutex read is authoritative. If it
+            # reads False the flip is queued behind us (no room can exist until we
+            # release: the WS gate reads the flag), so stamping git HEAD is
+            # correct; if True the checkpoint branch runs with the fresh state.
+            # This route is room-aware — the remedy is the fresh read feeding the
+            # existing branch, NOT the git-first writers' severance 409. First
+            # CollabArtifactState load in this session (no stale identity-map hit).
+            is_collab = collab_state.is_collab_enabled(
+                session, workspace_id=ws.id, artifact="spec"
+            )
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
@@ -606,9 +731,13 @@ def post_unlock_spec(
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        is_collab = collab_state.is_collab_enabled(session, workspace_id=ws.id, artifact="spec")
         try:
             acquire_commit_mutex(session, ws.id)
+            # Fresh flag read UNDER the mutex (Codex) — see post_lock_spec for the
+            # soundness argument; unlock shares the moved-read shape exactly.
+            is_collab = collab_state.is_collab_enabled(
+                session, workspace_id=ws.id, artifact="spec"
+            )
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
@@ -806,6 +935,15 @@ def post_save_section(
         except GitCommitError as e:
             logger.warning("workspace %s: git HEAD unavailable (%s)", workspace_id, e)
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
+        # 3b-5d.D4 severance: a collab-enabled artifact is Tiptap-only. A stale
+        # CM6 tab (or direct API call) must not git-first-write around the live
+        # room. 409 tells the client to reload (it will mount the collab editor).
+        # Under the kill-switch the flag reads False -> git-first saves resume.
+        if collab_state.is_collab_enabled(session, workspace_id=workspace_id, artifact="draft"):
+            raise HTTPException(
+                status_code=409,
+                detail=collab_state.COLLAB_SEVERED_DETAIL,
+            )
         try:
             result = save_section(
                 session=session,
@@ -818,6 +956,13 @@ def post_save_section(
                 workspaces_dir=settings.workspaces_dir,
             )
             session.commit()
+        except collab_state.CollabSeveranceConflict as e:
+            # enable-on-touch flipped draft collab on AFTER the pre-mutex guard but
+            # while save_section held the mutex — same 409 as that guard.
+            session.rollback()
+            raise HTTPException(
+                status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+            ) from e
         except StaleSectionError as e:
             session.rollback()
             raise HTTPException(
@@ -972,6 +1117,14 @@ async def post_citation(
                     workspaces_dir=settings.workspaces_dir,
                 )
                 session.commit()
+            except collab_state.CollabSeveranceConflict as e:
+                # enable-on-touch flipped draft collab on AFTER _route() read False
+                # but while insert_citation_for_user held the mutex — abort writing
+                # NOTHING; same 409 as the save routes' severance guard.
+                session.rollback()
+                raise HTTPException(
+                    status_code=409, detail=collab_state.COLLAB_SEVERED_DETAIL
+                ) from e
             except CiteStale as e:
                 session.rollback()
                 raise HTTPException(status_code=409, detail=str(e)) from e

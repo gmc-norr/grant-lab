@@ -330,7 +330,14 @@ def build_scheduler(
 
         def _collab_checkpoint_job() -> None:
             from call_manager.proposal_assist.collab.checkpoint import checkpoint_active_tails
+            from call_manager.proposal_assist.collab.handover import run_kill_switch_handover
 
+            if settings.collab_kill_switch:
+                # Kill-switch engaged: retry the drain-then-truncate handover for
+                # artifacts whose startup pass failed (no tail floor). Normal
+                # tail-bounding is pointless while connects are refused.
+                run_kill_switch_handover(session_factory, workspaces_dir=settings.workspaces_dir)
+                return
             checkpoint_active_tails(
                 session_factory,
                 workspaces_dir=settings.workspaces_dir,

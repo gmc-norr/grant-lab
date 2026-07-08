@@ -14,18 +14,18 @@ from tests.test_api_workspaces import _app, _client, _seed
 def test_draft_exposes_collab_enabled_and_can_write(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    """collab_enabled is False by default; owner can_write True; member can_write True;
-    after enable_collab the flag flips."""
+    """The first read auto-enables collab (enable-on-touch, 3b-5d.D4); owner
+    can_write True; member can_write True; the flag is sticky afterwards."""
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "Preamble.\n\n## A\n\nBody.\n"
     )
 
-    # --- collab OFF by default, owner ---
+    # --- first read auto-enables (enable-on-touch, 3b-5d.D4), owner ---
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/draft")
     assert r.status_code == 200
     body = r.json()
-    assert body["collab_enabled"] is False
+    assert body["collab_enabled"] is True
     assert body["can_write"] is True  # owner always can_write
 
     # --- non-owner active member: can_edit must stay owner-only, can_write must be True ---
@@ -35,7 +35,8 @@ def test_draft_exposes_collab_enabled_and_can_write(
     assert rm_body["can_edit"] is False  # unchanged owner-oriented semantics
     assert rm_body["can_write"] is True  # resolve_access: active phase → member can write
 
-    # --- enable_collab flips collab_enabled True ---
+    # --- already enabled by the first read; enable_collab is a sticky no-op
+    # and the flag stays True ---
     with pg_session_factory() as s:
         collab_state.enable_collab(s, workspace_id=ws_id, artifact="draft")
         s.commit()
@@ -47,18 +48,19 @@ def test_draft_exposes_collab_enabled_and_can_write(
 def test_spec_exposes_collab_enabled_and_can_write(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    """SpecOut gets the same two fields; unlocked active phase → member can_write True."""
+    """SpecOut gets the same two fields; the first read auto-enables collab
+    (enable-on-touch, 3b-5d.D4); unlocked active phase → member can_write True."""
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(
         app, pg_session_factory, tmp_path, "draft preamble\n"
     )
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
 
-    # --- owner: defaults ---
+    # --- owner: first read auto-enables (enable-on-touch, 3b-5d.D4) ---
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/spec")
     assert r.status_code == 200
     body = r.json()
-    assert body["collab_enabled"] is False
+    assert body["collab_enabled"] is True
     assert body["can_write"] is True  # owner, unlocked
 
     # --- member: can_edit False (owner-only), can_write True (unlocked active → any member) ---
@@ -68,7 +70,8 @@ def test_spec_exposes_collab_enabled_and_can_write(
     assert rm_body["can_edit"] is False
     assert rm_body["can_write"] is True
 
-    # --- enable_collab for spec flips its own flag ---
+    # --- already enabled by the first read; enable_collab is a sticky no-op
+    # and the flag stays True ---
     with pg_session_factory() as s:
         collab_state.enable_collab(s, workspace_id=ws_id, artifact="spec")
         s.commit()

@@ -68,7 +68,7 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 from call_manager.proposal_assist.collab import canonical
-from call_manager.proposal_assist.collab.state import is_collab_enabled
+from call_manager.proposal_assist.collab.state import is_collab_enabled, raise_if_collab_severed
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
@@ -797,6 +797,18 @@ def _insert_citation_locked(
         acquire_commit_mutex(session, ctx.workspace_id)
     except CommitMutexTimeout:
         return {"error": _BUSY_ERROR}
+
+    # 0b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b follow-up): the
+    # accept route's _route() fork read the flag as False, but enable-on-touch
+    # may have flipped draft collab on while we blocked on the mutex. RAISES
+    # (never returns an error dict) so _accept_citation_insert's terminal-stale
+    # mapping is skipped and the ProposedChange row stays PENDING — after the
+    # client reloads, the kernel accept path can still accept it. Propagates to
+    # _accept_git_first's CollabSeveranceConflict -> 409 handler. The only other
+    # caller (insert_citation_impl) is NOT in the MCP tool registry (propose-only
+    # world exposes propose_citation), so no live agent path sees this raise.
+    # No-op when the flag is off / kill-switch armed (flag-off byte-for-byte).
+    raise_if_collab_severed(session, workspace_id=ctx.workspace_id, artifact="draft")
 
     # 3. Read proposal.md + the (possibly absent) ledger.
     read = _read_proposal_and_ledger(ctx)

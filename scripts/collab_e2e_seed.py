@@ -4,7 +4,10 @@ Boots a testcontainers Postgres, runs Alembic migrations, seeds an ACTIVE
 workspace with collab enabled on the draft artifact, starts uvicorn in
 SPA_MODE=dev (APP_BASE_URL=http://localhost:5173 so the CSRF Origin check
 passes against the Vite proxy origin), then prints the env vars needed to
-run `pnpm exec playwright test e2e/collab.spec.ts`:
+run `pnpm exec playwright test e2e/collab.spec.ts`. Set E2E_SPA_MODE=prod
+(3b-5d.D4) to instead serve the BUILT bundle from FastAPI on :8000 under the
+strict CSP — see scripts/collab_e2e_run.sh, which builds+syncs the bundle
+and drives this mode end to end:
 
     E2E_COLLAB_WS_ID=<workspace-uuid>
     E2E_SESSION_COOKIE=<signed-cookie-value>
@@ -50,14 +53,19 @@ def main() -> int:
     # Minimal env that create_app/Settings validates.
     os.environ.setdefault("SESSION_SECRET", "e2e-seed-secret-at-least-16-chars!")
     os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    # SPA_MODE=dev is required: it makes the dev CSP emit
-    # "connect-src 'self' ws: http://localhost:5173" so the Yjs WebSocket is
-    # allowed by the browser.  Production/disabled CSP is strict (connect-src
-    # 'self' only) — do NOT use "prod" or "disabled" here.
-    os.environ["SPA_MODE"] = "dev"
-    # APP_BASE_URL must match the origin the browser POSTs from.  In dev the
-    # browser talks to the Vite proxy on :5173, not uvicorn on :8000.
-    os.environ["APP_BASE_URL"] = "http://localhost:5173"
+    # SPA_MODE: "dev" (default) uses the Vite server + dev CSP's broad ws: token.
+    # "prod" (E2E_SPA_MODE=prod) serves the BUILT bundle from FastAPI under the
+    # strict CSP with ONLY the same-origin ws token derived from APP_BASE_URL —
+    # the 3b-5d.D4 flip gate. prod REQUIRES a built SPA synced to
+    # src/call_manager/web/spa/ (the runner does this).
+    os.environ["SPA_MODE"] = os.environ.get("E2E_SPA_MODE", "dev")
+    # APP_BASE_URL must match the origin the browser POSTs from (CSRF Origin
+    # check + the CSP's derived ws token). In dev the browser talks to the Vite
+    # proxy on :5173; in prod FastAPI serves the bundle directly on :8000, so
+    # the browser (and the WS token) must agree on :8000 there instead.
+    os.environ["APP_BASE_URL"] = (
+        "http://localhost:8000" if os.environ["SPA_MODE"] == "prod" else "http://localhost:5173"
+    )
 
     import uvicorn
     from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]

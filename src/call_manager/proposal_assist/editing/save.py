@@ -31,6 +31,7 @@ from call_manager.proposal_assist.citations.audit import validate_citations_dete
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import empty_ledger, load_ledger
 from call_manager.proposal_assist.citations.markers import find_bare_markers
+from call_manager.proposal_assist.collab.state import raise_if_collab_severed
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -179,6 +180,13 @@ def save_section(
     acquire_commit_mutex(session, workspace.id)
 
     artifact = Artifact(artifact)  # normalize a stringly-typed caller
+
+    # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the route's
+    # pre-mutex severance guard can race enable-on-touch — the flip may have
+    # committed while we blocked on the mutex. Abort writing NOTHING if so; the
+    # route maps CollabSeveranceConflict to the same 409 as its pre-mutex guard.
+    # No-op when the flag is off / kill-switch armed (flag-off is byte-for-byte).
+    raise_if_collab_severed(session, workspace_id=workspace.id, artifact=str(artifact))
 
     # Spec-lock guard: a lock may have committed while we waited on the mutex,
     # so re-read the row under the lock before deciding. Gated on SPEC so the

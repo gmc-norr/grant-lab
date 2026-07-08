@@ -17,7 +17,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from call_manager.web.api.errors import envelope_dict, is_api_path
 
 
-def build_csp(dev: bool = False) -> str:
+def build_csp(dev: bool = False, ws_origin: str | None = None) -> str:
     """Content-Security-Policy for the dashboard.
 
     ``script-src 'self'`` (no ``'unsafe-inline'``) is the high-value line —
@@ -32,9 +32,20 @@ def build_csp(dev: bool = False) -> str:
     ``prod`` and ``disabled`` keep the strict ``script-src 'self'`` /
     ``connect-src 'self'`` policy (asserted by tests). Self-hosted, no-CDN,
     no-``unsafe-inline``-in-prod is itself a supply-chain control.
+
+    ``ws_origin`` (non-dev only) adds a single, narrow same-origin WebSocket
+    token — e.g. ``wss://grants.example.org`` — to ``connect-src``. It's
+    required for the Yjs collaboration socket: ``connect-src 'self'`` is not
+    reliably treated as covering ``ws:``/``wss:`` across browser engines.
+    Ignored when ``dev=True``, whose broad ``ws:`` token already covers it.
     """
     script = "script-src 'self'"
     connect = "connect-src 'self'"
+    if ws_origin:
+        # 3b-5d.D4: narrow same-origin allowance for the Yjs WebSocket
+        # (connect-src 'self' does not reliably cover ws:/wss: across engines).
+        # Exactly ONE origin, derived from APP_BASE_URL — never a bare scheme.
+        connect = f"connect-src 'self' {ws_origin}"
     if dev:
         script = "script-src 'self' 'unsafe-inline'"
         connect = "connect-src 'self' ws: http://localhost:5173"

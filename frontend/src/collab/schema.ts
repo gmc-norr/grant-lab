@@ -1,4 +1,11 @@
-import { Node, Mark, mergeAttributes, type Extensions } from "@tiptap/core";
+import {
+  Node,
+  Mark,
+  mergeAttributes,
+  textblockTypeInputRule,
+  wrappingInputRule,
+  type Extensions,
+} from "@tiptap/core";
 
 // NOTE on required-vs-nullable attrs (intrinsic Tiptap limitation):
 // collab-schema.mjs declares citation.citekey/ev_id, image.src and link.href as
@@ -23,6 +30,16 @@ const Heading = Node.create({
   addAttributes: () => ({ level: { default: 1 } }),
   parseHTML: () => [1, 2, 3, 4, 5, 6].map((level) => ({ tag: `h${level}`, attrs: { level } })),
   renderHTML: ({ node, HTMLAttributes }) => [`h${node.attrs.level}`, mergeAttributes(HTMLAttributes), 0],
+  addInputRules() {
+    // "# " .. "###### " at line start → heading of that level (3b-5d.D4 floor)
+    return [1, 2, 3, 4, 5, 6].map((level) =>
+      textblockTypeInputRule({
+        find: new RegExp(`^(#{${level}})\\s$`),
+        type: this.type,
+        getAttributes: { level },
+      })
+    );
+  },
 });
 const Blockquote = Node.create({
   name: "blockquote", group: "block", content: "block+", defining: true,
@@ -48,11 +65,23 @@ const Image = Node.create({
 const BulletList = Node.create({
   name: "bullet_list", group: "block", content: "list_item+",
   parseHTML: () => [{ tag: "ul" }], renderHTML: ({ HTMLAttributes }) => ["ul", mergeAttributes(HTMLAttributes), 0],
+  addInputRules() {
+    return [wrappingInputRule({ find: /^\s*([-+*])\s$/, type: this.type })];
+  },
 });
 const OrderedList = Node.create({
   name: "ordered_list", group: "block", content: "list_item+",
   addAttributes: () => ({ order: { default: 1 } }),
   parseHTML: () => [{ tag: "ol" }], renderHTML: ({ HTMLAttributes }) => ["ol", mergeAttributes(HTMLAttributes), 0],
+  addInputRules() {
+    return [
+      wrappingInputRule({
+        find: /^(\d+)\.\s$/,
+        type: this.type,
+        getAttributes: (match) => ({ order: +match[1] }),
+      }),
+    ];
+  },
 });
 const ListItem = Node.create({
   name: "list_item", content: "paragraph block*", defining: true,
@@ -71,11 +100,24 @@ const Link = Mark.create({
   addAttributes: () => ({ href: { default: null }, title: { default: null } }),
   parseHTML: () => [{ tag: "a[href]" }], renderHTML: ({ HTMLAttributes }) => ["a", mergeAttributes(HTMLAttributes), 0],
 });
-const Em = Mark.create({ name: "em", parseHTML: () => [{ tag: "em" }, { tag: "i" }], renderHTML: () => ["em", 0] });
-const Strong = Mark.create({ name: "strong", parseHTML: () => [{ tag: "strong" }, { tag: "b" }], renderHTML: () => ["strong", 0] });
+const Em = Mark.create({
+  name: "em", parseHTML: () => [{ tag: "em" }, { tag: "i" }], renderHTML: () => ["em", 0],
+  addKeyboardShortcuts() {
+    return { "Mod-i": () => this.editor.commands.toggleMark(this.name) };
+  },
+});
+const Strong = Mark.create({
+  name: "strong", parseHTML: () => [{ tag: "strong" }, { tag: "b" }], renderHTML: () => ["strong", 0],
+  addKeyboardShortcuts() {
+    return { "Mod-b": () => this.editor.commands.toggleMark(this.name) };
+  },
+});
 const Code = Mark.create({ name: "code", code: true, parseHTML: () => [{ tag: "code" }], renderHTML: () => ["code", 0] });
 const Strikethrough = Mark.create({
   name: "strikethrough", parseHTML: () => [{ tag: "s" }, { tag: "strike" }, { tag: "del" }], renderHTML: () => ["s", 0],
+  addKeyboardShortcuts() {
+    return { "Mod-Shift-s": () => this.editor.commands.toggleMark(this.name) };
+  },
 });
 
 export const collabExtensions: Extensions = [
