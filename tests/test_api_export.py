@@ -1,11 +1,35 @@
 """JSON /api Markdown export endpoints (Cockpit Slice F)."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from call_manager.db.models import Reference, User, Workspace, WorkspaceViewer
 from call_manager.main import create_app
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from call_manager.proposal_assist.collab import state, store
+from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.paths import workspace_repo_dir
+
+
+@pytest.fixture(autouse=True)
+def _reset_kill_switch():
+    yield
+    state.set_kill_switch(False)
+
+
+def _append_authored_room_edit(pg_session_factory, ws_id, actor_id, md):
+    """Enable draft collab and append ONE authored Yjs update whose content
+    diverges from disk (mirrors test_collab_annotations_canonical mechanics)."""
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        s.commit()
+    doc = pm_json_to_ydoc(markdown_to_pm(md))
+    with pg_session_factory() as s:
+        store.append_update(
+            s, workspace_id=ws_id, artifact="draft", actor_id=actor_id, update=doc.get_update()
+        )
+        s.commit()
 
 
 def _app(monkeypatch, pg_url, tmp_path):
@@ -104,6 +128,53 @@ def test_export_composed_corrupt_ledger_409(monkeypatch, pg_url, pg_session_fact
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export-composed.md")
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "citation_ledger_invalid"
+
+
+DISK_MD = "# Draft\n\nhello world\n"
+ROOM_MD = "# Draft\n\nlive room content.\n"
+
+
+def test_export_markdown_reflects_live_room_when_collab_enabled(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Item 1: with draft collab enabled + an AUTHORED room edit diverging from
+    disk, the raw export serves the LIVE room projection (an un-checkpointed tail
+    must not be omitted), not the stale disk bytes."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(pg_session_factory)
+    _write_repo(tmp_path, ws_id, proposal=DISK_MD)
+    _append_authored_room_edit(pg_session_factory, ws_id, owner_id, ROOM_MD)
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
+    assert r.status_code == 200, r.text
+    assert "live room content." in r.text  # from the ROOM
+    assert "hello world" not in r.text  # NOT the stale disk doc
+
+
+def test_export_composed_reflects_live_room_when_collab_enabled(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Item 1: the composed export composes from the same canonical room text."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(pg_session_factory)
+    _write_repo(tmp_path, ws_id, proposal=DISK_MD, citations=dump_ledger(empty_ledger()))
+    _append_authored_room_edit(pg_session_factory, ws_id, owner_id, ROOM_MD)
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export-composed.md")
+    assert r.status_code == 200, r.text
+    assert "live room content." in r.text
+    assert "hello world" not in r.text
+
+
+def test_export_markdown_byte_identical_to_disk_when_disabled(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Item 1 regression: with collab OFF the raw export is the disk bytes,
+    byte-for-byte (read_bytes, no decode/re-encode round-trip)."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(pg_session_factory)
+    repo = _write_repo(tmp_path, ws_id, proposal=DISK_MD)
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
+    assert r.status_code == 200, r.text
+    assert r.content == (repo / "proposal.md").read_bytes()
 
 
 def test_export_composed_blocked_lists_refs(monkeypatch, pg_url, pg_session_factory, tmp_path):

@@ -31,7 +31,7 @@ def export_markdown(
     settings = request.app.state.settings
     with request.app.state.session_factory() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
-        data = get_markdown_export(ws, settings.workspaces_dir)
+        data = get_markdown_export(ws, settings.workspaces_dir, session=session)
         title = safe_title(ws.title)
     if data is None:
         return api_error(404, "not_found", "no draft to export yet")
