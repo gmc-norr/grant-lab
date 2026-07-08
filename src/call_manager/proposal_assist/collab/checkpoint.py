@@ -60,8 +60,17 @@ def checkpoint_artifact(
     workspaces_dir,
     extra_files: dict[str, str] | None = None,
     record_version: bool = True,
+    record_event: bool | None = None,
 ) -> CheckpointResult:
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
+
+    # None means "follow record_version" (the default/existing behavior for
+    # every pre-existing call site, byte-for-byte). A kernel op that emits its
+    # OWN same-transaction user-action WorkspaceEvent (e.g. the Claims-tab
+    # insert's user_citation_insert) passes record_event=False to keep the
+    # ArtifactVersion (provenance) while suppressing the redundant
+    # collab_checkpoint feed row — one click, one feed row.
+    effective_event = record_version if record_event is None else record_event
 
     # Acquire the per-workspace commit mutex FIRST, so the whole
     # read -> decide -> commit -> advance sequence below is serialized against
@@ -126,6 +135,7 @@ def checkpoint_artifact(
                 message=f"collab checkpoint: {artifact}",
             )
         )
+    if changed and effective_event:
         session.add(
             WorkspaceEvent(
                 workspace_id=workspace_id,

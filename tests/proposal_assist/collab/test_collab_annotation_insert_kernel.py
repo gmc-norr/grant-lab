@@ -4,7 +4,7 @@ the marker lands in the LIVE room + ledger + checkpoint; annotation flips to
 
 import pytest
 
-from call_manager.db.models import UserClaimAnnotation, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, UserClaimAnnotation, WorkspaceEvent
 from call_manager.proposal_assist.collab import state
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -47,6 +47,15 @@ def test_enabled_insert_lands_in_room_and_flips_annotation(
             for e in s.query(WorkspaceEvent).filter_by(workspace_id=wid).all()
         ]
         assert "user_citation_insert" in ev_kinds
+        # single feed row per click (final-review Minor 5): the checkpoint's own
+        # collab_checkpoint event must be suppressed here — the ArtifactVersion
+        # (provenance) still lands, just not a second WorkspaceEvent/feed row.
+        assert ev_kinds.count("user_citation_insert") == 1
+        assert ev_kinds.count("collab_checkpoint") == 0
+        version = s.query(ArtifactVersion).filter_by(
+            workspace_id=wid, commit_sha=body["commit_sha"]
+        ).one_or_none()
+        assert version is not None
         # ledger row carries the annotation's claim context (bespoke core, not
         # the generic citation row shape)
         import json
