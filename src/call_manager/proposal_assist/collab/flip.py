@@ -31,23 +31,38 @@ logger = logging.getLogger(__name__)
 _FLIP_MUTEX_TIMEOUT_SECONDS = 5
 
 # A pipe-table-shaped row: a line with >=2 pipes separating cell-ish content
-# (covers header, |---| delimiter and body rows, with or without a leading
-# pipe). Conservative ON PURPOSE: a false positive only DELAYS enablement
-# (the artifact stays on the CM6 editor); a false negative flattens a table
-# on the first room round-trip. Fenced code blocks are excluded by the scanner.
+# (bordered header/body rows, with or without a leading pipe). Does NOT match
+# borderless 2-column rows (single interior pipe) — those are caught by
+# _DELIMITER_ROW below. Conservative ON PURPOSE: a false positive only DELAYS
+# enablement (the artifact stays on the CM6 editor); a false negative flattens
+# a table on the first room round-trip.
 _TABLE_ROW = re.compile(r"^\s*\|?[^|\n]*\|[^|\n]*\|")
+
+# A GFM delimiter row (`---- | -----`, `:--- | ---:`, `|---|---|`): the whole
+# line is dash-cells (>=3 dashes, optional alignment colons) joined by >=1 pipe.
+# This is the unambiguous table signature that catches BORDERLESS 2-column
+# tables, whose header/body rows have only a single interior pipe (post-flip
+# hardening; D4 final-review Minor 3). Prose-safe: real prose lines never
+# consist solely of dashes and pipes.
+_DELIMITER_ROW = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
 
 def has_pipe_tables(md: str) -> bool:
     in_fence = False
     for line in md.splitlines():
         stripped = line.lstrip()
+        # NOTE: generic fence toggle — the closing fence's character/length is
+        # not matched to the opener (CommonMark would). Mismatches err toward
+        # treating more lines as fenced, i.e. false NEGATIVES are possible only
+        # for a table following an unclosed pseudo-fence; accepted (D4
+        # final-review Minor 6) — indented-code pseudo-fences are exotic in
+        # proposal prose.
         if stripped.startswith("```") or stripped.startswith("~~~"):
             in_fence = not in_fence
             continue
         if in_fence:
             continue
-        if _TABLE_ROW.match(line):
+        if _TABLE_ROW.match(line) or _DELIMITER_ROW.match(line):
             return True
     return False
 

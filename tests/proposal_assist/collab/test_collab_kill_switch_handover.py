@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pycrdt import Doc
 
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.collab import handover, state, store
 from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
@@ -29,11 +29,11 @@ def _init_repo(repo: Path, content: str) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
 
 
-def _seed_room_edit(pg_session_factory, wid, actor_id, md) -> Doc:
+def _seed_room_edit(pg_session_factory, wid, actor_id, md, *, artifact="draft") -> Doc:
     doc = pm_json_to_ydoc(markdown_to_pm(md))
     with pg_session_factory() as s:
         store.append_update(
-            s, workspace_id=wid, artifact="draft", actor_id=actor_id, update=doc.get_update()
+            s, workspace_id=wid, artifact=artifact, actor_id=actor_id, update=doc.get_update()
         )
         s.commit()
     return doc
@@ -51,8 +51,37 @@ def _setup(pg_session_factory, tmp_path, email):
     return wid, oid, repo
 
 
-def _log_len(s, wid):
-    return len(store.load_rows(s, workspace_id=wid, artifact="draft"))
+def _init_repo_with_spec(repo: Path, draft_content: str, spec_content: str) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(args, cwd=repo, check=True)
+    (repo / PROPOSAL_FILENAME).write_text(draft_content)
+    (repo / SPEC_FILENAME).write_text(spec_content)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+
+def _setup_spec(pg_session_factory, tmp_path, email):
+    """Spec twin of _setup: the repo carries BOTH artifacts' files (like a real
+    workspace does) so a spec-only drain's cross-artifact isolation is a real
+    assertion, not vacuously true."""
+    with pg_session_factory() as s:
+        o = make_user(s, email=email)
+        ws = make_workspace(s, owner=o)
+        state.enable_collab(s, workspace_id=ws.id, artifact="spec")
+        s.commit()
+        wid, oid = ws.id, o.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo_with_spec(repo, "## Background\noriginal draft.\n", "## Approach\noriginal spec.\n")
+    return wid, oid, repo
+
+
+def _log_len(s, wid, *, artifact="draft"):
+    return len(store.load_rows(s, workspace_id=wid, artifact=artifact))
 
 
 def test_enter_direction_small_tail_drained_and_truncated(pg_session_factory, tmp_path):
@@ -144,3 +173,29 @@ def test_repoless_log_is_never_truncated(pg_session_factory, tmp_path):
     assert handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path)) == 0
     with pg_session_factory() as s:
         assert _log_len(s, wid) == 1
+
+
+def test_handover_drains_and_truncates_spec_artifact(pg_session_factory, tmp_path):
+    """Spec twin of test_enter_direction_small_tail_drained_and_truncated: the
+    drain-then-truncate handover is per-(workspace, artifact) — Artifact.SPEC
+    checkpoints to proposal-spec.md via filename_for, not proposal.md. A
+    spec-only uncheckpointed tail is drained and truncated exactly like the
+    draft path, while the co-located draft artifact in the SAME workspace/repo
+    is left completely untouched (cross-artifact isolation — the checkpoint
+    write must never clobber the sibling artifact's file or log)."""
+    wid, oid, repo = _setup_spec(pg_session_factory, tmp_path, "ho5@ki.se")
+    doc = _seed_room_edit(
+        pg_session_factory, wid, oid, "## Approach\n\nlive spec edit.\n", artifact="spec"
+    )
+    draft_before = (repo / PROPOSAL_FILENAME).read_text()
+
+    n = handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path))
+    assert n == 1
+    assert (repo / SPEC_FILENAME).read_text() == serialize_doc_to_markdown(doc)
+    with pg_session_factory() as s:
+        assert _log_len(s, wid, artifact="spec") == 0
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="spec") == 0
+    # cross-artifact isolation: the draft file/log are untouched by the spec-only drain
+    assert (repo / PROPOSAL_FILENAME).read_text() == draft_before
+    with pg_session_factory() as s:
+        assert _log_len(s, wid, artifact="draft") == 0

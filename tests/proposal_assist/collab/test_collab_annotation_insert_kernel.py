@@ -4,7 +4,7 @@ the marker lands in the LIVE room + ledger + checkpoint; annotation flips to
 
 import pytest
 
-from call_manager.db.models import UserClaimAnnotation, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, UserClaimAnnotation, WorkspaceEvent
 from call_manager.proposal_assist.collab import state
 from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -47,6 +47,15 @@ def test_enabled_insert_lands_in_room_and_flips_annotation(
             for e in s.query(WorkspaceEvent).filter_by(workspace_id=wid).all()
         ]
         assert "user_citation_insert" in ev_kinds
+        # single feed row per click (final-review Minor 5): the checkpoint's own
+        # collab_checkpoint event must be suppressed here — the ArtifactVersion
+        # (provenance) still lands, just not a second WorkspaceEvent/feed row.
+        assert ev_kinds.count("user_citation_insert") == 1
+        assert ev_kinds.count("collab_checkpoint") == 0
+        version = s.query(ArtifactVersion).filter_by(
+            workspace_id=wid, commit_sha=body["commit_sha"]
+        ).one_or_none()
+        assert version is not None
         # ledger row carries the annotation's claim context (bespoke core, not
         # the generic citation row shape)
         import json
@@ -116,6 +125,34 @@ def test_same_evidence_elsewhere_still_inserts_here(
             repo_dir=workspace_repo_dir(str(tmp_path), wid),
         )
     assert f"ev:{ev1}" in canon and f"ev:{body2['ev_id']}" in canon  # BOTH markers live
+
+
+def test_indexerror_maps_to_409_and_does_not_burn_annotation(
+    client_authed_owner, current_user, pg_session_factory, tmp_path, _app, monkeypatch
+):
+    """Sibling parity (workspaces.py's post_citation kernel branch mapping
+    IndexError -> 409): a bare IndexError surfacing from
+    insert_annotation_via_kernel (e.g. a peer's concurrent edit shrank the
+    section map mid-insert) must map to a 409, not an unhandled 500 — and the
+    annotation must NOT be burned to a terminal status by a request that never
+    actually inserted anything."""
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws, ann_id, repo = _seed_supported(s, tmp_path, current_user)
+        state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid = ws.id
+
+    import call_manager.web.api.annotations as annotations_mod
+
+    async def _boom(**kwargs):
+        raise IndexError("section map shrank underneath the annotation")
+
+    monkeypatch.setattr(annotations_mod, "insert_annotation_via_kernel", _boom)
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/annotations/{ann_id}/insert")
+    assert r.status_code == 409
+    with pg_session_factory() as s:
+        assert s.get(UserClaimAnnotation, ann_id).status == "open"  # not burned
 
 
 def test_disabled_insert_takes_git_path(  # regression pin for the fork

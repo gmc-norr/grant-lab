@@ -508,6 +508,13 @@ def apply_annotation_insert_to_room(
     cp = checkpoint_artifact(
         session, workspace_id=workspace_id, artifact="draft", workspaces_dir=workspaces_dir,
         extra_files={CITATIONS_FILENAME: dump_ledger(outcome.new_ledger)},
+        # Suppress the checkpoint's own collab_checkpoint WorkspaceEvent (final-
+        # review Minor 5): this op emits its OWN user_citation_insert event just
+        # below, so recording both would render two feed rows ("saved a
+        # version" + "added a citation") for one click. The ArtifactVersion
+        # still lands (record_version stays True) — only the redundant feed
+        # row is dropped.
+        record_event=False,
     )
 
     # Provenance parity with insert.py step 10 (deliberately NO ArtifactVersion

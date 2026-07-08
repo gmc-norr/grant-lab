@@ -146,6 +146,46 @@ def test_draft_save_severs_when_flag_flips_after_guard(
     assert (repo / "proposal.md").read_text() == DOC  # nothing written
 
 
+def test_spec_save_severs_when_flag_flips_after_guard(
+    client_authed_owner, current_user, pg_session_factory, tmp_path, _app, monkeypatch
+):
+    """Spec twin of test_draft_save_severs_when_flag_flips_after_guard (D4 final-
+    review carry): the flag is OFF at the route's pre-mutex severance guard, but
+    enable-on-touch flips SPEC collab on BEFORE save_section's under-mutex
+    recheck. The save must abort with the SAME 409 and write NOTHING to git —
+    proving the recheck is a real second line of defense past the guard on the
+    spec artifact too, not just draft."""
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        ws, repo = _seed(s, tmp_path, current_user, with_spec=True)  # flag OFF at seed
+        s.commit()
+        wid = ws.id
+
+    import call_manager.web.api.workspaces as workspaces_mod
+
+    real_save_section = workspaces_mod.save_section
+
+    def _flip_then_save(*args, **kwargs):
+        # Simulate enable-on-touch committing on another connection AFTER the
+        # route's pre-mutex guard read False but before save_section's recheck.
+        with _app.state.session_factory() as s2:
+            state.enable_collab(s2, workspace_id=wid, artifact="spec")
+            s2.commit()
+        return real_save_section(*args, **kwargs)
+
+    monkeypatch.setattr(workspaces_mod, "save_section", _flip_then_save)
+    spec_before = (repo / "proposal-spec.md").read_text()
+    head_before = current_head(repo)
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/spec/sections/1",
+        json=_save_payload(repo, fname="proposal-spec.md", content="## Approach\nnew.\n"),
+    )
+    assert r.status_code == 409
+    assert "live editor" in r.json()["error"]["message"]
+    assert current_head(repo) == head_before  # git HEAD unchanged
+    assert (repo / "proposal-spec.md").read_text() == spec_before  # nothing written
+
+
 def test_post_citation_git_path_severed_when_flag_flips_after_guard(
     pg_session_factory, tmp_path
 ):
