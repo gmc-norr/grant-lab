@@ -312,9 +312,10 @@ def _list_items(tokens: list[Any], i: int, stop_type: str) -> tuple[list[dict], 
         children, j = _blocks_until(tokens, i + 1, "list_item_close")
         # list_item content is "paragraph block*": a non-paragraph first block
         # (fence-first, quote-first, table-first, or an empty item) fails
-        # node.check(). Synthesize an empty leading paragraph — the serializer
-        # emits it as nothing visible, and a re-parse re-synthesizes it, so the
-        # round-trip stays idempotent (spec §B).
+        # node.check(). Synthesize an empty leading paragraph; the serializer
+        # DROPS it again when more blocks follow (Task 3 companion — emitting
+        # it would blank-line-break the item and the block would escape the
+        # list on re-parse), so the round-trip stays idempotent (spec §B).
         if not children or children[0]["type"] != "paragraph":
             children.insert(0, {"type": "paragraph"})
         items.append({"type": "list_item", "content": children})
@@ -497,7 +498,26 @@ def test_table_in_blockquote_and_list_roundtrips():
 
 
 def test_synthesized_leading_paragraph_roundtrips():
-    once = pm_to_markdown(markdown_to_pm("- > q\n"))
+    # Parse synthesizes the leading empty paragraph (Task 2); the serializer
+    # drops it again so the REAL first block occupies the marker line — the
+    # round-trip is idempotent for all non-paragraph-first item shapes.
+    for md, marker_line in [
+        ("- > q\n", "- > q"),
+        ("- ```\n  x\n  ```\n", "- ```"),
+        # marker line for the table case is locked by the T5 golden instead —
+        # it depends on how markdown-it parses GFM-tables-in-list-items:
+        ("- | a | b |\n  | --- | --- |\n", None),
+    ]:
+        once = pm_to_markdown(markdown_to_pm(md))
+        twice = pm_to_markdown(markdown_to_pm(once))
+        assert once == twice, md
+        assert markdown_to_pm(once) == markdown_to_pm(twice), md
+        if marker_line is not None:
+            assert once.splitlines()[0] == marker_line, md
+
+
+def test_empty_only_item_keeps_its_paragraph_and_roundtrips():
+    once = pm_to_markdown(markdown_to_pm("- a\n-\n- b\n"))
     twice = pm_to_markdown(markdown_to_pm(once))
     assert once == twice
     assert markdown_to_pm(once) == markdown_to_pm(twice)
@@ -528,7 +548,29 @@ Expected: new tests FAIL — `pm_to_markdown` drops the table (`_serialize_block
         return _serialize_table(node)
 ```
 
-(c) Add the serializer functions after `_serialize_list`:
+(c) **Serializer companion to Task 2's synthesis** — at the TOP of `_serialize_item_blocks` (before the loop), drop a leading empty paragraph when more blocks follow:
+
+```python
+    # Companion to the parser's leading-paragraph synthesis (spec §B): an EMPTY
+    # leading paragraph followed by more blocks is dropped, so the real first
+    # block occupies the marker line ("- > q", "- | a | b |"). Emitting it
+    # would place a blank line between the list marker and the first block —
+    # CommonMark allows at most ONE blank line at an item start, so the item
+    # would terminate empty and the following block would ESCAPE the list on
+    # re-parse. Dropping it here + re-synthesizing on parse = idempotent.
+    # (An item that is ONLY an empty paragraph keeps it: "- " re-parses as an
+    # empty item.)
+    if (
+        len(blocks) > 1
+        and blocks[0]["type"] == "paragraph"
+        and not blocks[0].get("content")
+    ):
+        blocks = blocks[1:]
+```
+
+Extend `_serialize_item_blocks`'s docstring with one sentence naming this rule.
+
+(d) Add the serializer functions after `_serialize_list`:
 
 ```python
 def _cell_text(cell: dict) -> str:
@@ -842,7 +884,7 @@ git commit -m "feat(collab): Tiptap strict-GFM table nodes + schema-twin parity 
 
 **Interfaces:**
 - Consumes: Tasks 1–4 (Python parse/serialize + JS schema twins).
-- Produces: 9 new corpus fixtures present BYTE-IDENTICALLY in both `fixtures.py` `CORPUS` and the gen script's `CORPUS`; goldens regenerated and committed. Gate: the two corpora may never diverge (`test_js_and_python_corpora_match`).
+- Produces: 10 new corpus fixtures present BYTE-IDENTICALLY in both `fixtures.py` `CORPUS` and the gen script's `CORPUS` (16 existing + 10 = 26 goldens); goldens regenerated and committed. Gate: the two corpora may never diverge (`test_js_and_python_corpora_match`).
 
 - [ ] **Step 1: Add fixtures to `fixtures.py` `CORPUS`** (append before the closing bracket):
 
@@ -904,7 +946,7 @@ md.core.ruler.push('wrap_table_cells', (state) => {
   tbody:        { ignore: true },
 ```
 
-(c) append the same 9 fixtures to the script's `CORPUS` (byte-identical strings; JS single-quoted, so `\\|` in the JS source = backslash-pipe, same bytes as Python's `"\\|"`):
+(c) append the same 10 fixtures to the script's `CORPUS` (byte-identical strings; JS single-quoted, so `\\|` in the JS source = backslash-pipe, same bytes as Python's `"\\|"`):
 
 ```js
   // --- tables (2026-07-08 collab-tables spec §D) --- //
