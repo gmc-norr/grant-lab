@@ -175,6 +175,28 @@ def test_repoless_log_is_never_truncated(pg_session_factory, tmp_path):
         assert _log_len(s, wid) == 1
 
 
+def test_handover_drains_table_to_bordered_gfm(pg_session_factory, tmp_path):
+    """Tables must survive the drain-then-truncate handover exactly like prose:
+    the room's table content is checkpointed to git as bordered GFM (spec §5),
+    and the committed markdown re-parses back into a table node — the drain ->
+    CM6 -> re-hydrate loop is lossless for tables."""
+    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho-tbl@ki.se")
+    table_md = (
+        "## Intro\n\nprose.\n\n"
+        "## Budget\n\n| Item | Cost |\n| --- | --- |\n| Staff | 100 |\n"
+    )
+    doc = _seed_room_edit(pg_session_factory, wid, oid, table_md)
+
+    n = handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path))
+    assert n == 1
+    committed = (repo / PROPOSAL_FILENAME).read_text()
+    assert committed == serialize_doc_to_markdown(doc)
+    assert "| Item | Cost |" in committed   # bordered GFM (spec §5)
+    assert "| --- | --- |" in committed
+    reparsed = markdown_to_pm(committed)
+    assert any(node.get("type") == "table" for node in reparsed["content"])
+
+
 def test_handover_drains_and_truncates_spec_artifact(pg_session_factory, tmp_path):
     """Spec twin of test_enter_direction_small_tail_drained_and_truncated: the
     drain-then-truncate handover is per-(workspace, artifact) — Artifact.SPEC
