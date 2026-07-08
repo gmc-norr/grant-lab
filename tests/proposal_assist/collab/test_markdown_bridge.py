@@ -94,3 +94,83 @@ def test_production_layout_hydrates():
     assert pm_to_markdown(markdown_to_pm(out)) == out  # idempotent
     assert "[@x9]" in out  # bare marker literal
     assert [s.heading for s in split_sections(out) if s.heading] == ["Background", "Aims"]
+
+
+# --- tables: parse (2026-07-08 spec §B) ------------------------------------ #
+
+
+def test_table_parses_to_table_nodes():
+    md = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+    doc = markdown_to_pm(md)
+    table = doc["content"][0]
+    assert table["type"] == "table"
+    rows = table["content"]
+    assert [c["type"] for c in rows[0]["content"]] == ["table_header", "table_header"]
+    assert [c["type"] for c in rows[1]["content"]] == ["table_cell", "table_cell"]
+    cell = rows[1]["content"][0]
+    # canonical parse-output attrs: explicit spans, colwidth key OMITTED
+    assert cell["attrs"] == {"colspan": 1, "rowspan": 1}
+    para = cell["content"][0]
+    assert para["type"] == "paragraph"
+    assert para["content"][0]["text"] == "1"
+
+
+def test_table_cell_inline_content_parses():
+    md = "| h |\n| --- |\n| *em* and `code` |\n"
+    doc = markdown_to_pm(md)
+    body_cell = doc["content"][0]["content"][1]["content"][0]
+    inline = body_cell["content"][0]["content"]
+    assert inline[0]["marks"][0]["type"] == "em"
+    assert any(any(m["type"] == "code" for m in n.get("marks", [])) for n in inline)
+
+
+def test_alignment_colons_are_dropped():
+    md = "| a | b |\n| :--- | ---: |\n| 1 | 2 |\n"
+    doc = markdown_to_pm(md)
+    for row in doc["content"][0]["content"]:
+        for cell in row["content"]:
+            assert set(cell["attrs"]) == {"colspan", "rowspan"}
+
+
+def test_escaped_pipe_in_cell_is_literal():
+    md = "| a \\| b |\n| --- |\n"
+    doc = markdown_to_pm(md)
+    header = doc["content"][0]["content"][0]["content"][0]
+    assert header["content"][0]["content"][0]["text"] == "a | b"
+
+
+def test_pipe_text_without_delimiter_stays_paragraph():
+    md = "a | b | c\n"
+    doc = markdown_to_pm(md)
+    assert doc["content"][0]["type"] == "paragraph"
+
+
+# --- list-item leading-paragraph synthesis (spec §B, pre-existing crash) --- #
+
+
+def test_fence_first_list_item_no_longer_crashes():
+    doc = markdown_to_pm("- ```\n  x\n  ```\n")
+    item = doc["content"][0]["content"][0]
+    assert [b["type"] for b in item["content"]] == ["paragraph", "code_block"]
+
+
+def test_quote_first_list_item_no_longer_crashes():
+    doc = markdown_to_pm("- > q\n")
+    item = doc["content"][0]["content"][0]
+    assert [b["type"] for b in item["content"]] == ["paragraph", "blockquote"]
+
+
+def test_empty_list_item_gets_a_paragraph():
+    doc = markdown_to_pm("- a\n-\n- b\n")
+    for item in doc["content"][0]["content"]:
+        assert item["content"][0]["type"] == "paragraph"
+
+
+def test_table_first_list_item_synthesizes_paragraph():
+    md = "- | a | b |\n  | --- | --- |\n"
+    doc = markdown_to_pm(md)
+    item = doc["content"][0]["content"][0]
+    types = [b["type"] for b in item["content"]]
+    # if markdown-it treats the pipe text as a table inside the item, synthesis
+    # kicks in; the invariant under test is "first child is a paragraph".
+    assert types[0] == "paragraph"

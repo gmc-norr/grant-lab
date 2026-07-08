@@ -3,7 +3,7 @@
 Two pure functions:
 
 - :func:`markdown_to_pm` parses markdown with ``markdown-it-py`` (CommonMark +
-  strikethrough) and walks the token stream into ProseMirror-JSON for the
+  strikethrough + GFM tables) and walks the token stream into ProseMirror-JSON for the
   constrained :data:`SCHEMA`. A custom inline rule recognises the FULL citation
   marker (``[@key]<!-- ev:ev-… -->``) and emits a ``citation`` atom node, so the
   marker never survives as text. A BARE ``[@x9]`` (no ev comment) is left as
@@ -88,7 +88,7 @@ def _citation_rule(state: StateInline, silent: bool) -> bool:
 
 
 def _make_parser() -> MarkdownIt:
-    md = MarkdownIt("commonmark").enable("strikethrough")
+    md = MarkdownIt("commonmark").enable(["strikethrough", "table"])
     # Register before "link": both trigger on "[", and we must win so the full
     # marker is consumed as a single citation atom rather than a link attempt
     # followed by an html_inline comment.
@@ -226,6 +226,9 @@ def _block_to_pm(tokens: list[Any], i: int) -> tuple[dict | None, int]:
     if ttype == "hr":
         return {"type": "horizontal_rule"}, i + 1
 
+    if ttype == "table_open":
+        return _table_to_pm(tokens, i)
+
     # INTENTIONAL DROP. Any block token we don't model — notably ``html_block``
     # (a raw block of HTML, including block-level HTML comments) — is dropped on
     # purpose: the constrained schema models no raw-HTML node, so there is
@@ -251,9 +254,57 @@ def _list_items(tokens: list[Any], i: int, stop_type: str) -> tuple[list[dict], 
     while i < len(tokens) and tokens[i].type != stop_type:
         assert tokens[i].type == "list_item_open", tokens[i].type
         children, j = _blocks_until(tokens, i + 1, "list_item_close")
+        # list_item content is "paragraph block*": a non-paragraph first block
+        # (fence-first, quote-first, table-first, or an empty item) fails
+        # node.check(). Synthesize an empty leading paragraph; the serializer
+        # DROPS it again when more blocks follow (Task 3 companion — emitting
+        # it would blank-line-break the item and the block would escape the
+        # list on re-parse), so the round-trip stays idempotent (spec §B).
+        if not children or children[0]["type"] != "paragraph":
+            children.insert(0, {"type": "paragraph"})
         items.append({"type": "list_item", "content": children})
         i = j + 1  # skip the list_item_close
     return items, i
+
+
+def _table_to_pm(tokens: list[Any], i: int) -> tuple[dict, int]:
+    """Consume ``table_open`` .. ``table_close`` into a strict-GFM table node.
+
+    markdown-it emits thead/tbody wrappers with no PM counterpart — rows
+    flatten directly into the table. Cells carry the CANONICAL attr form
+    (explicit colspan/rowspan = 1, NO colwidth key — spec §B): the hand-built
+    dict IS the output, schema defaults are never materialized into it, and
+    the Yjs encoding omits nulls, so this exact shape is what ydoc_to_pm_json
+    reproduces. Alignment styles on th/td are dropped on purpose (spec §2.1).
+    """
+    rows: list[dict] = []
+    i += 1  # skip table_open
+    while tokens[i].type != "table_close":
+        t = tokens[i].type
+        if t in ("thead_open", "thead_close", "tbody_open", "tbody_close"):
+            i += 1
+            continue
+        assert t == "tr_open", t
+        cells: list[dict] = []
+        i += 1
+        while tokens[i].type != "tr_close":
+            cell_type = "table_header" if tokens[i].type == "th_open" else "table_cell"
+            inline = tokens[i + 1]
+            content = _inline_to_pm(inline.children or [])
+            para: dict = {"type": "paragraph"}
+            if content:
+                para["content"] = content
+            cells.append(
+                {
+                    "type": cell_type,
+                    "attrs": {"colspan": 1, "rowspan": 1},
+                    "content": [para],
+                }
+            )
+            i += 3  # {th,td}_open, inline, {th,td}_close
+        rows.append({"type": "table_row", "content": cells})
+        i += 1  # skip tr_close
+    return {"type": "table", "content": rows}, i + 1  # skip table_close
 
 
 def markdown_to_pm(md: str) -> dict:
