@@ -89,8 +89,13 @@ def test_draft_returns_server_split_sections_and_head(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
+    # The fixture is deliberately in the ProseMirror-canonical ("loose") form
+    # (blank line after the heading) post-3b-5d.D4: the first GET enable-on-touch
+    # flips draft collab on and serves the room-canonical projection, and canonical
+    # input is a round-trip fixed point — so the original intent (server split +
+    # byte round-trip through the read model) holds verbatim in the enabled world.
     owner_id, _, _, ws_id = _seed(
-        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\n\noriginal.\n"
     )
     c = _client(app, owner_id)
     r = c.get(f"/api/workspaces/{ws_id}/draft")
@@ -103,7 +108,7 @@ def test_draft_returns_server_split_sections_and_head(
     assert [s["index"] for s in sections] == [0, 1]
     assert sections[0]["heading"] == ""
     assert sections[1]["heading"] == "Methods"
-    assert "".join(s["text"] for s in sections) == "preamble\n\n## Methods\noriginal.\n"
+    assert "".join(s["text"] for s in sections) == "preamble\n\n## Methods\n\noriginal.\n"
     # sha is sha256 of the section text bytes (64 hex chars).
     assert all(len(s["sha"]) == 64 for s in sections)
     assert body["citations"] == {}
