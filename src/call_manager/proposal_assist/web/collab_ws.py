@@ -127,8 +127,22 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
                 session_factory, workspaces_dir, room, websocket, state,
                 workspace_id=workspace_id, artifact=artifact,
             )
+            # Straddle epoch/status re-validation (session-revocation #1): a session
+            # invalidation (logout / admin-disable / epoch bump) may have committed
+            # AFTER handshake auth but BEFORE this client registered — so the
+            # revocation sweep missed it, and reconcile_client (membership / write /
+            # account-status, NOT epoch) would keep it. Re-run the full cookie
+            # validation now, still under recon_lock, so a stale-epoch socket is
+            # closed+dropped before the receive loop and can never send a write frame.
+            if websocket in room.clients:
+                try:
+                    await resolve_ws_user(websocket)
+                except WSAuthError:
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=_WS_POLICY_VIOLATION)
+                    await MANAGER.drop_client(key, websocket)
         if websocket not in room.clients:
-            return  # reconcile revoked + deregistered this client (already closed 1008)
+            return  # reconcile OR straddle re-validation revoked + deregistered this client
         async with room.lock:
             initial = room.initial_message()
         await websocket.send_bytes(initial)

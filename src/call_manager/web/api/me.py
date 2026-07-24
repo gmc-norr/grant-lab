@@ -7,6 +7,10 @@ from sqlalchemy import delete, select
 from call_manager.auth.dependencies import get_current_user
 from call_manager.auth.passwords import WeakPassword, hash_password, verify_password
 from call_manager.db.models import Profile, Subscription, User
+from call_manager.proposal_assist.collab.permissions import (
+    WS_RECONNECTABLE_CLOSE,
+    signal_user_revocation,
+)
 from call_manager.web.dashboard import set_default_profile
 
 router = APIRouter()
@@ -164,6 +168,10 @@ def change_password(
         db_user.session_epoch = (db_user.session_epoch or 0) + 1  # revoke other sessions
         new_epoch = db_user.session_epoch
         session.commit()
+    # Tear down the user's OTHER live collab sockets. 1012 (reconnectable), NOT
+    # 1008: the acting browser re-mints its cookie just below and should reconnect
+    # cleanly under the new epoch (logout/disable stay terminal 1008).
+    signal_user_revocation(request, user.id, close_code=WS_RECONNECTABLE_CLOSE)
     # Re-mint THIS browser's session under the new epoch (same cookie attrs as the Jinja route).
     response.set_cookie(
         "session",

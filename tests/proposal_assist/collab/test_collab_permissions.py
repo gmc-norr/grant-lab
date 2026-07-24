@@ -395,3 +395,31 @@ async def test_signal_schedules_refresh_on_loop(pg_session_factory, tmp_path):
         assert MANAGER.get(key).clients[member_c].can_write is False
     finally:
         await MANAGER.evict(key)
+
+
+# ---------------------------------------------------------------------------
+# Session-revocation: _resolve fails closed on a disabled account
+# ---------------------------------------------------------------------------
+
+def test_resolve_fails_closed_for_disabled_user(pg_session_factory):
+    # A disabled account that is still a workspace member must resolve as
+    # not-member, so any permission reconcile closes+deregisters its live socket
+    # (defense-in-depth beneath the prompt revocation sweep). _resolve is sync
+    # (runs in a threadpool in prod), so it is called directly here.
+    from call_manager.proposal_assist.collab import permissions as perms
+
+    ws_id, _owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
+
+    is_member, _can_write, ws_deleted = perms._resolve(
+        pg_session_factory, member_id, ws_id, "draft"
+    )
+    assert is_member is True and ws_deleted is False   # active member baseline
+
+    with pg_session_factory() as s:
+        s.get(User, member_id).status = "disabled"
+        s.commit()
+
+    is_member, can_write, ws_deleted = perms._resolve(
+        pg_session_factory, member_id, ws_id, "draft"
+    )
+    assert is_member is False and can_write is False and ws_deleted is False

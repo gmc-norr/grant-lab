@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from call_manager.auth.dependencies import require_admin
 from call_manager.auth.passwords import WeakPassword, hash_password
 from call_manager.db.models import User
+from call_manager.proposal_assist.collab.permissions import signal_user_revocation
 
 router = APIRouter()
 
@@ -162,6 +163,11 @@ def admin_approve_user(
         u.approved_by_user_id = admin.id
         u.approved_at = datetime.now(UTC)
         db.commit()
+    if body.initial_password:
+        # A credential was issued (epoch bumped above) — revoke any prior live
+        # collab sockets for this account (terminal 1008). Only on the
+        # password-issuing path; an OIDC approval without a password bumps nothing.
+        signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
 
 
@@ -199,6 +205,8 @@ def admin_disable_user(
         u.status = "disabled"
         u.session_epoch = (u.session_epoch or 0) + 1
         db.commit()
+    # Disabled + epoch bumped — tear down the user's live collab sockets (1008).
+    signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
 
 
@@ -260,4 +268,6 @@ def admin_reset_password(
             raise HTTPException(status_code=400, detail=str(e)) from e
         u.session_epoch = (u.session_epoch or 0) + 1  # revoke the target's sessions
         db.commit()
+    # Password reset + epoch bumped — tear down the target's live collab sockets (1008).
+    signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
