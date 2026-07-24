@@ -1501,8 +1501,19 @@ def soft_delete_workspace_api(
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
         # soft_delete_workspace commits internally (unlike create_workspace_api,
         # where the caller commits) — do not add a second commit here.
-        soft_delete_workspace(
-            session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir)
-        )
+        try:
+            soft_delete_workspace(
+                session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir)
+            )
+        except CommitMutexTimeout as e:
+            # Deletion participates in the commit mutex (so live writers can
+            # linearize against it). A wedged writer means nothing was committed —
+            # the workspace is untouched and the client may retry.
+            session.rollback()
+            raise HTTPException(
+                status_code=429,
+                detail=BUSY_ERROR_MESSAGE,
+                headers={"Retry-After": "2"},
+            ) from e
     signal_from_request(request, workspace_id=workspace_id, artifacts=["draft", "spec"])
     return Response(status_code=204)
