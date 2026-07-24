@@ -210,3 +210,56 @@ async def test_sweep_idle_runs_queued_turn_predicate_outside_the_lock():
         "has_queued_turn must be consulted with the registry lock RELEASED "
         f"(observed locked={lock_held_during_predicate})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice A — unconfirmed-dead generations occupy slots
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_generation_counts_toward_the_ceiling():
+    """An orphan whose death is unconfirmed still pins a subprocess (and its pooled
+    DB connection), so it must occupy a slot rather than being invisible."""
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600, max_live=1)
+
+    launch_id = adapter._live.register(uuid.uuid4(), client=object())
+    adapter._live.mark_retiring(launch_id)
+    assert adapter.retiring_count() == 1
+    assert registry._entries == {}
+
+    with pytest.raises(DraftingAtCapacity):
+        await registry.claim_launch_or_wait(uuid.uuid4())
+
+    adapter._live.confirm_dead(launch_id)
+    am_launcher, _ = await registry.claim_launch_or_wait(uuid.uuid4())
+    assert am_launcher is True
+
+
+@pytest.mark.asyncio
+async def test_eviction_whose_teardown_is_unconfirmed_refuses_the_replacement():
+    """The eviction path pops the victim, reserves the replacement, and tears down
+    OUTSIDE the lock. If that teardown ends unconfirmed the slot was never freed —
+    the replacement must be refused, and its reservation cleaned up, BEFORE any
+    adapter.launch."""
+    adapter = FakeAgentAdapter()
+
+    # The victim's teardown leaves an unconfirmed generation behind.
+    async def _terminate_unconfirmed(handle):
+        adapter.terminations.append(handle)
+        lid = adapter._live.register(handle.workspace_id, client=object())
+        adapter._live.mark_retiring(lid)  # died? unknown.
+
+    adapter.terminate = _terminate_unconfirmed
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600, max_live=1)
+
+    ws_victim = uuid.uuid4()
+    await _install_handle(registry, ws_victim)
+    assert len(registry._entries) == 1
+
+    with pytest.raises(DraftingAtCapacity):
+        await registry.claim_launch_or_wait(uuid.uuid4())
+
+    # The refused launcher must not leave a dangling reservation behind.
+    assert registry._pending_launches == {}

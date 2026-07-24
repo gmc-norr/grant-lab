@@ -436,3 +436,166 @@ async def test_send_turn_decrements_in_flight_on_early_exit(pg_session_factory):
 
     assert isinstance(first, AssistantTextEvent)
     assert in_flight_after == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_refuses_soft_deleted_workspace(pg_session_factory, tmp_path):
+    from call_manager.db.models import Workspace
+    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id = ws.id
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pytest.raises(WorkspaceRetired):
+        await controller.launch(ws_id)
+    assert adapter.launches == []
+
+
+@pytest.mark.asyncio
+async def test_launch_refuses_deleted_workspace_even_when_handle_is_cached(
+    pg_session_factory, tmp_path
+):
+    """The cached/pending path returns early at controller.py:109, so the check
+    MUST precede claim_launch_or_wait."""
+    from call_manager.db.models import Workspace
+    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id = ws.id
+
+    try:
+        await controller.launch(ws_id)  # warm: handle cached
+        assert len(adapter.launches) == 1
+
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+            s.commit()
+
+        with pytest.raises(WorkspaceRetired):
+            await controller.launch(ws_id)  # cached path must STILL refuse
+        assert len(adapter.launches) == 1
+    finally:
+        # Release the advisory-lock session held by the cached entry.
+        await controller.terminate(ws_id)
+
+
+@pytest.mark.asyncio
+async def test_precheck_race_is_documented_not_closed(pg_session_factory, tmp_path):
+    """CONCEDED RACE (spec v8): a deletion committing AFTER the precheck can still
+    see a cached handle returned. This test pins the documented behavior so a
+    future change cannot silently claim more than the design promises."""
+    from call_manager.db.models import Workspace
+
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id = ws.id
+
+    try:
+        await controller.launch(ws_id)  # warm the cache
+
+        original = controller._workspace_is_deleted
+
+        def _deleting_precheck(w):
+            result = original(w)  # observes NOT deleted
+            with pg_session_factory() as s:  # deletion commits AFTER the check
+                s.get(Workspace, w).soft_deleted_at = datetime.now(UTC)
+                s.commit()
+            return result
+
+        controller._workspace_is_deleted = _deleting_precheck
+
+        handle = await controller.launch(ws_id)  # documented: still succeeds
+        assert handle is not None
+        assert len(adapter.launches) == 1  # cached — no NEW subprocess
+    finally:
+        await controller.terminate(ws_id)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pops_deleted_entries_even_when_in_flight(pg_session_factory, tmp_path):
+    """A deleted workspace's entry must be torn down (releasing its advisory-lock
+    session) even mid-turn — the idle sweep deliberately skips in_flight > 0."""
+    from call_manager.db.models import Workspace
+    from tests.proposal_assist.conftest import make_user
+
+    adapter = FakeAgentAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
+    )
+    with pg_session_factory() as s:
+        live = make_workspace(s, owner=make_user(s, email="live-owner@ki.se"))
+        dead = make_workspace(s, owner=make_user(s, email="dead-owner@ki.se"))
+        s.commit()
+        live_id, dead_id = live.id, dead.id
+
+    await controller.launch(live_id)
+    await controller.launch(dead_id)
+    await registry.increment_in_flight(dead_id)  # mid-turn
+    with pg_session_factory() as s:
+        s.get(Workspace, dead_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    n = await controller.reconcile_live_clients()
+
+    assert n >= 1
+    assert dead_id not in registry._entries  # entry popped, lock released
+    assert live_id in registry._entries  # live workspace untouched
+    assert any(h.workspace_id == dead_id for h in adapter.terminations)
+    await controller.terminate(live_id)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_passes_soft_delete_predicate_to_the_adapter(pg_session_factory, tmp_path):
+    from call_manager.db.models import Workspace
+    from tests.proposal_assist.conftest import make_user
+
+    seen: list = []
+
+    class _RecordingAdapter(FakeAgentAdapter):
+        async def reconcile_live_clients(self, is_deleted):
+            seen.append(is_deleted)
+            return 0
+
+    adapter = _RecordingAdapter()
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
+    )
+    with pg_session_factory() as s:
+        live = make_workspace(s, owner=make_user(s, email="p-live@ki.se"))
+        dead = make_workspace(s, owner=make_user(s, email="p-dead@ki.se"))
+        s.commit()
+        live_id, dead_id = live.id, dead.id
+    with pg_session_factory() as s:
+        s.get(Workspace, dead_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    await controller.reconcile_live_clients()
+
+    assert len(seen) == 1
+    assert seen[0](dead_id) is True
+    assert seen[0](live_id) is False

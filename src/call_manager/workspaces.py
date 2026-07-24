@@ -130,6 +130,30 @@ def soft_delete_workspace(
             raw_error="workspace soft-deleted",
             emit_chat=False,
         )
+    # Terminalize any RUNNING turn in THIS transaction. The processor's
+    # success-finalize is a conditional UPDATE ... WHERE status='running', so once
+    # this commits both paths contend on the same row and the finalize becomes a
+    # no-op — closing the delete-vs-finalize race durably, with no in-process
+    # recheck. usage_unknown=True keeps the submit-time estimate: the turn HAS
+    # consumed input we cannot measure yet, and stamp_post_terminal_usage replaces
+    # it if the stream reports real usage.
+    running = session.execute(
+        select(TurnJob.id).where(
+            TurnJob.workspace_id == workspace_id,
+            TurnJob.status == "running",
+        )
+    ).all()
+    for row in running:
+        record_terminal_outcome(
+            session,
+            turn_job_id=row.id,
+            workspace_id=workspace_id,
+            outcome="cancelled",
+            expected_status="running",
+            raw_error="workspace soft-deleted",
+            emit_chat=False,
+            usage_unknown=True,
+        )
     session.commit()
     # Scrub attachment bytes (DB rows remain — audit trail). Best-effort.
     try:

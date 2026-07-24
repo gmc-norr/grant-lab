@@ -36,6 +36,7 @@ Lifecycle per workspace:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -64,6 +65,11 @@ from call_manager.proposal_assist.drafting.contract import (
     ToolResultEvent,
     ToolUseEvent,
     TurnDoneEvent,
+)
+from call_manager.proposal_assist.drafting.live_clients import (
+    RETIRING,
+    LiveClientRecord,
+    LiveClientRegistry,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,6 +164,8 @@ class ClaudeAgentSDKAdapter:
         tool_context_sink: dict[uuid.UUID, Any] | None = None,
         allowed_tools: list[str] | None = None,
         anthropic_api_key: str | None = None,
+        disconnect_deadline_seconds: float = 3.0,
+        reap_deadline_seconds: float = 2.0,
     ) -> None:
         self._model = model
         self._workspaces_dir = Path(workspaces_dir)
@@ -181,6 +189,11 @@ class ClaudeAgentSDKAdapter:
         self._tool_context_sink: dict[uuid.UUID, Any] = (
             tool_context_sink if tool_context_sink is not None else {}
         )
+        # Slice A: hard bounds on teardown, and the per-generation inventory that
+        # owns every SDK client from before connect() until its death is CONFIRMED.
+        self._disconnect_deadline_seconds = disconnect_deadline_seconds
+        self._reap_deadline_seconds = reap_deadline_seconds
+        self._live = LiveClientRegistry()
 
     async def launch(self, context: LaunchContext) -> AgentHandle:
         """Connect the SDK client for this workspace.
@@ -197,11 +210,19 @@ class ClaudeAgentSDKAdapter:
         options = ClaudeAgentOptions(**options_kwargs)
 
         client = ClaudeSDKClient(options=options)
-        await client.connect()
+        # Register BEFORE connect(): a connect-time failure otherwise leaves a
+        # half-built subprocess nobody owns. This record is what the reconciliation
+        # sweep and the capacity ceiling both count.
+        launch_id = self._live.register(context.workspace_id, client)
+        try:
+            await client.connect()
+        except BaseException:
+            await self._retire_generation(launch_id)
+            raise
 
         return AgentHandle(
             workspace_id=context.workspace_id,
-            state={"client": client},
+            state={"client": client, "launch_id": launch_id},
         )
 
     def _build_options_kwargs(self, context: LaunchContext) -> dict[str, Any]:
@@ -523,37 +544,126 @@ class ClaudeAgentSDKAdapter:
             )
 
     async def terminate(self, handle: AgentHandle) -> None:
-        """Disconnect the SDK client. Safe to call even if never connected."""
+        """Disconnect the SDK client, bounded. Safe to call even if never connected."""
         # Tie the retained ToolContext's lifetime to the subprocess: evict it here
         # (registry.terminate + sweep_idle both route through this) so the sink
         # doesn't accumulate one ctx per workspace ever drafted. Done before the
         # early return so eviction happens even if the client was never connected.
         self._tool_context_sink.pop(handle.workspace_id, None)
+        launch_id = handle.state.get("launch_id")
         client: ClaudeSDKClient | None = handle.state.pop("client", None)
-        if client is None:
+        if launch_id is None:
+            # Pre-inventory handle (bare-adapter tests): best-effort legacy path.
+            if client is not None:
+                await self._disconnect_bounded(client, handle.workspace_id)
             return
-        try:
-            await client.disconnect()
-        except Exception:
+        await self._retire_generation(launch_id)
+
+    async def _retire_generation(self, launch_id: uuid.UUID) -> None:
+        """Mark the generation retiring and await ONE tracked teardown task for it.
+        Shared by retirement, capacity eviction, idle sweep and reconciliation, so
+        concurrent callers never spawn a second kill for the same generation."""
+        record = self._live.mark_retiring(launch_id)
+        if record is None:
+            return
+        if record.teardown is None or record.teardown.done():
+            record.teardown = asyncio.create_task(self._teardown_record(record))
+        await asyncio.shield(record.teardown)
+
+    async def _teardown_record(self, record: LiveClientRecord) -> None:
+        confirmed = await self._disconnect_bounded(record.client, record.workspace_id)
+        if confirmed:
+            self._live.confirm_dead(record.launch_id)
+        else:
+            logger.warning(
+                "drafting subprocess for workspace %s not confirmed dead; retained "
+                "for the reconciliation sweep",
+                record.workspace_id,
+                extra={
+                    "event": "drafting_termination_unconfirmed",
+                    "workspace_id": str(record.workspace_id),
+                },
+            )
+
+    async def _disconnect_bounded(self, client: Any, workspace_id: uuid.UUID) -> bool:
+        """Disconnect within a hard deadline; force-kill + reap on overrun.
+
+        asyncio.wait_for waits for CANCELLATION to finish, so a
+        cancellation-resistant disconnect() would never reach force-kill. Run it as
+        a tracked task and fire the kill from an INDEPENDENT timer. Returns True
+        only when death is confirmed (clean disconnect, or kill + successful reap).
+        """
+        task = asyncio.create_task(client.disconnect())
+        done, _ = await asyncio.wait({task}, timeout=self._disconnect_deadline_seconds)
+        if task in done:
+            exc = task.exception()
+            if exc is None:
+                return True
             # Defect 3: disconnect() raising (e.g. an anyio task-group error)
             # short-circuits BEFORE the SDK transport's own SIGTERM→SIGKILL
             # escalation, leaving the OS subprocess orphaned and its pooled DB
             # connection potentially pinned. Fall back to a direct force-kill of
-            # the underlying process so the OS reaps it. Best-effort: if even the
-            # kill fails we log loudly — there is no further handle to retry.
+            # the underlying process so the OS reaps it.
             logger.warning(
                 "SDK client disconnect failed for workspace %s; force-killing subprocess",
-                handle.workspace_id,
+                workspace_id,
+                exc_info=exc,
+            )
+        else:
+            logger.warning(
+                "SDK client disconnect timed out for workspace %s; force-killing subprocess",
+                workspace_id,
+            )
+            task.cancel()  # best-effort; NOT awaited (it may resist)
+        if not self._force_kill_subprocess(client, workspace_id):
+            return False
+        return await self._reap_subprocess(client, workspace_id)
+
+    async def _reap_subprocess(self, client: Any, workspace_id: uuid.UUID) -> bool:
+        """Confirmed death means REAPED, not merely signalled."""
+        transport = getattr(client, "_transport", None)
+        process = getattr(transport, "_process", None) if transport is not None else None
+        wait = getattr(process, "wait", None)
+        if wait is None:
+            return False
+        try:
+            await asyncio.wait_for(wait(), timeout=self._reap_deadline_seconds)
+            return True
+        except Exception:
+            logger.warning(
+                "drafting subprocess for workspace %s was killed but not reaped",
+                workspace_id,
                 exc_info=True,
             )
-            self._force_kill_subprocess(client, handle.workspace_id)
+            return False
+
+    def retiring_count(self) -> int:
+        """Generations whose death is not confirmed — counted against the live
+        ceiling by SubprocessRegistry."""
+        return self._live.retiring_count()
+
+    async def reconcile_live_clients(self, is_deleted) -> int:
+        """Ensure a teardown is running for (a) every RETIRING generation — whose
+        workspace may well be LIVE (capacity-eviction / idle-sweep orphans) — and
+        (b) every generation of a soft-deleted workspace. Returns the number acted
+        on. Guarantees a remediation ATTEMPT, not that the process died."""
+        acted = 0
+        for record in self._live.records():
+            if record.state != RETIRING and not is_deleted(record.workspace_id):
+                continue
+            self._live.mark_retiring(record.launch_id)
+            if record.teardown is None or record.teardown.done():
+                record.teardown = asyncio.create_task(self._teardown_record(record))
+            acted += 1
+        return acted
 
     @staticmethod
-    def _force_kill_subprocess(client: ClaudeSDKClient, workspace_id: uuid.UUID) -> None:
+    def _force_kill_subprocess(client: Any, workspace_id: uuid.UUID) -> bool:
         """Reach through the SDK client to its transport's OS process and kill
-        it. Used only when disconnect() raised before the SDK could reap the
-        child. Tolerates SDK-internal shape drift (transport/_process may be
-        absent) — every step is guarded, and a failure is logged not raised."""
+        it. Used when disconnect() raised or overran its deadline before the SDK
+        could reap the child. Tolerates SDK-internal shape drift
+        (transport/_process may be absent) — every step is guarded, and a failure
+        is logged not raised. Returns True only when kill() was actually invoked."""
         try:
             transport = getattr(client, "_transport", None)
             process = getattr(transport, "_process", None) if transport is not None else None
@@ -563,10 +673,12 @@ class ClaudeAgentSDKAdapter:
                     "failure; OS process may have leaked",
                     workspace_id,
                 )
-                return
+                return False
             kill = getattr(process, "kill", None)
             if kill is not None:
                 kill()
+                return True
+            return False
         except Exception:
             logger.warning(
                 "force-kill of drafting subprocess for workspace %s failed; "
@@ -574,6 +686,7 @@ class ClaudeAgentSDKAdapter:
                 workspace_id,
                 exc_info=True,
             )
+            return False
 
     async def set_turn_provenance(
         self,

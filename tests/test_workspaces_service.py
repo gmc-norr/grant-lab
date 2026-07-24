@@ -87,3 +87,49 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
         )
         assert s.scalar(select(ChatTurn).where(ChatTurn.role == "system")) is None
     assert not attach_dir.exists()  # bytes scrubbed
+
+
+def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_factory, tmp_path):
+    from call_manager.db.models import ChatTurn, TurnJob
+    from call_manager.proposal_assist.turns.processor import _finalize_success
+    from call_manager.workspaces import soft_delete_workspace
+    from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "q"}, tokens_in=1234
+        )
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="running",
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
+
+    with pg_session_factory() as s:
+        soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status != "running"  # terminalized in the delete txn
+        assert s.get(ChatTurn, ut_id).tokens_in == 1234  # estimate retained
+
+    # The in-flight processor now finalizes "successfully" — must be a NO-OP.
+    _finalize_success(
+        pg_session_factory,
+        turn_job_id=job_id,
+        workspace_id=ws_id,
+        submitted_by_user_id=None,
+        user_turn_id=ut_id,
+        last_assistant_id=None,
+        tokens_in=10,
+        tokens_out=5,
+        model="m",
+        session_id=None,
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status != "completed"  # never resurrected

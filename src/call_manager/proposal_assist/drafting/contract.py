@@ -119,6 +119,19 @@ class DraftingAtCapacity(RuntimeError):
     importing the registry's concrete classes."""
 
 
+class WorkspaceRetired(RuntimeError):
+    """The workspace is soft-deleted, so no subprocess may be launched for it.
+
+    Raised by WorkspaceController.launch. Turn-path callers finalize instead of
+    sending. NOTE: this is a NARROWING, not a race-free gate — a deletion
+    committing after the check can still see a cached handle returned; the
+    reconciliation sweep is what eventually reaps such a subprocess."""
+
+    def __init__(self, workspace_id: uuid.UUID) -> None:
+        super().__init__(f"workspace {workspace_id} is retired")
+        self.workspace_id = workspace_id
+
+
 @runtime_checkable
 class DraftingAgent(Protocol):
     """The adapter contract.

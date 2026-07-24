@@ -14,6 +14,7 @@ from call_manager.proposal_assist.drafting.contract import (
     StreamEvent,
     TurnDoneEvent,
 )
+from call_manager.proposal_assist.drafting.live_clients import LiveClientRegistry
 
 
 class FakeAgentAdapter:
@@ -48,6 +49,10 @@ class FakeAgentAdapter:
         self._strict = strict
         self._in_flight = False
         self.leftover_events: list[StreamEvent] = []
+        # Slice A: mirror the real adapter's inventory surface so registry-level
+        # capacity/reconciliation tests can seed unconfirmed generations. The fake
+        # owns no subprocesses, so nothing is ever registered by launch().
+        self._live = LiveClientRegistry()
 
     def script_next_turn(self, events: list[StreamEvent]) -> None:
         """Queue the events the next send_turn() invocation should yield.
@@ -104,6 +109,12 @@ class FakeAgentAdapter:
 
     async def terminate(self, handle: AgentHandle) -> None:
         self.terminations.append(handle)
+
+    def retiring_count(self) -> int:
+        return self._live.retiring_count()
+
+    async def reconcile_live_clients(self, is_deleted) -> int:
+        return 0  # the fake owns no subprocesses
 
     async def set_turn_provenance(
         self,

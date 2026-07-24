@@ -69,6 +69,7 @@ from call_manager.proposal_assist.drafting.contract import (
     ToolResultEvent,
     ToolUseEvent,
     TurnDoneEvent,
+    WorkspaceRetired,
 )
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
 from call_manager.proposal_assist.drafting.turn_gating import (
@@ -76,7 +77,10 @@ from call_manager.proposal_assist.drafting.turn_gating import (
     selection_from_content,
 )
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
-from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
+from call_manager.proposal_assist.turns.outcomes import (
+    record_terminal_outcome,
+    stamp_post_terminal_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,17 +277,6 @@ async def process_turn_once(
     # claim_launch_or_wait; send_turn calls it internally anyway), THEN stamp,
     # THEN send_turn. Without the explicit launch, a workspace's first (cold) turn
     # would stamp an empty sink and silently drop provenance.
-    await controller.launch(workspace_id)
-    await controller.set_turn_provenance(
-        workspace_id,
-        triggering_turn_id=user_turn_id,
-        triggering_prompt=_extract_triggering_prompt(raw_turn_content),
-        created_by=submitted_by_user_id,
-        origin_session_id=ws_session_id,
-        allowed_tool_names=allowed_tools_for_content(raw_turn_content),
-        turn_selection=selection_from_content(raw_turn_content),
-    )
-
     last_assistant_id: uuid.UUID | None = None
     tokens_in = 0
     tokens_out = 0
@@ -291,8 +284,23 @@ async def process_turn_once(
     session_id: str | None = None
     sdk_error: SDKTurnError | None = None
     other_error: BaseException | None = None
+    retired: WorkspaceRetired | None = None
+    usage_reported = False
 
     try:
+        # COLD-LAUNCH ORDER (unchanged): ensure launch, THEN stamp provenance, THEN
+        # send. Now INSIDE the guarded region — a WorkspaceRetired raised here must
+        # finalize the turn, not escape and leave the row 'running' for the reaper.
+        await controller.launch(workspace_id)
+        await controller.set_turn_provenance(
+            workspace_id,
+            triggering_turn_id=user_turn_id,
+            triggering_prompt=_extract_triggering_prompt(raw_turn_content),
+            created_by=submitted_by_user_id,
+            origin_session_id=ws_session_id,
+            allowed_tool_names=allowed_tools_for_content(raw_turn_content),
+            turn_selection=selection_from_content(raw_turn_content),
+        )
         async for event in controller.send_turn(workspace_id, user_message):
             if isinstance(event, AssistantTextEvent):
                 last_assistant_id = _write_chat_turn(
@@ -330,13 +338,29 @@ async def process_turn_once(
                 tokens_out = event.tokens_out or 0
                 model = event.model
                 session_id = event.session_id
+                usage_reported = tokens_in > 0 or tokens_out > 0
+    except WorkspaceRetired as e:
+        retired = e
     except SDKTurnError as e:
         sdk_error = e
     except BaseException as e:  # noqa: BLE001
         other_error = e
 
-    if sdk_error is None and other_error is None:
-        _finalize_success(
+    if retired is not None:
+        # The delete transaction already terminalized this row, so this is
+        # normally a no-op; it keeps the code path honest when it is not.
+        won = _finalize_failed(
+            session_factory,
+            turn_job_id=turn_job_id,
+            workspace_id=workspace_id,
+            submitted_by_user_id=submitted_by_user_id,
+            error="workspace_retired",
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            user_turn_id=user_turn_id,
+        )
+    elif sdk_error is None and other_error is None:
+        won = _finalize_success(
             session_factory,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
@@ -351,7 +375,7 @@ async def process_turn_once(
         )
     elif sdk_error is not None:
         status_suffix = f"; status={sdk_error.status}" if sdk_error.status is not None else ""
-        _finalize_failed(
+        won = _finalize_failed(
             session_factory,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
@@ -363,7 +387,7 @@ async def process_turn_once(
         )
     else:
         assert other_error is not None
-        _finalize_failed(
+        won = _finalize_failed(
             session_factory,
             turn_job_id=turn_job_id,
             workspace_id=workspace_id,
@@ -373,8 +397,56 @@ async def process_turn_once(
             tokens_out=tokens_out,
             user_turn_id=user_turn_id,
         )
-        if not isinstance(other_error, Exception):
-            raise other_error
+
+    # Reconcile BEFORE the BaseException re-raise below, so a cancelled turn that
+    # still reported usage doesn't drop that spend from the cap.
+    _reconcile_lost_usage(
+        session_factory,
+        won=won,
+        usage_reported=usage_reported,
+        turn_job_id=turn_job_id,
+        workspace_id=workspace_id,
+        user_turn_id=user_turn_id,
+        last_assistant_id=last_assistant_id,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        model=model,
+    )
+    if other_error is not None and not isinstance(other_error, Exception):
+        raise other_error
+
+
+def _reconcile_lost_usage(
+    session_factory: sessionmaker,
+    *,
+    won: bool,
+    usage_reported: bool,
+    turn_job_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    user_turn_id: uuid.UUID | None,
+    last_assistant_id: uuid.UUID | None,
+    tokens_in: int,
+    tokens_out: int,
+    model: str | None,
+) -> None:
+    """When the finalize LOST the row — deletion terminalized it mid-stream — the
+    finalize rolled its token stamp back. Reconcile the usage that really was
+    spent, exactly once. When no usage was reported there is nothing to reconcile
+    and the retained submit-time estimate must be left alone."""
+    if won or not usage_reported:
+        return
+    with session_factory() as s:
+        stamp_post_terminal_usage(
+            s,
+            turn_job_id=turn_job_id,
+            workspace_id=workspace_id,
+            user_turn_id=user_turn_id,
+            last_assistant_id=last_assistant_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            model=model,
+        )
+        s.commit()
 
 
 def _write_chat_turn(
@@ -404,7 +476,12 @@ def _finalize_success(
     model: str | None,
     session_id: str | None,
     session_id_at_claim: str | None = None,
-) -> None:
+) -> bool:
+    """Returns True if this call WON the conditional running→completed update.
+
+    False means the row was already terminal (reaped, or terminalized by a
+    workspace deletion), so this call's token stamps were rolled back — the
+    caller may need to reconcile genuinely-reported usage separately."""
     with session_factory() as s:
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
         if last_assistant_id is not None:
@@ -457,7 +534,7 @@ def _finalize_success(
                 turn_job_id,
                 extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
             )
-            return
+            return False  # lost the row (already terminal) — caller may reconcile usage
         if session_id is not None:
             # Guard the compaction session-reset race: compaction runs as its
             # own tick and may set last_sdk_session_id=NULL while this turn is
@@ -490,6 +567,7 @@ def _finalize_success(
             )
         )
         s.commit()
+    return True
 
 
 def _finalize_failed(
@@ -502,7 +580,7 @@ def _finalize_failed(
     tokens_in: int,
     tokens_out: int,
     user_turn_id: uuid.UUID | None = None,
-) -> None:
+) -> bool:
     # Thin wrapper: the helper performs the conditional running→failed flip,
     # clears the user-turn token pre-count, writes the viewer-safe system row,
     # and writes the cloud_turn_failed event — all in one transaction. It reads
@@ -531,3 +609,4 @@ def _finalize_failed(
             turn_job_id,
             extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
         )
+    return did

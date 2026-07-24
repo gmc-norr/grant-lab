@@ -329,3 +329,269 @@ def test_failed_turn_with_zero_tokens_clears_precount(pg_session_factory):
         used_in, used_out = _daily_tokens(s, wsid)
         assert int(used_in) == 0
         assert int(used_out) == 0
+
+
+def test_usage_unknown_retains_submit_time_estimate(pg_session_factory):
+    # A running turn terminalized by workspace deletion HAS consumed input we
+    # cannot measure yet. The submit-time estimate must survive, or the spend
+    # vanishes from the daily cap.
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "hi"}, tokens_in=1234
+        )
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="running",
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
+
+    with pg_session_factory() as s:
+        assert (
+            record_terminal_outcome(
+                s,
+                turn_job_id=job_id,
+                workspace_id=ws_id,
+                outcome="cancelled",
+                expected_status="running",
+                raw_error="workspace soft-deleted",
+                emit_chat=False,
+                usage_unknown=True,
+            )
+            is True
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status == "cancelled"
+        assert s.get(ChatTurn, ut_id).tokens_in == 1234  # RETAINED
+
+
+def test_default_still_clears_estimate_when_nothing_consumed(pg_session_factory):
+    # Byte-for-byte guard on the pre-existing queued/reaped path.
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "hi"}, tokens_in=999
+        )
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="queued",
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
+
+    with pg_session_factory() as s:
+        record_terminal_outcome(
+            s,
+            turn_job_id=job_id,
+            workspace_id=ws_id,
+            outcome="cancelled",
+            expected_status="queued",
+            raw_error="workspace soft-deleted",
+            emit_chat=False,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(ChatTurn, ut_id).tokens_in is None  # cleared, as before
+
+
+def test_post_terminal_usage_stamps_truth_clears_estimate_and_is_idempotent(pg_session_factory):
+    from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "q"}, tokens_in=1234
+        )
+        assistant = make_chat_turn(s, ws, role="assistant", content={"type": "text", "text": "a"})
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="cancelled",  # already terminal
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id, a_id = ws.id, job.id, user_turn.id, assistant.id
+
+    with pg_session_factory() as s:
+        assert (
+            stamp_post_terminal_usage(
+                s,
+                turn_job_id=job_id,
+                workspace_id=ws_id,
+                user_turn_id=ut_id,
+                last_assistant_id=a_id,
+                tokens_in=500,
+                tokens_out=42,
+                model="claude-opus-4-7",
+            )
+            is True
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status == "cancelled"  # status untouched
+        assert s.get(ChatTurn, a_id).tokens_in == 500
+        assert s.get(ChatTurn, a_id).tokens_out == 42
+        assert s.get(ChatTurn, ut_id).tokens_in is None  # estimate cleared (no double count)
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.kind == "cloud_turn_usage_reconciled",
+                )
+            )
+            == 1
+        )
+
+    with pg_session_factory() as s:
+        assert (
+            stamp_post_terminal_usage(
+                s,
+                turn_job_id=job_id,
+                workspace_id=ws_id,
+                user_turn_id=ut_id,
+                last_assistant_id=a_id,
+                tokens_in=999,
+                tokens_out=999,
+                model="x",
+            )
+            is False
+        )  # idempotent
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(ChatTurn, a_id).tokens_in == 500  # unchanged
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(
+                    WorkspaceEvent.kind == "cloud_turn_usage_reconciled",
+                    WorkspaceEvent.workspace_id == ws_id,
+                )
+            )
+            == 1
+        )
+
+
+def test_post_terminal_usage_is_atomic_under_concurrency(pg_session_factory):
+    """Two concurrent stampers must produce exactly ONE event and ONE stamp.
+    A plain 'select event then insert' loses this race — the guard is the
+    SELECT ... FOR UPDATE on the TurnJob row."""
+    import threading
+
+    from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "q"}, tokens_in=1234
+        )
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="cancelled",
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
+
+    results: list[bool] = []
+    barrier = threading.Barrier(2)
+
+    def _stamp():
+        with pg_session_factory() as s:
+            barrier.wait(timeout=10)  # maximize overlap
+            ok = stamp_post_terminal_usage(
+                s,
+                turn_job_id=job_id,
+                workspace_id=ws_id,
+                user_turn_id=ut_id,
+                last_assistant_id=None,
+                tokens_in=300,
+                tokens_out=10,
+                model=None,
+            )
+            s.commit()
+            results.append(ok)
+
+    threads = [threading.Thread(target=_stamp) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert sorted(results) == [False, True]  # exactly one winner
+    with pg_session_factory() as s:
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.kind == "cloud_turn_usage_reconciled",
+                )
+            )
+            == 1
+        )
+        assert s.get(ChatTurn, ut_id).tokens_in == 300  # stamped once, not twice
+
+
+def test_post_terminal_usage_refuses_non_terminal_or_foreign_job(pg_session_factory):
+    from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="a-owner@ki.se"))
+        other = make_workspace(s, owner=make_user(s, email="b-owner@ki.se"))
+        user_turn = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "q"})
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="running",  # NOT terminal
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, other_id, job_id, ut_id = ws.id, other.id, job.id, user_turn.id
+
+    with pg_session_factory() as s:
+        assert (
+            stamp_post_terminal_usage(
+                s,
+                turn_job_id=job_id,
+                workspace_id=ws_id,
+                user_turn_id=ut_id,
+                last_assistant_id=None,
+                tokens_in=1,
+                tokens_out=1,
+                model=None,
+            )
+            is False
+        )  # still running
+        assert (
+            stamp_post_terminal_usage(
+                s,
+                turn_job_id=job_id,
+                workspace_id=other_id,
+                user_turn_id=ut_id,
+                last_assistant_id=None,
+                tokens_in=1,
+                tokens_out=1,
+                model=None,
+            )
+            is False
+        )  # wrong workspace
