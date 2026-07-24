@@ -344,7 +344,7 @@ def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
     first-touch flip that committed just before we got the mutex."""
     import call_manager.web.api.workspaces as workspaces_mod
 
-    real_acquire = workspaces_mod.acquire_commit_mutex
+    real_acquire = workspaces_mod.acquire_commit_mutex_live
 
     def _flip_then_acquire(session, wsid, **kw):
         with pg_session_factory() as s2:
@@ -352,7 +352,7 @@ def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
             s2.commit()
         return real_acquire(session, wsid, **kw)
 
-    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex", _flip_then_acquire)
+    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex_live", _flip_then_acquire)
 
 
 def test_lock_reads_flag_under_mutex_after_concurrent_flip(

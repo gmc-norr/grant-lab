@@ -126,3 +126,78 @@ def test_app_registers_a_workspace_deleted_handler(_app):
     """The single mapping every migrated writer relies on: no per-route except
     blocks, so if this registration is lost the refusals become 500s."""
     assert WorkspaceDeleted in _app.exception_handlers
+
+
+def test_save_section_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
+    """Representative service-level writer: raises before any git commit."""
+    import subprocess
+
+    from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME, save_section
+
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id = ws.id
+    repo = tmp_path / str(ws_id) / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / PROPOSAL_FILENAME).write_text(md0)
+    subprocess.run(["git", "add", PROPOSAL_FILENAME], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        with pytest.raises(WorkspaceDeleted):
+            save_section(
+                session=s,
+                workspace=ws,
+                user_id=ws.owner_id,
+                section_index=1,
+                new_text="## Background\nedited.\n",
+                base_commit_sha=head,
+                base_section_sha="0" * 64,
+                workspaces_dir=str(tmp_path),
+            )
+        s.rollback()
+
+    after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert after == head  # no commit
+
+
+def test_submit_user_turn_keeps_its_own_stronger_guard(pg_session_factory):
+    """PER-SITE DECISION: submit already re-checks under a FOR UPDATE row lock and
+    raises ValueError (mapped to 400). Pinned so a later 'uniformity' refactor
+    doesn't silently change that route's status code."""
+    from call_manager.config import Settings
+    from call_manager.proposal_assist.turns.submit import submit_user_turn
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id, owner_id = ws.id, ws.owner_id
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pg_session_factory() as s:
+        with pytest.raises(ValueError):  # NOT WorkspaceDeleted
+            submit_user_turn(
+                session=s,
+                workspace_id=ws_id,
+                content_text="hi",
+                submitted_by_user_id=owner_id,
+                settings=Settings(),
+            )
+        s.rollback()

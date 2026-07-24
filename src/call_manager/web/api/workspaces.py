@@ -60,7 +60,7 @@ from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
-    acquire_commit_mutex,
+    acquire_commit_mutex_live,
 )
 from call_manager.proposal_assist.editing.save import (
     CITATIONS_FILENAME,
@@ -533,7 +533,7 @@ async def post_init_spec(
             if not spec.exists():
                 raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
             try:
-                acquire_commit_mutex(session, ws.id)
+                acquire_commit_mutex_live(session, ws.id)
                 # Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the _route()
                 # fork read the flag as False, but enable-on-touch may have flipped
                 # spec collab on while we blocked on the mutex. Abort writing NOTHING
@@ -644,7 +644,7 @@ def post_lock_spec(
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            acquire_commit_mutex(session, ws.id)
+            acquire_commit_mutex_live(session, ws.id)
             # Fresh flag read UNDER the mutex (Codex): a pre-mutex read can go
             # stale while we block — enable-on-touch commits the enable while
             # HOLDING this mutex, so an under-mutex read is authoritative. If it
@@ -732,7 +732,7 @@ def post_unlock_spec(
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            acquire_commit_mutex(session, ws.id)
+            acquire_commit_mutex_live(session, ws.id)
             # Fresh flag read UNDER the mutex (Codex) — see post_lock_spec for the
             # soundness argument; unlock shares the moved-read shape exactly.
             is_collab = collab_state.is_collab_enabled(
