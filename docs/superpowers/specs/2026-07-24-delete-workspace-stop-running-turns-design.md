@@ -1,225 +1,239 @@
-# Workspace Retirement on Delete — Design (v6)
+# Workspace Retirement on Delete — Design (v7)
 
-**Status:** approved direction. v6 folds a fourth Codex review (6 findings, all
-verified). v5's durable-first reframe survives, with one correction: **v5's claim
-that reconciliation "dissolves" the leaked-subprocess findings was wrong** —
-reconciliation scanned `_entries`, but entries are popped *before* teardown
-(`registry.py:141/:367`) and the client is popped *before* disconnect
-(`claude_adapter.py:532`), so in exactly the failure case there is nothing left to
-find. v6 restores **one** durable ownership record (an adapter-owned live-client
-inventory) — one mechanism, not the six per-path trackers v4 carried.
+**Status:** approved direction; v7 folds a fifth Codex review (4 findings, all
+verified). Two changes are **claim weakenings**, not new machinery: v6 overstated
+race-freedom. v7 states only what is true.
 **Type:** backend-only, no migration, no frontend change, no OpenAPI change.
-**Delivery:** **Slice A** = durable floor (standalone). **Slice B** = prompt
-retirement + coordinator + collab. **Slice C** = passes.
+**Delivery:** **Slice A** = durable floor + containment. **Slice B** = prompt
+retirement + coordinator + collab + the live-workspace mutex helper.
+**Slice C** = passes.
 
-## Guarantee model
+## What is actually guaranteed (honest statement)
 
 | Guarantee | Mechanism | Strength |
 |---|---|---|
-| No new work | DB `soft_deleted_at`, already honored by every claim layer | Durable |
-| **No relaunch** | `controller.launch` consults `soft_deleted_at` (A2) | **Durable, restart-safe** |
-| Running turn row terminal | terminalized in the delete transaction (A1) | **Durable, race-free** |
-| Tokens counted | usage-unknown terminalization + post-terminal stamp (A1) | Durable |
-| Subprocess stops | prompt interrupt→terminate; hard-bounded (A4, B) | Best-effort |
-| Anything leaked | **live-client inventory** + reconciliation sweep (A3) | Eventual, self-healing |
+| No new turn dispatches | DB `soft_deleted_at`, honored by every claim layer | **Durable** |
+| Running turn row reaches terminal | terminalized in the delete transaction (A1) | **Durable, race-free** (same-row contention) |
+| Real token usage counted | usage-unknown terminalization + post-terminal stamp (A1) | **Durable** |
+| No writer mutates git/DB after delete | live-workspace commit-mutex helper (B4) | **Durable, race-free** (same mutex) |
+| Relaunch avoided | pre-claim `soft_deleted_at` check (A2) | **Narrowing only — NOT race-free** |
+| Subprocess stops | prompt interrupt→terminate (B), hard-bounded (A4) | Best-effort |
+| Anything leaked | per-launch client inventory + reconciliation (A3) | **Eventual, bounded by one sweep tick** |
 
-**Contract: `DELETE` always returns 204.** No 202/503 → no OpenAPI/`schema.gen.ts`
-change, no frontend change. Missing retirement wiring is a **startup invariant**.
+**Explicitly NOT claimed (review P1-2):** that the response, or Slice A, proves a
+subprocess died. Deletion can commit between any precheck and the outbound
+`client.query`, and no lock can be held across a streaming call, so
+check-then-act cannot be linearized. Slice A promises **containment within one
+reconciliation tick** (`WORKSPACE_IDLE_SWEEP_SECONDS`); Slice B narrows the
+common case to ~immediate. The *durable* rows above are unaffected by that race.
+
+**Contract:** `DELETE` always returns **204**. Missing retirement wiring is a
+**startup invariant**.
 
 ---
 
-# Slice A — durable floor (independently mergeable and standalone)
+# Slice A — durable floor + containment (standalone)
 
-### A1 — terminalize running turn rows **without breaking cap accounting**
+### A1 — terminalize running turn rows, preserving cap accounting
 
-Extend the existing **`soft_delete_workspace`** (not `soft_delete_workspace_db` —
-that extraction is B3; A must stand alone) to terminalize `running` turn rows in
-the same transaction as the tombstone, alongside today's queued-turn cancellation.
+Extend the existing **`soft_delete_workspace`** (the `_db` extraction is B) to
+terminalize `running` turn rows in the delete transaction, alongside today's
+queued cancellation. `_finalize_success` is already a conditional `UPDATE ...
+WHERE status='running'` (`processor.py:446-452`), so both racing paths contend on
+the **same database row** — closing the TOCTOU durably and neutralizing the
+defensive-`TurnDoneEvent` success path (`claude_adapter.py:497` → `:338`).
 
-`_finalize_success` is already a conditional `UPDATE ... WHERE status='running'`
-(`processor.py:446-452`) that rolls back on `rowcount == 0`, so once deletion
-terminalizes the row both racing paths contend on the **same database row** — the
-TOCTOU closes durably, and the defensive-`TurnDoneEvent` success path
-(`claude_adapter.py:497` → `:338`) can no longer resurrect a deleted turn.
+Cap accounting (v6 fix, retained): `record_terminal_outcome` computes `consumed =
+tokens_in > 0 or tokens_out > 0` and, when false, clears the submit-time estimate
+(`outcomes.py:~84`). Terminalizing a *running* turn at `0/0` would erase the
+pre-count while the real usage is rolled back by the terminal-row guard →
+repeated start-and-delete spends invisibly. Required:
+- **`usage_unknown=True`** terminalization — **retains** the submit-time estimate.
+- **Post-terminal usage stamp** — a narrow helper updating only the `ChatTurn`
+  token columns; no `TurnJob.status` change, no second *outcome* event.
 
-**Cap-accounting defect this introduces (review P1-3), and its fix.**
-`record_terminal_outcome` computes `consumed = tokens_in > 0 or tokens_out > 0`
-and, when nothing was consumed, **clears the submit-time estimate**
-(`user_turn.tokens_in = None`, `outcomes.py:~84`). Terminalizing a *running* turn
-with `0/0` would therefore (a) erase the pre-count and (b) leave the real usage
-unrecorded, because the later `_finalize_success` rolls back on the terminal row.
-Repeated start-and-delete cycles would then spend real tokens invisibly against
-the daily cap. Fix, both halves required:
-- **Usage-unknown terminalization:** a new flag (e.g.
-  `record_terminal_outcome(..., usage_unknown=True)`) that **retains** the
-  submit-time estimate rather than clearing it — the turn *did* consume input.
-- **Post-terminal usage stamp:** a narrow helper the processor calls when the
-  stream later reports real usage, which **only** updates the `ChatTurn` token
-  columns — it must not change `TurnJob.status` and must not emit a second
-  outcome event. The processor calls it on the retired path instead of relying on
-  `_finalize_success` (whose whole update is rolled back).
+**Audit honesty (review P2-4):** the outcome event's payload is written at
+cancellation time with zero usage (`outcomes.py:118-130`), and the late stamp
+touches only `ChatTurn`. Emit a **distinct non-outcome**
+`cloud_turn_usage_reconciled` `WorkspaceEvent` carrying the real tokens, leaving
+exactly one outcome event and no rewritten history. (Alternative, if rejected:
+narrow the guarantee to billing/cap accuracy and say audit payloads may
+understate — but the extra event is cheap and keeps both true.)
 
-### A2 — durable no-relaunch: `launch` consults the DB tombstone
+### A2 — pre-claim soft-delete check (a **narrowing**, not a guarantee)
 
-`process_turn_once` launches three times (`processor.py:158`, `:276`, and
-`send_turn`→`launch` `controller.py:213`), all get-or-create. In Slice A no route
-signal exists yet, so the **durable** stop is a soft-delete check inside
-`controller.launch`:
+`process_turn_once` launches three times (`processor.py:158`, `:276`,
+`send_turn`→`launch` `controller.py:213`), all get-or-create. Add a
+`soft_deleted_at` check **at the top of `controller.launch`, above
+`claim_launch_or_wait`** — the cached/pending path returns early at
+`controller.py:109` and never reaches the existing `work_session` block (`:138`).
+On deleted → raise `WorkspaceRetired(ws)`. Cost: one indexed PK lookup per launch.
 
-- The check must sit **at the top of `launch`, before `claim_launch_or_wait`** —
-  the cached/pending path returns early at `controller.py:109` and never reaches
-  the existing `work_session` block (which loads the `Workspace` row at `:138`).
-- On `soft_deleted_at is not None` → raise `WorkspaceRetired(ws)`.
-- Cost: one indexed PK lookup per launch (turns are user-paced; `send_turn` calls
-  `launch` once per turn). Acceptable.
+**Race (conceded):** a deletion committing *after* this check can still see a
+cached handle returned and `send_turn` reach `client.query`. This check therefore
+**shrinks** the window; it does not close it. Containment for the remainder is A3.
+Required test: pause after the precheck, commit the deletion, resume, and assert
+the **documented** behavior (query may proceed; the reconciliation tick then
+terminates it) — the test encodes the honest contract, not an aspirational one.
 
-This is restart-safe and needs no wiring, which is what makes **Slice A
-standalone**: an actively-deleted workspace cannot reach launch #2 or #3, so the
-normal active-delete path stops promptly rather than waiting for a sweep.
-(v5 wrongly claimed standalone safety while the tombstone only existed in
-`registry.retire_workspace`, which Slice B wires.)
+### A3 — per-launch live-client inventory + reconciliation
 
-### A3 — adapter-owned live-client inventory + reconciliation (the restored anchor)
+Keyed by **launch generation, not workspace** (review P1-1): after an unconfirmed
+teardown the registry releases the advisory lock (`registry.py:164`), so a fresh
+launch for the same workspace would otherwise overwrite the orphaned record — or a
+late teardown would clear the *new* client's record.
 
-The unavoidable durable ownership, because every existing path discards its
-handle before teardown succeeds:
-- `ClaudeAdapter` keeps `self._live_clients: dict[uuid.UUID, ClaudeSDKClient]`,
-  populated at launch and **removed only on confirmed death** (disconnect
-  completed, or force-kill with the process reaped). `terminate` may still pop
-  `handle.state["client"]`, but the inventory retains the reference, so a failed
-  attempt leaves something to retry.
-- **Reconciliation sweep** (new pass on the existing idle-sweep tick,
-  `WORKSPACE_IDLE_SWEEP_SECONDS`): for each inventory entry whose workspace is
-  soft-deleted, retry disconnect/force-kill; drop from the inventory on confirmed
-  death. Scans the **inventory**, not `_entries` — so it finds clients orphaned by
-  capacity eviction (`registry.py:141`), idle sweep (`:367`), retirement teardown,
-  or launcher cleanup (`controller.py:181`, which suppresses exceptions).
-- Registry entries whose workspace is soft-deleted are also terminated by this
-  pass **even when `in_flight > 0`** (unlike the idle pass — a running turn on a
-  deleted workspace is precisely the target).
+```python
+@dataclass
+class _LiveClient:
+    launch_id: uuid.UUID          # generation identity
+    workspace_id: uuid.UUID
+    client: ClaudeSDKClient
+    teardown: asyncio.Task | None = None
 
-This single inventory is what P1-1/P1-2/P1-3 actually require; no per-path acks,
-strict flags, or in-progress-teardown maps.
+self._live_clients: dict[uuid.UUID, _LiveClient]   # keyed by launch_id
+```
+- **Registered before `await client.connect()`** (`claude_adapter.py:185`) so
+  connect-time failures are discoverable.
+- **Cleared by identity** (`launch_id`) and only on **confirmed death**
+  (disconnect returned, or force-kill with the process reaped).
+- **One tracked teardown task per record**, reused if already running — repeated
+  retirement/sweep passes never spawn duplicate kills.
+- Orphan and replacement records coexist harmlessly; both are reaped on their own
+  terms.
 
-### A4 — hard-bounded disconnect (restore the v4 mechanism)
+**Reconciliation pass** (new pass on the existing idle-sweep tick,
+`config.py:216`): for every record whose workspace is soft-deleted, ensure its
+teardown task is running; drop on confirmed death. Because it scans the
+inventory, it finds clients orphaned by capacity eviction (`registry.py:141`),
+idle sweep (`:367`), retirement teardown, or launcher cleanup
+(`controller.py:181`, which suppresses exceptions). It also terminates registry
+entries for soft-deleted workspaces **even with `in_flight > 0`**.
+
+### A4 — hard-bounded disconnect
 
 `asyncio.wait_for` awaits cancellation completion, so a cancellation-resistant
-`disconnect()` can overrun indefinitely and force-kill never runs (v5 regressed
-this by reverting to plain `wait_for`). Run `client.disconnect()` as a **tracked
-task** and fire `_force_kill_subprocess` from an **independent timer** at the
-deadline, then reap (`process.wait()`, short second deadline) before clearing the
-inventory entry. `_force_kill_subprocess` returns `bool` for logging/metrics and
-inventory bookkeeping — not for a response contract.
+`disconnect()` can overrun and force-kill never fires. Run `client.disconnect()`
+as a **tracked task**; fire `_force_kill_subprocess` from an **independent timer**
+at the deadline; **reap** (`process.wait()`, short second deadline) before
+clearing the inventory record. Force-kill returns `bool` for logging/metrics and
+inventory bookkeeping only.
 
 ### A5 — processor guarded region
 
-Extend the finalization `try` (`:295`) to cover the post-claim
-`controller.launch` (`:276`) + `set_turn_provenance`; catch `WorkspaceRetired` →
-terminal/failed path (usually a no-op after A1) and route real usage through A1's
-post-terminal stamp.
-
-### Slice A acceptance
-
-Standalone: deletion terminalizes the row (durable), `launch` refuses to relaunch
-(durable), and any leaked client is reaped by the inventory sweep. No coordinator,
-no route change.
+Extend the finalization `try` (`:295`) over the post-claim `controller.launch`
+(`:276`) + `set_turn_provenance`; catch `WorkspaceRetired` → terminal path
+(usually a no-op after A1); route real usage through A1's post-terminal stamp.
 
 ---
 
-# Slice B — prompt retirement, coordinator, collab
+# Slice B — prompt retirement, coordinator, collab, mutex helper
 
-### B1 — coordinator + bridge (`proposal_assist/lifecycle/retirement.py`)
+### B1 — coordinator + bridge
 
-`WorkspaceRetirement` with `REQUIRED = ("turns", "collab")` validated **at
-construction (startup invariant)**; `retire(ws)` fans out concurrently and
-isolated (`gather`; `_run_one` logs+swallows). Hooks return `None` — no
-confirmation plumbing. `signal_workspace_retirement(request, ws) -> None`: the
-sync→loop bridge (as `signal_user_revocation`), **bounded ~5s** so streaming
-normally stops before the 204, then returns regardless; never raises. A4/A3
-remain the backstop.
+`WorkspaceRetirement`, `REQUIRED = ("turns", "collab")` validated at construction
+(**startup invariant**); `retire(ws)` fans out concurrently and isolated; hooks
+return `None`. `signal_workspace_retirement(request, ws) -> None`: sync→loop
+bridge (as `signal_user_revocation`), **bounded ~5s**, never raises. A3/A4 remain
+the backstop.
 
 ### B2 — turns hook: prompt in-process tombstone
 
-`registry._retired` + rejection in `claim_launch_or_wait`, and
+`registry._retired` + rejection in `claim_launch_or_wait`;
 `fulfill_pending_launch -> bool installed` (retired ⇒ don't install; resolve the
-waiter's future with `WorkspaceRetired`; `controller.launch` raises so its
-existing `except` tears the fresh handle down). This is the *promptness* layer
-over A2's durable floor: it stops an in-flight launcher from installing a handle
-between the delete commit and the next DB check.
+waiter with `WorkspaceRetired`; `controller.launch` raises so its existing
+`except` tears the fresh handle down). This is the promptness layer over A2's
+floor — it is a linearization point for *install*, though (per the honest
+statement) not for an already-cached client's in-flight `query`.
 
 ### B3 — collab retirement
 
 - `RoomManager._retired_ws`; **`acquire` and `operate`** both reject a retired
   workspace, re-checked **after every out-of-lock await** (`operate`'s
-  `await load()` at `room.py:491` is the straddle `kernel_accept.py:71` rides).
-- **Already-yielded operations (review P2-5):** gating entry is not enough — an
-  operation that already holds its room mutates Yjs and calls
-  `checkpoint_artifact` (`kernel.py:281`), and **git commits are not rolled back
-  with the SQL transaction**, so "no checkpoint after delete" can be violated.
-  Serialize deletion against the existing **per-workspace commit mutex** and
-  require a **post-mutex live-workspace re-check** before committing; collab
-  retirement additionally **drains active `room.ops`** before considering itself
-  done.
-- `retire_workspace(ws)`: tombstone, then for both artifact keys — `can_write =
-  False`, `evicted = True`, close each client **1008** (terminal for the frontend;
-  `evict()`'s 1011 invites reconnect storms), remove the room; **no checkpoint**.
-- **Retired `acquire` must map to 1008 (review P2-6):** the socket is accepted at
-  `collab_ws.py:87` and the route's `try` opens at `:118`, so a raise from
-  `acquire` bypasses cleanup and surfaces as 1011/1006. Catch the shared
-  retirement exception **around `acquire`** and `close(1008)` + return.
+  `await load()`, `room.py:491`, is the straddle `kernel_accept.py:71` rides).
+- `retire_workspace(ws)`: tombstone; for both artifact keys — `can_write=False`,
+  `evicted=True`, close each client **1008** (terminal for the frontend; 1011
+  invites reconnect storms), remove the room; **no checkpoint**; **drain active
+  `room.ops`** before considering retirement done.
+- **Retired `acquire` → 1008:** the socket is accepted at `collab_ws.py:87` and
+  the route's `try` opens at `:118`, so a raise from `acquire` bypasses cleanup
+  and surfaces as 1011/1006. Catch the shared retirement exception **around
+  `acquire`** and `close(1008)` + return.
 - Route's `signal_from_request` removed (subsumed).
 
-### B4 — service split + route
+### B4 — live-workspace commit-mutex helper (review P1-3 — **all writers**)
 
-Extract `soft_delete_workspace_db` (through `commit()`, including A1) and
+An already-waiting writer can acquire the mutex *after* deletion and mutate git
+(git commits are **not** rolled back with the SQL transaction — `kernel.py:281`
+checkpoints inside `operate`). This is **not** collab-specific. Enumerated call
+sites of `acquire_commit_mutex` (17): `human_cite.py:102`,
+`analysis/insert.py:349`, `collab/kernel.py:136/:221/:316/:427`,
+`collab/flip.py:117`, `web/api/workspaces.py:536/:647/:735`, `turns/submit.py:242`,
+`editing/save.py:180`, `tools/citations.py:797/:911/:1038/:1213`,
+`collab/checkpoint.py:82`. None currently rechecks soft-deletion (`save.py`'s
+under-mutex recheck is *severance*; `flip.py` re-reads flip state).
+
+**Add `acquire_commit_mutex_live(session, workspace_id)`** = acquire, then
+**immediately** re-read the `Workspace` row and raise `WorkspaceDeleted` if
+`soft_deleted_at is not None`, **before any mutation**. Migrate every *mutating*
+call site to it (the plan enumerates each of the 17 and records the decision;
+read-only/flip sites may keep the plain acquire with a stated reason). Deletion
+itself takes the same mutex, giving a **real linearization point** for writers.
+
+### B5 — service split + route
+
+Extract `soft_delete_workspace_db` (through `commit()`, incl. A1) and
 `scrub_workspace_bytes` (`:134-148`); keep a thin combined wrapper. Route: DB
 commit → `signal_workspace_retirement` → scrub → **204**.
 
 ## Testing
 
-**Slice A** — (1) **cap accounting:** delete during a running turn → estimate
-retained (not `None`), later real usage stamped onto the ChatTurn, status
-unchanged, exactly one outcome event; repeated start-and-delete accumulates
+**Slice A** — (1) cap accounting: delete mid-run → estimate retained, late real
+usage stamped on the `ChatTurn`, status unchanged, **exactly one outcome event**
+plus one `cloud_turn_usage_reconciled`; repeated start-and-delete accumulates
 against the daily cap. (2) delete → `_finalize_success` is a no-op; row stays
-terminal. (3) `launch` for a soft-deleted workspace raises `WorkspaceRetired` —
-including via the **cached-entry path** (proves the check precedes
-`claim_launch_or_wait`) and via `send_turn`'s internal launch. (4) inventory:
-a client orphaned by capacity-evict / idle-sweep / failed teardown is found and
-killed by the reconciliation pass; entry with `in_flight > 0` on a soft-deleted
-workspace is terminated. (5) **hard bound:** a `disconnect()` that ignores
-cancellation → force-kill still fires at the deadline; process reaped before the
-inventory entry clears. (6) processor: retire before launch #2 → no send, row
-terminal, not left `running`.
+terminal. (3) `launch` on a soft-deleted workspace raises — including via the
+**cached-entry path** and `send_turn`'s internal launch. (4) **the conceded
+race:** pause after the precheck, commit deletion, resume → assert documented
+behavior + that the reconciliation tick terminates it. (5) inventory: two
+generations for one workspace (orphan + fresh) are tracked and cleared **by
+identity**; a record registered before a failing `connect()` is discoverable; a
+second sweep does not spawn a duplicate teardown task. (6) hard bound: a
+cancellation-ignoring `disconnect()` still gets force-killed at the deadline and
+reaped before the record clears. (7) processor: retire before launch #2 → no
+send, row terminal.
 
-**Slice B** — (7) coordinator: concurrent+isolated; missing REQUIRED hook raises
-at startup. (8) bridge on a **separate-thread loop** (the M1 pattern); hanging
-hook → returns at the bound. (9) collab: both rooms evicted, clients closed
-**1008**, no checkpoint; `acquire` **and** `operate` reject, including retirement
-landing during `operate`'s `await load()`; **a mutation already inside `operate`
-cannot checkpoint after deletion** (commit-mutex + post-mutex re-check); retired
-`acquire` surfaces as **1008, not 1011/1006**. (10) route: `DELETE` → **204**, no
-send after the response, existing soft-delete assertions hold; `schema.gen.ts`
-untouched.
+**Slice B** — (8) coordinator concurrent+isolated; missing REQUIRED hook raises at
+startup. (9) bridge on a **separate-thread loop** (M1 pattern); hanging hook
+returns at the bound. (10) collab: both rooms evicted, clients **1008**, no
+checkpoint, `ops` drained; `acquire` **and** `operate` reject, incl. retirement
+landing during `operate`'s `await load()`; retired `acquire` surfaces **1008, not
+1011/1006**. (11) **mutex helper straddle, two writers:** a collab operation *and*
+a legacy writer (`save_section`) each blocked on the mutex when deletion commits
+→ both raise `WorkspaceDeleted` and mutate **nothing** (no git commit, no DB row).
+(12) route: `DELETE` → **204**, no send after the response, existing soft-delete
+assertions hold; `schema.gen.ts` untouched.
 
 ## Acceptance gates
 
-`tests/proposal_assist/{drafting,turns,collab,lifecycle}`, workspaces + route
-suites, `tests/test_api_spec.py`; `ruff check .`; frontend regression only. No
-migration, no frontend, no schema regen.
+`tests/proposal_assist/{drafting,turns,collab,editing,citations,lifecycle}`,
+workspaces + route suites, `tests/test_api_spec.py`; `ruff check .`; frontend
+regression only. No migration, no frontend, no schema regen.
 
 ## References (grounded)
 
-`web/api/workspaces.py:1488` · `workspaces.py:82` (commit `:133`, scrubs
-`:134-148`) · `outcomes.py:62-90` (`consumed`, estimate clear) ·
-`processor.py:158/:276/:295/:446-452` · `controller.py:105/:109/:138/:178-190/:213`
-· `registry.py:81/:141/:164/:195/:286/:367` · `claude_adapter.py:497/:525/:532/:536/:551`
-· `room.py:456/:491` · `kernel.py:281` · `kernel_accept.py:71/:92` ·
-`collab_ws.py:87/:117` · `config.py:216` (`WORKSPACE_IDLE_SWEEP_SECONDS`) ·
-`main.py:169/:235`.
+`web/api/workspaces.py:1488` · `workspaces.py:82` (`:133`, `:134-148`) ·
+`outcomes.py:62-90` (consumed/estimate), `:118-130` (event payload) ·
+`processor.py:158/:276/:295/:446-452` ·
+`controller.py:105/:109/:138/:178-190/:213` ·
+`registry.py:81/:141/:164/:195/:286/:367` ·
+`claude_adapter.py:185/:497/:525/:532/:536/:551` · `room.py:456/:491` ·
+`kernel.py:281` · `kernel_accept.py:71/:92` · `collab_ws.py:87/:117` ·
+17 mutex sites (listed in B4) · `config.py:216` · `main.py:169/:235`.
 
 ## Slice C (follow-up)
 
-Passes (coherence/evaluator/review/uncited) register a hook into the coordinator;
-needs workspace-scoped cancellation of the inline-awaited pass coroutines. The A3
-inventory does **not** cover them (their streams are coroutines, not SDK client
-handles). Separate spec → plan.
+Passes (coherence/evaluator/review/uncited) register a coordinator hook; needs
+workspace-scoped cancellation of the inline-awaited pass coroutines. A3's
+inventory does **not** cover them (coroutines, not SDK client handles). Separate
+spec → plan.
