@@ -1,6 +1,8 @@
 # Workspace Retirement — Slice B-mutex (live-workspace commit mutex) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **v2 — revised after a Codex review of v1** that found two implementation holes and three plan/gate gaps, all verified against code and folded below. One finding generalized during verification: the pre-mutex mutation exists in **both** kernel accept entry points, not just `kernel_accept_prose`.
 
 **Goal:** Every mutex-participating artifact/turn writer re-reads the workspace's live state *under* the commit mutex and refuses to mutate a deleted workspace — and the delete transaction takes that same mutex, so the two get a real linearization point instead of a hope.
 
@@ -36,10 +38,16 @@ Use these exact names/forms; do not guess.
 | Clean-error tuples | `_CLEAN_ACCEPT_ERRORS` (`proposals/kernel_accept.py:43`) and `_CLEAN_CITE_ERRORS` (`citations/collab_cite.py:34`) — errors raised **before** any doc mutation, so the room is NOT evicted. Both already contain `CommitMutexTimeout` |
 | Tool error shape | `tools/citations.py` returns `{"error": _BUSY_ERROR}` on busy; `_BUSY_ERROR = BUSY_ERROR_MESSAGE` (`:93`) |
 | App exception handlers | `main.py` registers `StarletteHTTPException` (`:445`), `AccountInactive` (`:463`), `RequestValidationError` (`:488`), `Exception` (`:498`). The `AccountInactive` handler is the pattern to copy: `api_request(request)` → `api_error(status, code, message)`, else a plain `JSONResponse` |
-| `checkpoint_artifact` callers | 10 sites; the 4 that are NOT already inside a `_live`-guarded transaction are `collab/permissions.py:54` (already catches `(GitCommitError, CommitMutexTimeout)`), `collab/checkpoint.py:201` (`checkpoint_active_tails`, whose pre-mutex soft-delete check at `:198` this closes), `collab/handover.py:35`, `web/collab_checkpoint.py:52` |
+| `checkpoint_artifact` callers | 10 sites; the 4 that are NOT already inside a `_live`-guarded transaction are `collab/permissions.py:54` (**skip** — already catches `(GitCommitError, CommitMutexTimeout)`), `collab/checkpoint.py:201` (`checkpoint_active_tails` — **skip**; this also closes its pre-mutex soft-delete check at `:198`), `collab/handover.py:35` (**skip, quietly**), and `web/collab_checkpoint.py:52` (**propagate → 404**, NOT skip — see the next row) |
 | `soft_delete_workspace` | `workspaces.py:82`, `(session, *, workspace_id, workspaces_dir) -> None`; commits internally at `:133` (after Slice A's running-turn terminalization); FS scrub at `:134-148` |
 | DELETE route | `web/api/workspaces.py:1488` `soft_delete_workspace_api`; `require_owner` → `soft_delete_workspace` → `signal_from_request(...)` → `Response(204)`. **No `CommitMutexTimeout` handler today** |
 | Test factories | `make_workspace(session, *, owner=None, ...)`; `make_user(session, *, email="owner@ki.se")` — default is **FIXED**, so two defaulted users in one test collide; always pass distinct emails |
+| **Pre-mutex mutation (v2 P1)** | **BOTH** accept entry points mutate `ProposedChange` before any mutex is held, and their wrapper commits: `kernel_accept_prose` flushes `status="stale"` at `kernel.py:204-208`, above its acquire at `:221`; `kernel_accept_citation`'s `_stale()` (`:361-366`) fires when `apply_citation_to_room` raises `CiteStale/CiteInvalid/CiteRefNotFound` — and that raise is at `kernel.py:132`, **above** the acquire at `:136`. Replacing the acquire in place would leave both holes open |
+| `_load_scoped` | takes `SELECT … FOR UPDATE` on the `ProposedChange` row. Hoisting the mutex above it fixes the holes **and** pins one lock order everywhere: advisory mutex → row lock |
+| `web/collab_checkpoint.py:51` | `res = checkpoint_artifact(...)` is assigned **inside** the `try` and read **after** it (`:66-70`), and there is no loop. A catch-and-skip here is an `UnboundLocalError` → 500. It is also the user-triggered "Save a version" route, so the right answer is to let `WorkspaceDeleted` propagate to the app handler → **404**. **This file needs no change** |
+| `collab/handover.py:51` | already has a broad `except Exception: rollback + log.error + continue`, and its `res` is used **inside** the try — so a deleted workspace is already isolated, just noisily. Needs only a quiet explicit branch |
+| `soft_delete_workspace` callers | one production caller (`web/api/workspaces.py:1504`) + 4 test call sites; none calls it twice on the same workspace, so making a re-delete raise is safe |
+| App test file | **`tests/test_main.py`** (there is no `tests/test_main_app.py`) |
 
 ## File Structure
 
@@ -54,8 +62,8 @@ Use these exact names/forms; do not guess.
 | `src/call_manager/proposal_assist/citations/collab_cite.py` | Modify — `WorkspaceDeleted` into `_CLEAN_CITE_ERRORS` |
 | `src/call_manager/proposal_assist/collab/checkpoint.py` | Modify — site migrated; `checkpoint_active_tails` skips |
 | `src/call_manager/proposal_assist/collab/permissions.py` | Modify — on-evict checkpoint skips a deleted workspace |
-| `src/call_manager/proposal_assist/collab/handover.py` | Modify — kill-switch drain skips |
-| `src/call_manager/proposal_assist/web/collab_checkpoint.py` | Modify — route-side checkpoint skips |
+| `src/call_manager/proposal_assist/collab/handover.py` | Modify — kill-switch drain skips **quietly** (ahead of its broad handler) |
+| ~~`src/call_manager/proposal_assist/web/collab_checkpoint.py`~~ | **NOT modified** — the user-triggered "Save a version" route lets `WorkspaceDeleted` propagate to the app handler → 404 (v2 P2) |
 | `src/call_manager/proposal_assist/collab/flip.py` | Modify — enable-on-touch refuses a deleted workspace |
 | `src/call_manager/proposal_assist/editing/save.py` | Modify — site migrated |
 | `src/call_manager/proposal_assist/citations/human_cite.py` | Modify — site migrated |
@@ -63,9 +71,11 @@ Use these exact names/forms; do not guess.
 | `src/call_manager/proposal_assist/tools/citations.py` | Modify — 4 sites migrated, deleted → error dict |
 | `tests/proposal_assist/test_commit_mutex_live.py` | **Create** |
 | `tests/test_workspaces_service.py` | Extend — delete takes the mutex |
-| `tests/proposal_assist/collab/test_collab_retire_mutex.py` | **Create** — two-writer straddle |
+| `tests/proposal_assist/collab/test_collab_retire_mutex.py` | **Create** — collab writers refuse |
 | `tests/proposal_assist/test_tools_citations_deleted.py` | **Create** |
-| `tests/proposal_assist/test_workspaces_delete_route.py` | Extend or create — 429 on contention |
+| `tests/proposal_assist/test_workspaces_delete_route.py` | **Create** — 429 on contention; concurrent double-delete |
+| `tests/proposal_assist/test_retire_mutex_straddle.py` | **Create** (Task 7) — the spec's real-writer straddle: writers **blocked on the mutex** when the deletion commits |
+| `scripts/honest_scope_gate.sh` | **Create** (Task 8) — the overclaim predicate, factored out so the gate can be run against known-bad input |
 
 ---
 
@@ -356,27 +366,22 @@ EOF
 - Test: `tests/test_workspaces_service.py`, `tests/proposal_assist/test_workspaces_delete_route.py`
 
 **Interfaces:**
-- Consumes: `acquire_commit_mutex` (Task 1 leaves it unchanged), `CommitMutexTimeout`.
-- Produces: `soft_delete_workspace` holds the commit mutex across its whole transaction; the DELETE route maps `CommitMutexTimeout` to **429** having committed nothing.
+- Consumes: `acquire_commit_mutex_live`, `WorkspaceDeleted`, `CommitMutexTimeout` (Task 1).
+- Produces: `soft_delete_workspace` holds the commit mutex across its whole transaction and **re-reads liveness under it**; the DELETE route maps `CommitMutexTimeout` to **429** having committed nothing, and a lost double-delete to **404**.
 
 **Why the mutex goes FIRST:** it must be held *before* `ws.soft_deleted_at` is set, or a writer could win the mutex, pass the live-check, and then have the deletion commit underneath it — the very ordering the helper exists to prevent.
+
+**Why the delete uses `_live`, not the plain acquire (v2 P2):** `soft_delete_workspace` loads `ws` via `session.get` at `workspaces.py:98`, *before* it could possibly block on the mutex. Two concurrent DELETEs can both pass `require_owner` while the workspace is live; the loser then wins the mutex and re-stamps `soft_deleted_at` off that stale identity-map instance, returning a second **204**. That contradicts the route's own documented contract ("Re-delete of an already-soft-deleted workspace → 404 … not idempotent, by design", `web/api/workspaces.py:1494`). Using `acquire_commit_mutex_live` makes the loser raise `WorkspaceDeleted`, which the Task-1 handler renders as exactly that 404 — the contract, for free.
 
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_workspaces_service.py`:
 
 ```python
-def test_soft_delete_holds_the_commit_mutex_so_a_blocked_writer_refuses(
-    pg_session_factory, tmp_path
-):
-    """The other half of the linearization point: a writer already blocked on the
-    mutex when the deletion commits must observe the deletion, not proceed."""
-    import threading
-
-    from call_manager.proposal_assist.drafting.locking import (
-        WorkspaceDeleted,
-        acquire_commit_mutex_live,
-    )
+def test_soft_delete_refuses_a_second_deletion(pg_session_factory, tmp_path):
+    """The delete's own under-mutex liveness read (v2 P2). Sequential here; the
+    concurrent form is the route test below."""
+    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
     from call_manager.workspaces import soft_delete_workspace
     from tests.proposal_assist.conftest import make_workspace
 
@@ -385,36 +390,12 @@ def test_soft_delete_holds_the_commit_mutex_so_a_blocked_writer_refuses(
         s.commit()
         ws_id = ws.id
 
-    writer_started = threading.Event()
-    outcome: dict = {}
-
-    def _writer():
-        with pg_session_factory() as s:
-            writer_started.set()
-            try:
-                acquire_commit_mutex_live(s, ws_id)
-                outcome["r"] = "acquired"
-            except WorkspaceDeleted:
-                outcome["r"] = "refused"
-            s.rollback()
-
-    t = threading.Thread(target=_writer)
-    t.start()
-    writer_started.wait(timeout=5)
     with pg_session_factory() as s:
         soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
-    t.join(timeout=30)
-
-    # Either the writer got in first (before the delete took the mutex) or it was
-    # refused — it must NEVER acquire a mutex on an already-deleted workspace.
-    if outcome["r"] == "acquired":
-        # Won the race legitimately; re-running now must refuse.
-        with pg_session_factory() as s:
-            with pytest.raises(WorkspaceDeleted):
-                acquire_commit_mutex_live(s, ws_id)
-            s.rollback()
-    else:
-        assert outcome["r"] == "refused"
+    with pg_session_factory() as s:
+        with pytest.raises(WorkspaceDeleted):
+            soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        s.rollback()
 
 
 def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
@@ -526,7 +507,44 @@ def test_delete_still_returns_204_uncontended(
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is not None
+
+
+def test_concurrent_double_delete_yields_exactly_one_204_and_one_404(
+    client_authed_owner, current_user, pg_session_factory
+):
+    """v2 P2: both requests pass require_owner while the workspace is live; the
+    loser wins the mutex afterwards and MUST see the committed deletion via the
+    under-mutex re-read, not re-stamp it from a stale identity-map instance.
+    404 is the route's own documented re-delete contract."""
+    import threading
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        ws_id = ws.id
+
+    codes: list[int] = []
+    start = threading.Barrier(2)
+    lock = threading.Lock()
+
+    def _delete():
+        start.wait(timeout=10)
+        r = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+        with lock:
+            codes.append(r.status_code)
+
+    threads = [threading.Thread(target=_delete) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert sorted(codes) == [204, 404]
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).soft_deleted_at is not None
 ```
+
+**Implementer note:** if `require_owner` filters the loser out *before* the mutex (the common, non-racing interleaving) the loser's 404 comes from `require_owner` instead of the helper — the assertion still holds and is still the contract. The point of the test is that **no interleaving yields two 204s**. If the barrier proves too coarse to reach the under-mutex path at all, keep this test *and* add the deterministic service-level twin from Task 7's straddle helper.
 
 **Note for the implementer:** the route's default mutex timeout is 10s, so the contended test blocks for ~10s. If that is too slow for the suite, thread a `timeout_seconds` through from the route's settings and pin it low in the test — but do NOT silently drop the assertion. Remove the placeholder `monkeypatch.setenv` line; it exists only to flag that this choice is yours to make explicit.
 
@@ -562,10 +580,18 @@ and immediately after the `ws is None` guard, **before** `ws.soft_deleted_at = .
     # turns their check into a real linearization point rather than a hope. A
     # wedged writer makes the delete raise CommitMutexTimeout having committed
     # nothing; the route maps that to the house 429 and the client retries.
-    acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
+    #
+    # _live, not the plain acquire: `ws` above was loaded BEFORE we could block on
+    # the mutex, so a concurrent deletion that committed while we waited would be
+    # invisible to it and we would re-stamp soft_deleted_at off a stale instance
+    # and return a second 204. The fresh under-mutex read raises WorkspaceDeleted
+    # instead — which is exactly this route's documented re-delete 404.
+    acquire_commit_mutex_live(session, workspace_id, timeout_seconds=timeout_seconds)
 ```
 
-Import `acquire_commit_mutex` from `call_manager.proposal_assist.drafting.locking`, and extend the function's docstring with one sentence naming the mutex and the `CommitMutexTimeout` contract.
+Import `acquire_commit_mutex_live` (and `WorkspaceDeleted` if you reference it) from `call_manager.proposal_assist.drafting.locking`, and extend the function's docstring with one sentence naming the mutex, the `CommitMutexTimeout` contract, and the `WorkspaceDeleted`-on-re-delete contract.
+
+Because the helper already validates existence, the pre-existing `if ws is None: raise ValueError(...)` guard now has a second, stricter gate behind it. **Keep** the `ValueError` guard — it is the "caller bypassed `require_owner`" contract check and its message is asserted by an existing test; the helper's raise is the *concurrency* gate. Order: `session.get` → `ValueError` guard → `acquire_commit_mutex_live`.
 
 - [ ] **Step 3b: Map the timeout on the route**
 
@@ -641,9 +667,18 @@ EOF
 
 **Interfaces:**
 - Consumes: `acquire_commit_mutex_live`, `WorkspaceDeleted` (Task 1).
-- Produces: all four kernel entry points raise `WorkspaceDeleted` before mutating the room doc; the room is NOT evicted (the raise joins the clean-error tuples).
+- Produces: all four kernel entry points raise `WorkspaceDeleted` before mutating **anything** — room doc *or* `ProposedChange` row; the room is NOT evicted (the raise joins the clean-error tuples).
 
 **Why the tuples matter:** `WorkspaceDeleted` is raised at the same place `CommitMutexTimeout` is — before any doc mutation. If it is not in `_CLEAN_ACCEPT_ERRORS` / `_CLEAN_CITE_ERRORS`, a refused write would needlessly evict a clean room and disconnect every editor in it.
+
+**Why the acquire is HOISTED, not replaced in place (v2 P1 — the finding with teeth):** an in-place swap leaves two real holes, because both accept entry points mutate the `ProposedChange` on their *early-exit* paths, above any mutex:
+
+| Entry point | Pre-mutex mutation | Reachable when |
+|---|---|---|
+| `kernel_accept_prose` | `pc.status="stale"` + `resolved_by/at` + `session.flush()` (`kernel.py:204-208`) | the live section SHA moved — i.e. any concurrent edit |
+| `kernel_accept_citation` | `_stale()` (`:361-366`), same three columns + flush | `apply_citation_to_room` raises `CiteStale/CiteInvalid/CiteRefNotFound` — raised at `:132`, **above** that function's own acquire at `:136` |
+
+`accept_via_kernel` commits the transaction, so on a deleted workspace either path would durably resolve a proposal that must not be touched. Hoisting the acquire to the **top of both functions**, above `_load_scoped`, closes both — and pins one lock order process-wide: **advisory mutex → `ProposedChange` row lock**, never the reverse. `apply_citation_to_room`'s own acquire then becomes a re-entrant no-op with one redundant fresh read; leave it in place (it is also called directly by `direct_cite_via_kernel`, which has no other guard).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -705,6 +740,37 @@ async def test_kernel_init_spec_and_annotation_insert_refuse(pg_session_factory,
     kernel.py:427 apply_annotation_insert_to_room). Both are sync functions —
     call them directly with a session, no room operate() needed."""
     # ... build ws, delete it, assert both raise WorkspaceDeleted ...
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["prose_edit", "citation_insert"])
+async def test_a_STALE_proposal_on_a_deleted_workspace_is_not_resolved(
+    kind, pg_session_factory, tmp_path
+):
+    """v2 P1 REGRESSION. Both accept paths resolve a proposal to 'stale' on an
+    early-exit branch that sits ABOVE any mutex, and the wrapper commits. With the
+    acquire merely swapped in place, a deleted workspace still gets a durable
+    ProposedChange mutation. Build a proposal that IS stale (bump the live section
+    so base_section_sha no longer matches), delete the workspace, and assert the
+    row is untouched.
+
+    This is the test that distinguishes 'replaced the acquire' from 'hoisted it'.
+    """
+    # ... build ws + live room + a PENDING proposal of `kind`;
+    #     mutate the room section so the proposal is now STALE ...
+    _delete(pg_session_factory, ws_id)
+
+    with pytest.raises(WorkspaceDeleted):
+        await accept_via_kernel(
+            session_factory=pg_session_factory, workspaces_dir=tmp_path,
+            workspace_id=ws_id, pc_id=pc_id, approver=owner, artifact="draft",
+        )
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, pc_id)
+        assert pc.status == "pending"        # NOT "stale"
+        assert pc.resolved_by is None
+        assert pc.resolved_at is None
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -715,20 +781,47 @@ cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
 ```
 Expected: FAIL — the writes succeed on a deleted workspace.
 
-- [ ] **Step 3a: Migrate the four sites**
+- [ ] **Step 3a: Migrate the four sites — two in place, two HOISTED**
 
-In `kernel.py`, replace each of the four `acquire_commit_mutex(session, workspace_id)` calls (`:136`, `:221`, `:316`, `:427`) with:
+In `kernel.py`, change the import at `:53` to `acquire_commit_mutex_live`, then:
+
+**In place** (nothing mutates above them) — `:136` (`apply_citation_to_room`) and `:316` (`kernel_init_spec`) and `:427` (`apply_annotation_insert_to_room`): replace the call with
 
 ```python
     acquire_commit_mutex_live(session, workspace_id)
 ```
+leaving every surrounding comment intact.
 
-Change the import at `kernel.py:53` to `acquire_commit_mutex_live`. Leave every surrounding comment intact except at `:221`, where the existing note about `checkpoint_artifact` re-acquiring the lock gains one sentence:
+**Hoisted** — `kernel_accept_prose` (`:183`): **delete** the acquire at `:221` and put it at the very top of the function body, above `pc = _load_scoped(...)`:
 
 ```python
-    # checkpoint_artifact later re-acquires the same xact lock (re-entrant, an
-    # instant no-op) and now also re-reads soft_deleted_at — a redundant but
-    # harmless second fresh read inside one transaction.
+def kernel_accept_prose(...) -> KernelAcceptResult:
+    # Mutex FIRST — above _load_scoped, above the staleness branch. Two reasons:
+    #   (1) the staleness branch below resolves the ProposedChange to "stale" and
+    #       flushes, and accept_via_kernel commits — so a workspace deleted mid-turn
+    #       would get a durable row mutation if we only guarded the later write path;
+    #   (2) it pins ONE lock order everywhere: advisory mutex -> ProposedChange row
+    #       lock (_load_scoped takes FOR UPDATE), never the reverse.
+    # It also still precedes the spec_locked_at read below, which is what the
+    # original placement was for (Codex H3): post_lock_spec sets that lock under
+    # this same mutex, so holding it here freezes the lock state for our whole
+    # transaction. checkpoint_artifact re-acquires it later — advisory xact locks
+    # are re-entrant, so that is an instant no-op with one redundant fresh read.
+    acquire_commit_mutex_live(session, workspace_id)
+
+    pc = _load_scoped(session, proposed_change_id, workspace_id)  # FOR UPDATE
+    ...
+```
+Replace the now-orphaned comment block at `:216-220` with a one-liner pointing at the top of the function, so the H3 rationale is not lost.
+
+**Hoisted** — `kernel_accept_citation` (`:340`): add the same acquire as the first statement of the body, above `pc = _load_scoped(...)`:
+
+```python
+    # Mutex FIRST (see kernel_accept_prose): _stale() below flushes a resolved
+    # ProposedChange, and it fires on CiteStale/CiteInvalid/CiteRefNotFound —
+    # which apply_citation_to_room raises ABOVE its own acquire. Guarding only
+    # that inner acquire would leave the stale path unguarded.
+    acquire_commit_mutex_live(session, workspace_id)
 ```
 
 - [ ] **Step 3b: Keep a refused write from evicting a clean room**
@@ -780,14 +873,16 @@ EOF
 - Modify: `src/call_manager/proposal_assist/collab/checkpoint.py:82` and `:184-210` (`checkpoint_active_tails`)
 - Modify: `src/call_manager/proposal_assist/collab/permissions.py:54`
 - Modify: `src/call_manager/proposal_assist/collab/handover.py:35`
-- Modify: `src/call_manager/proposal_assist/web/collab_checkpoint.py:52`
+- **NOT modified:** `src/call_manager/proposal_assist/web/collab_checkpoint.py` — see below
 - Modify: `src/call_manager/proposal_assist/collab/flip.py:117`
 - Test: `tests/proposal_assist/collab/test_collab_retire_mutex.py` (extend)
 
 **Interfaces:**
-- Produces: `checkpoint_artifact` raises `WorkspaceDeleted` on a deleted workspace; its four unguarded callers catch and skip; `enable_collab_on_touch` (`flip.py`) returns `False` for a deleted workspace rather than enabling collab on it.
+- Produces: `checkpoint_artifact` raises `WorkspaceDeleted` on a deleted workspace; its **three** background/teardown callers skip; the **user-triggered route propagates** to the app handler → 404; `enable_collab_on_touch` (`flip.py`) returns `False` rather than enabling collab on a deleted workspace.
 
-**Why skip and not propagate:** checkpointing writes git + DB rows. On a deleted workspace that is exactly the mutation we are preventing, and none of these four callers is a user action that deserves an error — they are teardown, a background tick, a kill-switch drain, and a best-effort route-side flush.
+**Why skip:** checkpointing writes git + DB rows. On a deleted workspace that is exactly the mutation we are preventing, and teardown / a background tick / a kill-switch drain are not user actions that deserve an error.
+
+**Why the explicit endpoint does NOT skip (v2 P2):** `web/collab_checkpoint.py` is the user-facing "Save a version" route. Two reasons a skip is wrong there: mechanically, `res` is assigned inside the `try` (`:51`) and read after it (`:66-70`) with no loop, so catch-and-continue is an `UnboundLocalError` → 500; and semantically, a user who asked to save a version deserves to be told the workspace is gone. Let `WorkspaceDeleted` propagate to the Task-1 handler → **404**. That file needs no edit — only a test pinning the 404.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -863,7 +958,29 @@ Replace `acquire_commit_mutex(session, workspace_id)` with `acquire_commit_mutex
                     continue
 ```
 
-`collab/handover.py:35` and `web/collab_checkpoint.py:52` — same shape: catch `WorkspaceDeleted`, roll the session back, and skip that artifact. Preserve each site's existing surrounding error handling; only add the new branch.
+`collab/handover.py:35` — it already isolates per artifact with a broad `except Exception: rollback + log.error + continue` (`:51`), so a deleted workspace is handled but logged as an **error**. Add a quiet explicit branch **above** the broad one, so a legitimate mid-drain deletion is not alarming noise:
+
+```python
+            except WorkspaceDeleted:
+                # Deleted between the pre-screen above and the mutex. Expected,
+                # not a failure: nothing to hand over.
+                s.rollback()
+                continue
+```
+
+`web/collab_checkpoint.py` — **no change.** `WorkspaceDeleted` propagates to the app-level handler and the route returns 404. Add only a test:
+
+```python
+def test_explicit_checkpoint_endpoint_404s_for_a_deleted_workspace(
+    client_authed_owner, current_user, pg_session_factory
+):
+    """The user-triggered 'Save a version' route must SAY the workspace is gone,
+    not skip (which would read an unbound `res` and 500)."""
+    # ... build ws with collab enabled on 'draft', delete it ...
+    r = client_authed_owner.post(f"/api/workspaces/{ws_id}/collab/draft/checkpoint")
+    assert r.status_code == 404
+```
+Confirm the exact route path from the module's decorator before writing the call.
 
 - [ ] **Step 3c: `flip.py:117` — refuse rather than enable**
 
@@ -892,7 +1009,6 @@ cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
   src/call_manager/proposal_assist/collab/checkpoint.py \
   src/call_manager/proposal_assist/collab/permissions.py \
   src/call_manager/proposal_assist/collab/handover.py \
-  src/call_manager/proposal_assist/web/collab_checkpoint.py \
   src/call_manager/proposal_assist/collab/flip.py
 ```
 
@@ -903,16 +1019,17 @@ git -C /home/parlar_ai/dev/call-monitor add \
   src/call_manager/proposal_assist/collab/checkpoint.py \
   src/call_manager/proposal_assist/collab/permissions.py \
   src/call_manager/proposal_assist/collab/handover.py \
-  src/call_manager/proposal_assist/web/collab_checkpoint.py \
   src/call_manager/proposal_assist/collab/flip.py \
   tests/proposal_assist/collab/test_collab_retire_mutex.py
 git -C /home/parlar_ai/dev/call-monitor commit -m "$(cat <<'EOF'
 feat(collab): checkpoint and enable-on-touch refuse a deleted workspace
 
 Checkpointing writes git + DB rows and enable-on-touch commits a
-CollabArtifactState row — both are exactly what deletion must stop. The four
-teardown/background callers SKIP rather than fail, and the under-mutex raise
-closes checkpoint_active_tails' pre-mutex soft-delete TOCTOU.
+CollabArtifactState row — both are exactly what deletion must stop. The three
+teardown/background callers SKIP rather than fail; the user-triggered "Save a
+version" route deliberately does NOT (its `res` is read after the try, so a skip
+would 500, and a user who asked to save deserves the 404). The under-mutex raise
+also closes checkpoint_active_tails' pre-mutex soft-delete TOCTOU.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 EOF
@@ -1144,7 +1261,107 @@ EOF
 
 ---
 
-### Task 7: Acceptance gates
+### Task 7: the real-writer straddle (spec test 12)
+
+**Files:**
+- Test: `tests/proposal_assist/test_retire_mutex_straddle.py` (create). No source changes — if this task needs one, an earlier task was wrong.
+
+**Interfaces:**
+- Consumes: everything Tasks 1–6 built.
+
+**Why this task exists (v2 P1-test):** Tasks 1–6 test the helper directly, and test concrete writers only *after* a deletion has already committed. Neither shape proves the property the spec actually asks for (`design.md:217-220`): that a real writer **already blocked on the mutex** when the deletion commits then mutates **nothing**. That is the property the whole slice claims, and a straddle test against `accept_via_kernel` is precisely what would have caught the Task-3 hoist bug — under a straddle, the un-hoisted code resolves the proposal to `stale` and commits it.
+
+**The blocking probe.** Do not sleep-and-hope. Postgres publishes lock waits, so poll for the writer to be genuinely queued:
+
+```python
+def _advisory_waiters(session_factory) -> int:
+    """Count ungranted advisory locks. The test DB is otherwise idle, so a
+    non-zero count means our writer really is queued behind the mutex — not
+    merely 'started' (a sleep would race on a loaded machine)."""
+    from sqlalchemy import text
+
+    with session_factory() as s:
+        return s.scalar(
+            text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+        )
+
+
+def _wait_until_blocked(session_factory, *, n: int = 1, timeout: float = 10.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _advisory_waiters(session_factory) >= n:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"no writer blocked on the advisory lock within {timeout}s")
+```
+
+- [ ] **Step 1: Write the straddle tests**
+
+Create `tests/proposal_assist/test_retire_mutex_straddle.py`:
+
+```python
+"""Spec test 12 — real writers BLOCKED on the commit mutex when a deletion
+commits must wake up, refuse, and mutate nothing.
+
+Shape, for every case:
+  1. a holder thread takes the commit mutex and parks;
+  2. the writer thread calls the REAL entry point -> queues behind it;
+  3. we poll pg_locks until the writer is genuinely blocked;
+  4. the holder marks the workspace deleted and COMMITS (releasing the mutex);
+  5. the writer wins the mutex, re-reads, and must raise WorkspaceDeleted
+     having written no git commit and no DB row.
+"""
+```
+
+Write one test per writer, all three the spec names:
+
+- **`test_blocked_save_section_refuses`** — the legacy git-first writer. Assert `WorkspaceDeleted`, and that git `HEAD` for the workspace repo is byte-identical to the pre-delete SHA.
+- **`test_blocked_kernel_accept_refuses_and_leaves_the_proposal_pending`** — parametrize over `prose_edit` and `citation_insert`, and run each **twice**: once with a fresh proposal and once with a **stale** one (bump the live section first). The stale variant is the one that fails against an un-hoisted acquire. Assert `status == "pending"`, `resolved_by is None`, `resolved_at is None`, and that the room was not evicted.
+- **`test_blocked_enable_on_touch_returns_false`** — `flip.py`'s variant: assert `False`, and that **no** `CollabArtifactState` row exists for the workspace/artifact.
+
+Each test's step 4 must use a **separate session** that holds the mutex, sets `soft_deleted_at`, and commits — not `soft_delete_workspace`, which would take the mutex the holder already owns. State that in a comment so a later reader does not "simplify" it into a deadlock.
+
+- [ ] **Step 2: Run — and expect the stale-proposal cases to be the interesting ones**
+
+```bash
+cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
+  tests/proposal_assist/test_retire_mutex_straddle.py -p no:cacheprovider -q
+```
+Expected: all pass. If a stale-proposal case fails with the proposal resolved to `"stale"`, Task 3's hoist was not applied to that entry point — fix Task 3, do not weaken this test.
+
+- [ ] **Step 3: Sanity-check that the probe actually probes**
+
+Temporarily change `_wait_until_blocked`'s poll to `return` immediately and re-run: at least one test must become flaky or fail. Restore it. This proves the tests are synchronizing on a real lock wait rather than passing by luck.
+
+- [ ] **Step 4: Lint**
+
+```bash
+cd /home/parlar_ai/dev/call-monitor && uv run ruff check tests/proposal_assist/test_retire_mutex_straddle.py
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git -C /home/parlar_ai/dev/call-monitor add tests/proposal_assist/test_retire_mutex_straddle.py
+git -C /home/parlar_ai/dev/call-monitor commit -m "$(cat <<'EOF'
+test(retirement): real writers blocked on the mutex refuse and mutate nothing
+
+Spec test 12. Testing the helper in isolation proves nothing about the actual
+entry points; these park a holder on the mutex, poll pg_locks until the real
+writer is genuinely queued, then commit the deletion underneath it. The stale-
+proposal variants are the ones that fail if the kernel acquire is swapped in
+place rather than hoisted above the early-exit mutation.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+### Task 8: Acceptance gates
 
 **Files:** none (verification only). Any failure → fix on-branch, re-run.
 
@@ -1155,7 +1372,7 @@ cd /home/parlar_ai/dev/call-monitor
 grep -rn "acquire_commit_mutex(" --include=*.py src/ | grep -v "def acquire_commit_mutex" \
   | grep -v "acquire_commit_mutex_live"
 ```
-Expected: exactly **two** lines — `workspaces.py` (the delete path, Task 2) and `turns/submit.py` (the recorded per-site decision, Task 5) — plus the `locking.py` internal call inside `acquire_commit_mutex_live`. Anything else is an unmigrated writer.
+Expected: exactly **two** lines — `turns/submit.py:242` (the recorded per-site decision, Task 5) and the internal call inside `acquire_commit_mutex_live` in `locking.py`. Anything else is an unmigrated writer. Note `workspaces.py`'s delete path uses `_live` (Task 2, v2 P2), so it must NOT appear here.
 
 - [ ] **Step 2: Grouped backend sweep**
 
@@ -1170,12 +1387,12 @@ Expected: all pass. `connection refused` from testcontainers PG is an infra flak
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
-  tests/test_scheduler.py tests/test_scheduler_digest.py tests/test_main_app.py \
+  tests/test_scheduler.py tests/test_scheduler_digest.py tests/test_main.py \
   -p no:cacheprovider -q
 cd /home/parlar_ai/dev/call-monitor && EMBEDDING_MODEL=bge-m3 uv run pytest \
   tests/test_scheduler_single_instance.py -p no:cacheprovider -q
 ```
-(The single-instance test runs isolated — a known nested-lifespan bug in another file poisons it when run together.) Substitute the real filename if `tests/test_main_app.py` does not exist; the point is to cover whatever exercises `create_app()`'s handler registration.
+`tests/test_main.py` is the verified filename (there is no `tests/test_main_app.py`) and is what exercises `create_app()`'s handler registration. The single-instance test runs **isolated** — a known nested-lifespan bug in another file poisons it when run together.
 
 - [ ] **Step 4: Lint (whole repo, as CI runs it)**
 
@@ -1201,36 +1418,66 @@ Expected: only the files in the File Structure table. **No migration, no fronten
 
 - [ ] **Step 7: Honest-scope gate (must FAIL the build if violated)**
 
+The predicate is factored into a function so Step 8 can execute **the same code** against known-bad input. A gate that is never run against something it should reject is not a verified gate.
+
+Write `scripts/honest_scope_gate.sh`:
+
 ```bash
-cd /home/parlar_ai/dev/call-monitor
-if git diff master...workspace-retirement-mutex -- '*.py' \
-     | grep -nEi "all writers|every writer|cannot write after|no writes after|proves.*stopped|fully prevents"; then
-  echo "FAIL: overclaiming language introduced — this slice covers MUTEX-PARTICIPATING writers only; settings.py update_settings/add_member remain uncovered"
+#!/usr/bin/env bash
+# Slice B-mutex honest-scope gate. Reads candidate text on stdin; exits 1 if it
+# contains language claiming more than the slice delivers. This slice covers
+# MUTEX-PARTICIPATING writers only — settings.py update_settings/add_member are
+# an accepted, documented residual.
+set -uo pipefail
+
+OVERCLAIM='all writers|every writer|cannot write after|no writes after|proves.*stopped|fully prevents'
+
+if grep -nEi "$OVERCLAIM"; then
+  echo "FAIL: overclaiming language introduced — this slice covers MUTEX-PARTICIPATING writers only" >&2
   exit 1
 fi
-echo "OK: no overclaiming language"
+exit 0
+```
+
+Run it:
+
+```bash
+cd /home/parlar_ai/dev/call-monitor && chmod +x scripts/honest_scope_gate.sh
+git diff master...workspace-retirement-mutex -- '*.py' | ./scripts/honest_scope_gate.sh \
+  && echo "OK: no overclaiming language"
 ```
 Expected: `OK: no overclaiming language`.
 
-- [ ] **Step 8: Prove the gate can fail**
+- [ ] **Step 8: Prove the gate can fail — by running it on known-bad input**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-if git diff master...workspace-retirement-mutex -- '*.py' | grep -qEi "commit mutex"; then
-  echo "gate control flow verified: it detects a pattern that is definitely present"
-else
-  echo "BROKEN GATE"
+# Feed the SAME predicate a line it must reject, and assert a non-zero exit.
+if echo '# this fully prevents any write after deletion' | ./scripts/honest_scope_gate.sh; then
+  echo "BROKEN GATE: accepted known-overclaiming input" >&2
+  exit 1
 fi
+# And a line it must accept, so the gate is not simply rejecting everything.
+if ! echo '# takes the per-workspace commit mutex' | ./scripts/honest_scope_gate.sh; then
+  echo "BROKEN GATE: rejected known-good input" >&2
+  exit 1
+fi
+echo "gate verified: rejects overclaiming input, accepts ordinary input"
 ```
+Expected: `gate verified: rejects overclaiming input, accepts ordinary input`. Note both failure branches `exit 1` — v1's echoed a message and exited 0, so a broken gate would have reported success.
+
+Add `scripts/honest_scope_gate.sh` to the File Structure table's created files and to Task 8's commit.
 
 ---
 
 ## Self-Review (completed at plan-writing time)
 
-- **Spec coverage:** B4 → Tasks 1, 3, 4, 5, 6 (helper + all 17 sites, each migrated or with a recorded reason); B4's "deletion takes the same mutex" → Task 2; spec test 12 (two-writer straddle) → Task 1 Step 1's `test_writer_blocked_on_the_mutex_sees_a_deletion_that_commits_meanwhile` + Task 2's service-level twin + Task 3's collab twin; spec test 13 (identity-map staleness) → Task 1's `test_reads_fresh_state_not_the_identity_map`; spec test 14's "contended delete → 429 with nothing committed" → Task 2. **Deferred to B-retire by design:** B1 coordinator, B2 turns tombstone, B3 collab retirement, B5 service split + `signal_workspace_retirement` + 204 ordering.
-- **Type consistency:** `acquire_commit_mutex_live(session, workspace_id, *, timeout_seconds=10) -> None` (T1 def; T3/T4/T5/T6 calls — `timeout_seconds` passed only at `flip.py`, matching its existing `_FLIP_MUTEX_TIMEOUT_SECONDS` usage). `WorkspaceDeleted(workspace_id)` with `.workspace_id` (T1 def; T1/T3/T4/T5 assertions). `DELETED_ERROR_MESSAGE` (T1 def; T6 alias `_DELETED_ERROR`, mirroring the existing `_BUSY_ERROR` alias).
-- **Ordering:** the helper (T1) precedes every consumer; delete-takes-the-mutex (T2) precedes the migrations so each can be tested against real contention; the clean-error tuples (T3b) land in the same commit as the kernel sites that raise into them.
-- **Placeholder scan:** three test bodies are deliberately prose-sketched — Task 3's kernel/room fixtures, Task 5's route-404 test, Task 6's `ToolContext` build — because each must reuse an existing suite's construction helper verbatim rather than a divergent invention. Every assertion, exception type and expected value in them is exact. Task 2's delete-route test carries an explicit implementer decision (mutex timeout vs. suite speed) flagged inline rather than silently assumed.
+- **Spec coverage:** B4 → Tasks 1, 3, 4, 5, 6 (helper + all 17 sites, each migrated or with a recorded reason); B4's "deletion takes the same mutex" → Task 2; **spec test 12 (real-writer straddle) → Task 7** — collab accept, `save_section`, and `flip.py`, each genuinely blocked on the mutex when the deletion commits; spec test 13 (identity-map staleness) → Task 1's `test_reads_fresh_state_not_the_identity_map`; spec test 14's "contended delete → 429 with nothing committed" → Task 2. **Deferred to B-retire by design:** B1 coordinator, B2 turns tombstone, B3 collab retirement, B5 service split + `signal_workspace_retirement` + 204 ordering.
+- **v2 review fixes folded:** P1-1 → Task 3 (acquire **hoisted** above `_load_scoped` in **both** `kernel_accept_prose` *and* `kernel_accept_citation` — the second hole found while verifying the first — plus the stale-proposal regression test). P2-2 → Task 4 (`web/collab_checkpoint.py` is now explicitly **not modified**; `WorkspaceDeleted` propagates to the 404 handler, since its `res` is read after the `try` and a skip would 500). P2-3 → Task 2 (deletion uses `acquire_commit_mutex_live`, so the losing concurrent DELETE gets the route's own documented re-delete 404 instead of a second 204). P1-test-4 → **new Task 7**, with a `pg_locks` probe instead of a sleep, and the weak either-outcome service test deleted. P2-5 → Task 8 (predicate factored into `scripts/honest_scope_gate.sh`, executed against known-bad *and* known-good input, both failure branches `exit 1`; verified empirically at plan-writing time: bad input → exit 1, good input → exit 0). `tests/test_main_app.py` → `tests/test_main.py`.
+- **Type consistency:** `acquire_commit_mutex_live(session, workspace_id, *, timeout_seconds=10) -> None` (T1 def; T2/T3/T4/T5/T6 calls — `timeout_seconds` passed at `flip.py`, matching its existing `_FLIP_MUTEX_TIMEOUT_SECONDS`, and at `soft_delete_workspace`, which now takes the same keyword). `WorkspaceDeleted(workspace_id)` with `.workspace_id` (T1 def; T1–T5, T7 assertions). `DELETED_ERROR_MESSAGE` (T1 def; T6 alias `_DELETED_ERROR`, mirroring the existing `_BUSY_ERROR` alias).
+- **Ordering:** the helper (T1) precedes every consumer; delete-takes-the-mutex (T2) precedes the migrations so each can be tested against real contention; the clean-error tuples (T3b) land in the same commit as the kernel sites that raise into them; the straddle suite (T7) runs last because it exercises all of them at once.
+- **Lock-order note:** hoisting the kernel acquire above `_load_scoped` makes the order **advisory mutex → `ProposedChange` row lock** on every path. Keep it that way; the reverse order on any future path is a deadlock.
+- **Placeholder scan:** three test bodies stay deliberately prose-sketched — Task 3's kernel/room fixtures, Task 5's route-404 test, Task 6's `ToolContext` build — because each must reuse an existing suite's construction helper verbatim rather than a divergent invention. Every assertion, exception type and expected value in them is exact. Task 2's delete-route test and Task 7's straddle probe each carry an explicit implementer decision flagged inline rather than silently assumed.
 - **Known sharp edge:** Task 1 Step 3a may hit a circular import (`locking` → `db.models`). The step says to fall back to a function-local import and document it, rather than restructuring `db.models`.
 
 ## Execution Handoff
