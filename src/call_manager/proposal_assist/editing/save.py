@@ -32,7 +32,7 @@ from call_manager.proposal_assist.citations.gitio import current_head, write_and
 from call_manager.proposal_assist.citations.ledger import empty_ledger, load_ledger
 from call_manager.proposal_assist.citations.markers import find_bare_markers
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
@@ -177,7 +177,7 @@ def save_section(
     the first resulting chunk; the reconcile tick covers any remainder.
     """
     # 1. Serialize against every other git mutation of this workspace.
-    acquire_commit_mutex(session, workspace.id)
+    acquire_commit_mutex_live(session, workspace.id)
 
     artifact = Artifact(artifact)  # normalize a stringly-typed caller
 

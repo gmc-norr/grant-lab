@@ -134,7 +134,7 @@ def test_disabled_init_severs_when_flag_flips_after_guard(
 
     import call_manager.web.api.workspaces as workspaces_mod
 
-    real_acquire_commit_mutex = workspaces_mod.acquire_commit_mutex
+    real_acquire_commit_mutex = workspaces_mod.acquire_commit_mutex_live
 
     def _flip_then_acquire(*args, **kwargs):
         # Simulate enable-on-touch committing on another connection AFTER
@@ -146,7 +146,7 @@ def test_disabled_init_severs_when_flag_flips_after_guard(
             s2.commit()
         return real_acquire_commit_mutex(*args, **kwargs)
 
-    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex", _flip_then_acquire)
+    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex_live", _flip_then_acquire)
     repo = Path(tmp_path) / str(wid) / "repo"
     head_before = current_head(repo)
     r = client_authed_owner.post(f"/api/workspaces/{wid}/spec")

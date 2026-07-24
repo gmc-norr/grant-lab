@@ -16,7 +16,7 @@ from call_manager.proposal_assist.collab.kernel import (
     kernel_accept_prose,
 )
 from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.accepting import (
     ProposedChangeNotFound,
@@ -47,6 +47,7 @@ _CLEAN_ACCEPT_ERRORS = (
     ProposedChangeNotFound,
     ProposedChangeNotPending,
     CommitMutexTimeout,
+    WorkspaceDeleted,
     IndexError,
     RoomEvicted,
 )

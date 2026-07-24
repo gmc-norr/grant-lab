@@ -784,6 +784,57 @@ async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
 
 
 @pytest.mark.asyncio
+async def test_retired_before_claim_cancels_the_queued_turn_instead_of_looping(
+    pg_session_factory,
+    _settings_env,
+):
+    """The PRE-claim launch (before the row is claimed) also raises WorkspaceRetired.
+
+    Stamping soft_deleted_at directly — rather than calling soft_delete_workspace —
+    is the point: it reproduces the one state the delete service normally prevents,
+    a QUEUED turn on a deleted workspace. Leaving it queued (the generic
+    launch-failed branch) would make every later drain tick re-raise and log a
+    stack trace for a workspace that is never coming back.
+    """
+    from datetime import UTC, datetime
+
+    _wsid, job_id, controller, adapter = _build_controller_and_submit(
+        pg_session_factory,
+        _settings_env,
+        [TurnDoneEvent(tokens_in=10, tokens_out=20, model="fake", session_id="s1")],
+    )
+    with pg_session_factory() as s:
+        s.get(Workspace, _wsid).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status == "cancelled"  # NOT left queued
+    assert adapter.turns == []  # never launched, never sent
+
+    # And it stays terminal: a later tick is a plain no-op, not a second write.
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status == "cancelled"
+        cancels = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == _wsid,
+                WorkspaceEvent.kind == "cloud_turn_cancelled",
+            )
+        ).all()
+        assert len(cancels) == 1  # exactly one outcome event, not one per tick
+
+
+@pytest.mark.asyncio
 async def test_delete_during_stream_reconciles_reported_usage(
     pg_session_factory,
     _settings_env,

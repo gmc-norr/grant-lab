@@ -20,7 +20,7 @@ from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, arti
                         workspaces_dir=workspaces_dir,
                     )
                     s.commit()
-                except (GitCommitError, CommitMutexTimeout):
+                except (GitCommitError, CommitMutexTimeout, WorkspaceDeleted):
                     logger.warning(
                         "collab.checkpoint_on_evict_skipped",
                         extra={"event": "collab_checkpoint_on_evict_skipped",

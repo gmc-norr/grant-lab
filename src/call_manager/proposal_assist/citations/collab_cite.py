@@ -23,7 +23,7 @@ from call_manager.proposal_assist.collab.kernel import (
     kernel_init_spec,
 )
 from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 
@@ -32,8 +32,17 @@ from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 # (incl. its SectionMapDivergenceError subclass) can be raised by the section apply
 # BEFORE the fragment mutation, so it must not needlessly evict a clean room.
 _CLEAN_CITE_ERRORS = (
-    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout,
+    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout, WorkspaceDeleted,
     IndexError, RoomEvicted, SectionStructureError,
+)
+
+# The init-spec path raises a NARROWER set than the cite paths (no anchor/section
+# work happens before its mutation), so it gets its own list rather than reusing
+# _CLEAN_CITE_ERRORS — an over-broad list here would silently stop evicting a room
+# that a genuine post-mutation failure had left dirty. Named (not inlined at the
+# except) so the "raised before any room mutation" invariant is assertable.
+_CLEAN_INIT_SPEC_ERRORS = (
+    SpecLockedError, CommitMutexTimeout, WorkspaceDeleted, RoomEvicted,
 )
 
 
@@ -96,9 +105,9 @@ async def init_spec_via_kernel(
 
     CAREFUL: kernel_init_spec mutates room.doc BEFORE its checkpoint; a failure
     AFTER the mutation must evict (dirty room) — that is exactly what the bare
-    `except Exception` below does. SpecLockedError/CommitMutexTimeout are raised
-    BEFORE the mutation so they are clean (no evict). Do not reorder
-    kernel_init_spec so that stops being true.
+    `except Exception` below does. _CLEAN_INIT_SPEC_ERRORS are raised BEFORE the
+    mutation so they are clean (no evict). Do not reorder kernel_init_spec so that
+    stops being true.
     """
     key = (workspace_id, "spec")
 
@@ -130,7 +139,7 @@ async def init_spec_via_kernel(
             if update is not None and not room.evicted:
                 await room.broadcast(P.create_update_message(update))
             return head, md
-        except (SpecLockedError, CommitMutexTimeout, RoomEvicted):
+        except _CLEAN_INIT_SPEC_ERRORS:
             raise  # pre/clean — room doc untouched or tombstoned; no evict
         except Exception:
             await MANAGER.evict(key)  # room.doc may be ahead of the rolled-back log

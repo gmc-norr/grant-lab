@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from call_manager.db.models import TurnJob, Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.coherence.jobs import cancel_coherence_jobs_for_workspace
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.evaluator.jobs import cancel_evaluator_jobs_for_workspace
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.review.jobs import cancel_review_runs_for_workspace
@@ -80,7 +81,11 @@ def create_workspace(
 
 
 def soft_delete_workspace(
-    session: Session, *, workspace_id: uuid.UUID, workspaces_dir: Path
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    workspaces_dir: Path,
+    timeout_seconds: int = 10,
 ) -> None:
     """Soft-delete a workspace: mark it deleted, cancel every active background
     job + queued turn so none can burn cloud tokens after deletion, commit, then
@@ -94,6 +99,11 @@ def soft_delete_workspace(
     are intentionally preserved for the audit trail; only the on-disk bytes go.
 
     The caller resolves ownership (require_owner) before calling this.
+
+    Takes the per-workspace commit mutex for the whole transaction: raises
+    CommitMutexTimeout (route → 429) if a writer is wedged, having committed
+    nothing, and WorkspaceDeleted (route → 404) if the workspace was already
+    deleted — the documented non-idempotent re-delete contract.
     """
     ws = session.get(Workspace, workspace_id)
     if ws is None:
@@ -101,6 +111,18 @@ def soft_delete_workspace(
         # exist; a None here means the contract was bypassed — fail loudly rather
         # than silently skipping the soft_deleted_at stamp while cancelling jobs.
         raise ValueError(f"workspace not found: {workspace_id}")
+    # Take the per-workspace commit mutex for this whole transaction, BEFORE any
+    # mutation. Mutex-participating writers call acquire_commit_mutex_live, which
+    # re-reads soft_deleted_at once it wins this lock — so holding it here is what
+    # turns their check into a real linearization point rather than a hope.
+    #
+    # _live, not the plain acquire: `ws` above was loaded BEFORE we could block on
+    # the mutex, so a concurrent deletion that committed while we waited would be
+    # invisible to it and we would re-stamp soft_deleted_at off a stale instance
+    # and report a second success. The fresh under-mutex read raises
+    # WorkspaceDeleted instead — which is exactly the route's documented
+    # re-delete 404.
+    acquire_commit_mutex_live(session, workspace_id, timeout_seconds=timeout_seconds)
     ws.soft_deleted_at = datetime.now(UTC)
     # Fail any active (queued|running) background pass so it can't claim and burn
     # cloud tokens after the workspace is gone (each claim_next also excludes

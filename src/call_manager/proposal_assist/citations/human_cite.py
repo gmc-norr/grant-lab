@@ -41,7 +41,7 @@ from call_manager.proposal_assist.citations.markers import (
 )
 from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -99,7 +99,7 @@ def insert_citation_for_user(
         raise CiteInvalid("select a claim span to cite")
 
     # 1. Serialize against every other git mutation of this workspace.
-    acquire_commit_mutex(session, workspace.id)
+    acquire_commit_mutex_live(session, workspace.id)
 
     # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b follow-up): the
     # route's _route() fork read the flag as False, but enable-on-touch may have

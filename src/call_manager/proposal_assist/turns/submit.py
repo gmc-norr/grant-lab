@@ -239,6 +239,13 @@ def submit_user_turn(
     # mutex so a user save's "no queued/running turn" check is authoritative —
     # either this enqueue lands first (save sees it → 409) or the save's
     # transaction commits first (turn starts strictly after the user's commit).
+    #
+    # PER-SITE DECISION (Slice B-mutex): this site keeps the PLAIN acquire. The
+    # block immediately below already does what acquire_commit_mutex_live does and
+    # more — it re-reads soft_deleted_at under a SELECT ... FOR UPDATE row lock, so
+    # submit and soft_delete serialize on the ROW as well as the mutex. Its
+    # ValueError is mapped to 400 by web/api/turns.py; swapping in WorkspaceDeleted
+    # would change that route's status code for no gain.
     acquire_commit_mutex(session, workspace_id)
 
     # Lock the workspace row for the duration of this transaction AND re-check

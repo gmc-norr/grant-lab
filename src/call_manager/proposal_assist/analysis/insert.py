@@ -60,7 +60,7 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
     TURN_IN_FLIGHT_MESSAGE,
@@ -342,11 +342,13 @@ def insert_from_annotation(
     Returns ``{"ev_id", "citekey", "commit_sha"}`` on success, or
     ``{"idempotent": True}`` when THIS annotation was already inserted.
     Raises :class:`InsertConflict` for every expected user-facing failure,
-    ``CommitMutexTimeout`` (web maps to 503) and ``GitCommitError`` (500).
+    ``CommitMutexTimeout`` (web maps to 429), ``WorkspaceDeleted`` (404, via the
+    app-level handler) and ``GitCommitError`` (500).
     """
-    # 1. Serialize against every other git mutation of this workspace.
-    # CommitMutexTimeout propagates — the web layer maps it to 503.
-    acquire_commit_mutex(session, workspace.id)
+    # 1. Serialize against every other git mutation of this workspace, and refuse
+    # outright if it was deleted while we blocked. Both propagate — the web layer
+    # maps them to 429 and 404 respectively.
+    acquire_commit_mutex_live(session, workspace.id)
 
     # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): enable-on-touch may
     # have flipped draft collab on while we blocked on the mutex, after the route's

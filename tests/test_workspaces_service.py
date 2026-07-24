@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 
 from call_manager.db.models import (
@@ -133,3 +134,70 @@ def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_f
 
     with pg_session_factory() as s:
         assert s.get(TurnJob, job_id).status != "completed"  # never resurrected
+
+
+def test_soft_delete_refuses_a_second_deletion(pg_session_factory, tmp_path):
+    """The delete's own under-mutex liveness read: `ws` is loaded BEFORE we can
+    block on the mutex, so a concurrent deletion that committed while we waited
+    would be invisible to it. Sequential here; the concurrent form is the route
+    test."""
+    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id = ws.id
+
+    with pg_session_factory() as s:
+        soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+    with pg_session_factory() as s:
+        with pytest.raises(WorkspaceDeleted):
+            soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        s.rollback()
+
+
+def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
+    pg_session_factory, tmp_path
+):
+    """A wedged writer holding the mutex must make the delete FAIL cleanly, not
+    half-apply: nothing committed, the workspace still live."""
+    import threading
+
+    from call_manager.proposal_assist.drafting.locking import (
+        CommitMutexTimeout,
+        acquire_commit_mutex,
+    )
+    from tests.proposal_assist.conftest import make_workspace
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _holder():
+        with pg_session_factory() as s:
+            acquire_commit_mutex(s, ws_id)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    t = threading.Thread(target=_holder)
+    t.start()
+    try:
+        holding.wait(timeout=5)
+        with pg_session_factory() as s:
+            with pytest.raises(CommitMutexTimeout):
+                soft_delete_workspace(
+                    s, workspace_id=ws_id, workspaces_dir=tmp_path, timeout_seconds=1
+                )
+            s.rollback()
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).soft_deleted_at is None  # nothing committed
