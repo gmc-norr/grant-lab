@@ -50,7 +50,7 @@ from call_manager.proposal_assist.collab.yjs_bridge import (
     apply_pm_section_to_fragment,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -133,7 +133,7 @@ def apply_citation_to_room(
         # empty-check (`== 0` would compare a list to an int and never fire).
         raise CiteStale("this section changed — reopen and re-cite")
 
-    acquire_commit_mutex(session, workspace_id)
+    acquire_commit_mutex_live(session, workspace_id)
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
     _cpath = repo / CITATIONS_FILENAME
     try:
@@ -189,6 +189,24 @@ def kernel_accept_prose(
     approver: User,
     workspaces_dir,
 ) -> KernelAcceptResult:
+    # Mutex FIRST — above _load_scoped, above the staleness branch. Three reasons:
+    #   (1) the staleness branch below resolves the ProposedChange to "stale" and
+    #       flushes, and accept_via_kernel COMMITS — so a workspace deleted
+    #       mid-turn would get a durable row mutation if we only guarded the later
+    #       write path. _live raises WorkspaceDeleted before any of it.
+    #   (2) it pins ONE lock order everywhere: advisory mutex -> ProposedChange row
+    #       lock (_load_scoped takes FOR UPDATE), never the reverse.
+    #   (3) it still precedes the spec_locked_at read below, which is what the
+    #       original placement was for (Codex H3): post_lock_spec (workspaces.py:487)
+    #       sets that lock UNDER this same mutex, so holding it here freezes the lock
+    #       state for our whole transaction.
+    # checkpoint_artifact re-acquires the same xact lock later — Postgres advisory
+    # xact locks are re-entrant within a transaction, so that is an instant no-op
+    # (no deadlock, no second timeout) with one redundant fresh liveness read.
+    # Raised BEFORE any mutation, so it needs no room eviction (both
+    # CommitMutexTimeout and WorkspaceDeleted are in _CLEAN_ACCEPT_ERRORS).
+    acquire_commit_mutex_live(session, workspace_id)
+
     pc = _load_scoped(session, proposed_change_id, workspace_id)  # FOR UPDATE
     if pc.status != "pending":
         from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotPending
@@ -209,16 +227,7 @@ def kernel_accept_prose(
         session.flush()
         return KernelAcceptResult(pc=pc, update=None, committed=False, evict=False)
 
-    # Acquire the commit mutex NOW — before reading spec_locked_at (Codex H3).
-    # post_lock_spec (workspaces.py:487) sets the lock UNDER this same mutex; checking
-    # spec_locked_at before taking the mutex would let a concurrent lock commit between
-    # our guard and our checkpoint, accepting into a spec that just got locked. Taking
-    # it here freezes the lock state for the rest of our transaction. checkpoint_artifact
-    # re-acquires the same xact lock later — Postgres advisory xact locks are re-entrant
-    # within a transaction, so that is an instant no-op (no deadlock, no second timeout).
-    # Raised BEFORE any doc mutation, so a CommitMutexTimeout needs no room eviction
-    # (it is in _CLEAN_ACCEPT_ERRORS).
-    acquire_commit_mutex(session, workspace_id)
+    # (The commit mutex is already held — taken at the top of this function.)
 
     # Spec-lock guard (the lock OPERATION is 2b-2; here we only honor an existing lock).
     if artifact == "spec":
@@ -313,7 +322,7 @@ def kernel_init_spec(
     spec", WorkspaceEvent kind="collab_checkpoint") rather than the git path's
     "user spec init" / kind="user_edit" rows — do NOT duplicate provenance rows.
     """
-    acquire_commit_mutex(session, workspace_id)
+    acquire_commit_mutex_live(session, workspace_id)
     ws = session.get(Workspace, workspace_id)
     session.refresh(ws, ["spec_locked_at"])
     if ws.spec_locked_at is not None:
@@ -352,6 +361,13 @@ def kernel_accept_citation(
     checkpoint pipeline to ``apply_citation_to_room``; all verify failures map to
     terminal stale (git-first parity). Caller owns the transaction.
     """
+    # Mutex FIRST (see kernel_accept_prose): _stale() below flushes a RESOLVED
+    # ProposedChange, and it fires on CiteStale/CiteInvalid/CiteRefNotFound —
+    # which apply_citation_to_room raises ABOVE its own acquire. Guarding only
+    # that inner acquire would leave this path writing to a deleted workspace.
+    # Also pins the lock order: advisory mutex -> ProposedChange row lock.
+    acquire_commit_mutex_live(session, workspace_id)
+
     pc = _load_scoped(session, proposed_change_id, workspace_id)  # FOR UPDATE
     if pc.status != "pending":
         from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotPending
@@ -424,7 +440,7 @@ def apply_annotation_insert_to_room(
     if ann is None or ann.workspace_id != workspace_id:
         raise InsertConflict("annotation is no longer actionable")
 
-    acquire_commit_mutex(session, workspace_id)
+    acquire_commit_mutex_live(session, workspace_id)
 
     # Parity with insert.py step 1: re-read status inside the mutex. A
     # concurrent insert that committed while we were blocked would have

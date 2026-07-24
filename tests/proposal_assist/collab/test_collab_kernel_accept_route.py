@@ -737,7 +737,7 @@ def test_kernel_commit_mutex_timeout_maps_to_429(_app, pg_session_factory, tmp_p
     def _boom(*a, **k):
         raise CommitMutexTimeout("busy")
 
-    monkeypatch.setattr(kernel_mod, "acquire_commit_mutex", _boom)
+    monkeypatch.setattr(kernel_mod, "acquire_commit_mutex_live", _boom)
 
     client = TestClient(_app)
     client.__enter__()

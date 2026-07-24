@@ -23,7 +23,7 @@ from call_manager.proposal_assist.collab.kernel import (
     kernel_init_spec,
 )
 from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 
@@ -32,7 +32,7 @@ from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 # (incl. its SectionMapDivergenceError subclass) can be raised by the section apply
 # BEFORE the fragment mutation, so it must not needlessly evict a clean room.
 _CLEAN_CITE_ERRORS = (
-    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout,
+    CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout, WorkspaceDeleted,
     IndexError, RoomEvicted, SectionStructureError,
 )
 
