@@ -13,6 +13,7 @@ from call_manager.auth.passwords import hash_password, verify_password
 from call_manager.auth.redirects import safe_next
 from call_manager.auth.session_cookie import InvalidSession
 from call_manager.db.models import User
+from call_manager.proposal_assist.collab.permissions import signal_user_revocation
 from call_manager.web.client_ip import MAX_EMAIL_LEN, client_ip, email_fingerprint
 
 _logger = logging.getLogger(__name__)
@@ -197,11 +198,18 @@ def logout(
         except InvalidSession:
             data = None
         if data is not None:
+            revoked = False
             with session_factory() as db:
                 user = db.get(User, data.user_id)
                 if user is not None:
                     user.session_epoch = (user.session_epoch or 0) + 1
                     db.commit()
+                    revoked = True
+            if revoked:
+                # The epoch bump invalidates the cookie for future requests, but an
+                # open collab socket rides cached write permission — tear it down
+                # (terminal 1008). Bounded barrier; never raises into the route.
+                signal_user_revocation(request, data.user_id)
     response.delete_cookie(
         "session", path="/", httponly=True, secure=settings.cookie_secure, samesite="lax"
     )
