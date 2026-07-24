@@ -144,3 +144,89 @@ def record_terminal_outcome(
         )
     )
     return True
+
+
+USAGE_RECONCILED_KIND = "cloud_turn_usage_reconciled"
+
+_TERMINAL_STATUSES = ("failed", "cancelled", "completed")
+
+
+def stamp_post_terminal_usage(
+    session: Session,
+    *,
+    turn_job_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    user_turn_id: uuid.UUID | None,
+    last_assistant_id: uuid.UUID | None,
+    tokens_in: int,
+    tokens_out: int,
+    model: str | None,
+) -> bool:
+    """Record a terminalized turn's REAL usage after the fact.
+
+    Used when a turn was terminalized while RUNNING (workspace deletion) and its
+    stream later reported actual usage, so the normal finalize lost the row and
+    rolled its token stamp back. Writes the SDK truth and CLEARS the retained
+    submit-time estimate (mirroring _finalize_success) so the daily cap counts the
+    spend exactly once. NEVER changes TurnJob.status; emits ONE non-outcome
+    ``cloud_turn_usage_reconciled`` audit event rather than a second outcome.
+
+    Concurrency: serialized on the TurnJob row (SELECT ... FOR UPDATE) — the event
+    lookup alone is not atomic (JSONB gives no uniqueness), so two callers could
+    otherwise both stamp. Returns True only for the caller that performed the
+    stamp. Caller commits.
+    """
+    job = session.execute(
+        select(TurnJob)
+        .where(TurnJob.id == turn_job_id, TurnJob.workspace_id == workspace_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if job is None or job.status not in _TERMINAL_STATUSES:
+        return False
+
+    already = session.scalar(
+        select(WorkspaceEvent.id).where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.kind == USAGE_RECONCILED_KIND,
+            WorkspaceEvent.payload["turn_job_id"].astext == str(turn_job_id),
+        )
+    )
+    if already is not None:
+        return False
+
+    user_turn = (
+        session.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
+        if user_turn_id is not None
+        else None
+    )
+    if last_assistant_id is not None:
+        assistant = session.scalar(select(ChatTurn).where(ChatTurn.id == last_assistant_id))
+        if assistant is not None:
+            assistant.tokens_in = tokens_in or None
+            assistant.tokens_out = tokens_out or None
+            assistant.model = model
+        # The SDK total already includes user-input tokens; drop the estimate so
+        # the cap sum doesn't count input twice (mirrors _finalize_success).
+        if user_turn is not None:
+            user_turn.tokens_in = None
+    elif user_turn is not None:
+        # No assistant row — persist totals on the user row, REPLACING the estimate.
+        user_turn.tokens_in = tokens_in or None
+        user_turn.tokens_out = tokens_out or None
+        if model is not None:
+            user_turn.model = model
+
+    session.add(
+        WorkspaceEvent(
+            workspace_id=workspace_id,
+            kind=USAGE_RECONCILED_KIND,
+            actor_id=None,
+            payload={
+                "turn_job_id": str(turn_job_id),
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "model": model,
+            },
+        )
+    )
+    return True
