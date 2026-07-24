@@ -726,3 +726,118 @@ async def test_process_turn_stamps_provenance_on_adapter(
     # the workspace was already launched when set_turn_provenance ran. If the
     # processor ever reorders the stamp before launch, this flips to [False].
     assert adapter.provenance_saw_launch == [True]
+
+
+def _set_user_turn_estimate(pg_session_factory, job_id, tokens_in):
+    """Pin a known submit-time estimate on the job's user turn; return its id."""
+    with pg_session_factory() as s:
+        ut_id = s.scalar(select(TurnJob.user_turn_id).where(TurnJob.id == job_id))
+        s.get(ChatTurn, ut_id).tokens_in = tokens_in
+        s.commit()
+    return ut_id
+
+
+@pytest.mark.asyncio
+async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
+    pg_session_factory,
+    _settings_env,
+    tmp_path,
+    monkeypatch,
+):
+    """Deletion between claim and the post-claim launch: no send, row not left
+    'running', and the retained estimate is NOT cleared (no usage was reported)."""
+    from call_manager.workspaces import soft_delete_workspace
+
+    _wsid, job_id, controller, adapter = _build_controller_and_submit(
+        pg_session_factory,
+        _settings_env,
+        [TurnDoneEvent(tokens_in=10, tokens_out=20, model="fake", session_id="s1")],
+    )
+    ut_id = _set_user_turn_estimate(pg_session_factory, job_id, 1234)
+
+    calls = {"n": 0}
+    real_launch = controller.launch
+
+    async def _launch(ws_id):
+        # The deletion lands between the atomic claim and the post-claim launch:
+        # it terminalizes the now-running row (retaining the estimate), and the
+        # real precheck then raises WorkspaceRetired on the way back in.
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            with pg_session_factory() as s:
+                if s.get(Workspace, ws_id).soft_deleted_at is None:
+                    soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        return await real_launch(ws_id)
+
+    monkeypatch.setattr(controller, "launch", _launch)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status != "running"
+        assert s.get(ChatTurn, ut_id).tokens_in == 1234  # estimate PRESERVED
+    assert adapter.turns == []  # nothing sent
+
+
+@pytest.mark.asyncio
+async def test_delete_during_stream_reconciles_reported_usage(
+    pg_session_factory,
+    _settings_env,
+    tmp_path,
+):
+    """The real race: deletion terminalizes the row WHILE streaming. TurnDoneEvent
+    arrives normally, _finalize_success loses the row and rolls back its stamp —
+    so the usage must be reconciled instead of lost."""
+    from sqlalchemy import func
+
+    from call_manager.workspaces import soft_delete_workspace
+
+    ws_id, job_id, controller, _adapter = _build_controller_and_submit(
+        pg_session_factory,
+        _settings_env,
+        [TurnDoneEvent(tokens_in=700, tokens_out=90, model="m", session_id=None)],
+    )
+    ut_id = _set_user_turn_estimate(pg_session_factory, job_id, 1234)
+
+    # Script a stream that deletes the workspace mid-flight, then reports usage.
+    class _DeletingStream:
+        def __init__(self, ws_id):
+            self.ws_id = ws_id
+
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            with pg_session_factory() as s:
+                soft_delete_workspace(s, workspace_id=self.ws_id, workspaces_dir=tmp_path)
+            yield TurnDoneEvent(tokens_in=700, tokens_out=90, model="m", session_id=None)
+
+    controller.send_turn = lambda ws, msg: _DeletingStream(ws_id)
+
+    await process_turn_once(
+        session_factory=pg_session_factory,
+        controller=controller,
+        turn_job_id=job_id,
+    )
+
+    with pg_session_factory() as s:
+        job = s.get(TurnJob, job_id)
+        assert job.status != "completed"  # delete won the row
+        # The reported usage was reconciled rather than rolled back with the finalize.
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(WorkspaceEvent)
+                .where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.kind == "cloud_turn_usage_reconciled",
+                )
+            )
+            == 1
+        )
+        ut = s.get(ChatTurn, ut_id)
+        assert ut.tokens_in == 700 and ut.tokens_out == 90  # truth replaced the estimate
