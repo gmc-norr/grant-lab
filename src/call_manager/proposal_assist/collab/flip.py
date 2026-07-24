@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 from call_manager.proposal_assist.collab import state
 from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
-    acquire_commit_mutex,
+    WorkspaceDeleted,
+    acquire_commit_mutex_live,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,8 +115,15 @@ def maybe_auto_enable(
     # Table-free candidate: serialize the flip against writers. On timeout the
     # xact is aborted — rollback clears it and we defer the flip this read.
     try:
-        acquire_commit_mutex(session, workspace_id, timeout_seconds=_FLIP_MUTEX_TIMEOUT_SECONDS)
+        acquire_commit_mutex_live(
+            session, workspace_id, timeout_seconds=_FLIP_MUTEX_TIMEOUT_SECONDS
+        )
     except CommitMutexTimeout:
+        session.rollback()
+        return False
+    except WorkspaceDeleted:
+        # Never enable collab on a deleted workspace — enable_collab writes a
+        # CollabArtifactState row and COMMITS. Stay legacy; there is no next read.
         session.rollback()
         return False
     # Re-read fresh disk under the mutex: an in-flight save that just committed

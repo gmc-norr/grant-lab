@@ -330,3 +330,39 @@ def test_flag_off_connection_rejected_and_fully_dormant(_app, pg_session_factory
             .all()
         )
         assert av == []
+
+
+def test_explicit_endpoint_404s_for_a_deleted_workspace(_app, pg_session_factory, tmp_path):
+    """Slice B-mutex: checkpoint_artifact now refuses a deleted workspace under the
+    mutex. This route deliberately does NOT skip — its `res` is read after the try,
+    so a skip would be an unbound local, and a user who asked to save a version
+    deserves to be told the workspace is gone. WorkspaceDeleted propagates to the
+    app-level handler → 404."""
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import Workspace
+
+    _app.state.session_factory = pg_session_factory
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    with pg_session_factory() as s:
+        owner = make_user(s, email="trig-deleted-owner@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+    _init_repo(Path(tmp_path) / str(wid) / "repo", "## X\norig.\n")
+    _seed_bridge_update(pg_session_factory, wid, oid, "## X\n\nedited by owner.\n")
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        # Deleted AFTER the membership/enabled guards would have passed.
+        with pg_session_factory() as s:
+            s.get(Workspace, wid).soft_deleted_at = datetime.now(UTC)
+            s.commit()
+        r = client.post(f"/api/workspaces/{wid}/collab/draft/checkpoint")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert r.status_code == 404, r.text

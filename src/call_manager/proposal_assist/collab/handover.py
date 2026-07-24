@@ -17,6 +17,7 @@ import logging
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,11 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                 state.reset_checkpoint(s, workspace_id=workspace_id, artifact=artifact)
                 s.commit()  # checkpoint rows + truncate + reset: ONE transaction
                 done += 1
+            except WorkspaceDeleted:
+                # Deleted between the pre-screen above and the mutex. Expected,
+                # not a failure: there is nothing to hand over.
+                s.rollback()
+                continue
             except Exception:  # noqa: BLE001 — isolate per artifact; scan retries
                 s.rollback()
                 logger.error(

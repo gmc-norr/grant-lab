@@ -23,7 +23,10 @@ from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.hydrate import build_doc
 from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from call_manager.proposal_assist.drafting.locking import (
+    WorkspaceDeleted,
+    acquire_commit_mutex_live,
+)
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
@@ -79,7 +82,12 @@ def checkpoint_artifact(
     # let a racing checkpoint commit and advance the watermark between our read
     # and our write — we could then rewrite git HEAD backwards and regress the
     # watermark. Released at the caller's COMMIT/ROLLBACK; we never commit here.
-    acquire_commit_mutex(session, workspace_id)
+    #
+    # _live: refuse outright if the workspace was deleted while we blocked. A
+    # checkpoint writes git + DB rows, which is precisely the mutation deletion
+    # must stop. Teardown/background callers skip on WorkspaceDeleted; the
+    # user-triggered "Save a version" route lets it reach the 404 handler.
+    acquire_commit_mutex_live(session, workspace_id)
 
     # ONE atomic snapshot of the log: doc, max_id, and authors all derive from
     # these rows (fixes the load-doc-then-read-max TOCTOU).
@@ -207,6 +215,11 @@ def checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail: int) -
                 )
                 s.commit()
                 done += 1
+            except WorkspaceDeleted:
+                # Deleted between the liveness screen above and the mutex. Expected,
+                # not a failure: there is nothing to checkpoint and nothing to retry.
+                s.rollback()
+                continue
             except Exception:  # noqa: BLE001 — best-effort; isolate per artifact
                 s.rollback()
                 logger.warning(

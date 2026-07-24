@@ -224,3 +224,107 @@ def test_workspace_deleted_is_a_clean_error_so_a_refusal_never_evicts_a_room():
 
     assert WorkspaceDeleted in _CLEAN_ACCEPT_ERRORS
     assert WorkspaceDeleted in _CLEAN_CITE_ERRORS
+
+
+# ---------------------------------------------------------------------------
+# checkpoint + flip
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_artifact_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
+    """Checkpointing writes git + DB rows — exactly what deletion must stop."""
+    from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+
+    wid, _oid, _repo, _room_doc, _sha = _setup(pg_session_factory, tmp_path, "cp-del@ki.se")
+    _delete(pg_session_factory, wid)
+
+    with pg_session_factory() as s:
+        with pytest.raises(WorkspaceDeleted):
+            checkpoint_artifact(
+                s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            )
+        s.rollback()
+
+
+def test_checkpoint_active_tails_skips_a_deleted_workspace_without_failing(
+    pg_session_factory, tmp_path
+):
+    """The background tick must SKIP, not blow up. Its pre-mutex liveness screen is
+    a TOCTOU; the under-mutex raise closes it, and this proves the closure is a
+    quiet skip rather than an error."""
+    from call_manager.proposal_assist.collab.checkpoint import checkpoint_active_tails
+
+    wid, _oid, repo, _room_doc, _sha = _setup(pg_session_factory, tmp_path, "cp-tail@ki.se")
+    head = _git_head(repo)
+    _delete(pg_session_factory, wid)
+
+    # min_tail=1 so our hydration seed alone makes it a candidate.
+    n = checkpoint_active_tails(pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1)
+
+    assert n == 0  # skipped, not counted as done
+    assert _git_head(repo) == head  # and nothing committed
+
+
+def test_enable_on_touch_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
+    """Enable-on-touch must never flip collab ON for a deleted workspace: it writes
+    a CollabArtifactState row and COMMITS."""
+    from call_manager.proposal_assist.collab.flip import maybe_auto_enable
+
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        owner = make_user(s, email="flip-del@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        s.commit()
+        wid = ws.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    _delete(pg_session_factory, wid)
+
+    with pg_session_factory() as s:
+        assert (
+            maybe_auto_enable(
+                s,
+                workspace_id=wid,
+                artifact="draft",
+                head_md=md0,  # table-free, so it WOULD otherwise be enabled
+                artifact_path=repo / PROPOSAL_FILENAME,
+            )
+            is False
+        )
+        s.rollback()
+
+    with pg_session_factory() as s:
+        assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
+
+
+def test_checkpoint_active_tails_skips_an_under_mutex_refusal_QUIETLY(
+    pg_session_factory, tmp_path, monkeypatch, caplog
+):
+    """The test above is caught by the tick's PRE-mutex liveness screen, so it never
+    reaches the new handler. This one does: the workspace is live at screen time and
+    the refusal comes from under the mutex — the real TOCTOU the guard closes.
+
+    The tick's pre-existing broad `except Exception` already swallowed this, so the
+    explicit branch changes only ONE thing: a routine mid-tick deletion stops being
+    logged as a failure. That is what this asserts — assert on the difference, not
+    on behaviour that was already correct."""
+    import logging
+
+    from call_manager.proposal_assist.collab import checkpoint as checkpoint_mod
+
+    wid, _oid, repo, _room_doc, _sha = _setup(pg_session_factory, tmp_path, "cp-straddle@ki.se")
+    head = _git_head(repo)
+
+    def _boom(*a, **k):
+        raise WorkspaceDeleted(wid)
+
+    monkeypatch.setattr(checkpoint_mod, "checkpoint_artifact", _boom)
+
+    with caplog.at_level(logging.WARNING, logger=checkpoint_mod.__name__):
+        n = checkpoint_mod.checkpoint_active_tails(
+            pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1
+        )
+
+    assert n == 0
+    assert _git_head(repo) == head
+    assert not [r for r in caplog.records if r.message == "collab.checkpoint_tail_failed"]
