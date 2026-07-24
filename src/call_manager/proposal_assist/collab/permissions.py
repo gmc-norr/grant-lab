@@ -137,6 +137,39 @@ async def reconcile_client(session_factory, workspaces_dir, room, client, state,
         state.can_write = can_write
 
 
+async def revoke_user_sockets(session_factory, workspaces_dir, user_id: int, *,
+                              close_code: int = _WS_POLICY_VIOLATION) -> int:
+    """Tear down every live collab socket belonging to ``user_id`` (all rooms).
+
+    For each match, mirror reconcile_client's not-member branch: flip
+    can_write=False (the synchronous write barrier), close the socket, and
+    PROACTIVELY deregister via MANAGER.release with a last-leave checkpoint.
+    Deregistration — not the flag — is what makes revocation durable: a flipped
+    can_write is reversible by a later reconcile (permissions.py else-branch),
+    but a socket removed from room.clients can never be re-granted. Returns the
+    count torn down. Runs on the event loop; caller (signal_user_revocation)
+    bridges from the sync route. Snapshot rooms first so we hold no manager/room
+    lock across the per-room awaits (keeps the recon_lock -> manager._lock ->
+    room._lock order — release()/drop_client() take manager._lock)."""
+    rooms = await MANAGER.snapshot_rooms()
+    n = 0
+    for room in rooms:
+        workspace_id, artifact = room.key
+        async with room.recon_lock:
+            for client, state in list(room.clients.items()):
+                if state.user_id != user_id:
+                    continue
+                state.can_write = False
+                with contextlib.suppress(Exception):
+                    await client.close(code=close_code)
+                on_evict = make_checkpoint_on_evict(
+                    session_factory, workspaces_dir, workspace_id, artifact
+                )
+                await MANAGER.release(room.key, client=client, on_evict=on_evict)
+                n += 1
+    return n
+
+
 async def refresh_permissions(session_factory, workspaces_dir, *,
                               workspace_id: uuid.UUID, artifact: str) -> None:
     """Reconcile every client in room (workspace_id, artifact). No-op if the room

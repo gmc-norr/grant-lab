@@ -535,6 +535,13 @@ class RoomManager:
     def get(self, key: RoomKey) -> Room | None:
         return self._rooms.get(key)
 
+    async def snapshot_rooms(self) -> list[Room]:
+        """A point-in-time list of live rooms, taken under the manager lock and
+        returned so callers can iterate WITHOUT holding it across per-room awaits
+        (preserves the recon_lock -> manager._lock -> room._lock order)."""
+        async with self._lock:
+            return list(self._rooms.values())
+
     async def release(self, key: RoomKey, *, client, on_evict=None) -> None:
         """Deregister a client; evict the room when the last one leaves. If a
         room is evicted and `on_evict` is given, call it (e.g. to checkpoint)
