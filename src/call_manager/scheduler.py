@@ -621,16 +621,22 @@ def build_scheduler(
         safe there and this branch is only exercised in tests."""
         import asyncio
 
+        async def _sweep_and_reconcile():
+            await workspace_controller.sweep_idle()
+            # Same tick: retry anything a deletion or a failed teardown left behind
+            # (Slice A). Cheap when there is nothing to do.
+            await workspace_controller.reconcile_live_clients()
+
         if app_loop is None:
             # Test/sync construction: fresh registry has no cross-loop concern.
             try:
-                asyncio.run(workspace_controller.sweep_idle())
+                asyncio.run(_sweep_and_reconcile())
             except Exception:
                 _logger.exception("drafting.idle_sweep failed")
             return
 
         fut = asyncio.run_coroutine_threadsafe(
-            workspace_controller.sweep_idle(),
+            _sweep_and_reconcile(),
             app_loop,
         )
         try:

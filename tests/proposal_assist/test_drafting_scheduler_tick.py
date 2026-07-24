@@ -175,3 +175,63 @@ async def test_idle_sweep_runs_on_app_loop_not_fresh_loop(monkeypatch, pg_url):
             sched.shutdown(wait=False)
     finally:
         engine.dispose()
+
+
+def test_idle_sweep_tick_also_reconciles(monkeypatch, pg_url):
+    """The scheduled tick must run BOTH passes — otherwise reconciliation never
+    runs in production."""
+    from unittest.mock import MagicMock
+
+    from call_manager.config import Settings
+    from call_manager.db.session import make_engine, make_session_factory
+    from call_manager.scheduler import build_scheduler
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
+    settings = Settings()
+
+    called = {"sweep": 0, "reconcile": 0}
+
+    class _Ctrl:
+        async def sweep_idle(self):
+            called["sweep"] += 1
+            return 0
+
+        async def reconcile_live_clients(self):
+            called["reconcile"] += 1
+            return 0
+
+    class _Alerter:
+        def record_failure(self, source_slug, *, error=None):
+            pass
+
+        def record_success(self, source_slug):
+            pass
+
+    engine = make_engine(settings.database_url)
+    try:
+        session_factory = make_session_factory(engine)
+        sched = build_scheduler(
+            session_factory=session_factory,
+            settings=settings,
+            alerter=_Alerter(),
+            ollama_url="http://localhost",
+            gemma_model="gemma:test",
+            ranking_tick_seconds=60,
+            ranking_queue_batch=10,
+            embedding_pregate_threshold=0.3,
+            embed_client=MagicMock(model="bge-m3"),
+            workspace_controller=_Ctrl(),
+            start=False,
+        )
+        try:
+            # app_loop is None here, so the closure drives its own asyncio.run.
+            sched.get_job("drafting_idle_sweep").func()
+            assert called == {"sweep": 1, "reconcile": 1}
+        finally:
+            sched.shutdown(wait=False)
+    finally:
+        engine.dispose()

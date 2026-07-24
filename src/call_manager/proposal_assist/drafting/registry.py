@@ -178,6 +178,26 @@ class SubprocessRegistry:
                 raise exc
         return (True, None)
 
+    async def reconcile_deleted_entries(self, is_deleted) -> int:
+        """Pop and tear down entries whose workspace is soft-deleted, REGARDLESS of
+        in_flight (a running turn on a deleted workspace is exactly the target; the
+        idle sweep deliberately skips those). _teardown_entry also releases the
+        advisory lock and closes the lock_session — something adapter-level
+        reconciliation cannot do. Returns the number torn down."""
+        async with self._lock:
+            candidates = list(self._entries.keys())
+        # Blocking DB predicate OUTSIDE the lock (I2), then re-acquire to pop.
+        deleted = [wsid for wsid in candidates if is_deleted(wsid)]
+        doomed: list[tuple[uuid.UUID, _Entry]] = []
+        async with self._lock:
+            for wsid in deleted:
+                entry = self._entries.pop(wsid, None)
+                if entry is not None:
+                    doomed.append((wsid, entry))
+        for wsid, entry in doomed:
+            await self._teardown_entry(wsid, entry, context="retire-reconcile")
+        return len(doomed)
+
     def _unconfirmed_generations(self) -> int:
         """Generations whose death the adapter has not confirmed. They may still
         pin a subprocess and a pooled DB connection, so they occupy slots.

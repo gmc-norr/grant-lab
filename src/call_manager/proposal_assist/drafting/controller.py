@@ -281,6 +281,29 @@ class WorkspaceController:
         never stalls concurrent launches."""
         return await self._registry.sweep_idle(has_queued_turn=self._workspace_has_queued_turn)
 
+    async def reconcile_live_clients(self) -> int:
+        """Retry teardown for everything a deletion or a failed teardown left behind.
+
+        TWO passes, in order: (1) the REGISTRY pass pops entries for soft-deleted
+        workspaces even mid-turn and releases their advisory locks; (2) the ADAPTER
+        pass retries detached generations — retiring records (whose workspace may be
+        LIVE: capacity-eviction / idle-sweep / launcher-cleanup orphans) plus any
+        generation of a deleted workspace. Guarantees a remediation ATTEMPT each
+        tick, not that a process died. Never raises: one bad record must not kill
+        the tick."""
+        total = 0
+        try:
+            total += await self._registry.reconcile_deleted_entries(self._workspace_is_deleted)
+        except Exception:
+            logger.exception("reconcile_live_clients: registry pass failed")
+        reconcile = getattr(self._registry._adapter, "reconcile_live_clients", None)
+        if reconcile is not None:
+            try:
+                total += await reconcile(is_deleted=self._workspace_is_deleted)
+            except Exception:
+                logger.exception("reconcile_live_clients: adapter pass failed")
+        return total
+
     def _workspace_is_deleted(self, workspace_id: uuid.UUID) -> bool:
         """True if the workspace row is missing or soft-deleted. Fresh short-lived
         session. Best-effort: on a DB error return False so a transient blip cannot
