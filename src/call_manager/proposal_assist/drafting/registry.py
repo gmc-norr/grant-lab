@@ -107,6 +107,11 @@ class SubprocessRegistry:
         the drain tick leaves the queued turn for next time. Cached/already-
         launching workspaces bypass this entirely — only net-new launches count
         against the ceiling.
+
+        Unconfirmed-dead generations (retiring records in the adapter's live-client
+        inventory) also occupy slots, and the ceiling is RE-CHECKED after an
+        eviction's teardown: if the victim's death is unconfirmed the replacement is
+        refused with DraftingAtCapacity (retriable 429) instead of exceeding the cap.
         """
         victim: _Entry | None = None
         victim_id: uuid.UUID | None = None
@@ -129,7 +134,11 @@ class SubprocessRegistry:
             # launch will become a live entry holding a connection). Evict the
             # LRU idle handle if at the cap; refuse if none are idle.
             if self._max_live is not None:
-                in_use = len(self._entries) + len(self._pending_launches)
+                in_use = (
+                    len(self._entries)
+                    + len(self._pending_launches)
+                    + self._unconfirmed_generations()
+                )
                 if in_use >= self._max_live:
                     victim_id = self._pick_lru_idle_victim_locked()
                     if victim_id is None:
@@ -150,7 +159,31 @@ class SubprocessRegistry:
         # correctly while this runs.
         if victim is not None and victim_id is not None:
             await self._teardown_entry(victim_id, victim, context="capacity-evict")
+            # The teardown may have ended UNCONFIRMED, in which case the victim's
+            # process (and its pooled connection) may still be alive and the slot
+            # was never really freed. Re-check before launching the replacement;
+            # surrender the reservation rather than exceed the ceiling.
+            async with self._lock:
+                over = self._max_live is not None and (
+                    len(self._entries)
+                    + len(self._pending_launches)
+                    + self._unconfirmed_generations()
+                ) > self._max_live
+            if over:
+                exc = DraftingAtCapacity(
+                    f"drafting at capacity ({self._max_live} live subprocesses; an "
+                    "evicted subprocess is not confirmed dead); retry shortly"
+                )
+                await self.fail_pending_launch(workspace_id, exc)
+                raise exc
         return (True, None)
+
+    def _unconfirmed_generations(self) -> int:
+        """Generations whose death the adapter has not confirmed. They may still
+        pin a subprocess and a pooled DB connection, so they occupy slots.
+        Adapters without an inventory report 0."""
+        counter = getattr(self._adapter, "retiring_count", None)
+        return counter() if counter is not None else 0
 
     def _pick_lru_idle_victim_locked(self) -> uuid.UUID | None:
         """Return the workspace_id of the least-recently-touched IDLE handle
