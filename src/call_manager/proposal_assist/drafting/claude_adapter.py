@@ -571,7 +571,20 @@ class ClaudeAgentSDKAdapter:
         await asyncio.shield(record.teardown)
 
     async def _teardown_record(self, record: LiveClientRecord) -> None:
-        confirmed = await self._disconnect_bounded(record.client, record.workspace_id)
+        """Never raises. reconcile_live_clients spawns this fire-and-forget, so an
+        escaping exception would surface only as an unretrieved-task warning; and
+        `terminate` awaits it from two cleanup paths that must not acquire a new
+        failure mode. Leaving the record unconfirmed is the correct outcome for
+        any failure — the next sweep retries it."""
+        try:
+            confirmed = await self._disconnect_bounded(record.client, record.workspace_id)
+        except Exception:
+            logger.exception(
+                "teardown of drafting subprocess for workspace %s raised; retained "
+                "for the reconciliation sweep",
+                record.workspace_id,
+            )
+            return
         if confirmed:
             self._live.confirm_dead(record.launch_id)
         else:
