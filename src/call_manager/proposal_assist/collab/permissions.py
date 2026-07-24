@@ -25,6 +25,14 @@ from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
 logger = logging.getLogger(__name__)
 
 _WS_POLICY_VIOLATION = 1008  # RFC 6455 — mirrors collab_ws.py; a revoked client is closed with it.
+# RFC 6455 service-restart — a RECONNECTABLE close. Used for a self
+# password-change: the acting browser re-mints its cookie and should reconnect
+# (unlike logout/disable, which are terminal 1008). Public: imported by me.py.
+WS_RECONNECTABLE_CLOSE = 1012
+# Upper bound on how long an invalidation route blocks on the teardown barrier.
+# Also a liveness bound: the barrier awaits release()->checkpoint run_in_threadpool,
+# which competes with the route worker for the pool. See signal_user_revocation.
+_REVOCATION_BARRIER_SECONDS = 5.0
 
 
 def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, artifact):
@@ -213,6 +221,49 @@ def _log_signal_result(fut) -> None:
         return  # a cancelled reconciliation is not an error to report
     if exc is not None:
         logger.warning("collab.signal_permission_change_failed", exc_info=exc)
+
+
+def signal_user_revocation(request, user_id: int, *,
+                           close_code: int = _WS_POLICY_VIOLATION) -> None:
+    """Route-side (SYNC): schedule revoke_user_sockets on the app loop and BLOCK
+    (bounded) until every matching socket is flipped+deregistered — the strong
+    'no writes after the invalidation response' contract. NEVER raises into the
+    route: a missing loop, a schedule failure, a timeout, or a coroutine error
+    degrades to a logged warning (the DB epoch bump already invalidated future
+    auth; the barrier is the live-socket guarantee, best-effort within its bound).
+
+    The _REVOCATION_BARRIER_SECONDS timeout is a LIVENESS bound as well as a
+    security-window bound: the teardown awaits release()->checkpoint via
+    run_in_threadpool, so a barrier-blocked route worker competes with the
+    checkpoint for the pool. On timeout the route returns and the teardown
+    continues on the loop (degrade to eventual)."""
+    try:
+        loop = getattr(request.app.state, "app_loop", None)
+        if loop is None:
+            return
+        session_factory = request.app.state.session_factory
+        workspaces_dir = request.app.state.settings.workspaces_dir
+        coro = revoke_user_sockets(
+            session_factory, workspaces_dir, user_id, close_code=close_code
+        )
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception:
+            coro.close()   # never-awaited coroutine → close it before re-raising
+            raise
+        try:
+            fut.result(timeout=_REVOCATION_BARRIER_SECONDS)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "collab.revocation_barrier_timeout",
+                extra={"event": "collab_revocation_barrier_timeout", "user_id": user_id},
+            )   # teardown continues on the loop; degrade to eventual
+    except Exception:
+        logger.warning(
+            "collab.signal_user_revocation_failed",
+            extra={"event": "collab_signal_user_revocation_failed", "user_id": user_id},
+            exc_info=True,
+        )
 
 
 def signal_permission_change(loop, session_factory, workspaces_dir, *,

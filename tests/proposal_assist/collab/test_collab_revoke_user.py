@@ -1,5 +1,7 @@
 """Session-revocation: user-keyed socket teardown (revoke_user_sockets),
 RoomManager.snapshot_rooms, and the strong bounded barrier signal_user_revocation."""
+import asyncio
+import threading
 import uuid
 
 import pytest
@@ -157,3 +159,71 @@ async def test_revoke_no_match_is_noop(pg_session_factory, tmp_path):
         assert other in MANAGER.get(key).clients
     finally:
         await MANAGER.drop_client(key, other)
+
+
+# ---------------------------------------------------------------------------
+# signal_user_revocation — strong bounded barrier
+# ---------------------------------------------------------------------------
+
+class _FakeRequest:
+    def __init__(self, loop, session_factory, workspaces_dir):
+        self.app = type("A", (), {})()
+        self.app.state = type("S", (), {})()
+        self.app.state.app_loop = loop
+        self.app.state.session_factory = session_factory
+        self.app.state.settings = type("Cfg", (), {"workspaces_dir": workspaces_dir})()
+
+
+def test_signal_user_revocation_no_loop_is_noop_no_raise():
+    # No captured app loop (e.g. a route hit before lifespan / in a headless run):
+    # returns before touching session_factory, never raises into the route.
+    req = _FakeRequest(None, None, "/tmp")
+    perms.signal_user_revocation(req, 7)  # must not raise
+
+
+def test_signal_user_revocation_blocks_until_teardown_completes(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # Strong barrier (Codex #3): the sync call must not return until the scheduled
+    # coroutine has finished. A blocking fut.result() cannot run on its own loop's
+    # thread, so the loop lives in a SEPARATE thread — the production topology
+    # (sync route thread -> event loop thread).
+    #
+    # CRITICAL (self-review M1): do NOT reuse the module-global MANAGER here. Its
+    # asyncio.Lock was bound to the pytest-anyio loop by earlier tests, so using
+    # it from this background loop raises "got Future attached to a different
+    # loop". Use a FRESH RoomManager monkeypatched into permissions.MANAGER and do
+    # ALL manager ops on the background loop, so its lock binds to THIS loop.
+    from call_manager.proposal_assist.collab.room import RoomManager
+
+    fresh = RoomManager()
+    monkeypatch.setattr(perms, "MANAGER", fresh)
+
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+
+    key = (uuid.uuid4(), "draft")
+    c = FakeClient()
+
+    async def _register_on_loop():
+        async def _load():
+            return []
+
+        await fresh.acquire(
+            key, load=_load, client=c,
+            state=ClientState(user_id=7, can_write=True),
+        )
+
+    asyncio.run_coroutine_threadsafe(_register_on_loop(), loop).result(5)
+    try:
+        req = _FakeRequest(loop, pg_session_factory, str(tmp_path))
+        perms.signal_user_revocation(req, 7)     # blocks on the barrier
+        # By the time signal returns, the socket is already torn down.
+        room = fresh.get(key)
+        assert room is None or c not in room.clients
+        assert c.closed == 1008
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(timeout=5)
+        loop.close()
