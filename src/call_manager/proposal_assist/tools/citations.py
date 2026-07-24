@@ -71,8 +71,10 @@ from call_manager.proposal_assist.collab import canonical
 from call_manager.proposal_assist.collab.state import is_collab_enabled, raise_if_collab_severed
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
     CommitMutexTimeout,
-    acquire_commit_mutex,
+    WorkspaceDeleted,
+    acquire_commit_mutex_live,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.proposals.proposing import propose_citation_insert
@@ -91,6 +93,9 @@ CITATIONS_FILENAME = "citations.json"
 # Spec 2026-06-10 §1 — every git mutation serializes on the per-workspace
 # commit mutex; a wedged holder surfaces as this error (web maps it to 503).
 _BUSY_ERROR = BUSY_ERROR_MESSAGE  # canonical string lives in locking.py
+# The workspace was deleted while the agent was mid-turn (observed under the
+# mutex, so nothing was mutated). Same canonical-string discipline.
+_DELETED_ERROR = DELETED_ERROR_MESSAGE
 
 # Error string for a transient git-commit failure on the insert path.
 # Promoted to a module-level constant so accepting.py can import and branch on it
@@ -794,9 +799,14 @@ def _insert_citation_locked(
     # 2026-06-10 §1). Transaction-scoped: released by this session's
     # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
     try:
-        acquire_commit_mutex(session, ctx.workspace_id)
+        acquire_commit_mutex_live(session, ctx.workspace_id)
     except CommitMutexTimeout:
         return {"error": _BUSY_ERROR}
+    except WorkspaceDeleted:
+        # Deleted while the agent was mid-turn. Nothing was mutated; tell the
+        # agent plainly rather than crashing the tool.
+        session.rollback()
+        return {"error": _DELETED_ERROR}
 
     # 0b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b follow-up): the
     # accept route's _route() fork read the flag as False, but enable-on-touch
@@ -908,9 +918,14 @@ def _remove_citation_locked(
     # 2026-06-10 §1). Transaction-scoped: released by this session's
     # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
     try:
-        acquire_commit_mutex(session, ctx.workspace_id)
+        acquire_commit_mutex_live(session, ctx.workspace_id)
     except CommitMutexTimeout:
         return {"error": _BUSY_ERROR}
+    except WorkspaceDeleted:
+        # Deleted while the agent was mid-turn. Nothing was mutated; tell the
+        # agent plainly rather than crashing the tool.
+        session.rollback()
+        return {"error": _DELETED_ERROR}
 
     # 1. Read proposal.md + the ledger.
     read = _read_proposal_and_ledger(ctx)
@@ -1035,9 +1050,14 @@ def _update_citation_locked(
     # 2026-06-10 §1). Transaction-scoped: released by this session's
     # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
     try:
-        acquire_commit_mutex(session, ctx.workspace_id)
+        acquire_commit_mutex_live(session, ctx.workspace_id)
     except CommitMutexTimeout:
         return {"error": _BUSY_ERROR}
+    except WorkspaceDeleted:
+        # Deleted while the agent was mid-turn. Nothing was mutated; tell the
+        # agent plainly rather than crashing the tool.
+        session.rollback()
+        return {"error": _DELETED_ERROR}
 
     # 1. Read proposal.md + the ledger; locate the row.
     read = _read_proposal_and_ledger(ctx)
@@ -1210,9 +1230,14 @@ def _rename_citekey_locked(
     # 2026-06-10 §1). Transaction-scoped: released by this session's
     # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
     try:
-        acquire_commit_mutex(session, ctx.workspace_id)
+        acquire_commit_mutex_live(session, ctx.workspace_id)
     except CommitMutexTimeout:
         return {"error": _BUSY_ERROR}
+    except WorkspaceDeleted:
+        # Deleted while the agent was mid-turn. Nothing was mutated; tell the
+        # agent plainly rather than crashing the tool.
+        session.rollback()
+        return {"error": _DELETED_ERROR}
 
     # 1. Validate both keys up front (markers/queries would otherwise raise or
     # silently no-op on a malformed key).
