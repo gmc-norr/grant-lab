@@ -329,3 +329,76 @@ def test_failed_turn_with_zero_tokens_clears_precount(pg_session_factory):
         used_in, used_out = _daily_tokens(s, wsid)
         assert int(used_in) == 0
         assert int(used_out) == 0
+
+
+def test_usage_unknown_retains_submit_time_estimate(pg_session_factory):
+    # A running turn terminalized by workspace deletion HAS consumed input we
+    # cannot measure yet. The submit-time estimate must survive, or the spend
+    # vanishes from the daily cap.
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "hi"}, tokens_in=1234
+        )
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="running",
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
+
+    with pg_session_factory() as s:
+        assert (
+            record_terminal_outcome(
+                s,
+                turn_job_id=job_id,
+                workspace_id=ws_id,
+                outcome="cancelled",
+                expected_status="running",
+                raw_error="workspace soft-deleted",
+                emit_chat=False,
+                usage_unknown=True,
+            )
+            is True
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(TurnJob, job_id).status == "cancelled"
+        assert s.get(ChatTurn, ut_id).tokens_in == 1234  # RETAINED
+
+
+def test_default_still_clears_estimate_when_nothing_consumed(pg_session_factory):
+    # Byte-for-byte guard on the pre-existing queued/reaped path.
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        user_turn = make_chat_turn(
+            s, ws, role="user", content={"type": "text", "text": "hi"}, tokens_in=999
+        )
+        job = TurnJob(
+            workspace_id=ws.id,
+            status="queued",
+            user_turn_id=user_turn.id,
+            submitted_by_user_id=ws.owner_id,
+        )
+        s.add(job)
+        s.commit()
+        ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
+
+    with pg_session_factory() as s:
+        record_terminal_outcome(
+            s,
+            turn_job_id=job_id,
+            workspace_id=ws_id,
+            outcome="cancelled",
+            expected_status="queued",
+            raw_error="workspace soft-deleted",
+            emit_chat=False,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(ChatTurn, ut_id).tokens_in is None  # cleared, as before

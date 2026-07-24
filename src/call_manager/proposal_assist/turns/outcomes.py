@@ -49,12 +49,18 @@ def record_terminal_outcome(
     emit_chat: bool = True,  # False → audit event only (soft-delete: no surface)
     tokens_in: int = 0,
     tokens_out: int = 0,
+    usage_unknown: bool = False,
 ) -> bool:
     """Record a terminal failed/cancelled outcome in the caller's transaction.
 
     Returns True if this call performed the transition, False if the job was
     already terminal / in the wrong workspace (no double-finalize). The caller
     commits.
+
+    usage_unknown: True when the turn is terminalized while RUNNING and its real
+        usage is not yet known (workspace deletion). Retains the submit-time
+        estimate so the spend stays in the daily-cap sum; stamp_post_terminal_usage
+        later replaces it with the SDK-reported truth.
     """
     # Workspace-scoped conditional flip + atomic read-back of the authoritative
     # ids. Test the RETURNING result, NOT rowcount (psycopg3 reports rowcount
@@ -81,10 +87,12 @@ def record_terminal_outcome(
     # user burn real spend invisibly. Stamp the consumed tokens onto a chat_turns
     # row so the cap sees them. When NOTHING was consumed (the common
     # reaped/orphaned/cancelled case) clear the submit-time pre-count so the
-    # abandoned turn doesn't keep burning budget for input it never used.
+    # abandoned turn doesn't keep burning budget for input it never used —
+    # UNLESS usage_unknown, where the turn really was running and its input was
+    # really spent, we just cannot measure it yet.
     if user_turn_id is not None:
         user_turn = session.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
-        if user_turn is not None and not consumed:
+        if user_turn is not None and not consumed and not usage_unknown:
             user_turn.tokens_in = None
     if emit_chat:
         # Stamp the actually-consumed tokens onto the viewer-safe system outcome
