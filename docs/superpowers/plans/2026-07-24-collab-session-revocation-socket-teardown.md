@@ -24,7 +24,7 @@
 
 | File | Role |
 |---|---|
-| `src/call_manager/proposal_assist/collab/permissions.py` | Modify: `_resolve` status check; new `revoke_user_sockets`, `signal_user_revocation`, `_REVOCATION_BARRIER_SECONDS`, `_WS_SERVICE_RESTART` |
+| `src/call_manager/proposal_assist/collab/permissions.py` | Modify: `_resolve` status check; new `revoke_user_sockets`, `signal_user_revocation`, `_REVOCATION_BARRIER_SECONDS`, `WS_RECONNECTABLE_CLOSE` |
 | `src/call_manager/proposal_assist/collab/room.py` | Modify: new `RoomManager.snapshot_rooms()` |
 | `src/call_manager/proposal_assist/web/collab_ws.py` | Modify: post-`acquire` straddle cookie re-validation |
 | `src/call_manager/web/api/auth.py` | Modify: `logout` wiring |
@@ -642,7 +642,7 @@ EOF
 - Test: `tests/test_api_session_revocation.py` (create)
 
 **Interfaces:**
-- Consumes: `signal_user_revocation`, `_WS_SERVICE_RESTART` (Task 3).
+- Consumes: `signal_user_revocation`, `WS_RECONNECTABLE_CLOSE` (Task 3).
 - Produces: each invalidation route calls `signal_user_revocation(request, <user_id>, close_code=<code>)` post-commit.
 
 - [ ] **Step 1: Write the failing test**
@@ -797,7 +797,7 @@ Expected: only the 6 source files + 4 test files + docs; no migration, no fronte
 ## Self-Review (completed at plan-writing time)
 
 - **Spec coverage:** §4.1 → Task 1; §4.2 (primitive + snapshot_rooms + proactive deregister + close_code) → Task 2; §4.3 (strong barrier + 1012 constant) → Task 3; §4.2b (straddle re-validation) → Task 4; §4.4 (5 routes + close codes) → Task 5; §7 tests → Tasks 1–5 (each Codex-numbered test mapped: #1 straddle=Task 4, #2 durability=Task 2, #3 barrier=Task 3, #4 close-codes=Task 5); §7 gates → Task 6. §8 constraints → Global Constraints.
-- **Type consistency:** `revoke_user_sockets(session_factory, workspaces_dir, user_id, *, close_code)` identical in Tasks 2 (def) and 3 (call); `signal_user_revocation(request, user_id, *, close_code)` identical in Tasks 3 (def) and 5 (calls); `snapshot_rooms()` used in Task 2 def and revoke body; `_WS_SERVICE_RESTART`/`_WS_POLICY_VIOLATION` codes consistent (1012 self-password, 1008 others).
+- **Type consistency:** `revoke_user_sockets(session_factory, workspaces_dir, user_id, *, close_code)` identical in Tasks 2 (def) and 3 (call); `signal_user_revocation(request, user_id, *, close_code)` identical in Tasks 3 (def) and 5 (calls); `snapshot_rooms()` used in Task 2 def and revoke body; `WS_RECONNECTABLE_CLOSE`/`_WS_POLICY_VIOLATION` codes consistent (1012 self-password, 1008 others).
 - **Known nuance:** several test bodies reference the module's existing pg/app fixtures by pattern rather than exact name (the collab and route test files vary) — the executor matches them to each file's conftest during inline execution; assertions and monkeypatch targets are exact.
 - **Route module patch targets:** each route imports `signal_user_revocation` into its own namespace, so Task 5's tests patch `call_manager.web.api.{auth,admin_users,me}.signal_user_revocation` (not the definition module) — noted in the test step.
 
