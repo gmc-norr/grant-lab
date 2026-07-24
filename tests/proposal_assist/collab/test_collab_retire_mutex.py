@@ -25,7 +25,7 @@ from call_manager.proposal_assist.collab.kernel import (
 )
 from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -218,12 +218,23 @@ def test_kernel_init_spec_refuses_a_deleted_workspace(pg_session_factory, tmp_pa
 def test_workspace_deleted_is_a_clean_error_so_a_refusal_never_evicts_a_room():
     """Raised where CommitMutexTimeout is — before any doc mutation. If it were
     not in these tuples a refused write would evict a healthy room and disconnect
-    everyone editing it."""
-    from call_manager.proposal_assist.citations.collab_cite import _CLEAN_CITE_ERRORS
+    everyone editing it.
+
+    EVERY clean-error list must be covered, not the two obvious ones: the
+    init-spec path keeps a third, narrower list, and checking only the first two
+    is exactly how it drifted. Anchored on CommitMutexTimeout — the sibling error
+    raised from the identical place — so a new list that forgets WorkspaceDeleted
+    is caught here rather than by a room full of disconnected editors.
+    """
+    from call_manager.proposal_assist.citations.collab_cite import (
+        _CLEAN_CITE_ERRORS,
+        _CLEAN_INIT_SPEC_ERRORS,
+    )
     from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
 
-    assert WorkspaceDeleted in _CLEAN_ACCEPT_ERRORS
-    assert WorkspaceDeleted in _CLEAN_CITE_ERRORS
+    for clean in (_CLEAN_ACCEPT_ERRORS, _CLEAN_CITE_ERRORS, _CLEAN_INIT_SPEC_ERRORS):
+        assert CommitMutexTimeout in clean  # the invariant's anchor
+        assert WorkspaceDeleted in clean
 
 
 # ---------------------------------------------------------------------------
