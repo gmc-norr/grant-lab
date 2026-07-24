@@ -173,6 +173,31 @@ async def process_turn_once(
             turn_job_id,
         )
         return
+    except WorkspaceRetired:
+        # The workspace was soft-deleted before this QUEUED turn could start.
+        # The delete transaction cancels queued rows itself, so this is normally
+        # unreachable — but "leave it queued for retry" would be wrong here: the
+        # workspace is never coming back, so every later drain tick would re-raise
+        # and log a stack trace forever. Terminalize on the same terms the delete
+        # uses (cancelled, emit_chat=False — a deleted workspace has no surface).
+        # Conditional on status='queued', so it cannot resurrect or double-write.
+        logger.info(
+            "process_turn_once: workspace %s is retired; cancelling queued turn_job %s",
+            workspace_id_for_launch,
+            turn_job_id,
+        )
+        with session_factory() as s:
+            record_terminal_outcome(
+                s,
+                turn_job_id=turn_job_id,
+                workspace_id=workspace_id_for_launch,
+                outcome="cancelled",
+                expected_status="queued",
+                raw_error="workspace soft-deleted",
+                emit_chat=False,
+            )
+            s.commit()
+        return
     except Exception:
         logger.exception(
             "process_turn_once: controller.launch failed for workspace %s; "
