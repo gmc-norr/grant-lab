@@ -371,7 +371,9 @@ EOF
 
 **Interfaces:**
 - Consumes: `revoke_user_sockets` (Task 2).
-- Produces: `_REVOCATION_BARRIER_SECONDS = 5.0`; `_WS_SERVICE_RESTART = 1012`; `signal_user_revocation(request, user_id: int, *, close_code: int = _WS_POLICY_VIOLATION) -> None` — schedules the teardown on `app_loop` and blocks (bounded) until it completes; never raises into the route.
+- Produces: `_REVOCATION_BARRIER_SECONDS = 5.0`; `WS_RECONNECTABLE_CLOSE = 1012` (PUBLIC — imported by `me.py` in Task 5; a public name avoids a cross-module private import); `signal_user_revocation(request, user_id: int, *, close_code: int = _WS_POLICY_VIOLATION) -> None` — schedules the teardown on `app_loop` and blocks (bounded) until it completes; never raises into the route.
+
+**Liveness note (self-review M2):** the barrier awaits `revoke_user_sockets`, which `await`s `MANAGER.release(... on_evict=checkpoint)` → `run_in_threadpool(_cp)`. So a barrier-blocked route worker and the teardown's checkpoint compete for the same threadpool. For the rare, low-concurrency invalidation events this is fine; the `_REVOCATION_BARRIER_SECONDS` timeout is therefore a **liveness bound** (route worker releases after it, freeing the pool), not only a security-window bound. Do not remove it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -396,33 +398,48 @@ def test_signal_user_revocation_no_loop_is_noop_no_raise():
     perms.signal_user_revocation(req, 7)  # must not raise
 
 
-def test_signal_user_revocation_blocks_until_teardown_completes(tmp_path):
-    # Strong barrier (Codex #3): the sync call must not return until the
-    # scheduled coroutine has finished. Run a real loop in a background thread
-    # (the production topology: sync route thread -> event loop thread).
+def test_signal_user_revocation_blocks_until_teardown_completes(tmp_path, monkeypatch):
+    # Strong barrier (Codex #3): the sync call must not return until the scheduled
+    # coroutine has finished. A blocking fut.result() cannot run on its own loop's
+    # thread, so we need the loop in a SEPARATE thread — the production topology
+    # (sync route thread -> event loop thread).
+    #
+    # CRITICAL (self-review M1): do NOT reuse the module-global MANAGER here. Its
+    # asyncio.Lock was bound to the pytest-anyio loop by earlier tests, so using
+    # it from this background loop raises "got Future attached to a different
+    # loop". Use a FRESH RoomManager monkeypatched into permissions.MANAGER and do
+    # ALL manager ops on the background loop, so its lock binds to THIS loop.
+    from call_manager.proposal_assist.collab.room import RoomManager
+
+    fresh = RoomManager()
+    monkeypatch.setattr(perms, "MANAGER", fresh)
+
     loop = asyncio.new_event_loop()
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
-    done = {"flag": False}
+
+    key = (uuid.uuid4(), "draft")
+    c = FakeClient()
 
     async def _register_on_loop():
-        key = (uuid.uuid4(), "draft")
-        c = FakeClient()
-        await _register(key, c, user_id=7)
-        return key, c
+        async def _load():
+            return []
+        await fresh.acquire(key, load=_load, client=c,
+                            state=ClientState(user_id=7, can_write=True))
 
-    key, c = asyncio.run_coroutine_threadsafe(_register_on_loop(), loop).result(5)
+    asyncio.run_coroutine_threadsafe(_register_on_loop(), loop).result(5)
     try:
         req = _FakeRequest(loop, _pg_factory_for(tmp_path), str(tmp_path))
         perms.signal_user_revocation(req, 7)     # blocks on the barrier
         # By the time signal returns, the socket is already torn down.
-        room = MANAGER.get(key)
+        room = fresh.get(key)
         assert room is None or c not in room.clients
         assert c.closed == 1008
     finally:
-        MANAGER._rooms.pop(key, None)
         loop.call_soon_threadsafe(loop.stop)
 ```
+
+Note the no-loop test uses the same `perms.MANAGER` isolation is unnecessary (it never touches MANAGER — it returns before scheduling). Only the blocking test needs the fresh manager.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -434,10 +451,10 @@ Expected: FAIL — `signal_user_revocation` not defined.
 
 - [ ] **Step 3: Implement**
 
-In `permissions.py`, add the constant near `_WS_POLICY_VIOLATION`:
+In `permissions.py`, add the constants near `_WS_POLICY_VIOLATION`:
 
 ```python
-_WS_SERVICE_RESTART = 1012      # RFC 6455 — reconnectable close (self password-change re-mint)
+WS_RECONNECTABLE_CLOSE = 1012   # RFC 6455 service-restart — reconnectable; self password-change re-mint (public: imported by me.py)
 _REVOCATION_BARRIER_SECONDS = 5.0
 ```
 
@@ -685,11 +702,11 @@ Expected: FAIL — routes do not yet call `signal_user_revocation` (name not imp
   ```
   (`admin_enable_user` and `admin_change_role` get NO call.)
 
-`me.py` — add `from call_manager.proposal_assist.collab.permissions import signal_user_revocation, _WS_SERVICE_RESTART` and, after `session.commit()` (`:166`, after the `with` block), before/after the cookie re-mint:
+`me.py` — add `from call_manager.proposal_assist.collab.permissions import signal_user_revocation, WS_RECONNECTABLE_CLOSE` and, after `session.commit()` (`:166`, after the `with` block), before the cookie re-mint:
 
 ```python
         session.commit()
-    signal_user_revocation(request, user.id, close_code=_WS_SERVICE_RESTART)  # 1012: acting browser reconnects
+    signal_user_revocation(request, user.id, close_code=WS_RECONNECTABLE_CLOSE)  # 1012: acting browser reconnects
     response.set_cookie(...)   # existing re-mint
 ```
 
@@ -783,3 +800,12 @@ Expected: only the 6 source files + 4 test files + docs; no migration, no fronte
 - **Type consistency:** `revoke_user_sockets(session_factory, workspaces_dir, user_id, *, close_code)` identical in Tasks 2 (def) and 3 (call); `signal_user_revocation(request, user_id, *, close_code)` identical in Tasks 3 (def) and 5 (calls); `snapshot_rooms()` used in Task 2 def and revoke body; `_WS_SERVICE_RESTART`/`_WS_POLICY_VIOLATION` codes consistent (1012 self-password, 1008 others).
 - **Known nuance:** several test bodies reference the module's existing pg/app fixtures by pattern rather than exact name (the collab and route test files vary) — the executor matches them to each file's conftest during inline execution; assertions and monkeypatch targets are exact.
 - **Route module patch targets:** each route imports `signal_user_revocation` into its own namespace, so Task 5's tests patch `call_manager.web.api.{auth,admin_users,me}.signal_user_revocation` (not the definition module) — noted in the test step.
+
+## Self-review findings folded (plan review before execution)
+
+- **M1 (would break execution):** Task 3's barrier test must run the loop in a separate thread (a blocking `fut.result()` can't run on its own loop), but the module-global `MANAGER`'s `asyncio.Lock` is bound to the pytest-anyio loop by earlier tests → cross-loop `RuntimeError`. **Fixed:** the barrier test uses a fresh `RoomManager()` monkeypatched into `permissions.MANAGER`, all manager ops on the background loop.
+- **M2 (liveness):** the barrier `await`s `release`→`checkpoint` `run_in_threadpool`, so barrier-blocked route workers compete with the checkpoint pool; the `_REVOCATION_BARRIER_SECONDS` timeout is a **liveness bound**, not just a security bound. Documented in Task 3; acceptable for rare invalidation events.
+- **L1:** the `1012` constant is **public** (`WS_RECONNECTABLE_CLOSE`) so `me.py` imports a public name (no cross-module private import).
+- **L2 (accepted residual):** `revoke_user_sockets` iterates a room snapshot; a room evicted-and-recreated for the same key between `snapshot_rooms` and the per-room `recon_lock` could be missed — self-healed by the straddle re-validation (Task 4) and the next reconcile. Extreme race; not worth per-key re-fetch.
+- **L3 (accepted):** Task 4's straddle test stubs `resolve_ws_user` to raise on the 2nd call (deterministic) rather than a real DB epoch bump — the epoch/status *reading* is already covered by the `ws_auth` unit tests; this test proves the new close+drop wiring. A real-epoch integration variant is optional.
+- **Lock order (re-verified):** `revoke_user_sockets` calls `release` (which takes `manager._lock` → transitively `room._lock`) while holding `recon_lock` — identical to the existing `refresh_permissions`→`reconcile_client`→`release` path, so no new edge in the `recon_lock → manager._lock → room._lock` DAG.
