@@ -79,7 +79,11 @@ def _resolve(session_factory, user_id: int, workspace_id: uuid.UUID,
         ws = s.get(Workspace, workspace_id)
         ws_deleted = ws is None or ws.soft_deleted_at is not None
         u = s.get(User, user_id)
-        if u is None:
+        if u is None or u.status != "active":
+            # Fail closed on a logged-out/disabled account: a member whose
+            # account is no longer active re-resolves as not-member, so a
+            # permission reconcile closes+deregisters their live socket
+            # (defense-in-depth beneath the prompt revocation sweep).
             return (False, False, ws_deleted)
         is_member, can_write = resolve_access(
             s, user=u, workspace_id=workspace_id, artifact=artifact
