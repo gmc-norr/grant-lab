@@ -283,6 +283,58 @@ def test_oversized_frame_closes_the_connection(_app, pg_session_factory):
         client.__exit__(None, None, None)
 
 
+def test_connect_straddle_revalidates_and_closes_stale_epoch(
+    _app, pg_session_factory, monkeypatch
+):
+    # Codex #1: a socket that passed handshake auth but whose epoch was bumped
+    # (or account disabled) BETWEEN handshake and registration — so the revocation
+    # sweep missed it and reconcile_client (membership/write/status, not epoch)
+    # would keep it — must be closed by the post-acquire re-validation, BEFORE the
+    # receive loop. Deterministic: resolve_ws_user succeeds at the handshake call
+    # and raises WSAuthError at the straddle re-validation call.
+    import pytest
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from call_manager.proposal_assist.collab import ws_auth
+    from call_manager.proposal_assist.collab.room import MANAGER
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="straddle-owner@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    calls = {"n": 0}
+    real = ws_auth.resolve_ws_user
+
+    async def _staggered(websocket):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await real(websocket)                   # handshake: valid
+        raise ws_auth.WSAuthError("session revoked")       # straddle: now stale
+
+    monkeypatch.setattr(
+        "call_manager.proposal_assist.web.collab_ws.resolve_ws_user", _staggered
+    )
+
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    try:
+        with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
+            f"/api/ws/workspaces/{wid}/draft"
+        ) as wsconn:
+            wsconn.receive_bytes()          # straddle re-validation closes before STEP1
+        assert exc.value.code == 1008
+        assert calls["n"] == 2              # handshake + straddle re-validation both ran
+        assert MANAGER.get((wid, "draft")) is None   # closed + deregistered (room emptied)
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_two_connections_converge_through_the_route(_app, pg_session_factory):
     # Both connections use the SAME authenticated owner so they share one
     # TestClient event loop (two TestClients = two loops sharing an asyncio.Lock
