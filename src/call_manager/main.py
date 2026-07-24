@@ -460,6 +460,22 @@ def create_app() -> FastAPI:
             headers=getattr(exc, "headers", None) or {},
         )
 
+    from call_manager.proposal_assist.drafting.locking import (
+        DELETED_ERROR_MESSAGE,
+        WorkspaceDeleted,
+    )
+
+    @app.exception_handler(WorkspaceDeleted)
+    async def _workspace_deleted(request: Request, exc: WorkspaceDeleted):
+        # A writer that won the per-workspace commit mutex only to find the
+        # workspace deleted. It mutated nothing. 404 matches what every reader
+        # already sees — the workspace is gone — and keeps the SPA on its existing
+        # not-found path. Registered explicitly so it resolves ahead of the
+        # catch-all Exception handler below.
+        if api_request(request):
+            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
     @app.exception_handler(AccountInactive)
     async def _inactive_account(request: Request, exc: AccountInactive):
         if api_request(request):
