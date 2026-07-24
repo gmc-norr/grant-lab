@@ -25,6 +25,7 @@ from call_manager.proposal_assist.drafting.contract import (
     LaunchContext,
     SDKTurnError,
     StreamEvent,
+    WorkspaceRetired,
 )
 from call_manager.proposal_assist.drafting.locking import (
     LockNotAcquired,
@@ -102,6 +103,14 @@ class WorkspaceController:
         future.set_result — neither should in practice), the handle
         leaks.  This is documented as an acceptable trade-off.
         """
+        # Durable no-relaunch floor: refuse a soft-deleted workspace BEFORE
+        # claim_launch_or_wait, because the cached/pending path returns early below
+        # and never reaches the work_session block. Restart-safe; needs no wiring.
+        # NARROWING ONLY — a deletion committing after this check can still see a
+        # cached handle returned; reconciliation is the backstop.
+        if self._workspace_is_deleted(workspace_id):
+            raise WorkspaceRetired(workspace_id)
+
         am_launcher, pending = await self._registry.claim_launch_or_wait(workspace_id)
         if not am_launcher:
             # Another coroutine is already launching (or entry is cached).
@@ -271,6 +280,23 @@ class WorkspaceController:
         candidates → run predicate → re-acquire to pop), so the blocking SELECT
         never stalls concurrent launches."""
         return await self._registry.sweep_idle(has_queued_turn=self._workspace_has_queued_turn)
+
+    def _workspace_is_deleted(self, workspace_id: uuid.UUID) -> bool:
+        """True if the workspace row is missing or soft-deleted. Fresh short-lived
+        session. Best-effort: on a DB error return False so a transient blip cannot
+        block legitimate drafting — reconciliation still reaps a genuinely deleted
+        workspace's subprocess."""
+        try:
+            with self._session_factory() as s:
+                row = s.execute(
+                    select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
+                ).first()
+                return row is None or row[0] is not None
+        except Exception:
+            logger.exception(
+                "launch: soft-delete lookup failed for %s; allowing launch", workspace_id
+            )
+            return False
 
     def _workspace_has_queued_turn(self, workspace_id: uuid.UUID) -> bool:
         """True if the workspace has at least one queued turn_jobs row. Opens a
