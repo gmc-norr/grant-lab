@@ -8,7 +8,7 @@
  * the Yjs round-trip output, independent of the Python markdown_to_pm() implementation.
  *
  * Each golden is self-verified before being written: the JS round-trip
- *   prosemirrorToYDoc  →  yDocToProsemirrorJSON
+ *   prosemirrorToYXmlFragment  →  yDocToProsemirrorJSON
  * must return a doc that deepStrictEquals pm_json.  Any failure aborts the
  * whole run so a Task-5 failure can only be a Python bug, never a bad fixture.
  *
@@ -36,8 +36,17 @@ const goldensDir   = path.resolve(repoRoot, 'tests/proposal_assist/collab/golden
 import { schema } from './collab-schema.mjs';
 import { MarkdownParser } from 'prosemirror-markdown';
 import MarkdownIt from 'markdown-it';
-import { prosemirrorToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror';
+import { prosemirrorToYXmlFragment, yDocToProsemirrorJSON } from 'y-prosemirror';
 import * as Y from 'yjs';
+
+// Pinned Yjs clientID for every fixture. `new Y.Doc()` (which prosemirrorToYDoc
+// calls internally) draws a RANDOM clientID, and encodeStateAsUpdate stamps it
+// into every item id — so regenerating rewrote ydoc_update_b64 in all goldens on
+// every run, and the DoD's `git diff --exit-code` idempotency gate could never
+// pass. Fixtures are offline artifacts that never join a real room, so a
+// constant is safe; the cross-runtime check is verify_python_writepath.mjs,
+// which compares read-back pm_json, not bytes.
+const GOLDEN_CLIENT_ID = 1;
 
 // ---------------------------------------------------------------------------
 // Citation marker constants (mirror of Python build_marker / MARKER_RE)
@@ -197,8 +206,13 @@ for (const [name, markdown] of CORPUS) {
     // 1. Parse markdown → ProseMirror doc
     const doc = markdownParser.parse(markdown);
 
-    // 2. Build Yjs doc from ProseMirror doc
-    ydoc = prosemirrorToYDoc(doc, 'prosemirror');
+    // 2. Build Yjs doc from ProseMirror doc.
+    //    Open-coded rather than prosemirrorToYDoc() so the clientID is pinned
+    //    BEFORE any content is created — item ids carry the client that made
+    //    them, so assigning it afterwards would not make the encoding stable.
+    ydoc = new Y.Doc();
+    ydoc.clientID = GOLDEN_CLIENT_ID;
+    prosemirrorToYXmlFragment(doc, ydoc.get('prosemirror', Y.XmlFragment));
 
     // 3. Encode Yjs state update as base64
     ydoc_update_b64 = Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString('base64');
