@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 
 from pycrdt import Doc
 
+from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+
 from . import protocol as P
 
 RoomKey = tuple[uuid.UUID, str]
@@ -35,6 +37,23 @@ _EMPTY_UPDATE = b"\x00\x00"
 
 # RFC 6455 close code: server error (used for poison-room eviction)
 _WS_INTERNAL_ERROR = 1011
+
+# RFC 6455 close code: policy violation. Retirement closes editors with THIS, not
+# 1011 (server error): a soft-deleted workspace is a policy decision, not a crash.
+_WS_POLICY_VIOLATION = 1008
+
+# Bound on how long retire_workspace waits for an in-flight server op (a kernel
+# accept mid-write) to leave before it declares a room's retirement done. On
+# overrun it logs and proceeds: B4's under-mutex re-read of soft_deleted_at is the
+# durable backstop for those ops (a straggler refuses to commit anyway). Applied
+# PER room, so both artifacts drain within ~2*this; well inside the 5s barrier.
+_RETIRE_OPS_DRAIN_SECONDS = 2.0
+
+# Bound on how long retire_workspace waits for room.lock in order to flip the
+# `evicted` tombstone. Room.handle holds that lock across its persist await, so
+# in practice this is one DB round-trip. On overrun we set the flag
+# unsynchronized (which still stops every LATER frame) and log.
+_RETIRE_LOCK_WAIT_SECONDS = 1.0
 
 # Per-USER cap on awareness client-id bindings per room (Slice 3b-5d.D2). Legit
 # usage is ~1 binding per page-load, so 64 is generous. Per-user, NOT per-room:
@@ -449,6 +468,11 @@ class RoomManager:
         # number of distinct rooms — tiny for this app); not popped, because a
         # concurrent acquirer may still hold a reference.
         self._keylocks: dict[RoomKey, asyncio.Lock] = {}
+        # Retirement tombstone (Slice B-retire): a soft-deleted workspace's rooms
+        # are torn down and no new room may be created for it. acquire/operate
+        # reject membership; retire_workspace populates it. Unbounded (one UUID per
+        # deleted workspace per process) — a Slice-C eviction candidate.
+        self._retired_ws: set[uuid.UUID] = set()
 
     def has_room(self, key: RoomKey) -> bool:
         return key in self._rooms
@@ -461,8 +485,15 @@ class RoomManager:
         lock, serialized only by a per-key lock — so hydrating one room never
         blocks connections to unrelated rooms (no process-wide head-of-line
         blocking as the update log grows).
+
+        A retired (soft-deleted) workspace never gets a room: rejected on entry
+        and RE-CHECKED after the out-of-lock ``await load()``, because retirement
+        can land inside that window.
         """
+        workspace_id = key[0]
         async with self._lock:
+            if workspace_id in self._retired_ws:
+                raise WorkspaceRetired(workspace_id)
             room = self._rooms.get(key)
             if room is not None:
                 room.clients[client] = state
@@ -476,6 +507,8 @@ class RoomManager:
             # gap between fetch and client-add (Codex H1 — the ops-refcount eviction
             # now makes this window reachable; keep register atomic with the fetch).
             async with self._lock:
+                if workspace_id in self._retired_ws:
+                    raise WorkspaceRetired(workspace_id)
                 room = self._rooms.get(key)
                 if room is not None:
                     room.clients[client] = state
@@ -484,6 +517,11 @@ class RoomManager:
                 for update in await load():  # runs OUTSIDE the manager lock
                     room.doc.apply_update(update)
                 async with self._lock:
+                    # Re-check AFTER the out-of-lock load(): retirement may have
+                    # landed while we hydrated. Publishing now would resurrect a
+                    # room for a deleted workspace that retirement already swept.
+                    if workspace_id in self._retired_ws:
+                        raise WorkspaceRetired(workspace_id)
                     self._rooms[key] = room
                     room.clients[client] = state
             return room
@@ -494,8 +532,15 @@ class RoomManager:
         Tracks an in-flight server-op count so eviction is deferred until BOTH
         no clients AND no other server op remain (Codex H1). Does not create its
         OWN checkpoint on evict, but runs any checkpoint `release` deferred
-        because this op held `ops > 0` (Slice 3a c)."""
+        because this op held `ops > 0` (Slice 3a c).
+
+        A retired (soft-deleted) workspace is rejected on entry and RE-CHECKED
+        after the out-of-lock `await load()` — the straddle kernel_accept.py:71
+        rides."""
+        workspace_id = key[0]
         async with self._lock:
+            if workspace_id in self._retired_ws:
+                raise WorkspaceRetired(workspace_id)
             room = self._rooms.get(key)
             if room is not None:
                 room.ops += 1
@@ -509,6 +554,8 @@ class RoomManager:
                 # invariant this refcount adds (never evict while an op is live)
                 # and hand back a zombie room detached from the registry.
                 async with self._lock:
+                    if workspace_id in self._retired_ws:
+                        raise WorkspaceRetired(workspace_id)
                     room = self._rooms.get(key)
                     if room is not None:
                         room.ops += 1
@@ -517,6 +564,12 @@ class RoomManager:
                     for update in await load():   # OUTSIDE the manager lock
                         room.doc.apply_update(update)
                     async with self._lock:
+                        # Re-check AFTER load(): retirement may have landed while
+                        # we hydrated. Publishing now would resurrect a room that
+                        # retirement already swept, and this op would then write
+                        # to a deleted workspace.
+                        if workspace_id in self._retired_ws:
+                            raise WorkspaceRetired(workspace_id)
                         self._rooms[key] = room
                         room.ops += 1
         try:
@@ -607,6 +660,83 @@ class RoomManager:
         for client in list(room.clients):
             with suppress(Exception):
                 await client.close(code=_WS_INTERNAL_ERROR)
+
+    async def retire_workspace(self, workspace_id: uuid.UUID) -> int:
+        """Collab retirement hook (coordinator-invoked). Tombstone the workspace so
+        acquire/operate refuse it, then tear down BOTH artifact rooms: pop each,
+        tombstone it (room.evicted, flipped UNDER room.lock so it linearizes
+        against in-flight client persists), close every editor with 1008, and drain
+        any in-flight server op. NEVER checkpoints — the workspace is soft-deleted,
+        so a last-leave checkpoint would write to a dead workspace (and B4 would
+        refuse it under the mutex anyway); this is drop_client semantics for the
+        whole room. Idempotent. Returns the number of sockets closed (tests/logging;
+        the coordinator discards it)."""
+        self._retired_ws.add(workspace_id)
+        loop = asyncio.get_running_loop()
+        closed = 0
+        for artifact in ("draft", "spec"):
+            key = (workspace_id, artifact)
+            # Pop under the manager lock so no new op/client can attach after this.
+            async with self._lock:
+                room = self._rooms.pop(key, None)
+            if room is None:
+                continue
+            # Tombstone UNDER room.lock — this is the client-write linearization
+            # point, not a cosmetic flag set. Room.handle's write path checks
+            # `self.evicted` and then awaits persist(...) INSIDE this same lock,
+            # and that persist commits a YjsUpdate row with NO commit mutex and NO
+            # soft_deleted_at read, so it is invisible to both room.ops and B4.
+            # Taking the lock therefore buys two things at once:
+            #   (a) when we get it, no client persist is in flight;
+            #   (b) every later frame sees evicted and drops before apply/persist.
+            # No inversion risk: we released self._lock at the pop above and hold
+            # NOTHING while waiting, and Room.handle never waits on a manager lock.
+            # Bounded like the ops drain — a wedged DB write must not eat the whole
+            # retirement barrier; on timeout we set the flag anyway and log, and
+            # the straggler's own commit remains the documented residual.
+            try:
+                await asyncio.wait_for(
+                    _set_evicted_under_lock(room), timeout=_RETIRE_LOCK_WAIT_SECONDS
+                )
+            except TimeoutError:
+                room.evicted = True   # unsynchronized fallback; still stops LATER frames
+                logger.warning(
+                    "collab.retire_lock_wait_timeout",
+                    extra={"event": "collab_retire_lock_wait_timeout", "room": str(key)},
+                )
+            # Flip can_write + close under recon_lock (parity with
+            # revoke_user_sockets), NOT room.lock — Room.handle holds room.lock, so
+            # taking it here for the close loop risks a lock-order inversion. We
+            # popped the whole room, so there are no surviving peers and no presence
+            # removal is needed.
+            async with room.recon_lock:
+                for client, state in list(room.clients.items()):
+                    state.can_write = False
+                    with suppress(Exception):
+                        await client.close(code=_WS_POLICY_VIOLATION)
+                    closed += 1
+            # Drain any in-flight server op: the room is popped so no NEW op can bump
+            # room.ops, but one already inside operate() may still be mid-write. Poll
+            # ops to zero under a bounded deadline, then proceed regardless (for THESE
+            # ops B4's mutex is the durable backstop; overrun is logged, not fatal).
+            deadline = loop.time() + _RETIRE_OPS_DRAIN_SECONDS
+            while room.ops > 0 and loop.time() < deadline:
+                await asyncio.sleep(0.01)
+            if room.ops > 0:
+                logger.warning(
+                    "collab.retire_ops_drain_timeout",
+                    extra={"event": "collab_retire_ops_drain_timeout",
+                           "room": str(key), "ops": room.ops},
+                )
+        return closed
+
+
+async def _set_evicted_under_lock(room: Room) -> None:
+    """Flip the room tombstone while holding room.lock, so it linearizes against
+    Room.handle's write path (which checks `evicted` and awaits persist under that
+    same lock)."""
+    async with room.lock:
+        room.evicted = True
 
 
 # Module-global registry (single-instance backend).

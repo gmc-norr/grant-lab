@@ -337,3 +337,43 @@ def test_checkpoint_active_tails_skips_an_under_mutex_refusal_QUIETLY(
     assert n == 0
     assert _git_head(repo) == head
     assert not [r for r in caplog.records if r.message == "collab.checkpoint_tail_failed"]
+
+
+# ---------------------------------------------------------------------------
+# cold hydration (Slice B-retire): the seed is a DB write room.ops cannot see
+# ---------------------------------------------------------------------------
+
+
+def test_hydration_refuses_to_seed_a_deleted_workspace(pg_session_factory, tmp_path):
+    """Cold hydration commits update #1 outside the manager lock and outside
+    room.ops, so retirement's drain cannot see it. The live mutex is what stops
+    it — and it must RAISE, never return [] (an empty list is indistinguishable
+    from 'no content yet' and would let a kernel accept write to an empty doc)."""
+    from sqlalchemy import select
+
+    from call_manager.db.models import YjsUpdate
+
+    md0 = "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        owner = make_user(s, email="hydrate-del@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid = ws.id
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _init_repo(repo, md0)
+    _delete(pg_session_factory, wid)          # soft-delete BEFORE first hydration
+
+    with pg_session_factory() as s:
+        with pytest.raises(WorkspaceDeleted):
+            load_or_hydrate(
+                s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            )
+        s.rollback()
+
+    # ...and nothing was persisted.
+    with pg_session_factory() as s:
+        rows = s.execute(
+            select(YjsUpdate).where(YjsUpdate.workspace_id == wid)
+        ).scalars().all()
+        assert rows == []

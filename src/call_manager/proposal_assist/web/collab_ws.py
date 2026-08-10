@@ -29,6 +29,8 @@ from call_manager.proposal_assist.collab.ws_auth import (
     resolve_access,
     resolve_ws_user,
 )
+from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +116,17 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         await run_in_threadpool(_write)
 
     state = ClientState(user_id=user.id, can_write=can_write)
-    room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
+    try:
+        room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
+    except (WorkspaceRetired, WorkspaceDeleted):
+        # The workspace was retired (soft-deleted) between the membership check and
+        # room acquisition — or during cold-start hydration, where load_or_hydrate's
+        # live-mutex guard raises WorkspaceDeleted. accept() already happened, so a
+        # raise would surface as 1011/1006; close with 1008 (policy) and return
+        # WITHOUT entering the try below (no client registered, nothing to release).
+        with contextlib.suppress(Exception):
+            await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
     try:
         # Close the connect-straddle TOCTOU (Slice 3a b): a permission mutation that
         # committed while we were mid-acquire may have fired its refresh BEFORE this
