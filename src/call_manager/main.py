@@ -172,6 +172,22 @@ async def lifespan(app: FastAPI):
     )
     app.state.workspace_controller = workspace_controller
 
+    # Workspace retirement (Slice B-retire): one coordinator fans a delete out to
+    # every subsystem that holds live per-workspace state. Constructed HERE, in the
+    # lifespan, so a missing required hook raises MissingRetirementHook and the app
+    # fails to boot rather than silently skipping a teardown on every delete (the
+    # spec's startup invariant). Local imports follow this module's lifespan
+    # convention (see build_workspace_controller above).
+    from call_manager.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
+    from call_manager.proposal_assist.retirement import WorkspaceRetirement
+
+    app.state.workspace_retirement = WorkspaceRetirement(
+        hooks={
+            "turns": workspace_controller.registry.retire_workspace,
+            "collab": _COLLAB_MANAGER.retire_workspace,
+        }
+    )
+
     # Claim-analysis embedder: the same construction reference ingest uses
     # (web/references.py wraps the shared embed_client per request). Always
     # constructible — embed_client is built unconditionally in create_app()
