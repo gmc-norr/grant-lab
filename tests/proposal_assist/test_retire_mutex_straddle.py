@@ -226,7 +226,7 @@ def test_blocked_enable_on_touch_returns_false_and_writes_no_state_row(
     run on a workspace whose deletion landed while it waited."""
     from call_manager.proposal_assist.collab.flip import maybe_auto_enable
 
-    md0 = "## Background\noriginal.\n"  # table-free: it WOULD otherwise enable
+    md0 = "## Background\noriginal.\n"  # a live workspace here WOULD be enabled
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s, email="straddle-flip@ki.se"))
         s.commit()
@@ -240,8 +240,6 @@ def test_blocked_enable_on_touch_returns_false_and_writes_no_state_row(
                 s,
                 workspace_id=ws_id,
                 artifact="draft",
-                head_md=md0,
-                artifact_path=repo / PROPOSAL_FILENAME,
             )
             s.rollback()
 

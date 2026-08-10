@@ -68,9 +68,11 @@ def test_spec_read_flips_spec_independently(
         assert _flag_row(s, wid, "spec").enabled_at is not None
 
 
-def test_table_doc_is_held_back(
+def test_table_doc_enables_and_serves_canonical_table(
     client_authed_owner, current_user, pg_session_factory, tmp_path, _app
 ):
+    """Tables slice: pipe-table docs are no longer held back — they enable on
+    first read and the response serves table content."""
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
         ws, _ = _seed(s, tmp_path, current_user, doc=TABLE_DOC)
@@ -78,9 +80,12 @@ def test_table_doc_is_held_back(
         wid = ws.id
     r = client_authed_owner.get(f"/api/workspaces/{wid}/draft")
     assert r.status_code == 200
-    assert r.json()["collab_enabled"] is False
+    body = r.json()
+    assert body["collab_enabled"] is True
+    joined = "".join(sec["text"] for sec in body["sections"])
+    assert "|" in joined  # pipe-table content served, not dropped
     with pg_session_factory() as s:
-        assert _flag_row(s, wid, "draft") is None
+        assert _flag_row(s, wid, "draft").enabled_at is not None
 
 
 def test_kill_switch_suppresses_flip(

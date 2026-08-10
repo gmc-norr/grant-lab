@@ -276,15 +276,13 @@ def get_draft(
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
         raw_disk = proposal.read_text()
-        # 3b-5d.D4 enable-on-touch: the first read of a table-free artifact
-        # flips collab on (sticky, per-artifact, kill-switch-suppressed) and
-        # THIS response already reports collab_enabled=true.
+        # 3b-5d.D4 enable-on-touch: the first read of an artifact flips collab
+        # on (sticky, per-artifact, kill-switch-suppressed) and THIS response
+        # already reports collab_enabled=true.
         collab_enabled = maybe_auto_enable(
             session,
             workspace_id=workspace_id,
             artifact="draft",
-            head_md=raw_disk,
-            artifact_path=proposal,
         )
         if collab_enabled:
             raw = canonical_artifact_markdown(
@@ -334,8 +332,6 @@ def get_spec(
             session,
             workspace_id=workspace_id,
             artifact="spec",
-            head_md=raw_disk,
-            artifact_path=spec,
         )
         raw = (
             canonical_artifact_markdown(
