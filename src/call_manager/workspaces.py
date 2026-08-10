@@ -80,23 +80,21 @@ def create_workspace(
     return ws
 
 
-def soft_delete_workspace(
+def soft_delete_workspace_db(
     session: Session,
     *,
     workspace_id: uuid.UUID,
-    workspaces_dir: Path,
     timeout_seconds: int = 10,
 ) -> None:
-    """Soft-delete a workspace: mark it deleted, cancel every active background
-    job + queued turn so none can burn cloud tokens after deletion, commit, then
-    best-effort scrub attachment + reference bytes from disk.
+    """The DB half of a soft-delete: mark the workspace deleted, cancel every
+    active background job + queued turn so none can burn cloud tokens after
+    deletion, terminalize any RUNNING turn, and COMMIT.
 
-    Order is deliberate (a prior Codex-finding fix): DB commit FIRST so the
-    user-visible 'deleted' state is durable, THEN best-effort FS cleanup. A
-    cleanup failure leaves the workspace soft-deleted with harmless orphan files
-    (no code reads them; the row-source-of-truth lookup gates serving on a live
-    DB row, and a future sweep collects the bytes). Attachment/reference DB rows
-    are intentionally preserved for the audit trail; only the on-disk bytes go.
+    Split out of soft_delete_workspace (Slice B-retire) so the delete route can
+    interleave in-process retirement between the durable DB commit and the FS
+    scrub: DB commit -> retire -> scrub -> 204. Nothing about the DB behaviour
+    changed in the split; soft_delete_workspace is retained as a thin wrapper
+    over this plus scrub_workspace_bytes.
 
     The caller resolves ownership (require_owner) before calling this.
 
@@ -177,6 +175,19 @@ def soft_delete_workspace(
             usage_unknown=True,
         )
     session.commit()
+
+
+def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> None:
+    """The FS half of a soft-delete: best-effort removal of attachment and
+    reference bytes from disk.
+
+    Runs AFTER the DB commit (a prior Codex-finding fix): the user-visible
+    'deleted' state is durable first, THEN the bytes go. A cleanup failure leaves
+    the workspace soft-deleted with harmless orphan files — no code reads them
+    (the row-source-of-truth lookup gates serving on a live DB row) and a future
+    sweep collects them. Attachment/reference DB rows are intentionally preserved
+    for the audit trail; only the on-disk bytes go. Never raises on OSError.
+    """
     # Scrub attachment bytes (DB rows remain — audit trail). Best-effort.
     try:
         AttachmentStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)
@@ -197,3 +208,17 @@ def soft_delete_workspace(
             workspace_id,
             exc_info=True,
         )
+
+
+def soft_delete_workspace(
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    workspaces_dir: Path,
+    timeout_seconds: int = 10,
+) -> None:
+    """Thin wrapper retained for existing callers: DB half then FS half, exactly
+    the pre-split behaviour. The delete route now calls the two halves directly so
+    it can interleave in-process retirement between them (Slice B-retire)."""
+    soft_delete_workspace_db(session, workspace_id=workspace_id, timeout_seconds=timeout_seconds)
+    scrub_workspace_bytes(workspace_id, workspaces_dir=workspaces_dir)
