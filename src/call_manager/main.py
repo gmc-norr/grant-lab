@@ -227,7 +227,15 @@ async def lifespan(app: FastAPI):
             },
         )
 
-    app.state.scheduler = build_scheduler(
+    # Bound to a LOCAL as well as app.state: the teardown below must stop the
+    # scheduler THIS lifespan started, not whatever app.state happens to hold by
+    # then. A second lifespan entered on the same app object (a nested TestClient)
+    # overwrites both attributes — with a scheduler built start=False, since the
+    # nested advisory-lock acquire necessarily loses to the outer one — and the
+    # outer teardown then shut down that inert object and released a None lock,
+    # orphaning the running scheduler and its advisory lock for the rest of the
+    # process. Locals make each lifespan tear down exactly what it created.
+    scheduler = build_scheduler(
         session_factory=app.state.session_factory,
         settings=settings,
         alerter=alerter,
@@ -253,6 +261,7 @@ async def lifespan(app: FastAPI):
         app_loop=_asyncio.get_running_loop(),
         start=start_scheduler,
     )
+    app.state.scheduler = scheduler
     app.state.app_loop = _asyncio.get_running_loop()
     try:
         yield
@@ -267,14 +276,18 @@ async def lifespan(app: FastAPI):
         # app loop runs their coroutine. Calling shutdown(wait=True) directly on
         # the loop would block the loop waiting for those workers, which are in
         # turn waiting for the loop → self-deadlock until the fut.result timeout.
-        await _asyncio.to_thread(app.state.scheduler.shutdown, wait=True)
+        #
+        # No `running` guard needed: build_scheduler returns a
+        # _SafeBackgroundScheduler, whose shutdown() is a documented no-op when the
+        # scheduler was never started (the start=False path taken by whichever
+        # replica loses the advisory lock).
+        await _asyncio.to_thread(scheduler.shutdown, wait=True)
         # Release the single-instance advisory lock (closes its dedicated
         # connection). Done after the scheduler stops so no in-flight job is
         # still relying on single-instance semantics. Must precede
         # engine.dispose() below — the lock holds its own connection.
-        _lock = getattr(app.state, "scheduler_lock", None)
-        if _lock is not None:
-            _lock.release()
+        if scheduler_lock is not None:
+            scheduler_lock.release()
         # B6-residuals: terminate every live drafting subprocess before
         # disposing the engine. Without this, each `lifespan` exit leaks
         # SDK subprocesses + the per-workspace pg advisory-lock sessions
