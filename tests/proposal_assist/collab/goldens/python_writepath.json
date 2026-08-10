@@ -211,7 +211,7 @@
         }
       ]
     },
-    "update_b64": "ARsBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgdOb3ZlbHR5hwEAAwlwYXJhZ3JhcGgHAAEKBgQAAQsIVGhpcyBpcyCGARMGc3Ryb25nAnt9hAEUBGJvbGSGARgGc3Ryb25nBG51bGyEARkCLCCGARsCZW0Ce32EARwGaXRhbGljhgEiAmVtBG51bGyEASMCLCCGASUNc3RyaWtldGhyb3VnaAJ7fYQBJgZzdHJ1Y2uGASwNc3RyaWtldGhyb3VnaARudWxshAEtAiwghgEvBGNvZGUCe32EATAEY29kZYYBNARjb2RlBG51bGyEATUILCBhbmQgYSCGAT0EbGluayt7ImhyZWYiOiJodHRwczovL2V4YW1wbGUub3JnIiwidGl0bGUiOm51bGx9hAE+BGxpbmuGAUIEbGluawRudWxshAFDAS4A"
+    "update_b64": "ARsBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgdOb3ZlbHR5hwEAAwlwYXJhZ3JhcGgHAAEKBgQAAQsIVGhpcyBpcyCGARMGc3Ryb25nAnt9hAEUBGJvbGSGARgGc3Ryb25nBG51bGyEARkCLCCGARsCZW0Ce32EARwGaXRhbGljhgEiAmVtBG51bGyEASMCLCCGASUNc3RyaWtldGhyb3VnaAJ7fYQBJgZzdHJ1Y2uGASwNc3RyaWtldGhyb3VnaARudWxshAEtAiwghgEvBGNvZGUCe32EATAEY29kZYYBNARjb2RlBG51bGyEATUILCBhbmQgYSCGAT0EbGluayt7InRpdGxlIjpudWxsLCJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLm9yZyJ9hAE+BGxpbmuGAUIEbGluawRudWxshAFDAS4A"
   },
   {
     "name": "nested_marked_list",
@@ -850,5 +850,934 @@
       ]
     },
     "update_b64": "ARQBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgRBaW1zhwEAAwdoZWFkaW5nKAABBwVsZXZlbAF9AgcAAQcGBAABCQhBcHByb2FjaIcBBwMHaGVhZGluZygAARIFbGV2ZWwBfQIHAAESBgQAARQWTm92ZWx0eSAmIFNpZ25pZmljYW5jZYcBEgMHaGVhZGluZygAASsFbGV2ZWwBfQIHAAErBgQAAS0PRXhwZWN0ZWQgSW1wYWN0hwErAwdoZWFkaW5nKAABPQVsZXZlbAF9AgcAAT0GBAABPwpLZXkgQ2xhaW1zAA=="
+  },
+  {
+    "name": "table_basic",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Budget"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Item"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Cost"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Staff"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "100"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Lab"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "50"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ASwBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgZCdWRnZXSHAQADBXRhYmxlBwABCQMJdGFibGVfcm93BwABCgMMdGFibGVfaGVhZGVyKAABCwdjb2xzcGFuAX0BKAABCwdyb3dzcGFuAX0BBwABCwMJcGFyYWdyYXBoBwABDgYEAAEPBEl0ZW2HAQsDDHRhYmxlX2hlYWRlcigAARQHY29sc3BhbgF9ASgAARQHcm93c3BhbgF9AQcAARQDCXBhcmFncmFwaAcAARcGBAABGARDb3N0hwEKAwl0YWJsZV9yb3cHAAEdAwp0YWJsZV9jZWxsKAABHgdjb2xzcGFuAX0BKAABHgdyb3dzcGFuAX0BBwABHgMJcGFyYWdyYXBoBwABIQYEAAEiBVN0YWZmhwEeAwp0YWJsZV9jZWxsKAABKAdjb2xzcGFuAX0BKAABKAdyb3dzcGFuAX0BBwABKAMJcGFyYWdyYXBoBwABKwYEAAEsAzEwMIcBHQMJdGFibGVfcm93BwABMAMKdGFibGVfY2VsbCgAATEHY29sc3BhbgF9ASgAATEHcm93c3BhbgF9AQcAATEDCXBhcmFncmFwaAcAATQGBAABNQNMYWKHATEDCnRhYmxlX2NlbGwoAAE5B2NvbHNwYW4BfQEoAAE5B3Jvd3NwYW4BfQEHAAE5AwlwYXJhZ3JhcGgHAAE8BgQAAT0CNTAA"
+  },
+  {
+    "name": "table_cell_escapes",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "T"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a | b"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x|y",
+                          "marks": [
+                            {
+                              "type": "code",
+                              "attrs": {}
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "em",
+                          "marks": [
+                            {
+                              "type": "em",
+                              "attrs": {}
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "text": " text"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "plain"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ASQBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgFUhwEAAwV0YWJsZQcAAQQDCXRhYmxlX3JvdwcAAQUDDHRhYmxlX2hlYWRlcigAAQYHY29sc3BhbgF9ASgAAQYHcm93c3BhbgF9AQcAAQYDCXBhcmFncmFwaAcAAQkGBAABCgVhIHwgYocBBgMMdGFibGVfaGVhZGVyKAABEAdjb2xzcGFuAX0BKAABEAdyb3dzcGFuAX0BBwABEAMJcGFyYWdyYXBoBwABEwYGAAEUBGNvZGUCe32EARUDeHx5hgEYBGNvZGUEbnVsbIcBBQMJdGFibGVfcm93BwABGgMKdGFibGVfY2VsbCgAARsHY29sc3BhbgF9ASgAARsHcm93c3BhbgF9AQcAARsDCXBhcmFncmFwaAcAAR4GBgABHwJlbQJ7fYQBIAJlbYYBIgJlbQRudWxshAEjBSB0ZXh0hwEbAwp0YWJsZV9jZWxsKAABKQdjb2xzcGFuAX0BKAABKQdyb3dzcGFuAX0BBwABKQMJcGFyYWdyYXBoBwABLAYEAAEtBXBsYWluAA=="
+  },
+  {
+    "name": "table_borderless_normalizes",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "T"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Name"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Value"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "foo"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "bar"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AR8BAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgFUhwEAAwV0YWJsZQcAAQQDCXRhYmxlX3JvdwcAAQUDDHRhYmxlX2hlYWRlcigAAQYHY29sc3BhbgF9ASgAAQYHcm93c3BhbgF9AQcAAQYDCXBhcmFncmFwaAcAAQkGBAABCgROYW1lhwEGAwx0YWJsZV9oZWFkZXIoAAEPB2NvbHNwYW4BfQEoAAEPB3Jvd3NwYW4BfQEHAAEPAwlwYXJhZ3JhcGgHAAESBgQAARMFVmFsdWWHAQUDCXRhYmxlX3JvdwcAARkDCnRhYmxlX2NlbGwoAAEaB2NvbHNwYW4BfQEoAAEaB3Jvd3NwYW4BfQEHAAEaAwlwYXJhZ3JhcGgHAAEdBgQAAR4DZm9vhwEaAwp0YWJsZV9jZWxsKAABIgdjb2xzcGFuAX0BKAABIgdyb3dzcGFuAX0BBwABIgMJcGFyYWdyYXBoBwABJQYEAAEmA2JhcgA="
+  },
+  {
+    "name": "table_cite_in_cell",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Claims"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Claim"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Source"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Sky is blue"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "citation",
+                          "attrs": {
+                            "citekey": "smith2021",
+                            "ev_id": "ev-0a1b2c3d4e5f"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ASABAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgZDbGFpbXOHAQADBXRhYmxlBwABCQMJdGFibGVfcm93BwABCgMMdGFibGVfaGVhZGVyKAABCwdjb2xzcGFuAX0BKAABCwdyb3dzcGFuAX0BBwABCwMJcGFyYWdyYXBoBwABDgYEAAEPBUNsYWlthwELAwx0YWJsZV9oZWFkZXIoAAEVB2NvbHNwYW4BfQEoAAEVB3Jvd3NwYW4BfQEHAAEVAwlwYXJhZ3JhcGgHAAEYBgQAARkGU291cmNlhwEKAwl0YWJsZV9yb3cHAAEgAwp0YWJsZV9jZWxsKAABIQdjb2xzcGFuAX0BKAABIQdyb3dzcGFuAX0BBwABIQMJcGFyYWdyYXBoBwABJAYEAAElC1NreSBpcyBibHVlhwEhAwp0YWJsZV9jZWxsKAABMQdjb2xzcGFuAX0BKAABMQdyb3dzcGFuAX0BBwABMQMJcGFyYWdyYXBoBwABNAMIY2l0YXRpb24oAAE1B2NpdGVrZXkBdwlzbWl0aDIwMjEoAAE1BWV2X2lkAXcPZXYtMGExYjJjM2Q0ZTVmAA=="
+  },
+  {
+    "name": "table_header_only",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "table",
+          "content": [
+            {
+              "type": "table_row",
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Only"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Header"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQ4BAAcBC3Byb3NlbWlycm9yAwV0YWJsZQcAAQADCXRhYmxlX3JvdwcAAQEDDHRhYmxlX2hlYWRlcigAAQIHY29sc3BhbgF9ASgAAQIHcm93c3BhbgF9AQcAAQIDCXBhcmFncmFwaAcAAQUGBAABBgRPbmx5hwECAwx0YWJsZV9oZWFkZXIoAAELB2NvbHNwYW4BfQEoAAELB3Jvd3NwYW4BfQEHAAELAwlwYXJhZ3JhcGgHAAEOBgQAAQ8GSGVhZGVyAA=="
+  },
+  {
+    "name": "table_in_blockquote",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "blockquote",
+          "content": [
+            {
+              "type": "table",
+              "content": [
+                {
+                  "type": "table_row",
+                  "content": [
+                    {
+                      "type": "table_header",
+                      "attrs": {
+                        "colspan": 1,
+                        "rowspan": 1
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "table_header",
+                      "attrs": {
+                        "colspan": 1,
+                        "rowspan": 1
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "b"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_row",
+                  "content": [
+                    {
+                      "type": "table_cell",
+                      "attrs": {
+                        "colspan": 1,
+                        "rowspan": 1
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "1"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "table_cell",
+                      "attrs": {
+                        "colspan": 1,
+                        "rowspan": 1
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "2"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ARwBAAcBC3Byb3NlbWlycm9yAwpibG9ja3F1b3RlBwABAAMFdGFibGUHAAEBAwl0YWJsZV9yb3cHAAECAwx0YWJsZV9oZWFkZXIoAAEDB2NvbHNwYW4BfQEoAAEDB3Jvd3NwYW4BfQEHAAEDAwlwYXJhZ3JhcGgHAAEGBgQAAQcBYYcBAwMMdGFibGVfaGVhZGVyKAABCQdjb2xzcGFuAX0BKAABCQdyb3dzcGFuAX0BBwABCQMJcGFyYWdyYXBoBwABDAYEAAENAWKHAQIDCXRhYmxlX3JvdwcAAQ8DCnRhYmxlX2NlbGwoAAEQB2NvbHNwYW4BfQEoAAEQB3Jvd3NwYW4BfQEHAAEQAwlwYXJhZ3JhcGgHAAETBgQAARQBMYcBEAMKdGFibGVfY2VsbCgAARYHY29sc3BhbgF9ASgAARYHcm93c3BhbgF9AQcAARYDCXBhcmFncmFwaAcAARkGBAABGgEyAA=="
+  },
+  {
+    "name": "table_in_list_item",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "L"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "intro"
+                    }
+                  ]
+                },
+                {
+                  "type": "table",
+                  "content": [
+                    {
+                      "type": "table_row",
+                      "content": [
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "table_row",
+                      "content": [
+                        {
+                          "type": "table_cell",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "1"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "table_cell",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "ASQBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nKAABAAVsZXZlbAF9AgcAAQAGBAABAgFMhwEAAwtidWxsZXRfbGlzdAcAAQQDCWxpc3RfaXRlbQcAAQUDCXBhcmFncmFwaAcAAQYGBAABBwVpbnRyb4cBBgMFdGFibGUHAAENAwl0YWJsZV9yb3cHAAEOAwx0YWJsZV9oZWFkZXIoAAEPB2NvbHNwYW4BfQEoAAEPB3Jvd3NwYW4BfQEHAAEPAwlwYXJhZ3JhcGgHAAESBgQAARMBYYcBDwMMdGFibGVfaGVhZGVyKAABFQdjb2xzcGFuAX0BKAABFQdyb3dzcGFuAX0BBwABFQMJcGFyYWdyYXBoBwABGAYEAAEZAWKHAQ4DCXRhYmxlX3JvdwcAARsDCnRhYmxlX2NlbGwoAAEcB2NvbHNwYW4BfQEoAAEcB3Jvd3NwYW4BfQEHAAEcAwlwYXJhZ3JhcGgHAAEfBgQAASABMYcBHAMKdGFibGVfY2VsbCgAASIHY29sc3BhbgF9ASgAASIHcm93c3BhbgF9AQcAASIDCXBhcmFncmFwaAcAASUGBAABJgEyAA=="
+  },
+  {
+    "name": "table_first_list_item",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph"
+                },
+                {
+                  "type": "table",
+                  "content": [
+                    {
+                      "type": "table_row",
+                      "content": [
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AREBAAcBC3Byb3NlbWlycm9yAwtidWxsZXRfbGlzdAcAAQADCWxpc3RfaXRlbQcAAQEDCXBhcmFncmFwaIcBAgMFdGFibGUHAAEDAwl0YWJsZV9yb3cHAAEEAwx0YWJsZV9oZWFkZXIoAAEFB2NvbHNwYW4BfQEoAAEFB3Jvd3NwYW4BfQEHAAEFAwlwYXJhZ3JhcGgHAAEIBgQAAQkBYYcBBQMMdGFibGVfaGVhZGVyKAABCwdjb2xzcGFuAX0BKAABCwdyb3dzcGFuAX0BBwABCwMJcGFyYWdyYXBoBwABDgYEAAEPAWIA"
+  },
+  {
+    "name": "quote_first_list_item",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph"
+                },
+                {
+                  "type": "blockquote",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "quoted"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQcBAAcBC3Byb3NlbWlycm9yAwtidWxsZXRfbGlzdAcAAQADCWxpc3RfaXRlbQcAAQEDCXBhcmFncmFwaIcBAgMKYmxvY2txdW90ZQcAAQMDCXBhcmFncmFwaAcAAQQGBAABBQZxdW90ZWQA"
+  },
+  {
+    "name": "empty_list_item",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "bullet_list",
+          "content": [
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph"
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "update_b64": "AQsBAAcBC3Byb3NlbWlycm9yAwtidWxsZXRfbGlzdAcAAQADCWxpc3RfaXRlbQcAAQEDCXBhcmFncmFwaAcAAQIGBAABAwFhhwEBAwlsaXN0X2l0ZW0HAAEFAwlwYXJhZ3JhcGiHAQUDCWxpc3RfaXRlbQcAAQcDCXBhcmFncmFwaAcAAQgGBAABCQFiAA=="
   }
 ]

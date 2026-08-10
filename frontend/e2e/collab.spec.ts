@@ -328,4 +328,50 @@ test.describe("collab two-browser (distinct users)", () => {
     await A.ctx.close();
     await B.ctx.close();
   });
+
+  // (f) Tables (collab-tables T9): owner inserts a table; the member sees it converge
+  // live and edits a body cell; the owner sees that edit; the table menu appears for
+  // the owner while its caret sits inside the table; the state checkpoints cleanly.
+  test("owner inserts a table; member sees it live and edits a cell", async ({
+    browser,
+    baseURL,
+  }) => {
+    const draft = `/cockpit/${WS}`;
+    const A = await openAs(browser, COOKIE_OWNER!, baseURL!, draft);
+    const B = await openAs(browser, COOKIE_MEMBER!, baseURL!, draft);
+
+    const edA = A.page.getByTestId("collab-editor");
+    const edB = B.page.getByTestId("collab-editor");
+    await expect(edA).toBeVisible({ timeout: 15_000 });
+    await expect(edB).toBeVisible({ timeout: 15_000 });
+
+    // OWNER: insert a table and type into the first header cell.
+    await A.page.getByTestId("insert-table").click();
+    await A.page.locator('[data-testid="collab-editor"] th').first().click();
+    await A.page.keyboard.type("Cost");
+
+    // MEMBER: the table converges.
+    const memberTable = B.page.locator('[data-testid="collab-editor"] table');
+    await expect(memberTable).toBeVisible({ timeout: 8_000 });
+    await expect(B.page.locator('[data-testid="collab-editor"] th').first()).toContainText(
+      "Cost",
+      { timeout: 8_000 },
+    );
+
+    // MEMBER: edit a body cell; OWNER sees it.
+    await B.page.locator('[data-testid="collab-editor"] td').first().click();
+    await B.page.keyboard.type("42");
+    await expect(A.page.locator('[data-testid="collab-editor"] td').first()).toContainText("42", {
+      timeout: 8_000,
+    });
+
+    // OWNER: table menu is visible while the caret is in the table.
+    await expect(A.page.getByTestId("table-menu")).toBeVisible();
+
+    // Persist: save a version and confirm the checkpoint POST succeeds.
+    await saveVersion(A.page);
+
+    await A.ctx.close();
+    await B.ctx.close();
+  });
 });

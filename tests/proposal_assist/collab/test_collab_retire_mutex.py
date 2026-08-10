@@ -296,9 +296,7 @@ def test_enable_on_touch_refuses_a_deleted_workspace(pg_session_factory, tmp_pat
             maybe_auto_enable(
                 s,
                 workspace_id=wid,
-                artifact="draft",
-                head_md=md0,  # table-free, so it WOULD otherwise be enabled
-                artifact_path=repo / PROPOSAL_FILENAME,
+                artifact="draft",  # a live workspace here WOULD be enabled
             )
             is False
         )

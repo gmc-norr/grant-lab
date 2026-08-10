@@ -6,6 +6,12 @@ import {
   wrappingInputRule,
   type Extensions,
 } from "@tiptap/core";
+import {
+  Table as BaseTable,
+  TableCell as BaseTableCell,
+  TableHeader as BaseTableHeader,
+  TableRow as BaseTableRow,
+} from "@tiptap/extension-table";
 
 // NOTE on required-vs-nullable attrs (intrinsic Tiptap limitation):
 // collab-schema.mjs declares citation.citekey/ev_id, image.src and link.href as
@@ -87,6 +93,36 @@ const ListItem = Node.create({
   name: "list_item", content: "paragraph block*", defining: true,
   parseHTML: () => [{ tag: "li" }], renderHTML: ({ HTMLAttributes }) => ["li", mergeAttributes(HTMLAttributes), 0],
 });
+
+// Strict-GFM constrained tables (2026-07-08 collab-tables spec §A/§E):
+// snake_case names to match the server schema; cells hold ONE paragraph;
+// attr-level parseHTML pins colspan/rowspan/colwidth to their defaults so a
+// pasted Word/HTML merge normalizes to 1x1 cells (prosemirror-tables'
+// fixTables pads the resulting ragged rows); resizing off — colwidth can
+// never be set. The server serializer's degrade law is the backstop.
+const gfmCellAttributes = () => ({
+  colspan: { default: 1, parseHTML: () => 1 },
+  rowspan: { default: 1, parseHTML: () => 1 },
+  colwidth: { default: null, parseHTML: () => null },
+});
+const Table = BaseTable.extend({ name: "table", content: "table_row+" }).configure({
+  resizable: false,
+});
+const TableRow = BaseTableRow.extend({
+  name: "table_row",
+  content: "(table_cell | table_header)+",
+});
+const TableHeader = BaseTableHeader.extend({
+  name: "table_header",
+  content: "paragraph",
+  addAttributes: gfmCellAttributes,
+});
+const TableCell = BaseTableCell.extend({
+  name: "table_cell",
+  content: "paragraph",
+  addAttributes: gfmCellAttributes,
+});
+
 export const Citation = Node.create({
   name: "citation", group: "inline", inline: true, atom: true,
   addAttributes: () => ({ citekey: { default: null }, ev_id: { default: null } }),
@@ -123,4 +159,5 @@ const Strikethrough = Mark.create({
 export const collabExtensions: Extensions = [
   Doc, Text, Paragraph, Heading, Blockquote, HorizontalRule, CodeBlock, HardBreak,
   Image, BulletList, OrderedList, ListItem, Citation, Link, Em, Strong, Code, Strikethrough,
+  Table, TableRow, TableHeader, TableCell,
 ];

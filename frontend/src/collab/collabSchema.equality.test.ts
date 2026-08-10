@@ -31,6 +31,8 @@ function nodeShape(s: any, name: string) {
     code: !!n.code,
     selectable: n.selectable ?? null,
     draggable: n.draggable ?? null,
+    isolating: !!n.isolating,
+    tableRole: (n as any).tableRole ?? null,
     attrs: Object.fromEntries(Object.entries(n.attrs ?? {}).map(([k, v]: any) => [k, v.default ?? null])),
   };
 }

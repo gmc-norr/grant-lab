@@ -18,6 +18,11 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 _DOC = "Preamble.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n"
 _NO_PREAMBLE = "## A\n\nBody a.\n\n## B\n\nBody b.\n"
+_TABLE_SECTIONED = (
+    "## Intro\n\nprose.\n\n"
+    "## Budget\n\n| Item | Cost |\n| --- | --- |\n| Staff | 100 |\n\n"
+    "## Outro\n\nend.\n"
+)
 
 
 def _fork_edit_last_paragraph(room_doc, text: str) -> bytes:
@@ -131,3 +136,49 @@ def test_blank_clear_of_already_empty_preamble_is_noop_accept(pg_session_factory
         rows = store.load_updates(s, workspace_id=wid, artifact="draft")
         assert b"" not in rows                       # no poison row persisted
     assert pm_to_markdown(ydoc_to_pm_json(room_doc)) == before   # doc untouched
+
+
+def test_section_write_beside_a_table_preserves_it(pg_session_factory, tmp_path):
+    # A section-scoped edit to "## Intro" must leave the sibling "## Budget"
+    # table's Yjs identity (and content) completely alone.
+    wid, oid, repo, room_doc = _seed(
+        pg_session_factory, tmp_path, _TABLE_SECTIONED, "k-tbl-beside@ki.se"
+    )
+    live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
+    base_sha = split_sections(live_md)[1].sha   # section 1 = "## Intro"
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(s, wid, section_index=1, new_text="## Intro\n\nnew intro body.\n",
+                       base_commit_sha=_git_head(repo), base_section_sha=base_sha)
+    with pg_session_factory() as s:
+        approver = s.get(User, oid)
+        kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
+                            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        s.commit()
+    out = pm_to_markdown(ydoc_to_pm_json(room_doc))
+    assert "| Item | Cost |" in out            # table untouched
+    assert "| --- | --- |" in out
+    assert "new intro body" in out             # the edit landed
+
+
+def test_section_write_INTO_a_table_section_roundtrips(pg_session_factory, tmp_path):
+    # A section-scoped edit that REPLACES a section whose body is a table: the
+    # table block-range must line up with split_sections' line-scan boundaries
+    # exactly like any other block, so this must NOT raise SectionMapDivergenceError.
+    wid, oid, repo, room_doc = _seed(
+        pg_session_factory, tmp_path, _TABLE_SECTIONED, "k-tbl-into@ki.se"
+    )
+    live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
+    base_sha = split_sections(live_md)[2].sha   # section 2 = "## Budget"
+    new_budget = "## Budget\n\n| Item | Cost |\n| --- | --- |\n| Staff | 120 |\n"
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(s, wid, section_index=2, new_text=new_budget,
+                       base_commit_sha=_git_head(repo), base_section_sha=base_sha)
+    with pg_session_factory() as s:
+        approver = s.get(User, oid)
+        kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
+                            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        s.commit()
+    out = pm_to_markdown(ydoc_to_pm_json(room_doc))
+    assert "| Staff | 120 |" in out       # edit landed, bordered form
+    assert "| Staff | 100 |" not in out   # old table row replaced
+    assert "prose." in out and "end." in out  # neighbors untouched

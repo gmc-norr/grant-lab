@@ -2,7 +2,8 @@
 
 Nodes: doc, paragraph, heading (H1–H6), bullet_list, ordered_list,
        list_item, blockquote, code_block, horizontal_rule, image,
-       hard_break, citation (inline atom).
+       hard_break, citation (inline atom), table, table_row, table_cell,
+       table_header.
 Marks: strong, em, strikethrough, code, link.
 
 The Python schema is the server-side half of a matching pair — the JS
@@ -57,6 +58,51 @@ _nodes[CITATION_NODE] = NodeSpec(
             "data-ev-id": node.attrs["ev_id"],
         },
     ],
+)
+
+# ---------------------------------------------------------------------------
+# Tables (strict GFM — 2026-07-08 collab-tables spec §A)
+# ---------------------------------------------------------------------------
+# Cells hold exactly ONE paragraph (inline-only in practice); colspan/rowspan/
+# colwidth exist because prosemirror-tables requires them — all defaulted, all
+# pinned to the defaults by the client. tableRole/isolating are inert for the
+# Python side (no editor here) but keep the pair description identical to
+# frontend/scripts/collab-schema.mjs.
+_TABLE_CELL_ATTRS = {
+    "colspan": {"default": 1},
+    "rowspan": {"default": 1},
+    "colwidth": {"default": None},
+}
+
+_nodes["table"] = NodeSpec(
+    content="table_row+",
+    group="block",
+    isolating=True,
+    tableRole="table",
+    parseDOM=[{"tag": "table"}],
+    toDOM=lambda node: ["table", ["tbody", 0]],
+)
+_nodes["table_row"] = NodeSpec(
+    content="(table_cell | table_header)+",
+    tableRole="row",
+    parseDOM=[{"tag": "tr"}],
+    toDOM=lambda node: ["tr", 0],
+)
+_nodes["table_cell"] = NodeSpec(
+    content="paragraph",
+    attrs=dict(_TABLE_CELL_ATTRS),
+    isolating=True,
+    tableRole="cell",
+    parseDOM=[{"tag": "td"}],
+    toDOM=lambda node: ["td", 0],
+)
+_nodes["table_header"] = NodeSpec(
+    content="paragraph",
+    attrs=dict(_TABLE_CELL_ATTRS),
+    isolating=True,
+    tableRole="header_cell",
+    parseDOM=[{"tag": "th"}],
+    toDOM=lambda node: ["th", 0],
 )
 
 # ---------------------------------------------------------------------------

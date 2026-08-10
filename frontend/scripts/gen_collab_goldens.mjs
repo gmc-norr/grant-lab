@@ -73,10 +73,31 @@ function citationInlineRule(state, silent) {
 // ---------------------------------------------------------------------------
 // Configure markdown-it + MarkdownParser
 // ---------------------------------------------------------------------------
-const md = new MarkdownIt('commonmark', { html: true }).enable('strikethrough');
-// Note: strikethrough is provided by prosemirror-markdown's bundled markdown-it tokenizer; .enable() ensures it's active.
+const md = new MarkdownIt('commonmark', { html: true })
+  .enable('strikethrough')
+  .enable('table');
+// Note: strikethrough/table are provided by prosemirror-markdown's bundled
+// markdown-it tokenizer; .enable() ensures they're active.
 // Register before "link" — both trigger on "[", and we must win.
 md.inline.ruler.before('link', 'citation', citationInlineRule);
+
+// Our table cells hold ONE paragraph (strict GFM, spec §A) but markdown-it
+// emits inline content directly inside th/td. Wrap each cell's inline run in
+// paragraph tokens so MarkdownParser constructs table_cell > paragraph.
+md.core.ruler.push('wrap_table_cells', (state) => {
+  const out = [];
+  for (const tok of state.tokens) {
+    if (tok.type === 'th_close' || tok.type === 'td_close') {
+      out.push(new state.Token('paragraph_close', 'p', -1));
+    }
+    out.push(tok);
+    if (tok.type === 'th_open' || tok.type === 'td_open') {
+      out.push(new state.Token('paragraph_open', 'p', 1));
+    }
+  }
+  state.tokens = out;
+  return true;
+});
 
 const markdownParser = new MarkdownParser(schema, md, {
   // Block nodes
@@ -89,6 +110,12 @@ const markdownParser = new MarkdownParser(schema, md, {
   code_block:   { block: 'code_block',   noCloseToken: true },
   fence:        { block: 'code_block',   noCloseToken: true },
   hr:           { node: 'horizontal_rule' },
+  table:        { block: 'table' },
+  tr:           { block: 'table_row' },
+  th:           { block: 'table_header' },
+  td:           { block: 'table_cell' },
+  thead:        { ignore: true },
+  tbody:        { ignore: true },
 
   // Inline atoms
   image:      { node: 'image', getAttrs: tok => ({
@@ -141,6 +168,17 @@ const CORPUS = [
   ['h1_title_preamble',        '# Proposal Title\n\nIntro under an H1 title.\n\n## Aims\n\nBody.\n'],
   ['production_layout',        '# T\nintro\n## Background\nold body [@x9]\n## Aims\naims\n'],
   ['spec_skeleton',            SPEC_SKELETON],
+  // --- tables (2026-07-08 collab-tables spec §D) --- //
+  ['table_basic',               '## Budget\n\n| Item | Cost |\n| --- | --- |\n| Staff | 100 |\n| Lab | 50 |\n'],
+  ['table_cell_escapes',        '## T\n\n| a \\| b | `x\\|y` |\n| --- | --- |\n| *em* text | plain |\n'],
+  ['table_borderless_normalizes', '## T\n\nName | Value\n--- | ---\nfoo | bar\n'],
+  ['table_cite_in_cell',        `## Claims\n\n| Claim | Source |\n| --- | --- |\n| Sky is blue | ${CITE} |\n`],
+  ['table_header_only',         '| Only | Header |\n| --- | --- |\n'],
+  ['table_in_blockquote',       '> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n'],
+  ['table_in_list_item',        '## L\n\n- intro\n\n  | a | b |\n  | --- | --- |\n  | 1 | 2 |\n'],
+  ['table_first_list_item',     '- | a | b |\n  | --- | --- |\n'],
+  ['quote_first_list_item',     '- > quoted\n'],
+  ['empty_list_item',           '- a\n-\n- b\n'],
 ];
 
 // ---------------------------------------------------------------------------

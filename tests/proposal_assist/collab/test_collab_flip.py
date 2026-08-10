@@ -1,62 +1,18 @@
-"""3b-5d.D4: enable-on-touch seam — sticky lazy enable with table hold-back."""
-
-from pathlib import Path
+"""3b-5d.D4: enable-on-touch seam — sticky lazy enable."""
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from call_manager.proposal_assist.collab import flip, state
-from call_manager.proposal_assist.collab.flip import has_pipe_tables, maybe_auto_enable
+from call_manager.proposal_assist.collab.flip import maybe_auto_enable
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from tests.proposal_assist.conftest import make_user, make_workspace
-
-# The flip's under-mutex re-read falls back to head_md when the file is absent, so
-# these logic tests pass a path that does not exist (no repo on disk).
-_NO_FILE = Path("/nonexistent-flip-test/proposal.md")
 
 
 @pytest.fixture(autouse=True)
 def _reset_kill_switch():
     yield
     state.set_kill_switch(False)
-
-
-# --- has_pipe_tables ------------------------------------------------------ #
-
-def test_detects_plain_pipe_table():
-    assert has_pipe_tables("## T\n| a | b |\n|---|---|\n| 1 | 2 |\n") is True
-
-def test_detects_leading_pipe_free_row():
-    assert has_pipe_tables("intro\na | b | c\n") is True
-
-def test_fenced_code_is_excluded():
-    md = "## T\n```\n| a | b |\n|---|---|\n```\nprose.\n"
-    assert has_pipe_tables(md) is False
-
-def test_plain_prose_and_single_pipe_are_clean():
-    assert has_pipe_tables("## T\neither/or, no tables here.\n") is False
-    assert has_pipe_tables("a single | pipe is not a table row\n") is False
-
-
-def test_detects_borderless_two_column_table():
-    md = "# T\n\nName | Value\n---- | -----\nfoo | bar\n"
-    assert has_pipe_tables(md) is True
-
-
-def test_detects_aligned_delimiter_row():
-    md = "col a | col b\n:--- | ---:\nx | y\n"
-    assert has_pipe_tables(md) is True
-
-
-def test_single_pipe_prose_still_clean():
-    # A lone prose pipe (no delimiter row anywhere) must NOT trigger the hold-back.
-    md = "# T\n\neither | or, as they say.\n\nMore prose.\n"
-    assert has_pipe_tables(md) is False
-
-
-def test_delimiter_row_inside_fence_still_clean():
-    md = "```\nName | Value\n---- | -----\n```\nprose\n"
-    assert has_pipe_tables(md) is False
 
 
 # --- maybe_auto_enable ----------------------------------------------------- #
@@ -70,55 +26,13 @@ def test_enables_once_sticky_and_commits(pg_session_factory):
         wid = _ws(s, "flip1@ki.se").id
         s.commit()
     with pg_session_factory() as s:
-        result = maybe_auto_enable(
-            s, workspace_id=wid, artifact="draft", head_md="## A\nx.\n", artifact_path=_NO_FILE
-        )
+        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
         assert result is True
     with pg_session_factory() as s:  # committed by the hook — visible to a NEW session
         assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is True
         # sticky repeat: no error, still True
-        result = maybe_auto_enable(
-            s, workspace_id=wid, artifact="draft", head_md="## A\nx.\n", artifact_path=_NO_FILE
-        )
+        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
         assert result is True
-
-
-def test_hold_back_on_pipe_tables(pg_session_factory):
-    with pg_session_factory() as s:
-        wid = _ws(s, "flip2@ki.se").id
-        s.commit()
-    with pg_session_factory() as s:
-        md = "## T\n| a | b |\n|---|---|\n"
-        assert (
-            maybe_auto_enable(
-                s, workspace_id=wid, artifact="draft", head_md=md, artifact_path=_NO_FILE
-            )
-            is False
-        )
-        assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
-
-
-def test_hold_back_when_fresh_disk_gained_a_table(pg_session_factory, tmp_path):
-    """Item 2a: head_md (the pre-mutex read) is table-free, but a writer committed a
-    table-adding edit before the flip re-read under the mutex — the FRESH bytes
-    hold the flip back, so we never flip around the just-committed table."""
-    with pg_session_factory() as s:
-        wid = _ws(s, "flip2b@ki.se").id
-        s.commit()
-    artifact_path = tmp_path / "proposal.md"
-    artifact_path.write_text("## T\n| a | b |\n|---|---|\n")  # fresh disk HAS a table
-    with pg_session_factory() as s:
-        assert (
-            maybe_auto_enable(
-                s,
-                workspace_id=wid,
-                artifact="draft",
-                head_md="## T\ntable-free at read time.\n",
-                artifact_path=artifact_path,
-            )
-            is False
-        )
-        assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
 
 
 def test_kill_switch_suppresses(pg_session_factory):
@@ -126,9 +40,7 @@ def test_kill_switch_suppresses(pg_session_factory):
     with pg_session_factory() as s:
         wid = _ws(s, "flip3@ki.se").id
         s.commit()
-        result = maybe_auto_enable(
-            s, workspace_id=wid, artifact="draft", head_md="## A\nx.\n", artifact_path=_NO_FILE
-        )
+        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
         assert result is False
     state.set_kill_switch(False)
     with pg_session_factory() as s:  # nothing was persisted while suppressed
@@ -140,12 +52,7 @@ def test_per_artifact_independence(pg_session_factory):
         wid = _ws(s, "flip4@ki.se").id
         s.commit()
     with pg_session_factory() as s:
-        assert (
-            maybe_auto_enable(
-                s, workspace_id=wid, artifact="spec", head_md="## S\ny.\n", artifact_path=_NO_FILE
-            )
-            is True
-        )
+        assert maybe_auto_enable(s, workspace_id=wid, artifact="spec") is True
         assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
 
 
@@ -166,9 +73,7 @@ def test_concurrent_first_read_race_reports_enabled(pg_session_factory, monkeypa
             real_commit()
 
         monkeypatch.setattr(s, "commit", _racy_commit)
-        result = maybe_auto_enable(
-            s, workspace_id=wid, artifact="draft", head_md="## A\nx.\n", artifact_path=_NO_FILE
-        )
+        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
         assert result is True
 
 
@@ -184,13 +89,7 @@ def test_mutex_held_by_writer_defers_flip(pg_session_factory, monkeypatch):
     try:
         acquire_commit_mutex(holder, wid)  # held until holder commits/rolls back
         with pg_session_factory() as s:
-            result = maybe_auto_enable(
-                s,
-                workspace_id=wid,
-                artifact="draft",
-                head_md="## A\nx.\n",
-                artifact_path=_NO_FILE,
-            )
+            result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
             assert result is False
             # session still usable after the aborted-mutex rollback
             assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
@@ -199,3 +98,14 @@ def test_mutex_held_by_writer_defers_flip(pg_session_factory, monkeypatch):
         holder.close()
     with pg_session_factory() as s:  # nothing was persisted under contention
         assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
+
+
+def test_table_doc_enables_now(pg_session_factory):
+    """The D4 hold-back is gone: a pipe-table artifact enables like any other
+    (the bridge round-trips GFM tables losslessly — tables slice §G)."""
+    with pg_session_factory() as s:
+        wid = _ws(s, "flip7@ki.se").id
+        s.commit()
+    with pg_session_factory() as s:
+        assert maybe_auto_enable(s, workspace_id=wid, artifact="draft") is True
+        assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is True

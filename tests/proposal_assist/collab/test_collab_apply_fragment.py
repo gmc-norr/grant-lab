@@ -43,3 +43,11 @@ def test_apply_fragment_to_empty_doc_content():
     update = apply_pm_json_to_fragment(room, {"type": "doc", "content": [{"type": "paragraph"}]})
     assert update is not None
     assert ydoc_to_pm_json(room) == {"type": "doc", "content": [{"type": "paragraph"}]}
+
+
+def test_table_doc_survives_fragment_apply_roundtrip():
+    md = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+    pm = markdown_to_pm(md)
+    ydoc = pm_json_to_ydoc(pm)
+    assert ydoc_to_pm_json(ydoc) == pm          # attrs survive the Yjs coercion
+    assert pm_to_markdown(ydoc_to_pm_json(ydoc)) == pm_to_markdown(pm)
