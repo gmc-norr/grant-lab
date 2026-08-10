@@ -10,7 +10,7 @@ def test_proposal_assist_settings_have_defaults(monkeypatch, _settings_env):
     s = Settings()
     assert s.extractor_version == "sections-v1"
     assert s.rubric_extractor_version == "rubric-v1"
-    assert s.proposal_assist_llm_model == "claude-opus-4-7"
+    assert s.proposal_assist_llm_model == "claude-opus-5"
 
 
 def test_proposal_assist_settings_override_via_env(monkeypatch, _settings_env):
