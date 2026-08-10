@@ -1,8 +1,13 @@
-# Workspace Retirement on Delete — Design (v8)
+# Workspace Retirement on Delete — Design (v9)
 
-**Status:** approved direction; v8 folds a sixth Codex review (5 findings, all
-verified). Two are further **claim weakenings**; one closes a real leak *and* a
-capacity-ceiling bypass introduced by v7's inventory.
+**Status:** approved direction; v9 folds a seventh review, this one against the
+B-retire *plan* (7 findings, all verified). Two were lifecycle gaps that changed
+this design: `room.ops` never covered the collab client-write or cold-hydration
+paths (two new guarantee rows + NOT-claimed item 4), and B2 must actually
+terminate a live entry rather than defer it to the 60s idle sweep. v8 folded a
+sixth Codex review (5 findings, all verified): two further **claim weakenings**,
+one closing a real leak *and* a capacity-ceiling bypass introduced by v7's
+inventory.
 **Type:** backend-only, no migration, no frontend change, no OpenAPI change.
 **Delivery:** **Slice A** = durable floor + generation lifecycle. **Slice B** =
 prompt retirement + coordinator + collab + live-mutex helper. **Slice C** = passes.
@@ -17,6 +22,8 @@ prompt retirement + coordinator + collab + live-mutex helper. **Slice C** = pass
 | **Mutex-participating** artifact/turn writers cannot mutate git/DB after delete | `acquire_commit_mutex_live` + deletion takes the same mutex (B4) | **Durable, race-free** (same mutex) |
 | Relaunch avoided | pre-claim `soft_deleted_at` check (A2) | **Narrowing only — NOT race-free** |
 | Subprocess stops | prompt interrupt→terminate (B2), hard-bounded (A4) | Best-effort |
+| Collab **cold-hydration** seed cannot commit after delete | `acquire_commit_mutex_live` inside `load_or_hydrate` (B3) | **Durable, race-free** (same mutex as the delete txn) |
+| Collab **client** writes cannot commit after delete | `room.evicted` flipped under `room.lock`, the lock `Room.handle` holds across its persist (B3) | **Race-free once the lock is won**; bounded wait, see NOT-claimed 4 |
 | Leaked generations | inventory + reconciliation (A3) | **First retry at the next successful sweep, retried each tick; confirmed death remains best-effort** |
 
 **Explicitly NOT claimed:**
@@ -30,6 +37,22 @@ prompt retirement + coordinator + collab + live-mutex helper. **Slice C** = pass
    committing after their `require_owner` can be followed by a metadata write.
    **Accepted residual:** metadata-only, no git, no cloud spend, on a workspace
    that is already 404 to every reader. Listed as a Slice-C candidate.
+4. That the collab **client** write path is closed with zero window. B3 flips
+   `room.evicted` under `room.lock` — the same lock `Room.handle` holds across
+   its `persist` await — so once retirement wins that lock no client write is in
+   flight and every later frame drops. The wait for the lock is **bounded**
+   (`_RETIRE_LOCK_WAIT_SECONDS`); on overrun retirement sets the flag
+   unsynchronized and proceeds, and a persist already inside the lock can still
+   commit its `YjsUpdate` row after the 204. **Accepted residual:** an orphaned
+   update row, no git write, no cloud spend, on a workspace already 404 to every
+   reader. It is logged (`collab.retire_lock_wait_timeout`).
+
+**Note on `room.ops` (first-review correction).** `room.ops` is bumped only by
+`RoomManager.operate`, so draining it covers server ops (kernel accepts,
+checkpoints) and **nothing else**. The two paths that dominate collab writes —
+`Room.handle`'s per-frame persist and cold hydration's seed — bypass both `ops`
+and the commit mutex, and are covered by the two mechanisms added to the table
+above. Do not describe B4 as their backstop.
 
 **Contract:** a **successful** deletion returns **204**. Because deletion now
 takes the commit mutex (B4), a contended delete can raise `CommitMutexTimeout`
@@ -149,14 +172,29 @@ waiter with `WorkspaceRetired`; `controller.launch` raises so its existing
 `except` tears the fresh handle down — which now also marks the generation
 `retiring`). A linearization point for *install*, not for an in-flight `query`.
 
+`retire_workspace` **also pops an already-live entry and tears it down
+best-effort** via the shared `_teardown_entry` (adapter terminate, then advisory
+lock release + session close), popping regardless of `in_flight` exactly as
+`reconcile_deleted_entries` does. That is what makes the table's "prompt
+interrupt→terminate" real: without it the subprocess survives until the next idle
+sweep (`WORKSPACE_IDLE_SWEEP_SECONDS`, default 60). The strength stays
+**Best-effort** — terminate can fail, and the sweep remains the retry.
+
 ### B3 — collab retirement
 
 - `RoomManager._retired_ws`; **`acquire` and `operate`** reject a retired
   workspace, re-checked **after every out-of-lock await** (`operate`'s
   `await load()`, `room.py:491`, is the straddle `kernel_accept.py:71` rides).
 - `retire_workspace(ws)`: tombstone; both artifact keys — `can_write=False`,
-  `evicted=True`, close clients **1008**, remove the room; **no checkpoint**;
-  **drain active `room.ops`** before considering retirement done.
+  `evicted=True` (**set under `room.lock`**, the lock `Room.handle` holds across
+  its persist — this is the client-write linearization point, bounded by
+  `_RETIRE_LOCK_WAIT_SECONDS`), close clients **1008**, remove the room; **no
+  checkpoint**; **drain active `room.ops`** before considering retirement done.
+- `load_or_hydrate` takes `acquire_commit_mutex_live` before persisting a seed,
+  and **raises** rather than returning `[]` — an empty list is indistinguishable
+  from "no content yet" and would let `accept_via_kernel` write to an empty doc.
+  `room.ops` cannot cover this: hydration runs during `acquire`'s out-of-lock
+  `await load()`.
 - **Retired `acquire` → 1008:** accept happens at `collab_ws.py:87` and the
   route's `try` opens at `:118`, so a raise from `acquire` would surface as
   1011/1006. Catch the shared retirement exception **around `acquire`** →
