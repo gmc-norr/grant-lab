@@ -121,6 +121,8 @@ def model_label(value: str | None) -> str:
         "claude-sonnet-4-7": "Sonnet 4.7",
         "claude-opus-4-6": "Opus 4.6",
         "claude-opus-4-7": "Opus 4.7",
+        "claude-opus-5": "Opus 5",
+        "claude-sonnet-5": "Sonnet 5",
         "claude-haiku-4-5": "Haiku 4.5",
     }.get(value)
     if pretty:

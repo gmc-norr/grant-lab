@@ -136,7 +136,7 @@ class Settings(BaseSettings):
         description="Bump when the rubric extractor prompt or output schema changes.",
     )
     proposal_assist_llm_model: str = Field(
-        default="claude-opus-4-7",
+        default="claude-opus-5",
         alias="PROPOSAL_ASSIST_LLM_MODEL",
         description="Anthropic model id used for proposal-assist extractors, "
         "score_against_rubric, fit-check, persona scoring, and consolidation.",
@@ -449,13 +449,16 @@ class Settings(BaseSettings):
     review_price_input_per_mtok: Decimal = Field(
         default=Decimal("5.00"),
         alias="REVIEW_PRICE_INPUT_PER_MTOK",
-        description="claude-opus-4-7 input price per 1M tokens (cache-read is bundled into "
-        "tokens_in by the adapter and priced at this rate).",
+        description="Input price per 1M tokens for proposal_assist_llm_model (cache-read is "
+        "bundled into tokens_in by the adapter and priced at this rate, which OVERSTATES it — "
+        "a cache hit really costs 0.1x input). $5.00 covers Opus 4.5 through Opus 5, which all "
+        "share this rate; re-check against the pricing page when changing the model.",
     )
     review_price_output_per_mtok: Decimal = Field(
         default=Decimal("25.00"),
         alias="REVIEW_PRICE_OUTPUT_PER_MTOK",
-        description="claude-opus-4-7 output price per 1M tokens.",
+        description="Output price per 1M tokens for proposal_assist_llm_model. $25.00 covers "
+        "Opus 4.5 through Opus 5, which all share this rate.",
     )
     problem_section_char_budget: int = Field(
         default=6000,
