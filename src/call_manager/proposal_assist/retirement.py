@@ -33,7 +33,17 @@ REQUIRED_HOOKS = ("turns", "collab")
 # under-mutex re-read of soft_deleted_at is the durable backstop; the collab
 # client-write and cold-hydration paths are covered by their own guards (the
 # room.lock tombstone and load_or_hydrate's mutex), NOT by B4.
-_RETIREMENT_BARRIER_SECONDS = 5.0
+#
+# MUST EXCEED every hook's own worst case, or the barrier fires on healthy-but-slow
+# deletes and scrub_workspace_bytes starts deleting files while teardown is still in
+# flight. Hooks run concurrently, so the budget is the MAX, not the sum:
+#   collab: max over the two rooms (they retire concurrently) of
+#           _RETIRE_LOCK_WAIT_SECONDS (1.0) + _RETIRE_OPS_DRAIN_SECONDS (2.0) = 3.0
+#   turns:  adapter disconnect_deadline_seconds (3.0) + reap_deadline_seconds (2.0) = 5.0
+# => 5.0 worst case, so 5.0 was a coin flip rather than a bound. 6.0 keeps 1s of
+# headroom. test_retirement_coordinator.py asserts this inequality against the live
+# constants so raising any sub-bound fails loudly instead of silently eroding it.
+_RETIREMENT_BARRIER_SECONDS = 6.0
 
 
 class MissingRetirementHook(RuntimeError):

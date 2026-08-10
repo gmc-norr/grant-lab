@@ -7,6 +7,7 @@ is bounded so a hanging hook can never wedge the route.
 """
 
 import asyncio
+import inspect
 import threading
 import uuid
 
@@ -24,6 +25,35 @@ def _noop_hook():
     async def _h(_ws):
         return None
     return _h
+
+
+def test_the_barrier_exceeds_every_hooks_own_worst_case():
+    """The barrier is a BOUND, not a hope. If a hook's own timeouts can exceed it,
+    the delete route routinely logs retirement.barrier_timeout and returns to run
+    scrub_workspace_bytes while teardown is still in flight — deleting files a live
+    subprocess may still be reading. Hooks run concurrently (asyncio.gather), so the
+    budget is the MAX of the hooks, not the sum.
+
+    Reads the LIVE constants (and the adapter's real signature defaults) so raising
+    any sub-bound fails here instead of silently eroding the barrier."""
+    from call_manager.proposal_assist.collab import room as room_module
+    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+
+    # collab: the two artifact rooms retire CONCURRENTLY (see
+    # test_collab_retire.test_both_artifact_rooms_retire_concurrently), so the hook's
+    # worst case is one room's, not two.
+    collab_worst = (
+        room_module._RETIRE_LOCK_WAIT_SECONDS + room_module._RETIRE_OPS_DRAIN_SECONDS
+    )
+    params = inspect.signature(ClaudeAgentSDKAdapter.__init__).parameters
+    turns_worst = (
+        params["disconnect_deadline_seconds"].default + params["reap_deadline_seconds"].default
+    )
+
+    assert max(collab_worst, turns_worst) < retirement._RETIREMENT_BARRIER_SECONDS, (
+        f"barrier {retirement._RETIREMENT_BARRIER_SECONDS}s does not cover "
+        f"collab {collab_worst}s / turns {turns_worst}s"
+    )
 
 
 def test_missing_required_hook_raises_at_construction():
