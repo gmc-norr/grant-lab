@@ -28,6 +28,7 @@ from call_manager.embeddings.client import OllamaEmbedClient
 from call_manager.logging import configure_logging
 from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.collab import state as collab_state
+from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
 from call_manager.proposal_assist.drafting.locking import (
     DELETED_ERROR_MESSAGE,
     WorkspaceDeleted,
@@ -487,6 +488,29 @@ def create_app() -> FastAPI:
         # already sees — the workspace is gone — and keeps the SPA on its existing
         # not-found path. Registered explicitly so it resolves ahead of the
         # catch-all Exception handler below.
+        if api_request(request):
+            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
+    @app.exception_handler(WorkspaceRetired)
+    async def _workspace_retired(request: Request, exc: WorkspaceRetired):
+        # Same fact as WorkspaceDeleted, observed one layer earlier: the in-process
+        # retirement tombstone. B-retire made RoomManager.acquire/operate raise this,
+        # and operate raises from __aenter__ — i.e. BEFORE the `try` each kernel
+        # writer opens inside its `async with`, so the writers' own clean-error
+        # handling never sees it and it lands in the calling route's except chain,
+        # which lists only cite/git/mutex errors. The collab writer routes (kernel
+        # accept, direct cite, spec init, annotation insert) would otherwise 500 on
+        # a delete race that used to yield a clean 404 from the mutex's
+        # WorkspaceDeleted.
+        #
+        # Deliberately reuses the "workspace_deleted" code and message rather than
+        # minting a "workspace_retired" one: to a client these are one event (the
+        # workspace is gone), and reusing them makes the raced response BYTE-
+        # IDENTICAL to the pre-B-retire behaviour. WorkspaceRetired is NOT a
+        # subclass of WorkspaceDeleted (both are bare RuntimeErrors), so Starlette
+        # cannot reach the handler above — this registration is required, not
+        # redundant.
         if api_request(request):
             return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
         return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
