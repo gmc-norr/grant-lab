@@ -130,3 +130,23 @@ def profile_factory(pg_session_factory):
             return p.id, u.id
 
     yield _make
+
+
+@pytest.fixture(autouse=True)
+def _close_helper_entered_lifespans():
+    """Close every app lifespan opened by _refs_helpers.authed_client.
+
+    That helper enters a TestClient lifespan and returns the client; its ~60 call
+    sites use it inline, so nothing ever exits it. Each unclosed lifespan leaves a
+    started APScheduler alive for the rest of the session — one whose
+    _analysis_drain_tick needs no app_loop and so keeps draining the shared
+    analysis queue under other tests, while holding the single-instance advisory
+    lock that test_scheduler_single_instance asserts is free.
+
+    Imported lazily so this root conftest does not pull in call_manager.main at
+    collection time. A no-op for the vast majority of tests, which never call it.
+    """
+    yield
+    from tests.proposal_assist._refs_helpers import close_entered_clients
+
+    close_entered_clients()
