@@ -186,13 +186,19 @@ def test_activity_member_category_owner_only_pii(
     # Owner client already provided by client_authed_owner fixture.
     owner_items = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity").json()["items"]
 
-    # Mint a member-authed client (same pattern as client_authed_owner fixture).
+    # Mint a member-authed client. Deliberately NOT entered as a context manager:
+    # _app is already inside client_authed_owner's lifespan, and entering a SECOND
+    # lifespan on the same app overwrites app.state.scheduler with a never-started
+    # one and app.state.scheduler_lock with None (the nested acquire loses the
+    # advisory lock). Both teardowns then shut down that inert object, orphaning
+    # the RUNNING scheduler and its lock for the rest of the session — a zombie
+    # whose _analysis_drain_tick keeps draining the shared analysis queue and
+    # breaks unrelated tests. A non-entered TestClient dispatches into the ASGI app
+    # per request, which is all this needs: app.state is already populated.
     member_client = TestClient(_app, raise_server_exceptions=True)
-    member_client.__enter__()
     signer: SessionSigner = _app.state.session_signer
     member_client.cookies.set("session", signer.make(user_id=viewer_id))
     member_items = member_client.get(f"/api/workspaces/{ws_id}/activity").json()["items"]
-    member_client.__exit__(None, None, None)
 
     assert any(
         it["category"] == "member" and member_email in it["summary"]

@@ -670,64 +670,97 @@ class RoomManager:
         so a last-leave checkpoint would write to a dead workspace (and B4 would
         refuse it under the mutex anyway); this is drop_client semantics for the
         whole room. Idempotent. Returns the number of sockets closed (tests/logging;
-        the coordinator discards it)."""
+        the coordinator discards it).
+
+        The two artifact rooms are torn down CONCURRENTLY. They share nothing but
+        self._lock (held only across the pop), so serialising them merely doubled
+        the hook's worst case — 2 x (_RETIRE_LOCK_WAIT_SECONDS + _RETIRE_OPS_DRAIN_
+        SECONDS) = 6.0s — past the retirement barrier the sync delete route blocks
+        on. Concurrent, the worst case is one room's 3.0s. See
+        retirement._RETIREMENT_BARRIER_SECONDS, whose budget this feeds."""
         self._retired_ws.add(workspace_id)
+        # return_exceptions=True keeps "tear down BOTH rooms" a guarantee rather
+        # than an accident: a bare gather would propagate the first failure while
+        # the sibling task ran on detached, and a second failure would then surface
+        # as an unretrieved-task-exception warning. Nothing in _retire_room is
+        # expected to raise (the wait_for timeout is caught, the closes are
+        # suppressed), so this is a floor, not a routine path.
+        results = await asyncio.gather(
+            *(self._retire_room(workspace_id, artifact) for artifact in ("draft", "spec")),
+            return_exceptions=True,
+        )
+        closed = 0
+        for artifact, result in zip(("draft", "spec"), results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "collab.retire_room_failed",
+                    extra={
+                        "event": "collab_retire_room_failed",
+                        "room": str((workspace_id, artifact)),
+                    },
+                    exc_info=result,
+                )
+                continue
+            closed += result
+        return closed
+
+    async def _retire_room(self, workspace_id: uuid.UUID, artifact: str) -> int:
+        """Tear down ONE artifact room for retire_workspace. Returns sockets closed."""
         loop = asyncio.get_running_loop()
         closed = 0
-        for artifact in ("draft", "spec"):
-            key = (workspace_id, artifact)
-            # Pop under the manager lock so no new op/client can attach after this.
-            async with self._lock:
-                room = self._rooms.pop(key, None)
-            if room is None:
-                continue
-            # Tombstone UNDER room.lock — this is the client-write linearization
-            # point, not a cosmetic flag set. Room.handle's write path checks
-            # `self.evicted` and then awaits persist(...) INSIDE this same lock,
-            # and that persist commits a YjsUpdate row with NO commit mutex and NO
-            # soft_deleted_at read, so it is invisible to both room.ops and B4.
-            # Taking the lock therefore buys two things at once:
-            #   (a) when we get it, no client persist is in flight;
-            #   (b) every later frame sees evicted and drops before apply/persist.
-            # No inversion risk: we released self._lock at the pop above and hold
-            # NOTHING while waiting, and Room.handle never waits on a manager lock.
-            # Bounded like the ops drain — a wedged DB write must not eat the whole
-            # retirement barrier; on timeout we set the flag anyway and log, and
-            # the straggler's own commit remains the documented residual.
-            try:
-                await asyncio.wait_for(
-                    _set_evicted_under_lock(room), timeout=_RETIRE_LOCK_WAIT_SECONDS
-                )
-            except TimeoutError:
-                room.evicted = True   # unsynchronized fallback; still stops LATER frames
-                logger.warning(
-                    "collab.retire_lock_wait_timeout",
-                    extra={"event": "collab_retire_lock_wait_timeout", "room": str(key)},
-                )
-            # Flip can_write + close under recon_lock (parity with
-            # revoke_user_sockets), NOT room.lock — Room.handle holds room.lock, so
-            # taking it here for the close loop risks a lock-order inversion. We
-            # popped the whole room, so there are no surviving peers and no presence
-            # removal is needed.
-            async with room.recon_lock:
-                for client, state in list(room.clients.items()):
-                    state.can_write = False
-                    with suppress(Exception):
-                        await client.close(code=_WS_POLICY_VIOLATION)
-                    closed += 1
-            # Drain any in-flight server op: the room is popped so no NEW op can bump
-            # room.ops, but one already inside operate() may still be mid-write. Poll
-            # ops to zero under a bounded deadline, then proceed regardless (for THESE
-            # ops B4's mutex is the durable backstop; overrun is logged, not fatal).
-            deadline = loop.time() + _RETIRE_OPS_DRAIN_SECONDS
-            while room.ops > 0 and loop.time() < deadline:
-                await asyncio.sleep(0.01)
-            if room.ops > 0:
-                logger.warning(
-                    "collab.retire_ops_drain_timeout",
-                    extra={"event": "collab_retire_ops_drain_timeout",
-                           "room": str(key), "ops": room.ops},
-                )
+        key = (workspace_id, artifact)
+        # Pop under the manager lock so no new op/client can attach after this.
+        async with self._lock:
+            room = self._rooms.pop(key, None)
+        if room is None:
+            return 0
+        # Tombstone UNDER room.lock — this is the client-write linearization
+        # point, not a cosmetic flag set. Room.handle's write path checks
+        # `self.evicted` and then awaits persist(...) INSIDE this same lock,
+        # and that persist commits a YjsUpdate row with NO commit mutex and NO
+        # soft_deleted_at read, so it is invisible to both room.ops and B4.
+        # Taking the lock therefore buys two things at once:
+        #   (a) when we get it, no client persist is in flight;
+        #   (b) every later frame sees evicted and drops before apply/persist.
+        # No inversion risk: we released self._lock at the pop above and hold
+        # NOTHING while waiting, and Room.handle never waits on a manager lock.
+        # Bounded like the ops drain — a wedged DB write must not eat the whole
+        # retirement barrier; on timeout we set the flag anyway and log, and
+        # the straggler's own commit remains the documented residual.
+        try:
+            await asyncio.wait_for(
+                _set_evicted_under_lock(room), timeout=_RETIRE_LOCK_WAIT_SECONDS
+            )
+        except TimeoutError:
+            room.evicted = True   # unsynchronized fallback; still stops LATER frames
+            logger.warning(
+                "collab.retire_lock_wait_timeout",
+                extra={"event": "collab_retire_lock_wait_timeout", "room": str(key)},
+            )
+        # Flip can_write + close under recon_lock (parity with
+        # revoke_user_sockets), NOT room.lock — Room.handle holds room.lock, so
+        # taking it here for the close loop risks a lock-order inversion. We
+        # popped the whole room, so there are no surviving peers and no presence
+        # removal is needed.
+        async with room.recon_lock:
+            for client, state in list(room.clients.items()):
+                state.can_write = False
+                with suppress(Exception):
+                    await client.close(code=_WS_POLICY_VIOLATION)
+                closed += 1
+        # Drain any in-flight server op: the room is popped so no NEW op can bump
+        # room.ops, but one already inside operate() may still be mid-write. Poll
+        # ops to zero under a bounded deadline, then proceed regardless (for THESE
+        # ops B4's mutex is the durable backstop; overrun is logged, not fatal).
+        deadline = loop.time() + _RETIRE_OPS_DRAIN_SECONDS
+        while room.ops > 0 and loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        if room.ops > 0:
+            logger.warning(
+                "collab.retire_ops_drain_timeout",
+                extra={"event": "collab_retire_ops_drain_timeout",
+                       "room": str(key), "ops": room.ops},
+            )
         return closed
 
 

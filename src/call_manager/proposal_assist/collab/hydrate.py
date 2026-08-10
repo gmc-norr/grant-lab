@@ -48,8 +48,10 @@ def load_or_hydrate(
     # Do NOT catch WorkspaceDeleted / CommitMutexTimeout here. Returning [] would
     # be indistinguishable from "this artifact has no content yet" (the branch
     # above), and accept_via_kernel would then build an EMPTY room and apply a
-    # section write to it. Both exceptions are already house contracts: kernel_accept
-    # handles WorkspaceDeleted, and CommitMutexTimeout is the standard busy -> 429.
+    # section write to it. Both exceptions are already house contracts: on the HTTP
+    # paths WorkspaceDeleted is a 404 (app-level handler) and CommitMutexTimeout the
+    # standard busy -> 429. The WEBSOCKET path has neither status code available, so
+    # collab_ws maps BOTH to a close frame — see its except around MANAGER.acquire.
     acquire_commit_mutex_live(
         session, workspace_id, timeout_seconds=_HYDRATE_MUTEX_TIMEOUT_SECONDS
     )

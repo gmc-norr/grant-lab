@@ -141,6 +141,14 @@ describe("CollabProvider", () => {
     sockets1006[0].open(); sockets1006[0].drop(1006);
     vi.advanceTimersByTime(50);
     expect(sockets1006.length).toBeGreaterThanOrEqual(2);
+    // 1013 "try again later": the server sends this when the first-ever open of a
+    // room loses the workspace commit mutex (collab_ws.py). It is transient
+    // contention, so retrying is the CORRECT behaviour — this asserts 1013 stays
+    // out of the no-reconnect set above.
+    const { sockets: sockets1013 } = makeProvider(true);
+    sockets1013[0].open(); sockets1013[0].drop(1013);
+    vi.advanceTimersByTime(50);
+    expect(sockets1013.length).toBeGreaterThanOrEqual(2);
     vi.useRealTimers();
   });
 

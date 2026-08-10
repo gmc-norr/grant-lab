@@ -13,6 +13,7 @@ import pytest
 from pycrdt import Doc, Text
 
 from call_manager.proposal_assist.collab import protocol as P
+from call_manager.proposal_assist.collab import room as room_module
 from call_manager.proposal_assist.collab.room import ClientState, RoomManager
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
 
@@ -67,6 +68,78 @@ async def test_retire_evicts_both_rooms_and_closes_clients_1008():
     assert n == 2
     assert cd.closed == 1008 and cs.closed == 1008   # policy violation, NOT 1011
     assert mgr.get(draft) is None and mgr.get(spec) is None
+
+
+@pytest.mark.anyio
+async def test_both_artifact_rooms_retire_concurrently(monkeypatch):
+    """Budget-critical, not cosmetic: serialising the two rooms doubled the collab
+    hook's worst case to 2 x (lock wait + ops drain) = 6.0s, past the retirement
+    barrier the sync delete route blocks on (see test_retirement_coordinator's
+    budget invariant).
+
+    The discriminator is `completed`, not `seen`: under SERIAL teardown the first
+    room's _set_evicted_under_lock is cancelled by its own _RETIRE_LOCK_WAIT_SECONDS
+    bound before it can finish, so only the second room ever completes."""
+    mgr = RoomManager()
+    ws = uuid.uuid4()
+    for artifact in ("draft", "spec"):
+        await mgr.acquire((ws, artifact), load=_empty_load, client=FakeClient(),
+                          state=ClientState(user_id=1, can_write=True))
+
+    original = room_module._set_evicted_under_lock
+    seen: list = []
+    completed: list = []
+    both_in = asyncio.Event()
+
+    async def _instrumented(room):
+        seen.append(room.key)
+        if len(seen) == 2:
+            both_in.set()
+        await both_in.wait()          # only releases if the other room is also here
+        await original(room)
+        completed.append(room.key)
+
+    monkeypatch.setattr(room_module, "_set_evicted_under_lock", _instrumented)
+
+    n = await asyncio.wait_for(mgr.retire_workspace(ws), timeout=10)
+
+    assert n == 2                      # both sockets still closed
+    assert len(completed) == 2         # serial teardown would leave 1
+    assert mgr.get((ws, "draft")) is None and mgr.get((ws, "spec")) is None
+
+
+@pytest.mark.anyio
+async def test_one_rooms_failure_does_not_abandon_the_other(monkeypatch):
+    """Concurrency must not weaken the guarantee: if the draft room's teardown
+    blows up, the spec room is still evicted and its editor still closed, and
+    retire_workspace still returns (the coordinator's own isolation is the last
+    resort, not the first)."""
+    mgr = RoomManager()
+    ws = uuid.uuid4()
+    clients = {}
+    for artifact in ("draft", "spec"):
+        clients[artifact] = FakeClient()
+        await mgr.acquire((ws, artifact), load=_empty_load, client=clients[artifact],
+                          state=ClientState(user_id=1, can_write=True))
+
+    original = room_module._set_evicted_under_lock
+
+    async def _boom_on_draft(room):
+        if room.key[1] == "draft":
+            raise RuntimeError("teardown exploded")
+        await original(room)
+
+    monkeypatch.setattr(room_module, "_set_evicted_under_lock", _boom_on_draft)
+
+    closed = await asyncio.wait_for(mgr.retire_workspace(ws), timeout=10)
+
+    assert closed == 1                                  # only spec's socket counted
+    assert clients["spec"].closed == 1008               # ...but it WAS closed
+    # Both rooms are gone either way: the pop happens before the flip.
+    assert mgr.get((ws, "draft")) is None and mgr.get((ws, "spec")) is None
+    with pytest.raises(WorkspaceRetired):               # tombstone still applied
+        await mgr.acquire((ws, "draft"), load=_empty_load, client=FakeClient(),
+                          state=ClientState(user_id=1, can_write=True))
 
 
 @pytest.mark.anyio

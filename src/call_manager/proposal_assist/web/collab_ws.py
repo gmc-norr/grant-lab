@@ -30,7 +30,7 @@ from call_manager.proposal_assist.collab.ws_auth import (
     resolve_ws_user,
 )
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,10 @@ _VALID_ARTIFACTS = {"draft", "spec"}
 _WS_POLICY_VIOLATION = 1008  # RFC 6455: policy violation
 _WS_MESSAGE_TOO_BIG = 1009  # RFC 6455: message too big
 _WS_INTERNAL_ERROR = 1011  # RFC 6455: server error
+# IANA-registered 1013 "Try Again Later": transient server-side contention, not a
+# refusal. The client provider treats every code EXCEPT 1008/1009 as reconnect-
+# with-backoff, which is exactly the retry this needs.
+_WS_TRY_AGAIN_LATER = 1013
 # Cap a single inbound frame. A proposal doc is small; legitimate CRDT updates
 # are far under this. HTTP body-size middleware does NOT protect WS frames, so
 # bound them here to deny memory-exhaustion / abusive payloads.
@@ -126,6 +130,19 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         # WITHOUT entering the try below (no client registered, nothing to release).
         with contextlib.suppress(Exception):
             await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+    except CommitMutexTimeout:
+        # The OTHER exception the same hydration guard can raise, and a different
+        # animal: contention, not refusal. It is reachable only on the first-ever
+        # open of a room (load_or_hydrate takes the live commit mutex to persist the
+        # seed) and it means "someone else holds the workspace mutex right now" —
+        # the artifact still exists and the client SHOULD come back. On HTTP this is
+        # the house 429; a WebSocket has no status code, so map it to 1013 (try again
+        # later), which the client provider retries with backoff. Falling through to
+        # the route's own `raise` would give 1011 + a traceback for a routine,
+        # expected collision.
+        with contextlib.suppress(Exception):
+            await websocket.close(code=_WS_TRY_AGAIN_LATER)
         return
     try:
         # Close the connect-straddle TOCTOU (Slice 3a b): a permission mutation that

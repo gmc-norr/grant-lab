@@ -1,5 +1,7 @@
 """Shared helpers for reference-permission web tests."""
 
+from contextlib import suppress
+
 from fastapi.testclient import TestClient
 
 from call_manager.db.models import WorkspaceViewer
@@ -24,11 +26,33 @@ def add_member(session, *, workspace_id, user):
     session.commit()
 
 
+# Every authed_client() enters an app lifespan, and its ~60 call sites use the
+# result inline (`authed_client(app, ...).post(...)`), so none of them can exit it.
+# Unclosed, each one leaves a started APScheduler running for the rest of the
+# session; its _analysis_drain_tick needs no app_loop, so it keeps draining the
+# shared analysis queue and stealing jobs from unrelated tests, and it holds the
+# single-instance advisory lock that test_scheduler_single_instance asserts is
+# free. Rather than rewrite every call site, entered clients are registered here
+# and closed by an autouse fixture in tests/conftest.py after each test.
+_ENTERED: list[TestClient] = []
+
+
 def authed_client(app, *, user_id):
     client = TestClient(app, raise_server_exceptions=True)
     client.__enter__()
+    _ENTERED.append(client)
     client.cookies.set("session", app.state.session_signer.make(user_id=user_id))
     return client
+
+
+def close_entered_clients() -> None:
+    """Exit every lifespan authed_client opened, innermost first (LIFO): nested
+    lifespans on one app must unwind in reverse. Never raises — a teardown error
+    must not mask the test's own result."""
+    while _ENTERED:
+        client = _ENTERED.pop()
+        with suppress(Exception):        # best-effort teardown
+            client.__exit__(None, None, None)
 
 
 class FakeEmbedClient:

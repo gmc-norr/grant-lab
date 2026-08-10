@@ -95,6 +95,58 @@ def _delete(pg_session_factory, wid):
         s.commit()
 
 
+@pytest.mark.asyncio
+async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
+    pg_session_factory, tmp_path
+):
+    """The middle link of the 404 chain (post-B-retire review).
+
+    MANAGER.operate raises WorkspaceRetired from __aenter__, i.e. ABOVE the `try`
+    accept_via_kernel opens inside its `async with`. So neither the writer's
+    _CLEAN_ACCEPT_ERRORS branch nor its `except Exception` sees it, and it leaves
+    the writer untouched for the calling route — whose except chain lists only
+    cite/git/mutex errors — and lands on main.py's handler (tested in
+    test_retired_exception_handler.py) as a 404 rather than a 500.
+
+    Nothing is mutated on the way out: no git commit, proposal still pending.
+    """
+    from call_manager.proposal_assist.collab.room import MANAGER
+    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+    from call_manager.proposal_assist.proposals.kernel_accept import accept_via_kernel
+
+    wid, oid, repo, _room_doc, base_sha = _setup(
+        pg_session_factory, tmp_path, "kernel-retired@ki.se"
+    )
+    head = _git_head(repo)
+    with pg_session_factory() as s:
+        pc_id = _mk_pc(
+            s, wid, base_section_sha=base_sha, base_commit_sha=head,
+            kind="prose_edit", payload={"new_text": "## Background\nnew.\n"},
+        )
+
+    # Set the in-process tombstone directly (deterministic, and MANAGER is the same
+    # module-global the writer uses). Discarded in finally: MANAGER is process-global.
+    MANAGER._retired_ws.add(wid)
+    try:
+        with pg_session_factory() as s:
+            approver = s.get(User, oid)
+            with pytest.raises(WorkspaceRetired):
+                await accept_via_kernel(
+                    session_factory=pg_session_factory,
+                    workspaces_dir=str(tmp_path),
+                    workspace_id=wid,
+                    pc_id=pc_id,
+                    approver=approver,
+                    artifact="draft",
+                )
+    finally:
+        MANAGER._retired_ws.discard(wid)
+
+    assert _git_head(repo) == head                       # no commit
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).status == "pending"
+
+
 # ---------------------------------------------------------------------------
 # kernel_accept_prose
 # ---------------------------------------------------------------------------
