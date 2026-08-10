@@ -147,25 +147,38 @@ def test_unlock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_
 def test_soft_delete_route_signals_both_artifacts(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    """DELETE /workspaces/{id} calls signal_from_request with artifacts=["draft","spec"]."""
+    """DELETE /workspaces/{id} RETIRES the workspace instead of signalling a
+    permission refresh (Slice B-retire).
+
+    Until B-retire the route called signal_from_request(artifacts=["draft","spec"])
+    to make live editors re-resolve their permissions. Retirement subsumes that: it
+    tears both rooms down and closes every socket 1008, so there is no client left
+    to refresh. The coverage this test carries is unchanged — "deleting a workspace
+    tells the collab layer, for BOTH artifacts" — only the mechanism moved, so the
+    assertion moves with it rather than being dropped."""
     import call_manager.web.api.workspaces as wsmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
 
-    calls: list = []
+    signal_calls: list = []
+    retire_calls: list = []
     monkeypatch.setattr(
         wsmod,
         "signal_from_request",
-        lambda request, *, workspace_id, artifacts: calls.append((workspace_id, artifacts)),
+        lambda request, *, workspace_id, artifacts: signal_calls.append((workspace_id, artifacts)),
+    )
+    monkeypatch.setattr(
+        wsmod,
+        "signal_workspace_retirement",
+        lambda request, *, workspace_id: retire_calls.append(workspace_id),
     )
 
     c = _client(app, owner_id)
     resp = c.delete(f"/api/workspaces/{ws_id}")
     assert resp.status_code == 204, resp.text
-    assert len(calls) == 1
-    assert calls[0][0] == ws_id
-    assert calls[0][1] == ["draft", "spec"]
+    assert retire_calls == [ws_id]      # retirement ran...
+    assert signal_calls == []           # ...and subsumed the permission refresh
 
 
 # ---------------------------------------------------------------------------
